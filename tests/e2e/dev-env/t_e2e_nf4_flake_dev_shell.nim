@@ -53,14 +53,39 @@ proc reproBinary(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc bashExe(): string =
+  let found = findExe("bash")
+  doAssert found.len > 0, "NF-4's flake gate needs `bash` on PATH."
+  found
+
+var runToolCounter = 0
+
 proc runTool(exe: string; args: openArray[string]; workDir = "";
              env: StringTableRef = nil):
     tuple[output, error: string, code: int] =
-  var process = startProcess(exe, workDir, args, env, {})
+  ## stderr goes to a file, not a second pipe. Reading stdout to EOF and only
+  ## then stderr deadlocks as soon as the child writes more than one pipe
+  ## buffer (64 KiB on Linux) to stderr before closing stdout: the child
+  ## blocks in write(2) on stderr and the test blocks in read(2) on stdout.
+  ## `repro __repro-direnv-activate` renders its progress line to stderr for
+  ## as long as the flake evaluation runs, so on a loaded host it reaches
+  ## that size, and the case hung with the activation parked in `pipe_write`.
+  inc runToolCounter
+  let errPath = getTempDir() / ("repro-nf4-runtool-" &
+    $getCurrentProcessId() & "-" & $runToolCounter & ".stderr")
+  var shArgs = @["-c", "f=$1; shift; exec \"$@\" 2>\"$f\"", "runTool",
+    errPath, exe]
+  for arg in args:
+    shArgs.add(arg)
+  var process = startProcess(bashExe(), workDir, shArgs, env, {})
   try:
     let outText = process.outputStream().readAll()
-    let errText = process.errorStream().readAll()
-    result = (outText, errText, process.waitForExit())
+    let code = process.waitForExit()
+    var errText = ""
+    if fileExists(errPath):
+      errText = readFile(errPath)
+      removeFile(errPath)
+    result = (outText, errText, code)
   finally:
     process.close()
 
@@ -69,11 +94,6 @@ proc nixExe(): string =
   doAssert found.len > 0,
     "NF-4's flake gate needs `nix` on PATH. Install nix (or run the suite " &
     "inside the repo dev shell); this gate must not pass without it."
-  found
-
-proc bashExe(): string =
-  let found = findExe("bash")
-  doAssert found.len > 0, "NF-4's flake gate needs `bash` on PATH."
   found
 
 proc gitExe(): string =
@@ -341,9 +361,45 @@ proc nixDevelopEnv(f: Fixture; projectRoot: string):
   doAssert lines.len >= 3, "unexpected `nix develop` output: " & res.output
   (lines[0], lines[1], lines[2])
 
+const NixDaemonSocket = "/nix/var/nix/daemon-socket/socket"
+
+proc declareNixDaemonTrust(f: Fixture) =
+  ## Claim 3 needs the introspection edge to PUBLISH, and on a multi-user Nix
+  ## host it cannot unless the daemon it talks to is trusted: the monitor sees
+  ## an IPC peer outside the monitored tree (on a socket-activated host the
+  ## kernel names pid 1 as that peer), grades it as an unknown-scope loss, and
+  ## Failure-Semantics.md §Monitoring Failures skips the publish. Trust is
+  ## declared, never assumed (Dev-Env-Warm-Entry.md §3; c6c9f1654 "daemon
+  ## trust: identify a root-owned daemon by its endpoint, not its pid"), and
+  ## the production entry points apply the machine's declarations before
+  ## computing the edge (`startAutoRunQuotaIfNeeded` ->
+  ## `applyMachineDeclaredDaemonTrust`). This gate calls the engine directly,
+  ## so it does both itself: it declares the host's daemon BY ENDPOINT in a
+  ## file it owns (`REPRO_DAEMONS_CONFIG` replaces the system and user layers,
+  ## so the result does not depend on this machine's own configuration) and
+  ## applies it the way production does. The check behind the declaration is
+  ## the real one: the socket and its directories must be root-owned and the
+  ## peer of a test connection uid 0. A single-user Nix install has no daemon
+  ## socket and no peer to trust, so nothing is declared there.
+  # Existence of the socket's directory, not a passing check, decides this:
+  # a broken check must fail the gate, not read as "no daemon here".
+  if not dirExists(NixDaemonSocket.parentDir):
+    return
+  let conf = f.root / "daemons.conf"
+  writeFile(conf,
+    "[nix-daemon]\n" &
+    "socket = " & NixDaemonSocket & "\n" &
+    "endpoint-owner = root\n")
+  putEnv("REPRO_DAEMONS_CONFIG", conf)
+  for report in applyDeclaredDaemonTrust(loadDeclaredDaemons()):
+    doAssert report.outcome == dcoTrusted,
+      "NF-4's flake gate could not trust this host's nix daemon by its " &
+      "endpoint: " & renderDaemonCheckReport(report)
+
 suite "e2e_nf4_flake_dev_shell":
   when isIoMonitorSupported:
     let fixture = prepareFixture()
+    fixture.declareNixDaemonTrust()
     let monitor = prepareMonitorTools(fixture.repoRoot,
       fixture.root / "monitor", "nf4-flake")
 
