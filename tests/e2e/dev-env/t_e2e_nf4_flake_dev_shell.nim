@@ -341,9 +341,45 @@ proc nixDevelopEnv(f: Fixture; projectRoot: string):
   doAssert lines.len >= 3, "unexpected `nix develop` output: " & res.output
   (lines[0], lines[1], lines[2])
 
+const NixDaemonSocket = "/nix/var/nix/daemon-socket/socket"
+
+proc declareNixDaemonTrust(f: Fixture) =
+  ## Claim 3 needs the introspection edge to PUBLISH, and on a multi-user Nix
+  ## host it cannot unless the daemon it talks to is trusted: the monitor sees
+  ## an IPC peer outside the monitored tree (on a socket-activated host the
+  ## kernel names pid 1 as that peer), grades it as an unknown-scope loss, and
+  ## Failure-Semantics.md §Monitoring Failures skips the publish. Trust is
+  ## declared, never assumed (Dev-Env-Warm-Entry.md §3; c6c9f1654 "daemon
+  ## trust: identify a root-owned daemon by its endpoint, not its pid"), and
+  ## the production entry points apply the machine's declarations before
+  ## computing the edge (`startAutoRunQuotaIfNeeded` ->
+  ## `applyMachineDeclaredDaemonTrust`). This gate calls the engine directly,
+  ## so it does both itself: it declares the host's daemon BY ENDPOINT in a
+  ## file it owns (`REPRO_DAEMONS_CONFIG` replaces the system and user layers,
+  ## so the result does not depend on this machine's own configuration) and
+  ## applies it the way production does. The check behind the declaration is
+  ## the real one: the socket and its directories must be root-owned and the
+  ## peer of a test connection uid 0. A single-user Nix install has no daemon
+  ## socket and no peer to trust, so nothing is declared there.
+  # Existence of the socket's directory, not a passing check, decides this:
+  # a broken check must fail the gate, not read as "no daemon here".
+  if not dirExists(NixDaemonSocket.parentDir):
+    return
+  let conf = f.root / "daemons.conf"
+  writeFile(conf,
+    "[nix-daemon]\n" &
+    "socket = " & NixDaemonSocket & "\n" &
+    "endpoint-owner = root\n")
+  putEnv("REPRO_DAEMONS_CONFIG", conf)
+  for report in applyDeclaredDaemonTrust(loadDeclaredDaemons()):
+    doAssert report.outcome == dcoTrusted,
+      "NF-4's flake gate could not trust this host's nix daemon by its " &
+      "endpoint: " & renderDaemonCheckReport(report)
+
 suite "e2e_nf4_flake_dev_shell":
   when isIoMonitorSupported:
     let fixture = prepareFixture()
+    fixture.declareNixDaemonTrust()
     let monitor = prepareMonitorTools(fixture.repoRoot,
       fixture.root / "monitor", "nf4-flake")
 
