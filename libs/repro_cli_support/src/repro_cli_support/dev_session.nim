@@ -648,12 +648,29 @@ proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
                   artifact: var DevEnvArtifact; artifactPath: var string) =
   if artifact.tasks.len > 0:
     state.runWatchCycle(config, artifact, artifactPath)
+  # THE STOP REQUEST IS POLLED, NOT WATCHED FOR. ``stop.request.json`` is in
+  # ``eventInputPaths``, but it lives under ``.repro/``, and the filesystem
+  # watcher drops every event under a ``.repro`` component as build-output
+  # noise (fc8d425a8). So the watch delivered the stop request to nobody,
+  # ``waitForEvent`` waited for a source edit that never came, and ``repro
+  # down`` timed out with the session still "up" and its services running.
+  # The cancel check is the watcher's own way out of a blocking wait; it is
+  # consulted on every poll on every platform.
+  let stopPath = state.stopRequestPath
+  let stopCheck: FilesystemWatchCancelCheck =
+    proc(): bool = fileExists(extendedPath(stopPath))
   while not state.stopRequested():
     let paths = eventInputPaths(artifact, state)
     state.emitEvent("watch.idle")
     var watcher = openFilesystemWatcher(paths)
     try:
-      let event = watcher.waitForEvent()
+      let event =
+        try:
+          watcher.waitForEvent(cancelCheck = stopCheck)
+        except IOError:
+          if state.stopRequested():
+            break
+          raise
       if state.stopRequested():
         break
       if event.path == state.stopRequestPath or

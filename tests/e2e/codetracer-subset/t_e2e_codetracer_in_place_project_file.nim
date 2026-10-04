@@ -1603,7 +1603,7 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(buildDebug(projectRoot, "subwindow.js.map"))
   check fileExists(buildDebug(projectRoot, "src/subwindow.js"))
   for stylesheet in [
-    "default_white_theme.css",
+    "default_white_theme_electron.css",
     "default_dark_theme_electron.css",
     "default_dark_theme_extension.css",
     "default_dark_theme.css",
@@ -2386,7 +2386,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2439,7 +2439,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2474,7 +2474,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(changedReport, "frontend-subwindow-html")
       assertActionCacheEffective(changedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2841,7 +2841,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2871,7 +2871,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2904,7 +2904,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(htmlChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(htmlChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2947,7 +2947,7 @@ when defined(macosx) or defined(linux):
       assertAction(helperChangedReport, "frontend-src-helpers-js",
         "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3040,7 +3040,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "subwindow.html"))
       check fileExists(buildDebug(projectRoot, "src/helpers.js"))
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3081,7 +3081,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3135,7 +3135,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3166,7 +3166,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(cChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(cChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3199,7 +3199,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(headerDeletedReport, "frontend-subwindow-html")
       assertActionCacheEffective(headerDeletedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",

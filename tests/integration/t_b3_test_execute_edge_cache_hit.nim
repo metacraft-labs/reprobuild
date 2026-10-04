@@ -177,9 +177,15 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
     # Both dlopen-only runtimes belong on graph-built test binaries. Keep the
     # Clingo names in the shared test-runtime list (not only the shipping repro
     # list), and retain the POSIX gate so Windows still emits no Unix rpaths.
+    # The block is the ``testRuntimePassL`` call itself, up to the close of
+    # its library list. It used to end at the NEXT declaration in the file,
+    # ``proc findNixStoreSourceDir``, which fe3af4e0d deleted (nim-bearssl is
+    # now resolved by the module marker) -- an anchor about an unrelated
+    # helper that turned this check into "-1 > start" with nothing wrong.
     let testRuntimeStart = reproNimText.find("let testRuntimePassL")
-    let testRuntimeEnd = reproNimText.find("proc findNixStoreSourceDir",
-                                           testRuntimeStart)
+    let testRuntimeEnd =
+      if testRuntimeStart >= 0: reproNimText.find("])", testRuntimeStart)
+      else: -1
     check testRuntimeStart >= 0
     check testRuntimeEnd > testRuntimeStart
     if testRuntimeStart >= 0 and testRuntimeEnd > testRuntimeStart:

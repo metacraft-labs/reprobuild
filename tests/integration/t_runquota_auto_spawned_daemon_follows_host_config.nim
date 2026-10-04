@@ -58,7 +58,15 @@ type
     daemon: Process
 
 proc startAutoSpawnedShape(repoRoot, tag, hostText: string): Fixture =
-  result.root = getTempDir() / ("repro-rq-autospawn-" & tag & "-" &
+  # The scratch root and the socket's directory are TWO directories. The
+  # socket's parent is the rendezvous ``runquotad`` verifies before it binds
+  # (owner-only, the mode RunQuota's policy requires); a scratch directory
+  # made with ``createDir`` carries the umask's 0755 and is refused with
+  # ``refusing mode 0755, required 0700`` before the daemon listens. So the
+  # host file lives here, and the endpoint lives where
+  # ``runquotaSocketEndpoint`` puts it -- a directory the daemon creates
+  # itself, exactly as the product's own spawn does.
+  result.root = getTempDir() / ("repro-rq-autospawn-files-" & tag & "-" &
     $getCurrentProcessId())
   removeDir(result.root)
   createDir(result.root)
@@ -67,8 +75,8 @@ proc startAutoSpawnedShape(repoRoot, tag, hostText: string): Fixture =
     "schema = \"runquota.host-config.v1\"\n" & hostText)
   result.socket = runquotaSocketEndpoint("repro-rq-autospawn-" & tag & "-" &
     $getCurrentProcessId())
-  if fileExists(result.socket):
-    removeFile(result.socket)
+  when not defined(windows):
+    removeDir(result.socket.parentDir)
   # The production budget argv, over the file this daemon will read.
   let budget = autoRunQuotaBudgetArgs(readHostConfig(result.hostFile))
   var args = @["--socket", result.socket, "--host-config", result.hostFile,
@@ -95,6 +103,8 @@ proc stop(fixture: var Fixture) =
     fixture.daemon = nil
   delEnv("RUNQUOTA_SOCKET")
   removeDir(fixture.root)
+  when not defined(windows):
+    removeDir(fixture.socket.parentDir)
 
 proc topology(): JsonNode =
   var client = runquota_client.connectDefault()
