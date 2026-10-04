@@ -53,14 +53,39 @@ proc reproBinary(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc bashExe(): string =
+  let found = findExe("bash")
+  doAssert found.len > 0, "NF-4's flake gate needs `bash` on PATH."
+  found
+
+var runToolCounter = 0
+
 proc runTool(exe: string; args: openArray[string]; workDir = "";
              env: StringTableRef = nil):
     tuple[output, error: string, code: int] =
-  var process = startProcess(exe, workDir, args, env, {})
+  ## stderr goes to a file, not a second pipe. Reading stdout to EOF and only
+  ## then stderr deadlocks as soon as the child writes more than one pipe
+  ## buffer (64 KiB on Linux) to stderr before closing stdout: the child
+  ## blocks in write(2) on stderr and the test blocks in read(2) on stdout.
+  ## `repro __repro-direnv-activate` renders its progress line to stderr for
+  ## as long as the flake evaluation runs, so on a loaded host it reaches
+  ## that size, and the case hung with the activation parked in `pipe_write`.
+  inc runToolCounter
+  let errPath = getTempDir() / ("repro-nf4-runtool-" &
+    $getCurrentProcessId() & "-" & $runToolCounter & ".stderr")
+  var shArgs = @["-c", "f=$1; shift; exec \"$@\" 2>\"$f\"", "runTool",
+    errPath, exe]
+  for arg in args:
+    shArgs.add(arg)
+  var process = startProcess(bashExe(), workDir, shArgs, env, {})
   try:
     let outText = process.outputStream().readAll()
-    let errText = process.errorStream().readAll()
-    result = (outText, errText, process.waitForExit())
+    let code = process.waitForExit()
+    var errText = ""
+    if fileExists(errPath):
+      errText = readFile(errPath)
+      removeFile(errPath)
+    result = (outText, errText, code)
   finally:
     process.close()
 
@@ -69,11 +94,6 @@ proc nixExe(): string =
   doAssert found.len > 0,
     "NF-4's flake gate needs `nix` on PATH. Install nix (or run the suite " &
     "inside the repo dev shell); this gate must not pass without it."
-  found
-
-proc bashExe(): string =
-  let found = findExe("bash")
-  doAssert found.len > 0, "NF-4's flake gate needs `bash` on PATH."
   found
 
 proc gitExe(): string =
