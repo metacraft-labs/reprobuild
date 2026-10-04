@@ -96,6 +96,7 @@
 ## there first, which is why the narrowness arm is not optional.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_core
