@@ -752,6 +752,178 @@ dev_shell_fingerprint_drift() {
 }
 
 # ---------------------------------------------------------------------------
+# The OTHER side of the comparison: what flake.lock pins
+# ---------------------------------------------------------------------------
+#
+# Everything above compares the cached shell against THE OVERRIDE SOURCES — the
+# sibling working trees. Both sides of that comparison are the same local
+# checkout, which is why it is structurally unable to answer the one question
+# that keeps costing whole days: is the checkout the shell is built from BEHIND
+# the revision `flake.lock` pins for that input? A sibling that is behind its
+# pin compiles against sources that lack the symbols its consumers were written
+# for, and the resulting error names neither the sibling nor the pin — it names
+# whatever module the compiler happened to reach first, including modules of
+# the standard library.
+#
+# So this section supplies the second, INDEPENDENT side: the committed lock.
+#
+# WHY A PARSER HERE AND NOT `repro flake override-status`. That verb computes
+# the same relation and computes it well, and `.envrc` already calls it at
+# shell entry (see `dev_shell_report_override_drift`). It is the wrong tool for
+# a LINT GATE for three reasons, each of which has a scar behind it:
+#
+#   * it needs `repro`, and this gate is run by the pre-commit hook on a PATH
+#     built in `flake.nix` that deliberately carries no compiled artifact of
+#     this repository — the gate's own tool contract (check 0) is coreutils,
+#     awk, sed and git;
+#   * it needs the APPLIED override vector, which exists only inside an
+#     activated dev shell. `just lint` is routinely run from a git hook, where
+#     there is no plugin and no vector;
+#   * it reports, and is required never to be fatal. A warning is what this
+#     already was. The warning was printed, in a shell-entry banner alongside
+#     others, and the stale sibling still reached a compiler five times.
+#
+# The lock is a committed text file and the question is two `git rev-list`
+# calls, so the gate asks it itself and FAILS on the answer.
+
+# Print `input<TAB>rev` for every input of the lock's ROOT node, where `rev` is
+# the revision that input's node is locked to, or `-` when it has none — a
+# `follows` (whose entry is an array, not a node name), or a node with no
+# `locked.rev` at all (a `path:`/`file:` input).
+#
+# `-` rows are emitted rather than dropped for the same reason
+# `dev_shell_flake_input_repos` emits them: "this input carries no pin" and
+# "this input is not in the file" are different answers and the caller treats
+# them differently. Dropping the first would turn it into the second.
+#
+# nix writes `flake.lock` as deterministically indented JSON — two spaces per
+# level, one key per line — so the nesting depth of a line identifies what it
+# is. The parser keys on that, and the caller is required to refuse an empty
+# result rather than read it as "no pins to disagree with".
+dev_shell_flake_lock_pins() {
+  local lock="$1"
+  [[ -f "$lock" ]] || return 0
+  awk '
+    # A top-level node header: `    "<key>": {`
+    /^    "[^"]+": \{$/ {
+      node = $0; sub(/^    "/, "", node); sub(/": \{$/, "", node)
+      innode = 1; inlocked = 0; inrootinputs = 0; infollows = 0
+      inroot = (node == "root") ? 1 : 0
+      next
+    }
+    /^    \},?$/ {
+      innode = 0; inroot = 0; inlocked = 0; inrootinputs = 0; infollows = 0
+      next
+    }
+
+    # The root node`s input map: `<input name>` -> `<node key>`.
+    inroot && /^      "inputs": \{$/ { inrootinputs = 1; next }
+    inrootinputs && /^      \},?$/ { inrootinputs = 0; next }
+    infollows && /^        \],?$/ { infollows = 0; next }
+    infollows { next }
+    inrootinputs && /^        "[^"]+": "[^"]+",?$/ {
+      n = $0; sub(/^        "/, "", n); sub(/": ".*/, "", n)
+      v = $0; sub(/^        "[^"]*": "/, "", v); sub(/",?$/, "", v)
+      rootnode[n] = v; order[++cnt] = n; next
+    }
+    # An array value is a `follows` path, which routes to another input and
+    # carries no revision of its own.
+    inrootinputs && /^        "[^"]+": \[$/ {
+      n = $0; sub(/^        "/, "", n); sub(/": \[$/, "", n)
+      rootnode[n] = "-"; order[++cnt] = n; infollows = 1; next
+    }
+
+    # Every other node`s `locked.rev`. `original.rev` is deliberately NOT read:
+    # it is what was ASKED for, and the question here is what was resolved.
+    innode && !inroot && /^      "locked": \{$/ { inlocked = 1; next }
+    inlocked && /^      \},?$/ { inlocked = 0; next }
+    inlocked && /^        "rev": "[0-9a-fA-F]+",?$/ {
+      r = $0; sub(/^        "rev": "/, "", r); sub(/",?$/, "", r)
+      noderev[node] = r; next
+    }
+
+    END {
+      for (i = 1; i <= cnt; i++) {
+        n = order[i]; k = rootnode[n]
+        if (k == "-" || !(k in noderev)) printf "%s\t-\n", n
+        else printf "%s\t%s\n", n, noderev[k]
+      }
+    }
+  ' "$lock"
+}
+
+# Classify one checkout against one pin. Prints
+# `relation<TAB>ahead<TAB>behind<TAB>detail` on one line, where `relation` is
+#
+#   at         the revision the shell was built from IS the pinned one
+#   ahead      the checkout contains the pin and more — ordinary development
+#   behind     THE PIN CONTAINS COMMITS THE CHECKOUT DOES NOT
+#   diverged   each contains commits the other does not; the behind half of
+#              that is the same deficiency as `behind`
+#   unfetched  one of the two revisions is not an object in this repository
+#   unknown    both objects are there and `rev-list` still could not answer
+#
+# The names and the directions match `repro flake override-status`, which
+# decides the same relation in Nim (`flakeClassifyPin`), so an operator who has
+# seen one reading has seen the other. The two implementations are deliberately
+# independent — this one must answer with nothing compiled — and where they are
+# compared they must agree.
+#
+# `unknown` is kept apart from `unfetched` because it is the shape a CORRUPT
+# object database presents: a commit that the commit-graph knows and the object
+# store does not. `git log`, `git cat-file -e` and a history search all answer
+# from the graph and report confidently; only a walk that must read the objects
+# fails. A gate that folded that into "fine" would certify a repository that
+# cannot be read.
+dev_shell_pin_relation() {
+  local dir="$1" pin="$2" head="$3"
+  if [[ ! -d "$dir" ]]; then
+    printf 'unknown\t0\t0\t%s\n' "$dir is not on disk"
+    return 0
+  fi
+  if [[ "$pin" == "$head" ]]; then
+    printf 'at\t0\t0\t\n'
+    return 0
+  fi
+  local absent=()
+  dev_shell_git -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null ||
+    absent+=("the pinned revision $pin")
+  dev_shell_git -C "$dir" cat-file -e "$head^{commit}" 2>/dev/null ||
+    absent+=("the recorded revision $head")
+  if [[ ${#absent[@]} -gt 0 ]]; then
+    printf 'unfetched\t0\t0\t%s\n' \
+      "$(printf '%s and ' "${absent[@]}" | sed 's/ and $//') is not an object in $dir"
+    return 0
+  fi
+  local ahead behind err
+  err=""
+  ahead="$(dev_shell_git -C "$dir" rev-list --count "$pin..$head" 2>&1)" ||
+    err="$ahead"
+  if [[ -z "$err" ]]; then
+    behind="$(dev_shell_git -C "$dir" rev-list --count "$head..$pin" 2>&1)" ||
+      err="$behind"
+  fi
+  if [[ -n "$err" ]]; then
+    printf 'unknown\t0\t0\t%s\n' \
+      "git rev-list in $dir failed: $(printf '%s' "$err" | tr '\n' ' ')"
+    return 0
+  fi
+  if [[ "$behind" -gt 0 && "$ahead" -gt 0 ]]; then
+    printf 'diverged\t%s\t%s\t\n' "$ahead" "$behind"
+  elif [[ "$behind" -gt 0 ]]; then
+    printf 'behind\t0\t%s\t\n' "$behind"
+  elif [[ "$ahead" -gt 0 ]]; then
+    printf 'ahead\t%s\t0\t\n' "$ahead"
+  else
+    # Distinct revisions, neither reachable from the other and both counts
+    # zero: `rev-list` cannot produce this, so reaching it means the two
+    # queries did not describe the revisions asked about.
+    printf 'unknown\t0\t0\t%s\n' \
+      "$pin and $head differ but rev-list reports no distance in either direction"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # The §3.2 ambient drift report, at shell entry
 # ---------------------------------------------------------------------------
 #

@@ -478,15 +478,28 @@ e2e_reprobuild_cmake_m11_coverage_nightly:
 
 lint:
     mkdir -p test-logs
-    bash ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
-    bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
-    bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # The dev-shell honesty gate. Here rather than only in the suite for the
     # same reason as the case-count gate below: it reads .envrc and .direnv and
     # needs nothing compiled, and the failure it catches — a cached dev shell
-    # built from a source that has since moved — is the failure that makes
-    # every OTHER lint step below it report a fiction. First, for that reason.
-    bash ./scripts/check_dev_shell_env.sh 2>&1 | tee -a test-logs/lint.log
+    # built from a source that has since moved, or from a source behind the
+    # revision flake.lock pins for it — is the failure that makes every OTHER
+    # lint step below it report a fiction. First, for that reason.
+    #
+    # It is FIRST IN BYTES, not only in prose. This comment claimed the
+    # position for a long time while the recipe ran the gate fourth, behind
+    # check_nim_sources.sh — so the step whose output this paragraph calls
+    # worthless without the gate ran a full compile sweep BEFORE it. That cost
+    # an hour of wall clock and roughly seven thousand lines of cascade naming
+    # repositories that were not at fault, where the gate answers in seconds
+    # with one line naming the stale sibling. A rationale that the ordering
+    # contradicts is worse than no rationale: it reads as though the question
+    # had been settled. Keep this line immediately after `mkdir -p test-logs`,
+    # and note that it is the step that TRUNCATES test-logs/lint.log (`tee`,
+    # not `tee -a`) — whichever check runs first owns that.
+    bash ./scripts/check_dev_shell_env.sh 2>&1 | tee test-logs/lint.log
+    bash ./scripts/check_repo_requirements.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # The "poEvalCommand is not a shell" gate. Same shape as the ambient
     # check above and for the same reason: it is a source scan, so it can
     # answer before anything is compiled. Five defects in one campaign came
