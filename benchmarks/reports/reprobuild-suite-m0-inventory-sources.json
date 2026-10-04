@@ -1787,7 +1787,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 256,
+          "line": 279,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -1811,7 +1811,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 294,
+          "line": 328,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -1835,7 +1835,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 310,
+          "line": 344,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
