@@ -309,12 +309,26 @@ suite "integration_reprobuild_sessions_share_runquota":
         sleep(25)
       check pathExists(codeStartStamp)
 
+      # The two sessions must OVERLAP: the second is launched while the first
+      # is still alive (its action is parked on the release gate, holding the
+      # only slot). That is what the original ``launchEnd - launchStart <
+      # 1000`` check established when both sessions were launched back to
+      # back (34b16ebb8). e9a91a7c8 put the wait for the first session's
+      # action start between the two launches and widened the bound to
+      # 150 s, which turned it into a wall-clock budget on the first
+      # session's cold interface extraction, provider compile and lease waits
+      # under a one-slot daemon -- none of which is what this gate claims.
+      # Assert the overlap itself; the 300 s wait above stays a liveness
+      # bound, enforced by ``check pathExists(codeStartStamp)``.
+      let firstSessionAlive = codeBuild.peekExitCode() == -1
       let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
         args = ["build", fixtureProject, "--daemon=off",
           "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
       let launchEnd = nowMillis()
-      check launchEnd - launchStart < 150000
+      checkpoint("first session reached its action after " &
+        $(launchEnd - launchStart) & " ms")
+      check firstSessionAlive
 
       var lastLeases = ""
       var observedQueue = false
