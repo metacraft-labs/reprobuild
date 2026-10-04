@@ -30,7 +30,12 @@
 ## fetched 2026-09-20. Each carries two PEM certificates: the signing key
 ## for that generation, then the root. The three `Kds*CrlDerHex`
 ## constants are the verbatim bodies of the sibling `/crl` endpoints,
-## fetched in the same session.
+## fetched 2026-10-02 — a refresh, because the lists first pinned in the
+## 2026-09-20 session stated a next-update of 2026-10-04 and the service
+## had since reissued all three. Each refreshed list verifies under the
+## root pinned beside it (OpenSSL 3, independently of the code under
+## test), and the revoked sets did not change: Genoa names 020001, Milan
+## and Turin name nothing.
 ##
 ## One qualification, because "verbatim" has to be true or it is worth
 ## nothing: the Turin chain is served with CRLF line endings and the
