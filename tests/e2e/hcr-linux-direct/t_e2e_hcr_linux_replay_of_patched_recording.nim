@@ -73,9 +73,10 @@
 ## so, and it FAILS LOUDLY naming this paragraph if the symptom reappears,
 ## rather than presenting it as an HX-S-2 failure.
 
-import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
+import std/[json, options, os, osproc, posix, streams, strtabs, strutils, unittest]
 
 when defined(linux) and defined(amd64):
+  import std/net
   import repro_hcr_agent
   import repro_project_dsl
 
@@ -151,6 +152,20 @@ when defined(linux) and defined(amd64):
       return output[from0 .. ^1]
     output[from0 ..< b]
 
+  proc agentConnectsBeforeExit(listener: HcrAgentUnixListener;
+                               process: Process): bool =
+    ## Waits until the recorded target's agent is connecting (the listener is
+    ## readable) or `ct-mcr record` has exited, whichever is first.  A plain
+    ## `accept` blocks forever when the recorder refuses the recording before
+    ## the agent connects: the HX-S-2 gate then hung until its caller's
+    ## timeout, with the recorder's refusal unread in its pipe.
+    var fds = [TPollfd(fd: listener.socket.getFd().cint, events: POLLIN)]
+    while true:
+      if poll(addr fds[0], 1, 200) > 0 and (fds[0].revents and POLLIN) != 0:
+        return true
+      if not process.running:
+        return false
+
   proc recordWithPatch(ctMcr, targetBin, tracePath, socketPath: string;
                        patchBytes: seq[byte]; cwd: string;
                        patchCount: int): tuple[targetOut: string,
@@ -171,6 +186,14 @@ when defined(linux) and defined(amd64):
     let process = startProcess(ctMcr, workingDir = cwd,
       args = @["record", "--output", tracePath, "--", targetBin],
       env = env, options = {poStdErrToStdOut})
+    if not agentConnectsBeforeExit(listener, process):
+      let earlyOut = process.outputStream.readAll()
+      let earlyCode = process.waitForExit()
+      process.close()
+      checkpoint("`ct-mcr record` exited " & $earlyCode & " before the " &
+        "target's HCR agent connected:")
+      checkpoint(earlyOut)
+      require false
     var connection = acceptHcrAgentConnection(listener)
     var client = initHcrCoordinatorClient(SupportProfile)
     client.completeHandshake(connection)
@@ -259,11 +282,22 @@ when defined(linux) and defined(amd64):
           "a real patch object and cannot be run without it")
       require gcc.len > 0
 
-      let ctMcr = repoRoot / ".." / "codetracer-native-recorder" / "ct_cli" / "ct_cli"
+      # The recorder: `CT_MCR_TEST_BINARY` when set, else the sibling
+      # checkout's.  The recorder's own HX-S-2 gate
+      # (codetracer-native-recorder tests/test_hx_s2_replay_crosses_the_patch_
+      # boundary.sh) replays this recording with ITS ct-mcr and must record
+      # with the same one; run from a worktree of that repo (as its full gate
+      # always is) the sibling path names another build, and it refused to
+      # run at all.  It exports its binary here.
+      let ctMcrOverride = getEnv("CT_MCR_TEST_BINARY", "")
+      let ctMcr =
+        if ctMcrOverride.len > 0: ctMcrOverride
+        else: repoRoot / ".." / "codetracer-native-recorder" / "ct_cli" / "ct_cli"
       if not fileExists(ctMcr):
         checkpoint("ct-mcr not found at " & ctMcr & ". This gate records and " &
-          "replays with the sibling recorder checkout; build it with " &
-          "`just build-ct-mcr` in codetracer-native-recorder.")
+          "replays with the sibling recorder checkout (or CT_MCR_TEST_BINARY " &
+          "when set); build it with `just build-ct-mcr` in " &
+          "codetracer-native-recorder.")
       require fileExists(ctMcr)
 
       # `replay-worker` consults the licensing gate BEFORE it reads the trace,
