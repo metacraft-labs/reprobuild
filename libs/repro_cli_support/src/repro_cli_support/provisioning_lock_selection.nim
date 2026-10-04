@@ -53,14 +53,15 @@
 ##     ``contribution-changed``, ``interface-changed``, ``catalog-changed``,
 ##     ``realization-changed``, ``policy-contradicts-lock``, ambiguity, ...);
 ##   * the lock has records for this platform pair but no catalog source is
-##     installed. THIS IS THE PRODUCTION STATE TODAY: explicit
-##     cross-repository catalog imports with their coordinates, and the
-##     provider identity of each offered contribution (ReproOS M6
-##     deliverables 1 and 2), have no production supplier, so a real
-##     ``repro build`` whose lock carries provisioning records refuses with
-##     a message saying so. That is the safe side: before this module the
-##     CLI ignored those records and provisioned whatever the catalogs
-##     offered;
+##     installed (``setProvisioningCatalogSource(nil)``). Before ReproOS M6
+##     deliverables 1 and 2 this was the production state; it still refuses,
+##     with the same message;
+##   * the PRODUCTION catalog source (``productionProvisioningCatalogSource``,
+##     installed by default: ``catalog_discovery``) cannot supply the
+##     catalogs -- the project declares none (no ``repro-catalogs.toml``), an
+##     import has no lock pin or one that disagrees with the declaration, or
+##     a catalog cannot be read at its pinned identity. It never falls back
+##     to a sibling checkout, another revision or an unpinned selection;
 ##   * the lock's ``provisioning`` records cannot be read, or some line
 ##     names the key in a spelling the strict reader skips, in any letter
 ##     case (even beside a line it does read);
@@ -85,8 +86,11 @@
 ## (``reselectCommittedProvisioning``): resolve WITHOUT the lock's own
 ## claims, lock every selection through the lock writer, carry other
 ## platform pairs, print the diff, and write nothing on any refusal --
-## including when no catalog source is installed, the production state
-## today. ``repro lock diff`` (``diffProvisioningLockDocuments``) is the
+## including when no catalog source is installed, or the production one
+## finds no declaration (``repro-catalogs.toml``) or cannot read a declared
+## catalog. Re-selection also re-pins every declared catalog import
+## (``catalog_imports``; ReproOS M6 D1) and reports how the pins moved.
+## ``repro lock diff`` (``diffProvisioningLockDocuments``) is the
 ## same diff over two lock files; an unreadable lock refuses it, never
 ## reads as "no change".
 ##
@@ -113,10 +117,13 @@ import repro_interface_artifacts/contribution_selection
 import repro_interface_artifacts/provisioning_lock_diff
 import repro_lock
 
+import ./catalog_discovery
+
 export catalog_composition.CatalogImport, catalog_composition.CatalogSelectionPolicy
 export contribution_fingerprint.ContributionIdentity,
   contribution_fingerprint.ContributionResolver
 export provisioning_lock_diff
+export catalog_discovery
 
 type
   ProvisioningSelectionRefused* = object of ValueError
@@ -142,6 +149,13 @@ type
     hostPlatform*: string
     targetPlatform*: string
     purpose*: ProvisioningCatalogPurpose
+    catalogImportPins*: seq[LockedCatalogImport]
+      ## The committed lock's catalog import pins (ReproOS M6 D1), strictly
+      ## read. A build reads every catalog at the revision pinned here;
+      ## re-selection re-pins and ignores them.
+    lockClaims*: seq[LockedRealization]
+      ## The committed lock's provisioning records, all platform pairs: the
+      ## coordinates a source may read diagnostic evidence at.
 
   ProvisioningCatalogInputs* = object
     ## The resolver inputs a build cannot read out of its own artifact.
@@ -163,15 +177,40 @@ type
       ## field (``provisioning_lock_diff``), and only after its fingerprint
       ## is recomputed and found EQUAL to the locked one. Never selects
       ## anything.
+    catalogImportPins*: seq[LockedCatalogImport]
+      ## The catalog import pins the answer was read at (ReproOS M6 D1).
+      ## Re-selection writes them into the lock (and reports how they
+      ## moved); a build ignores them. A source that pins nothing leaves the
+      ## lock's ``catalog_imports`` key absent, exactly as before it existed.
 
   ProvisioningCatalogSource* = proc (request: ProvisioningCatalogRequest):
     ProvisioningCatalogInputs {.closure.}
-    ## Supplies the catalog imports for a lock-governed build. ReproOS M6
-    ## deliverables 1 and 2 are its production implementation and do not
-    ## exist yet; until one is installed, a lock with provisioning records
-    ## refuses.
+    ## Supplies the catalog imports for a lock-governed build. The
+    ## production implementation is ``productionProvisioningCatalogSource``
+    ## (ReproOS M6 deliverables 1 and 2), installed by default.
 
-var catalogSource: ProvisioningCatalogSource = nil
+proc productionProvisioningCatalogSource*(request: ProvisioningCatalogRequest):
+    ProvisioningCatalogInputs =
+  ## THE production catalog source (``catalog_discovery``): the catalogs the
+  ## project declares in ``repro-catalogs.toml``, each read from the
+  ## workspace's shared clone of its remote at the revision the committed
+  ## lock pins (a build) or at the revision its declared commit or ref names
+  ## now (re-selection), every object re-hashed, nothing compiled or run.
+  ## Raises ``CatalogDiscoveryError`` naming every cause; the callers turn
+  ## that into a refusal.
+  let answer =
+    case request.purpose
+    of pcpBuild:
+      catalogsForBuild(request.projectRoot, request.catalogImportPins,
+        request.lockClaims)
+    of pcpLockReselect:
+      catalogsForReselect(request.projectRoot, request.lockClaims)
+  ProvisioningCatalogInputs(imports: answer.imports, offered: answer.offered,
+    policy: answer.policy, resolver: answer.resolver,
+    previous: answer.previous, catalogImportPins: answer.pins)
+
+var catalogSource: ProvisioningCatalogSource =
+  productionProvisioningCatalogSource
 
 proc setProvisioningCatalogSource*(source: ProvisioningCatalogSource) =
   ## Install (or, with ``nil``, remove) the catalog source every
@@ -270,6 +309,13 @@ proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
     return @[]
   let packages = here.mapIt("\"" & it.packageName & "\" -> \"" &
     it.contributor & "\"").sorted(cmp).deduplicate(isSorted = true)
+  if lockHasUnreadCatalogImportsSpelling(text):
+    # M6 D1: catalog import pins under a key spelling the strict reader
+    # skips would be invisible, and the catalogs would read as unpinned.
+    refuse("the committed lock " & lockPath & " names `" &
+      CatalogImportsLockKey & "` in a form the lock reader does not read " &
+      "(only the writer's `" & CatalogImportsLockKey & " = [...]` line is " &
+      "read); the pins are not ignored. " & CatalogImportsRepairAdvice & ".")
   if catalogSource.isNil:
     refuse("the committed lock " & lockPath & " pins provisioning " &
       "contributions on " & host & " -> " & target & " (" &
@@ -283,7 +329,8 @@ proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
   try:
     inputs = catalogSource(ProvisioningCatalogRequest(
       projectRoot: projectRoot, lockPath: lockPath, artifact: artifact,
-      hostPlatform: host, targetPlatform: target))
+      hostPlatform: host, targetPlatform: target,
+      catalogImportPins: lock.lockedCatalogImportPins(), lockClaims: claims))
   except CatchableError as err:
     refuse("the catalogs the committed lock " & lockPath &
       " is verified against could not be obtained: " & err.msg)
@@ -400,18 +447,36 @@ proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
       "the committed lock " & lockPath, incumbent)
     if refusal.len > 0:
       return CommittedReselection(refusals: @[refusal])
+  # M6 D1: the incumbent's catalog import pins, read only to report how
+  # re-selection moves them -- but read strictly: an unreadable array is
+  # refused, not silently replaced.
+  var incumbentPins: seq[LockedCatalogImport] = @[]
+  if incumbentExists and lockDeclaresCatalogImports(incumbentText):
+    if lockHasUnreadCatalogImportsSpelling(incumbentText):
+      return CommittedReselection(refusals: @["the committed lock " &
+        lockPath & " names `" & CatalogImportsLockKey & "` in a form the " &
+        "lock reader does not read; " & CatalogImportsRepairAdvice])
+    try:
+      incumbentPins = parseLockedDependencies(incumbentText).
+        lockedCatalogImportPins()
+    except CatchableError as err:
+      return CommittedReselection(refusals: @["the committed lock " &
+        lockPath & " has `" & CatalogImportsLockKey & "` pins that cannot " &
+        "be read (" & err.msg & ")"])
   if catalogSource.isNil:
     return CommittedReselection(refusals: @["re-selection needs the " &
       "composed catalogs, and none is supplied to this command: explicit " &
       "cross-repository catalog imports and the offered contributions' " &
-      "provider identities (ReproOS M6 deliverables 1 and 2) have no " &
-      "production source yet. The lock is left unchanged."])
+      "provider identities (ReproOS M6 deliverables 1 and 2) -- and no " &
+      "catalog source is installed in this process. The lock is left " &
+      "unchanged."])
   var inputs: ProvisioningCatalogInputs
   try:
     inputs = catalogSource(ProvisioningCatalogRequest(
       projectRoot: projectRoot, lockPath: lockPath,
       artifact: ProjectInterfaceArtifact(), hostPlatform: hostPlatform,
-      targetPlatform: targetPlatform, purpose: pcpLockReselect))
+      targetPlatform: targetPlatform, purpose: pcpLockReselect,
+      catalogImportPins: incumbentPins, lockClaims: incumbent))
   except CatchableError as err:
     return CommittedReselection(refusals: @["the catalogs to re-select " &
       "from could not be obtained: " & err.msg])
@@ -430,11 +495,13 @@ proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
     return CommittedReselection(refusals: outcome.refusals)
   var document = freshDocument
   try:
-    # With no record to write, the fresh document is written exactly as a
-    # plain refresh writes it (``landCommittedLock``), byte for byte.
-    if outcome.records.len > 0:
+    # With no record and no catalog import pin to write, the fresh document
+    # is written exactly as a plain refresh writes it (``landCommittedLock``),
+    # byte for byte.
+    if outcome.records.len > 0 or inputs.catalogImportPins.len > 0:
       document = serializeLockedDependencies(parseLockedDependencies(
-        freshDocument).withProvisioningRealizations(outcome.records))
+        freshDocument).withProvisioningRealizations(outcome.records).
+        withCatalogImportPins(inputs.catalogImportPins))
   except CatchableError as err:
     return CommittedReselection(refusals: @["the re-selected lock cannot " &
       "be written: " & err.msg])
@@ -447,5 +514,8 @@ proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
     report.add("\nno provisioning selection changed")
   else:
     report.add("\n" & renderProvisioningDiff(outcome.diff))
+  # M6 D1: how the catalog import pins moved (nothing when unchanged).
+  for line in renderCatalogPinChanges(incumbentPins, inputs.catalogImportPins):
+    report.add("\n" & line)
   CommittedReselection(document: document, report: report,
     diff: outcome.diff)

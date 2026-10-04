@@ -62434,7 +62434,19 @@ proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
     newText = readFile(extendedPath(newPath))
   except CatchableError as err:
     return (2, "repro lock diff: " & err.msg)
-  let diff = diffProvisioningLockDocuments(oldText, newText)
+  # ReproOS M6 D2: evidence for a field-level explanation, read from each
+  # record's OWN catalog coordinate (remote + revision) in the workspace's
+  # shared clones, where readable. Optional by construction: evidence is
+  # used only if it reproduces a recorded fingerprint, and a catalog that
+  # cannot be read leaves the cause "not determinable from the records".
+  var evidence = ProvisioningDiffEvidence()
+  var oldRecords, newRecords: seq[LockedRealization]
+  let anchor = parentDir(absolutePath(newPath))
+  if provisioningRecordsOf(oldText, "the old lock", oldRecords).len == 0:
+    evidence.previous = catalogEvidenceForRecords(oldRecords, anchor)
+  if provisioningRecordsOf(newText, "the new lock", newRecords).len == 0:
+    evidence.current = catalogEvidenceForRecords(newRecords, anchor)
+  let diff = diffProvisioningLockDocuments(oldText, newText, evidence)
   if diff.refused:
     return (2, "repro lock diff: " & renderProvisioningDiff(diff))
   if diff.unchanged:

@@ -24,9 +24,12 @@
 ## ambient sibling-directory names" either. So a ``CatalogCoordinate``
 ## names a catalog by four EXPLICIT components and nothing else:
 ##
-##   * ``workspace`` — the declaring workspace's own identity. Two
-##     workspaces may pin the same remote at different revisions, and a
-##     composition is a statement made by one of them.
+##   * ``workspace`` — the workspace name under which the consumer declares
+##     the catalog repository (the ``repo`` of its ``repro-catalogs.toml``
+##     import, which is the ``repos/<repo>.toml`` / ``LockedDep`` name; see
+##     ``reprobuild-specs/Federated-Catalog-Imports.md``). A composition is a
+##     statement made by one consumer, and the name is how that consumer
+##     refers to the catalog.
 ##   * ``remote`` — the catalog repository. Not a local path: a path is
 ##     where a checkout happens to sit today.
 ##   * ``revision`` — the exact pinned revision. Without it the same remote
@@ -121,7 +124,10 @@
 ##     without complaint. Only TWO imports of one coordinate disagreeing
 ##     on their CONTENT are caught, by ``catalog-identity-conflict``. A
 ##     consumer that needs the component verified must recompute it
-##     where the artifacts are actually read.
+##     where the artifacts are actually read -- which the production
+##     catalog source (``repro_cli_support/catalog_discovery``) does: the
+##     coordinate it hands in carries the identity it recomputed from the
+##     artifacts it read at the pinned revision, checked against the lock.
 ##   * It does not filter by version, platform, ABI or capability (spec
 ##     § Resolution step 4). Every contribution whose target interface
 ##     fingerprint matches is eligible here, so a set this module calls

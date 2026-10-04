@@ -216,7 +216,7 @@ proc integrityDefect(value: string): string =
     return ""
   "not a 64-hex digest or a full-width sha256-/sha512- SRI digest"
 
-proc localPathDefect(value: string): string =
+proc localPathDefect*(value: string): string =
   ## A value that spells a location on SOME host's filesystem. None may
   ## enter a record: a lock is committed and read on other hosts, and an
   ## absolute path in it is the cross-host leak this campaign has already

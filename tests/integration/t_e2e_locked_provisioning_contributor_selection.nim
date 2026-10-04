@@ -45,11 +45,18 @@
 ## provider-compile edge) staying put for realization-only changes while
 ## the CLI cache and the realization keys move (deliverable 4).
 ##
-## The catalog source is supplied BY THE TEST (``useCatalogs``). It is not a
-## mock of anything that exists: explicit catalog imports and provider
-## identities (M6 deliverables 1 and 2) have no production implementation,
-## so in a real ``repro build`` no source is installed and a lock with
-## provisioning records refuses -- which is also tested.
+## Most cases supply the catalog source BY THE TEST (``useCatalogs``): the
+## catalog imports are constructed in memory, so a case can vary one input
+## (a revision, a provider identity) without publishing a repository. It is
+## not a mock of anything: the source's contract is "the explicitly
+## identified catalogs and the offered identities", and the in-memory values
+## are exactly that. The PRODUCTION source (M6 deliverables 1 and 2,
+## ``catalog_discovery``: ``repro-catalogs.toml``, published interface
+## artifacts read from the workspace's shared clones at the pinned revision)
+## is installed by default and is exercised by the last case, "the CLI build
+## path selects through the production catalog source over published catalog
+## repositories", over real git repositories; with NO source installed a lock
+## with provisioning records still refuses -- which is also tested.
 ##
 ## ## What this does NOT cover
 ##
@@ -59,7 +66,9 @@
 ##     and ``repro develop`` sites, and the producer runtime-tool sites are
 ##     not run end to end: the binary's ``.#apps`` edge crashes on this host
 ##     (``nim.exe`` STATUS_STACK_BUFFER_OVERRUN, pre-existing).
-##   * A production catalog source (M6 deliverables 1 and 2).
+##   * The production catalog source's own adversarial cases (dirty and
+##     wrong-commit checkouts, forged artifacts, coordinate claims, ...):
+##     ``t_e2e_federated_catalog_discovery_from_published_repositories``.
 ##   * Linux. Built and run on Windows only.
 ##   * Nix and Scoop realization (the tarball family is the one that
 ##     realizes on every host); their planners share ``selectContributor``
@@ -83,6 +92,8 @@ import repro_lock
 import repro_lock_files
 import repro_project_dsl
 import repro_tool_profiles
+
+import ./published_catalog_fixtures
 
 package lockedTool:
   executable lockedTool:
@@ -355,8 +366,8 @@ var catalogSourceCalls = 0
 
 proc useCatalogs(w: World) =
   ## Install ``w``'s catalogs as the CLI's ``ProvisioningCatalogSource`` --
-  ## the input M6 deliverables 1 and 2 will supply in production (see the
-  ## module docstring).
+  ## in memory; the production source reads the same inputs out of
+  ## published catalog repositories (see the module docstring).
   catalogWorld = w
   setProvisioningCatalogSource(
     proc (request: ProvisioningCatalogRequest): ProvisioningCatalogInputs =
@@ -1008,8 +1019,9 @@ suite "e2e_locked_provisioning_contributor_selection":
       discard buildProvisioningPins(onlyB.cliArtifact(), project))
     check "locked-contribution-unavailable" in gone
     check ContributorA in gone
-    # In production no catalog source is installed yet (M6 deliverables 1
-    # and 2): a lock with provisioning records refuses, naming why.
+    # With NO catalog source installed (the state before M6 deliverables 1
+    # and 2 supplied the production one): a lock with provisioning records
+    # refuses, naming why.
     setProvisioningCatalogSource(nil)
     check not provisioningCatalogSourceInstalled()
     let production = cliRefusal(proc () = discard w1.cliBuild(project, outDir))
@@ -1378,8 +1390,8 @@ suite "e2e_locked_provisioning_contributor_selection":
       noContributionResolver)
     check foreign.locked
     # A record made on another HOST for this target is not this platform
-    # pair either: it governs nothing here, and (production, no catalog
-    # source) is not refused as though it did.
+    # pair either: it governs nothing here, and (with no catalog source
+    # installed) is not refused as though it did.
     let crossHost = lockSelectedRealization(RealizationLockRequest(
       selection: s.selection, identity: s.identity,
       realizationLockIdentity: "sha256:" & archiveA1.sha256,
@@ -1436,7 +1448,7 @@ suite "e2e_locked_provisioning_contributor_selection":
         let text = cliRefusal(proc () =
           discard buildProvisioningPins(artifact, mixed))
         check "not read" in text
-        # ...and with no catalog source installed (production) as well.
+        # ...and with no catalog source installed as well.
         setProvisioningCatalogSource(nil)
         check "not read" in cliRefusal(proc () =
           discard buildProvisioningPins(artifact, mixed))
@@ -1452,5 +1464,148 @@ suite "e2e_locked_provisioning_contributor_selection":
     for member in ["x = { provisioning = 1 }", "x = { Provisioning = 1 }"]:
       writeFile(mixed / "repro.lock", plainLock & "\n" & member & "\n")
       check buildProvisioningPins(artifact, mixed).len == 0
+
+  test "the CLI build path selects through the production catalog source over published catalog repositories":
+    # The same two contributors, now PUBLISHED: three real git repositories
+    # (the canonical interface, catalog A, catalog B) commit their generated
+    # interface artifacts; their shared clones are what the production
+    # source reads (Federated-Catalog-Imports.md). No in-memory catalog.
+    let clones = fixtureRoot / "published-clones"
+    let previousClones = getEnv("REPRO_WORKSPACE_CLONES")
+    putEnv("REPRO_WORKSPACE_CLONES", clones)
+    defer:
+      if previousClones.len > 0: putEnv("REPRO_WORKSPACE_CLONES", previousClones)
+      else: delEnv("REPRO_WORKSPACE_CLONES")
+    setProvisioningCatalogSource(productionProvisioningCatalogSource)
+    check provisioningCatalogSourceInstalled()
+    let packages = registeredPackages()
+    let target = findPackage(ToolPackage, packages)
+    let root = fixtureRoot / "published"
+    let ifaces = initCatalogRepo(root, "locked-tool-packages",
+      "https://example.invalid/m7/locked-tool-packages")
+    let repoA = initCatalogRepo(root, "locked-tool-catalog-a",
+      "https://example.invalid/m7/locked-tool-catalog-a")
+    let repoB = initCatalogRepo(root, "locked-tool-catalog-b",
+      "https://example.invalid/m7/locked-tool-catalog-b")
+    proc catalogOf(name: string; def: ProvisioningContributionDef):
+        ProjectInterfaceArtifact =
+      artifactFor(ProjectInterface(projectName: name, packageName: name,
+        provisioningContributions: @[recordOf(def, packages)]))
+    let defA1 = contributionDef(ContributorA, archiveA1, packages, 10)
+    let defB1 = contributionDef(ContributorB, archiveB1, packages, 20)
+    discard ifaces.publishCommit(@[("locked-tool.rbsz", artifactFor(
+      toProjectInterface(target, packages, @[])))], "interfaces")
+    let revA1 = repoA.publishCommit(@[("catalog.rbsz",
+      catalogOf("catalog-a", defA1))], "A1")
+    discard repoB.publishCommit(@[("catalog.rbsz",
+      catalogOf("catalog-b", defB1))], "B1")
+    for repo in [ifaces, repoA, repoB]:
+      discard repo.syncSharedClone(clones)
+    let specs = @[
+      ImportSpec(repo: "locked-tool-packages", remote: ifaces.remote,
+        gitRef: "main"),
+      ImportSpec(repo: "locked-tool-catalog-a", remote: repoA.remote,
+        gitRef: "main"),
+      ImportSpec(repo: "locked-tool-catalog-b", remote: repoB.remote,
+        gitRef: "main")]
+    var projects = 0
+    proc publishedProject(order: seq[int]): string =
+      inc projects
+      result = fixtureRoot / ("published-project-" & $projects)
+      createDir(result)
+      writeFile(result / "repro.solver", "package app\nversions: 1.0.0\n")
+      writeFile(result / "repro.lock", serializeLockedDependencies(baseLock()))
+      writeDeclaration(result, order.mapIt(specs[it]),
+        @[(ToolPackage, ContributorA)])
+      check runReproLockCommand(@["refresh", result, "--inputs",
+        result / "repro.solver", "--provisioning"]) == 0
+    proc selectedLines(dir: string): string =
+      for line in readFile(dir / "repro.lock").splitLines():
+        if line.startsWith(ProvisioningLockKey & " = ") or
+            line.startsWith(CatalogImportsLockKey & " = "):
+          result.add(line & "\n")
+    let w1 = world(@[tipA1(), tipB1()])
+    let project = publishedProject(@[0, 1, 2])
+    let claims = claimsOf(project / "repro.lock")
+    check claims.len == 1
+    check claims[0].contributor == ContributorA
+    check claims[0].catalogRevision == revA1
+    check claims[0].catalogRemote == repoA.remote
+    # The lock selects through the production source and the engine
+    # realizes the locked archive.
+    let outDir = fixtureRoot / "cli-out-published"
+    let pinsA = buildProvisioningPins(w1.cliArtifact(), project)
+    check pinsA.len == 1
+    check pinsA[0].contributor == ContributorA
+    check pinsA[0].contributionFingerprint == claims[0].contributionFingerprint
+    let first = warmResolveAndWriteIdentity(w1.cliArtifact(), outDir,
+      tpmTarball, pins = pinsA).identity
+    check first.realizedMarker == archiveA1.marker
+    # Every declaration order re-selects byte-identically.
+    let reference = selectedLines(project)
+    check reference.len > 0
+    var perm = @[0, 1, 2]
+    var seen = 0
+    while true:
+      check selectedLines(publishedProject(perm)) == reference
+      inc seen
+      if not perm.nextPermutation(): break
+    check seen == 6
+    # B's branch tip moves: the pins, the cache keys and the realized
+    # archive stay A's.
+    let defB2 = contributionDef(ContributorB, archiveB2, packages, 20)
+    discard repoB.publishCommit(@[("catalog.rbsz",
+      catalogOf("catalog-b", defB2))], "B2")
+    discard repoB.syncSharedClone(clones)
+    check buildProvisioningPins(w1.cliArtifact(), project) == pinsA
+    let afterB = warmResolveAndWriteIdentity(w1.cliArtifact(), outDir,
+      tpmTarball, pins = pinsA).identity
+    check afterB.realizedMarker == archiveA1.marker
+    check afterB.profiles[0].profileFingerprint ==
+      first.profiles[0].profileFingerprint
+    # A republishes new content on its branch: the build still reads the
+    # PINNED revision.
+    let defA2 = contributionDef(ContributorA, archiveA2, packages, 10)
+    let revA2 = repoA.publishCommit(@[("catalog.rbsz",
+      catalogOf("catalog-a", defA2))], "A2")
+    discard repoA.syncSharedClone(clones)
+    check buildProvisioningPins(w1.cliArtifact(), project) == pinsA
+    # Bumping A's pin by hand to the new revision (consistently: revision
+    # and identity) is refused against the locked record -- the
+    # contribution changed -- and is explained from the PUBLISHED A1 and
+    # A2 artifacts, field by field; never re-selected.
+    let lockText = readFile(project / "repro.lock")
+    var pins = parseLockedDependencies(lockText).lockedCatalogImportPins()
+    for p in pins.mitems:
+      if p.repo == "locked-tool-catalog-a":
+        p.revision = revA2
+        p.interfaceArtifact = catalogArtifactIdentity(
+          @[catalogOf("catalog-a", defA2)])
+    writeFile(project / "repro.lock", serializeLockedDependencies(
+      parseLockedDependencies(lockText).withCatalogImportPins(pins)))
+    let bumped = cliRefusal(proc () =
+      discard buildProvisioningPins(w1.cliArtifact(), project))
+    check "contribution-changed" in bumped
+    check "not relaxed to an unpinned selection" in bumped
+    check "cause (from the two contribution identities" in bumped
+    check "provider identity: " in bumped
+    check "repro lock refresh --provisioning " & quoteShell(project) in bumped
+    # Explicit re-selection adopts A2; the build then realizes A2's archive.
+    writeFile(project / "repro.lock", lockText)
+    check runReproLockCommand(@["refresh", project, "--inputs",
+      project / "repro.solver", "--provisioning"]) == 0
+    check claimsOf(project / "repro.lock")[0].catalogRevision == revA2
+    let w2 = world(@[Tip(contributor: ContributorA, remote: RemoteA,
+      revision: RevA2, archive: archiveA2, provider: ProviderA), tipB1()])
+    let pinsA2 = buildProvisioningPins(w2.cliArtifact(), project)
+    check pinsA2[0].contributionFingerprint != pinsA[0].contributionFingerprint
+    check warmResolveAndWriteIdentity(w2.cliArtifact(), outDir, tpmTarball,
+      pins = pinsA2).identity.realizedMarker == archiveA2.marker
+    # Removing the published catalogs' store refuses the build; nothing
+    # falls back to an unpinned selection.
+    removeDir(clones)
+    check "there is no shared clone of catalog remote" in cliRefusal(proc () =
+      discard buildProvisioningPins(w2.cliArtifact(), project))
+    setProvisioningCatalogSource(nil)
 
   removeDir(fixtureRoot)

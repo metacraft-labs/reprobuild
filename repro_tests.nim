@@ -2439,6 +2439,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/test_catalog_import_declaration.nim",
+    binary: "build/test-bin/test_catalog_import_declaration",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim",
     binary: "build/test-bin/test_contribution_fingerprint_invalidation_boundaries",
     defines: @[],
@@ -2601,6 +2610,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_lock/tests/t_catalog_import_pins.nim",
+    binary: "build/test-bin/t_catalog_import_pins",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim",
     binary: "build/test-bin/t_lock_identity_feature_change_differs",
     defines: @[],
@@ -2711,6 +2729,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim",
     binary: "build/test-bin/t_lock_generation_one_path_four_entry_points",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_lock_gen/tests/t_lock_refresh_carries_catalog_import_pins_forward.nim",
+    binary: "build/test-bin/t_lock_refresh_carries_catalog_import_pins_forward",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -9650,6 +9677,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_e2e_engine_shim_removed.nim",
     binary: "build/test-bin/t_e2e_engine_shim_removed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_e2e_federated_catalog_discovery_from_published_repositories.nim",
+    binary: "build/test-bin/t_e2e_federated_catalog_discovery_from_published_repositories",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

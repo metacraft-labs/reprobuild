@@ -963,7 +963,9 @@ proc landCommittedLock(generated: var LockGenerationResult;
                        writeTo: string) =
   ## Land a generated lock at the COMMITTED path, carrying forward the
   ## locked provisioning realizations (ReproOS-Campaign-Completion M7 D2)
-  ## of the lock it replaces. The solve knows nothing about provisioning, so
+  ## of the lock it replaces -- and its catalog import pins (ReproOS M6
+  ## D1), which only ``repro lock refresh --provisioning`` re-resolves.
+  ## The solve knows nothing about provisioning, so
   ## writing ``generated.lockDocument`` as it stands would silently drop a
   ## pinned contributor. ``withProvisioningCarriedForward`` raises -- BEFORE
   ## anything is written -- when the incumbent carries a ``provisioning``
@@ -972,7 +974,8 @@ proc landCommittedLock(generated: var LockGenerationResult;
   if fileExists(writeTo):
     let carried = withProvisioningCarriedForward(
       parseLockedDependencies(generated.lockDocument), readFile(writeTo))
-    if carried.provisioningRealizationCount > 0:
+    if carried.provisioningRealizationCount > 0 or
+        carried.catalogImportPinCount > 0:
       generated.lockDocument = serializeLockedDependencies(carried)
   createDir(parentDir(writeTo))
   writeFile(writeTo, generated.lockDocument)
