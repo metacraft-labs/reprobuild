@@ -3646,7 +3646,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1317,
+          "line": 1327,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -7825,7 +7825,8 @@
         "repro_core",
         "repro_depfile",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
