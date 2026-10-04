@@ -1242,7 +1242,7 @@ type
       ## for its own" contribution). Derived attribution from a peer, not an
       ## observation this engine made.
 
-  ObservedPathChannel* = distinct seq[string]
+  ObservedPathChannel* = object
     ## DA-1f — one of the FIVE OBSERVED channels of `PathSetEvidence`, which
     ## are exactly the five terms of the zero-evidence guard in
     ## `applyMonitorEvidenceStatus`.
@@ -1281,12 +1281,13 @@ type
     ## report's own mark. That is fixed where it was caused, in
     ## `addPathSet`; see `evcEmptyToolDepfileReport`.
     ##
-    ## `distinct` is what closes that. The only append is `observe` (and its
-    ## bulk form `observeAll`), which REQUIRES an `EvidenceContributor` and
-    ## `incl`s it into the evidence's `evidenceProvenance` before it appends
-    ## anything. There is no unmarked append to write, so the zero-evidence
-    ## guard's question — "did anything LOOK at this action" — can no longer
-    ## be answered accidentally by a writer that never looked.
+    ## AN OBJECT WITH AN UNEXPORTED FIELD is what closes that. The only
+    ## append is `observe` (and its bulk form `observeAll`), which REQUIRES
+    ## an `EvidenceContributor` and `incl`s it into the evidence's
+    ## `evidenceProvenance` before it appends anything. There is no unmarked
+    ## append to write, so the zero-evidence guard's question — "did anything
+    ## LOOK at this action" — can no longer be answered accidentally by a
+    ## writer that never looked.
     ##
     ## A COMPILE ERROR, NOT A TEST, for the same reason
     ## `DepfileObservingContributors` is an exhaustive `case` and not a set
@@ -1294,31 +1295,91 @@ type
     ## test, and the construction catches the ones nobody has written yet.
     ##
     ## WHAT THAT COMPILE ERROR SAYS, because an error nobody can act on is
-    ## half a guard. The `distinct` alone refuses `channel.add(p)` with a type
+    ## half a guard. The type alone refuses `channel.add(p)` with a type
     ## mismatch that names the field and its type but NOT the right spelling —
     ## `observe` is not an `add` overload, so it never enters the candidate
     ## list and the compiler cannot suggest it. The `{.error.}` `add` overload
     ## beside `observe` supplies the name. It covers the likeliest wrong
     ## spelling only; the remaining ones are listed in the next paragraph.
     ##
-    ## WHAT IS STILL EXPRESSIBLE, recorded rather than claimed away: Nim
-    ## allows the explicit conversion `ObservedPathChannel(@[p])` from
-    ## anywhere, so a determined writer can still replace a channel wholesale.
-    ## That is a deliberate, greppable act rather than an ordinary `.add`, and
-    ## the tree contains no instance of it outside this module — measured,
-    ## `git grep 'ObservedPathChannel('` is four hits, three of them these
-    ## doc comments and the fourth `dropObserved`'s own
-    ## `ObservedPathChannel(kept)` a few hundred lines below. Closing it
-    ## completely wants an object with a private field.
+    ## WHAT IS NO LONGER EXPRESSIBLE, and why this type is an object rather
+    ## than the `distinct seq[string]` it was until `d448ab99`. A `distinct`
+    ## closes `.add` and whole-channel assignment, but Nim permits the
+    ## explicit conversion `ObservedPathChannel(@[p])` from ANY module, so a
+    ## determined writer could still replace a channel wholesale and buy the
+    ## publish that way. An object closes it: there is no conversion from
+    ## `seq[string]` to an object type at all, and the field-initializer
+    ## spelling `ObservedPathChannel(entries: @[p])` is refused outside this
+    ## module because `entries` is unexported. Both refusals measured from a
+    ## probe module outside this one, in a tree branched from `d448ab99`,
+    ## under the dev shell's Nim 2.3.1 codetracer fork:
     ##
-    ## WHAT THAT WOULD COST IS SMALLER THAN IT LOOKS, and the next reader
-    ## should not accept this residual on the strength of a cost nobody
-    ## measured. Seven of the ten read-surface members below are already
-    ## hand-written bodies an object would keep verbatim; only `len`, `==`
-    ## and `$` are `{.borrow.}`, and each becomes a one-line body over the
-    ## private field. On that reading no reader moves and no file outside
-    ## this one is touched. NOT COMPILED — a hypothesis, not a measurement,
-    ## and recorded as one.
+    ##   ObservedPathChannel(@[p])
+    ##     Error: type mismatch: got 'seq[string]' for '@[p]' but expected
+    ##     'ObservedPathChannel = object'
+    ##
+    ##   ObservedPathChannel(entries: @[p])
+    ##     Error: the field 'entries' is not accessible.
+    ##     (then two cascades: "undeclared field: 'entries' for type
+    ##     repro_build_engine.ObservedPathChannel" and "expression '' has no
+    ##     type (or is ambiguous)")
+    ##
+    ## AND THE SEALING IS WHAT REFUSES THEM, not an incidental type error.
+    ## Exporting the field — `entries*` — and re-running the same two probes
+    ## makes the field-initializer compile (rc 0) while the conversion stays
+    ## refused with the identical message, because an object is not
+    ## convertible from a `seq` at any visibility. Against the `distinct`
+    ## form at `d448ab99` the conversion compiled, which is the hole this
+    ## closes.
+    ##
+    ## What stays expressible, and is harmless: `ObservedPathChannel()`, the
+    ## no-field object constructor, which yields an EMPTY channel.
+    ##
+    ## It is harmless on the GUARD'S POLARITY, which is the only thing that
+    ## matters here. The five terms in `applyMonitorEvidenceStatus` are
+    ## joined by `and`, and the conjunction being TRUE is the REFUSAL — it
+    ## adds `zeroEvidenceDiagnostic`, sets `disableCacheHits` and
+    ## `cirEmptyEvidence`. An empty channel makes its term TRUE, i.e. pushes
+    ## toward refusing the publish; a FILLED one makes its term FALSE and
+    ## short-circuits the refusal. No term anywhere reads emptiness as
+    ## success. That asymmetry is the whole of it: the B1 defect was a
+    ## writer FILLING a channel to make a term false and buy the publish,
+    ## and filling is what the unexported field now seals. Constructing an
+    ## empty one buys nothing, because the direction it moves the guard in
+    ## is the fail-closed one.
+    ##
+    ## Nor is it new surface. An empty channel was already constructible
+    ## from any module at `d448ab99` — `var empty: ObservedPathChannel`
+    ## default-initializes a `distinct seq[string]` to the empty seq and
+    ## assigning it over a populated channel compiled rc 0 there, measured.
+    ## `ObservedPathChannel()` is a second SPELLING of a capability the
+    ## `distinct` form already had, not a capability the object added.
+    ##
+    ## WHAT THE CONVERSION COST, measured rather than estimated — the earlier
+    ## pass recorded the object as expensive on the belief that it would lose
+    ## a `{.borrow.}` read surface and move ~15 files that compile unchanged.
+    ## Of the ELEVEN read-surface members below only `len`, `==`(a, b) and
+    ## `$` were `{.borrow.}`; each became a one-line body over `entries`, and
+    ## the other eight were already hand-written bodies that only changed
+    ## `seq[string](channel)` to `channel.entries`.
+    ##
+    ## Re-`nim check`ed in a tree branched from `d448ab99`, under the dev
+    ## shell's Nim 2.3.1 codetracer fork, over a set chosen by GREP rather
+    ## than by hand so the next reader can rebuild it mechanically:
+    ##
+    ##   git grep -l -E 'depfileInputs|monitorReads|monitorWrites|
+    ##   monitorProbes|monitorDirectoryEnumerations' -- '*.nim'
+    ##   (one alternation, wrapped here only to fit the margin)
+    ##
+    ## That is 43 files, plus `t_hermetic_action_env.nim` for its partial
+    ## `PathSetEvidence(…)` construction: 44 of 44 compile UNEDITED, this
+    ## module being the only one changed. The 43 include all 13 files
+    ## besides this one that the `distinct` conversion at `83719fe6` had to
+    ## edit, so the read surface really did survive. No reader moved and no
+    ## file outside this one was touched, and
+    ## `t_zero_evidence_edge_is_not_cacheable` — the suite that grades this
+    ## guard — runs 32 OK / 0 FAILED on both sides of the change, from a
+    ## source file that is byte-identical across them.
     ##
     ## READS ARE UNRESTRICTED. Everything a `seq[string]` reader did —
     ## `len`, `[]`, `for … in`, `==`, `$`, `join`, `find`, `in`, the `…It`
@@ -1326,6 +1387,13 @@ type
     ## `seq[string]` for an `openArray` parameter. Nothing about what a
     ## correct writer publishes changes: this is a refactor of HOW a channel
     ## is appended to, not of what evidence means.
+
+    entries: seq[string]
+      ## THE UNEXPORTED FIELD IS THE CONSTRUCTION. Exporting it — or going
+      ## back to `distinct seq[string]` — restores a legal whole-channel
+      ## replacement from any module and undoes everything above. The
+      ## accessor for readers outside this module is `paths`, which hands
+      ## back a COPY.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -3852,39 +3920,53 @@ proc envNameKey*(name: string): string =
 # appending to it, and which therefore has no contributor to name.
 # ---------------------------------------------------------------------------
 
-proc len*(channel: ObservedPathChannel): int {.borrow.}
-proc `==`*(a, b: ObservedPathChannel): bool {.borrow.}
-proc `$`*(channel: ObservedPathChannel): string {.borrow.}
+proc len*(channel: ObservedPathChannel): int =
+  channel.entries.len
+
+proc `==`*(a, b: ObservedPathChannel): bool =
+  a.entries == b.entries
+
+proc `$`*(channel: ObservedPathChannel): string =
+  ## The SAME rendering a `seq[string]` gives (`@["a", "b"]`), because the
+  ## checkpoint lines and fixture comparisons that print a channel were
+  ## written against that spelling and compare text across arms.
+  $channel.entries
 
 proc `[]`*(channel: ObservedPathChannel; index: int): string =
-  seq[string](channel)[index]
+  channel.entries[index]
 
 iterator items*(channel: ObservedPathChannel): string =
   ## Also what makes `anyIt` / `allIt` / `mapIt` / `toSeq` keep working:
   ## every one of those templates expands to `for it in items(s)`.
-  for path in seq[string](channel):
+  for path in channel.entries:
     yield path
 
 proc `==`*(a: ObservedPathChannel; b: openArray[string]): bool =
-  seq[string](a) == @b
+  a.entries == @b
 
 proc `==`*(a: openArray[string]; b: ObservedPathChannel): bool =
-  @a == seq[string](b)
+  @a == b.entries
 
 proc paths*(channel: ObservedPathChannel): seq[string] =
   ## The channel as a plain `seq[string]`, for an `openArray[string]`
   ## parameter or a JSON encoder. A COPY of the entries and not a handle on
   ## the channel, so it cannot be appended to behind the contributor.
-  seq[string](channel)
+  ##
+  ## Returning the field by value is what makes that true: Nim's assignment
+  ## of a `seq` copies, so the caller's seq and `entries` are two objects
+  ## from the first statement onwards. It is the IDENTITY on contents — the
+  ## same strings in the same order — and a benchmark arm comparison
+  ## (`hm6_acceptance`) depends on exactly that.
+  channel.entries
 
 proc join*(channel: ObservedPathChannel; sep = ""): string =
-  seq[string](channel).join(sep)
+  channel.entries.join(sep)
 
 proc find*(channel: ObservedPathChannel; value: string): int =
-  seq[string](channel).find(value)
+  channel.entries.find(value)
 
 proc contains*(channel: ObservedPathChannel; value: string): bool =
-  seq[string](channel).contains(value)
+  channel.entries.contains(value)
 
 proc observe*(channel: var ObservedPathChannel;
               provenance: var set[EvidenceContributor];
@@ -3911,7 +3993,7 @@ proc observe*(channel: var ObservedPathChannel;
   provenance.incl contributor
   if seen.containsOrIncl(value):
     return
-  seq[string](channel).add(value)
+  channel.entries.add(value)
 
 proc observeAll*(channel: var ObservedPathChannel;
                  provenance: var set[EvidenceContributor];
@@ -3920,7 +4002,7 @@ proc observeAll*(channel: var ObservedPathChannel;
   ## `observe` for a whole path set at once, de-duplicated against whatever
   ## the channel already holds. For the callers — chiefly suites building a
   ## fixture evidence object — that have no long-lived `seen` set to thread.
-  var seen = seq[string](channel).toHashSet()
+  var seen = channel.entries.toHashSet()
   for value in values:
     channel.observe(provenance, contributor, seen, value)
 
@@ -3932,7 +4014,7 @@ proc add*(channel: var ObservedPathChannel; value: string) {.error:
   ## NOT an append, and the body is never reached: `{.error.}` makes any CALL
   ## a compile error carrying the message above.
   ##
-  ## IT EXISTS FOR THE MESSAGE AND NOTHING ELSE. Without it, the `distinct`
+  ## IT EXISTS FOR THE MESSAGE AND NOTHING ELSE. Without it, the type
   ## already refuses `channel.add(p)` — but with a type mismatch whose
   ## candidate list is `JsonNode`, `Table`, `string` and `seq[T]`, and which
   ## never mentions `observe`: the compiler cannot suggest `observe` for an
@@ -3943,19 +4025,20 @@ proc add*(channel: var ObservedPathChannel; value: string) {.error:
   ## reader to find the right spelling themselves. This names it.
   ##
   ## It covers the most likely wrong spelling, not every one. A whole-channel
-  ## assignment (`= @[p]`) and the explicit conversion
-  ## (`ObservedPathChannel(@[p])`) are discussed in `ObservedPathChannel`'s
-  ## own docstring; the first is refused by the `distinct` with a clear
-  ## message already, the second is deliberately still legal.
+  ## assignment (`= @[p]`), the explicit conversion
+  ## (`ObservedPathChannel(@[p])`) and the field-initializer construction
+  ## (`ObservedPathChannel(entries: @[p])`) are discussed in
+  ## `ObservedPathChannel`'s own docstring; all three are refused, the first
+  ## two on the type and the third on the unexported field.
 
 proc dropObserved*(channel: var ObservedPathChannel; drop: HashSet[string]) =
   ## Remove every entry in `drop`. Subtractive only — it names no contributor
   ## because it introduces no evidence.
   var kept: seq[string] = @[]
-  for path in seq[string](channel):
+  for path in channel.entries:
     if path notin drop:
       kept.add(path)
-  channel = ObservedPathChannel(kept)
+  channel.entries = kept
 
 proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
   result = path.replace('\\', '/').strip()
