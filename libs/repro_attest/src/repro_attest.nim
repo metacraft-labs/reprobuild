@@ -19,6 +19,11 @@
 ##     wrote.
 ##   * ``repro_attest/manifest`` — the ``reproos.attested-image.v1``
 ##     document: typed record, canonical renderer, strict parser.
+##   * ``repro_attest/image_layout`` — the ``reproos.image-layout.v1``
+##     record: the disk layout an image was actually BUILT with, bound to
+##     the digest of the partition table that built it, so a profile's
+##     belief about the shape of its root filesystem can be checked
+##     against the image instead of against itself.
 ##   * ``repro_attest/tpm2`` — the TPM 2.0 structure codec: the
 ##     big-endian TLV a measured-boot machine signs, plus recomputation
 ##     of a quote's PCR composite digest.
@@ -108,6 +113,7 @@ import ./repro_attest/tdx_launch
 import ./repro_attest/tpm2
 import ./repro_attest/event_log
 import ./repro_attest/manifest
+import ./repro_attest/image_layout
 import ./repro_attest/binding
 import ./repro_attest/report
 import ./repro_attest/driver
@@ -125,6 +131,7 @@ import ./repro_attest/commitment
 import ./repro_attest/inference_statement
 
 export measurement, snp_launch, tdx_launch, tpm2, event_log, manifest,
+       image_layout,
        binding, report, driver, provision, mock_backend, tpm2_backend,
        tsm_report, snp_backend, tdx_backend, sealing, cloud_launch,
        merkle, edge_attestation, commitment, inference_statement
