@@ -895,7 +895,17 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "runQuotaLeaseHolders", "summarizeRunQuotaLeaseHolders",
                "runQuotaEndpointText", "runQuotaQueueTimeoutMs",
                "initRunQuotaQueueWait", "stepRunQuotaQueueWait",
-               "runQuotaQueueWaitMessage", "runQuotaQueueTimeoutMessage"]),
+               "runQuotaQueueWaitMessage", "runQuotaQueueTimeoutMessage",
+               # Build-declared pools (8dd3ac277, "A RunQuota daemon
+               # reprobuild starts now follows the host's configuration").
+               # `declareRunQuotaPools` is a `DeclarePools` request over the
+               # session's existing connection; the unsupported-daemon
+               # report is one stderr line; the memory-budget read is an
+               # `inspectionJson("topology")` round trip on a
+               # `connectDefault` client, the same connect
+               # `isRunQuotaDaemonReachable` makes. None starts a process.
+               "declareRunQuotaPools", "reportPoolDeclarationUnsupported",
+               "runQuotaDaemonMemoryBudget"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
@@ -1985,8 +1995,11 @@ suite "every_launch_path_is_monitored":
     check countOccurrences(src,
       "startBypassRunQuotaProcess(plan.action, config)") == 1          # L1
     check countOccurrences(src, "proc startRunQuotaProcess(") == 1
+    # The L2 call site takes the action pool's declared capacity as a
+    # fourth argument since 8dd3ac277 (the helper declares that pool on its
+    # own session), so the needle stops at the shared prefix.
     check countOccurrences(src,
-      "startRunQuotaProcess(plan.action, config, resultPath)") == 1    # L2
+      "startRunQuotaProcess(plan.action, config, resultPath,") == 1    # L2
     check countOccurrences(src, "offerWithRunQuotaBatch(") == 1        # L3
     check countOccurrences(src, "startGrantedWithRunQuota(") == 1      # L3b
 
