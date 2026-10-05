@@ -909,6 +909,9 @@ type
       ## How many incumbent records (other platform pairs) are carried
       ## unchanged.
     refusals*: seq[string]
+    diagnostics*: seq[CatalogDiagnostic]
+      ## The composition's structured diagnostics behind ``refusals``, when
+      ## the composition refused (see ``ProvisioningResolution``).
 
 proc reselected*(r: ProvisioningReselection): bool = r.refusals.len == 0
 
@@ -940,14 +943,26 @@ proc reselectProvisioning*(request: ProvisioningReselectionRequest;
     refusals.add(resolution.refusals)
     let pinnedHere = request.incumbent.filterIt(it.hostPlatform == host and
       it.targetPlatform == target)
-    if pinnedHere.len > 0 and resolution.refusals.anyIt(
-        it.startsWith($cdAmbiguousContribution)):
+    # Only for an ambiguity a policy CAN resolve: one between contributors.
+    # When the policy already names the contributor and several catalogs
+    # offer it (``named`` set), naming it again changes nothing (M6 D4); nor
+    # does naming the one contributor every candidate comes from.
+    proc policyCanResolve(d: CatalogDiagnostic): bool =
+      if d.kind != cdAmbiguousContribution or d.named.len > 0:
+        return false
+      for p in d.parties:
+        if p.contributor != d.parties[0].contributor:
+          return true
+      false
+    if pinnedHere.len > 0 and resolution.diagnostics.anyIt(
+        policyCanResolve(it)):
       refusals.add("note: re-selection does not take the incumbent lock's " &
         "own pins as a selection rule (they are what is being re-derived); " &
         "the incumbent pins " & pinnedHere.mapIt(q(it.packageName) & " -> " &
           q(it.contributor)).join(", ") & ". Name the contributor in the " &
         "curator policy to keep it.")
-    return ProvisioningReselection(refusals: refusals)
+    return ProvisioningReselection(refusals: refusals,
+      diagnostics: resolution.diagnostics)
 
   var fresh: seq[LockedRealization] = @[]
   for s in resolution.selections:

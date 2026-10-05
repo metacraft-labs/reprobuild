@@ -117,6 +117,7 @@ import repro_interface_artifacts/contribution_selection
 import repro_interface_artifacts/provisioning_lock_diff
 import repro_lock
 
+import ./catalog_diagnostics
 import ./catalog_discovery
 
 export catalog_composition.CatalogImport, catalog_composition.CatalogSelectionPolicy
@@ -124,6 +125,7 @@ export contribution_fingerprint.ContributionIdentity,
   contribution_fingerprint.ContributionResolver
 export provisioning_lock_diff
 export catalog_discovery
+export catalog_diagnostics
 
 type
   ProvisioningSelectionRefused* = object of ValueError
@@ -182,47 +184,19 @@ type
       ## Re-selection writes them into the lock (and reports how they
       ## moved); a build ignores them. A source that pins nothing leaves the
       ## lock's ``catalog_imports`` key absent, exactly as before it existed.
+    declaration*: LocatedCatalogDeclaration
+      ## OPTIONAL, diagnostics only (ReproOS M6 D4): the declaration the
+      ## catalogs were read for, with the line of every table, so a refusal
+      ## can name the table to edit. Empty from a source that reads none.
+    evidenceFailures*: seq[CatalogEvidenceFailure]
+      ## OPTIONAL, diagnostics only: catalogs that could not be read at a
+      ## locked record's own revision for ``previous``, with the cause.
 
   ProvisioningCatalogSource* = proc (request: ProvisioningCatalogRequest):
     ProvisioningCatalogInputs {.closure.}
     ## Supplies the catalog imports for a lock-governed build. The
     ## production implementation is ``productionProvisioningCatalogSource``
     ## (ReproOS M6 deliverables 1 and 2), installed by default.
-
-proc productionProvisioningCatalogSource*(request: ProvisioningCatalogRequest):
-    ProvisioningCatalogInputs =
-  ## THE production catalog source (``catalog_discovery``): the catalogs the
-  ## project declares in ``repro-catalogs.toml``, each read from the
-  ## workspace's shared clone of its remote at the revision the committed
-  ## lock pins (a build) or at the revision its declared commit or ref names
-  ## now (re-selection), every object re-hashed, nothing compiled or run.
-  ## Raises ``CatalogDiscoveryError`` naming every cause; the callers turn
-  ## that into a refusal.
-  let answer =
-    case request.purpose
-    of pcpBuild:
-      catalogsForBuild(request.projectRoot, request.catalogImportPins,
-        request.lockClaims)
-    of pcpLockReselect:
-      catalogsForReselect(request.projectRoot, request.lockClaims)
-  ProvisioningCatalogInputs(imports: answer.imports, offered: answer.offered,
-    policy: answer.policy, resolver: answer.resolver,
-    previous: answer.previous, catalogImportPins: answer.pins)
-
-var catalogSource: ProvisioningCatalogSource =
-  productionProvisioningCatalogSource
-
-proc setProvisioningCatalogSource*(source: ProvisioningCatalogSource) =
-  ## Install (or, with ``nil``, remove) the catalog source every
-  ## lock-governed build consults.
-  catalogSource = source
-
-proc provisioningCatalogSourceInstalled*(): bool =
-  not catalogSource.isNil
-
-proc refuse(message: string) {.noreturn.} =
-  raise newException(ProvisioningSelectionRefused,
-    "provisioning selection refused: " & message)
 
 const ProvisioningCommittedLockName = "repro.lock"
   ## ``repro_cli_support.CommittedLockFileName``; repeated here because this
@@ -240,6 +214,69 @@ proc provisioningReselectCommand*(projectRoot, lockPath: string): string =
       os.normalizedPath(absolutePath(projectRoot /
         ProvisioningCommittedLockName)):
     result.add(" --lock " & quoteShell(lockPath))
+
+proc productionProvisioningCatalogSource*(request: ProvisioningCatalogRequest):
+    ProvisioningCatalogInputs =
+  ## THE production catalog source (``catalog_discovery``): the catalogs the
+  ## project declares in ``repro-catalogs.toml``, each read from the
+  ## workspace's shared clone of its remote at the revision the committed
+  ## lock pins (a build) or at the revision its declared commit or ref names
+  ## now (re-selection), every object re-hashed, nothing compiled or run.
+  ## Raises ``CatalogDiscoveryError`` naming every cause; the callers turn
+  ## that into a refusal.
+  let answer =
+    case request.purpose
+    of pcpBuild:
+      catalogsForBuild(request.projectRoot, request.catalogImportPins,
+        request.lockClaims, provisioningReselectCommand(request.projectRoot,
+          request.lockPath))
+    of pcpLockReselect:
+      catalogsForReselect(request.projectRoot, request.lockClaims)
+  ProvisioningCatalogInputs(imports: answer.imports, offered: answer.offered,
+    policy: answer.policy, resolver: answer.resolver,
+    previous: answer.previous, catalogImportPins: answer.pins,
+    declaration: answer.declaration,
+    evidenceFailures: answer.evidenceFailures)
+
+var catalogSource: ProvisioningCatalogSource =
+  productionProvisioningCatalogSource
+
+proc setProvisioningCatalogSource*(source: ProvisioningCatalogSource) =
+  ## Install (or, with ``nil``, remove) the catalog source every
+  ## lock-governed build consults.
+  catalogSource = source
+
+proc provisioningCatalogSourceInstalled*(): bool =
+  not catalogSource.isNil
+
+proc refuse(message: string) {.noreturn.} =
+  raise newException(ProvisioningSelectionRefused,
+    "provisioning selection refused: " & message)
+
+proc relevantEvidenceFailures*(changes: seq[ProvisioningRecordChange];
+                               records: seq[LockedRealization];
+                               failures: seq[CatalogEvidenceFailure]):
+    seq[CatalogEvidenceFailure] =
+  ## The evidence failures that explain why a change's cause is NOT
+  ## determinable (M6 deliverable 4): a failure for the catalog coordinate
+  ## (remote, revision) of a record of a change whose cause could not be
+  ## determined. A failure for any other record -- another platform pair, an
+  ## explained change -- is not printed. Sorted by repo, remote, revision.
+  for c in changes:
+    if c.causeDeterminable: continue
+    for f in failures:
+      if f in result: continue
+      for r in records:
+        if r.packageName == c.packageName and
+            r.hostPlatform == c.hostPlatform and
+            r.targetPlatform == c.targetPlatform and
+            r.catalogRemote == f.remote and r.catalogRevision == f.revision:
+          result.add(f)
+          break
+  result.sort(proc (a, b: CatalogEvidenceFailure): int =
+    result = cmp(a.repo, b.repo)
+    if result == 0: result = cmp(a.remote, b.remote)
+    if result == 0: result = cmp(a.revision, b.revision))
 
 proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
                                    projectRoot, lockPath: string;
@@ -276,7 +313,10 @@ proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
       return @[]
     refuse("the committed lock " & lockPath & " has `" &
       ProvisioningLockKey & "` records that cannot be read (" & err.msg &
-      "); they are not ignored. Repair or regenerate the lock.")
+      "); they are not ignored. Restore the `" & ProvisioningLockKey &
+      "` line from version control, or delete it and re-select with `" &
+      provisioningReselectCommand(projectRoot, lockPath) & "` (a refresh " &
+      "does not replace records it cannot read).")
   let host = currentPlatformId()
   let target = host
   let claims = lock.lockedProvisioningClaims()
@@ -290,7 +330,10 @@ proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
     refuse("the committed lock " & lockPath & " names `" &
       ProvisioningLockKey & "` in a form the lock reader does not read (only " &
       "the writer's `" & ProvisioningLockKey & " = [...]` line is read); the " &
-      "records are not ignored. Regenerate the lock.")
+      "records are not ignored. Restore the `" & ProvisioningLockKey &
+      " = [...]` line from version control, or delete every spelling of " &
+      "the key and re-select with `" &
+      provisioningReselectCommand(projectRoot, lockPath) & "`.")
   let here = claims.filterIt(it.hostPlatform == host and
     it.targetPlatform == target)
   if here.len == 0:
@@ -342,9 +385,18 @@ proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
     offered: inputs.offered, hostPlatform: host, targetPlatform: target)
   let resolution = resolveProvisioningSelections(request, resolver)
   if not resolution.resolved:
+    # M6 deliverable 4: each refusal the composed catalogs produced is
+    # followed by the catalogs and candidates it concerns (repo, remote,
+    # revision, published source location, the importing
+    # ``repro-catalogs.toml`` line) and the exact edit or command.
+    let remedy = CatalogRemedyContext(projectRoot: projectRoot,
+      lockPath: lockPath,
+      reselectCommand: provisioningReselectCommand(projectRoot, lockPath),
+      declaration: inputs.declaration, lockClaims: here)
     var message = "the committed lock " & lockPath & " does not resolve " &
       "against the composed catalogs; the lock is not relaxed to an " &
-      "unpinned selection:\n  " & resolution.refusals.join("\n  ")
+      "unpinned selection:\n  " & withRemedies(resolution.refusals,
+        resolution.diagnostics, remedy, "    ").join("\n  ")
     # M7 deliverable 5: say WHAT changed, with the same diff re-selection
     # prints, and name the one command that re-selects.
     try:
@@ -355,6 +407,9 @@ proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
         for change in explained:
           for line in renderChange(change):
             message.add("\n  " & line)
+        for line in renderEvidenceFailures(relevantEvidenceFailures(
+            explained, here, inputs.evidenceFailures)):
+          message.add("\n  " & line)
     except CatchableError as err:
       message.add("\n(the change could not be explained: " & err.msg & ")")
     message.add("\nto re-select explicitly (rewrites the lock's " &
@@ -419,6 +474,17 @@ type
     refusals*: seq[string]
 
 proc reselected*(r: CommittedReselection): bool = r.refusals.len == 0
+
+proc renderReselectionRefusal*(verb, lockPath: string;
+                               refusals: seq[string]): string =
+  ## What ``repro lock <verb> --provisioning`` prints on stderr when
+  ## re-selection refuses (exit 1, the lock untouched): the header, then
+  ## every refusal -- with its remedy lines -- indented by two spaces.
+  result = "repro lock " & verb & " --provisioning: re-selection refused; " &
+    lockPath & " was not written:"
+  for refusal in refusals:
+    for line in refusal.splitLines():
+      result.add("\n  " & line)
 
 proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
                                     incumbentExists: bool;
@@ -492,7 +558,12 @@ proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
   except CatchableError as err:
     return CommittedReselection(refusals: @["re-selection failed: " & err.msg])
   if not outcome.reselected:
-    return CommittedReselection(refusals: outcome.refusals)
+    # M6 deliverable 4: each composition refusal followed by what to edit.
+    return CommittedReselection(refusals: withRemedies(outcome.refusals,
+      outcome.diagnostics, CatalogRemedyContext(projectRoot: projectRoot,
+        lockPath: lockPath,
+        reselectCommand: provisioningReselectCommand(projectRoot, lockPath),
+        declaration: inputs.declaration), "    "))
   var document = freshDocument
   try:
     # With no record and no catalog import pin to write, the fresh document

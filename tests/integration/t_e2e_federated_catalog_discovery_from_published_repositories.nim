@@ -14,11 +14,16 @@
 ## commits: ``fed-packages`` publishes the canonical interface of
 ## ``federatedTool``; ``fed-catalog-a`` and ``fed-catalog-b`` each publish a
 ## tarball contribution for it. Each commits its provider source
-## (``repro.nim``) and its GENERATED interface artifacts
-## (``published-interfaces/*.rbsz``, written by the production codec). Each
-## has a shared bare clone under ``REPRO_WORKSPACE_CLONES`` -- the store
-## ``repro ws sync`` maintains -- whose origin is the catalog's logical
-## remote. The consumer declares the three by ``repro-catalogs.toml`` (two by
+## (``repro.nim``) and the interface artifacts THAT PROVIDER GENERATES
+## (``published-interfaces/*.rbsz``, written by the production publisher,
+## ``repro_cli_support/catalog_publication``, which compiles and runs the
+## committed provider -- M6 deliverable 5; see ``federated_catalog_fixture``
+## for what "published" means in a hermetic test). Each has a shared bare
+## clone under ``REPRO_WORKSPACE_CLONES`` -- the store ``repro ws sync``
+## maintains -- whose origin is the catalog's logical remote. The process
+## runs in the fixture's hermetic environment (isolated ``HOME`` and global
+## git configuration, no ``GIT_*`` variable, its own clone and realization
+## stores). The consumer declares the three by ``repro-catalogs.toml`` (two by
 ## the moving ref ``main``) with a curator policy, and then, through the
 ## functions the ``repro`` binary calls, with the DEFAULT (production)
 ## ``ProvisioningCatalogSource``:
@@ -35,12 +40,19 @@
 ##   revision.
 ##
 ## No develop override exists anywhere in the fixture, and no catalog
-## provider is compiled or run: catalog A's ``repro.nim`` would, if compiled
-## or run, write marker files and declare a DIFFERENT contribution than its
-## artifact; the markers never appear and the selected record is the
+## provider is compiled or run by a consumer: catalog A's committed provider
+## writes marker files when compiled or run -- which PUBLISHING does (the
+## markers appear then and are removed) -- and its working tree, left dirty
+## after publishing, declares a DIFFERENT contribution; while consuming, the
+## markers never reappear and the selected record is the published
 ## artifact's.
 ##
 ## ## Adversarial inputs (each refuses, or provably changes nothing)
+##
+## (The adversarial ARTIFACTS below -- garbage bytes, a forged fingerprint,
+## imported / developInterface records, a replacement object -- are crafted
+## on purpose with the production codec: no publisher writes them, which is
+## the point. Every valid publication in this file is generated.)
 ##
 ## A dirty checkout and a checkout at another commit named exactly like the
 ## catalog, next to the consumer; a branch name or an abbreviated id where a
@@ -91,7 +103,7 @@ import repro_lock
 import repro_project_dsl
 import repro_tool_profiles
 
-import ./published_catalog_fixtures
+import ./federated_catalog_fixture
 
 package federatedTool:
   executable federatedTool:
@@ -117,6 +129,11 @@ let Host = currentPlatformId()
 
 var fixtureRoot = ""
 var clonesRoot = ""
+var toolFingerprint = ""
+  ## The canonical interface fingerprint the interface catalog PUBLISHED.
+var publisherRanProviderA = false
+  ## Publishing catalog A compiled and ran its provider (its markers
+  ## appeared): the artifacts are the provider's output.
 
 # ---------------------------------------------------------------------------
 # Archives, contributions, artifacts
@@ -125,31 +142,11 @@ var clonesRoot = ""
 proc executableRelPath(): string =
   when defined(windows): "bin/federated-tool.cmd" else: "bin/federated-tool"
 
-type Archive = object
-  url, sha256, marker: string
+type Archive = FixtureArchive
 
 proc buildArchive(name, marker: string): Archive =
-  let payload = fixtureRoot / ("payload-" & name)
-  let top = payload / "federated-tool-1.0.0"
-  createDir(top / "bin")
-  let tool = top / executableRelPath()
-  when defined(windows):
-    writeFile(tool, "@echo off\r\necho " & marker & "\r\n")
-  else:
-    writeFile(tool, "#!/bin/sh\necho " & marker & "\n")
-    setFilePermissions(tool, {fpUserRead, fpUserWrite, fpUserExec,
-      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
-  let archive = fixtureRoot / (name & ".tar.gz")
-  var tarExe = "tar"
-  when defined(windows):
-    let systemTar = getEnv("SystemRoot", r"C:\Windows") / "System32" /
-      "tar.exe"
-    tarExe = if fileExists(systemTar): systemTar else: findExe("tar")
-  let res = execCmdEx(quoteShell(tarExe) & " -czf " & quoteShell(archive) &
-    " -C " & quoteShell(payload) & " federated-tool-1.0.0")
-  doAssert res.exitCode == 0, "tar failed: " & res.output
-  Archive(url: "file://" & archive.replace('\\', '/'),
-    sha256: fileSha256Hex(archive).toLowerAscii(), marker: marker)
+  buildFixtureArchive(fixtureRoot, name, marker, "federated-tool-1.0.0",
+    "federated-tool")
 
 var archiveA1, archiveA2, archiveB1: Archive
 
@@ -180,10 +177,6 @@ proc recordOf(def: ProvisioningContributionDef):
   toProjectInterface(findPackage("federatedConsumer"), registeredPackages(),
     @[def]).provisioningContributions[0]
 
-proc canonicalArtifact(): ProjectInterfaceArtifact =
-  artifactFor(toProjectInterface(findPackage(ToolPackage),
-    registeredPackages(), @[]))
-
 proc catalogArtifact(name: string;
                      records: seq[InterfaceProvisioningContribution]):
     ProjectInterfaceArtifact =
@@ -206,23 +199,42 @@ proc consumerArtifact(defs: seq[ProvisioningContributionDef];
 proc markerPath(name: string): string =
   fixtureRoot / ("provider-" & name & ".marker")
 
-proc providerSourceA(): string =
-  ## Catalog A's provider. If it were COMPILED, the ``static`` block would
-  ## write one marker; if it were RUN, the top-level statement another; and
-  ## it declares a different archive than its published artifact.
-  "import repro_project_dsl\n" &
-  "static: writeFile(" & escape(markerPath("compiled")) & ", \"compiled\")\n" &
-  "writeFile(" & escape(markerPath("ran")) & ", \"ran\")\n" &
+proc markerPrelude(): string =
+  ## Statements that write one marker if the provider is COMPILED and
+  ## another if it is RUN.
+  providerMarkerPrelude(markerPath("compiled"), markerPath("ran"))
+
+proc providerSourceA(archive: Archive): string =
+  ## Catalog A's COMMITTED provider: it publishes ``archive`` for
+  ## ``ContributorA`` and leaves the markers when compiled or run -- which
+  ## publishing does.
+  fedCatalogSource("fedCatalogA", [fedContribution(ContributorA, archive,
+    toolFingerprint)], markerPrelude())
+
+proc providerSourceB(contributor: string; archive: Archive): string =
+  fedCatalogSource("fedCatalogB", [fedContribution(contributor, archive,
+    toolFingerprint)])
+
+proc otherwiseSourceA(): string =
+  ## What catalog A's WORKING TREE says after publishing: the markers, and a
+  ## different contribution than its published artifact. Never committed.
+  "import repro_project_dsl\n" & markerPrelude() &
   "provisioningFor \"" & ToolPackage & "\":\n" &
   "  interfaceFingerprint \"" & repeat('0', 64) & "\"\n" &
   "  contributor \"" & ContributorA & "\"\n" &
-  "  tarball \"https://example.invalid/provider-says-otherwise.tar.gz\"\n"
+  "  tarball url = \"https://example.invalid/provider-says-otherwise.tar.gz\"\n"
+
+proc forgetMarkers() =
+  for name in ["compiled", "ran"]:
+    if fileExists(markerPath(name)):
+      removeFile(markerPath(name))
 
 type World = object
   tag: string
   packages, a, b: CatalogRepo
   revPackages, revA1, revB1: string
   defA1, defB1: ProvisioningContributionDef
+  publishedPackages, publishedA1: seq[PublishedArtifactFile]
 
 proc remoteOf(tag, repo: string): string =
   "https://example.invalid/" & tag & "/" & repo
@@ -231,23 +243,35 @@ proc newWorld(tag: string): World =
   ## Three fresh catalog repositories (own remotes, so a test that moves a
   ## branch or damages a store affects no other test), each with one
   ## publication, synced into the shared clones.
+  ## Every publication is GENERATED: each catalog commits its provider and
+  ## what the production publisher extracted from it (memoized per source
+  ## text within this process; the D5 fixture test measures that the
+  ## publisher is deterministic).
   result.tag = tag
   let root = fixtureRoot / tag
   result.packages = initCatalogRepo(root, RepoPackages,
     remoteOf(tag, RepoPackages))
-  result.a = initCatalogRepo(root, RepoA, remoteOf(tag, RepoA),
-    providerSourceA())
+  result.a = initCatalogRepo(root, RepoA, remoteOf(tag, RepoA))
   result.b = initCatalogRepo(root, RepoB, remoteOf(tag, RepoB))
+  let p = result.packages.publishRevision(
+    canonicalToolSource(ToolPackage, "federated-tool"), "publish interfaces")
+  result.revPackages = p.revision
+  result.publishedPackages = p.files
+  if toolFingerprint.len == 0:
+    toolFingerprint = fingerprintHexOf(p.files[0].artifact)
+  doAssert toolFingerprint == fingerprintHexOf(p.files[0].artifact)
   result.defA1 = contributionDef(ContributorA, archiveA1)
   result.defB1 = contributionDef(ContributorB, archiveB1)
-  result.revPackages = result.packages.publishCommit(
-    @[("federated-tool.rbsz", canonicalArtifact())], "publish interfaces")
-  result.revA1 = result.a.publishCommit(
-    @[("catalog.rbsz", catalogArtifact(RepoA, @[recordOf(result.defA1)]))],
-    "publish A1")
-  result.revB1 = result.b.publishCommit(
-    @[("catalog.rbsz", catalogArtifact(RepoB, @[recordOf(result.defB1)]))],
-    "publish B1")
+  let a = result.a.publishRevision(providerSourceA(archiveA1), "publish A1")
+  result.revA1 = a.revision
+  result.publishedA1 = a.files
+  if fileExists(markerPath("compiled")) and fileExists(markerPath("ran")):
+    publisherRanProviderA = true
+  forgetMarkers()
+  # The working tree now says something else; it is never committed.
+  writeFile(result.a.upstream / "repro.nim", otherwiseSourceA())
+  result.revB1 = result.b.publishRevision(
+    providerSourceB(ContributorB, archiveB1), "publish B1").revision
   for repo in [result.packages, result.a, result.b]:
     discard repo.syncSharedClone(clonesRoot)
 
@@ -320,6 +344,9 @@ proc realizedMarker(dir: string; defs: seq[ProvisioningContributionDef];
 proc identityOfPublished(artifacts: seq[ProjectInterfaceArtifact]): string =
   catalogArtifactIdentity(artifacts)
 
+proc identityOfPublished(files: seq[PublishedArtifactFile]): string =
+  catalogArtifactIdentity(files.mapIt(it.artifact))
+
 proc lockLine(text, key: string): string =
   for line in text.splitLines():
     if line.startsWith(key & " = "):
@@ -352,8 +379,9 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
       getEnv("PATH"))
   putEnv("REPRO_CACHE_DISABLE", "1")
   fixtureRoot = createTempDir("repro-federated-", "")
-  clonesRoot = fixtureRoot / "clones"
-  putEnv("REPRO_WORKSPACE_CLONES", clonesRoot)
+  let hermetic = enterHermeticEnvironment(fixtureRoot)
+  clonesRoot = hermetic.clonesRoot
+  check getEnv("REPRO_WORKSPACE_CLONES") == fixtureRoot / "clones"
   archiveA1 = buildArchive("a1", "federated-tool-from-catalog-a-1")
   archiveA2 = buildArchive("a2", "federated-tool-from-catalog-a-2")
   archiveB1 = buildArchive("b1", "federated-tool-from-catalog-b-1")
@@ -379,9 +407,19 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
     # same value catalogArtifactIdentity gives the artifacts the publisher
     # wrote.
     check byRepo(RepoPackages).interfaceArtifact ==
-      identityOfPublished(@[canonicalArtifact()])
+      identityOfPublished(main.publishedPackages)
     check byRepo(RepoA).interfaceArtifact == identityOfPublished(
-      @[catalogArtifact(RepoA, @[recordOf(main.defA1)])])
+      main.publishedA1)
+    # The publisher GENERATED them from the committed providers: catalog A's
+    # provider was compiled and run to publish, the canonical interface it
+    # published is the one this process computes for the same package, and
+    # the record it published is the one the consumer imports.
+    check publisherRanProviderA
+    check toolFingerprint == canonicalPackageInterfaceFingerprint(
+      findPackage(ToolPackage), registeredPackages())
+    check interfaceContributionRecordDigest(recordOfPublished(
+      main.publishedA1)) == interfaceContributionRecordDigest(
+        recordOf(main.defA1))
     # The policy selection is locked, with the catalog coordinate it was read
     # at.
     let records = recordsOf(dir)
@@ -452,9 +490,9 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
       archiveA1.marker
     # A publishes A2 on main; the shared clone is synced.
     let defA2 = contributionDef(ContributorA, archiveA2)
-    let revA2 = w.a.publishCommit(
-      @[("catalog.rbsz", catalogArtifact(RepoA, @[recordOf(defA2)]))],
-      "publish A2")
+    let revA2 = w.a.publishRevision(providerSourceA(archiveA2),
+      "publish A2").revision
+    forgetMarkers()
     discard w.a.syncSharedClone(clonesRoot)
     check revA2 != w.revA1
     # The build reads the PINNED revision: identical pins, A1 realized.
@@ -733,7 +771,8 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
     # (measured below as the control), discovery re-hashes and refuses.
     let looseRoot = fixtureRoot / "clones-loose"
     let looseBare = w.a.syncSharedClone(looseRoot, loose = true)
-    let blob = blobIdAt(looseBare, w.revA1, "published-interfaces/catalog.rbsz")
+    let blob = blobIdAt(looseBare, w.revA1,
+      "published-interfaces/fedCatalogA.rbsz")
     let other = writeBlob(looseBare, "a different artifact")
     let blobFile = looseBare / "objects" / blob[0 .. 1] / blob[2 .. ^1]
     check fileExists(blobFile)
@@ -771,7 +810,7 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
     let w = newWorld("shapes")
     let bareA = sharedCloneOf(clonesRoot, w.a.remote)
     let artifactBlob = blobIdAt(bareA, w.revA1,
-      "published-interfaces/catalog.rbsz")
+      "published-interfaces/fedCatalogA.rbsz")
     let rootEntries = proc (pub: TreeEntrySpec): string =
       writeTree(bareA, [pub])
     proc commitWith(pubEntries: seq[TreeEntrySpec]; asLink = false): string =
@@ -882,8 +921,8 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
       sharedCloneOf(clonesRoot, collidingTwin)
     let collide = initCatalogRepo(fixtureRoot / "claims-collide", "x",
       colliding)
-    discard collide.publishCommit(@[("catalog.rbsz",
-      catalogArtifact("x", @[recordOf(w.defA1)]))], "x")
+    discard collide.publishRevision(providerSourceA(archiveA1), "x")
+    forgetMarkers()
     discard collide.syncSharedClone(clonesRoot)
     specs = w.specs()
     specs[1].remote = collidingTwin
@@ -911,9 +950,8 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
       moveDir(moved, bareA)
     # A second catalog claiming the first one's contributor id is not a
     # silent substitute: both are offered, and the policy cannot choose.
-    let impostor = w.b.publishCommit(@[("catalog.rbsz",
-      catalogArtifact(RepoB, @[recordOf(contributionDef(ContributorA,
-        archiveB1))]))], "impostor", branch = "impostor")
+    let impostor = w.b.publishRevision(providerSourceB(ContributorA,
+      archiveB1), "impostor", branch = "impostor").revision
     discard w.b.syncSharedClone(clonesRoot)
     specs = w.specs()
     specs[2].commit = impostor
@@ -968,9 +1006,9 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
       selection(baselineLock)
     discard git(["--git-dir=" & bareA, "replace", "-d", w.revA1])
     # HEAD moved to another branch: a ref is resolved by name, never HEAD.
-    let side = w.a.publishCommit(@[("catalog.rbsz", catalogArtifact(RepoA,
-      @[recordOf(contributionDef(ContributorA, archiveA2))]))], "side",
-      branch = "side")
+    let side = w.a.publishRevision(providerSourceA(archiveA2), "side",
+      branch = "side").revision
+    forgetMarkers()
     discard w.a.syncSharedClone(clonesRoot)
     discard git(["--git-dir=" & bareA, "symbolic-ref", "HEAD",
       "refs/heads/side"])
@@ -1076,7 +1114,7 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
     for key in ["remote.origin.promisor", "remote.origin.partialclonefilter"]:
       discard git(["--git-dir=" & partialBare, "config", "--unset", key])
     let missingBlob = blobIdAt(partialBare, w.revB1,
-      "published-interfaces/catalog.rbsz")
+      "published-interfaces/fedCatalogB.rbsz")
     putEnv("REPRO_WORKSPACE_CLONES", partialRoot)
     try:
       let partial = reselectRefusal(w.newProject())
@@ -1120,5 +1158,5 @@ suite "e2e_federated_catalog_discovery_from_published_repositories":
     check not fileExists(markerPath("compiled"))
     check not fileExists(markerPath("ran"))
 
-delEnv("REPRO_WORKSPACE_CLONES")
+  hermetic.leave()
 removeDir(fixtureRoot)

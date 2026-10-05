@@ -171,6 +171,10 @@ type
     ## exactly one owner across the whole composition; two owners refuse.
     packageName*: string
     interfaceFingerprint*: string
+    location*: SourceLocation
+      ## Where the catalog declares the package, as published. DIAGNOSTIC
+      ## ONLY (M6 deliverable 4): never part of ``contentText``, a digest,
+      ## the composed bytes or a selection.
 
   CatalogContent* = object
     ## What an imported catalog publishes — read out of its interface
@@ -243,9 +247,44 @@ type
       ## diagnostics -- do not move.
     cdContradictoryLock = "contradictory-lock-pins"
 
+  CatalogDiagnosticParty* = object
+    ## One party a diagnostic names (M6 deliverable 4): a contribution
+    ## (``contributor`` set) or the owner of a canonical interface
+    ## (``contributor`` empty), with the catalog it was read from and where
+    ## that catalog declares it. DIAGNOSTIC ONLY.
+    contributor*: string
+    coordinate*: CatalogCoordinate
+    interfaceFingerprint*: string
+      ## The contribution's target interface fingerprint, or the interface
+      ## the owner declares (normalised).
+    location*: SourceLocation
+
   CatalogDiagnostic* = object
+    ## ``message`` is the human statement of the refusal. The other fields
+    ## carry the same facts in structured form so a caller that knows the
+    ## consumer's files (the CLI: ``repro-catalogs.toml``, the lock) can
+    ## name the exact edit that resolves it (M6 deliverable 4). They are
+    ## canonical -- every list sorted -- so a diagnostic is a function of
+    ## the composed inputs, never of their order, and they reach no digest.
     kind*: CatalogDiagnosticKind
     message*: string
+    packageName*: string
+      ## The package the diagnostic is about; "" when it concerns a catalog.
+    canonicalFingerprint*: string
+      ## ``incompatible-interface-fingerprint``: the composed canonical
+      ## interface the contribution does not match.
+    parties*: seq[CatalogDiagnosticParty]
+      ## The candidates (ambiguity, unsatisfied policy, unavailable lock
+      ## pin), the offending contribution (unknown target, incompatible
+      ## fingerprint) or the owners (duplicate canonical interface; for an
+      ## incompatible fingerprint, the owner of the canonical interface).
+    named*: seq[string]
+      ## Contributors the policy or the lock NAMES for ``packageName``.
+    eligible*: seq[string]
+      ## Contributors that offer an eligible contribution for it.
+    catalogs*: seq[CatalogCoordinate]
+      ## The imports a catalog-level diagnostic is about (incomplete
+      ## coordinate, missing catalog, identity conflict).
 
   CatalogComposition* = object
     ## ``resolverInput`` is non-empty exactly when ``diagnostics`` is
@@ -358,12 +397,13 @@ proc catalogArtifactIdentity*(
   text.add(entries.deduplicate(isSorted = true).join(""))
   digestOfText(text)
 
-proc catalogInterface*(packageName, interfaceFingerprint: string):
-    CatalogPackageInterface =
+proc catalogInterface*(packageName, interfaceFingerprint: string;
+                       location = SourceLocation()): CatalogPackageInterface =
   ## Construct a canonical-interface entry. The fingerprint is expected to
-  ## come from ``canonicalPackageInterfaceFingerprint``.
+  ## come from ``canonicalPackageInterfaceFingerprint``. ``location`` is
+  ## diagnostic only.
   CatalogPackageInterface(packageName: packageName,
-    interfaceFingerprint: interfaceFingerprint)
+    interfaceFingerprint: interfaceFingerprint, location: location)
 
 # ---------------------------------------------------------------------------
 # Composition
@@ -423,6 +463,36 @@ proc coordinateGaps(coordinate: CatalogCoordinate): seq[string] =
     result.add("interface-artifact identity is not a 64-hex digest: \"" &
       coordinate.interfaceArtifact & "\"")
 
+proc partyOf(contributor: string; coordinate: CatalogCoordinate;
+             interfaceFingerprint: string;
+             location: SourceLocation): CatalogDiagnosticParty =
+  CatalogDiagnosticParty(contributor: contributor, coordinate: coordinate,
+    interfaceFingerprint: normalizedFingerprint(interfaceFingerprint),
+    location: location)
+
+proc partyKey(p: CatalogDiagnosticParty): string =
+  record(p.contributor, catalogCoordinateKey(p.coordinate),
+    catalogCoordinateDigest(p.coordinate), p.interfaceFingerprint,
+    p.location.file, $p.location.line)
+
+proc canonicalDiagnostic(d: CatalogDiagnostic): CatalogDiagnostic =
+  ## The structured lists that arrive in INPUT order -- ``parties`` (raised
+  ## in catalog, i.e. import, order) and ``eligible`` (one entry per
+  ## candidate, so a contributor two catalogs offer appears twice) -- are
+  ## sorted, and ``eligible`` de-duplicated, so a diagnostic is a function
+  ## of the composed inputs and not of their order. Each of these guards is
+  ## the only one over its list. Deliberately NOT guarded, each for a
+  ## stated reason, so that no guard here is unfalsifiable: ``named`` is
+  ## already sorted and de-duplicated where it has more than one entry (the
+  ## contradictory policy / lock diagnostics build it that way) and has one
+  ## entry everywhere else; ``catalogs`` has exactly one entry; and two
+  ## parties are never identical (a party is one candidate or owner of ONE
+  ## catalog, with its own location).
+  result = d
+  result.parties.sort(proc (a, b: CatalogDiagnosticParty): int =
+    cmp(partyKey(a), partyKey(b)))
+  result.eligible = d.eligible.sorted(cmp).deduplicate(isSorted = true)
+
 proc composeCatalogs*(imports: openArray[CatalogImport];
                       policy: CatalogSelectionPolicy;
                       lockPins: openArray[CatalogLockPin] = []):
@@ -442,8 +512,12 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
   ## text of a diagnostic that names it.
   var diagnostics: seq[CatalogDiagnostic] = @[]
 
-  template refuse(diagnosticKind: CatalogDiagnosticKind; text: string) =
-    diagnostics.add(CatalogDiagnostic(kind: diagnosticKind, message: text))
+  template refuse(diagnosticKind: CatalogDiagnosticKind; text: string;
+                  details: CatalogDiagnostic) =
+    var structured = details
+    structured.kind = diagnosticKind
+    structured.message = text
+    diagnostics.add(canonicalDiagnostic(structured))
 
   # --- 1. Per-import identity validation -----------------------------------
   var groupOrder: seq[string] = @[]
@@ -457,7 +531,8 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         "\") has an incomplete coordinate: " & gaps.join(", ") &
         ". A catalog is bound by explicit workspace/remote/revision/" &
         "interface-artifact identity, never by a sibling-directory name " &
-        "or its position in the import list.")
+        "or its position in the import list.",
+        CatalogDiagnostic(catalogs: @[imported.coordinate]))
       continue
     if imported.content.isNone:
       refuse(cdMissingCatalog,
@@ -465,7 +540,8 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         " was declared but not found (discovered at \"" &
         imported.discoveredAt & "\"); no interface artifact is available " &
         "to compose. Pin the catalog in the workspace manifest, or remove " &
-        "the import.")
+        "the import.",
+        CatalogDiagnostic(catalogs: @[imported.coordinate]))
       continue
     let digest = catalogCoordinateDigest(imported.coordinate)
     if digest notin groupImports:
@@ -504,7 +580,8 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         "exactly one interface-artifact identity. Discovered at: " &
         locations.sorted(cmp).deduplicate(isSorted = true).join("; ") &
         ". Re-extract the catalog's interface artifacts, or give the " &
-        "differing checkout its own revision.")
+        "differing checkout its own revision.",
+        CatalogDiagnostic(catalogs: @[group[0].coordinate]))
       continue
     catalogs.add(ResolvedCatalog(
       coordinate: group[0].coordinate,
@@ -516,14 +593,18 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
   # --- 3. Canonical interface ownership ------------------------------------
   var ownerOrder: seq[string] = @[]
   var owners = initTable[string, seq[string]]()
+  var ownerParties = initTable[string, seq[CatalogDiagnosticParty]]()
   var canonicalOf = initTable[string, string]()
   for catalog in catalogs:
     for entry in catalog.content.canonicalInterfaces:
       if entry.packageName notin owners:
         ownerOrder.add(entry.packageName)
         owners[entry.packageName] = @[]
+        ownerParties[entry.packageName] = @[]
       owners[entry.packageName].add("catalog " & catalog.key &
         " declares " & normalizedFingerprint(entry.interfaceFingerprint))
+      ownerParties[entry.packageName].add(partyOf("", catalog.coordinate,
+        entry.interfaceFingerprint, entry.location))
       canonicalOf[entry.packageName] =
         normalizedFingerprint(entry.interfaceFingerprint)
   # Not sorted, for the reason above: ``ownerOrder`` only chooses the
@@ -541,7 +622,9 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         "package \"" & packageName & "\" has more than one canonical " &
         "interface owner: " & declarations.join("; ") &
         ". Exactly one catalog may own a canonical package interface; " &
-        "split the declaration or drop one of the imports.")
+        "split the declaration or drop one of the imports.",
+        CatalogDiagnostic(packageName: packageName,
+          parties: ownerParties[packageName]))
 
   # --- 4. Contribution eligibility -----------------------------------------
   var eligible: seq[EligibleContribution] = @[]
@@ -557,7 +640,10 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
           locationSpelling(contribution.location) &
           "), but no imported catalog declares a canonical interface for " &
           "it. Import the catalog that owns the interface, or remove the " &
-          "contribution.")
+          "contribution.",
+          CatalogDiagnostic(packageName: contribution.targetPackage,
+            parties: @[partyOf(contribution.contributor, catalog.coordinate,
+              declared, contribution.location)]))
         continue
       if contribution.targetPackage in ambiguouslyOwned:
         continue
@@ -571,7 +657,12 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
           canonical & " (contribution declared at " &
           locationSpelling(contribution.location) &
           "). The contribution is pinned to a superseded interface " &
-          "revision and must be refreshed against the current interface.")
+          "revision and must be refreshed against the current interface.",
+          CatalogDiagnostic(packageName: contribution.targetPackage,
+            canonicalFingerprint: canonical,
+            parties: @[partyOf(contribution.contributor, catalog.coordinate,
+              declared, contribution.location)] &
+              ownerParties[contribution.targetPackage]))
         continue
       eligible.add(EligibleContribution(
         targetPackage: contribution.targetPackage,
@@ -609,7 +700,8 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         ". A policy entry's position is no more a selection rule than an import's " &
         "(Provisioning-Contributions.md, Resolution): which of two contradictory " &
         "entries wins is undecidable, so composition refuses rather than taking " &
-        "the one written last. Keep exactly one entry per package.")
+        "the one written last. Keep exactly one entry per package.",
+        CatalogDiagnostic(packageName: packageName, named: named))
 
   # Lock pins. Like the policy, a pin's POSITION is never a selection rule:
   # two pins naming different contributors for one package refuse.
@@ -632,7 +724,8 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         "the lock pins " & $named.len & " different contributors for " &
         "package \"" & packageName & "\": " &
         named.mapIt("\"" & it & "\"").join(", ") &
-        ". Which one wins is undecidable; restore the committed lock.")
+        ". Which one wins is undecidable; restore the committed lock.",
+        CatalogDiagnostic(packageName: packageName, named: named))
 
   var packageOrder: seq[string] = @[]
   for candidate in eligible:
@@ -671,7 +764,12 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
             deduplicate(isSorted = true).join(", ") &
           ". The lock is not re-selected by policy or by a unique " &
           "eligible contribution: restore the locked catalog, or refresh " &
-          "the lock deliberately.")
+          "the lock deliberately.",
+          CatalogDiagnostic(packageName: packageName,
+            named: @[lockOf[packageName]],
+            eligible: candidates.mapIt(it.contributor),
+            parties: candidates.mapIt(partyOf(it.contributor, it.coordinate,
+              it.targetFingerprint, it.location))))
         continue
       if wanted.len > 1:
         var described: seq[string] = @[]
@@ -687,7 +785,12 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
           "never a selection rule (Provisioning-Contributions.md, " &
           "Resolution). Candidates: " &
           described.sorted(cmp).deduplicate(isSorted = true).join("; ") &
-          ".")
+          ".",
+          CatalogDiagnostic(packageName: packageName,
+            named: @[lockOf[packageName]],
+            eligible: candidates.mapIt(it.contributor),
+            parties: wanted.mapIt(partyOf(it.contributor, it.coordinate,
+              it.targetFingerprint, it.location))))
         continue
       selections.add(CatalogSelection(
         targetPackage: packageName,
@@ -722,7 +825,12 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
           (if candidates.len == 0: "<none>"
            else: candidates.mapIt(it.contributor).sorted(cmp).
              deduplicate(isSorted = true).mapIt("\"" & it & "\"").
-             join(", ")) & ".")
+             join(", ")) & ".",
+          CatalogDiagnostic(packageName: packageName,
+            named: @[policyOf[packageName]],
+            eligible: candidates.mapIt(it.contributor),
+            parties: candidates.mapIt(partyOf(it.contributor, it.coordinate,
+              it.targetFingerprint, it.location))))
         continue
       satisfiedPolicy.add(packageName)
     if wanted.len > 1:
@@ -731,14 +839,58 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         described.add("contributor \"" & candidate.contributor &
           "\" from catalog " & candidate.catalogKey & " declared at " &
           locationSpelling(candidate.location))
+      # With a policy, every candidate is the contributor the policy names:
+      # saying "no lock or curator policy selects one" there was false (M6
+      # deliverable 4), and pointing at a policy cannot resolve it. Nor can
+      # a policy resolve an ambiguity whose candidates all come from ONE
+      # contributor (a policy names a contributor, not one of its
+      # contributions) -- and when they all come from one CATALOG, the
+      # catalog publishes the contributor twice, so importing one catalog
+      # is no remedy either.
+      let offeringCatalogs = wanted.mapIt(it.catalogKey).deduplicate()
+      let offeringContributors = wanted.mapIt(it.contributor).deduplicate()
+      let rule = "import order is never a selection rule " &
+        "(Provisioning-Contributions.md, Resolution). Candidates: "
+      let why =
+        if reason == csCuratorPolicy and offeringCatalogs.len > 1:
+          " eligible provisioning contributions from contributor \"" &
+            policyOf[packageName] & "\", which the curator policy selects; " &
+            "a contributor id names one publisher, so the policy cannot " &
+            "choose between the catalogs that offer it, and " & rule
+        elif reason == csCuratorPolicy:
+          " eligible provisioning contributions from contributor \"" &
+            policyOf[packageName] & "\", which the curator policy selects, " &
+            "all published by one catalog; a policy names a contributor, " &
+            "not one of its contributions, so it cannot choose between " &
+            "them, and " & rule
+        elif offeringContributors.len == 1:
+          " eligible provisioning contributions, all from contributor \"" &
+            offeringContributors[0] & "\"; a curator policy names a " &
+            "contributor, not one of its contributions, so none can choose " &
+            "between them, and " & rule
+        else:
+          " eligible provisioning contributions and no lock or curator " &
+            "policy selects one; " & rule
+      let remedy =
+        if offeringContributors.len > 1:
+          ". Pin one with an explicit selection."
+        elif offeringCatalogs.len > 1:
+          ". Import only the catalog that should offer it."
+        else:
+          ". A catalog publishes one contribution per contributor and " &
+            "package: pin a revision of that catalog that does, or have it " &
+            "republished."
       refuse(cdAmbiguousContribution,
         "package \"" & packageName & "\" (interface " &
-        wanted[0].targetFingerprint & ") has " & $wanted.len &
-        " eligible provisioning contributions and no lock or curator " &
-        "policy selects one; import order is never a selection rule " &
-        "(Provisioning-Contributions.md, Resolution). Candidates: " &
+        wanted[0].targetFingerprint & ") has " & $wanted.len & why &
         described.sorted(cmp).deduplicate(isSorted = true).join("; ") &
-        ". Pin one with an explicit selection.")
+        remedy,
+        CatalogDiagnostic(packageName: packageName,
+          named: (if reason == csCuratorPolicy: @[policyOf[packageName]]
+                  else: @[]),
+          eligible: candidates.mapIt(it.contributor),
+          parties: wanted.mapIt(partyOf(it.contributor, it.coordinate,
+            it.targetFingerprint, it.location))))
       continue
     selections.add(CatalogSelection(
       targetPackage: packageName,
@@ -760,7 +912,9 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
       "curator policy selects contributor \"" & policyOf[packageName] &
       "\" for package \"" & packageName &
       "\", but no imported catalog offers an eligible contribution from " &
-      "it. Eligible contributors: <none>.")
+      "it. Eligible contributors: <none>.",
+      CatalogDiagnostic(packageName: packageName,
+        named: @[policyOf[packageName]]))
 
   for packageName in lockPackages:
     if packageName in packageOrder or packageName in contradictoryLock:
@@ -770,7 +924,9 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
       "\" for package \"" & packageName & "\", but no imported catalog " &
       "offers an eligible contribution for the package at all. Eligible " &
       "contributors: <none>. The lock is not re-selected: restore the " &
-      "locked catalog, or refresh the lock deliberately.")
+      "locked catalog, or refresh the lock deliberately.",
+      CatalogDiagnostic(packageName: packageName,
+        named: @[lockOf[packageName]]))
 
   # --- 6. Canonical serialisation ------------------------------------------
   var catalogLines: seq[string] = @[]
@@ -829,6 +985,10 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
   diagnostics.sort(proc (a, b: CatalogDiagnostic): int =
     result = cmp(ord(a.kind), ord(b.kind))
     if result == 0: result = cmp(a.message, b.message))
+  # Whole-object de-duplication, as before the structured facts existed
+  # (M6 deliverable 4): two diagnostics with one kind and message are raised
+  # from the same facts -- every message names the package, catalogs and
+  # candidates the structured fields carry -- so they are equal objects.
   diagnostics = diagnostics.deduplicate(isSorted = true)
   if diagnostics.len > 0:
     return CatalogComposition(diagnostics: diagnostics)

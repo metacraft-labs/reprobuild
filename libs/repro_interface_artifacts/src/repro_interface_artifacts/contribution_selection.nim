@@ -146,6 +146,12 @@ type
       ## ``refusals`` is not.
     refusals*: seq[string]
       ## Sorted, de-duplicated.
+    diagnostics*: seq[CatalogDiagnostic]
+      ## The composition's own diagnostics, structured (M6 deliverable 4),
+      ## when the composition refused; each also appears in ``refusals`` as
+      ## ``"<kind>: <message>"``. A caller that knows the consumer's files
+      ## uses them to name the edit that resolves each one. Never consulted
+      ## to select anything.
 
 proc resolved*(resolution: ProvisioningResolution): bool =
   resolution.refusals.len == 0
@@ -345,7 +351,8 @@ proc resolveProvisioningSelections*(request: ProvisioningResolutionRequest;
 
   if refusals.len > 0:
     return ProvisioningResolution(
-      refusals: refusals.sorted(cmp).deduplicate(isSorted = true))
+      refusals: refusals.sorted(cmp).deduplicate(isSorted = true),
+      diagnostics: composition.diagnostics)
   # ``composition.selections`` is already in sorted package order and is
   # walked in that order, so ``selections`` is too.
   ProvisioningResolution(selections: selections)

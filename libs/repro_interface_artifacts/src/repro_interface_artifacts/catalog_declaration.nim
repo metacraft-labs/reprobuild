@@ -89,6 +89,14 @@ type
     interfaceArtifact*: string  ## lower-cased 64-hex assertion, or "".
     line*: int                  ## where the table starts (diagnostics only).
 
+  CatalogPolicyDeclaration* = object
+    ## One ``[[policy]]`` table and the line it starts on. DIAGNOSTICS ONLY
+    ## (M6 deliverable 4: a refusal names the table to edit); never a
+    ## selection input.
+    package*: string
+    contributor*: string
+    line*: int
+
   CatalogImportsDeclaration* = object
     imports*: seq[CatalogImportDeclaration]
       ## Sorted by ``repo``: declaration order is not an input.
@@ -112,11 +120,15 @@ type
 proc isHexOf(value: string; width: int): bool =
   value.len == width and value.allIt(it in {'0'..'9', 'a'..'f', 'A'..'F'})
 
-proc parseCatalogImportsDeclaration*(text, path: string):
+proc parseCatalogImportsDeclaration*(text, path: string;
+    policyTables: var seq[CatalogPolicyDeclaration]):
     CatalogImportsDeclaration =
   ## Read a ``repro-catalogs.toml`` (see the module docstring). Raises
   ## ``CatalogDeclarationError`` naming EVERY cause; never returns a
-  ## partially read declaration.
+  ## partially read declaration. ``policyTables`` receives every
+  ## ``[[policy]]`` table with its line, sorted by (package, contributor,
+  ## line) -- for diagnostics only.
+  policyTables = @[]
   var errors: seq[string] = @[]
   template fail(lineNo: int; message: string) =
     errors.add(path & ":" & $lineNo & ": " & message)
@@ -360,6 +372,8 @@ proc parseCatalogImportsDeclaration*(text, path: string):
         nameProblem(contributor))
     rules.add(CatalogSelectionRule(targetPackage: package,
       contributor: contributor))
+    policyTables.add(CatalogPolicyDeclaration(package: package,
+      contributor: contributor, line: at))
 
   if errors.len > 0:
     raise newException(CatalogDeclarationError,
@@ -369,8 +383,18 @@ proc parseCatalogImportsDeclaration*(text, path: string):
   rules.sort(proc (a, b: CatalogSelectionRule): int =
     result = cmp(a.targetPackage, b.targetPackage)
     if result == 0: result = cmp(a.contributor, b.contributor))
+  policyTables.sort(proc (a, b: CatalogPolicyDeclaration): int =
+    result = cmp(a.package, b.package)
+    if result == 0: result = cmp(a.contributor, b.contributor)
+    if result == 0: result = cmp(a.line, b.line))
   CatalogImportsDeclaration(imports: declared,
     policy: CatalogSelectionPolicy(selections: rules))
+
+proc parseCatalogImportsDeclaration*(text, path: string):
+    CatalogImportsDeclaration =
+  ## ``parseCatalogImportsDeclaration`` without the diagnostic policy lines.
+  var ignored: seq[CatalogPolicyDeclaration]
+  parseCatalogImportsDeclaration(text, path, ignored)
 
 # ---------------------------------------------------------------------------
 # What a catalog publishes
@@ -414,7 +438,7 @@ proc publishedCatalogContent*(published: seq[PublishedArtifact];
     let pi = p.artifact.projectInterface
     if pi.provisioningContributions.len == 0:
       result.canonicalInterfaces.add(catalogInterface(pi.packageName,
-        fingerprintHex(p.artifact.interfaceFingerprint)))
+        fingerprintHex(p.artifact.interfaceFingerprint), pi.location))
       continue
     for c in pi.provisioningContributions:
       let what = "published artifact " & p.path & ": contribution from \"" &

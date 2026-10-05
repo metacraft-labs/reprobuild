@@ -96,6 +96,16 @@ type
     content*: CatalogContent
     offered*: seq[ContributionIdentity]
 
+  CatalogEvidenceFailure* = object
+    ## A catalog that could not be read at a locked record's own revision
+    ## for DIAGNOSTIC evidence (M6 deliverable 4): a diff then cannot name
+    ## the cause field by field, and says why instead of only "not
+    ## determinable".
+    repo*: string
+    remote*: string
+    revision*: string
+    cause*: string
+
   CatalogAnswer* = object
     ## What discovery supplies to the provisioning resolver.
     imports*: seq[CatalogImport]
@@ -106,6 +116,17 @@ type
     pins*: seq[LockedCatalogImport]
       ## The import pins this answer was read at: the lock's own (verified)
       ## for a build, freshly resolved ones for re-selection.
+    evidenceFailures*: seq[CatalogEvidenceFailure]
+      ## Locked records whose own catalog revision could not be read for
+      ## ``previous`` (diagnostics only).
+    declaration*: LocatedCatalogDeclaration
+      ## The declaration the answer was read for (diagnostics only).
+
+  LocatedCatalogDeclaration* = object
+    ## The declaration and where each table starts, for diagnostics.
+    path*: string
+    declaration*: CatalogImportsDeclaration
+    policyTables*: seq[CatalogPolicyDeclaration]
 
 proc discoveryError(message: string) {.noreturn.} =
   raise newException(CatalogDiscoveryError, message)
@@ -215,25 +236,35 @@ proc catalogObjectStore*(remote, projectRoot: string): string =
   ## The shared bare clone discovery reads ``remote`` from.
   sharedBarePath(defaultCacheRoot(projectRoot), remote)
 
-proc openCatalogStore(remote, projectRoot: string): GitStore =
+proc catalogName*(repo, remote: string): string =
+  ## How every discovery diagnostic names a catalog: by the ``repo`` and
+  ## ``remote`` its import declares (M6 deliverable 4).
+  "catalog \"" & repo & "\" (" & remote & ")"
+
+proc recloneCommand(remote, bare: string): string =
+  "`git clone --bare " & quoteShell(remote) & " " & quoteShell(bare) & "`"
+
+proc openCatalogStore(repo, remote, projectRoot: string): GitStore =
   var gitBin = ""
   try:
     gitBin = resolveGitTool(tpmPathOnly, getEnv("PATH")).binaryPath
   except CatchableError as err:
-    discoveryError("git is needed to read catalog objects out of the " &
-      "shared clone of " & remote & " and cannot be resolved: " & err.msg)
+    discoveryError(catalogName(repo, remote) & ": git is needed to read " &
+      "catalog objects out of the shared clone of " & remote & " and " &
+      "cannot be resolved: " & err.msg & ". Put git on PATH and re-run")
   let remoteShape = remoteShapeDefect(remote)
   if remoteShape.len > 0:
     # Checked BEFORE the remote reaches ``urlSlug`` / ``canonicalRemoteIdentity``:
     # a lock record's remote reaches here unparsed (``evidenceAt``).
-    discoveryError("catalog remote " & remote.escape() & " " & remoteShape)
+    discoveryError("catalog \"" & repo & "\": catalog remote " &
+      remote.escape() & " " & remoteShape)
   let bare = catalogObjectStore(remote, projectRoot)
   if not (dirExists(bare / "objects") and fileExists(bare / "HEAD")):
-    discoveryError("there is no shared clone of catalog remote " & remote &
-      " at " & bare & ". Populate it with `repro ws sync` (or `git clone " &
-      "--bare " & remote & " " & bare & "`). Discovery reads ONLY that " &
-      "store -- never a working checkout, a sibling directory or a develop " &
-      "override")
+    discoveryError(catalogName(repo, remote) & ": there is no shared clone " &
+      "of catalog remote " & remote & " at " & bare & ". Populate it with " &
+      "`repro ws sync` (or " & recloneCommand(remote, bare) & "). Discovery " &
+      "reads ONLY that store -- never a working checkout, a sibling " &
+      "directory or a develop override")
   result = GitStore(gitBin: gitBin, gitDir: bare)
   # What the store says it is a clone of. EVERY ``remote.origin.url`` value
   # (``--get`` would answer with the last of several, while a fetch uses the
@@ -248,35 +279,40 @@ proc openCatalogStore(remote, projectRoot: string): GitStore =
           result.add(line.strip())
   let configured = urlsOf(result.run(["config", "--get-all",
     "remote.origin.url"]))
+  let who = catalogName(repo, remote) & ": "
+  let reclone = "Move it aside and re-create it with " &
+    recloneCommand(remote, bare) & " (or `repro ws sync`)"
   if configured.len == 0:
-    discoveryError("the shared clone at " & bare & " has no " &
+    discoveryError(who & "the shared clone at " & bare & " has no " &
       "remote.origin.url, so nothing shows it is a clone of " & remote &
-      "; re-create it with `git clone --bare " & remote & " " & bare & "`")
+      ". It is not read for this catalog. " & reclone)
   let effective = urlsOf(result.run(["remote", "get-url", "--all", "origin"]))
   if configured.len != 1 or effective.len != 1:
-    discoveryError("the shared clone at " & bare & " names " &
+    discoveryError(who & "the shared clone at " & bare & " names " &
       $configured.len & " origin URL(s) (" & configured.join(", ") &
       ") that a fetch would use as " & $effective.len & " URL(s) (" &
       effective.join(", ") & "); a store that is a clone of " & remote &
-      " names exactly one. It is not read for this catalog")
+      " names exactly one. It is not read for this catalog. " & reclone)
   for (what, observed) in [("is a clone of", configured[0]),
                            ("fetches (after url.*.insteadOf) from", effective[0])]:
     let shape = remoteShapeDefect(observed)
     if shape.len > 0:
-      discoveryError("the shared clone at " & bare & " " & what & " " &
+      discoveryError(who & "the shared clone at " & bare & " " & what & " " &
         observed.escape() & ", which " & shape & "; it is not read for " &
-        "catalog remote " & remote)
+        "catalog remote " & remote & ". " & reclone)
     if canonicalRemoteIdentity(observed) != declaredIdentity:
-      discoveryError("the shared clone at " & bare & " " & what & " " &
-        observed & ", not of catalog remote " & remote & " (two remotes " &
+      discoveryError(who & "the shared clone at " & bare & " " & what & " " &
+        observed & ", not " & (if what.startsWith("is"): "of" else: "from") &
+        " catalog remote " & remote & " (two remotes " &
         "share one cache directory name, or the store's configuration " &
-        "redirects it); it is not read for this catalog")
+        "redirects it); it is not read for this catalog. " & reclone)
   let format = result.run(["rev-parse", "--show-object-format"])
   if format.code != 0 or format.output.strip() != "sha1":
-    discoveryError("the shared clone at " & bare & " uses the " &
+    discoveryError(who & "the shared clone at " & bare & " uses the " &
       (if format.code != 0: "undeterminable (" & format.errors.strip() & ")"
        else: format.output.strip()) & " object format; catalog discovery " &
-      "re-hashes SHA-1 objects only and refuses the rest")
+      "re-hashes SHA-1 objects only and refuses the rest (a false refusal: " &
+      "SHA-256 repositories are not supported yet)")
 
 # ---------------------------------------------------------------------------
 # Reading one catalog at one revision
@@ -290,11 +326,15 @@ proc discoverCatalogAt*(repo, remote, gitRef, revision,
     discoveryError("catalog \"" & repo & "\" (" & remote & ") is pinned to " &
       revision.escape() & ", which is not a full-width lower-case commit " &
       "id; a branch name or an abbreviated id names a set of commits")
-  let store = openCatalogStore(remote, projectRoot)
+  let store = openCatalogStore(repo, remote, projectRoot)
   if not isLowerHex40(revision):
-    discoveryError("catalog \"" & repo & "\" is pinned to a 64-hex " &
+    discoveryError(catalogName(repo, remote) & " is pinned to a 64-hex " &
       "revision; SHA-256 repositories are not supported yet")
-  let where = "catalog \"" & repo & "\" (" & remote & ") at " & revision
+  let where = catalogName(repo, remote) & " at " & revision
+  let republish = ". Pin a revision of \"" & repo & "\" that publishes " &
+    "valid interface artifacts (the `commit` or `ref` of its [[import]] in " &
+    CatalogImportsFileName & "), or have its publisher regenerate and " &
+    "commit `" & PublishedInterfacesDir & "/`"
   var commit = ""
   try:
     commit = store.readVerified("commit", revision)
@@ -305,26 +345,39 @@ proc discoverCatalogAt*(repo, remote, gitRef, revision,
       revision & "` or `repro ws sync`; another revision, a checkout or a " &
       "sibling directory is never used instead")
   if not commit.startsWith("tree ") or commit.len < 46 or commit[45] != '\n':
-    discoveryError(where & ": the commit object does not start with its tree")
+    discoveryError(where & ": the commit object does not start with its " &
+      "tree" & republish)
   let rootTree = commit[5 ..< 45]
   if not isLowerHex40(rootTree):
-    discoveryError(where & ": the commit names a malformed tree")
-  let rootEntries = parseTree(store.readVerified("tree", rootTree), rootTree)
+    discoveryError(where & ": the commit names a malformed tree" & republish)
+  proc treeAt(oid: string): seq[TreeEntry] =
+    ## A tree on the path to the artifacts. Its refusal names the catalog
+    ## and the remedy (M6 deliverable 4): a tree that cannot be read or does
+    ## not hash to its id is a damaged store; one that does not parse was
+    ## published that way.
+    try:
+      result = parseTree(store.readVerified("tree", oid), oid)
+    except CatalogDiscoveryError as err:
+      if err.msg.endsWith(" is malformed"):
+        discoveryError(where & ": " & err.msg & republish)
+      discoveryError(where & ": " & err.msg & ". Move the shared clone " &
+        store.gitDir & " aside and re-create it (`repro ws sync`)")
+  let rootEntries = treeAt(rootTree)
   let pubs = rootEntries.filterIt(it.name == PublishedInterfacesDir)
   if pubs.len == 0:
     discoveryError(where & ": the commit publishes no interface artifacts " &
       "(there is no `" & PublishedInterfacesDir & "/` directory at the " &
       "repository root). A catalog publishes its generated artifacts there; " &
-      "its provider is never run to discover contributions")
+      "its provider is never run to discover contributions" & republish)
   if pubs.len > 1:
     # git never writes such a tree; a crafted one could, and which entry
     # "is" the publication would then be the reader's choice.
     discoveryError(where & ": the root tree names `" & PublishedInterfacesDir &
-      "` " & $pubs.len & " times")
+      "` " & $pubs.len & " times" & republish)
   if pubs[0].mode != "40000":
     discoveryError(where & ": `" & PublishedInterfacesDir & "` is not a " &
-      "directory (mode " & pubs[0].mode & ")")
-  let entries = parseTree(store.readVerified("tree", pubs[0].oid), pubs[0].oid)
+      "directory (mode " & pubs[0].mode & ")" & republish)
+  let entries = treeAt(pubs[0].oid)
   var refusals: seq[string] = @[]
   var names: seq[string] = @[]
   for e in entries:
@@ -341,11 +394,21 @@ proc discoverCatalogAt*(repo, remote, gitRef, revision,
   if entries.len == 0:
     refusals.add("`" & PublishedInterfacesDir & "/` is empty")
   var published: seq[PublishedArtifact] = @[]
+  var damaged = 0
+    ## Refusals that are a damaged store, not a bad publication.
   if refusals.len == 0:
     for e in entries:
       let path = PublishedInterfacesDir & "/" & e.name
+      var bytes = ""
       try:
-        let bytes = store.readVerified("blob", e.oid)
+        bytes = store.readVerified("blob", e.oid)
+      except CatalogDiscoveryError as err:
+        # A damaged store, not a bad publication: its own remedy.
+        refusals.add(err.msg & ". Move the shared clone " & store.gitDir &
+          " aside and re-create it (`repro ws sync`)")
+        inc damaged
+        continue
+      try:
         published.add(PublishedArtifact(path: path,
           artifact: decodePublishedArtifact(path, bytes)))
       except CatchableError as err:
@@ -354,8 +417,16 @@ proc discoverCatalogAt*(repo, remote, gitRef, revision,
   if refusals.len == 0:
     content = publishedCatalogContent(published, refusals)
   if refusals.len > 0:
+    # The publication remedy only when something IS wrong with the
+    # publication; a damaged store names its own remedy on its line.
     discoveryError(where & " cannot be composed:\n    " &
-      refusals.sorted(cmp).join("\n    "))
+      refusals.sorted(cmp).join("\n    ") &
+      (if refusals.len > damaged:
+         "\n    fix: pin a revision of \"" & repo & "\" that publishes valid " &
+         "interface artifacts (the `commit` or `ref` of its [[import]] in " &
+         CatalogImportsFileName & "), or have its publisher regenerate and " &
+         "commit `" & PublishedInterfacesDir & "/`"
+       else: ""))
   result = DiscoveredCatalog(repo: repo, remote: remote, gitRef: gitRef,
     revision: revision, interfaceArtifact: publishedArtifactIdentity(published),
     providerIdentity: catalogProviderIdentity("sha1", rootTree),
@@ -370,19 +441,20 @@ proc resolveCatalogRef*(repo, remote, gitRef, projectRoot: string): string =
   ## symbolic ref -> refuse (it would answer with its target, possibly
   ## ``HEAD``). ``HEAD`` is never consulted. Used ONLY by re-selection; a build reads
   ## the lock's revision.
+  let who = catalogName(repo, remote) & ": "
   let defect = refDefect(gitRef)
   if defect.len > 0:
-    discoveryError("catalog \"" & repo & "\": ref " & gitRef.escape() & " " &
-      defect)
-  let store = openCatalogStore(remote, projectRoot)
+    discoveryError(who & "ref " & gitRef.escape() & " " & defect &
+      "; correct the `ref` of its [[import]] in " & CatalogImportsFileName)
+  let store = openCatalogStore(repo, remote, projectRoot)
   let heads = "refs/heads/" & gitRef
   let tags = "refs/tags/" & gitRef
   let r = store.run(["for-each-ref",
     "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)" &
       "%00%(*objecttype)%00%(symref)", heads, tags])
   if r.code != 0:
-    discoveryError("catalog \"" & repo & "\": cannot list refs in " &
-      store.gitDir & ": " & r.errors.strip())
+    discoveryError(who & "cannot list refs in " & store.gitDir & ": " &
+      r.errors.strip())
   var found: seq[(string, string)] = @[]
   for line in r.output.splitLines():
     if line.len == 0: continue
@@ -392,27 +464,29 @@ proc resolveCatalogRef*(repo, remote, gitRef, projectRoot: string): string =
     if f[5].len > 0:
       # A symbolic ref answers with its target's commit -- possibly HEAD's
       # (``refs/heads/x -> HEAD``), which a ref is never resolved through.
-      discoveryError("catalog \"" & repo & "\": " & f[0] & " is a " &
-        "symbolic ref (to " & f[5] & "); name the branch or tag itself, or " &
-        "pin a `commit`")
+      discoveryError(who & f[0] & " is a symbolic ref (to " & f[5] &
+        "); name the branch or tag itself, or pin a `commit`, in its " &
+        "[[import]] in " & CatalogImportsFileName)
     var commit = ""
     if f[2] == "commit":
       commit = f[1]
     elif f[2] == "tag" and f[4] == "commit":
       commit = f[3]
     else:
-      discoveryError("catalog \"" & repo & "\": " & f[0] & " does not name " &
-        "a commit (it names a " & f[2] & ")")
+      discoveryError(who & f[0] & " does not name a commit (it names a " &
+        f[2] & "); name a branch or tag that points at a commit, or pin a " &
+        "`commit`, in its [[import]] in " & CatalogImportsFileName)
     found.add((f[0], commit.toLowerAscii()))
   if found.len == 0:
-    discoveryError("catalog \"" & repo & "\": there is no branch or tag " &
-      gitRef.escape() & " in the shared clone " & store.gitDir & " of " &
-      remote & "; fetch it (`repro ws sync`) or pin a `commit`")
+    discoveryError(who & "there is no branch or tag " & gitRef.escape() &
+      " in the shared clone " & store.gitDir & " of " & remote &
+      "; fetch it (`repro ws sync`) or pin a `commit`")
   if found.len > 1 and found[0][1] != found[1][1]:
-    discoveryError("catalog \"" & repo & "\": " & gitRef.escape() & " is " &
+    discoveryError(who & gitRef.escape() & " is " &
       "both a branch (" & found.filterIt(it[0] == heads).mapIt(it[1]).join() &
       ") and a tag (" & found.filterIt(it[0] == tags).mapIt(it[1]).join() &
-      ") naming different commits; pin a `commit` instead")
+      ") naming different commits; pin a `commit` instead (in its " &
+      "[[import]] in " & CatalogImportsFileName & ")")
   found[0][1]
 
 proc catalogImportOf*(d: DiscoveredCatalog): CatalogImport =
@@ -433,48 +507,88 @@ proc lockPinOf*(d: DiscoveredCatalog): LockedCatalogImport =
 # The declaration
 # ---------------------------------------------------------------------------
 
-proc readCatalogDeclaration*(projectRoot: string): CatalogImportsDeclaration =
-  ## ``<projectRoot>/repro-catalogs.toml``, strictly read. Raises
-  ## ``CatalogDiscoveryError`` when it is missing or cannot be read, and when
-  ## two imports name one remote in two spellings.
+proc declarationLocation*(located: LocatedCatalogDeclaration;
+                          repo: string): string =
+  ## ``<path>:<line>`` of the ``[[import]]`` naming ``repo``, or "" when the
+  ## declaration names none.
+  for d in located.declaration.imports:
+    if d.repo == repo:
+      return located.path & ":" & $d.line
+  ""
+
+proc readLocatedCatalogDeclaration*(projectRoot: string;
+                                    lockClaims: seq[LockedRealization] = @[]):
+    LocatedCatalogDeclaration =
+  ## ``<projectRoot>/repro-catalogs.toml``, strictly read, with where each
+  ## table starts. Raises ``CatalogDiscoveryError`` when it is missing or
+  ## cannot be read, and when two imports name one remote in two
+  ## spellings. ``lockClaims``: the committed lock's provisioning records,
+  ## named in the "missing" refusal so the user knows what to declare.
   let path = projectRoot / CatalogImportsFileName
+  result.path = path
   if not fileExists(path):
+    var named: seq[string] = @[]
+    for r in lockClaims:
+      let line = catalogName(r.catalogWorkspace, r.catalogRemote) & " at " &
+        r.catalogRevision
+      if line notin named: named.add(line)
+    named.sort(cmp)
     discoveryError("the project declares no catalog imports: " & path &
       " does not exist. Declare the catalogs it imports there " &
       "(Federated-Catalog-Imports.md); a catalog is never inferred from a " &
-      "sibling directory")
+      "sibling directory. Create it with `schema = \"" &
+      CatalogImportsSchemaV1 & "\"` and one [[import]] table (`repo`, " &
+      "`remote`, and `commit` or `ref`) per catalog" &
+      (if named.len > 0:
+         "; the committed lock's provisioning records were selected from " &
+         named.join(", ")
+       else: ""))
   var text = ""
   try:
     text = readFile(path)
   except CatchableError as err:
     discoveryError("cannot read " & path & ": " & err.msg)
   try:
-    result = parseCatalogImportsDeclaration(text, path)
+    result.declaration = parseCatalogImportsDeclaration(text, path,
+      result.policyTables)
   except CatalogDeclarationError as err:
-    discoveryError(err.msg)
-  var identities = initTable[string, string]()
+    discoveryError(err.msg & "\n  fix: correct " & path & " as stated above " &
+      "(Federated-Catalog-Imports.md, \"Reading the file\")")
+  var identities = initTable[string, CatalogImportDeclaration]()
   var clashes: seq[string] = @[]
-  for d in result.imports:
+  for d in result.declaration.imports:
     let identity = canonicalRemoteIdentity(d.remote)
     if identity in identities:
-      clashes.add("imports \"" & identities[identity] & "\" and \"" & d.repo &
-        "\" name one remote (" & identity & ")")
+      let first = identities[identity]
+      clashes.add("imports \"" & first.repo & "\" (line " & $first.line &
+        ") and \"" & d.repo & "\" (line " & $d.line & ") name one remote (" &
+        identity & ")")
     else:
-      identities[identity] = d.repo
+      identities[identity] = d
   if clashes.len > 0:
     discoveryError(path & ": one remote is one catalog import: " &
-      clashes.join("; "))
+      clashes.join("; ") & ". Keep one [[import]] per repository and " &
+      "remove the other")
+
+proc readCatalogDeclaration*(projectRoot: string): CatalogImportsDeclaration =
+  ## ``readLocatedCatalogDeclaration`` without the diagnostic locations.
+  readLocatedCatalogDeclaration(projectRoot).declaration
 
 # ---------------------------------------------------------------------------
 # What the resolver is handed
 # ---------------------------------------------------------------------------
 
 proc evidenceAt(records: seq[LockedRealization]; projectRoot: string;
-                known: seq[DiscoveredCatalog]): seq[ContributionIdentity] =
+                known: seq[DiscoveredCatalog];
+                failures: var seq[CatalogEvidenceFailure]):
+    seq[ContributionIdentity] =
   ## Diagnostic evidence: the identities each record's own catalog
   ## coordinate offers for the record's (package, contributor), where that
   ## catalog can be read at the RECORDED revision. Best effort -- evidence
-  ## is optional and is used only if it reproduces the recorded fingerprint.
+  ## is optional and is used only if it reproduces the recorded fingerprint
+  ## -- but never silent: a catalog that cannot be read is reported in
+  ## ``failures`` with its cause (M6 deliverable 4), so a diff that cannot
+  ## name a cause says why.
   var cache = known
   var attempted: seq[string] = @[]
   for r in records:
@@ -489,8 +603,10 @@ proc evidenceAt(records: seq[LockedRealization]; projectRoot: string;
         cache.add(discoverCatalogAt(r.catalogWorkspace, r.catalogRemote, "",
           r.catalogRevision, projectRoot))
         at = cache.high
-      except CatchableError:
-        discard
+      except CatchableError as err:
+        failures.add(CatalogEvidenceFailure(repo: r.catalogWorkspace,
+          remote: r.catalogRemote, revision: r.catalogRevision,
+          cause: err.msg))
     if at < 0:
       continue
     for identity in cache[at].offered:
@@ -498,14 +614,52 @@ proc evidenceAt(records: seq[LockedRealization]; projectRoot: string;
           identity.contribution.contributor == r.contributor and
           identity notin result:
         result.add(identity)
+  failures.sort(proc (a, b: CatalogEvidenceFailure): int =
+    result = cmp(a.repo, b.repo)
+    if result == 0: result = cmp(a.remote, b.remote)
+    if result == 0: result = cmp(a.revision, b.revision))
+
+proc catalogEvidenceForRecords*(records: seq[LockedRealization];
+                                projectRoot: string;
+                                failures: var seq[CatalogEvidenceFailure]):
+    seq[ContributionIdentity] =
+  ## ``repro lock diff``'s evidence: the published identities at each
+  ## record's own catalog coordinate, where readable; ``failures`` receives
+  ## each catalog that could not be read, with its cause.
+  failures = @[]
+  evidenceAt(records, projectRoot, @[], failures)
 
 proc catalogEvidenceForRecords*(records: seq[LockedRealization];
                                 projectRoot: string): seq[ContributionIdentity] =
-  ## ``repro lock diff``'s evidence: the published identities at each
-  ## record's own catalog coordinate, where readable.
-  evidenceAt(records, projectRoot, @[])
+  ## ``catalogEvidenceForRecords`` without the failures.
+  var ignored: seq[CatalogEvidenceFailure]
+  catalogEvidenceForRecords(records, projectRoot, ignored)
 
-proc answerOf(declaration: CatalogImportsDeclaration;
+proc renderEvidenceFailures*(failures: seq[CatalogEvidenceFailure]):
+    seq[string] =
+  ## The lines a diff appends when a cause is not determinable because
+  ## these catalogs could not be read at the recorded revisions: each
+  ## catalog, why, and the command that makes it readable.
+  if failures.len == 0:
+    return
+  result.add("the published catalogs that would explain this field by " &
+    "field could not be read at the recorded revisions:")
+  for f in failures:
+    var cause = f.cause.splitLines()
+    if cause.len == 0: cause = @[""]
+    # The cause usually names the catalog itself; it is named once.
+    let name = catalogName(f.repo, f.remote)
+    for prefix in [name & " at " & f.revision & ": ", name & ": "]:
+      if cause[0].startsWith(prefix):
+        cause[0] = cause[0][prefix.len .. ^1]
+        break
+    result.add("  " & name & " at " & f.revision & ": " & cause[0])
+    for extra in cause[min(1, cause.len) .. ^1]:
+      result.add("  " & extra)
+  result.add("  fix: fetch each revision into the workspace's shared clone " &
+    "(`repro ws sync`) and run the command again")
+
+proc answerOf(located: LocatedCatalogDeclaration;
               discovered: seq[DiscoveredCatalog];
               claims: seq[LockedRealization];
               projectRoot: string): CatalogAnswer =
@@ -513,21 +667,31 @@ proc answerOf(declaration: CatalogImportsDeclaration;
     result.imports.add(catalogImportOf(d))
     result.offered.add(d.offered)
     result.pins.add(lockPinOf(d))
-  result.policy = declaration.policy
+  result.policy = located.declaration.policy
   result.resolver = offeredContributionResolver(result.offered)
-  result.previous = evidenceAt(claims, projectRoot, discovered)
+  result.previous = evidenceAt(claims, projectRoot, discovered,
+    result.evidenceFailures)
+  result.declaration = located
+
+proc defaultReselectCommand(projectRoot: string): string =
+  "repro lock refresh --provisioning " & quoteShell(projectRoot)
 
 proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
-                       claims: seq[LockedRealization]): CatalogAnswer =
+                       claims: seq[LockedRealization];
+                       reselectCommand = ""): CatalogAnswer =
   ## The catalogs a build whose committed lock carries provisioning records
   ## is verified against: every declared import, read at the revision the
   ## lock pins for it. Refuses -- naming every cause and its remedy -- when
   ## the declaration is missing, an import has no pin, a pin is not declared
   ## or disagrees with its declaration, or the artifacts read at the pinned
-  ## revision do not have the pinned identity.
-  let declaration = readCatalogDeclaration(projectRoot)
-  let reselect = "re-pin with `repro lock refresh --provisioning " &
-    quoteShell(projectRoot) & "`"
+  ## revision do not have the pinned identity. ``reselectCommand`` is the
+  ## exact re-select command for this lock (default: the project's own).
+  let located = readLocatedCatalogDeclaration(projectRoot, claims)
+  let declaration = located.declaration
+  let command =
+    if reselectCommand.len > 0: reselectCommand
+    else: defaultReselectCommand(projectRoot)
+  let reselect = "re-pin with `" & command & "`"
   var refusals: seq[string] = @[]
   var pinOf = initTable[string, LockedCatalogImport]()
   for p in lockPins:
@@ -536,9 +700,11 @@ proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
   var toRead: seq[(CatalogImportDeclaration, LockedCatalogImport)] = @[]
   for d in declaration.imports:
     declared.add(d.repo)
+    let at = located.path & ":" & $d.line
     if d.repo notin pinOf:
-      refusals.add("catalog import \"" & d.repo & "\" is declared but the " &
-        "committed lock pins no revision for it; " & reselect)
+      refusals.add("catalog import \"" & d.repo & "\" (" & d.remote & ", " &
+        at & ") is declared but the committed lock pins no revision for " &
+        "it; " & reselect)
       continue
     let p = pinOf[d.repo]
     var disagree: seq[string] = @[]
@@ -558,16 +724,21 @@ proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
         d.interfaceArtifact & ", the lock pins " & p.interfaceArtifact)
     if disagree.len > 0:
       refusals.add("the committed lock's pin for catalog import \"" & d.repo &
-        "\" disagrees with repro-catalogs.toml: " & disagree.join("; ") &
-        "; " & reselect)
+        "\" disagrees with repro-catalogs.toml (" & at & "): " &
+        disagree.join("; ") & "; " & reselect & " to adopt the " &
+        "declaration, or change the [[import]] at " & at & " back to what " &
+        "the lock pins")
       continue
     toRead.add((d, p))
   for p in lockPins:
     if p.repo notin declared:
       refusals.add("the committed lock pins catalog import \"" & p.repo &
-        "\", which repro-catalogs.toml does not declare; " & reselect)
+        "\" (" & p.remote & " at " & p.revision & "), which " &
+        "repro-catalogs.toml does not declare; " & reselect & " to drop " &
+        "the pin, or declare it in " & located.path)
   var discovered: seq[DiscoveredCatalog] = @[]
   for (d, p) in toRead:
+    let at = located.path & ":" & $d.line
     try:
       let found = discoverCatalogAt(p.repo, p.remote, p.gitRef, p.revision,
         projectRoot)
@@ -577,14 +748,15 @@ proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
           found.interfaceArtifact & ", but the committed lock pins " &
           p.interfaceArtifact & " (a stale or hand-edited pin, or a " &
           "republished revision); nothing read at that revision is used. " &
-          reselect)
+          reselect.capitalizeAscii())
         continue
       discovered.add(found)
     except CatalogDiscoveryError as err:
-      refusals.add(err.msg)
+      refusals.add(err.msg & "\n    (the [[import]] of \"" & p.repo &
+        "\" is at " & at & ")")
   if refusals.len > 0:
     discoveryError(refusals.sorted(cmp).join("\n  "))
-  answerOf(declaration, discovered, claims, projectRoot)
+  answerOf(located, discovered, claims, projectRoot)
 
 proc catalogsForReselect*(projectRoot: string;
                           claims: seq[LockedRealization]): CatalogAnswer =
@@ -592,10 +764,11 @@ proc catalogsForReselect*(projectRoot: string;
   ## --provisioning``) selects from: every declared import, at its declared
   ## commit or at the commit its declared ref names NOW. The answer's
   ## ``pins`` are what the lock is to record.
-  let declaration = readCatalogDeclaration(projectRoot)
+  let located = readLocatedCatalogDeclaration(projectRoot)
   var refusals: seq[string] = @[]
   var discovered: seq[DiscoveredCatalog] = @[]
-  for d in declaration.imports:
+  for d in located.declaration.imports:
+    let at = located.path & ":" & $d.line
     try:
       let revision =
         if d.commit.len > 0: d.commit
@@ -607,14 +780,17 @@ proc catalogsForReselect*(projectRoot: string;
         refusals.add("catalog \"" & d.repo & "\" (" & d.remote & ") at " &
           revision & " publishes interface artifact " &
           found.interfaceArtifact & ", but repro-catalogs.toml asserts " &
-          d.interfaceArtifact)
+          d.interfaceArtifact & " (" & at & "); correct or remove the " &
+          "`interface_artifact` assertion there, or pin the revision that " &
+          "publishes it")
         continue
       discovered.add(found)
     except CatalogDiscoveryError as err:
-      refusals.add(err.msg)
+      refusals.add(err.msg & "\n    (the [[import]] of \"" & d.repo &
+        "\" is at " & at & ")")
   if refusals.len > 0:
     discoveryError(refusals.sorted(cmp).join("\n  "))
-  answerOf(declaration, discovered, claims, projectRoot)
+  answerOf(located, discovered, claims, projectRoot)
 
 proc renderCatalogPinChanges*(old, new: seq[LockedCatalogImport]): seq[string] =
   ## One line per catalog import pin that re-selection added, removed or

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1667,
+    "nimTestBinaries": 1670,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 595,
+    "pureUnitTests": 596,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1678
+    "testEntries": 1681
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1132,8 +1132,8 @@
     "classificationCounts": {
       "graph-fixture": 12,
       "integration": 777,
-      "platform/destructive": 116,
-      "pure unit": 595,
+      "platform/destructive": 118,
+      "pure unit": 596,
       "unclassified": 178
     },
     "graphOwnedTestArtifacts": [
@@ -1282,9 +1282,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1667,
+    "nimTestBinaryCount": 1670,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1678
+    "testEntryCount": 1681
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7787,6 +7787,25 @@
       "source": "libs/repro_cli_support/tests/t_action_cache_root_resolution.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_catalog_publication",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_catalog_publication.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25674,6 +25693,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_federated_catalog_diagnostics_are_actionable",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_lock",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_federated_catalog_diagnostics_are_actionable.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_finish_outcome_reaches_the_spine",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -25796,6 +25835,26 @@
       "source": "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_hermetic_published_catalog_fixture",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_lock",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_hermetic_published_catalog_fixture.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -100,6 +100,7 @@ import repro_cli_support/push_hook_protocol
 import repro_cli_support/cmake_direct
 import repro_cli_support/daemon_working_directory
 import repro_cli_support/provisioning_lock_selection
+import repro_cli_support/catalog_publication
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -219,6 +220,7 @@ export home.runHomeCommand, home.setPackageCatalogLookup,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
 export provisioning_lock_selection
+export catalog_publication
 export cli_hardware.runHardwareCommand
 export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
@@ -2724,6 +2726,22 @@ proc buildProvisioningPins*(artifact: ProjectInterfaceArtifact;
     else: committedProvisioningLockPath(projectRoot)
   lockSelectedProvisioningPins(artifact, projectRoot, path,
     lockRequired = named)
+
+proc reproBuildErrorText*(message: string): string =
+  ## What ``repro build`` prints on stderr for a failure it reports with
+  ## exit 1 -- among them a provisioning refusal
+  ## (``ProvisioningSelectionRefused``), whose message is printed whole.
+  "repro build: error: " & message
+
+proc devEnvProvisioningRefusalText*(refusal: string): string =
+  ## What dev-env activation prints on stderr when the committed lock's
+  ## provisioning selection is refused. Activation is never fatal: it
+  ## provisions NOTHING (nothing is provisioned unpinned) and the shell
+  ## keeps the ambient PATH.
+  "repro dev-env: error: " & refusal & "\n" &
+    "repro dev-env: no declared tool is provisioned (nothing is " &
+    "provisioned unpinned); the activated shell will resolve tools from " &
+    "the ambient PATH."
 
 proc carriesContributedRealization(pi: ProjectInterface): bool =
   ## True when some tool use carries a realization from a provisioning
@@ -13132,10 +13150,7 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
     provisioningPins = buildProvisioningPins(interfaceArtifact,
       selection.projectRoot)
   except ProvisioningSelectionRefused as refusal:
-    stderr.writeLine("repro dev-env: error: " & refusal.msg & "\n" &
-      "repro dev-env: no declared tool is provisioned (nothing is " &
-      "provisioned unpinned); the activated shell will resolve tools from " &
-      "the ambient PATH.")
+    stderr.writeLine(devEnvProvisioningRefusalText(refusal.msg))
     return
   let storeRoot = resolveStoreRoot() / "tool-store"
   var binDirs: seq[string] = @[]
@@ -61824,10 +61839,8 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
         incumbentExists, incumbentText, generated.lockDocument, platform,
         platform)
       if not outcome.reselected:
-        stderr.writeLine("repro lock " & verb & " --provisioning: " &
-          "re-selection refused; " & lockP & " was not written:")
-        for refusal in outcome.refusals:
-          stderr.writeLine("  " & refusal)
+        stderr.writeLine(renderReselectionRefusal(verb, lockP,
+          outcome.refusals))
         return 1
       stdout.writeLine(outcome.report)
       createDir(parentDir(lockP))
@@ -62441,17 +62454,31 @@ proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
   # cannot be read leaves the cause "not determinable from the records".
   var evidence = ProvisioningDiffEvidence()
   var oldRecords, newRecords: seq[LockedRealization]
+  var oldFailures, newFailures: seq[CatalogEvidenceFailure]
   let anchor = parentDir(absolutePath(newPath))
   if provisioningRecordsOf(oldText, "the old lock", oldRecords).len == 0:
-    evidence.previous = catalogEvidenceForRecords(oldRecords, anchor)
+    evidence.previous = catalogEvidenceForRecords(oldRecords, anchor,
+      oldFailures)
   if provisioningRecordsOf(newText, "the new lock", newRecords).len == 0:
-    evidence.current = catalogEvidenceForRecords(newRecords, anchor)
+    evidence.current = catalogEvidenceForRecords(newRecords, anchor,
+      newFailures)
   let diff = diffProvisioningLockDocuments(oldText, newText, evidence)
   if diff.refused:
     return (2, "repro lock diff: " & renderProvisioningDiff(diff))
   if diff.unchanged:
     return (0, "repro lock diff: no provisioning selection changed")
-  (1, renderProvisioningDiff(diff))
+  var text = renderProvisioningDiff(diff)
+  # ReproOS M6 D4: a cause the diff could not determine says WHY -- the
+  # catalogs that could not be read at the recorded revisions, each with
+  # its cause and the command that makes it readable -- rather than only
+  # "not determinable". Only for those records: an explained change, or a
+  # change that needs no evidence, adds nothing.
+  let failures = relevantEvidenceFailures(diff.changes,
+    oldRecords & newRecords, oldFailures & newFailures)
+  if failures.len > 0:
+    for line in renderEvidenceFailures(failures):
+      text.add("\n" & line)
+  (1, text)
 
 proc runReproLockDiff(rest: openArray[string]): int =
   var paths: seq[string] = @[]
@@ -70054,7 +70081,7 @@ proc runThinAppDispatch(programName: string): int =
       stderr.write(renderUnknownTargetDiagnostic(err[]))
       return 2
     except CatchableError as err:
-      stderr.writeLine("repro build: error: " & err.msg)
+      stderr.writeLine(reproBuildErrorText(err.msg))
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "test":
     # CI-Sharding M2 — ``repro test --shard k/N [...]``.  Implementation
