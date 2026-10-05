@@ -35693,7 +35693,7 @@ proc orderedLockCandidates(identity: GitToolIdentity;
   # including not-yet-committed ones.
   let subtreeAbs = recordStoreRoot / lockPrefix.replace('/', DirSep)
   var seen = initHashSet[string]()
-  var uncommitted: seq[string]
+  var uncommitted: seq[(Time, string)]
   if dirExists(subtreeAbs):
     for path in walkDirRec(subtreeAbs):
       if not path.endsWith(".toml"):
@@ -35707,10 +35707,25 @@ proc orderedLockCandidates(identity: GitToolIdentity;
       rel = rel.strip(chars = {'/', '\\'}).replace('\\', '/')
       seen.incl(rel)
       if rel notin committedOrder:
-        uncommitted.add(rel)
-  # Uncommitted first (deterministic order), then committed by recency.
-  uncommitted.sort()
-  for rel in uncommitted:
+        let written =
+          try: getLastModificationTime(extendedPath(path))
+          except CatchableError: fromUnix(0)
+        uncommitted.add((written, rel))
+  # Uncommitted first, newest-written first, then committed by recency.
+  #
+  # Git history cannot order drafts, so their write time is the only recency
+  # signal there is. A record is immutable once written (a gate that finds its
+  # record on disk leaves the bytes alone), so its mtime is the moment it was
+  # written. Ordering drafts by path instead meant ordering them by trigger
+  # SHA — a hash — so "the newest lock" was whichever draft's commit id sorted
+  # first: a fresh push record and an older `workspace lock` draft swapped
+  # places from one run to the next, and the coherence advisory compared the
+  # checkout against a different claim each time. The path breaks exact ties
+  # only, so the order stays deterministic.
+  uncommitted.sort(proc (a, b: (Time, string)): int =
+    result = cmp(b[0], a[0])
+    if result == 0: result = cmp(a[1], b[1]))
+  for (_, rel) in uncommitted:
     result.add(LockCandidate(relPath: rel, committed: false, commitOrder: -1))
   var committed: seq[(int, string)]
   for rel, rank in committedOrder:

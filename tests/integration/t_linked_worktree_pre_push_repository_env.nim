@@ -11,11 +11,13 @@
 ## is mocked.  The tests are independently falsifiable: removing the scrub
 ## from Workspace-VCS queries makes the first test report repo A's SHA for repo
 ## B, while removing it from the CLI rev-parse/lock-coherence path makes the
-## second test emit a false coherence notice even if the Workspace-VCS queries
-## remain correct.  The second test additionally proves that a preserved user
-## hook receives Git's original argv, stdin bytes, and repository environment,
-## while the managed Reprobuild child receives the scrubbed environment and all
-## unrelated environment values unchanged.
+## second test's coherence advisory observe the pushed worktree's HEAD instead
+## of the declared ``app`` checkout, so the expected ``app`` finding (checkout
+## at the seed commit, newest record ahead of it) vanishes even if the
+## Workspace-VCS queries remain correct.  The second test additionally proves
+## that a preserved user hook receives Git's original argv, stdin bytes, and
+## repository environment, while the managed Reprobuild child receives the
+## scrubbed environment and all unrelated environment values unchanged.
 
 import std/[algorithm, json, os, osproc, streams, strtabs, strutils, tempfiles,
   unittest]
@@ -280,6 +282,31 @@ proc lockStoreSnapshot(fx: Fixture): string =
   entries.sort()
   result = entries.join("\0")
 
+proc checkAppBehindLinkedRecord(document: JsonNode;
+    appSha, linkedSha: string) =
+  ## After the linked push the record store holds two unpublished drafts: the
+  ## fixture's initial ``workspace lock`` record (app at the seed commit) and
+  ## the push's record (app at the linked commit). The push's is the newer, so
+  ## it is the manifests-DB claim the advisory compares against. The advisory
+  ## observes the DECLARED ``app`` checkout, which is still at the seed commit,
+  ## so the honest output is one informational ``descendant`` finding — the
+  ## lock is ahead of the checkout (CLI/README.md §"Lock Coherence": a branch
+  ## that bumped a private revision reports a discrepancy no remedy clears).
+  ##
+  ## For the poisoned direct dispatch this is also the scrub witness: if the
+  ## hook's ``GIT_DIR`` leaked into the advisory's ``rev-parse``, the ``app``
+  ## checkout would read as the linked commit, match the claim, and the
+  ## finding would disappear.
+  let notices = noticesText(document)
+  checkpoint(notices)
+  check "lock coherence: 0 needing attention, 1 informational\n" in notices
+  check "  app: checked out " & appSha & " on main\n" in notices
+  check "    locks/app/app/" & linkedSha & ".toml claims " & linkedSha &
+    " (descendant)\n" in notices
+  check "lock coherence is ADVISORY: nothing was blocked or changed\n" in
+    notices
+  check linkedSha & " on " notin notices
+
 suite "linked-worktree pre-push repository-local environment isolation":
   test "canonical scrub removes the complete repository namespace only":
     const ExpectedLocal = [
@@ -518,11 +545,9 @@ suite "linked-worktree pre-push repository-local environment isolation":
       if direct.code != 0: checkpoint(direct.output)
       check direct.code == 0
       let directReport = fx.report()
-      if directReport["notices"].len != 0:
-        checkpoint($directReport)
       check directReport["exitCode"].getInt() == 0
       check directReport["failures"].len == 0
-      check directReport["notices"].len == 0
+      checkAppBehindLinkedRecord(directReport, fx.appSha, linkedSha)
       check directReport["activeBranch"].getStr() == "linked"
       check directReport["pushedBranch"].getStr() == "linked"
       check directReport["lockUpdate"]["triggerSha"].getStr() == linkedSha
@@ -548,9 +573,11 @@ suite "linked-worktree pre-push repository-local environment isolation":
          "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
       if standard.code != 0: checkpoint(standard.output)
       check standard.code == 0
-      if fx.report()["notices"].len != 0:
-        checkpoint($fx.report())
-      check fx.report()["notices"].len == 0
+      let standardReport = fx.report()
+      check standardReport["exitCode"].getInt() == 0
+      check standardReport["failures"].len == 0
+      check standardReport["lockUpdate"]["triggerSha"].getStr() == fx.appSha
+      checkAppBehindLinkedRecord(standardReport, fx.appSha, linkedSha)
 
   test "a dirty declared dependency still blocks the linked push":
     let gitBin = findExe("git")
