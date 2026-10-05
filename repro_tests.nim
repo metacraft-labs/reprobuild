@@ -8883,6 +8883,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch.nim",
+    binary: "build/test-bin/t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim",
     binary: "build/test-bin/t_a_dirty_sibling_leaves_the_lock_alone",
     defines: @[],

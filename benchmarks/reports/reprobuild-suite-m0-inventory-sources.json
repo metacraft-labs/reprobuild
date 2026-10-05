@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1857,
+    "nimTestBinaries": 1858,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 110,
-    "testEntries": 1874
+    "testEntries": 1875
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1063,7 +1063,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 995,
+      "integration": 996,
       "platform/destructive": 119,
       "pure unit": 592,
       "unclassified": 157
@@ -1214,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1857,
+    "nimTestBinaryCount": 1858,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1874
+    "testEntryCount": 1875
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24122,6 +24122,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

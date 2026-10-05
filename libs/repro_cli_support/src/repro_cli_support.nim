@@ -16246,7 +16246,94 @@ proc vcsDispatcherContent(hookName: string): string =
       "exec \"$MANAGED_HOOK\" \"$@\") || exit $?; fi\n")
   result.add("exit 0\n")
 
-proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
+const ManagedHookRefusalRecordSchemaId* =
+  "reprobuild.managed-hook.contract-refusal.v1"
+  ## Schema of the record a managed hook files when it refuses to dispatch
+  ## because its resolved ``repro`` does not generate it.
+  ##
+  ## PG-15. A SEPARATE document from ``post-commit-report.json`` rather than a
+  ## new ``outcome`` inside it, and deliberately so — see
+  ## ``managedHookRefusalRecordName`` for the whole argument.
+
+const ManagedHookRefusalOutcomeTag* = "refused-contract-mismatch"
+  ## The record's ``outcome``. Deliberately NOT a member of
+  ## ``postCommitOutcomeTag``'s vocabulary: a reader that knows the dispatch
+  ## tags must fail to recognise this one rather than quietly bin it with
+  ## ``skipped-*``, which would reproduce the defect — a run that did not
+  ## happen reported in the vocabulary of runs that did.
+
+proc managedHookRefusalRecordName*(hookName: string): string =
+  ## Basename of the contract-refusal record for ``hookName``.
+  ##
+  ## WHY ITS OWN FILE, and not a ``refused-contract-mismatch`` outcome written
+  ## over ``post-commit-report.json``. The defect PG-15 corrects is that the
+  ## refusal path writes NOTHING, so "wired and refusing" and "wired and
+  ## working" are the same bytes on disk. There are three ways to end that and
+  ## only one of them keeps both facts:
+  ##
+  ##   * DELETE the stale report. Cheapest, and the milestone names it as the
+  ##     alternative. It loses the last-good outcome, which on a workspace
+  ##     whose dispatch has been refused for a week is the only surviving
+  ##     record of the last run that worked.
+  ##   * OVERWRITE the report with the refusal. Makes "the latest outcome"
+  ##     correct and loses the same last-good record, for the same reason.
+  ##   * WRITE A SIBLING, which is this. The last serviced dispatch keeps its
+  ##     report; the refusal gets a dated record of its own, naming the binary
+  ##     that refused and how it was resolved. An operator comparing the two
+  ##     timestamps can see which happened last, which is a question neither
+  ##     of the other two shapes can answer at all.
+  ##
+  ## Keyed BY HOOK because five hook types can refuse independently and the
+  ## four observational ones fail open while ``pre-push`` fails closed: one
+  ## shared file would be overwritten by whichever fired last and would lose
+  ## the one distinction that changes what the operator does.
+  ##
+  ## Four of the five hooks have no dispatch report to overwrite in any case
+  ## (only ``post-commit`` writes one), so "put the refusal in the report" is
+  ## not even available for ``pre-push``, ``post-merge``, ``post-checkout`` or
+  ## ``pre-commit``. A record of its own is the only shape that is uniform
+  ## across the five.
+  hookName & "-contract-refusal.json"
+
+# `managedHookRefusalRecordDir` is DEFINED beside the post-commit report
+# writers (next to `commitHookReportDir`, whose guard it is), because that is
+# where the reasoning about where a commit hook may file a diagnostic lives.
+# It is DECLARED here because the hook BODY generator needs its answer at
+# install time and necessarily precedes those writers in this module.
+proc managedHookRefusalRecordDir(repoRoot: string): string
+
+type
+  ManagedHookSite = object
+    ## The facts a generated managed-hook body carries about the PLACE it was
+    ## installed, as distinct from the body it IS.
+    ##
+    ## Both members are machine-local, and both are therefore excluded from
+    ## the contract digest — ``managedHookContract`` renders the body with an
+    ## empty site. A token derived from either would differ between two
+    ## installs of one identical build, and the contract must identify the
+    ## BODY, not the filesystem it was written from.
+    authorBin: string
+      ## Absolute path of the ``repro`` that GENERATED the body, baked in so
+      ## the refusal can hand the operator a command instead of the shape of
+      ## one.
+    refusalRecordDir: string
+      ## PG-15 — the directory a contract refusal may file its record in, or
+      ## "" when it may file one NOWHERE.
+      ##
+      ## ALREADY FILTERED through ``commitHookReportDir``. The question "may a
+      ## commit hook write into this root at all?" is answered in process, by
+      ## the single proc that holds it, at install time; the generated ``sh``
+      ## only honours a baked answer. Re-deriving it in the hook would mean a
+      ## second copy of ``isInitializedWorkspace`` in shell, free to drift
+      ## from the Nim one, and a recursive ``mkdir -p`` at a root the engine
+      ## has disclaimed — which manufactures the very ``.repro/`` marker a
+      ## later run misreads as a workspace. That forgery is the hazard
+      ## ``commitHookReportDir`` exists to prevent, and a REFUSING hook is the
+      ## worst possible caller to exempt from it: it is writing into a
+      ## workspace whose ``repro`` it has just established it cannot trust.
+
+proc vcsManagedHookBody(hookName, hookContract: string;
+                        site: ManagedHookSite): string =
   ## Canonical managed-hook body. M17 wires the dispatch path as
   ## ``repro hooks dispatch <name>`` (no-op until later milestones
   ## register a body). Drift detection compares the on-disk file to
@@ -16261,13 +16348,10 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
   ## once with an empty token to derive the digest; ``vcsManagedHookContent``
   ## then renders it again with the real one.
   ##
-  ## ``hookAuthorBin`` is the absolute path of the ``repro`` that GENERATED
-  ## this body, baked in so the refusal can hand the operator a command instead
-  ## of the shape of one. It is threaded in for the same reason as the token
-  ## and excluded from the digest for a different one: the path is machine
-  ## local (a Nix store path here, a build tree there), and a token derived
-  ## from it would differ between two installs of the identical build. The
-  ## contract must identify the BODY, not the filesystem it was written from.
+  ## ``site`` carries the two machine-local values — the generating binary's
+  ## path and the directory a refusal may record itself in — for the same
+  ## reason the token is threaded in and excluded from the digest for a
+  ## different one. See ``ManagedHookSite``.
   result = "#!/usr/bin/env sh\n"
   if hookName == "pre-push":
     result.add("# " & V2ManagedMarker & "\n")
@@ -16277,6 +16361,16 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
   result.add("# dispatches to: repro hooks dispatch " & hookName & "\n")
   result.add("set -eu\n")
   result.add("set +x\n")
+  # PG-15 — where this hook may file a contract-refusal record, and under what
+  # name. The DIRECTORY is the answer `commitHookReportDir` gave at install
+  # time, baked in; "" means "nowhere", and the refusal then says so on stderr
+  # instead of inventing a destination. Written at column zero as a plain
+  # assignment so `managedHookRefusalRecordDirAdvertised` can read it back out
+  # of an installed body.
+  result.add("REPRO_REFUSAL_RECORD_DIR=" &
+    quoteShellPosix(site.refusalRecordDir) & "\n")
+  result.add("REPRO_REFUSAL_RECORD_NAME=" &
+    quoteShellPosix(managedHookRefusalRecordName(hookName)) & "\n")
   result.add("REPROBUILD_CAPTURED_INTERNAL_CONTEXT=${" &
     InternalHookContextEnv & ":-}\n")
   result.add("unset " & InternalHookContextEnv & "\n")
@@ -16309,6 +16403,12 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
   # binary and the source it came from.
   result.add("REPRO_CMD=\n")
   result.add("REPRO_CMD_SOURCE=\n")
+  # Declared up front, not where they are first assigned: the body runs under
+  # `set -u`, the refusal and the record writer read all three, and the arm
+  # that never resolves an interpreter reaches neither assignment.
+  result.add("REPRO_CMD_VERSION=\n")
+  result.add("REPRO_PROBE_STATUS=0\n")
+  result.add("REPRO_PROBE_DIAGNOSTIC=\n")
   result.add("find_repro_cmd() {\n")
   result.add("  if [ -n \"${REPROBUILD_REPRO:-}\" ]; then\n")
   result.add("    if [ -x \"$REPROBUILD_REPRO\" ]; then\n")
@@ -16324,6 +16424,141 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
   result.add("    return 0\n")
   result.add("  fi\n")
   result.add("  return 1\n")
+  result.add("}\n\n")
+  # ---- PG-15: the refusal's DURABLE half ----------------------------------
+  #
+  # Before this, `repro_contract_refusal` was 24 `echo … >&2` lines and ZERO
+  # file writes — no redirection, no `tee`, no `touch`, no `mkdir` — while
+  # every DISPATCH path wrote `post-commit-report.json`. So "wired and
+  # refusing" and "wired and working" were the same bytes on disk, and the one
+  # durable artefact described a run that had not happened: measured on this
+  # workspace, a report dated 2026-09-30T11:45:49Z — and 2026-10-02T11:35:04Z
+  # when it was re-measured two days later, with the SAME outcome
+  # `no-lock-dirty-siblings` — that survived every refusing fire since. Both
+  # dates are kept deliberately: the date moved while the finding did not, so
+  # quoting only the first would date a defect that is still live.
+  #
+  # Stderr alone cannot carry this. The four observational hooks exit 0, git
+  # relays their stderr to a terminal that may not exist (a CI step, an editor
+  # subprocess, an agent harness — §1.6b measures that those are exactly the
+  # shells in which the refusal happens), and nothing afterwards can be asked
+  # what the last fire did.
+  #
+  # Written as JSON from `sh` rather than by handing the work to `repro`,
+  # because the only `repro` this hook has resolved is the one it has just
+  # established it cannot trust, and the one that WROTE the body may since
+  # have been garbage-collected. `REPRO_REFUSAL_RECORD_DIR` is baked in at
+  # install time by `commitHookReportDir` for the reasons set out on
+  # `ManagedHookSite.refusalRecordDir`: the "may I write here?" predicate
+  # stays in Nim, and the shell only honours its answer.
+  result.add("repro_json_string() {\n")
+  # A JSON string body, from arbitrary bytes. The inputs include a foreign
+  # binary's diagnostic, so none of them can be assumed to be clean: tabs
+  # become spaces, the other C0 controls and DEL are dropped (JSON forbids
+  # them unescaped and no reader wants them), backslash and quote are escaped
+  # BEFORE the newline pass so the `\n` this introduces is not re-escaped,
+  # and embedded newlines become `\n`. LC_ALL=C so the byte ranges mean bytes
+  # in every locale.
+  result.add("  printf '%s' \"${1:-}\" \\\n")
+  result.add("    | LC_ALL=C tr '\\011' ' ' \\\n")
+  result.add("    | LC_ALL=C tr -d '\\000-\\010\\013\\014\\016-\\037\\177' \\\n")
+  result.add("    | LC_ALL=C sed -e 's/\\\\/\\\\\\\\/g' -e 's/\"/\\\\\"/g' \\\n")
+  result.add("    | LC_ALL=C sed -e ':a' -e 'N' -e '$!ba' " &
+    "-e 's/\\n/\\\\n/g'\n")
+  result.add("}\n\n")
+  result.add("repro_refusal_record_path() {\n")
+  result.add("  printf '%s' " &
+    "\"$REPRO_REFUSAL_RECORD_DIR/$REPRO_REFUSAL_RECORD_NAME\"\n")
+  result.add("}\n\n")
+  result.add("repro_file_contract_refusal_record() {\n")
+  # Returns 0 only when a record actually landed, so the refusal can tell the
+  # operator where it is instead of claiming one exists.
+  result.add("  [ -n \"$REPRO_REFUSAL_RECORD_DIR\" ] || return 1\n")
+  result.add("  mkdir -p \"$REPRO_REFUSAL_RECORD_DIR\" 2>/dev/null || " &
+    "return 1\n")
+  # The probe's status is interpolated as a JSON NUMBER, so it is validated
+  # as one. It is always `$?` today; a non-numeric value would silently emit
+  # a document no reader can parse, which is a worse failure than -1.
+  result.add("  REPRO_RECORD_EXIT=-1\n")
+  result.add("  case \"${REPRO_PROBE_STATUS:-}\" in\n")
+  result.add("    ''|*[!0-9]*) ;;\n")
+  result.add("    *) REPRO_RECORD_EXIT=$REPRO_PROBE_STATUS ;;\n")
+  result.add("  esac\n")
+  result.add("  REPRO_RECORD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ " &
+    "2>/dev/null || true)\n")
+  # Written to a temp file and renamed into place: a reader must never meet a
+  # half-written document, and `post-commit` races a detached cache-push child
+  # plus whatever else the commit kicked off.
+  result.add("  REPRO_RECORD_TMP=$(mktemp " &
+    "\"$REPRO_REFUSAL_RECORD_DIR/.contract-refusal.XXXXXX\" 2>/dev/null) " &
+    "|| return 1\n")
+  # 0644, CHOSEN rather than inherited. `mktemp` creates 0600, and every other
+  # document in this directory — `post-commit-report.json`,
+  # `post-commit-lock.log`, every verb's `--write-report` artifact — is 0644.
+  # The asymmetry would matter: this record exists to be read by somebody other
+  # than the process that wrote it (an operator, `repro health`, a CI step),
+  # and a shared workspace is routinely touched by more than one uid. There is
+  # nothing secret in it — paths, a version string, a contract token and a
+  # foreign build's diagnostic, all of which the same refusal already printed
+  # to a terminal. Explicit rather than umask-dependent so the mode is a
+  # property of the record and not of whoever's shell fired the hook.
+  result.add("  chmod 644 \"$REPRO_RECORD_TMP\" 2>/dev/null || true\n")
+  result.add("  {\n")
+  result.add("    printf '{\\n'\n")
+  result.add("    printf '  \"schema\": \"%s\",\\n' " &
+    quoteShellPosix(ManagedHookRefusalRecordSchemaId) & "\n")
+  # The outcome tag is the whole point of the record: it is NOT one of
+  # `postCommitOutcomeTag`'s values, so no reader can mistake this document
+  # for the report of a dispatch that ran.
+  result.add("    printf '  \"outcome\": \"%s\",\\n' " &
+    quoteShellPosix(ManagedHookRefusalOutcomeTag) & "\n")
+  result.add("    printf '  \"hook\": \"%s\",\\n' " &
+    quoteShellPosix(hookName) & "\n")
+  result.add("    printf '  \"timestamp\": \"%s\",\\n' " &
+    "\"$(repro_json_string \"$REPRO_RECORD_TIME\")\"\n")
+  result.add("    printf '  \"repoRoot\": \"%s\",\\n' " &
+    "\"$(repro_json_string \"$REPO_ROOT\")\"\n")
+  # The three facts §"Contract Handshake And Stand-Down" requires of every
+  # dispatch failure: WHICH binary, HOW it was resolved, and only then its
+  # version — which on this host partitions nothing (three 0.1.3 builds
+  # disagree about this very flag), hence last and never alone.
+  result.add("    printf '  \"resolvedBinary\": \"%s\",\\n' " &
+    "\"$(repro_json_string \"$REPRO_CMD\")\"\n")
+  result.add("    printf '  \"resolvedFrom\": \"%s\",\\n' " &
+    "\"$(repro_json_string \"$REPRO_CMD_SOURCE\")\"\n")
+  result.add("    printf '  \"resolvedVersion\": \"%s\",\\n' " &
+    "\"$(repro_json_string \"$REPRO_CMD_VERSION\")\"\n")
+  result.add("    printf '  \"hookContract\": \"%s\",\\n' " &
+    "\"$(repro_json_string " & quoteShellPosix(hookContract) & ")\"\n")
+  result.add("    printf '  \"hookAuthorBin\": \"%s\",\\n' " &
+    "\"$(repro_json_string " & quoteShellPosix(site.authorBin) & ")\"\n")
+  result.add("    printf '  \"probeExit\": %s,\\n' \"$REPRO_RECORD_EXIT\"\n")
+  # Deliverable 3's other half: the probe's own output, kept rather than
+  # discarded, so the diagnostic survives the terminal that was not there.
+  result.add("    printf '  \"probeDiagnostic\": \"%s\",\\n' " &
+    "\"$(repro_json_string \"$REPRO_PROBE_DIAGNOSTIC\")\"\n")
+  result.add("    printf '  \"dispatched\": false\\n'\n")
+  result.add("    printf '}\\n'\n")
+  result.add("  } > \"$REPRO_RECORD_TMP\" 2>/dev/null || { " &
+    "rm -f \"$REPRO_RECORD_TMP\"; return 1; }\n")
+  result.add("  mv -f \"$REPRO_RECORD_TMP\" \"$(repro_refusal_record_path)\" " &
+    "2>/dev/null || { rm -f \"$REPRO_RECORD_TMP\"; return 1; }\n")
+  result.add("  return 0\n")
+  result.add("}\n\n")
+  result.add("repro_clear_contract_refusal_record() {\n")
+  # The record must not outlive the state it describes, or it becomes the same
+  # defect pointing the other way. Under §1.6b's shell-dependence the two
+  # outcomes ALTERNATE on one machine — a dev shell dispatches, a bare shell
+  # refuses — so a record left behind by yesterday's bare shell would describe
+  # today's dev-shell commit exactly as wrongly as the stale report described
+  # a refusal.
+  #
+  # Unconditional removal, never a read. `CLI/README.md`'s rule is that no
+  # command may read a previous report back to decide what to do; this decides
+  # nothing from it, and a missing record changes no behaviour.
+  result.add("  [ -n \"$REPRO_REFUSAL_RECORD_DIR\" ] || return 0\n")
+  result.add("  rm -f \"$(repro_refusal_record_path)\" 2>/dev/null || true\n")
+  result.add("  return 0\n")
   result.add("}\n\n")
   # The refusal an unconfirmed interpreter earns.
   #
@@ -16370,6 +16605,20 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     "$REPRO_CMD_VERSION\" >&2\n")
   result.add("  echo \"repro hooks:   hook contract:   " & hookContract &
     "\" >&2\n")
+  # PG-15 deliverable 3 — the probe's own output, which used to be thrown away
+  # by `>/dev/null 2>&1`. `CLI/hooks.md` §"Contract Handshake And Stand-Down"
+  # requires that every dispatch failure name the binary and how it was
+  # resolved "so a diagnostic cannot be misattributed to a build that did not
+  # produce it"; discarding the one diagnostic the binary produces and then
+  # describing it in our own words is the same misattribution with the sign
+  # flipped. It is RELAYED, not streamed: each line carries the `repro hooks:`
+  # prefix so a foreign build's multi-line complaint cannot be read as ours,
+  # and the attribution above it names whose words these are.
+  result.add("  if [ -n \"$REPRO_PROBE_DIAGNOSTIC\" ]; then\n")
+  result.add("    echo \"repro hooks:   and it said, verbatim:\" >&2\n")
+  result.add("    printf '%s\\n' \"$REPRO_PROBE_DIAGNOSTIC\" | " &
+    "sed -e 's/^/repro hooks:     | /' >&2\n")
+  result.add("  fi\n")
   result.add("  if [ \"${REPRO_PROBE_STATUS:-1}\" = \"3\" ]; then\n")
   result.add("    echo \"repro hooks: That build speaks this handshake and " &
     "simply builds a different\" >&2\n")
@@ -16398,7 +16647,7 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     "is behind the workspace:\" >&2\n")
   result.add("    echo \"repro hooks:      update the reprobuild pin and " &
     "rebuild your environment.\" >&2\n")
-  if hookAuthorBin.len > 0:
+  if site.authorBin.len > 0:
     # The generating binary knows where it lives, so the escape hatch can be a
     # real command. Offered only while that path is still executable: a Nix
     # store path survives a great deal but not a garbage collection, and a
@@ -16412,11 +16661,11 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     # only runnable remedy in the refusal -- was never printed on Windows.
     # The echoed command is quoted for the same reason: typed into Git Bash
     # as printed, an unquoted Windows path loses its separators.
-    result.add("    if [ -x " & quoteShellPosix(hookAuthorBin) & " ]; then\n")
+    result.add("    if [ -x " & quoteShellPosix(site.authorBin) & " ]; then\n")
     result.add("      echo \"repro hooks:   3. To push right now with the " &
       "build that installed this hook:\" >&2\n")
     result.add("      echo " & quoteShellPosix("repro hooks:        " &
-      "REPROBUILD_REPRO=" & quoteShellPosix(hookAuthorBin) & " git push") &
+      "REPROBUILD_REPRO=" & quoteShellPosix(site.authorBin) & " git push") &
       " >&2\n")
     result.add("    fi\n")
   result.add("  fi\n")
@@ -16424,6 +16673,32 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     "turns off the refusals that\" >&2\n")
   result.add("  echo \"repro hooks: are working, such as pushing an " &
     "unpublished or unlocked head.\" >&2\n")
+  # The durable half, LAST: `$REPRO_CMD_VERSION` and the relayed diagnostic
+  # above are inputs to it, and a record filed before them would carry less
+  # than the terminal did.
+  #
+  # Where it landed is printed, because a record nobody can find is stderr
+  # with extra steps; and when there is nowhere to file one, THAT is printed
+  # too. Silence in the second case is what made "the hook never fired"
+  # indistinguishable from "the hook fired and was refused" in the first
+  # place, and the reason for the silence is itself the finding: these hooks
+  # are installed somewhere Reprobuild does not consider a workspace.
+  result.add("  if repro_file_contract_refusal_record; then\n")
+  result.add("    echo \"repro hooks:   recorded in:    " &
+    "$(repro_refusal_record_path)\" >&2\n")
+  result.add("  elif [ -n \"$REPRO_REFUSAL_RECORD_DIR\" ]; then\n")
+  result.add("    echo \"repro hooks:   NOT RECORDED:   could not write " &
+    "into $REPRO_REFUSAL_RECORD_DIR; this refusal\" >&2\n")
+  result.add("    echo \"repro hooks:                   survives only in " &
+    "this terminal.\" >&2\n")
+  result.add("  else\n")
+  result.add("    echo \"repro hooks:   NOT RECORDED:   " & hookName &
+    " was installed outside an initialized\" >&2\n")
+  result.add("    echo \"repro hooks:                   Reprobuild " &
+    "workspace, so there is nowhere to file a\" >&2\n")
+  result.add("    echo \"repro hooks:                   record. This " &
+    "refusal survives only in this terminal.\" >&2\n")
+  result.add("  fi\n")
   result.add("}\n\n")
   # Attribution for a dispatch that DID run: the binary that produced the
   # verdict is named next to it, so a diagnostic can never be read as coming
@@ -16506,13 +16781,21 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     # the refusal prints. Discarding it is what forced the old text to give
     # one piece of advice for two opposite situations.
     result.add("  REPRO_PROBE_STATUS=0\n")
-    result.add("  \"$REPRO_CMD\" hooks protocol --require=2 " &
-      "--hook-contract=" & hookContract & " >/dev/null 2>&1 || " &
+    # PG-15 — CAPTURED, not discarded. `>/dev/null 2>&1` threw away the only
+    # words the foreign build contributed to its own refusal; both streams now
+    # land in a variable, are relayed under our prefix by
+    # `repro_contract_refusal`, and reach the record. On the success arm the
+    # capture is dropped unread: a probe that confirmed the contract has
+    # nothing an operator needs, and printing its "2" would be noise on every
+    # commit in every repo.
+    result.add("  REPRO_PROBE_DIAGNOSTIC=$(\"$REPRO_CMD\" hooks protocol " &
+      "--require=2 --hook-contract=" & hookContract & " 2>&1) || " &
       "REPRO_PROBE_STATUS=$?\n")
     result.add("  if [ \"$REPRO_PROBE_STATUS\" -ne 0 ]; then\n")
     result.add("    repro_contract_refusal\n")
     result.add("    exit 1\n")
     result.add("  fi\n")
+    result.add("  repro_clear_contract_refusal_record\n")
     result.add("  REPRO_STATUS=0\n")
     result.add("  " & HookCapabilityEnv &
       "=\"$REPROBUILD_CAPTURED_CAPABILITY\" \"$REPRO_CMD\" hooks dispatch " &
@@ -16522,13 +16805,18 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     # The non-blocking hooks announce and keep going: failing a commit after
     # the fact would be worse than the mismatch being reported.
     result.add("  REPRO_PROBE_STATUS=0\n")
-    result.add("  \"$REPRO_CMD\" hooks protocol --require=2 " &
-      "--hook-contract=" & hookContract & " >/dev/null 2>&1 || " &
+    # Captured for the same reason as in `pre-push` above, and it matters MORE
+    # here: these four hooks exit 0, so the terminal is the only thing that
+    # ever saw the refusal and §1.6b measures that the shells which refuse are
+    # precisely the ones with no terminal attached.
+    result.add("  REPRO_PROBE_DIAGNOSTIC=$(\"$REPRO_CMD\" hooks protocol " &
+      "--require=2 --hook-contract=" & hookContract & " 2>&1) || " &
       "REPRO_PROBE_STATUS=$?\n")
     result.add("  if [ \"$REPRO_PROBE_STATUS\" -ne 0 ]; then\n")
     result.add("    repro_contract_refusal\n")
     result.add("    exit 0\n")
     result.add("  fi\n")
+    result.add("  repro_clear_contract_refusal_record\n")
     result.add("  REPRO_STATUS=0\n")
     # The private index carrier is a PER-COMMAND assignment, not an export:
     # the contract probe above and anything else this body may ever run see
@@ -16582,9 +16870,14 @@ proc managedHookContract*(hookName: string): string =
   ## parsing both pass it. That residue is covered by the second obligation in
   ## the generated body: any dispatch that fails is attributed to the binary
   ## that produced it by path and by how it was resolved.
+  ## The site (author path, refusal-record directory) is rendered EMPTY here
+  ## for the reason given on ``ManagedHookSite``: both are machine-local, and a
+  ## token that moved with them would differ between two installs of one
+  ## build — including between two checkouts of one workspace, which would make
+  ## every hook in every sibling repo demand a different contract.
   ManagedHookContractPrefix & "." & hookName & "." &
     digestHex(weakFingerprintFromText(
-      vcsManagedHookBody(hookName, "", "")))[0 .. 15]
+      vcsManagedHookBody(hookName, "", ManagedHookSite())))[0 .. 15]
 
 proc managedHookNameFromContract*(contract: string): string =
   ## Recover the hook name from a contract token, or "" when the token is not
@@ -16625,9 +16918,21 @@ const ManagedHookContractFlag* = "--hook-contract="
   ## marker whose ABSENCE identifies a body written by a build that predates
   ## the handshake.
 
+const ManagedHookRefusalDirAssignment = "REPRO_REFUSAL_RECORD_DIR="
+  ## The anchor around the SECOND machine-local value a managed hook body
+  ## carries (PG-15). `vcsManagedHookBody` writes it at column zero as a bare
+  ## `sh` assignment, so a prefix match on a whole line finds the baked value
+  ## and never the three indented places that merely READ the variable.
+  ##
+  ## Same coupling hazard as the author anchors below, and the same
+  ## consequence if it breaks: `managedHookBodyIsCurrent` re-renders the body
+  ## from what it extracts, so a reader that stops finding the directory
+  ## reports every installed hook as "old or partially upgraded" and `repro
+  ## push` stops at hook-preflight.
+
 const
-  # The two anchors around the one machine-local value a managed hook body
-  # carries. Kept beside the reader rather than inside it so the coupling to
+  # The two anchors around the FIRST such value. Kept beside the reader rather
+  # than inside it so the coupling to
   # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
   #
   # That block writes the line as
@@ -16665,6 +16970,21 @@ proc managedHookAuthorBin*(body: string): string =
       let inner = line[ManagedHookAuthorEchoPrefix.len ..
         ^(ManagedHookAuthorEchoSuffix.len + 1)].replace("'\"'\"'", "'")
       return unquoteShellPosixWord(inner)
+  ""
+
+proc managedHookRefusalRecordDirAdvertised*(body: string): string =
+  ## The directory an installed managed hook advertises as the place it may
+  ## file a contract-refusal record, or "" when it advertises none.
+  ##
+  ## "" is two different facts and the caller does not need to tell them
+  ## apart: either the body predates PG-15, or it was installed outside an
+  ## initialized workspace and ``commitHookReportDir`` disclaimed the root.
+  ## Both mean the same thing to the only caller — a re-render with an empty
+  ## site, which will match the first case never and the second case exactly.
+  for line in body.splitLines():
+    if line.startsWith(ManagedHookRefusalDirAssignment):
+      return unquoteShellPosixWord(
+        line[ManagedHookRefusalDirAssignment.len .. ^1])
   ""
 
 proc managedHookBodyContractDemand*(body: string): string =
@@ -16988,9 +17308,19 @@ type
     interpreterPath: string
     interpreterSource: string
     probed: Table[string, HookContractServicing]
+    recordDirs: Table[string, string]
+      ## PG-15 — ``managedHookRefusalRecordDir`` per repo root. That answer
+      ## costs an ancestor walk with a manifest-resolution test at each level,
+      ## and it is identical for all five hooks of one repo; without the memo
+      ## ``ensure`` pays for it 860 times across this workspace. Keyed by repo
+      ## root, not cached guard-wide, because two repos of one workspace can
+      ## legitimately resolve to different roots (a nested checkout under
+      ## ``references/`` is the measured case).
 
 proc newHookWriteGuard*(): HookWriteGuard =
-  HookWriteGuard(probed: initTable[string, HookContractServicing]())
+  HookWriteGuard(
+    probed: initTable[string, HookContractServicing](),
+    recordDirs: initTable[string, string]())
 
 proc interpreter*(guard: HookWriteGuard; repoRoot: string):
     tuple[path, source: string] =
@@ -17017,6 +17347,17 @@ proc servicing*(guard: HookWriteGuard; repoRoot, contract: string):
   guard.probed[contract] = verdict
   verdict
 
+proc refusalRecordDir*(guard: HookWriteGuard; repoRoot: string): string =
+  ## Where a hook installed into ``repoRoot`` may file a contract refusal, or
+  ## "" for nowhere. Memoised per repo root; see ``recordDirs``.
+  if guard.isNil:
+    return managedHookRefusalRecordDir(repoRoot)
+  if repoRoot in guard.recordDirs:
+    return guard.recordDirs[repoRoot]
+  let dir = managedHookRefusalRecordDir(repoRoot)
+  guard.recordDirs[repoRoot] = dir
+  dir
+
 proc describeHookInterpreterResolution*(res: HookInterpreterResolution): string =
   ## One row of a skew report: how it was resolved, which build that is, and
   ## what it answered.
@@ -17030,19 +17371,28 @@ proc describeHookInterpreterResolution*(res: HookInterpreterResolution): string 
       "does NOT speak the handshake (exit " & $res.probeExit & ")"
   res.source & " -> " & describeReproBuild(res.build) & ": " & verdict
 
-proc vcsManagedHookContent(hookName: string): string =
-  ## The canonical managed-hook body, carrying the contract token of THIS
-  ## build. Drift detection compares the on-disk file to this exact string, so
-  ## a hook installed by a build with a different body is rewritten by the next
-  ## ``repro hooks ensure --vcs``.
+proc vcsManagedHookContent(hookName, repoRoot: string;
+                           guard: HookWriteGuard = nil): string =
+  ## The canonical managed-hook body for ``repoRoot``, carrying the contract
+  ## token of THIS build. Drift detection compares the on-disk file to this
+  ## exact string, so a hook installed by a build with a different body is
+  ## rewritten by the next ``repro hooks ensure --vcs``.
   ##
   ## This build's own path goes in beside the token so the refusal can name a
   ## runnable escape hatch. It is part of the canonical content, so a hook
   ## written by a binary at a different path counts as drift and is
   ## re-anchored on the next ``ensure`` — which is what keeps the escape hatch
   ## pointing at a binary that still exists.
+  ##
+  ## ``repoRoot`` is what makes the refusal-record destination (PG-15) a
+  ## property of the INSTALL rather than of the generator: the same build
+  ## installing into two repos of two workspaces bakes two different
+  ## directories, and a repo that moves between workspaces counts as drift and
+  ## is re-anchored, exactly as the author path is.
   vcsManagedHookBody(hookName, managedHookContract(hookName),
-    getAppFilename())
+    ManagedHookSite(
+      authorBin: getAppFilename(),
+      refusalRecordDir: guard.refusalRecordDir(repoRoot)))
 
 type
   VcsHookEnsureOutcome* = enum
@@ -17357,7 +17707,14 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   anyChange = sanitizePreCommitLegacyHook(hooksDir, hookName) or anyChange
 
   # Detect drift: file exists, sentinel matches, body diverges from canonical.
-  let canonicalManaged = vcsManagedHookContent(hookName)
+  #
+  # The canonical body is a function of the REPOSITORY as well as of this
+  # build: PG-15 bakes the refusal-record destination in, and that destination
+  # is the workspace this repo belongs to. Same guard object as the contract
+  # questions below, so the ancestor walk is paid once per repo and not once
+  # per hook.
+  let canonicalManaged =
+    vcsManagedHookContent(hookName, parentDir(parentDir(hooksDir)), guard)
   var existingManaged = ""
   if fileExists(extendedPath(managed)) and
       isReprobuildVcsHook(managed, hookName):
@@ -44253,27 +44610,39 @@ proc managedHookBodyIsCurrent(hookName, body: string): bool =
   ## any amount of upgrading because nothing about the hook is behind.
   ##
   ## That path is deliberately NOT part of the hook's identity. The contract
-  ## token digests `vcsManagedHookBody(hookName, "", "")` — empty token, empty
-  ## author — because, as `vcsManagedHookBody` puts it, "the contract must
-  ## identify the BODY, not the filesystem it was written from". The only
-  ## thing the author path feeds is an optional escape-hatch `echo`, which
-  ## changes no behaviour of the hook and gates itself on `[ -x ... ]`.
+  ## token digests `vcsManagedHookBody(hookName, "", ManagedHookSite())` —
+  ## empty token, empty site — because, as `vcsManagedHookBody` puts it, "the
+  ## contract must identify the BODY, not the filesystem it was written from".
+  ## The only thing the author path feeds is an optional escape-hatch `echo`,
+  ## which changes no behaviour of the hook and gates itself on `[ -x ... ]`.
   ##
-  ## So: accept the body when it is what this build renders for the author it
-  ## ADVERTISES. The re-render is byte-exact, so the extracted path only
-  ## proposes a candidate and cannot widen what is accepted — a body that
-  ## differs anywhere else still fails.
+  ## PG-15 added a SECOND value of exactly that kind — the directory a refusal
+  ## may record itself in — and it is read back here for exactly the same
+  ## reason. Asking `vcsManagedHookContent` instead would require a repo root
+  ## AND would re-run the workspace walk, and would then reject every hook
+  ## whose workspace this process resolves differently from the process that
+  ## installed it (a `repro` invoked from inside a nested checkout is the
+  ## measured case) — the same false "old or partially upgraded" refusal the
+  ## author path already produced once.
+  ##
+  ## So: accept the body when it is what this build renders for the SITE it
+  ## ADVERTISES. The re-render is byte-exact, so the extracted values only
+  ## propose a candidate and cannot widen what is accepted — a body that
+  ## differs anywhere else still fails. An author-less body is rejected
+  ## outright: this build always bakes a path, so a body without one was not
+  ## written by it.
   ##
   ## Drift detection in `ensureVcsHookDetailed` stays byte-exact on purpose:
   ## `ensure` SHOULD re-anchor a hook whose baked path no longer names a
-  ## binary that exists, which is what keeps the escape hatch runnable. This
-  ## is the authorization question, not the freshness one.
-  if body == vcsManagedHookContent(hookName):
-    return true
-  let author = managedHookAuthorBin(body)
-  if author.len == 0:
+  ## binary that exists, or whose baked record directory no longer names this
+  ## repository's workspace. This is the authorization question, not the
+  ## freshness one.
+  let site = ManagedHookSite(
+    authorBin: managedHookAuthorBin(body),
+    refusalRecordDir: managedHookRefusalRecordDirAdvertised(body))
+  if site.authorBin.len == 0:
     return false
-  body == vcsManagedHookBody(hookName, managedHookContract(hookName), author)
+  body == vcsManagedHookBody(hookName, managedHookContract(hookName), site)
 
 proc effectivePrePushHook(identity: GitToolIdentity; repoRoot: string):
     tuple[kind: EffectivePrePushHookKind; hookPath: string;
@@ -46399,6 +46768,34 @@ proc commitHookReportDir(workspaceRoot: string): string =
   if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
     return ""
   workspaceReportDir(workspaceRoot)
+
+proc managedHookRefusalRecordDir(repoRoot: string): string =
+  ## PG-15 — where a managed hook installed into ``repoRoot`` may file a
+  ## contract-refusal record, or "" when it may file one nowhere. Forward
+  ## declared beside the hook-body generator, which bakes the answer in at
+  ## install time; see ``ManagedHookSite.refusalRecordDir``.
+  ##
+  ## IT IS THE SAME GUARD, called rather than restated. The refusing hook is
+  ## the most dangerous caller ``commitHookReportDir`` has: it writes into a
+  ## workspace whose ``repro`` it has just established it cannot trust, from
+  ## ``sh``, with no way to ask the tool anything. Had the destination been
+  ## derived in the body instead, the body would have had to decide "is this
+  ## root a workspace?" with a shell test — a second copy of
+  ## ``isInitializedWorkspace``, free to drift, whose recursive ``mkdir -p``
+  ## at a disclaimed root manufactures the ``.repro/`` marker that makes a lock
+  ## record store be misread as a workspace. That is the exact failure the
+  ## guard was written for, and it was measured in the field.
+  ##
+  ## The workspace is resolved with ``enclosingWorkspaceRoot``, the SAME walk
+  ## the post-commit dispatch path uses (``resolvePostCommitWorkspaceRoot``
+  ## with no explicit root), so a refusal and a dispatch in one repo file
+  ## their diagnostics in one directory. Resolving it any other way would
+  ## split the two outcomes of the same hook across two places and leave the
+  ## comparison PG-15 exists to enable — which happened last? — unanswerable
+  ## again.
+  if repoRoot.len == 0:
+    return ""
+  commitHookReportDir(enclosingWorkspaceRoot(repoRoot))
 
 proc postCommitReportPath(workspaceRoot: string): string =
   workspaceReportDir(workspaceRoot) / "post-commit-report.json"
