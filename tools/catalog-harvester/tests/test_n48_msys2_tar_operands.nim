@@ -53,14 +53,24 @@
 ##     still proves is that the fix did not break the platform it does not
 ##     apply to.
 
-import std/[os, osproc, sequtils, strutils, unittest]
+import std/[exitprocs, os, osproc, sequtils, strutils, unittest]
 
 import ../src/msys2_source
 from repro_core/paths import extendedPath
 
-const N48Root = "build/test-tmp/test-n48-msys2"
+let N48Root = "build/test-tmp/test-n48-msys2/" & $getCurrentProcessId()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
   ## ``createTempDir`` — see the vacuity note above.
+  ##
+  ## Per PROCESS, though: the runner executes every case of this binary in
+  ## its own process, concurrently with the others. One shared root let each
+  ## case's ``n48Reset`` delete the payload or archive another case's ``tar``
+  ## was still reading ("File removed before we read it"). A decimal pid adds
+  ## no backslash, so the vacuity guarantee above is unchanged.
+
+addExitProc(proc () =
+  try: removeDir(extendedPath(N48Root))
+  except CatchableError: discard)
 
 const N48RaisingFirstChars = {'a', 'b', 'f', 'n', 'r', 't', 'v'}
 
