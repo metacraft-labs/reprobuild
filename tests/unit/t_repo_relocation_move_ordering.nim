@@ -253,12 +253,18 @@ suite "repo_relocation — the move, and the order of it":
       let b = scratch / "b"
       seedCheckout(gitBin, a)
       seedCheckout(gitBin, b)
+      # The seed is deterministic -- same content, author and message -- so
+      # two seeds made within the same second produce the SAME commit id, and
+      # HEAD would not differ at all. A distinct commit on `b` makes the HEAD
+      # difference this case asserts a property of the fixture, not of timing.
+      discard git(gitBin, "-C " & q(b) &
+        " commit --quiet --allow-empty -m distinct-from-a")
 
       let capA = captureCheckoutState(probe, a)
       let capB = captureCheckoutState(probe, b)
       check capA.ok and capB.ok
-      # Two independently seeded repos have different commit ids, so HEAD is
-      # the first thing that differs — and it is named.
+      # The two checkouts have different commit ids, so HEAD is the first
+      # thing that differs — and it is named.
       check sameState(capA, capB).startsWith("HEAD")
       check sameState(capA, capA) == ""
 
