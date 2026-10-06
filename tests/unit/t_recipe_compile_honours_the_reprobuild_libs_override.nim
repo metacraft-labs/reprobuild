@@ -44,7 +44,9 @@ proc valueIn(env: openArray[string]; name: string): string =
 suite "the reprobuild libs override reaches the recipe compile":
   setup:
     let saved = @[getEnv("REPROBUILD_REPO_ROOT"), getEnv("REPROBUILD_LIBS_DIR")]
-    let home = getTempDir() / "repro-libs-override-home"
+    # Per process: cases run concurrently and each teardown removes `home`.
+    let home = getTempDir() / ("repro-libs-override-home-" &
+      $getCurrentProcessId())
 
   teardown:
     for i, name in ["REPROBUILD_REPO_ROOT", "REPROBUILD_LIBS_DIR"]:
