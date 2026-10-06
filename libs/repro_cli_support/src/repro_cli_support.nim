@@ -49513,6 +49513,14 @@ type
       ## certificate (a chicken-and-egg that would make a project's FIRST
       ## ``required`` cert un-issuable). The real pre-push hook leaves this
       ## ``false`` so the gate enforces the policy as designed.
+    issuingForCurrentHead*: bool
+      ## Agents-Push-Gate.md §4.1 — set ONLY by
+      ## ``evaluateIssuancePreconditions``. The current repository's OWN HEAD
+      ## is exempt from the "unpublished" stage: its publication is the push a
+      ## certificate is being minted FOR, and the receiving-side gateway
+      ## (TC-6) refuses that push until the certificate exists. Requiring
+      ## publication first deadlocked the two. Every sibling in the closure
+      ## must still be published, and the current repo must still be clean.
     report*: ReportSpec
       ## Opt-in ``--write-report[=PATH]`` artifact.
 
@@ -50695,6 +50703,28 @@ type
     sbOtherState       ## no  — it attests a different one (not evidence here)
     sbUnreproducible   ## cannot tell: this consumer cannot reproduce the claim
 
+
+proc readStoredCertificates*(storeDir, commit: string): seq[TestCertificate] =
+  ## Every certificate in a workspace certificate store that binds
+  ## ``commit``. Files are named ``<sha12>-<os>-<cpu>.toml``
+  ## (``defaultCertificatePath``); the prefix only narrows the scan, and the
+  ## record's own ``vcs.commit`` is what decides. An unreadable file
+  ## contributes nothing: an absent certificate is already a refusal under
+  ## ``required``, so skipping a corrupt one can only make the gate stricter.
+  if storeDir.len == 0 or commit.len < 12 or not dirExists(storeDir):
+    return
+  let prefix = commit[0 ..< 12] & "-"
+  for kind, path in walkDir(storeDir):
+    if kind notin {pcFile, pcLinkToFile}: continue
+    let name = extractFilename(path)
+    if not (name.startsWith(prefix) and name.endsWith(".toml")): continue
+    try:
+      let cert = readCertificateFile(path)
+      if cert.vcs.commit == commit:
+        result.add(cert)
+    except CatchableError:
+      discard
+
 proc scopeCoversPath*(scope: openArray[string]; required: string): bool =
   ## Standard §3.2.1: a path naming a DIRECTORY scopes the subtree beneath it,
   ## a path naming a file scopes that file. Paths are repo-relative, use ``/``
@@ -50792,6 +50822,52 @@ proc verifyCoverage*(certs: openArray[TestCertificate];
     if t notin union:
       result.missingTargets.add(t)
   result.covered = result.missingTargets.len == 0
+
+const anyCertificatePlatform* = "*"
+  ## Agents-Push-Gate.md §4.2 — the reserved ``required_platforms`` entry for
+  ## a PLATFORM-NEUTRAL requirement (the pre-commit check set): one trusted
+  ## certificate set from ANY single platform covers it. It must be the only
+  ## entry; the manifest resolver refuses it combined with concrete platforms.
+
+proc uncoveredPlatforms*(trusted: openArray[TestCertificate];
+                         requiredPlatforms, requiredTargets: seq[string];
+                         commit: string): seq[string] =
+  ## The per-platform shortfall of ``trusted`` against a policy, as
+  ## ``"<platform> (missing: …)"`` descriptors; EMPTY means covered. Shared by
+  ## the client gate (TC-3) and the receiving-side gateway (TC-6) so the two
+  ## can never disagree about what ``"*"`` means.
+  ##
+  ## For ``@["*"]`` every platform that some trusted certificate names is a
+  ## candidate, and the requirement holds when ANY candidate is covered on its
+  ## own. Coverage is still the TC-1 union PER PLATFORM: a linux cert for one
+  ## target and a macos cert for another do not add up to "any platform".
+  if requiredPlatforms == @[anyCertificatePlatform]:
+    var candidates: seq[string]
+    for cert in trusted:
+      if cert.platform notin candidates:
+        candidates.add(cert.platform)
+    var bestMissing: seq[string]
+    var haveBest = false
+    for platform in candidates:
+      let cov = verifyCoverage(trusted, CoverageRequirement(
+        framework: reprobuildFrameworkId, commit: commit,
+        platform: platform, requiredTargets: requiredTargets))
+      if cov.covered:
+        return @[]
+      if not haveBest or cov.missingTargets.len < bestMissing.len:
+        bestMissing = cov.missingTargets
+        haveBest = true
+    return @["any platform (missing: " &
+      (if haveBest and bestMissing.len > 0: bestMissing.join(", ")
+       else: "<no certificate>") & ")"]
+  for platform in requiredPlatforms:
+    let cov = verifyCoverage(trusted, CoverageRequirement(
+      framework: reprobuildFrameworkId, commit: commit,
+      platform: platform, requiredTargets: requiredTargets))
+    if not cov.covered:
+      result.add(platform & " (missing: " &
+        (if cov.missingTargets.len > 0: cov.missingTargets.join(", ")
+         else: "<no certificate>") & ")")
 
 # ============================================================================
 # TC-5 — Daemon signing + key registration.
@@ -52125,7 +52201,14 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
   # per-platform covered set is the UNION of every matching cert's targets
   # (multi-cert union: a linux cert + a macos cert together satisfy a
   # {linux, macos} requirement).
-  let attached = readAttachedCertificates(gitBin, certRepoPath, pushedCommit)
+  var attached = readAttachedCertificates(gitBin, certRepoPath, pushedCommit)
+  # Agents-Push-Gate.md §4.3: the workspace certificate store is a second
+  # carrier, read on BOTH sides so the client gate and the gateway agree on a
+  # one-ref push of a certified commit. Same trust checks below.
+  if report.workspaceRoot.len > 0:
+    for cert in readStoredCertificates(report.workspaceRoot / ".repro" /
+        "workspace" / "certificates", pushedCommit):
+      attached.add(cert)
   # TC-5: coverage now requires a VALID REGISTERED SIGNATURE. A certificate
   # counts toward coverage ONLY when its ``key_id`` resolves to a registered,
   # unrevoked key and the ed25519 signature over the canonical payload checks.
@@ -52156,19 +52239,8 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
       signatureNotes.add(cert.platform & ": " & lockAt.detail)
       continue
     trusted.add(cert)
-  var perPlatformMissing: seq[string] = @[]
-  for platform in policy.requiredPlatforms:
-    let req = CoverageRequirement(
-      framework: reprobuildFrameworkId,
-      repo: "",
-      commit: pushedCommit,
-      platform: platform,
-      requiredTargets: policy.requiredTargets)
-    let cov = verifyCoverage(trusted, req)
-    if not cov.covered:
-      perPlatformMissing.add(platform & " (missing: " &
-        (if cov.missingTargets.len > 0: cov.missingTargets.join(", ")
-         else: "<no certificate>") & ")")
+  let perPlatformMissing = uncoveredPlatforms(trusted,
+    policy.requiredPlatforms, policy.requiredTargets, pushedCommit)
   if perPlatformMissing.len == 0:
     if policy.gateMode == cgmAdvisory:
       report.notices.add("certificate advisory: coverage OK for " &
@@ -52279,6 +52351,13 @@ type
     upstreamUrl*: string
       ## The real upstream (a second bare repo standing in for GitHub) the
       ## ``post-receive`` forwards the push to on success.
+    certificateStoreDir*: string
+      ## Agents-Push-Gate.md §4.3 — the workspace certificate store
+      ## (``<workspace>/.repro/workspace/certificates``) a LOCAL gateway also
+      ## reads certificates from, so a plain one-ref ``git push`` is enough:
+      ## the agent does not have to push the notes ref beside its branch.
+      ## The carrier earns no trust — the signature, coverage and lock checks
+      ## are identical for both carriers. Empty = notes ref only.
 
 proc serializeGatewayConfig*(cfg: GatewayConfig): string =
   ## Deterministic TOML writer for the gateway config.
@@ -52290,6 +52369,9 @@ proc serializeGatewayConfig*(cfg: GatewayConfig): string =
   result.add("registered_keys = \"" &
     tomlEscapeCert(cfg.registeredKeysPath) & "\"\n")
   result.add("upstream = \"" & tomlEscapeCert(cfg.upstreamUrl) & "\"\n")
+  if cfg.certificateStoreDir.len > 0:
+    result.add("certificate_store = \"" &
+      tomlEscapeCert(cfg.certificateStoreDir) & "\"\n")
   result.add("required_targets = [")
   for i, t in cfg.requiredTargets:
     if i > 0: result.add(", ")
@@ -52329,6 +52411,8 @@ proc parseGatewayConfig*(content: string): GatewayConfig =
     of "lock_records_dir": result.lockRecordsDir = parseTomlBasicValue(rhs)
     of "registered_keys": result.registeredKeysPath = parseTomlBasicValue(rhs)
     of "upstream": result.upstreamUrl = parseTomlBasicValue(rhs)
+    of "certificate_store":
+      result.certificateStoreDir = parseTomlBasicValue(rhs)
     of "required_targets": result.requiredTargets = parseTomlStringArray(rhs)
     of "required_platforms":
       result.requiredPlatforms = parseTomlStringArray(rhs)
@@ -52846,6 +52930,11 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
       attached = read.certs
       if read.status == gorUnreadable and noteUnreadable.len == 0:
         noteUnreadable = read.diagnostic
+    # Agents-Push-Gate.md §4.3: a LOCAL gateway also reads the workspace
+    # certificate store, so a one-ref push of a certified commit is covered.
+    # The certificates are judged by exactly the same checks below.
+    for cert in readStoredCertificates(cfg.certificateStoreDir, pushedCommit):
+      attached.add(cert)
     # Drop every cert that is not this framework's, or is not a
     # registered-signed, unrevoked, valid-sig attestation, BEFORE coverage.
     var trusted: seq[TestCertificate]
@@ -52870,18 +52959,8 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
           sigNotes.add(cert.platform & ": " & lockAt.detail)
           continue
       trusted.add(cert)
-    var missing: seq[string]
-    for platform in cfg.requiredPlatforms:
-      let req = CoverageRequirement(
-        framework: reprobuildFrameworkId,
-        commit: pushedCommit,
-        platform: platform,
-        requiredTargets: cfg.requiredTargets)
-      let cov = verifyCoverage(trusted, req)
-      if not cov.covered:
-        missing.add(platform & " (missing: " &
-          (if cov.missingTargets.len > 0: cov.missingTargets.join(", ")
-           else: "<no certificate>") & ")")
+    let missing = uncoveredPlatforms(trusted, cfg.requiredPlatforms,
+      cfg.requiredTargets, pushedCommit)
     if missing.len > 0:
       let sigDetail =
         if sigNotes.len > 0: " (untrusted certs ignored: " &
@@ -53150,6 +53229,10 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       result.gatewayDir
     return
   var cfg = GatewayConfig()
+  # Agents-Push-Gate.md §4.3: the gateway of a workspace checkout also reads
+  # that workspace's certificate store, so a one-ref push is enough.
+  cfg.certificateStoreDir = workspaceRoot / ".repro" / "workspace" /
+    "certificates"
   let wired = wirePushGateway(gitBin, repoPath, result.gatewayDir,
     result.upstreamUrl, cfg, remoteName)
   if not wired.ok:
@@ -54548,7 +54631,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       continue
     if not obs.isPublished and not
         (outgoing.outgoingCurrent and obs.name == currentRepoName and
-         obs.headSha == outgoing.headOid):
+         obs.headSha == outgoing.headOid) and not
+        (parsed.issuingForCurrentHead and currentRepoName.len > 0 and
+         obs.name == currentRepoName):
       # RA-32 — when the repo being refused IS the one whose push we are
       # gating, and the object we are gating IS its HEAD, "unpublished" is a
       # true statement with a false remedy: the push it tells you to run is the
@@ -65408,6 +65493,9 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     # TC-3/RA-32 certificate stage when the gate is reused to decide whether a
     # cert is ISSUABLE. The real pre-push hook keeps it enabled.
     skipCertificateGate: true,
+    # Certify BEFORE push (Agents-Push-Gate.md §4.1): the current repo's own
+    # unpublished HEAD is the commit being certified, not a reason to refuse.
+    issuingForCurrentHead: true,
     toolProvisioning:
       if toolProvisioning == tpmUnspecified: tpmPathOnly else: toolProvisioning)
   if not isInitializedWorkspace(parsed.workspaceRoot):
@@ -67017,6 +67105,151 @@ proc runReproTestCommand*(args: openArray[string];
         cert.keyId & ")")
     return code
   return runWorkspaceModeShard(opts, peer, publicCliPath)
+
+const checkSetTarget* = "pre-commit"
+  ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
+  ## check-set certificate covers, the way ``test`` and ``lint`` name
+  ## conventional collections.
+
+proc defaultCheckSetCommand*(repoPath: string): seq[string] =
+  ## The repository's check set until PCS-3 names pinned sets: its committed
+  ## ``.pre-commit-config.yaml``, run over the WHOLE tree (a certificate binds
+  ## a commit, so a diff-scoped run would attest files it never saw). ``prek``
+  ## is preferred; ``pre-commit`` is the same config's other runner. Empty
+  ## when the repository declares no check set or no runner is installed.
+  if not fileExists(repoPath / ".pre-commit-config.yaml"):
+    return @[]
+  for runner in ["prek", "pre-commit"]:
+    let exe = findExe(runner)
+    if exe.len > 0:
+      return @["sh", "-c", "cd " & quoteShell(repoPath) & " && exec " &
+        quoteShell(exe) & " run --all-files"]
+  @[]
+
+proc runCertifyCheckSet*(args: openArray[string];
+                         publicCliPath = ""): int =
+  ## ``repro certify --check-set [--current-repo=PATH] [--workspace-root=PATH]
+  ## [--check-set-command=SHELL]`` — Agents-Push-Gate.md §3.2 / P6.e.
+  ##
+  ## Runs the repository's pre-commit check set as ONE certifiable target
+  ## (``pre-commit``) through the ordinary issuance path, so every TC rule
+  ## holds unchanged: a clean tree, published siblings at their locked
+  ## revisions, a real passing run, a daemon signature, and the idempotent
+  ## no-op when a covering certificate already exists. The current repo's own
+  ## HEAD need not be published (§4.1). On success the certificate is in the
+  ## workspace store (which a local gateway reads, §4.3) and is attached to
+  ## ``refs/notes/reprobuild/certificates`` so a forward carries it upstream.
+  ##
+  ## Exit: 0 = a covering certificate exists for HEAD; 2 = the check set
+  ## failed or the state is not certifiable (the reason is printed);
+  ## 1 = usage or tooling error.
+  var currentRepo, workspaceRoot, commandOverride: string
+  var passThrough: seq[string]
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--check-set":
+      discard
+    elif arg.startsWith("--current-repo="):
+      currentRepo = arg["--current-repo=".len .. ^1]
+    elif arg.startsWith("--workspace-root="):
+      workspaceRoot = arg["--workspace-root=".len .. ^1]
+    elif arg.startsWith("--check-set-command="):
+      commandOverride = arg["--check-set-command=".len .. ^1]
+    else:
+      passThrough.add(arg)
+    inc i
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    stderr.writeLine("repro certify: git not found on PATH")
+    return 1
+  if currentRepo.len == 0:
+    let top = execCmdEx(quoteShell(gitBin) & " rev-parse --show-toplevel")
+    if top.exitCode != 0:
+      stderr.writeLine("repro certify --check-set: not inside a git " &
+        "repository; pass --current-repo=PATH")
+      return 1
+    currentRepo = top.output.strip()
+  currentRepo = absolutePath(currentRepo)
+  if workspaceRoot.len == 0:
+    workspaceRoot = enclosingWorkspaceRoot(currentRepo)
+  if workspaceRoot.len == 0:
+    stderr.writeLine("repro certify --check-set: " & currentRepo &
+      " is not inside a reprobuild workspace; pass --workspace-root=PATH")
+    return 1
+  workspaceRoot = absolutePath(workspaceRoot)
+  let command =
+    if commandOverride.len > 0: @["sh", "-c", commandOverride]
+    else: defaultCheckSetCommand(currentRepo)
+  if command.len == 0:
+    stderr.writeLine("repro certify --check-set: " & currentRepo &
+      " declares no check set (no .pre-commit-config.yaml, or neither prek " &
+      "nor pre-commit is on PATH); pass --check-set-command=SHELL")
+    return 1
+  # The run's working files (fixture, test-logs/) go to a scratch directory,
+  # never the repository: a check set that dirtied the tree it certifies
+  # would make its own push fail the clean-tree gate.
+  let scratch = createTempDir("repro-certify-check-set-", "")
+  defer: removeDir(scratch)
+  var edge = newJObject()
+  edge["id"] = %1
+  edge["selector"] = %checkSetTarget
+  edge["historyKey"] = %checkSetTarget
+  edge["buildDeps"] = newJArray()
+  edge["runCmd"] = %command
+  edge["testName"] = %checkSetTarget
+  var fixture = newJObject()
+  fixture["fallbackBuildCostNs"] = %1
+  fixture["fallbackTestCostNs"] = %1
+  fixture["testEdges"] = %[edge]
+  fixture["buildActions"] = newJArray()
+  let fixturePath = scratch / "check-set-fixture.json"
+  writeFile(fixturePath, fixture.pretty() & "\n")
+  var testArgs = @["--certify", "--fixture-from=" & fixturePath,
+    "--shard=1/1", "--workspace-root=" & workspaceRoot,
+    "--current-repo=" & currentRepo]
+  testArgs.add(passThrough)
+  let previousDir = getCurrentDir()
+  setCurrentDir(scratch)
+  let code =
+    try: runReproTestCommand(testArgs, publicCliPath)
+    finally: setCurrentDir(previousDir)
+  let head = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(currentRepo) &
+    " rev-parse HEAD")
+  if head.exitCode != 0:
+    stderr.writeLine("repro certify --check-set: cannot read HEAD of " &
+      currentRepo)
+    return 1
+  let commit = head.output.strip()
+  let certPath = defaultCertificatePath(workspaceRoot, commit,
+    currentPlatformTag())
+  if code != 0 or not fileExists(certPath):
+    stderr.writeLine("repro certify --check-set: NO certificate for " &
+      commit & " — " &
+      (if code != 0: "the check set failed (output above)"
+       else: "the state is not certifiable (reason above)"))
+    return 2
+  let cert = readCertificateFile(certPath)
+  if checkSetTarget notin cert.targets:
+    stderr.writeLine("repro certify --check-set: the certificate at " &
+      certPath & " does not cover '" & checkSetTarget & "'")
+    return 2
+  # Attach once: a re-certify that was a no-op must not append a duplicate.
+  var alreadyAttached = false
+  for existing in readAttachedCertificates(gitBin, currentRepo, commit):
+    if existing.signature.value == cert.signature.value:
+      alreadyAttached = true
+  if not alreadyAttached:
+    let att = attachCertificate(gitBin, currentRepo, commit, cert)
+    if not att.ok:
+      stderr.writeLine("repro certify --check-set: certificate issued at " &
+        certPath & " but attaching it as a git note failed: " &
+        att.diagnostic)
+      return 1
+  stderr.writeLine("repro certify --check-set: " & commit[0 ..< 12] &
+    " is certified for '" & checkSetTarget & "' on " & cert.platform &
+    " (" & certPath & ")")
+  0
 
 # --------------------------------------------------------------------
 # TC-4 — `repro ci plan` subcommand (the CI fast-track decision)
@@ -76939,6 +77172,12 @@ proc runThinAppDispatch(programName: string): int =
     # ``runReproTestCommand`` with ``--certify`` prepended so the same
     # issuance path runs; ``--no-certify`` would contradict the verb and is
     # left to the user's responsibility (last-flag-wins in the parser).
+    if "--check-set" in args:
+      try:
+        return runCertifyCheckSet(args[1 .. ^1], publicCliPath)
+      except CatchableError as err:
+        stderr.writeLine("repro certify: error: " & err.msg)
+        return 1
     try:
       var certifyArgs = @["--certify"]
       if args.len > 1:

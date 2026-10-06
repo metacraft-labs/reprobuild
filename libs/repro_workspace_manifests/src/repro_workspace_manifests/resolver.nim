@@ -398,6 +398,15 @@ proc resolveCertificatePolicy*(body: CertificatesBody;
           "' (expected: off | advisory | required)")
   result.requiredTargets = body.required_targets
   result.requiredPlatforms = body.required_platforms
+  # Agents-Push-Gate.md §4.2: ``"*"`` (any one platform) is a requirement of
+  # its own kind. Mixed with concrete platforms it has no single meaning, so
+  # it is refused rather than guessed at.
+  if "*" in result.requiredPlatforms and result.requiredPlatforms.len != 1:
+    raiseManifestError(projectFile, "certificates.required_platforms",
+      schemaProjectManifestV1, schemaProjectManifestV1,
+      "`certificates.required_platforms` may contain \"*\" (any one " &
+        "platform) only on its own; it was combined with " &
+        $result.requiredPlatforms)
   # TC-4 — resolve the CI-trust decision. The DEFAULT — an absent / omitted
   # `ci_trust` — is `cctAdvisory`: CI never fast-tracks on trust unless the
   # project explicitly opts in, so a forged certificate can never cause a skip
