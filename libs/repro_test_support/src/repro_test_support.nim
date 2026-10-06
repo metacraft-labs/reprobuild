@@ -545,6 +545,29 @@ proc testCaseScratchSlug*(): string =
     h = h * 16777619'u32
   "case-" & toHex(h, 8).toLowerAscii
 
+proc testScratchSlug*(): string =
+  ## ``testCaseScratchSlug`` qualified by the executable's name, for a scratch
+  ## path that a HELPER MODULE hands out to several test binaries.
+  ##
+  ## The case slug is private within one binary, but a fixture helper
+  ## imported by several binaries (``hcr-linux-rbhcr/m8_fixture.nim`` builds
+  ## ``hcr_lx_m8_target`` for each of them) is shared ACROSS binaries too,
+  ## and the suite runs those binaries concurrently: one relinks the target
+  ## while another is executing it. Hashing the binary's name in with the
+  ## case keeps the set bounded and stable (one directory per binary and
+  ## case) while making it private to the one process that runs that case.
+  ##
+  ## Short on purpose -- ``p-`` and eight hex digits, like the case slug --
+  ## because these directories hold Unix sockets, and ``sun_path`` allows
+  ## 107 bytes for the WHOLE path.
+  let caseSlug = testCaseScratchSlug()
+  var h: uint32 = 2166136261'u32
+  for c in getAppFilename().extractFilename.changeFileExt("") & "|" &
+      caseSlug:
+    h = h xor uint32(ord(c))
+    h = h * 16777619'u32
+  "p-" & toHex(h, 8).toLowerAscii
+
 proc isTransientDirectoryNotEmpty(e: ref OSError): bool =
   ## Nim's OSError does not expose the failing errno portably. Keep this
   ## deliberately narrow: retry only the ENOTEMPTY-shaped cleanup race the

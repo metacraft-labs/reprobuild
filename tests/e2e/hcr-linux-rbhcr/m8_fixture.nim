@@ -36,6 +36,7 @@ import repro_hcr_agent
 import repro_project_dsl
 
 import "../hcr-linux-direct/elf_rel_reader"
+from repro_test_support import testScratchSlug
 
 const
   TargetSymbol* = "hcr_lx_m8_victim"
@@ -65,7 +66,11 @@ proc runOrFail*(command, cwd: string): string =
   res.output
 
 proc m8WorkDir*(repoRoot: string): string =
-  result = repoRoot / "build" / "hcr-linux-m8"
+  # Private to the process running ONE case of ONE binary: several binaries
+  # import this helper and the suite runs them (and their cases) concurrently,
+  # so a shared directory had one process relink a fixture or rewrite a patch
+  # object while another was executing or parsing it.
+  result = repoRoot / "build" / "hcr-linux-m8" / testScratchSlug()
   createDir(result)
 
 proc m8CaseDir*(repoRoot: string): string =
@@ -102,7 +107,10 @@ proc buildTarget*(repoRoot, outputName: string;
                   defines: openArray[string] = [];
                   source = "hcr_lx_m8_target.c"): string =
   let caseDir = m8CaseDir(repoRoot)
-  let binDir = repoRoot / "build" / "test-bin"
+  # In the per-process work directory, not ``build/test-bin``: three
+  # binaries build ``hcr_lx_m8_target`` concurrently, and a shared output
+  # was relinked under a sibling that was executing it.
+  let binDir = m8WorkDir(repoRoot) / "bin"
   createDir(binDir)
   result = binDir / outputName
   let compileFlags = patchableCompileFlags(ReproHcr())
