@@ -38,15 +38,15 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 2,
       "defines": [],
       "dependencyShape": [
         "io_mon",
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "sources": [
-        "libs/repro_build_engine/tests/t_named_pipe_evidence.nim",
         "libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim",
         "libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim"
       ],
@@ -70,7 +70,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
@@ -80,7 +80,6 @@
         "libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim",
         "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
         "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
-        "libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim",
         "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim"
       ],
       "targetOs": "soAny"
@@ -996,7 +995,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 9,
+      "count": 8,
       "defines": [],
       "dependencyShape": [
         "repro_profile"
@@ -1008,7 +1007,6 @@
         "tests/unit/t_m9r20_3_hardware_macro_basic.nim",
         "tests/unit/t_m9r20_4_reproos_desktop_via_system_macro.nim",
         "tests/unit/t_m9r20_5_installer_output_parses.nim",
-        "tests/unit/t_m9r21_1_stable_system_id.nim",
         "tests/unit/t_m9r21_2_probe_driver.nim",
         "tests/unit/t_m9r22_1_disko_btrfs_subvols.nim",
         "tests/unit/t_m9r22_2_disko_macro_emit.nim"
@@ -1275,7 +1273,7 @@
             "lightCmd",
             "stagingDir"
           ],
-          "line": 223,
+          "line": 225,
           "path": "libs/repro_home_apply/tests/t_builtin_adapter_installer.nim",
           "patterns": [
             "wix-candle"
@@ -1292,7 +1290,7 @@
             "lightCmd",
             "stagingDir"
           ],
-          "line": 230,
+          "line": 232,
           "path": "libs/repro_home_apply/tests/t_builtin_adapter_installer.nim",
           "patterns": [
             "wix-light"
@@ -1312,7 +1310,7 @@
           "executedVariables": [
             "isccCmd"
           ],
-          "line": 118,
+          "line": 120,
           "path": "libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim",
           "patterns": [
             "inno-iscc"
@@ -2086,7 +2084,7 @@
             "repro",
             "source"
           ],
-          "line": 142,
+          "line": 143,
           "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
           "patterns": [
             "gcc"
@@ -2109,7 +2107,7 @@
             "repro",
             "source"
           ],
-          "line": 167,
+          "line": 168,
           "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
           "patterns": [
             "gcc"
@@ -2858,7 +2856,7 @@
             "compileCmd",
             "outPath"
           ],
-          "line": 34,
+          "line": 43,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile.nim",
           "patterns": [
             "nim-c"
@@ -6941,7 +6939,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_binary_cache_client",
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "libs/repro_binary_cache_client",
       "requiresReproBinary": false,
@@ -7170,7 +7169,8 @@
         "repro_core",
         "repro_depfile",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
@@ -7191,7 +7191,8 @@
         "repro_core",
         "repro_depfile",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
@@ -7520,7 +7521,8 @@
         "repro_cas_store",
         "repro_core",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
@@ -7541,7 +7543,8 @@
         "repro_build_engine",
         "repro_core",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
@@ -8096,7 +8099,8 @@
       "language": "nim",
       "localDependencyShape": [
         "io_mon",
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
@@ -8114,7 +8118,8 @@
       "language": "nim",
       "localDependencyShape": [
         "io_mon",
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
@@ -8133,7 +8138,8 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
@@ -8226,7 +8232,8 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
@@ -8753,7 +8760,8 @@
         "repro_cas_store",
         "repro_hash",
         "repro_local_store",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
@@ -8845,7 +8853,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_cli_support"
+        "repro_cli_support",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
@@ -8862,7 +8871,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_cli_support"
+        "repro_cli_support",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
@@ -9060,7 +9070,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_binary_cache_client",
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
@@ -9100,7 +9111,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_core"
+        "repro_core",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
@@ -9117,7 +9129,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_home_intent"
+        "repro_home_intent",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
@@ -9134,7 +9147,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_cli_support"
+        "repro_cli_support",
+        "repro_test_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
@@ -10982,7 +10996,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11002,7 +11017,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11064,7 +11080,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11084,7 +11101,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11104,7 +11122,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11123,7 +11142,8 @@
       "localDependencyShape": [
         "repro_core",
         "repro_dsl_stdlib",
-        "repro_home_apply"
+        "repro_home_apply",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11143,7 +11163,8 @@
         "repro_core",
         "repro_home_apply",
         "repro_home_generations",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11161,7 +11182,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_core",
-        "repro_home_apply"
+        "repro_home_apply",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11220,7 +11242,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": true,
@@ -11240,7 +11263,8 @@
         "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": true,
@@ -11298,7 +11322,8 @@
       "localDependencyShape": [
         "repro_core",
         "repro_home_apply",
-        "repro_home_resources"
+        "repro_home_resources",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11393,7 +11418,8 @@
       "localDependencyShape": [
         "repro_home_apply",
         "repro_home_intent",
-        "repro_home_resources"
+        "repro_home_resources",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -11465,7 +11491,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_core",
-        "repro_home_generations"
+        "repro_home_generations",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_generations",
       "requiresReproBinary": false,
@@ -21352,7 +21379,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_hcr_agent",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
@@ -21369,7 +21397,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_hcr_linkgraph"
+        "repro_hcr_linkgraph",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
@@ -22483,7 +22512,8 @@
       "localDependencyShape": [
         "repro_dsl_stdlib",
         "repro_home_apply",
-        "repro_home_intent"
+        "repro_home_intent",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": false,
@@ -23449,7 +23479,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_elevation",
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": false,
@@ -29754,7 +29785,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -30704,7 +30736,8 @@
         "repro_dsl_stdlib",
         "repro_home_apply",
         "repro_local_store",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
@@ -38154,7 +38187,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
@@ -38189,7 +38223,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
@@ -38241,7 +38276,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
@@ -38276,7 +38312,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
@@ -38471,7 +38508,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_profile"
+        "repro_profile",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
