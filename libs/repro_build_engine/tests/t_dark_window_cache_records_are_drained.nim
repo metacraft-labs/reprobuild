@@ -77,8 +77,10 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_dark_window_cache_records_are_drained"
+let TmpDir = "build/test-tmp/t_dark_window_cache_records_are_drained" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
 proc weak(name: string): ContentDigest =

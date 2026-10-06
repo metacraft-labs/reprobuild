@@ -79,8 +79,10 @@ import repro_core
 import repro_depfile
 import repro_hash
 import repro_local_store
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_declared_depfile_absent_is_not_cacheable"
+let TmpDir = "build/test-tmp/t_declared_depfile_absent_is_not_cacheable" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 const RootImage = "/bin/sh"
 

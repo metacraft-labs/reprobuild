@@ -105,8 +105,10 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable"
+let TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
 let RootImage =

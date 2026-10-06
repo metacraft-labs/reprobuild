@@ -13,8 +13,10 @@
 import std/[json, math, os, osproc, strutils, tables, times, unittest]
 
 import repro_cli_support/partition
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/m1-partition-planner-reads-runquota"
+let TmpDir = "build/test-tmp/m1-partition-planner-reads-runquota" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

@@ -30,8 +30,10 @@ import std/[os, sets, strutils, unittest]
 
 import repro_build_engine
 import io_mon/[types, writer]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/test_m9r73_narrow_invalidation"
+let TmpDir = "build/test-tmp/test_m9r73_narrow_invalidation" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

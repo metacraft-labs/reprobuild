@@ -56,7 +56,7 @@ import repro_core
 import repro_test_support
 import io_mon/[types, writer, capabilities, encode]
 
-const TmpDir = "build/test-tmp/t_da1i_evidence_scope"
+let TmpDir = "build/test-tmp/t_da1i_evidence_scope" / testCaseScratchSlug()
 
 const EngineModuleRelPath =
   "libs/repro_build_engine/src/repro_build_engine.nim"

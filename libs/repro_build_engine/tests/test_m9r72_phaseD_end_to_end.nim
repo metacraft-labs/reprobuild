@@ -21,8 +21,9 @@ import std/[os, strutils, unittest]
 
 import repro_build_engine
 import io_mon/[types, writer]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/test_m9r72_phaseD"
+let TmpDir = "build/test-tmp/test_m9r72_phaseD" / testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

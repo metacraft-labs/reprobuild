@@ -8,34 +8,43 @@ import std/[os, unittest]
 from repro_core/paths import extendedPath
 
 import repro_home_generations
+from repro_test_support import testCaseScratchSlug
 
-const SmokeDir = "build/test-tmp/home-generations-smoke"
+let SmokeDir = "build/test-tmp/home-generations-smoke" / testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):
     removeDir(extendedPath(path))
   createDir(extendedPath(path))
 
+proc writeSamplePointer(p: string): tuple[env: PointerEnvelope,
+                                             realized: Digest256] =
+  ## The envelope both pointer cases start from. Each case writes its OWN
+  ## copy: cases run as separate processes, in no guaranteed order, so the
+  ## corruption case cannot rely on a file the round-trip case left behind.
+  var env = PointerEnvelope(
+    schemaVersion: 1'u16,
+    activationTimestamp: 1700000000'i64,
+    hostIdentity: "dev-laptop")
+  for i in 0 ..< 32:
+    env.intentSnapshotDigest[i] = byte(i)
+    env.configurableGraphDigest[i] = byte(0x40 + i)
+    env.activationManifestDigest[i] = byte(0x80 + i)
+  var realized: Digest256
+  for i in 0 ..< 32:
+    realized[i] = byte(0xc0 + i)
+  env.realizedPrefixIds = @[realized]
+  env.generationId = computeGenerationId(env.intentSnapshotDigest,
+    env.hostIdentity, env.activationTimestamp)
+  writePointerFile(p, env)
+  (env, realized)
+
 suite "Home-generations smoke":
 
   test "pointer envelope round-trip preserves audited field set":
     resetDir(SmokeDir)
-    var env = PointerEnvelope(
-      schemaVersion: 1'u16,
-      activationTimestamp: 1700000000'i64,
-      hostIdentity: "dev-laptop")
-    for i in 0 ..< 32:
-      env.intentSnapshotDigest[i] = byte(i)
-      env.configurableGraphDigest[i] = byte(0x40 + i)
-      env.activationManifestDigest[i] = byte(0x80 + i)
-    var realized: Digest256
-    for i in 0 ..< 32:
-      realized[i] = byte(0xc0 + i)
-    env.realizedPrefixIds = @[realized]
-    env.generationId = computeGenerationId(env.intentSnapshotDigest,
-      env.hostIdentity, env.activationTimestamp)
     let p = SmokeDir / "pointer.bin"
-    writePointerFile(p, env)
+    let (env, realized) = writeSamplePointer(p)
     let decoded = readPointerFile(p)
     check decoded.schemaVersion == 1'u16
     check decoded.activationTimestamp == 1700000000'i64
@@ -52,7 +61,9 @@ suite "Home-generations smoke":
     check onDiskBytes.len == expectedPointerFileSize(env)
 
   test "corrupt pointer body byte fails closed":
+    resetDir(SmokeDir)
     let p = SmokeDir / "pointer.bin"
+    discard writeSamplePointer(p)
     var raw = readFile(extendedPath(p))
     # Flip a byte in the middle of the body (well past the magic +
     # version + bodyLen header, well before the trailing checksum).

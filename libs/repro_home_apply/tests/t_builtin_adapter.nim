@@ -36,8 +36,9 @@ import repro_dsl_stdlib/packages_schema
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
 import repro_home_apply/realize
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter" / testCaseScratchSlug()
 
 # ---------------------------------------------------------------------------
 # Helpers

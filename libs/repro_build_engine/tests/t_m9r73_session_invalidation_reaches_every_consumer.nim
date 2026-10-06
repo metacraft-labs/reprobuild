@@ -70,8 +70,11 @@ import repro_core
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_m9r73_session_invalidation_reaches_every_consumer"
+let TmpDir =
+  "build/test-tmp/t_m9r73_session_invalidation_reaches_every_consumer" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
 proc weak(name: string): ContentDigest =

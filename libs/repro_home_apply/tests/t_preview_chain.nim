@@ -61,7 +61,7 @@ import repro_home_apply/realize
 import repro_home_apply/package_catalog
 
 let
-  FixtureRoot = "build/test-tmp/t-preview-chain"
+  FixtureRoot = "build/test-tmp/t-preview-chain" / testCaseScratchSlug()
   ReprobuildRoot = currentSourcePath().parentDir().parentDir().parentDir().parentDir()
   M71ReferenceHome =
     workspaceRootForRepo(ReprobuildRoot) / "reprobuild-examples" /

@@ -20,8 +20,10 @@ import repro_dsl_stdlib/packages_schema
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-installer-innosetup-fpc"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-installer-innosetup-fpc" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):

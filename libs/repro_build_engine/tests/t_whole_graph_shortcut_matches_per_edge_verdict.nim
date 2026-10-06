@@ -54,7 +54,8 @@ import repro_test_support
 
 const
   ChildFlag = "--whole-graph-shortcut-child"
-  TmpDir = "build/test-tmp/t_whole_graph_shortcut_matches_per_edge_verdict"
+let TmpDir = "build/test-tmp/t_whole_graph_shortcut_matches_per_edge_verdict" /
+  testCaseScratchSlug()
 
 let StableMtime = fromUnix(1_700_000_000)
   ## A whole second, so a `getFileInfo` → `setLastModificationTime`

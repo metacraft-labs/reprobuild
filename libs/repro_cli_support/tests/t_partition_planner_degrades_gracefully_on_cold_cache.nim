@@ -8,8 +8,10 @@
 import std/[os, times, unittest]
 
 import repro_cli_support/partition
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/m1-partition-planner-cold-cache"
+let TmpDir = "build/test-tmp/m1-partition-planner-cold-cache" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

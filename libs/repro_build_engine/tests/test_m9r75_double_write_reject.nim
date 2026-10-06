@@ -36,8 +36,10 @@ import std/[os, strutils, unittest]
 import repro_build_engine
 import repro_hash
 import repro_local_store
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/test_m9r75_double_write_reject"
+let TmpDir = "build/test-tmp/test_m9r75_double_write_reject" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

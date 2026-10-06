@@ -23,8 +23,9 @@ import std/[os, strutils, unittest]
 
 import repro_profile
 import repro_cli_support/hardware as cli_hw
+from repro_test_support import testCaseScratchSlug
 
-const TmpRoot = "build/m9r21_4_e2e"
+let TmpRoot = "build/m9r21_4_e2e" / testCaseScratchSlug()
 
 proc resetDir(): string =
   if dirExists(TmpRoot): removeDir(TmpRoot)
