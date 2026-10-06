@@ -1035,6 +1035,9 @@ static int repro_hcr_lx_memfd_dual_supported(size_t page_size) {
   }
   repro_hcr_lx_memfd_dual_probe_done = 1;
   repro_hcr_lx_memfd_dual_available = 0;
+  /* The probe maps an executable memfd page: a recorder that watches
+   * executable memory must already know this process reports its code. */
+  repro_hcr_mcr_declare_reporter();
 
   fd = repro_hcr_lx_raw_memfd_create(
       "repro-hcr-probe",
@@ -1721,6 +1724,7 @@ static uint64_t repro_hcr_lx_allocate_island(uint64_t window_address,
      * is requested of a kernel that may refuse one. */
     uint8_t *writer = repro_hcr_lx_code_writer((void *)(uintptr_t)page->base);
     memcpy(writer + (slot - page->base), island, sizeof(island));
+    repro_hcr_mcr_report_code((const void *)(uintptr_t)slot, sizeof(island));
     page->used += 1;
     /* Sealed the moment it can take no more islands. Until then the shared
      * alias must stay, which is the honest cost of a page that is written
@@ -2201,10 +2205,8 @@ static void repro_hcr_lx_txn_discard_prepared(repro_hcr_lx_transaction *txn,
    * left as unclaimed as it was found, or the next patcher — or the next
    * reload — is refused bytes nobody is using. */
   if (ps->claimed_here) {
-    if (ct_claimed_guest_text_release != NULL) {
-      ct_claimed_guest_text_release((uintptr_t)ps->window_address);
-      txn->released_claim_count += 1;
-    }
+    repro_hcr_mcr_release((uintptr_t)ps->window_address);
+    txn->released_claim_count += 1;
     /* The report must say the claim is gone, not merely that it was taken:
      * `claim_held` is what the arbitration gate reads to distinguish a
      * released claim from a leaked one. */
@@ -2312,17 +2314,18 @@ static int repro_hcr_lx_txn_prepare_site(repro_hcr_lx_transaction *txn,
    * refusal is NAMED (`claimed-by-recorder`) and carries the holder out, so
    * the agent reports it as a skipped function rather than a mystery.
    *
-   * `ct_claimed_guest_text_claim` is weak: when `libct_interpose` is not in the
-   * process it is NULL, which means there is no other patcher of this text and
-   * therefore no claim to conflict with.
+   * `repro_hcr_mcr_claim` binds the recorder's claim map, or reaches it through
+   * the recorder call when the recorder is in no link map; with no recorder in
+   * the process there is no other patcher of this text and therefore no claim
+   * to conflict with.
    *
    * The claim is taken only for a FRESH site. A re-patch is publishing into a
    * window this provider already owns; re-claiming would be refused by its own
    * live claim (§4.5).
    * ---------------------------------------------------------------------- */
-  if (ps->fresh_site && ct_claimed_guest_text_claim != NULL) {
+  if (ps->fresh_site) {
     unsigned holder = 0;
-    int claim_rc = ct_claimed_guest_text_claim(
+    int claim_rc = repro_hcr_mcr_claim(
         (uintptr_t)ps->window_address, (size_t)REPRO_HCR_LX_WINDOW_BYTES,
         REPRO_HCR_CGT_OWNER_REPRO_HCR, &holder);
     if (claim_rc == -2) {
@@ -2405,6 +2408,9 @@ static int repro_hcr_lx_txn_prepare_site(repro_hcr_lx_transaction *txn,
       memcpy(writer, repro_hcr_lx_endbr64, sizeof(repro_hcr_lx_endbr64));
     }
     memcpy(writer + body_prefix, ps->patch_bytes, ps->patch_len);
+    /* A recorder that watches executable memory sees nothing of a write
+     * through the alias; the body is reported while it is still unreachable. */
+    repro_hcr_mcr_report_code(ps->patch_page, body_prefix + ps->patch_len);
   }
   /* A patch body is written ONCE and never again, so this is the case
    * `F_SEAL_WRITE` exists for: the writable alias is dropped and the memfd is
@@ -2953,9 +2959,8 @@ static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
         ps->site->used = 0;
         ps->site = NULL;
       }
-      if ((ps->claimed_here || site_claimed) &&
-          ct_claimed_guest_text_release != NULL) {
-        ct_claimed_guest_text_release((uintptr_t)ps->window_address);
+      if (ps->claimed_here || site_claimed) {
+        repro_hcr_mcr_release((uintptr_t)ps->window_address);
         txn->released_claim_count += 1;
       }
       ps->claimed_here = 0;
