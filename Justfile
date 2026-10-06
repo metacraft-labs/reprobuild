@@ -564,6 +564,14 @@ lint:
     # while that happens. Source scan, no compiler, same cost class as its
     # neighbours.
     python3 ./scripts/check_bare_skips.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse a test source that declares a FIXED scratch path at module level
+    # (`const TmpDir = "build/test-tmp/x"`). Every case runs as its own process,
+    # concurrently with the binary's other cases, so such a path is shared
+    # between them: one case's reset deletes what a sibling is still using, a
+    # fixture compiled to a fixed output is relinked under a sibling executing
+    # it. Each instance passed alone and failed only in full runs. No
+    # allowlist; source scan, no compiler, same cost class as its neighbours.
+    python3 ./scripts/check_fixed_test_scratch_dirs.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT
