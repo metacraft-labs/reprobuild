@@ -17,11 +17,14 @@
 ## This gate is the measurement that the refusal can be narrowed. It records a
 ## real program whose own function is replaced by the real HCR agent over the
 ## real coordinator wire while `ct-mcr record` is recording it, and then
-## REPLAYS that recording: the replay re-launches the same program with
-## `libct_interpose` in replay mode, the program's own in-process agent applies
-## the recorded bundle again, and the recorder's bridge validates the note the
-## agent just built against the recorded slot byte for byte before releasing
-## it. The observable is the program's own output either side of the boundary.
+## REPLAYS that recording on the recorder's emulator (`replay-worker
+## --emulator`): it runs the same program's own agent from the recorded binary,
+## serves it the recorded coordinator bytes, so the agent applies the recorded
+## bundle again, and compares the note the agent builds with the recorded
+## CodePatchEvent field by field. The observable is the program's own output
+## either side of the boundary. (The recorder's real-process `--verify` worker
+## refuses recordings made by its default in-process arm, which is how this one
+## is made, so it can no longer be the replay arm.)
 ##
 ## `allowed_mocks: none`. The agent is the production
 ## `libs/repro_hcr_agent/c/repro_hcr_agent.c` compiled into the target; the
@@ -39,20 +42,18 @@
 ##     DIFFER before anything is replayed. If they were equal the gate could
 ##     not tell the two code bodies apart and would pass either way; that is a
 ##     CHECK FAILURE here, not a pass;
-##   * NOT-APPLIED arm — the same trace replayed with the agent given no
-##     coordinator socket, so the bundle is never applied. Must be red;
-##   * APPLIED-LATE arm — the same trace, same binary, replayed with
-##     `HXS2_APPLY_LATE=1`, which moves the agent's poll past the post-boundary
-##     write. The bundle IS applied and the boundary IS crossed; only the WHEN
-##     is wrong. It must be red, and it must be caught on the post-boundary
-##     observable rather than on the absence of an error — this arm asserts the
-##     diagnostic names the output mismatch, not the missing crossing;
+##   * the replay's falsifiers — the patch suppressed, the delivered bundle
+##     altered — are the recorder's half of this gate
+##     (codetracer-native-recorder `ct_cli/tests/test_hx_s2_replay_boundary.nim`),
+##     because both are switches inside the recorder's emulator;
 ##   * CONTROL arm — an unpatched recording of the SAME workload replays
-##     cleanly and never arms the HCR path, so the crossing behaviour above is
+##     cleanly and checks no patch note, so the crossing behaviour above is
 ##     shown to be caused by the patch;
-##   * three REFUSAL arms — a replay command that does not run the agent, a
-##     foreign support profile, and a trace with two boundaries — each of which
-##     must still be refused BY NAME. The refusal is narrowed, not removed.
+##   * three REFUSAL arms on the real-process worker — a replay command that
+##     does not run the agent, a foreign support profile, and a trace with two
+##     boundaries — each of which must still be refused BY NAME. The emulator,
+##     which runs the agent itself, replays the two-boundary trace and checks
+##     both notes.
 ##
 ## A KNOWN RECORDER DEFECT THIS GATE HAS TO STEER AROUND
 ## ---------------------------------------------------------------------------
@@ -134,23 +135,22 @@ when defined(linux) and defined(amd64):
     process.close()
     ReplayRun(exitCode: code, output: output)
 
-  proc replayStdoutSection(output: string): string =
-    ## The replay CHILD's own stdout, as the worker echoed it, and nothing
-    ## else.  This matters: the worker's mismatch diagnostic quotes BOTH the
-    ## recorded and the replayed bytes, so a naive `contains` over the whole
-    ## log would find the recording's `post=77` in a run where the replay
-    ## produced `post=11` — a check that is true for free in exactly the arm
-    ## it is supposed to catch.  Anchor on the two markers the worker prints.
-    const startMarker = "verify: stdout content: "
-    const endMarker = "\nverify: stderr content:"
-    let a = output.find(startMarker)
+  proc emulatorStdout(output: string): string =
+    ## What the emulator's replay of the program printed, as the worker
+    ## reports it (`M-RTI-3: capturedOutput="..."`, escaped), and nothing
+    ## else: the worker's stop detail can quote recorded bytes, so a
+    ## `contains` over the whole log could find the recording's `post=77` in a
+    ## run that never produced it.
+    const marker = "M-RTI-3: capturedOutput="
+    let a = output.find(marker)
     if a < 0:
       return ""
-    let from0 = a + startMarker.len
-    let b = output.find(endMarker, from0)
-    if b < 0:
-      return output[from0 .. ^1]
-    output[from0 ..< b]
+    let e = output.find('\n', a)
+    let raw = output[a + marker.len ..< (if e < 0: output.len else: e)]
+    try:
+      unescape(raw)
+    except ValueError:
+      raw
 
   proc agentConnectsBeforeExit(listener: HcrAgentUnixListener;
                                process: Process): bool =
@@ -383,92 +383,46 @@ when defined(linux) and defined(amd64):
       check codePatchCount(ctMcr, controlTrace, repoRoot) == 0
 
       # --- 4. ARM B: the replay that must cross the boundary -------------
+      # A recording made by the recorder's default (in-process) arm is
+      # replayed by its emulator: it runs this program's own agent from the
+      # recorded binary, serves the agent the recorded coordinator bytes, and
+      # compares the patch note the agent builds with the recorded
+      # CodePatchEvent (HCR-Overview §8.5).  The recorder's real-process
+      # `--verify` worker refuses such a recording before it runs anything.
+      # The falsifiers of this arm -- the patch suppressed, the bundle altered
+      # -- are the recorder's half of the gate
+      # (codetracer-native-recorder ct_cli/tests/test_hx_s2_replay_boundary.nim).
       var replayEnv = baseEnv()
-      replayEnv[ReproHcrAgentSocketEnv] = socketPath
+      replayEnv.del(ReproHcrAgentSocketEnv)
       replayEnv.del("HXS2_APPLY_LATE")
       replayEnv.del("HXS2_POLL_TWICE")
-      removeFile(socketPath)
       let applied = runCtMcr(ctMcr,
-        @["replay-worker", "--verify", patchedTrace], replayEnv, repoRoot)
+        @["replay-worker", "--emulator", patchedTrace], replayEnv, repoRoot)
       if applied.exitCode != 0:
         checkpoint(applied.output)
       check applied.exitCode == 0
-      check applied.output.contains(
-        "will be applied by the recorded program's own in-process HCR agent")
-      check applied.output.contains(
-        "HCR CodePatchEvent consumed by the real in-process agent bridge")
-      check applied.output.contains(
-        "the post-boundary output reproduces the recording byte for byte")
-      # The post-boundary observable the replay CHILD actually produced.
-      check replayStdoutSection(applied.output).contains(RecordedPre)
-      check replayStdoutSection(applied.output).contains(RecordedPost)
-
-      # --- 5. ARM C: the bundle is never applied -------------------------
-      var noAgentEnv = baseEnv()
-      noAgentEnv.del(ReproHcrAgentSocketEnv)
-      noAgentEnv.del("HXS2_APPLY_LATE")
-      noAgentEnv.del("HXS2_POLL_TWICE")
-      let notApplied = runCtMcr(ctMcr,
-        @["replay-worker", "--verify", patchedTrace], noAgentEnv, repoRoot)
-      if notApplied.exitCode == 0:
-        checkpoint(notApplied.output)
-        checkpoint("FALSIFIER SURVIVED: the replay reported success with the " &
-          "bundle never applied, which is exactly the silent wrongness the " &
-          "CodePatchEvent refusal exists to prevent.")
-      check notApplied.exitCode != 0
-      check notApplied.output.contains(
-        "the code-version boundary was not crossed")
-      # And it is red for the RIGHT reason: the replay never produced the
-      # patched body's post-boundary value.  A refusal that fired while the
-      # replay had in fact reproduced `post=77` would be testing something
-      # else.
-      check not replayStdoutSection(notApplied.output).contains(RecordedPost)
-      check notApplied.output.contains("DIFFER from offset")
-
-      # --- 6. ARM D: the bundle is applied one boundary LATE -------------
-      var lateEnv = baseEnv()
-      lateEnv[ReproHcrAgentSocketEnv] = socketPath
-      lateEnv["HXS2_APPLY_LATE"] = "1"
-      removeFile(socketPath)
-      let late = runCtMcr(ctMcr,
-        @["replay-worker", "--verify", patchedTrace], lateEnv, repoRoot)
-      if late.exitCode == 0:
-        checkpoint(late.output)
-        checkpoint("FALSIFIER SURVIVED: the bundle was applied AFTER the " &
-          "post-boundary observable and the replay still reported success, " &
-          "so this gate is insensitive to WHEN the patch is applied.")
-      check late.exitCode != 0
-      # CAUGHT ON THE OBSERVABLE, which is what this arm is for.  The replay
-      # must NOT have produced the patched body's post-boundary value: with the
-      # application moved past the post-boundary write, that write runs the
-      # ORIGINAL body, and `post=77` never appears.
-      check late.output.contains("DIFFER from offset")
-      check not replayStdoutSection(late.output).contains(RecordedPost)
-      # WHICH of the worker's two refusals fires is deliberately NOT asserted.
-      # Measured 2026-09-19: both are reachable from this arm and which one
-      # wins is a race between the replay child exiting and the parent's next
-      # boundary poll — the agent may consume the CodePatchEvent out of place
-      # and be refused on the output ("does not reproduce the recording"), or
-      # the child may finish before the parent observes the consumption and be
-      # refused on the crossing ("the code-version boundary was not crossed").
-      # Pinning one of them would make this arm flaky and would be asserting
-      # the race rather than the property.  The property is the two checks
-      # above, and both hold either way.
-      check (late.output.contains("does not reproduce the recording") or
-             late.output.contains("the code-version boundary was not crossed"))
+      check applied.output.contains("stop=rsrExit")
+      check applied.output.contains("W5: hcrPatchNotesChecked=1 ")
+      # The post-boundary observable the replayed program actually printed.
+      check emulatorStdout(applied.output).contains(RecordedPre)
+      check emulatorStdout(applied.output).contains(RecordedPost)
+      check not emulatorStdout(applied.output).contains(UnpatchedPost)
 
       # --- 7. ARM E: the control replay ----------------------------------
       let controlReplay = runCtMcr(ctMcr,
-        @["replay-worker", "--verify", controlTrace], noAgentEnv, repoRoot)
+        @["replay-worker", "--emulator", controlTrace], replayEnv, repoRoot)
       if controlReplay.exitCode != 0:
         checkpoint(controlReplay.output)
       check controlReplay.exitCode == 0
-      check not controlReplay.output.contains("HCR replay armed")
-      check not controlReplay.output.contains("CodePatchEvent")
+      check controlReplay.output.contains("stop=rsrExit")
+      check controlReplay.output.contains("W5: hcrPatchNotesChecked=0 ")
+      check emulatorStdout(controlReplay.output).contains(UnpatchedPost)
 
       # --- 8. ARM F: a command that cannot apply is still refused --------
+      var verifyEnv = baseEnv()
+      verifyEnv[ReproHcrAgentSocketEnv] = socketPath
       let noVerify = runCtMcr(ctMcr,
-        @["replay-worker", patchedTrace], replayEnv, repoRoot)
+        @["replay-worker", patchedTrace], verifyEnv, repoRoot)
       check noVerify.exitCode != 0
       check noVerify.output.contains("CodePatchEvent(s) at geid")
       check noVerify.output.contains(
@@ -495,11 +449,19 @@ when defined(linux) and defined(amd64):
       check twoPatched.applied
       check codePatchCount(ctMcr, twoPatchTrace, repoRoot) == 2
       removeFile(socketPath)
+      # The real-process worker still refuses two boundaries...
       let twoReplay = runCtMcr(ctMcr,
-        @["replay-worker", "--verify", twoPatchTrace], replayEnv, repoRoot)
+        @["replay-worker", "--verify", twoPatchTrace], verifyEnv, repoRoot)
       check twoReplay.exitCode != 0
       check twoReplay.output.contains(
         "replays exactly one code-version boundary per trace")
+      # ...and the emulator, which runs the agent itself, crosses both.
+      let twoEmulated = runCtMcr(ctMcr,
+        @["replay-worker", "--emulator", twoPatchTrace], replayEnv, repoRoot)
+      if twoEmulated.exitCode != 0:
+        checkpoint(twoEmulated.output)
+      check twoEmulated.exitCode == 0
+      check twoEmulated.output.contains("W5: hcrPatchNotesChecked=2 ")
 
       # --- inspection record ---------------------------------------------
       var inspection = newJObject()
@@ -511,9 +473,8 @@ when defined(linux) and defined(amd64):
       inspection["controlTargetOutput"] = newJString(controlOut)
       inspection["arms"] = %*{
         "applied": applied.exitCode,
-        "notApplied": notApplied.exitCode,
-        "appliedLate": late.exitCode,
         "controlReplay": controlReplay.exitCode,
+        "twoBoundariesEmulated": twoEmulated.exitCode,
         "refusedNoVerify": noVerify.exitCode,
         "refusedForeignProfile": foreign.exitCode,
         "refusedTwoBoundaries": twoReplay.exitCode
