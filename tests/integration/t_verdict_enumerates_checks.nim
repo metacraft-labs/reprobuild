@@ -5,7 +5,7 @@
 ##
 ## "The verifier reported everything" is the easiest claim in this
 ## codebase to make and the hardest to hold. A gate that verified one
-## report and looked for eleven rows would stay green under a driver that
+## report and looked for thirteen rows would stay green under a driver that
 ## recorded a skipped check as a pass, under a driver that silently
 ## dropped a check for one backend, and under a verdict type that let an
 ## early failure decide the outcome and made the remaining rows
@@ -191,7 +191,7 @@ suite "a verdict enumerates every check, and a skip is never a pass":
       check decisionFor(v.checks, atMock) == vdRejected
       inc cleared
     check cleared == countChecks()
-    check cleared == 11
+    check cleared == 13
 
   # -- the two acceptances, and their rows ----------------------------
 
@@ -206,20 +206,20 @@ suite "a verdict enumerates every check, and a skip is never a pass":
       check v.checks[chk].outcome != coNotReached
       check v.checks[chk].detail.len > 0
       inc seen
-    check seen == 11
+    check seen == 13
 
     let text = renderVerdictText(v)
     let json = renderVerdictJson(v)
     # The TABLE, not the document: each row named, each carrying the
-    # outcome its record holds, and exactly eleven of them.
+    # outcome its record holds, and exactly thirteen of them.
     let rows = renderedRows(text)
-    check rows.len == 11
+    check rows.len == 13
     for chk in VerifierCheck:
       check rows.hasKey($chk)
       if rows.hasKey($chk):
         check rows[$chk] == $v.checks[chk].outcome
       check ("\"check\": \"" & $chk & "\"") in json
-    check json.count("\"check\":") == 11
+    check json.count("\"check\":") == 13
     check text.count("not-reached") == 0
     check json.count("\"not-reached\"") == 0
 
@@ -245,7 +245,7 @@ suite "a verdict enumerates every check, and a skip is never a pass":
       check rows.hasKey($chk)
       if rows.hasKey($chk): check rows[$chk] == "skipped"
     check v.failedChecks.len == 0
-    check v.checksWith(coPassed).len + skipped.len == 11
+    check v.checksWith(coPassed).len + skipped.len == 13
 
   # -- 4. the same check, the same report, two policies ---------------
 
@@ -612,7 +612,7 @@ suite "a verdict enumerates every check, and a skip is never a pass":
       check v.checks[chk].outcome == coFailed
     check v.checks[vcReportSchema].kind == fkViolated
     check v.checks[vcTierAccepted].kind == fkInapplicable
-    check renderVerdictJson(v).count("\"check\":") == 11
+    check renderVerdictJson(v).count("\"check\":") == 13
 
   # -- 6. the package boundary ---------------------------------------
 

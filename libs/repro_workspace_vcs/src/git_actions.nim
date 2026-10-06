@@ -48,6 +48,7 @@ import repro_core/path_identity
 import repro_hash
 
 import git_tool
+from shared_clones import prepareSharedBare, sharedBareFetchArgs
 
 export GitToolIdentity, EGitToolUnresolved, ensureGitToolResolvable,
   resolveGitTool, digestHex, ToolProvisioningMode
@@ -1356,11 +1357,21 @@ proc executeRefreshBare(payload: GitVcsPayload;
   ## maps to its OWN bare directory: the race the serial loop guarded against is
   ## per-bare, and distinct bares share no state. The caller deduplicates by
   ## URL, so two actions never target the same directory.
+  ##
+  ## Both arms go through ``shared_clones.prepareSharedBare`` -- the same
+  ## preparation ``refreshSharedBare`` does. This action used to fetch with
+  ## neither: no fetch refspec (so the "refresh" advanced no refs) and no
+  ## borrower-safety config (so the fetch's automatic maintenance could
+  ## expire objects that checkouts in other workspaces still borrow, and
+  ## rewrite the commit-graph layers they chain onto). One preparation proc
+  ## for every refresh path is what keeps the two from drifting apart again.
   let bare = payload.repoPath
   var outcome = "fetched"
   if dirExists(bare / "objects") or dirExists(bare / ".git"):
-    let res = runGit(payload,
-      ["-C", bare, "fetch", "--all", "--prune", "--quiet"])
+    let prepared = prepareSharedBare(payload.binaryPath, bare)
+    if prepared.len > 0:
+      return failed("refresh-bare-prepare-failed", prepared)
+    let res = runGit(payload, sharedBareFetchArgs(bare))
     if res.exitCode != 0:
       return failed("refresh-bare-fetch-failed",
         "git fetch in shared bare failed (" & $res.exitCode & "): " &
@@ -1382,6 +1393,10 @@ proc executeRefreshBare(payload: GitVcsPayload;
       return failed("refresh-bare-clone-failed",
         "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
           res.output.trimmed)
+    let prepared = prepareSharedBare(payload.binaryPath, bare)
+    if prepared.len > 0:
+      return failed("refresh-bare-prepare-failed",
+        "cloned the shared bare but " & prepared)
     outcome = "cloned"
   var receipt = RefreshBareReceiptHeader & "\n"
   receipt.add("kind\t" & WorkspaceVcsKind & "\n")
@@ -2227,9 +2242,10 @@ proc isPublishedQuery*(repoPath, remoteName: string): GitQueryAction =
 proc extendedStatusQuery*(repoPath, trunkBranch: string;
                           queryStashes, queryFiles, queryAheadBehind,
                           queryUnmerged: bool;
-                          queryFileDetails = false): GitQueryAction =
+                          queryFileDetails = false;
+                          remoteName = "origin"): GitQueryAction =
   GitQueryAction(kind: gqkExtendedStatus, repoPath: repoPath,
-    remoteName: "origin", trunkBranch: trunkBranch,
+    remoteName: remoteName, trunkBranch: trunkBranch,
     queryStashes: queryStashes, queryFiles: queryFiles,
     queryAheadBehind: queryAheadBehind, queryUnmerged: queryUnmerged,
     queryFileDetails: queryFileDetails)
@@ -2358,8 +2374,16 @@ proc queryGitState*(query: GitQueryAction;
     # 6. Unmerged Branches
     if query.queryUnmerged:
       let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+      let remoteName = if query.remoteName.len > 0: query.remoteName else: "origin"
+      let remoteRef = remoteName & "/" & trunkBranch
+      var targetRef = trunkBranch
+      let checkRemote = runGitQuery(payload,
+        ["-C", query.repoPath, "rev-parse", "--verify", "--quiet", "refs/remotes/" & remoteRef])
+      if checkRemote.exitCode == 0:
+        targetRef = remoteRef
+
       let unmergedRes = runGitQuery(payload,
-        ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
+        ["-C", query.repoPath, "branch", "--no-merged", targetRef])
       if unmergedRes.exitCode == 0:
         for rawLine in unmergedRes.output.splitLines():
           var line = rawLine.strip()
@@ -2374,7 +2398,7 @@ proc queryGitState*(query: GitQueryAction;
           # named `heads/main` makes bare `main` ambiguous). A real branch name
           # contains no whitespace or ':' and never starts with '(' (the
           # detached-HEAD note), so reject anything else as non-branch noise.
-          if line.len == 0 or line == trunkBranch: continue
+          if line.len == 0 or line == trunkBranch or line == targetRef: continue
           if line.startsWith("(") or line.contains(' ') or
              line.contains('\t') or line.contains(':'):
             continue

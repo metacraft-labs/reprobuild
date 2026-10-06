@@ -85,6 +85,7 @@ jobs:
             devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
+            reprobuild-packages
             reprobuild-test-adapters
             runquota
             tree-sitter-aiken
@@ -367,6 +368,7 @@ jobs:
             devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
+            reprobuild-packages
             reprobuild-test-adapters
             runquota
             tree-sitter-aiken
@@ -898,6 +900,7 @@ jobs:
             devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
+            reprobuild-packages
             reprobuild-test-adapters
             runquota
             tree-sitter-aiken

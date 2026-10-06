@@ -675,6 +675,7 @@ type
     msaFastForward
     msaRebase
     msaMerge
+    msaClone
 
   MainlineSyncObservation* = object
     ## One repo's git state, relative to ITS mainline. Every field is a fact
@@ -724,6 +725,7 @@ proc mainlineSyncActionTag*(a: MainlineSyncAction): string =
   of msaFastForward: "fast_forward"
   of msaRebase: "rebase"
   of msaMerge: "merge"
+  of msaClone: "clone"
 
 proc classifyMainlineSync*(resolved: ResolvedRepo;
                            obs: MainlineSyncObservation;
@@ -736,10 +738,18 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
   result.action = msaNone
 
   if not obs.exists:
+    if obs.mainlineBranch.len == 0:
+      result.syncCase = mscNoMainlineBranch
+      result.refusalReason = "repo '" & resolved.path &
+        "' declares no `branch` in its manifest fragment" &
+        (if resolved.fragmentPath.len > 0: " (" & resolved.fragmentPath & ")"
+         else: "") & " — cannot clone without a target branch"
+      result.message = result.refusalReason
+      return
     result.syncCase = mscMissingCheckout
-    result.refusalReason = "no checkout at '" & resolved.path &
-      "' — run `repro sync` or `repro workspace pull` first"
-    result.message = result.refusalReason
+    result.action = msaClone
+    result.message = "scheduling clone of '" & resolved.path & "' from " &
+      resolved.fetchUrl & " @ " & obs.mainlineBranch
     return
 
   # The manifest is this mode's input, so an incomplete fragment is named

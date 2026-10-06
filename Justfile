@@ -574,6 +574,28 @@ format:
 
 fmt: format
 
+# Regenerate the four tracked artifacts that are pure functions of the tree:
+# repro_tests.nim, scripts/reprobuild-test-shape-parity.tsv,
+# scripts/reprobuild-suite-static-case-counts.tsv and
+# benchmarks/reports/reprobuild-suite-m0-inventory-sources.json.
+#
+# THIS IS HOW YOU RESOLVE A CONFLICT IN THEM. Those four paths are `-merge`
+# in `.gitattributes` (read the block at the top of that file for why), so a
+# merge, rebase or cherry-pick where both sides moved one of them stops with
+# the path unmerged instead of text-merging a derived file into something no
+# generator ever produced. There is nothing to resolve by hand: run this, then
+# `git add` the four paths. The order matters -- the edge generator writes
+# repro_tests.nim, and both inventory writers read it.
+#
+# Not part of `just lint`, deliberately: lint CHECKS these (four gates, see
+# the `lint` recipe) and a lint that silently rewrote them would turn every
+# staleness into a no-op and leave nothing for the gates to catch.
+regen-suite-artifacts:
+    mkdir -p test-logs
+    nim r scripts/generate_test_edges.nim 2>&1 | tee test-logs/regen-suite-artifacts.log
+    python3 ./scripts/reprobuild_suite_inventory.py --write-static-case-counts 2>&1 | tee -a test-logs/regen-suite-artifacts.log
+    python3 ./scripts/reprobuild_suite_inventory.py --write-inventory-sources 2>&1 | tee -a test-logs/regen-suite-artifacts.log
+
 bump-version version:
     bash ./scripts/bump_version.sh {{version}}
 

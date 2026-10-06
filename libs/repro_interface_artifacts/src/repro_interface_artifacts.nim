@@ -4786,7 +4786,12 @@ proc externalHashFlags(workDir = ""): seq[string] =
         ["libblake3.dylib", "libblake3.so", "libblake3.a"])
   if blake3Prefix.len > 0:
     result.add("--passC:-I" & (blake3Prefix / "include"))
-    result.add("--passL:-L" & (blake3Prefix / "lib"))
+    let libDir = firstExistingPrefixLibDir(blake3Prefix,
+      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+    result.add("--passL:-L" & libDir)
+    # The source bootstrap has no installed wrapper to supply runtime paths.
+    # The generated runner must find the same library it linked against.
+    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
     result.add("--passL:-lblake3")
 
   let xxhashPrefix = block:
@@ -4802,7 +4807,12 @@ proc externalHashFlags(workDir = ""): seq[string] =
         ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
   if xxhashPrefix.len > 0:
     result.add("--passC:-I" & (xxhashPrefix / "include"))
-    result.add("--passL:-L" & (xxhashPrefix / "lib"))
+    let libDir = firstExistingPrefixLibDir(xxhashPrefix,
+      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+    result.add("--passL:-L" & libDir)
+    # The source bootstrap has no installed wrapper to supply runtime paths.
+    # The generated runner must find the same library it linked against.
+    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
     result.add("--passL:-lxxhash")
 
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init

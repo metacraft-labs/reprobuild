@@ -133,6 +133,32 @@ function Ensure-CleanDirectory {
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
 
+function Expand-ZipArchive {
+  ## Extract a zip archive into $Destination, which must not already hold any
+  ## of the archive's files.
+  ##
+  ## Calls System.IO.Compression.ZipFile.ExtractToDirectory rather than the
+  ## Expand-Archive cmdlet. Both use the same .NET zip reader, but Windows
+  ## PowerShell 5.1's Expand-Archive writes a progress record for every entry,
+  ## and on a 4-vCPU CI machine that cost reached about 90 ms per entry when
+  ## output was captured: a 12,000-entry toolchain zip took about 40 minutes
+  ## against about 3 with this call. ExtractToDirectory also reads an archive
+  ## whatever its file name, where Expand-Archive insisted on `.zip`.
+  ##
+  ## Relative paths are resolved against the PowerShell location, not the
+  ## process directory .NET would use.
+  param(
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $archive = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArchivePath)
+  $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  New-Item -ItemType Directory -Force -Path $target | Out-Null
+  [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $target)
+}
+
 function Test-BootstrapStepEnabled {
   param([Parameter(Mandatory = $true)][string]$Step)
 

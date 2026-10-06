@@ -15,8 +15,25 @@ fi
 
 archive_name=$(basename "$archive_path")
 mkdir -p "$(pwd)/build"
+
+# The extracted tree carries read-only files and directories (copies of
+# Nix-store paths keep their r-x modes), and a plain `rm -rf` cannot remove an
+# entry from a directory that has no write bit. Restore owner write first. A
+# tree left behind would otherwise sit in the runner's checkout, and on a
+# persistent runner the next job's checkout clean fails on it with EACCES.
+remove_tree() {
+  [[ -e "$1" ]] || return 0
+  chmod -R u+w "$1" 2>/dev/null || true
+  rm -rf "$1"
+}
+
+# Trees from earlier runs that were killed before their EXIT trap ran.
+for stale in "$(pwd)"/build/reprobuild-verify-??????; do
+  [[ -d "$stale" ]] && remove_tree "$stale"
+done
+
 tmp_dir=$(mktemp -d "$(pwd)/build/reprobuild-verify-XXXXXX")
-trap 'rm -rf "$tmp_dir"' EXIT
+trap 'remove_tree "$tmp_dir"' EXIT
 
 echo "=== Extracting $archive_name to $tmp_dir ==="
 if [[ "$archive_name" == *.zip ]]; then
@@ -24,17 +41,20 @@ if [[ "$archive_name" == *.zip ]]; then
   # guaranteed in the bash that runs this step: Git for Windows' bash ships a
   # GNU tar that cannot read zip, and unzip.exe is not part of every Git
   # install. Prefer unzip when present, but fall back to tools that always
-  # exist on a Windows host -- PowerShell's Expand-Archive, or the
+  # exist on a Windows host -- PowerShell with .NET's zip reader, or the
   # System32 bsdtar (libarchive tar.exe, which unlike GNU tar DOES read zip) --
   # so a missing unzip does not fail the release AFTER an hour of build time.
   if command -v unzip > /dev/null 2>&1; then
     unzip -q "$archive_path" -d "$tmp_dir"
   elif command -v powershell > /dev/null 2>&1 && command -v cygpath > /dev/null 2>&1; then
-    echo "    unzip not found; extracting with PowerShell Expand-Archive"
-    powershell -NoProfile -Command \
-      "Expand-Archive -LiteralPath '$(cygpath -w "$archive_path")' -DestinationPath '$(cygpath -w "$tmp_dir")' -Force"
+    # ZipFile.ExtractToDirectory rather than Expand-Archive, whose per-entry
+    # progress records make an archive of this size take minutes. $tmp_dir is
+    # fresh, so nothing needs overwriting.
+    echo "    unzip not found; extracting with PowerShell (System.IO.Compression.ZipFile)"
+    powershell -NoProfile -NonInteractive -Command \
+      "\$ProgressPreference = 'SilentlyContinue'; \$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('$(cygpath -w "$archive_path")', '$(cygpath -w "$tmp_dir")')"
   elif [[ -x /c/Windows/System32/tar.exe ]]; then
-    echo "    unzip not found; extracting with Windows bsdtar (System32\\tar.exe)"
+    printf '%s\n' '    unzip not found; extracting with Windows bsdtar (System32\tar.exe)'
     /c/Windows/System32/tar.exe -xf "$archive_path" -C "$tmp_dir"
   else
     echo "ERROR: cannot extract $archive_name -- no unzip, no PowerShell, no bsdtar available" >&2
@@ -101,6 +121,24 @@ if (( ${#missing_sources[@]} > 0 )); then
   echo "ERROR: $archive_name cannot build a project: missing from share/repro: ${missing_sources[*]}" >&2
   echo "       Staged by scripts/release/stage_release_sources.sh." >&2
   exit 1
+fi
+
+if [[ "$archive_name" != *.zip ]]; then
+  echo "=== Verifying the packaged Nix helper and Python runtime ==="
+  # A real short-lived Unix socket server exercises its imports and runtime
+  # with no host Python on PATH. No Nix evaluation is needed for this probe.
+  (
+    helper_scratch="$(mktemp -d /tmp/repro-helper.XXXXXX)"
+    trap 'rm -rf "$helper_scratch"' EXIT
+    helper_socket="$helper_scratch/daemon.sock"
+    env -u PYTHONHOME -u PYTHONPATH PATH=/usr/bin:/bin \
+      "$pkg_dir/bin/reprobuild-nix-daemon" \
+      --socket-path "$helper_socket" --idle-exit-ms 1
+    [[ ! -e "$helper_socket" ]] || {
+      echo "ERROR: Nix helper left its socket behind" >&2
+      exit 1
+    }
+  )
 fi
 
 # ── Windows: archive self-containment ────────────────────────────────────────

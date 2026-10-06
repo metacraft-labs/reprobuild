@@ -62,8 +62,11 @@
 
 import std/[options, os, strutils, times]
 
+import cbor
+
 import repro_attest
 import repro_attest/cloud_lease
+import repro_attest/cose
 import repro_attest_verify
 import repro_attest_verify/fetch
 
@@ -110,6 +113,9 @@ type
     hexOnly*: bool
     trustAnchorPaths*: seq[string]
     revocationListPaths*: seq[string]
+    attestationsPath*: string
+    signerKeyPaths*: seq[string]
+    witnessedRoots*: seq[string]
     firmware*: string
     vcpus*: string
     vcpuType*: string
@@ -136,6 +142,10 @@ type
     leaseOut*: string
     planOut*: string
     leaseNow*: string
+    reapDestroy*: bool
+    reapTagSweep*: bool
+    reapInterval*: string
+    reapSweeps*: string
 
 type
   AttestExitCode* = enum
@@ -170,6 +180,19 @@ type
       ## not a channel ``$?`` can read, so a script could not tell this
       ## apart from a verdict backed by a manifest its operators had
       ## named in advance. Now it can.
+    aecAcceptedEvidenceBackedManifest = 5
+      ## An acceptance whose established identity was read out of a
+      ## measurement manifest the policy pinned nothing about, and which
+      ## a quorum of the rebuilders the policy admits had signed.
+      ##
+      ## Its own code rather than ``0`` or ``4``. It is not ``0``
+      ## because the operator's own list of manifest digests did not
+      ## decide it; it is not ``4`` because something DID vouch for the
+      ## document, and a script that treated "a named quorum signed
+      ## this" the same as "nobody vouched for this" could not express
+      ## the posture the evidence clause exists to offer.
+      ##
+      ## Appended, so no existing ordinal moves.
 
 const
   AttestExitAccepted* = ord(aecAccepted)
@@ -178,6 +201,8 @@ const
   AttestExitAcceptedNoRootOfTrust* = ord(aecAcceptedNoRootOfTrust)
   AttestExitAcceptedUnauthenticatedManifest* =
     ord(aecAcceptedUnauthenticatedManifest)
+  AttestExitAcceptedEvidenceBackedManifest* =
+    ord(aecAcceptedEvidenceBackedManifest)
 
 proc attestExitCodeFor*(d: VerdictDecision): AttestExitCode =
   ## The single place a verdict becomes an exit code.
@@ -192,6 +217,7 @@ proc attestExitCodeFor*(d: VerdictDecision): AttestExitCode =
   of vdAccepted: aecAccepted
   of vdAcceptedNoRootOfTrust: aecAcceptedNoRootOfTrust
   of vdAcceptedUnpinnedManifest: aecAcceptedUnauthenticatedManifest
+  of vdAcceptedEvidenceBackedManifest: aecAcceptedEvidenceBackedManifest
   of vdRejected: aecRejected
 
 proc renderAttestUsage*(): string =
@@ -201,10 +227,12 @@ Subcommands:
   expect     compute the measurement manifest for an attested image
   challenge  mint a verifier nonce and record when it was minted
   verify     check a runtime report against a measurement policy
-  reap       report what a sweep of a cloud-lease store would destroy:
-             every lease it can see, whether its owner is alive, whether
-             it has expired, what it has cost so far, and the invocation
-             each one would be destroyed with. It destroys nothing.
+  reap       sweep a cloud-lease store. By default it REPORTS: every
+             lease it can see, whether its owner is alive, whether it
+             has expired, what it has cost so far, and the invocation
+             each one would be destroyed with, touching nothing. With
+             --destroy it runs those invocations, which is what bounds
+             how long a leaked instance can keep billing.
   launch     describe a confidential-instance launch on a public cloud:
              the provider invocation it would be made with and the
              expected-measurement identity a policy would pin. It
@@ -279,6 +307,22 @@ repro attest verify --report-file PATH | --report-url URL [options]
                                     issuer in a bundled chain — an
                                     unasked question is not an answer of
                                     no.
+      --attestations PATH           the edge attestations published beside
+                                    the manifest: rebuilder signatures over
+                                    the claim that this configuration
+                                    produces it, and any transparency-log
+                                    inclusion proofs for that claim
+      --signer-key PATH             a COSE_Key holding one admitted
+                                    rebuilder's public key; repeatable. The
+                                    policy says which key identifiers may
+                                    count; this says what their keys are,
+                                    and the two sets must agree exactly.
+      --witnessed-root LOG:SIZE:HEX a transparency-log root this verifier
+                                    has already witnessed; repeatable. An
+                                    inclusion proof for a log with no
+                                    witnessed root here is refused, because
+                                    a proof checked against a root the same
+                                    document supplied establishes nothing.
       --json                        print the machine-readable verdict
       --out PATH                    write the verdict instead of printing it
 
@@ -322,9 +366,28 @@ repro attest launch --provider NAME --instance-shape NAME [options]
       --now UNIX                    the moment the lease is taken from,
                                     for a caller that needs a stated one
 
-repro attest reap --lease-store DIR [--now UNIX]
+repro attest reap --lease-store DIR [options]
       --lease-store DIR             the lease store to sweep
       --now UNIX                    the moment to judge expiry against
+      --destroy                     really destroy what the sweep
+                                    selects, by running the provider's
+                                    own tool. Without it the sweep is
+                                    printed and nothing is touched.
+      --tag-sweep                   sweep by provider tag instead of by
+                                    the store, for a sweeper that has
+                                    lost the records or never had them.
+                                    Needs --provider and --region, reaps
+                                    on expiry only, and implies --destroy
+      --interval-seconds N          repeat the sweep every N seconds
+                                    (default """ & $DefaultReapIntervalSeconds &
+    """, at most """ & $MaxReapIntervalSeconds & """). A leaked
+                                    instance outlives its owner by at
+                                    most its remaining hold plus this.
+      --sweeps N                    stop after N sweeps. Omitted, the
+                                    sweep runs ONCE, unless
+                                    --interval-seconds asked for a
+                                    cadence, in which case it repeats
+                                    until it is stopped
 
 Exit codes:
   0  success, or a verdict of `accepted`
@@ -334,7 +397,17 @@ Exit codes:
   4  a verdict of `accepted-against-an-unauthenticated-manifest`: it
      established an identity, out of a manifest your policy pins nothing
      about
+  5  a verdict of `accepted-against-an-evidence-backed-manifest`: it
+     established an identity, out of a manifest your policy pins nothing
+     about and a quorum of the rebuilders it admits had signed
 """
+
+proc fileBytes(path: string): seq[byte] =
+  ## A file's bytes. The CBOR reader wants bytes and `readFile` gives a
+  ## string; the conversion lives here so it has one spelling.
+  let text = readFile(path)
+  result = newSeq[byte](text.len)
+  for i in 0 ..< text.len: result[i] = byte(text[i])
 
 proc valueFor(args: openArray[string]; i: var int; flag: string): string =
   ## Accepts both ``--flag VALUE`` and ``--flag=VALUE``.
@@ -381,6 +454,12 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
       result.trustAnchorPaths.add valueFor(args, i, "--trust-anchor")
     of "--revocation-list":
       result.revocationListPaths.add valueFor(args, i, "--revocation-list")
+    of "--attestations":
+      result.attestationsPath = valueFor(args, i, "--attestations")
+    of "--signer-key":
+      result.signerKeyPaths.add valueFor(args, i, "--signer-key")
+    of "--witnessed-root":
+      result.witnessedRoots.add valueFor(args, i, "--witnessed-root")
     of "--json":
       result.asJson = true
       inc i
@@ -441,6 +520,15 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
     of "--lease-out": result.leaseOut = valueFor(args, i, "--lease-out")
     of "--plan-out": result.planOut = valueFor(args, i, "--plan-out")
     of "--now": result.leaseNow = valueFor(args, i, "--now")
+    of "--destroy":
+      result.reapDestroy = true
+      inc i
+    of "--tag-sweep":
+      result.reapTagSweep = true
+      inc i
+    of "--interval-seconds":
+      result.reapInterval = valueFor(args, i, "--interval-seconds")
+    of "--sweeps": result.reapSweeps = valueFor(args, i, "--sweeps")
     of "--out": result.outPath = valueFor(args, i, "--out")
     of "--check": result.checkPath = valueFor(args, i, "--check")
     else:
@@ -756,7 +844,7 @@ proc readLaunchFileArg(flag, path: string; into: var string): string =
   into = readFile(path)
   ""
 
-proc runAttestLaunch(opts: AttestCliOptions): int =
+proc runAttestLaunch(opts: AttestCliOptions; env: CloudEnvLookup): int =
   var spec: CloudLaunchSpec
   if opts.provider.len == 0:
     stderr.writeLine("repro attest launch: --provider is required; this " &
@@ -848,10 +936,10 @@ proc runAttestLaunch(opts: AttestCliOptions): int =
   var scan: PlanSecretScan
   try:
     if holder != nil:
-      plan = leasedLaunchPlan(spec, holder.lease)
-      scan = requirePlanCarriesNoCredential(plan)
+      plan = leasedLaunchPlan(spec, holder.lease, env)
+      scan = requirePlanCarriesNoCredential(plan, env)
     else:
-      let checked = checkedCloudLaunchPlanScanned(spec)
+      let checked = checkedCloudLaunchPlanScanned(spec, env)
       plan = checked.plan
       scan = checked.scan
     manifestText = cloudExpectedManifestText(spec)
@@ -907,40 +995,148 @@ proc runAttestLaunch(opts: AttestCliOptions): int =
 # ---------------------------------------------------------------------
 # reap
 #
-# The sweep, and it destroys nothing for the same reason `launch`
-# creates nothing: the library's reaper takes an effector, this build
-# ships none, and the command does not construct one. What it prints is
-# the decision for every lease it can see and the invocation each one
-# would be destroyed with.
+# Two modes, and the difference between them is the difference between
+# a substrate and a safety property.
+#
+# Without `--destroy` this prints the decision for every lease it can
+# see and the invocation each one would be destroyed with, and touches
+# nothing — which is the right default for a command that destroys
+# machines.
+#
+# With `--destroy` it runs them, through the effector this build ships.
+# That is the half that was missing: the reaper answers the one exit
+# path the holder cannot see, a printing reaper answers it with a
+# sentence, and a leak whose destroy is "until somebody runs the sweep"
+# has no bound at all. `--interval-seconds` is the other half — a sweep
+# that runs once is not a cadence — and it is capped, because the
+# interval is the term that turns the exposure window into a number.
 # ---------------------------------------------------------------------
 
-proc runAttestReap(opts: AttestCliOptions): int =
-  if opts.leaseStore.len == 0:
+proc runAttestReap(opts: AttestCliOptions; env: CloudEnvLookup): int =
+  let destroying = opts.reapDestroy or opts.reapTagSweep
+  if opts.reapTagSweep:
+    if opts.provider.len == 0 or opts.region.len == 0:
+      stderr.writeLine("repro attest reap: --tag-sweep needs --provider " &
+        "and --region; a sweep that reads no store has nothing else to " &
+        "say which cloud and which region it means")
+      return AttestExitUsage
+  elif opts.leaseStore.len == 0:
     stderr.writeLine("repro attest reap: --lease-store is required; a " &
       "sweep with no store named would either scan nothing or scan " &
       "somewhere nobody asked for")
     return AttestExitUsage
-  if not dirExists(opts.leaseStore):
+  elif not dirExists(opts.leaseStore):
     stderr.writeLine("repro attest reap: no lease store at " &
       opts.leaseStore)
     return AttestExitUsage
-  var now = getTime().toUnix
+
+  var stated = 0'i64
+  var hasStated = false
   if opts.leaseNow.len > 0:
     try:
-      now = parseBiggestInt(opts.leaseNow)
+      stated = parseBiggestInt(opts.leaseNow)
+      hasStated = true
     except ValueError:
       stderr.writeLine("repro attest reap: --now is " &
         opts.leaseNow.escape() & " and it is read as whole seconds")
       return AttestExitUsage
-  try:
-    stdout.write(renderReapPlanText(openCloudLeaseStore(opts.leaseStore),
-      now, processOwnerLiveness()))
-  except CloudLeaseError as err:
-    stderr.writeLine("repro attest reap: " & err.msg)
-    return AttestExitUsage
-  except CloudLaunchError as err:
-    stderr.writeLine("repro attest reap: " & err.msg)
-    return AttestExitUsage
+
+  var interval = DefaultReapIntervalSeconds
+  if opts.reapInterval.len > 0:
+    try:
+      interval = parseBiggestInt(opts.reapInterval)
+    except ValueError:
+      stderr.writeLine("repro attest reap: --interval-seconds is " &
+        opts.reapInterval.escape() & " and it is read as whole seconds")
+      return AttestExitUsage
+    if interval <= 0 or interval > MaxReapIntervalSeconds:
+      stderr.writeLine("repro attest reap: --interval-seconds is " &
+        $interval & " and this build sweeps at least once every " &
+        $MaxReapIntervalSeconds & " seconds; the interval is half of " &
+        "how long a leaked instance can keep billing, so a longer one " &
+        "is not a preference this command accepts")
+      return AttestExitUsage
+
+  # ONE sweep unless a cadence was asked for. Repetition is what
+  # `--interval-seconds` means, and tying it to that flag rather than to
+  # `--destroy` is a correction the gate found: written the other way a
+  # bare `repro attest reap --destroy` never returned, which is a
+  # surprise on a command line and is not what a `oneshot` unit wants
+  # either. `--sweeps` overrides both, and zero is refused because a
+  # sweep that never runs is not a sweep.
+  var sweeps = 1
+  if opts.reapInterval.len > 0: sweeps = 0    # until it is stopped
+  if opts.reapSweeps.len > 0:
+    try:
+      sweeps = parseBiggestInt(opts.reapSweeps)
+    except ValueError:
+      stderr.writeLine("repro attest reap: --sweeps is " &
+        opts.reapSweeps.escape() & " and it is read as a whole number")
+      return AttestExitUsage
+    if sweeps <= 0:
+      stderr.writeLine("repro attest reap: --sweeps is " & $sweeps &
+        " and a sweep that never runs is not a sweep")
+      return AttestExitUsage
+
+  var provider: CloudProvider
+  if opts.reapTagSweep:
+    try:
+      provider = cloudProviderFor(opts.provider)
+    except CloudLaunchError as err:
+      stderr.writeLine("repro attest reap: " & err.msg)
+      return AttestExitUsage
+
+  # The destroying effector, wrapped so the command can SAY which
+  # program it resolved and from where. This is a PATH-resolved external
+  # tool — nothing here provisioned it and nothing afterwards can say
+  # which file it was — so the resolution is reported rather than left
+  # implicit. An operator whose instances have just been destroyed is
+  # entitled to know by what.
+  var resolvedProgram = ""
+  var resolvedFrom = ""
+  var effector: CloudLeaseEffector = nil
+  if destroying:
+    let inner = subprocessCloudLeaseEffector(env)
+    effector = proc (effect: CloudEffect): CloudEffectResult =
+      result = inner(effect)
+      if result.program.len > 0 and resolvedProgram.len == 0:
+        resolvedProgram = result.program
+        resolvedFrom = result.searchPath
+        stdout.write("provider-tool: " & resolvedProgram & "\n")
+        stdout.write("provider-tool-search-path: " & resolvedFrom & "\n")
+  var failures = 0
+  var swept = 0
+  while sweeps == 0 or swept < sweeps:
+    let now = (if hasStated: stated else: getTime().toUnix)
+    try:
+      if opts.reapTagSweep:
+        let report = reapExpiredByTag(provider, opts.region, now, effector)
+        stdout.write(renderReapReportText(report))
+        failures += report.failed
+      elif destroying:
+        let report = reapCloudLeases(openCloudLeaseStore(opts.leaseStore),
+          now, processOwnerLiveness(), effector)
+        stdout.write(renderReapReportText(report))
+        failures += report.failed
+      else:
+        stdout.write(renderReapPlanText(
+          openCloudLeaseStore(opts.leaseStore), now,
+          processOwnerLiveness()))
+    except CloudLeaseError as err:
+      stderr.writeLine("repro attest reap: " & err.msg)
+      return AttestExitUsage
+    except CloudLaunchError as err:
+      stderr.writeLine("repro attest reap: " & err.msg)
+      return AttestExitUsage
+    inc swept
+    stdout.flushFile()
+    if sweeps == 0 or swept < sweeps:
+      sleep(int(interval * 1000))
+  # A sweep that could not destroy something is a FAILURE and not a
+  # usage error: the record is still there, the next sweep tries again,
+  # and whatever runs this on a cadence has to be able to tell the two
+  # apart.
+  if failures > 0: return AttestExitRejected
   AttestExitAccepted
 
 # ---------------------------------------------------------------------
@@ -1029,6 +1225,45 @@ proc runAttestVerify(opts: AttestCliOptions): int =
         " is not a revocation list this build reads: " & err.msg)
       return AttestExitUsage
 
+  # The build plane's evidence, and the two things the verifier supplies
+  # to judge it with. Every one of them is a REFUSAL when it cannot be
+  # read, for the reason stated above the trust store: a verifier that
+  # dropped what it could not parse would be judging against a smaller
+  # set than the one it was configured with, and would not say so.
+  if opts.attestationsPath.len > 0:
+    if not fileExists(opts.attestationsPath):
+      stderr.writeLine("repro attest verify: no edge attestations at " &
+        opts.attestationsPath)
+      return AttestExitUsage
+    req.attestationsSource = opts.attestationsPath
+    req.attestationsText = some(readFile(opts.attestationsPath))
+  for path in opts.signerKeyPaths:
+    if not fileExists(path):
+      stderr.writeLine("repro attest verify: no signer key at " & path)
+      return AttestExitUsage
+    try:
+      req.signerRoster.add QuorumSigner(
+        key: parseCoseKey(decodeItem(fileBytes(path))))
+    except CatchableError as err:
+      stderr.writeLine("repro attest verify: --signer-key " & path &
+        " is not a COSE_Key this build reads: " & err.msg)
+      return AttestExitUsage
+  for spec in opts.witnessedRoots:
+    let parts = spec.split(':')
+    if parts.len != 3:
+      stderr.writeLine("repro attest verify: --witnessed-root " &
+        spec.escape() & " must be <log-id>:<tree-size>:<root-hash>")
+      return AttestExitUsage
+    var size = 0
+    try:
+      size = parseInt(parts[1])
+    except ValueError:
+      stderr.writeLine("repro attest verify: --witnessed-root " &
+        spec.escape() & " does not state a tree size")
+      return AttestExitUsage
+    req.witnessedLogRoots.add WitnessedLogRoot(
+      logId: parts[0], treeSize: size, rootHash: parts[2])
+
   req.expectedChallengeHex = opts.challengeHex
   if opts.challengeFile.len > 0:
     if not fileExists(opts.challengeFile):
@@ -1072,7 +1307,20 @@ proc runAttestVerify(opts: AttestCliOptions): int =
   # about a verdict that `attestExitCodeFor` does not say.
   ord(attestExitCodeFor(verdict.decision))
 
-proc runAttestCommand*(args: seq[string]): int =
+proc runAttestCommand*(args: seq[string];
+                       env: CloudEnvLookup = nil): int =
+  ## `env` is the environment the cloud subcommands READ, stated by the
+  ## caller.
+  ##
+  ## The library was made environment-free and its gates state
+  ## `fixedEnvLookup` — and every case that went through this procedure
+  ## still reached the process environment, so three gates were
+  ## statements about the machine they ran on after all: one exported
+  ## variable whose value a plan legitimately spells turned 17 passing
+  ## cases into 13, 28 into 27 and 40 into 37. Fail-closed, and a gate
+  ## that fails on somebody's laptop and not on somebody else's is not a
+  ## gate. Omitted, this is the process environment, which is what an
+  ## operator means.
   var opts: AttestCliOptions
   try:
     opts = parseAttestArgs(args)
@@ -1080,12 +1328,13 @@ proc runAttestCommand*(args: seq[string]): int =
     stderr.writeLine("repro attest: " & err.msg)
     stderr.write(renderAttestUsage())
     return AttestExitUsage
+  let lookup = (if env == nil: processEnvLookup() else: env)
   case opts.sub
   of ascExpect: runAttestExpect(opts)
   of ascVerify: runAttestVerify(opts)
   of ascChallenge: runAttestChallenge(opts)
-  of ascLaunch: runAttestLaunch(opts)
-  of ascReap: runAttestReap(opts)
+  of ascLaunch: runAttestLaunch(opts, lookup)
+  of ascReap: runAttestReap(opts, lookup)
   of ascNone:
     stderr.write(renderAttestUsage())
     AttestExitUsage
