@@ -12438,6 +12438,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_pre_push_accepts_source_expression_local_ref.nim",
+    binary: "build/test-bin/t_pre_push_accepts_source_expression_local_ref",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_pre_push_protocol_v2_ref_validation.nim",
     binary: "build/test-bin/t_pre_push_protocol_v2_ref_validation",
     defines: @[],
