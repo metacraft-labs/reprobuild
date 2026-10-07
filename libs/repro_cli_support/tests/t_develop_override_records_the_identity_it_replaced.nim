@@ -70,7 +70,7 @@
 ## for the monitored helper edges the verb reaches; it is a collaborator here,
 ## not the entry point.
 
-import std/[exitprocs, json, os, posix, strutils, tables, unittest]
+import std/[exitprocs, hashes, json, os, posix, strutils, tables, unittest]
 
 import repro_cli_support
 import repro_core/cli_images
@@ -183,6 +183,54 @@ proc writeSibling(root, recipe: string; versionFile = ""): string =
   writeFile(result / "repro.nim", recipe)
   if versionFile.len > 0:
     writeFile(result / "VERSION", versionFile & "\n")
+
+proc renameDir(source, dest: cstring): cint {.importc: "rename",
+  header: "<stdio.h>".}
+  ## rename(2): atomic, and refuses a non-empty destination, which is the
+  ## publish-once property `sharedSibling` needs (`moveDir` falls back to a
+  ## non-atomic copy).
+
+proc sharedSibling(label, recipe: string; versionFile = ""): string =
+  ## The develop checkout for ``label``'s recipe, shared READ-ONLY by every
+  ## case process of every run in this worktree, at a path that depends only
+  ## on its content.
+  ##
+  ## WHY SHARED. The runner executes each case in its own process, so the
+  ## per-process memo below cannot stop 17 cases from building 17 scenarios,
+  ## and each build is a cold interface extraction plus a provider compile of
+  ## the same five recipes — about two minutes apiece, measured alone. The
+  ## probe keeps its compiled artifacts in the action cache keyed by the
+  ## recipe's PATH (`lockProviderArtifactDir`), so a per-pid sibling path made
+  ## every one of them a miss. A content-addressed path lets the engine's own
+  ## monitored-edge validation answer "already compiled" for the same recipe,
+  ## which is exactly what it does for a user who runs `repro develop` twice.
+  ##
+  ## WHY THIS IS SAFE. Nothing here, and nothing the verb does, writes into the
+  ## checkout: the override document lives in the CONSUMER, which stays
+  ## per-process, and the probe writes no artifacts into the project tree. The
+  ## directory name hashes the recipe and the `VERSION` text, so a changed
+  ## fixture lands at a new path rather than reusing an old one, and it is
+  ## published by one atomic rename, so a concurrent case either sees the
+  ## complete checkout or builds its own and discards it. No case asserts on
+  ## cold-compile behaviour; each asserts on the document the verb writes.
+  let siblingsRoot = repoRoot() / "build" / "nlf-devrec-siblings"
+  # Keyed by CONTENT only: two labels with the same recipe and `VERSION` text
+  # ("locked" and "unlocked") are the same checkout and share one compile.
+  let key = toHex(hash(recipe & "\x00" & versionFile))
+  let published = siblingsRoot / key
+  result = published / DevelopedPackage
+  if fileExists(result / "repro.nim"):
+    return
+  createDir(siblingsRoot)
+  let staging = siblingsRoot /
+    (".staging-" & label & "-" & $getCurrentProcessId())
+  removeDir(staging)
+  discard writeSibling(staging, recipe, versionFile)
+  if renameDir(staging.cstring, published.cstring) != 0:
+    # Another case published the same content first; theirs is identical.
+    removeDir(staging)
+  doAssert fileExists(result / "repro.nim"),
+    "shared develop sibling missing after publish: " & result
 
 proc developInto(consumerRoot, checkout: string;
                  dependency = DevelopedPackage): string =
@@ -373,7 +421,7 @@ proc scenario(label: string; lockedPackages: openArray[LockedPackage];
     var built: Scenario
     built.root = scratchRoot(label)
     writeConsumer(built.root / "app", lockedPackages)
-    built.checkout = writeSibling(built.root, recipe, versionFile)
+    built.checkout = sharedSibling(label, recipe, versionFile)
     built.metadataPath = developInto(built.root / "app", built.checkout)
     builtScenarios[label] = built
   builtScenarios[label]
