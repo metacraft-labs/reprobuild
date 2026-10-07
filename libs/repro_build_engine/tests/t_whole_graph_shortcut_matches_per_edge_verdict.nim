@@ -265,7 +265,9 @@ suite "whole-graph shortcut matches the per-edge verdict":
       weakFingerprint: act.weakFingerprint,
       policy: act.actionCachePolicy,
       outputRoot: act.cwd,
-      refuseRecordWithNoInputs: act.refusesRecordWithNoInputs())
+      refuseRecordWithNoInputs: act.refusesRecordWithNoInputs(),
+      enforceOwnedOutputs: true,
+      ownedOutputs: act.outputs)
 
     let scan = cache.scanHotIndexMetadataInputsUnchanged([probe], nil,
       [resolver])

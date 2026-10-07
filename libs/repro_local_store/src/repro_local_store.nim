@@ -351,6 +351,15 @@ type
       ## The action's cwd, used to resolve the record's relative output
       ## paths so the whole-build fast path can revalidate output state
       ## (Incremental-Invalidation.md §"Minimum check set" Step 3.3).
+    enforceOwnedOutputs*: bool
+      ## Treat a matched record whose recorded outputs are not exactly
+      ## `ownedOutputs` as if there were no record at all — see
+      ## `recordOutputsNotOwnedBy`. The engine always sets it; it is a flag
+      ## rather than implied by `ownedOutputs` because an action that declares
+      ## no outputs is a legitimate empty set.
+    ownedOutputs*: seq[string]
+      ## The action's declared outputs, as the action spells them (resolved
+      ## against `outputRoot`).
     refuseRecordWithNoInputs*: bool
       ## Treat a matched record that has NO input fingerprints and NO
       ## environment inputs as if there were no record at all.
@@ -2569,6 +2578,61 @@ proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
    revalidateDirEntries: revalidateDirEntries,
    recordDirWalks: recordDirWalks, recordDirEntries: recordDirEntries)
 
+proc ownedOutputKey(outputRoot, path: string): string =
+  ## One spelling per output location: resolved against the action's cwd the
+  ## way `restoreOutputs` and `outputStateMismatch` resolve it, separators
+  ## folded, `.`/`..` removed, no trailing separator, and case-folded where
+  ## the filesystem is case-insensitive.
+  result = os.normalizedPath(materialPath(outputRoot, path)).replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  when defined(windows):
+    result = result.toLowerAscii()
+
+proc recordOutputsNotOwnedBy*(record: ActionResultRecord; outputRoot: string;
+                              ownedOutputs: openArray[string]): string =
+  ## Why `record` does not describe an action whose declared outputs are
+  ## `ownedOutputs` (resolved against `outputRoot`, the action's cwd), or ""
+  ## when its recorded outputs are exactly those paths.
+  ##
+  ## Incremental-Invalidation.md §"Minimum check set per target
+  ## consultation", Step 3.3 defines a hit by the action's OWN declared
+  ## outputs: they must exist and match the record, or be materialized from
+  ## it. Both halves resolve the record's output paths, so a record that
+  ## names different paths is a record of some other computation — a hit on
+  ## it would revalidate, and on restore WRITE, files the requesting action
+  ## does not own (Filesystem-Policy-And-Observed-Inputs.md §"Double
+  ## Writes": a path has one writer).
+  ##
+  ## Nothing used to check this, because a weak fingerprint was assumed to
+  ## pin the output set. It does not: `action()`'s default weak fingerprint
+  ## is derived from the id, and a caller-supplied one need not mention the
+  ## outputs at all. Two actions whose keys converge while their declared
+  ## outputs live in different places — the same edge in two checkouts, a
+  ## collision, a record installed from a peer laid out elsewhere — would
+  ## otherwise share records. Relative outputs are unaffected: they resolve
+  ## against the requesting action's cwd on both sides of the comparison.
+  ##
+  ## The comparison is of SETS: a record missing one of the action's
+  ## outputs cannot produce it either.
+  var owned = initHashSet[string]()
+  for path in ownedOutputs:
+    owned.incl(ownedOutputKey(outputRoot, path))
+  var recorded = initHashSet[string]()
+  for output in record.outputs:
+    let key = ownedOutputKey(outputRoot, output.path)
+    recorded.incl(key)
+    if key notin owned:
+      return "the cached record's output '" & output.path &
+        "' is not one of this action's declared outputs (resolved against " &
+        "'" & outputRoot & "'); the record describes another location's " &
+        "computation and is not served"
+  for key in owned:
+    if key notin recorded:
+      return "this action declares output '" & key & "' but the cached " &
+        "record does not describe it; the record is not served"
+  ""
+
 proc outputStateMismatchImpl(record: ActionResultRecord;
                              outputRoot: string): string =
   ## Incremental-Invalidation.md §"Minimum check set per target
@@ -4431,6 +4495,14 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     # `HotMetadataProbe.refuseRecordWithNoInputs`.
     if probe.refuseRecordWithNoInputs and record.inputs.len == 0 and
         record.envInputs.len == 0:
+      return HotMetadataScan(status: hmssMissingRecord,
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
+    # A record of some other location's computation is not this action's
+    # record. Reported as `hmssMissingRecord` for the reason given just above:
+    # the full scheduler re-consults the edge, and the per-edge refusal
+    # (`unservableCacheRecordReason`) states the reason once.
+    if probe.enforceOwnedOutputs and recordOutputsNotOwnedBy(record,
+        probe.outputRoot, probe.ownedOutputs).len > 0:
       return HotMetadataScan(status: hmssMissingRecord,
         recordCount: totalRecords, checkedInputCount: checkedInputs)
     # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.

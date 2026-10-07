@@ -407,7 +407,14 @@ suite "a record keyed on nothing is refused at lookup":
     let builtin = builtinAction(bakWriteText, "pkg.write_text",
       outputs = ["out.txt"], text = "hello",
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
-    check builtin.unservableCacheRecordReason(empty).len == 0
+    # Empty of INPUTS, but describing the action's own output, as every real
+    # record of this edge does — so this asserts the no-inputs exemption and
+    # nothing else (a record that does not describe the action's declared
+    # outputs is refused for that separate reason; see
+    # `recordOutputsNotOwnedBy`).
+    var emptyOfInputs = empty
+    emptyOfInputs.outputs = @[OutputBlob(path: "out.txt")]
+    check builtin.unservableCacheRecordReason(emptyOfInputs).len == 0
 
     # An edge whose evidence comes from a report its AUTHOR declared owns that
     # set; `dgRecognizedFormat` is not in `MonitorPolicyKinds`, the engine

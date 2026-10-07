@@ -396,6 +396,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_cache_record_for_other_outputs_is_not_served.nim",
+    binary: "build/test-bin/t_cache_record_for_other_outputs_is_not_served",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
     binary: "build/test-bin/t_child_cpu_stats_row",
     defines: @[],

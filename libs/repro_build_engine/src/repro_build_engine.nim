@@ -3839,6 +3839,20 @@ proc unservableCacheRecordReason*(action: BuildAction;
   ## 6). Draining those needs a discriminator the record does carry, which is
   ## its version; see `ActionRecordVersion` in `repro_local_store`. Guessing
   ## here instead would refuse sound entries and still miss unsound ones.
+  ##
+  ## A SECOND, INDEPENDENT REFUSAL comes first and applies to every action
+  ## kind: a record whose outputs are not exactly this action's declared
+  ## outputs is another computation's record (`recordOutputsNotOwnedBy`).
+  ## Serving it would revalidate, or on restore overwrite, files this action
+  ## does not own — the outcome a weak-fingerprint collision across locations
+  ## must never have. Equally record-intrinsic: it compares the record with
+  ## the action in hand and nothing else.
+  let foreign = recordOutputsNotOwnedBy(record, action.cwd, action.outputs)
+  if foreign.len > 0:
+    return "action '" & action.id & "': " & foreign & ". Re-running. " &
+      "Spec: Incremental-Invalidation.md §\"Minimum check set per target " &
+      "consultation\" Step 3.3, Filesystem-Policy-And-Observed-Inputs.md " &
+      "§\"Double Writes\"."
   if not action.refusesRecordWithNoInputs():
     return ""
   if record.inputs.len > 0 or record.envInputs.len > 0:
@@ -16099,7 +16113,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # `lookupActionResult` seam is not on this path at all. The probe
           # carries the scope so the scan can apply it where it already has
           # the record in hand. See `refusesRecordWithNoInputs`.
-          refuseRecordWithNoInputs: action.refusesRecordWithNoInputs()))
+          refuseRecordWithNoInputs: action.refusesRecordWithNoInputs(),
+          # Same reason, the other refusal `unservableCacheRecordReason`
+          # makes: a record of another location's outputs is not this
+          # action's record. See `recordOutputsNotOwnedBy`.
+          enforceOwnedOutputs: true,
+          ownedOutputs: action.outputs))
         hotEnvResolvers.add(action.actionEnvResolver(unsafeAddr config))
       let lookupStart = statStart()
       let navigatorStart = statStart()
