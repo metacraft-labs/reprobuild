@@ -1703,6 +1703,31 @@ type
       ## ("no cache record for weak fingerprint", "input changed: <path>",
       ## …). Empty when there is nothing to say; stored as SQL NULL so
       ## "no reason recorded" stays distinguishable from an empty reason.
+    cachePublishSkipReason*: string
+      ## WHY THIS ACTION PUBLISHED NO CACHE RECORD, although it is
+      ## `cacheable`, ran and exited 0. Empty on every action that either
+      ## published or was never asked to.
+      ##
+      ## A withheld publish is the fail-closed arm of
+      ## `Failure-Semantics.md` §"Monitoring Failures" and
+      ## `Monitor-Loss-Path-Invalidation.md` §Vocabulary, and it is CORRECT.
+      ## What was missing is that it was indistinguishable, from outside, from
+      ## a first build: the edge comes back `cdMiss` with `reason` = the
+      ## settle detail (`exit=0`), it re-runs on the next build for the same
+      ## reason, and it does so forever as long as the cause persists. The
+      ## cause was recorded in `cacheIneligibilityReasons` and in a scheduler
+      ## TRACE, neither of which any build log prints.
+      ##
+      ## This is the `reason`/`cacheMissReason` pair's missing third: `reason`
+      ## says how the action settled, `cacheMissReason` says why the LOOKUP
+      ## found nothing, and this says why the next lookup will not find
+      ## anything either. On an edge in this state `cacheMissReason` is
+      ## "no cache record for weak fingerprint" on every build — true, and
+      ## silent about the fact that none will ever be written.
+      ##
+      ## Spec: `Action-Cache-Per-Edge-Store.md` §8.3's observability rule
+      ## ("a cost that cannot be attributed cannot be defended") applied to a
+      ## permanent miss rather than to the prefix's cost.
     outputBytes*: int64
       ## Total size of the action's declared outputs after it settled.
 
@@ -3183,7 +3208,17 @@ proc trace(result: var BuildRunResult; actionId, event, detail: string) =
     detail: detail)
 
 proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
-                            collection: EvidenceCollection) =
+                            collection: EvidenceCollection;
+                            resultIndex = -1;
+                            causeNote = "") =
+  ## `causeNote` is an OPTIONAL sentence naming the host-level cause behind
+  ## the reason codes (today: a SIP-protected root image, which no reason
+  ## code can express because the code says only "monitor loss"). It reaches
+  ## `ActionResult.cachePublishSkipReason` and NOT the trace detail: the
+  ## detail's exact text is pinned by `t_zero_evidence_edge_is_not_cacheable`
+  ## and `test_m6_entropy_blessing`, and widening it there would move a
+  ## string three suites compare byte-for-byte while adding nothing those
+  ## suites are about.
   var reasons: seq[string] = @[]
   for reason in collection.cacheIneligibilityReasons:
     reasons.add($reason)
@@ -3197,6 +3232,20 @@ proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
       "cache-skip-ineligible"
   result.trace(actionId, event,
     "action-cache publication skipped; reasons=" & reasons.join(","))
+  # The same facts, on the RESULT, so a caller that renders results rather
+  # than traces can say them. Every build log is in that class.
+  #
+  # `resultIndex` is passed rather than searched for. A scan by id would be
+  # O(n) per skipped edge and O(n^2) over a graph on which EVERY edge is
+  # skipped — which is precisely the case this field exists to describe (a
+  # host whose toolchain image cannot be injected skips all of them), so the
+  # cheap spelling would have been quadratic exactly where it is used.
+  if resultIndex >= 0 and resultIndex < result.results.len:
+    var text = "reasons=" & reasons.join(",") &
+      "; this edge will re-run on every build until the cause is removed"
+    if causeNote.len > 0:
+      text.add(". " & causeNote)
+    result.results[resultIndex].cachePublishSkipReason = text
 
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
@@ -11727,6 +11776,57 @@ when defined(macosx):
       parts.add("rejected as SIP-protected: " & rejected.join(", "))
     parts.join("; ")
 
+proc unobservableRootImageNote(action: BuildAction;
+                               config: ptr BuildEngineConfig): string =
+  ## Name a SIP-protected root image as the cause of a withheld publish.
+  ##
+  ## WHY THIS SENTENCE IS WORTH A PROC. macOS strips `DYLD_INSERT_LIBRARIES`
+  ## when it execs a platform binary, so the shim never loads, the root
+  ## process emits no `mrProcessStart`, io-mon synthesises an un-injectable
+  ## root spawn and reports an UNKNOWN-SCOPE loss, and
+  ## `applyMonitorEvidenceStatus` withholds the record. Every step of that is
+  ## correct and fail-closed. The problem is that the reason code the operator
+  ## would see — `cirMonitorLoss` — is the same code a kill-before-flush or a
+  ## breakaway daemon produces, and the three have nothing in common at the
+  ## keyboard: two are transient and this one is PERMANENT for as long as that
+  ## image is what the edge's tool name resolves to.
+  ##
+  ## MEASURED, and the reason this is not hypothetical. `examples/hello-world-c`
+  ## declares `uses: "gcc"`. On a macOS Nix dev shell the clang wrapper on
+  ## PATH supplies `cc`, `clang`, `c++`, `ar` and `ld` and NOT `gcc`, so the
+  ## bare name resolves to `/usr/bin/gcc` — Apple's SIP-protected xcrun shim.
+  ## The shipped example's link edge therefore published no record on any
+  ## build and relinked every time. Its compile edge runs the SAME image and
+  ## escapes only because its `-MD` depfile is a second evidence channel; its
+  ## `ar` archive edge escapes because `ar` IS in the wrapper. So the
+  ## asymmetry is per TOOL NAME, not per member kind.
+  ##
+  ## The prefix predicate is `sip_propagation.isSipProtected`, the same one
+  ## io-mon uses, for the reason `resolveNonSipShell` gives: the engine and
+  ## the monitor must not hold two opinions about what is SIP-protected.
+  ##
+  ## Empty off macOS, and empty when the root image is injectable — in which
+  ## case the loss has some other cause and this must not guess at one.
+  when defined(macosx):
+    let image = executedToolImagePath(action, config)
+    if image.len > 0 and sip_propagation.isSipProtected(image):
+      return "The action's root image is " & image & ", which is " &
+        "SIP-protected: macOS strips DYLD_INSERT_LIBRARIES when it execs a " &
+        "platform binary, so the monitor shim cannot load and this edge can " &
+        "never publish a cache record. Point the edge's tool name at a " &
+        "non-SIP image (on a Nix/Homebrew macOS host the clang wrapper's " &
+        "`cc`/`clang` rather than `/usr/bin/gcc`), or declare the edge " &
+        "`cacheable = false` so the permanent re-run is stated rather than " &
+        "discovered."
+    return ""
+  else:
+    # Not a `discard action` / `discard config` pair: an unused proc
+    # parameter is not a warning in Nim, and a `when` branch this host does
+    # not take is not semantically checked either — so a dead statement here
+    # would be two risks (a compile error only another platform sees, and a
+    # reader thinking the discards were needed) bought for nothing.
+    result = ""
+
 proc bypassActionStdoutLogPath(cacheRoot, actionId: string): string =
   bypassActionLogDir(cacheRoot) / (actionId & ".stdout.log")
 
@@ -17781,7 +17881,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishPeerCacheBundle(action.weakFingerprint, record)
               publishBinaryCacheBundle(action, record)
             elif action.cacheable and evidence.disableCacheHits:
-              runResult.traceCacheIneligibility(id, evidence)
+              runResult.traceCacheIneligibility(id, evidence,
+                idToIndex.resultIndex(id),
+                unobservableRootImageNote(action, unsafeAddr config))
             elif action.fixedOutput:
               recordFixedOutputPortable(idToIndex.resultIndex(id), action)
             completeSuccess(id, asSucceeded,
@@ -17989,7 +18091,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishPeerCacheBundle(plan.action.weakFingerprint, record)
               publishBinaryCacheBundle(plan.action, record)
             elif plan.action.cacheable and evidence.disableCacheHits:
-              runResult.traceCacheIneligibility(finished.id, evidence)
+              runResult.traceCacheIneligibility(finished.id, evidence,
+                idToIndex.resultIndex(finished.id),
+                unobservableRootImageNote(plan.action, unsafeAddr config))
             elif plan.action.fixedOutput:
               recordFixedOutputPortable(
                 idToIndex.resultIndex(finished.id), plan.action)
@@ -18591,7 +18695,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           publishPeerCacheBundle(action.weakFingerprint, record)
           publishBinaryCacheBundle(action, record)
         elif action.cacheable and evidence.disableCacheHits:
-          runResult.traceCacheIneligibility(finished.id, evidence)
+          runResult.traceCacheIneligibility(finished.id, evidence, idx,
+            unobservableRootImageNote(action, unsafeAddr config))
         elif action.fixedOutput:
           recordFixedOutputPortable(idx, action)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,

@@ -4929,7 +4929,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         return ActionCacheLookup(
           status: aclMissInputChanged,
           record: hot.record,
-          message: "input metadata changed: " & changedInput,
+          message: "input metadata changed: " & changedInput &
+            " (1 candidate record considered)",
           changedInputPath: changedInput)
       # ffpHybrid, metadata moved: this is exactly the case the hybrid
       # policy exists for -- "compare timestamp metadata first; when the
@@ -4999,18 +5000,30 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       cache.writePerEdgeRecord(candidate)
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
     return ActionCacheLookup(status: aclHit, record: candidate)
+  # `Action-Cache-Per-Edge-Store.md` §8.3's observability rule, applied to a
+  # miss: an edge that HAD candidates and matched none is a different event
+  # from an edge with no record at all, and the two were reported with
+  # messages a reader could not tell apart from the outside ("input changed:
+  # <path>" does not say whether one record was consulted or eight, and
+  # "no matching cache record for policy" does not say that records existed).
+  # The count is what separates a first build from a warm edge that cannot
+  # hit. It is `records.len` — every candidate the walk above could have
+  # matched, before the policy filter, because a record skipped for its
+  # policy is still a record this edge has.
+  let considered = $records.len & " candidate record" &
+    (if records.len == 1: "" else: "s") & " considered"
   if sawInputChange:
     ActionCacheLookup(
       status: aclMissInputChanged,
       message:
-        if firstChangedInput.len > 0:
+        (if firstChangedInput.len > 0:
           "input changed: " & firstChangedInput
         else:
-          "input changed",
+          "input changed") & " (" & considered & ")",
       changedInputPath: firstChangedInput)
   else:
     ActionCacheLookup(status: aclMissNoRecord,
-      message: "no matching cache record for policy")
+      message: "no matching cache record for policy (" & considered & ")")
 
 proc determinismMetaFor*(cache: ActionCache; weak, strong: ContentDigest):
     EntryDeterminism =

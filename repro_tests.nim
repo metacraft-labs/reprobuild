@@ -1332,6 +1332,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_withheld_cache_publish_is_attributable.nim",
+    binary: "build/test-bin/t_withheld_cache_publish_is_attributable",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim",
     binary: "build/test-bin/test_engine_publisher_wiring",
     defines: @[],

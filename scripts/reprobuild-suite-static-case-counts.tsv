@@ -154,6 +154,7 @@ libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
 libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	5
 libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim	nim	9
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
+libs/repro_cli_support/tests/t_withheld_cache_publish_is_attributable.nim	nim	5
 libs/repro_cli_support/tests/test_engine_publisher_wiring.nim	nim	5
 libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	4
 libs/repro_cli_support/tests/test_m10_home_gc_cli.nim	nim	7

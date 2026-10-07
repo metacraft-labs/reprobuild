@@ -5605,6 +5605,11 @@ proc actionResultJson(item: ActionResult): JsonNode =
     # re-ran, and a warm activation that never converges cannot be diagnosed
     # from the stats it writes.
     "cacheMissReason": item.cacheMissReason,
+    # WHY NO RECORD WILL BE THERE NEXT TIME EITHER. `cacheMissReason` grades
+    # the lookup that just happened; this grades the publish that did not,
+    # which is the only field that distinguishes a first build from an edge
+    # that can never hit. See `ActionResult.cachePublishSkipReason`.
+    "cachePublishSkipReason": item.cachePublishSkipReason,
     "reason": item.reason,
     "dependencyPolicyKind": $item.dependencyPolicyKind,
     "runQuotaBackend": item.runQuotaBackend,
@@ -9427,6 +9432,30 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   finally:
     releaseInterfaceArtifactLock(artifactLock)
 
+proc cacheAttributionLines*(item: ActionResult): seq[string] =
+  ## The follow-on lines a `--log=actions` entry needs before a PERMANENT
+  ## cache miss is distinguishable from a first build.
+  ##
+  ## WHY THEY ARE SEPARATE LINES. The `action: …` line's field list is
+  ## compared byte-for-byte by several suites and read by scripts; a new
+  ## field inside it moves text for every action in every build to serve two
+  ## of them. These are emitted only for an action that has something to say,
+  ## so a build in which every edge behaves adds no output at all.
+  ##
+  ## WHY THE ACTION LINE CANNOT ALREADY SAY IT. `completeSuccess` overwrites
+  ## `reason` with the settle detail, so for exactly the actions that LAUNCH
+  ## — the ones whose cost is in question — the cache verdict that preceded
+  ## the launch is gone by the time the line is built. `cacheMissReason` is
+  ## pinned at the lookup (`recordCacheLookupFacts`) for that reason and was
+  ## then rendered nowhere but the report JSON.
+  ##
+  ## Spec: `Action-Cache-Per-Edge-Store.md` §8.3 — "a cost that cannot be
+  ## attributed cannot be defended".
+  if item.launched and item.cacheMissReason.len > 0:
+    result.add("  cache-miss: " & item.cacheMissReason)
+  if item.cachePublishSkipReason.len > 0:
+    result.add("  cache-publish-skipped: " & item.cachePublishSkipReason)
+
 proc restoreCachedOutputsEnvDefault(): bool =
   ## S7 — the ``REPRO_RESTORE_CACHED_OUTPUTS`` default behind
   ## ``--restore-cached-outputs``, in one place because every command that
@@ -10040,6 +10069,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
         " evidence=depfile:" & $item.depfileInputCount())
+      for line in cacheAttributionLines(item):
+        logAction(line)
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
@@ -11663,6 +11694,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
         " evidence=depfile:" & $item.depfileInputCount())
+      for line in cacheAttributionLines(item):
+        logAction(line)
     if reportPersistence.requested and not reportPersistence.suppressed:
       logSummary("buildReport: " & reportPath)
     finishStat(buildStats, statsEnabled, "repro action log render",
