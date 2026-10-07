@@ -28,7 +28,7 @@
 ## ``workDir = getCurrentDir()`` (the reprobuild repo root), mirroring
 ## ``t_rp2_provider_session_invoke.nim``.
 
-import std/[os, strutils, tables, unittest]
+import std/[hashes, os, strutils, tables, unittest]
 
 import repro_interface_artifacts
 import repro_provider_runtime
@@ -123,13 +123,46 @@ proc unmarshalResponse(box: BoxedValue): ProviderGraphResponse =
 
 type BuiltProvider = tuple[binary, artifactId, projectRoot, packageName: string]
 
-proc buildProvider(tempRoot, tag, body, packageName: string): BuiltProvider =
-  let projectRoot = tempRoot / tag
-  let outDir = tempRoot / (tag & "-out")
+when not defined(windows):
+  proc flock(fd: cint; operation: cint): cint {.importc: "flock",
+    header: "<sys/file.h>".}
+  var LOCK_EX {.importc: "LOCK_EX", header: "<sys/file.h>".}: cint
+
+proc buildProvider(tag, body, packageName: string): BuiltProvider =
+  ## Build (or reuse) the provider for ``body`` in a directory shared by every
+  ## case process of every run in this checkout.
+  ##
+  ## The three cases need five distinct providers but used to build nine,
+  ## each in a per-pid temp dir, and the runner gives each case its own
+  ## process, so nothing was ever reused: every build was a cold interface
+  ## extraction plus a cold provider compile. The directory is keyed by the
+  ## tag and the recipe text, and the build runs through the same
+  ## ``extractInterfaceFromModule`` / ``compileProviderBinary`` calls as
+  ## before; their own freshness checks (which fold in the reprobuild library
+  ## source fingerprint) decide whether an existing artifact is still valid.
+  ## No case asserts on compile behaviour — only on the sessions and
+  ## evaluation inputs of the providers once built — and the recipe is never
+  ## rewritten once present, so a running provider's source stays stable.
+  ##
+  ## An exclusive ``flock`` serialises concurrent cases on the same provider:
+  ## the second waits for the first's build and then finds it fresh.
+  ## Windows has no ``flock``; there each process keeps its own directory.
+  let sharedRoot = getCurrentDir() / "build" / "rp3-shared-providers" /
+    (tag & "-" & toHex(hash(body)) &
+      (when defined(windows): "-" & $getCurrentProcessId() else: ""))
+  let projectRoot = sharedRoot / tag
+  let outDir = sharedRoot / (tag & "-out")
   createDir(extendedPath(projectRoot))
   createDir(extendedPath(outDir))
+  let lockFile = open(sharedRoot / ".build.lock", fmWrite)
+  defer: lockFile.close()   # closing the descriptor releases the lock
+  when not defined(windows):
+    doAssert flock(cint(lockFile.getFileHandle()), LOCK_EX) == 0,
+      "flock failed on " & sharedRoot
   let modulePath = projectRoot / "reprobuild.nim"
-  writeFile(extendedPath(modulePath), body)
+  if not fileExists(extendedPath(modulePath)) or
+      readFile(extendedPath(modulePath)) != body:
+    writeFile(extendedPath(modulePath), body)
   let interfacePath = outDir / (tag & "-interface.rbsz")
   let stubPath = outDir / (tag & "-interface.nim")
   let artifact = extractInterfaceFromModule(modulePath, interfacePath,
@@ -186,14 +219,10 @@ proc resolveDependency(pool: ProviderSessionPool; dep: BuiltProvider):
 suite "RP3 bind-deps + cross-consumer session sharing":
 
   test "two consumers binding the SAME dependency share ONE launched session; a different version does not":
-    let tempRoot = getTempDir() / "rp3-share-" & $getCurrentProcessId()
-    removeDir(extendedPath(tempRoot))
-    defer: removeDir(extendedPath(tempRoot))
-
-    let dep = buildProvider(tempRoot, "dep", dependencyBodyTemplate % "", "rp3dep")
-    let consumerA = buildProvider(tempRoot, "ca",
+    let dep = buildProvider("dep", dependencyBodyTemplate % "", "rp3dep")
+    let consumerA = buildProvider("ca",
       consumerBodyTemplate % "a", "rp3consumera")
-    let consumerB = buildProvider(tempRoot, "cb",
+    let consumerB = buildProvider("cb",
       consumerBodyTemplate % "b", "rp3consumerb")
 
     let pool = newProviderSessionPool()
@@ -225,7 +254,7 @@ suite "RP3 bind-deps + cross-consumer session sharing":
     # NON-VACUITY: a DIFFERENT dependency version has a distinct
     # ProviderArtifactId ⇒ distinct ProviderSessionKey ⇒ a distinct launched
     # session (sharing is keyed, not unconditional).
-    let depV2 = buildProvider(tempRoot, "depv2",
+    let depV2 = buildProvider("depv2",
       dependencyBodyTemplate % "v2", "rp3depv2")
     check depV2.artifactId != dep.artifactId
     let depForV2 = pool.resolveDependency(depV2)
@@ -234,12 +263,8 @@ suite "RP3 bind-deps + cross-consumer session sharing":
     check pool.launchCount == 4  # v2 is a fresh launch
 
   test "BindDependencies is honored: a bound consumer invokes through the handle; an unbound consumer fails cleanly":
-    let tempRoot = getTempDir() / "rp3-bind-" & $getCurrentProcessId()
-    removeDir(extendedPath(tempRoot))
-    defer: removeDir(extendedPath(tempRoot))
-
-    let dep = buildProvider(tempRoot, "dep", dependencyBodyTemplate % "", "rp3dep")
-    let consumer = buildProvider(tempRoot, "ca",
+    let dep = buildProvider("dep", dependencyBodyTemplate % "", "rp3dep")
+    let consumer = buildProvider("ca",
       consumerBodyTemplate % "a", "rp3consumera")
 
     let pool = newProviderSessionPool()
@@ -285,14 +310,10 @@ suite "RP3 bind-deps + cross-consumer session sharing":
     check mentionedNoBinding
 
   test "the dependency's observed inputs propagate to the consumer edge":
-    let tempRoot = getTempDir() / "rp3-inputs-" & $getCurrentProcessId()
-    removeDir(extendedPath(tempRoot))
-    defer: removeDir(extendedPath(tempRoot))
-
-    let dep = buildProvider(tempRoot, "dep", dependencyBodyTemplate % "", "rp3dep")
-    let consumer = buildProvider(tempRoot, "ca",
+    let dep = buildProvider("dep", dependencyBodyTemplate % "", "rp3dep")
+    let consumer = buildProvider("ca",
       consumerBodyTemplate % "a", "rp3consumera")
-    let plain = buildProvider(tempRoot, "plain", plainConsumerBody, "rp3plain")
+    let plain = buildProvider("plain", plainConsumerBody, "rp3plain")
 
     let pool = newProviderSessionPool()
     defer: pool.closeAll()
