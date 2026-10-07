@@ -5458,7 +5458,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "buildProvider",
           "executedVariables": [],
-          "line": 135,
+          "line": 168,
           "path": "tests/integration/t_rp3_bind_deps_and_sharing.nim",
           "patterns": [
             "repro-extract-interface"
@@ -5474,7 +5474,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "buildProvider",
           "executedVariables": [],
-          "line": 141,
+          "line": 174,
           "path": "tests/integration/t_rp3_bind_deps_and_sharing.nim",
           "patterns": [
             "repro-compile-provider-binary"
