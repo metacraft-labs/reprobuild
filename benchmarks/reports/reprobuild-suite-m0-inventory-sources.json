@@ -31001,7 +31001,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_cli_support"
+        "repro_cli_support",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
