@@ -6494,6 +6494,45 @@ proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
       return false
   true
 
+proc keyedToolIdentityPaths(outDir: string; key: string):
+    tuple[identityPath: string; inspectionPath: string] =
+  ## The memo entry for ONE tool-identity key. These are the authoritative
+  ## copies: a file here only ever holds the identity resolved for ``key``.
+  ##
+  ## The STABLE files next to them (``identityPaths``) are not. They hold
+  ## whichever resolution in this ``outDir`` ran LAST, and every invocation
+  ## with a different key rewrites them — a narrower target closure (``repro
+  ## build .#test#X`` resolves only the uses that closure names, so two or
+  ## three tools against the whole project's thirty-odd) or a ``$PATH`` that
+  ## selects another executable. Concurrent invocations in one checkout are
+  ## routine (a test suite, two terminals), so neither reading a stable file
+  ## back as a cache entry nor handing its path to a caller as "the identity
+  ## this invocation resolved" is sound: by the time it is read it can be
+  ## another invocation's identity.
+  let cacheDir = outDir / "tool-identity-cache"
+  (identityPath: cacheDir / (key & ".rbtp"),
+    inspectionPath: cacheDir / (key & ".inspect.json"))
+
+proc replaceFile(path: string; write: proc (staged: string)) =
+  ## Write ``path`` so that a concurrent reader sees the old content or the
+  ## new, never a truncated file: ``write`` fills a staged file beside it,
+  ## which is then renamed over it.
+  createDir(extendedPath(parentDir(path)))
+  let staged = path & ".tmp-" & $getCurrentProcessId()
+  write(staged)
+  moveFile(extendedPath(staged), extendedPath(path))
+
+proc writeKeyedInspection(path: string; identity: PathOnlyBuildIdentity) =
+  replaceFile(path, proc (staged: string) =
+    writeInspectionJson(staged, identity))
+
+proc writeKeyedToolIdentity(outDir: string; key: string;
+                            identity: PathOnlyBuildIdentity) =
+  let keyed = keyedToolIdentityPaths(outDir, key)
+  replaceFile(keyed.identityPath, proc (staged: string) =
+    writePathOnlyBuildIdentity(staged, identity))
+  writeKeyedInspection(keyed.inspectionPath, identity)
+
 proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
                         artifact: ProjectInterfaceArtifact;
                         stableIdentityPath,
@@ -6501,42 +6540,36 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
     tuple[hit: bool; identity: PathOnlyBuildIdentity] =
   let key = toolIdentityCacheKey(artifact, mode)
   let cacheDir = outDir / "tool-identity-cache"
-  let cacheIdentityPath = cacheDir / (key & ".rbtp")
-  let cacheInspectionPath = cacheDir / (key & ".inspect.json")
+  let keyed = keyedToolIdentityPaths(outDir, key)
   let stableKeyPath = cacheDir / (mode.modeName & ".current-key")
-  if fileExists(extendedPath(stableIdentityPath)) and fileExists(extendedPath(stableKeyPath)) and
-      readFile(extendedPath(stableKeyPath)).strip() == key:
-    try:
-      let identity = readPathOnlyBuildIdentity(stableIdentityPath)
-      if identity.interfaceFingerprint != artifact.interfaceFingerprint:
-        return
-      if not identity.toolIdentityRealizationsUsable():
-        return
-      if not fileExists(extendedPath(stableInspectionPath)):
-        if fileExists(extendedPath(cacheInspectionPath)):
-          createDir(extendedPath(parentDir(stableInspectionPath)))
-          copyFile(extendedPath(cacheInspectionPath), extendedPath(stableInspectionPath))
-        else:
-          writeInspectionJson(stableInspectionPath, identity)
-      return (hit: true, identity: identity)
-    except CatchableError:
-      discard
-  if not fileExists(extendedPath(cacheIdentityPath)):
+  # Only the keyed entry is read back. The stable files are refreshed from
+  # it below for readers that want "the latest identity in this outDir",
+  # but they are never the cache: checking ``current-key`` and then reading
+  # the stable identity is two reads, and another invocation can replace
+  # the identity between them with one for a different key — same project,
+  # same interface fingerprint, different tools.
+  if not fileExists(extendedPath(keyed.identityPath)):
     return
   try:
-    let identity = readPathOnlyBuildIdentity(cacheIdentityPath)
+    let identity = readPathOnlyBuildIdentity(keyed.identityPath)
     if identity.interfaceFingerprint != artifact.interfaceFingerprint:
       return
     if not identity.toolIdentityRealizationsUsable():
       return
-    writePathOnlyBuildIdentity(stableIdentityPath, identity)
-    if fileExists(extendedPath(cacheInspectionPath)):
+    if not fileExists(extendedPath(keyed.inspectionPath)):
+      writeKeyedInspection(keyed.inspectionPath, identity)
+    let alreadyCurrent =
+      fileExists(extendedPath(stableKeyPath)) and
+        fileExists(extendedPath(stableIdentityPath)) and
+        fileExists(extendedPath(stableInspectionPath)) and
+        readFile(extendedPath(stableKeyPath)).strip() == key
+    if not alreadyCurrent:
+      writePathOnlyBuildIdentity(stableIdentityPath, identity)
       createDir(extendedPath(parentDir(stableInspectionPath)))
-      copyFile(extendedPath(cacheInspectionPath), extendedPath(stableInspectionPath))
-    else:
-      writeInspectionJson(stableInspectionPath, identity)
-    createDir(extendedPath(cacheDir))
-    writeFile(extendedPath(stableKeyPath), key & "\n")
+      copyFile(extendedPath(keyed.inspectionPath),
+        extendedPath(stableInspectionPath))
+      createDir(extendedPath(cacheDir))
+      writeFile(extendedPath(stableKeyPath), key & "\n")
     return (hit: true, identity: identity)
   except CatchableError:
     return (hit: false, identity: PathOnlyBuildIdentity())
@@ -6544,10 +6577,8 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
 proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
                             artifact: ProjectInterfaceArtifact;
                             identity: PathOnlyBuildIdentity) =
-  let key = toolIdentityCacheKey(artifact, mode)
-  let cacheDir = outDir / "tool-identity-cache"
-  writePathOnlyBuildIdentity(cacheDir / (key & ".rbtp"), identity)
-  writeInspectionJson(cacheDir / (key & ".inspect.json"), identity)
+  writeKeyedToolIdentity(outDir, toolIdentityCacheKey(artifact, mode),
+    identity)
 
 proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
   if snapshot.fragments.len == 0:
@@ -6977,7 +7008,14 @@ proc prewarmToolIdentitiesFrom(outDir: string;
       let identityEvidence = durableFileEvidence(paths.identityPath)
       if not keyEvidence.exists or not identityEvidence.exists:
         continue
-      let identity = readPathOnlyBuildIdentity(paths.identityPath)
+      # The identity comes from the KEYED entry, not the stable file beside
+      # the stamp: reading the stamp and then the stable identity is two
+      # reads, and a build of another target closure in between leaves the
+      # stable file holding a different key's tools under this key.
+      let keyed = keyedToolIdentityPaths(outDir, key)
+      if not fileExists(extendedPath(keyed.identityPath)):
+        continue
+      let identity = readPathOnlyBuildIdentity(keyed.identityPath)
       warmToolIdentities[outDir & "\0" & mode.modeName & "\0" & key] =
         WarmToolIdentity(
           populatedByPid: getCurrentProcessId(),
@@ -24281,8 +24319,17 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       publicCliPath, effectiveMode)
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
-    result.toolIdentityPath = resolved.identityPath
-    result.toolInspectionPath = resolved.inspectionPath
+    # Report the KEYED memo entry, not the stable files: those are rewritten
+    # by every later invocation in this outDir with another key (a narrower
+    # target, another $PATH), so the path this payload names would describe
+    # whatever ran last by the time a caller opens it — not this graph.
+    let key = toolIdentityCacheKey(artifact, effectiveMode)
+    let keyed = keyedToolIdentityPaths(outDir, key)
+    if not fileExists(extendedPath(keyed.identityPath)) or
+        not fileExists(extendedPath(keyed.inspectionPath)):
+      writeKeyedToolIdentity(outDir, key, identity)
+    result.toolIdentityPath = keyed.identityPath
+    result.toolInspectionPath = keyed.inspectionPath
 
   let hasBuildBlock = moduleHasBuildBlock(modulePath)
   if not hasBuildBlock and

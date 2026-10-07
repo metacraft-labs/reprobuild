@@ -141,14 +141,43 @@ suite "repro infra apply: a hung lock owner does not wedge the host":
     # heartbeat goes stale between beats. A naive "stale ⇒ reclaim" rule
     # would steal the lock from a perfectly healthy apply. The second
     # observation is what prevents that.
-    let holder = startHolder(sd, beatMs = 1500)
+    #
+    # The cycle has to be long enough for "stale" to be reachable at all.
+    # The heartbeat is a whole-second timestamp and the rule is strict
+    # (`now - heartbeatAt > 1`), so a beat at wall time B reads stale only
+    # from `floor(B) + 2` on: between 1 and 2 seconds after the beat,
+    # depending on where in its second B fell. A 1.5 s cycle leaves a stale
+    # window of `frac(B) mod 0.5` seconds, which is ZERO for a holder whose
+    # beats land near a whole or half second; a run that started there
+    # timed out in `waitUntilHeartbeatOlderThan` without ever seeing a
+    # stale reading. A 3 s cycle leaves at least one stale second per beat.
+    const beatMs = 3000
+    let holder = startHolder(sd, beatMs = beatMs)
     defer: stopHolder(holder)
     let holderPid = processID(holder)
     check waitForOwner(sd, holderPid)
-    check waitUntilHeartbeatOlderThan(sd, 1)
-    let before = readApplyLockRecord(sd)
-    let acq = tryAcquireApplyLock(sd, ApplyLockPolicy(
-      heartbeatStaleSeconds: 1, maxAgeSeconds: 0, reclaimConfirmMs: 3000))
+    let policy = ApplyLockPolicy(
+      heartbeatStaleSeconds: 1, maxAgeSeconds: 0,
+      # A stale reading means more than one second since the last beat,
+      # so the next one is due within `beatMs - 1000`; the confirmation
+      # window covers that with a further two seconds to spare.
+      reclaimConfirmMs: beatMs + 2000)
+    # The case is about what the acquirer does with a STALE reading, so
+    # that is the precondition, and it is the acquirer's own reading that
+    # counts: a beat landing between our observation and its read would
+    # hand it a fresh heartbeat, which it refuses without watching. Such
+    # an attempt proves nothing and is repeated rather than judged.
+    var before: ApplyLockRecord
+    var acq: ApplyLockAcquisition
+    for attempt in 1 .. 3:
+      check waitUntilHeartbeatOlderThan(sd, 1)
+      before = readApplyLockRecord(sd)
+      acq = tryAcquireApplyLock(sd, policy)
+      if acq.acquired or acq.sinceHeartbeatSeconds > 1:
+        break
+      checkpoint("attempt " & $attempt & " read a fresh heartbeat (" &
+        $acq.sinceHeartbeatSeconds & "s); retrying")
+    check acq.sinceHeartbeatSeconds > 1
     check not acq.acquired
     check applyLockOwner(sd) == holderPid
     # It really did beat during the window — the refusal was earned.
