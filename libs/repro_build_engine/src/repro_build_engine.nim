@@ -14214,6 +14214,75 @@ proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
     return candidate.path
   "reprobuild-nix-daemon"
 
+when not defined(windows):
+  const NixDaemonExchangeAttempts* = 3
+    ## How many times one request is offered to the evaluation daemon before
+    ## a dropped connection is reported as a failure.
+
+  proc nixDaemonSocketPath*(): string =
+    "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
+
+  proc exchangeWithNixDaemon*(socketPath, request: string;
+                              spawnDaemon: proc ()):
+      tuple[connected: bool; response: string; attempts: int] =
+    ## Send one request line to the shared ``reprobuild-nix-daemon`` and
+    ## return its one response line, spawning the daemon when nothing is
+    ## listening.
+    ##
+    ## THE DAEMON IS SHARED AND IT CAN GO AWAY UNDER US. Every reprobuild
+    ## process of this user talks to the one socket, whichever process spawned
+    ## it. That process's lifetime is not the daemon's, but the daemon can
+    ## still end while it holds our request: it exits when idle (a connection
+    ## that lands between its accept timing out and its socket closing is
+    ## dropped unanswered), and whoever owns the spawning process's tree can
+    ## end it — the suite runner terminates every process carrying a finished
+    ## test's private token, and the daemon carries the token of the test that
+    ## happened to spawn it. A request in flight then reads end-of-stream: no
+    ## response at all, which is not an answer about the selector.
+    ##
+    ## Resolve requests are idempotent, so a connection that ends without a
+    ## response line is offered again — to the same daemon if it is still
+    ## there, to a fresh one otherwise — up to ``NixDaemonExchangeAttempts``
+    ## times. ``response`` is empty only when every attempt was dropped.
+    for attempt in 1 .. NixDaemonExchangeAttempts:
+      result.attempts = attempt
+      var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+        protocol = IPPROTO_IP)
+      var connected = false
+      try:
+        sock.connectUnix(socketPath)
+        connected = true
+      except CatchableError:
+        sock.close()
+        spawnDaemon()
+        for i in 0 .. 40:
+          sleep(50)
+          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+            protocol = IPPROTO_IP)
+          try:
+            sock.connectUnix(socketPath)
+            connected = true
+            break
+          except CatchableError:
+            sock.close()
+      if not connected:
+        result.connected = false
+        return
+      result.connected = true
+      var line = ""
+      try:
+        sock.send(request & "\n")
+        sock.readLine(line)
+      except CatchableError:
+        # A reset or broken pipe is the same event as end-of-stream: the
+        # daemon went away holding the request.
+        line = ""
+      finally:
+        sock.close()
+      if line.len > 0:
+        result.response = line
+        return
+
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -14507,14 +14576,13 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if provisioner != "nix":
           raiseEngine("Unsupported provisioner: " & provisioner)
         
-        let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
-        var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-        var connected = false
-        try:
-          sock.connectUnix(socketPath)
-          connected = true
-        except CatchableError:
-          sock.close()
+        let socketPath = nixDaemonSocketPath()
+        let req = %*{
+          "action": "resolve",
+          "selector": selector,
+          "workspaceRoot": action.cwd
+        }
+        proc spawnDaemon() =
           # Spawn daemon process detached.
           #
           # THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` --
@@ -14534,33 +14602,16 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
             envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
           let daemon = startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
             options = {poDaemon, poUsePath})
-          defer: daemon.close()
-          for i in 0 .. 40:
-            sleep(50)
-            try:
-              sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-              sock.connectUnix(socketPath)
-              connected = true
-              break
-            except CatchableError:
-              sock.close()
-        if not connected:
+          daemon.close()
+        let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
+        if not exchange.connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
-        
-        let req = %*{
-          "action": "resolve",
-          "selector": selector,
-          "workspaceRoot": action.cwd
-        }
-        var respLine = ""
-        try:
-          sock.send($req & "\n")
-          sock.readLine(respLine)
-        finally:
-          sock.close()
+        let respLine = exchange.response
         
         if respLine.len == 0:
-          raiseEngine("Received empty response from reprobuild-nix-daemon")
+          raiseEngine("Received empty response from reprobuild-nix-daemon " &
+            "(the connection closed without a response on each of " &
+            $exchange.attempts & " attempts)")
         
         let resp = parseJson(respLine)
         if resp.getOrDefault("status").getStr() != "success":

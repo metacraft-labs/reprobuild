@@ -1574,13 +1574,15 @@ else:
       return cached.profile
 
     # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
-    let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
-    var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-    var connected = false
-    try:
-      sock.connectUnix(socketPath)
-      connected = true
-    except CatchableError:
+    let socketPath = nixDaemonSocketPath()
+    let req = %*{
+      "action": "resolve",
+      "selector": selector,
+      "expressionFile": plan.nixExpressionFile,
+      "workspaceRoot": getCurrentDir(),
+      "evaluateOnly": true
+    }
+    proc spawnDaemon() =
       # Spawn daemon process detached.
       #
       # ONE RESOLVER, THE ENGINE'S. This used to be a private candidate chain
@@ -1607,34 +1609,21 @@ else:
             envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
         except BuildEngineError as err:
           raise newException(OSError, err.msg)
-      discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
-      for i in 0 .. 40:
-        sleep(50)
-        try:
-          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-          sock.connectUnix(socketPath)
-          connected = true
-          break
-        except CatchableError:
-          discard
-
-    if not connected:
+      # Detached like the engine's spawn: the daemon serves every reprobuild
+      # process of this user, so it must not sit in this build's process
+      # group and go down with it on a terminal interrupt.
+      startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
+        options = {poDaemon}).close()
+    let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
+    if not exchange.connected:
       raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
-
-    let req = %*{
-      "action": "resolve",
-      "selector": selector,
-      "expressionFile": plan.nixExpressionFile,
-      "workspaceRoot": getCurrentDir(),
-      "evaluateOnly": true
-    }
-    sock.send($req & "\n")
-    var respLine = ""
-    sock.readLine(respLine)
-    sock.close()
+    let respLine = exchange.response
 
     if respLine.len == 0:
-      raise newException(OSError, "Received empty response from reprobuild-nix-daemon during tool resolution")
+      raise newException(OSError, "Received empty response from " &
+        "reprobuild-nix-daemon during tool resolution (the connection " &
+        "closed without a response on each of " & $exchange.attempts &
+        " attempts)")
 
     let resp = parseJson(respLine)
     if resp.getOrDefault("status").getStr() != "success":
