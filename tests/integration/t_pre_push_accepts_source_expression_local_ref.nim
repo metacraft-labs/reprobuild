@@ -20,6 +20,7 @@
 ## ``refs/`` name, a ``(delete)`` with a non-zero object, and an expression with
 ## a zero object are still refused.
 
+import repro_test_support/reasoned_skip
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_cli_support/push_hook_protocol
@@ -42,7 +43,7 @@ suite "pre-push protocol — source expressions in the local-ref field":
   test "bare SHA, HEAD~0 and main~0 sources parse and classify as outgoing HEAD":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; this case needs a repository")
     else:
       let scratch = createTempDir("repro-pre-push-srcexpr-", "")
       defer: removeDir(scratch)
@@ -89,7 +90,7 @@ suite "pre-push protocol — source expressions in the local-ref field":
   test "remaining strictness: bad ref names and impossible object pairs":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; this case needs a repository")
     else:
       let scratch = createTempDir("repro-pre-push-srcexpr-neg-", "")
       defer: removeDir(scratch)

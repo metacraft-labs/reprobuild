@@ -26,6 +26,7 @@
 ## driving the built `repro`; no network, no mocks.
 ## Skip rule: `git` or `ssh-keygen` missing on PATH.
 
+import repro_test_support/reasoned_skip
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -264,7 +265,7 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
   test "t_gateway_accepts_one_ref_push_certified_before_push":
     let gitBin = findExe("git")
     if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
-      skip()
+      skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
     else:
       let policy =
         "[certificates]\n" &

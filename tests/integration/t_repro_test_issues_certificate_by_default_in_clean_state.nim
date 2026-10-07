@@ -23,6 +23,7 @@
 ##
 ## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -290,7 +291,7 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
     # being gated. Restoring the old requirement fails ``fileExists(cp)``.
     let gitBin = findExe("git")
     if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
-      skip()
+      skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
     else:
       let fx = setupFixture(gitBin, "unpushed")
       defer: removeDir(fx.scratch)

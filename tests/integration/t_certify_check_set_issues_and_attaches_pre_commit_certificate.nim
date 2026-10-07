@@ -22,6 +22,7 @@
 ## Hermetic: local repos, the built `repro`; no network, no mocks.
 ## Skip rule: `git` or `ssh-keygen` missing on PATH.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -262,7 +263,7 @@ suite "P6.e — repro certify --check-set":
   test "t_certify_check_set_issues_and_attaches_pre_commit_certificate":
     let gitBin = findExe("git")
     if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
-      skip()
+      skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
     else:
       let fx = setupFixture(gitBin, "")
       defer: removeDir(fx.scratch)
