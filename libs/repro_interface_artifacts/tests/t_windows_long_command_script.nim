@@ -41,3 +41,27 @@ suite "Windows long command script planning":
     check "  ''," in script
     check "'--define:name=\"two words\"'," in script
     check "'owner''s path'" in script
+
+suite "Windows command failure reports name the launcher":
+
+  test "the launcher whose exit status is reported is named":
+    # runCommand never starts the command itself on Windows; it starts
+    # cmd.exe or PowerShell, and the status it reports is theirs. The
+    # 2026-09-18..10-05 `.#apps` blocker was reported as `nim.exe` failing
+    # with -1073740791 while `pwsh.exe` -- the launcher -- was the process
+    # that died, and nim had never started.
+    let note = windowsLauncherNote(
+      r"C:\pwsh\pwsh.exe -File C:\Temp\repro-runcommand-1.ps1", -1073740791)
+    check note.startsWith("\n(run through ")
+    check r"C:\pwsh\pwsh.exe -File C:\Temp\repro-runcommand-1.ps1" in note
+    check "the exit status is the launcher's" in note
+    check "0xC0000409" in note
+    check "NTSTATUS" in note
+
+  test "an ordinary nonzero status is not called an NTSTATUS":
+    let note = windowsLauncherNote(r"cmd.exe /c C:\Temp\x.cmd", 1)
+    check r"cmd.exe /c C:\Temp\x.cmd" in note
+    check "NTSTATUS" notin note
+
+  test "no launcher, nothing to say":
+    check windowsLauncherNote("", -1073740791) == ""

@@ -2630,10 +2630,34 @@ proc powerShellRunCommandScript*(command: openArray[string];
     " 2>&1\r\n")
   result.add("exit $LASTEXITCODE\r\n")
 
+proc windowsLauncherNote*(launcher: string; exitCode: int): string =
+  ## On Windows ``runCommand`` never starts the command itself: it starts a
+  ## LAUNCHER (``cmd.exe`` or PowerShell) that runs it with its output
+  ## redirected, and the exit status it reports is the launcher's. A failure
+  ## report that names only the command therefore blames a process that may
+  ## never have started. That is not hypothetical: from 2026-09-18 to
+  ## 2026-10-05 ``repro build .#apps`` reported
+  ## ``command failed (-1073740791): ...nim.exe c ...`` while ``nim`` was never
+  ## run -- ``pwsh.exe``, the launcher, was dying of a shadow-stack violation
+  ## while the io-mon shim was being injected into it, and the investigation
+  ## went after the compiler. Empty when there is no launcher to name.
+  if launcher.len == 0:
+    return ""
+  result = "\n(run through " & launcher & "; the exit status is the " &
+    "launcher's"
+  # NTSTATUS failure codes (0xC0000000 and up) arrive as negative values.
+  if exitCode < 0:
+    result.add(", and 0x" & toHex(uint32(exitCode)) &
+      " is an NTSTATUS: a process in the chain was terminated by the OS, " &
+      "and it may be the launcher itself -- possibly before the command " &
+      "even started")
+  result.add(")")
+
 proc runCommand(command: openArray[string];
     cwd = ""): ProviderCompileExecutionResult =
   if command.len == 0:
     raise newException(OSError, "runCommand requires a non-empty argv")
+  var launcher = ""
   when defined(windows):
     # Capture the child's merged stdout+stderr through a temp-file sink
     # rather than draining an inherited OS pipe. The pipe variant deadlocks
@@ -2692,6 +2716,7 @@ proc runCommand(command: openArray[string];
               raise newException(OSError,
                 "pwsh/powershell required for long Windows command; " &
                 "neither is on PATH and " & fallback & " does not exist")
+      launcher = powerShellExe & " -File " & psScriptPath
       withSpawnWorkingDir:
         process = startProcess(powerShellExe,
           args = @[
@@ -2707,6 +2732,7 @@ proc runCommand(command: openArray[string];
         command.mapIt(cmdExeShellEscape(it)).join(" ") &
         " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
       writeFile(extendedPath(scriptPath), scriptBody)
+      launcher = "cmd.exe /c " & scriptPath
       withSpawnWorkingDir:
         process = startProcess("cmd.exe",
           args = @["/c", scriptPath],
@@ -2760,8 +2786,8 @@ proc runCommand(command: openArray[string];
   if result.exitCode != 0:
     let quoted = command.mapIt(shellQuote(it)).join(" ")
     raise newException(OSError, "command failed (" & $result.exitCode &
-      "): " & quoted & "\n" & result.output &
-      injectedLibraryNote(result.output))
+      "): " & quoted & windowsLauncherNote(launcher, result.exitCode) &
+      "\n" & result.output & injectedLibraryNote(result.output))
 
 proc nimCompilerPath(): string =
   if cachedNimCompilerPath.len > 0:
