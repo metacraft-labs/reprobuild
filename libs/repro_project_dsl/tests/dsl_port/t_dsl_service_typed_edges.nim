@@ -113,6 +113,29 @@ package pathSvcPkg:
     executable executableAtPath("/usr/sbin/nginx")
     args "-c", "/etc/nginx/nginx.conf"
 
+# Supervisor options on `restart`, which `Package-Model.md` §"Service
+# Lifecycle And Reactive Triggers" specifies as a LIST -- "Optional named
+# arguments configure supervisor-level policy: `backoff =
+# exponential|linear|fixed`, `maxRetries = <n>`, `delay = "5s"`". No
+# lowering consumes them yet, so they are carried as the option's source
+# text; carrying only the FIRST of them is the same silent drop as the
+# ones `t_dsl_service_setter_surface_is_typed.nim` now refuses, with the
+# extra sting that it is not even a misspelling -- it is the spec's own
+# spelling, partially recorded.
+#
+# `exponential` and `linear` are undeclared identifiers on purpose: the
+# option text is never spliced, so it must never reach the compiler. If
+# this package stops compiling, that property has broken.
+package triggerOptionsPkg:
+  executable optBin:
+    build:
+      discard
+  service opt:
+    executable optBin
+    on crash:
+      restart backoff = exponential, maxRetries = 3
+    restartOnCrash backoff = linear, delay = "5s"
+
 proc serviceNamed(packageName, serviceName: string): DslServiceDef =
   for svc in registeredServices(packageName):
     if svc.serviceName == serviceName:
@@ -340,3 +363,22 @@ suite "L1 — the typed record survives the gnkService payload codec":
     bytes[0] = byte(ord('X'))
     expect CatchableError:
       discard decodeServicePayload(bytes)
+
+suite "L1 follow-up — supervisor options are carried whole, not truncated":
+
+  test "`restart` keeps every named option, not just the first":
+    let svc = serviceNamed("triggerOptionsPkg", "opt")
+    check svc.triggers.len == 2
+    check svc.triggers[0].kind == stkCrash
+    check svc.triggers[0].actions.len == 1
+    check svc.triggers[0].actions[0].kind == stakRestart
+    check svc.triggers[0].actions[0].argument ==
+      "backoff = exponential, maxRetries = 3"
+
+  test "and so does the `restartOnCrash` short form":
+    let svc = serviceNamed("triggerOptionsPkg", "opt")
+    check svc.triggers[1].kind == stkCrash
+    check svc.triggers[1].actions.len == 1
+    check svc.triggers[1].actions[0].kind == stakRestart
+    check svc.triggers[1].actions[0].argument ==
+      "backoff = linear, delay = \"5s\""

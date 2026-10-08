@@ -1756,20 +1756,99 @@ proc m5ServiceStringLitArg(stmt: NimNode): NimNode =
     return nil
   return stmt[1].copyNimTree()
 
-proc m5ServiceTriggerActionCall(stmt: NimNode): NimNode =
+const
+  ## The trigger heads and actions ``Package-Model.md`` §"Service
+  ## Lifecycle And Reactive Triggers" specifies, quoted back at the author
+  ## in a refusal. Spelled out as text rather than derived from the enum,
+  ## because the enum names (``stkChangeOutput``) are not what anybody
+  ## writes in a recipe.
+  m5ServiceRecognisedTriggers = "`on rebuild <ident>`, " &
+    "`on change <buildOutput>`, `on change \"<path>\"`, `on start`, " &
+    "`on stop` and `on crash`"
+  m5ServiceRecognisedActions = "`hotReload`, `restart`, " &
+    "`sendSignal \"<SIG...>\"`, `exec <cmd>` and `notify <endpoint>`"
+  m5ServiceNoSilentDropRule = "An unrecognised spelling here is REFUSED " &
+    "rather than dropped: a trigger that is recorded but can never fire, " &
+    "or one recorded with none of its actions, is indistinguishable from " &
+    "support for it. This is the same defect the `args` setter had before " &
+    "Shared-Development-Services L1, where a non-literal argument vanished " &
+    "with no diagnostic."
+
+proc m5ServiceUnknownTrigger(stmt, spec: NimNode) =
+  ## Refuse an ``on <trigger>:`` head the walker does not recognise.
+  ##
+  ## Before Shared-Development-Services L1's follow-up this returned
+  ## ``nil`` and the caller skipped the statement: ``on ready:`` produced
+  ## NO RECORD AT ALL and compiled clean.
+  ##
+  ## ``on ready:`` is handled by name because it is the spelling
+  ## ``Shared-Development-Services.md`` §9's worked example uses, so it is
+  ## the one spelling an author is most likely to arrive at — and the one
+  ## where "unrecognised" is least informative.
+  let spelling = spec.repr.strip()
+  var message = "`service` does not recognise the trigger `on " &
+    spelling & ":`. Package-Model.md §\"Service Lifecycle And Reactive " &
+    "Triggers\" specifies " & m5ServiceRecognisedTriggers & ". "
+  if spelling.normalize == "ready":
+    message.add("`on ready:` is the spelling Shared-Development-" &
+      "Services.md §9 \"Worked example\" uses, and it is deliberately NOT " &
+      "recognised yet: a readiness trigger needs the `readiness` probe " &
+      "that says WHEN the service is ready -- §9 declares it one line " &
+      "above, as `readiness httpGet(\"/debug/ready\", port = port)` -- " &
+      "which this release does not implement, and whose edge semantics " &
+      "are still that spec's §8 open decision D-SS10. ")
+  message.add(m5ServiceNoSilentDropRule)
+  error(message, stmt)
+
+proc m5ServiceUnknownAction(stmt: NimNode; triggerDesc: string) =
+  ## Refuse a statement inside an ``on <trigger>:`` body that is not one
+  ## of the five actions. Before L1's follow-up this returned ``nil`` and
+  ## the caller skipped it, so ``on crash: converge relyingParties``
+  ## recorded the trigger with ZERO actions and the identifier
+  ## ``relyingParties`` never reached the compiler at all.
+  error("`service` does not recognise the trigger action `" &
+    stmt.repr.strip() & "` inside " & triggerDesc & ". Package-Model.md " &
+    "§\"Service Lifecycle And Reactive Triggers\" specifies " &
+    m5ServiceRecognisedActions & ". " & m5ServiceNoSilentDropRule, stmt)
+
+proc m5ServiceTriggerOptionText(stmt: NimNode): string =
+  ## The supervisor options of ``restart`` / ``hotReload`` /
+  ## ``restartOnCrash``, as source text — ALL of them.
+  ##
+  ## ``Package-Model.md`` §"Service Lifecycle And Reactive Triggers"
+  ## specifies them as a list ("Optional named arguments configure
+  ## supervisor-level policy: ``backoff = exponential|linear|fixed``,
+  ## ``maxRetries = <n>``, ``delay = "5s"``"), so
+  ## ``restart backoff = exponential, maxRetries = 3`` is three AST
+  ## children and reading only ``stmt[1]`` dropped ``maxRetries`` — the
+  ## spec's own spelling, silently half-recorded. They are text rather
+  ## than parsed for the reason the original note gives: no lowering
+  ## consumes them yet, and a schema invented here would be a second
+  ## place to change when one does.
+  var parts: seq[string] = @[]
+  for i in 1 ..< stmt.len:
+    parts.add(stmt[i].repr)
+  parts.join(", ")
+
+proc m5ServiceTriggerActionCall(stmt: NimNode; triggerDesc: string): NimNode =
   ## Shared-Development-Services L1 — one action inside an ``on
   ## <trigger>:`` body, lowered to its ``addActiveServiceTriggerAction``
-  ## call. ``nil`` for a statement that is not a recognised action, so
-  ## the caller can leave it to the ``bodyRepr`` capture rather than
-  ## guessing.
+  ## call. ``nil`` only for a statement that carries no action at all (a
+  ## doc comment, a ``discard``); an action the taxonomy does not contain
+  ## is a macro ``error`` here, not a ``nil`` the caller drops.
   ##
   ## The action taxonomy is ``Package-Model.md`` §"Service Lifecycle And
   ## Reactive Triggers": ``hotReload`` / ``restart`` / ``sendSignal`` /
-  ## ``exec`` / ``notify``. Supervisor options on ``restart``
-  ## (``backoff = ...``, ``maxRetries = ...``) are carried as the
-  ## argument's source text rather than parsed: the lowering that
-  ## consumes them does not exist yet, and inventing a schema for it here
-  ## would be a second place to change when it does.
+  ## ``exec`` / ``notify``.
+  ##
+  ## ``triggerDesc`` is the enclosing trigger's source text, used only in
+  ## diagnostics: a service can carry several ``on`` blocks and an error
+  ## that names the action without naming its trigger sends the author
+  ## grepping.
+  if stmt.kind in {nnkCommentStmt, nnkEmpty, nnkDiscardStmt}:
+    # A doc comment or an explicit ``discard`` is not an action and is not
+    # a mistake. Everything else in the body is claimed to be one.
+    return nil
   if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
     case identText(stmt).normalize
     of "hotreload":
@@ -1779,44 +1858,46 @@ proc m5ServiceTriggerActionCall(stmt: NimNode): NimNode =
       return quote do:
         addActiveServiceTriggerAction(stakRestart)
     else:
-      return nil
-  if stmt.kind notin {nnkCall, nnkCommand}:
-    return nil
-  if stmt.len < 2:
-    return nil
+      m5ServiceUnknownAction(stmt, triggerDesc)
+  if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 2 or
+      stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    m5ServiceUnknownAction(stmt, triggerDesc)
   let head = stmt[0]
-  if head.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-    return nil
   let headName = identText(head).normalize
   case headName
-  of "sendsignal":
+  of "sendsignal", "exec", "notify":
+    # One argument, exactly. The runtime record carries one, so reading
+    # ``stmt[1]`` and ignoring the rest dropped the others in silence.
+    if stmt.len != 2:
+      error("`" & identText(head) & "` takes exactly one argument; `" &
+        stmt.repr.strip() & "` inside " & triggerDesc & " has " &
+        $(stmt.len - 1) & ". " & m5ServiceNoSilentDropRule, stmt)
     let arg = stmt[1].copyNimTree()
+    let kindLit =
+      case headName
+      of "sendsignal": ident("stakSendSignal")
+      of "exec": ident("stakExec")
+      else: ident("stakNotify")
     return quote do:
-      addActiveServiceTriggerAction(stakSendSignal, `arg`)
-  of "exec":
-    let arg = stmt[1].copyNimTree()
-    return quote do:
-      addActiveServiceTriggerAction(stakExec, `arg`)
-  of "notify":
-    let arg = stmt[1].copyNimTree()
-    return quote do:
-      addActiveServiceTriggerAction(stakNotify, `arg`)
+      addActiveServiceTriggerAction(`kindLit`, `arg`)
   of "hotreload", "restart":
-    # ``restart backoff = exponential`` / ``hotReload otherwise
-    # sendSignal "SIGHUP"`` — the option text, verbatim.
-    let optionLit = newLit(stmt[1].repr)
+    # ``restart backoff = exponential, maxRetries = 3`` / ``hotReload
+    # otherwise sendSignal "SIGHUP"`` — the option text, verbatim and
+    # whole.
+    let optionLit = newLit(m5ServiceTriggerOptionText(stmt))
     let kindLit =
       if headName == "restart": ident("stakRestart")
       else: ident("stakHotReload")
     return quote do:
       addActiveServiceTriggerAction(`kindLit`, `optionLit`)
   else:
-    return nil
+    m5ServiceUnknownAction(stmt, triggerDesc)
 
 proc m5ServiceTriggerEmission(stmt: NimNode): NimNode =
   ## Lower one ``on <trigger>:`` block to its begin/try/finally triple.
-  ## ``nil`` when the head is not a trigger shape this milestone
-  ## recognises.
+  ## NEVER returns ``nil``: a head this milestone does not recognise is a
+  ## macro ``error``, which is the whole point of the follow-up to
+  ## Shared-Development-Services L1 — see ``m5ServiceUnknownTrigger``.
   ##
   ##   on rebuild api:        -> beginActiveServiceTrigger(stkRebuild, "api")
   ##   on change cfg:         -> beginActiveServiceTrigger(stkChangeOutput, cfg)
@@ -1826,14 +1907,19 @@ proc m5ServiceTriggerEmission(stmt: NimNode): NimNode =
   ## ``on change <expr>`` splices ``<expr>`` VERBATIM into the
   ## ``BuildOutput`` overload, so a misspelled handle is a type error at
   ## the spliced call site rather than a watch that silently never fires.
-  if stmt.kind notin {nnkCall, nnkCommand}:
-    return nil
-  if stmt.len < 3:
-    return nil
+  if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 3 or
+      stmt[^1].kind != nnkStmtList:
+    # ``on crash`` without the colon parses as a two-child Command. The
+    # arity guard used to decline it silently, so a dropped colon turned a
+    # crash policy into nothing at all.
+    error("`on <trigger>:` needs a block body of actions; `" &
+      stmt.repr.strip() & "` has none. Package-Model.md §\"Service " &
+      "Lifecycle And Reactive Triggers\" spells it `on <trigger>:` " &
+      "followed by an indented body drawn from " &
+      m5ServiceRecognisedActions & ". " & m5ServiceNoSilentDropRule, stmt)
   let body = stmt[^1]
-  if body.kind != nnkStmtList:
-    return nil
   let spec = stmt[1]
+  let triggerDesc = "`on " & spec.repr.strip() & ":`"
   var beginCall: NimNode = nil
   if spec.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
     case identText(spec).normalize
@@ -1847,7 +1933,7 @@ proc m5ServiceTriggerEmission(stmt: NimNode): NimNode =
       beginCall = quote do:
         beginActiveServiceTrigger(stkCrash)
     else:
-      return nil
+      m5ServiceUnknownTrigger(stmt, spec)
   elif spec.kind in {nnkCall, nnkCommand} and spec.len == 2 and
        spec[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
     let subject = spec[1].copyNimTree()
@@ -1873,12 +1959,14 @@ proc m5ServiceTriggerEmission(stmt: NimNode): NimNode =
         beginCall = quote do:
           beginActiveServiceTrigger(stkChangeOutput, `subject`)
     else:
-      return nil
+      m5ServiceUnknownTrigger(stmt, spec)
   else:
-    return nil
+    m5ServiceUnknownTrigger(stmt, spec)
   let actionBody = newStmtList()
   for inner in body:
-    let call = m5ServiceTriggerActionCall(inner)
+    # ``nil`` only for a doc comment or a ``discard``; anything else that
+    # is not an action has already been refused by name.
+    let call = m5ServiceTriggerActionCall(inner, triggerDesc)
     if call != nil:
       actionBody.add(call)
   if actionBody.len == 0:
@@ -1935,9 +2023,11 @@ proc m5ServiceShortFormEmission(stmt: NimNode): NimNode =
     return nil
   case identText(stmt[0]).normalize
   of "restartoncrash":
-    # ``restartOnCrash backoff = exponential`` — option text verbatim,
-    # for the same reason the ``restart`` action carries it that way.
-    let optionLit = newLit(stmt[1].repr)
+    # ``restartOnCrash backoff = exponential, maxRetries = 3`` — option
+    # text verbatim, for the same reason the ``restart`` action carries it
+    # that way, and ALL of it, for the reason
+    # ``m5ServiceTriggerOptionText`` gives.
+    let optionLit = newLit(m5ServiceTriggerOptionText(stmt))
     return quote do:
       block:
         beginActiveServiceTrigger(stkCrash)
@@ -1947,7 +2037,13 @@ proc m5ServiceShortFormEmission(stmt: NimNode): NimNode =
           finishActiveServiceTrigger()
   of "reloadonchange":
     if stmt.len != 3:
-      return nil
+      # ``reloadOnChange cfg, "SIGHUP"`` — a build output (or path) plus a
+      # signal name. A wrong arity used to fall through to the setter walk
+      # and be preserved as raw body text, i.e. dropped.
+      error("`reloadOnChange` takes a build output (or a path string) and " &
+        "a signal name: `reloadOnChange <buildOutput>, \"<SIG...>\"`. `" &
+        stmt.repr.strip() & "` has " & $(stmt.len - 1) & " argument(s). " &
+        m5ServiceNoSilentDropRule, stmt)
     let subject = stmt[1].copyNimTree()
     let signal = stmt[2].copyNimTree()
     let beginCall =
@@ -2059,9 +2155,10 @@ proc m5ParseServiceBody(body: NimNode): tuple[
         "`renderConfigFile(...)`, and pass the handle on `args` or " &
         "declare it with `runtimeFile`.", stmt)
     of "on":
-      let emission = m5ServiceTriggerEmission(stmt)
-      if emission != nil:
-        result.reactiveEmissions.add(emission)
+      # Always a node, or a macro ``error`` naming the offending spelling.
+      # It is deliberately NOT guarded with ``if emission != nil``: that
+      # guard is exactly how ``on ready:`` used to disappear.
+      result.reactiveEmissions.add(m5ServiceTriggerEmission(stmt))
     of "executable":
       # ``executable <ident>`` — record the ident's text, unevaluated.
       # Any other expression is kept as a node and spliced.

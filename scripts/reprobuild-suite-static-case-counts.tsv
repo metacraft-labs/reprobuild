@@ -449,8 +449,8 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_expression_setters.nim	nim	4
-libs/repro_project_dsl/tests/dsl_port/t_dsl_service_setter_surface_is_typed.nim	nim	5
-libs/repro_project_dsl/tests/dsl_port/t_dsl_service_typed_edges.nim	nim	19
+libs/repro_project_dsl/tests/dsl_port/t_dsl_service_setter_surface_is_typed.nim	nim	10
+libs/repro_project_dsl/tests/dsl_port/t_dsl_service_typed_edges.nim	nim	21
 libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim	nim	9
 libs/repro_project_dsl/tests/dsl_port/t_dsl_uses_staged.nim	nim	16

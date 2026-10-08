@@ -136,3 +136,123 @@ suite "L1 — args and runtimeFile are typed, not stringly":
       "args-handle")
     checkpoint(probe.output)
     check probe.ok
+
+suite "L1 follow-up — an unrecognised trigger or action is refused":
+  # The defect this suite pins, measured on `e7546acd2`: an `on <trigger>:`
+  # head the walker did not recognise produced NO RECORD AT ALL, and an
+  # unrecognised action inside a trigger the walker DID recognise left that
+  # trigger with zero actions. Both were silent — no diagnostic, exit 0.
+  # Probed on that commit, a service body of `on ready: sendSignal "SIGHUP"`
+  # / `on crash: converge relyingParties` / `on stop: exec "..."` recorded
+  # `triggers=2`, the `stkCrash` one with `actions=0`, and the identifier
+  # `relyingParties` never reached the compiler.
+  #
+  # That is the SAME defect class L1 removed from `args` (see the
+  # `args 42` case above), so it does not get to be reintroduced one setter
+  # to the left.
+  #
+  # WHY `on ready:` IS REFUSED RATHER THAN RECOGNISED. It is the spelling
+  # `Shared-Development-Services.md` §9 "Worked example" uses, so the
+  # temptation is to accept it. The authority for the IMPLEMENTED surface is
+  # `Package-Model.md` §"Service Lifecycle And Reactive Triggers", which
+  # enumerates exactly three groups — build-graph (`on rebuild <ident>`),
+  # runtime-file (`on change <buildOutput>` / `on change "<path>"`) and
+  # lifecycle (`on start` / `on stop` / `on crash`). `ready` is in none of
+  # them, and it cannot be: a readiness trigger needs the `readiness` probe
+  # that says WHEN a service is ready, which §9 declares one line above the
+  # trigger (`readiness httpGet("/debug/ready", port = port)`) and which this
+  # release does not implement — and whose edge semantics are still
+  # `Shared-Development-Services.md` §8 open decision **D-SS10**. Recognising
+  # the head without the probe would record a trigger that can never fire,
+  # which is a silent no-op wearing the clothes of support. So the refusal
+  # NAMES the gap instead, and the test asserts that it does.
+
+  test "`on ready:` is refused, with its spelling and the recognised set":
+    let probe = edited(
+      "    on change probeConfig:\n      sendSignal \"SIGHUP\"",
+      "    on ready:\n      sendSignal \"SIGHUP\"",
+      "on-ready")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("does not recognise the trigger `on ready:`")
+    # The recognised alternatives, so the author does not have to go
+    # reading the macro to find out what IS accepted.
+    check probe.mentions("on rebuild <ident>")
+    check probe.mentions("on change <buildOutput>")
+    check probe.mentions("on start")
+    check probe.mentions("on stop")
+    check probe.mentions("on crash")
+    # And the specific reason THIS spelling is refused rather than missing,
+    # because it is the one the design's own worked example uses.
+    check probe.mentions("Shared-Development-Services.md")
+    check probe.mentions("readiness")
+
+  test "an unrecognised action inside a recognised trigger is refused":
+    let probe = edited(
+      "    on change probeConfig:\n      sendSignal \"SIGHUP\"",
+      "    on crash:\n      converge relyingParties",
+      "unknown-action")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("does not recognise the trigger action")
+    # The offending spelling, verbatim — an error that does not quote it
+    # leaves the author grepping a multi-trigger service for the one the
+    # compiler meant.
+    check probe.mentions("converge relyingParties")
+    check probe.mentions("on crash")
+    # The recognised action set.
+    check probe.mentions("hotReload")
+    check probe.mentions("restart")
+    check probe.mentions("sendSignal")
+    check probe.mentions("exec")
+    check probe.mentions("notify")
+
+  test "`on <trigger>` with no block body is refused rather than ignored":
+    # `on crash` without the colon is a Command of two children, which the
+    # walker's arity guard declined — silently, so a dropped colon turned a
+    # crash policy into nothing.
+    let probe = edited(
+      "    on change probeConfig:\n      sendSignal \"SIGHUP\"",
+      "    on crash",
+      "on-no-body")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("needs a block body of actions")
+
+  test "`sendSignal` refuses a second argument rather than dropping it":
+    # `addActiveServiceTriggerAction` reads one argument, so the walker read
+    # `stmt[1]` and ignored the rest.
+    let probe = edited(
+      "      sendSignal \"SIGHUP\"",
+      "      sendSignal \"SIGHUP\", \"SIGTERM\"",
+      "sendsignal-arity")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`sendSignal` takes exactly one argument")
+
+  test "the control: every recognised trigger and action still compiles":
+    # The control WITHOUT which all four refusals above could be passed by a
+    # walker that refuses every `on` block. It exercises each of the five
+    # trigger spellings `Package-Model.md` recognises, each of the five
+    # actions, the supervisor-option form of `restart`, and all three
+    # short-form atoms — in one service.
+    let probe = edited(
+      "    on change probeConfig:\n      sendSignal \"SIGHUP\"",
+      "    on change probeConfig:\n      sendSignal \"SIGHUP\"\n" &
+        "    on change \"/var/lib/probe/keys\":\n" &
+        "      sendSignal \"SIGUSR1\"\n" &
+        "    on start:\n      exec \"scripts/warm.sh\"\n" &
+        "    on stop:\n      exec \"scripts/drain.sh\"\n" &
+        "    on crash:\n" &
+        # A doc comment inside a trigger body is not an action and is not a
+        # mistake: `nnkCommentStmt` has to stay exempt, or the refusal above
+        # turns documenting a trigger into a compile error.
+        "      ## why this policy\n" &
+        "      restart backoff = exponential, maxRetries = 3\n" &
+        "    on rebuild probeBin:\n      hotReload\n" &
+        "      notify \"webhook\"\n" &
+        "    hotReload\n    restartOnCrash\n" &
+        "    reloadOnChange probeConfig, \"SIGHUP\"",
+      "all-triggers")
+    checkpoint(probe.output)
+    check probe.ok

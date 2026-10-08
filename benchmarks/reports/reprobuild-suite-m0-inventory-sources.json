@@ -14289,8 +14289,8 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_setter_surface_is_typed.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14307,8 +14307,8 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_typed_edges.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 19,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
