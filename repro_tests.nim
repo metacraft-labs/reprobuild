@@ -684,6 +684,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim",
+    binary: "build/test-bin/t_portable_record_from_local_hit",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_scratch_dirs.nim",
     binary: "build/test-bin/t_scratch_dirs",
     defines: @[],
@@ -2792,6 +2801,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim",
     binary: "build/test-bin/t_fingerprint_metadata_classifies_every_posix_entity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_local_store/tests/t_input_access_sidecar.nim",
+    binary: "build/test-bin/t_input_access_sidecar",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

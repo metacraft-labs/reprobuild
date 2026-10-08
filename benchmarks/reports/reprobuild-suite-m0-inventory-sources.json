@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1863,
-    "pureUnitConsolidationGroups": 47,
-    "pureUnitTests": 592,
+    "nimTestBinaries": 1865,
+    "pureUnitConsolidationGroups": 48,
+    "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1880
+    "testEntries": 1882
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -251,6 +251,21 @@
         "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
         "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
         "libs/repro_local_store/tests/t_store_optimise_dedup.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_input_access_sidecar.nim",
+        "libs/repro_local_store/tests/t_retention_gc.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1061,9 +1076,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 1001,
+      "integration": 1002,
       "platform/destructive": 119,
-      "pure unit": 592,
+      "pure unit": 593,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1242,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1863,
+    "nimTestBinaryCount": 1865,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1880
+    "testEntryCount": 1882
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7698,6 +7713,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_portable_record_from_local_hit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_scratch_dirs",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -12056,6 +12092,25 @@
       "source": "libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_input_access_sidecar",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_input_access_sidecar.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

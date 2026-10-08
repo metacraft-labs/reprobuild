@@ -82,6 +82,7 @@ libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	15
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim	nim	6
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
+libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	4
 libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	4
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
@@ -317,6 +318,7 @@ libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	nim	12
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	6
+libs/repro_local_store/tests/t_input_access_sidecar.nim	nim	3
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
 libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	22
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4

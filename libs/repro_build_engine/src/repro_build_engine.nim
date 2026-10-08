@@ -15806,36 +15806,52 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       runResult.trace(action.id, "portable-fingerprint-unavailable",
         fp.reason)
 
-  proc recordPortableFingerprint(idx: int; action: BuildAction;
-                                 evidence: PathSetEvidence) =
-    ## Cache-Scope P3.1: compute the action's portable weak/strong
-    ## fingerprint over logical paths, from the SAME filtered input set
-    ## the local record uses (`cacheInputPaths`: tool roots, ignored
+  proc portableAccessesOf(action: BuildAction;
+                          evidence: PathSetEvidence): InputAccesses =
+    ## What the portable record is computed over: the SAME filtered input
+    ## set the local record uses (`cacheInputPaths`: tool roots, ignored
     ## prefixes and the action's own writes already removed), split into
-    ## reads, probes and enumerations. Observational only in P3.1: it is
-    ## reported on the result and the trace, and changes no cache decision.
-    if config.portableRoots.len == 0:
-      return
-    var enumerations: seq[string] = @[]
+    ## reads, probes and enumerations, less what is not an input of the
+    ## action at all (its own outputs, its transient writes, the host temp
+    ## listing).
+    ##
+    ## Computed for EVERY local record, portable roots or not, and stored
+    ## beside it (`recordInputAccesses`): it is the one thing a later local
+    ## hit cannot recover from the record, and the only way the record that
+    ## hit derives is the record this run produced (P3.4b).
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence):
       enumerated.incl(path)
       if not isHostTempListing(path) and not isOwnOutput(action, path):
-        enumerations.add(path)
+        result.enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
       probed.incl(materialPath(action.cwd, path))
-    var reads: seq[string] = @[]
-    var probes: seq[string] = @[]
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
           path.replace('\\', '/') in transient or isOwnOutput(action, path):
         continue
       elif path in probed:
-        probes.add(path)
+        result.probes.add(path)
       else:
-        reads.add(path)
+        result.reads.add(path)
+
+  proc recordPortableFingerprint(idx: int; action: BuildAction;
+                                 evidence: PathSetEvidence;
+                                 record: ActionResultRecord) =
+    ## Cache-Scope P3.1: compute the action's portable weak/strong
+    ## fingerprint over logical paths from `portableAccessesOf`. Reported on
+    ## the result and the trace, and recorded in the portable memo.
+    ##
+    ## `record` is the local record this run just published. The accesses
+    ## are stored beside it whether or not portable roots are configured, so
+    ## a local cache written now can seed the portable plane later.
+    let accesses = portableAccessesOf(action, evidence)
+    cache.recordInputAccesses(record.weakFingerprint,
+      record.strongFingerprint, accesses)
+    if config.portableRoots.len == 0:
+      return
     # The OBSERVED environment, exactly as the local fingerprint takes it:
     # a variable a process read is an input whether or not the action
     # declared it.
@@ -15843,7 +15859,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for variable in action.cacheEnvInputs(evidence, unsafeAddr config):
       observed.add(ObservedEnv(name: variable.name,
         present: variable.present, value: variable.value))
-    finishPortableRecord(idx, action, reads, probes, enumerations, observed)
+    finishPortableRecord(idx, action, accesses.reads, accesses.probes,
+      accesses.enumerations, observed)
 
   proc recordFixedOutputPortable(idx: int; action: BuildAction) =
     ## A fixed-output action is not locally cacheable and leaves no local
@@ -15862,28 +15879,44 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   proc recordPortableFromLocalHit(idx: int; action: BuildAction;
                                   record: ActionResultRecord) =
-    ## Cache-Scope P3.4: a local cache hit's record names the inputs the
-    ## action observed when it last ran, so the portable record can be
-    ## derived without re-running it — existing local caches seed the
-    ## portable plane. A missing path was probed, a directory enumerated, a
-    ## file read. (An existing file that was only probed is identified by
-    ## content here: stricter than presence, never looser.)
+    ## Cache-Scope P3.4b: a local cache hit derives the portable record
+    ## without re-running the action, so existing local caches seed the
+    ## portable plane. It is derived from the accesses the run that
+    ## produced `record` stored beside it (`portableAccessesOf`), so it is
+    ## the record that run computed: same path set, same strong fingerprint.
+    ## The inputs' identities are taken now; a hit means they are the ones
+    ## recorded.
+    ##
+    ## The record alone cannot stand in for them. It keeps each input's file
+    ## kind, not how it was accessed, and the two do not determine each
+    ## other: classifying by kind made every probed directory an
+    ## enumeration (outside every root, that made the record non-portable),
+    ## every probed file a read and every failed read a probe, and it could
+    ## not apply the recorder's filters (transient writes need the run's
+    ## write evidence). Each gave one action two path sets.
+    ##
+    ## A record without stored accesses (written before they were, or
+    ## installed from a peer) derives nothing; the action's next run
+    ## records the portable record live.
     if config.portableRoots.len == 0:
       return
-    var reads, probes, enumerations: seq[string]
-    for input in record.inputs:
-      let path = materialPath(action.cwd, input.path)
-      if isHostTempListing(path):
-        continue
-      case input.metadata.kind
-      of ffkMissing, ffkOther: probes.add(path)
-      of ffkRegular: reads.add(path)
-      of ffkDirectory: enumerations.add(path)
+    let accesses = cache.inputAccessesFor(record.weakFingerprint,
+      record.strongFingerprint)
+    if accesses.isNone:
+      runResult.results[idx].portable = false
+      runResult.results[idx].portableReason =
+        "the local record carries no input-access record, so the portable " &
+        "record cannot be derived from it"
+      runResult.trace(action.id, "portable-fingerprint-unavailable",
+        runResult.results[idx].portableReason)
+      return
     var observed: seq[ObservedEnv] = @[]
     for variable in record.envInputs:
       observed.add(ObservedEnv(name: variable.name,
         present: variable.present, value: variable.value))
-    finishPortableRecord(idx, action, reads, probes, enumerations, observed)
+    let derived = accesses.get()
+    finishPortableRecord(idx, action, derived.reads, derived.probes,
+      derived.enumerations, observed)
 
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
@@ -17955,7 +17988,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
-              recordPortableFingerprint(idx, action, evidence.evidence)
+              recordPortableFingerprint(idx, action, evidence.evidence, record)
               publishPeerCacheBundle(action.weakFingerprint, record)
               publishBinaryCacheBundle(action, record)
             elif action.cacheable and evidence.disableCacheHits:
@@ -18165,7 +18198,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
-              recordPortableFingerprint(idx, plan.action, evidence.evidence)
+              recordPortableFingerprint(idx, plan.action, evidence.evidence,
+                record)
               publishPeerCacheBundle(plan.action.weakFingerprint, record)
               publishBinaryCacheBundle(plan.action, record)
             elif plan.action.cacheable and evidence.disableCacheHits:
@@ -18769,7 +18803,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
-          recordPortableFingerprint(idx, action, evidence.evidence)
+          recordPortableFingerprint(idx, action, evidence.evidence, record)
           publishPeerCacheBundle(action.weakFingerprint, record)
           publishBinaryCacheBundle(action, record)
         elif action.cacheable and evidence.disableCacheHits:

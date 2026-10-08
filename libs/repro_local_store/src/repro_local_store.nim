@@ -192,6 +192,26 @@ type
       ## Identifies the `repro build` invocation that wrote the entry, for
       ## §2.2's `this-build` clause. Empty when undeclared.
 
+  InputAccesses* = object
+    ## HOW the execution that produced a record accessed what it observed:
+    ## the paths it read, the ones it only probed for presence, and the
+    ## directories it enumerated, after the engine's portable recorder
+    ## filtered them (Cache-Scope P3.1).
+    ##
+    ## The record cannot say this itself. `FileFingerprint` keeps a path's
+    ## KIND and metadata, which is what a local lookup compares, and the
+    ## access is not a function of either: a directory may have been probed
+    ## or enumerated, an existing file probed or read, and a read may have
+    ## found nothing. A portable record derived from a local hit
+    ## (Cache-Scope P3.4b) needs exactly the access, so it is kept here, in a
+    ## sidecar beside the `.rec` (`InputAccessFileExt`), and read only by
+    ## that derivation -- never by a lookup.
+    ##
+    ## Physical paths, in the order the recorder produced them.
+    reads*: seq[string]
+    probes*: seq[string]
+    enumerations*: seq[string]
+
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
     policy*: FileFingerprintPolicy
@@ -2314,6 +2334,108 @@ proc decodeDeterminism(raw: openArray[byte]):
   except EnvelopeError, CatchableError:
     return (0'u64, EntryDeterminism())
 
+# ---------------------------------------------------------------------------
+# Input-access sidecar (Cache-Scope P3.4b).
+#
+# The third sidecar, for the reason the other two exist: the RBAR frame cannot
+# grow without locking every older `repro` sharing the cache root out of the
+# records this one writes (see `ActionRecordVersion`). It differs from them in
+# two ways, both deliberate.
+#
+# * It is keyed by the STRONG fingerprint alone, with no write-sequence
+#   back-reference. A strong fingerprint fixes the action's static description
+#   and every recorded input path with its metadata, so any `.rec` of that name
+#   -- however often it is republished, by whatever binary -- describes an
+#   execution that observed exactly those inputs; the accesses written for one
+#   such execution are a true observation of the path set. A republish by a
+#   writer that never saw the accesses (the cache daemon, a peer install)
+#   therefore leaves the sidecar alone instead of discarding it.
+# * It is not stapled onto records by `decodeRecContainer`. No lookup needs it,
+#   and a lookup is the hot path: it is read by `inputAccessesFor`, which only
+#   the portable derivation on a local hit calls.
+#
+# Paths are front-coded against their predecessor in the same list: an
+# action's observations cluster under a few directories, and the record frame
+# interns its paths for the same reason (Action-Cache-Per-Edge-Store.md §5.5
+# C4).
+# ---------------------------------------------------------------------------
+
+const
+  InputAccessMagic = "RBIA"
+  InputAccessVersion = 1'u16
+  InputAccessFileExt* = ".acc"
+    ## Exported so tests and tooling can find the sidecar without re-deriving
+    ## the extension. Not `.rec`, `.octime` or `.det`, so every older reader
+    ## of an edge directory ignores it.
+
+proc inputAccessFileName*(strongHex: string): string =
+  strongHex & InputAccessFileExt
+
+proc writeFrontCoded(outp: var seq[byte]; paths: openArray[string]) =
+  outp.writeU32Le(uint32(paths.len))
+  var previous = ""
+  for path in paths:
+    var shared = 0
+    let limit = min(previous.len, path.len)
+    while shared < limit and previous[shared] == path[shared]:
+      inc shared
+    outp.writeU32Le(uint32(shared))
+    outp.writeString(path[shared .. ^1])
+    previous = path
+
+proc readFrontCoded(raw: openArray[byte]; pos: var int): seq[string] =
+  let count = int(readU32Le(raw, pos))
+  # Each entry occupies at least 8 bytes; a count the remaining bytes cannot
+  # hold is a torn or forged file, refused before it sizes an allocation.
+  if count > (raw.len - pos) div 8:
+    raiseEnvelopeError(eeMalformed, "input-access count exceeds payload")
+  var previous = ""
+  for _ in 0 ..< count:
+    let shared = int(readU32Le(raw, pos))
+    if shared > previous.len:
+      raiseEnvelopeError(eeMalformed, "input-access prefix exceeds previous")
+    let path = previous[0 ..< shared] & readString(raw, pos)
+    result.add(path)
+    previous = path
+
+proc encodeInputAccesses*(strongHex: string;
+                          accesses: InputAccesses): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(InputAccessMagic[i])))
+  result.writeU16Le(InputAccessVersion)
+  # The record this describes, inside the payload as well as in the file
+  # name, so a sidecar copied or renamed beside another record is refused.
+  result.writeString(strongHex)
+  result.writeFrontCoded(accesses.reads)
+  result.writeFrontCoded(accesses.probes)
+  result.writeFrontCoded(accesses.enumerations)
+
+proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
+    Option[InputAccesses] =
+  ## `none` on ANY problem: a wrong magic, an unknown version (a newer
+  ## writer), a different record, trailing or missing bytes. The caller's
+  ## answer to `none` is "the accesses are unknown", never a guess.
+  if raw.len < 6:
+    return none(InputAccesses)
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(InputAccessMagic[i])):
+      return none(InputAccesses)
+  try:
+    var pos = 4
+    if readU16Le(raw, pos) != InputAccessVersion:
+      return none(InputAccesses)
+    if readString(raw, pos) != strongHex:
+      return none(InputAccesses)
+    var accesses: InputAccesses
+    accesses.reads = readFrontCoded(raw, pos)
+    accesses.probes = readFrontCoded(raw, pos)
+    accesses.enumerations = readFrontCoded(raw, pos)
+    if pos != raw.len:
+      return none(InputAccesses)
+    some(accesses)
+  except EnvelopeError:
+    none(InputAccesses)
+
 proc metaOf(records: openArray[ActionResultRecord]): EntryDeterminism =
   ## All records in one `.rec` share a strong fingerprint and therefore one
   ## producing action, so they share one class. A declared entry wins over an
@@ -3909,7 +4031,8 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
   # so a reap placed after the early return below would essentially never run.
   for kind, path in walkDir(extendedPath(dirPath)):
     if kind == pcFile and
-        (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt)):
+        (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt) or
+         path.endsWith(InputAccessFileExt)):
       let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
       if not fileExists(extendedPath(owner)):
         try:
@@ -3934,7 +4057,9 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
       for sidecar in [entries[i].path.parentDir /
                         witnessFileName(entries[i].strongHex),
                       entries[i].path.parentDir /
-                        determinismFileName(entries[i].strongHex)]:
+                        determinismFileName(entries[i].strongHex),
+                      entries[i].path.parentDir /
+                        inputAccessFileName(entries[i].strongHex)]:
         if fileExists(extendedPath(sidecar)):
           try:
             removeFile(extendedPath(sidecar))
@@ -5124,6 +5249,44 @@ proc determinismMetaFor*(cache: ActionCache; weak, strong: ContentDigest):
   except OSError, IOError, EnvelopeError:
     EntryDeterminism()
 
+proc recordInputAccesses*(cache: ActionCache; weak, strong: ContentDigest;
+                          accesses: InputAccesses) =
+  ## Write the input-access sidecar for one (edge, path-set) pair, beside the
+  ## `.rec` that `recordActionResult` just published. Temp file + rename, like
+  ## every other write in the edge directory. Best-effort: a sidecar that
+  ## cannot be written costs the portable derivation on a later hit (which
+  ## then says the accesses are unknown), never the build.
+  let dirPath = cache.perEdgeDirPath(weak)
+  let strongHex = digestHex(strong)
+  let finalPath = dirPath / inputAccessFileName(strongHex)
+  let now = getTime()
+  let tmpPath = finalPath & ".tmp." & $getCurrentProcessId() & "." &
+    $now.toUnix & "." & $now.nanosecond
+  try:
+    createDir(extendedPath(dirPath))
+    writeFile(extendedPath(tmpPath),
+      byteString(encodeInputAccesses(strongHex, accesses)))
+    moveFile(extendedPath(tmpPath), extendedPath(finalPath))
+  except OSError, IOError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+
+proc inputAccessesFor*(cache: ActionCache; weak, strong: ContentDigest):
+    Option[InputAccesses] =
+  ## The accesses recorded for one (edge, path-set) pair, or `none` when no
+  ## sidecar is there or it cannot be read: a record written before the
+  ## sidecar existed, one installed from a peer, or one whose sidecar was
+  ## lost.
+  let strongHex = digestHex(strong)
+  let path = cache.perEdgeDirPath(weak) / inputAccessFileName(strongHex)
+  if not fileExists(extendedPath(path)):
+    return none(InputAccesses)
+  try:
+    decodeInputAccesses(bytes(readFile(extendedPath(path))), strongHex)
+  except OSError, IOError:
+    none(InputAccesses)
+
 proc applyRetention(cache: ActionCache; weak: ContentDigest;
                     lookup: var ActionCacheLookup;
                     retention: CacheRetention;
@@ -5298,7 +5461,7 @@ proc scanCacheEntries*(cache: ActionCache;
         strongHex: strongHex,
         recPath: path,
         recordBytes: fileSizeOrZero(path))
-      for ext in [WitnessFileExt, DeterminismFileExt]:
+      for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt]:
         entry.recordBytes += fileSizeOrZero(edgeDir / (strongHex & ext))
       try:
         entry.mtimeUnix = toUnix(getLastModificationTime(extendedPath(path)))
@@ -5336,12 +5499,12 @@ proc scanCacheEntries*(cache: ActionCache;
       result.add(entry)
 
 proc removeEntry(entry: CacheEntryRef): bool =
-  ## Unlink one entry's `.rec` and both sidecars. Best-effort on the
+  ## Unlink one entry's `.rec` and its sidecars. Best-effort on the
   ## sidecars: an orphaned one is reaped by `capRecFiles` anyway, whereas a
   ## `.rec` that survives is a live cache entry, so only its removal decides
   ## success.
   let dir = entry.recPath.parentDir
-  for ext in [WitnessFileExt, DeterminismFileExt]:
+  for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt]:
     let sidecar = dir / (entry.strongHex & ext)
     if fileExists(extendedPath(sidecar)):
       try: removeFile(extendedPath(sidecar))
