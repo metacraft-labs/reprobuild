@@ -30,13 +30,15 @@
 ## refusal-gates-are-vacuous-under-not-compiles.md`).
 ##
 ## WHICH DISCRIMINATOR IS LOAD-BEARING, AND IT IS NOT THE SAME ONE IN
-## EVERY CASE. Measured at `68abb6308` with the reservation absent and
-## this file present, on the same five fixtures:
+## EVERY CASE. Measured with the reservation absent and this file
+## present — the first five at `68abb6308`, the sixth at `60bdcbbbb`,
+## which is the commit that introduced the other five — on the same six
+## fixtures:
 ##
 ## * `liftedExports` as a service and as an activity — exit 1, but with
 ##   `Error: overloaded 'liftedExports' leads to ambiguous calls` and
 ##   `redefinition of 'liftedExports'` reported at `(25, 6)` / `(23, 6)`
-##   of a SIXTEEN-LINE recipe and with no filename at all, because the
+##   of a SEVENTEEN-LINE recipe and with no filename at all, because the
 ##   node they sit on is generated. So `not probe.ok` discriminates
 ##   nothing for these two; what does is the refusal's text, the ABSENCE
 ##   of the ambiguous-call phrase, and the anchor.
@@ -51,6 +53,19 @@
 ##   reserved because the name is the lift's and a future emission that
 ##   changed that call's arity would break in generated code for an
 ##   author who cannot see it.
+## * the PACKAGE'S OWN TYPE, `L3resvPackage` — exit 1 with
+##   `redefinition of 'L3resvPackage'; previous declaration here:
+##   (3, 3)`, no filename on either location. This one is a name the
+##   emission only REFERENCES — it is the `pkg:` parameter type of
+##   every signature the lift writes — and it collides anyway because
+##   `toolActionWrapperCode` declares it in the SAME module
+##   (`macros_a.nim`, `type <Title>Package* = object`), so an accessor
+##   `proc` of that name is a redefinition rather than an overload of an
+##   import. The five OTHER referenced types — `LiftedServiceHandle`,
+##   `ActivityInterfaceDef`, `ActivityParamInterfaceDef`,
+##   `ActivityConfigInterfaceDef`, `ServiceInterfaceDef` — all live in
+##   `types.nim` and are imported, each measured exit 0 as a service
+##   name at `60bdcbbbb`, so they are deliberately NOT reserved.
 ##
 ## No case asserts only the exit code. Each asserts the refusal's
 ## DIAGNOSTIC TEXT and the anchor: the reported line is the line of the
@@ -97,7 +112,9 @@ const
   # `L3resvPackage`, and the suffixes are the macro's own.
   ExportsObject = "L3resvPackageExports"
   SsoHandleType = "L3resvPackageSsoHandle"
+  PackageType = "L3resvPackage"
   AmbiguousCallPhrase = "leads to ambiguous calls"
+  RedefinitionPhrase = "redefinition of"
 
 proc editedProducer(needle, replacement: string): string =
   ## One-line edit to `Producer`. Raises rather than returning a
@@ -209,3 +226,21 @@ suite "L3 — the rest of the emitted module-scope set is reserved too":
       check r.probe.mentions("is RESERVED")
       check r.probe.mentions("the registry call the lift emits")
       check anchoredAt(r.probe, r.line)
+
+  test "the package's own type name is reserved":
+    # The name the emission only REFERENCES. It is the `pkg:` parameter
+    # type of `liftedExports` and of every accessor, and it is declared
+    # in the recipe's own module, so an export of that name is a
+    # redefinition in the author's module — reported on a generated line
+    # with no filename, which is the outcome being closed here.
+    let r = probeFor("service standalone:", "service " & PackageType & ":",
+      "l3-reserved-package-type")
+    checkpoint(r.probe.output)
+    check not r.probe.ok
+    check r.probe.mentions("`service " & PackageType & "`")
+    check r.probe.mentions("is RESERVED")
+    check r.probe.mentions("the package's own type `" & PackageType & "`")
+    check anchoredAt(r.probe, r.line)
+    # The before-state: Nim's redefinition error against generated code,
+    # on no line an author can act on, must be GONE.
+    check not r.probe.mentions(RedefinitionPhrase)

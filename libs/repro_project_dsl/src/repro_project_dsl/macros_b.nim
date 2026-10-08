@@ -3518,18 +3518,34 @@ proc l3CollectExports(packageName: string; pkgBody: NimNode):
 proc l3EmittedModuleScopeNames(packageName: string;
                                activities: seq[L3ActivityExport]):
     seq[tuple[name, what: string]] =
-  ## Every name `l3LiftedExportSurface` puts at MODULE scope for this
-  ## package, with a phrase naming what each one is. Derived here and
-  ## consumed by `l3CheckExportNames`, so an export cannot be given a
-  ## name the lift is about to use for something else.
+  ## Every name the code `l3LiftedExportSurface` emits for this package
+  ## RESOLVES at module scope, with a phrase naming what each one is.
+  ## Derived here and consumed by `l3CheckExportNames`, so an export
+  ## cannot be given a name the lift is about to use, or to name, for
+  ## something else.
   ##
   ## It is a derivation and not a hand-kept list: the three fixed names
   ## are the consts the emission itself interpolates, the reflection
-  ## object comes from `l3PackageExportsTypeName` and the handle types
-  ## from `l3ActivityHandleTypeName` by way of `act.handleType` — the
-  ## same calls that produce the emitted text. A new emitted name is
-  ## reserved by being added to that one source, not by being remembered
-  ## here as well.
+  ## object comes from `l3PackageExportsTypeName`, the package's own type
+  ## from `titleIdent` and the handle types from
+  ## `l3ActivityHandleTypeName` by way of `act.handleType` — the same
+  ## calls that produce the emitted text. A new emitted name is reserved
+  ## by being added to that one source, not by being remembered here as
+  ## well.
+  ##
+  ## IT COVERS WHAT THE EMISSION REFERENCES, NOT ONLY WHAT IT DECLARES.
+  ## `titleIdent(packageName)` is the `pkg:` parameter type of
+  ## `liftedExports` and of every accessor; the lift never declares it —
+  ## `toolActionWrapperCode` does, as `type <Title>Package* = object` —
+  ## but it declares it in the SAME module, so an accessor `proc` of that
+  ## name is a redefinition there rather than an overload, and Nim
+  ## reports it on a generated line. The five OTHER types the emission
+  ## references (`LiftedServiceHandle`, `ActivityInterfaceDef`,
+  ## `ActivityParamInterfaceDef`, `ActivityConfigInterfaceDef`,
+  ## `ServiceInterfaceDef`) live in `types.nim` and reach the recipe by
+  ## import, so an accessor of one of those names merely shadows the
+  ## import and compiles — measured, each exit 0 — and reserving them
+  ## would refuse a legal recipe.
   ##
   ## The ACCESSOR procs are deliberately absent: their names ARE the
   ## export names, and `claim` already refuses two exports sharing one.
@@ -3545,7 +3561,10 @@ proc l3EmittedModuleScopeNames(packageName: string;
      "the registry call the lift emits for each service"),
     (l3PackageExportsTypeName(packageName),
      "the generated reflection object `" &
-       l3PackageExportsTypeName(packageName) & "`")]
+       l3PackageExportsTypeName(packageName) & "`"),
+    (titleIdent(packageName),
+     "the package's own type `" & titleIdent(packageName) &
+       "`, which every signature the lift writes names")]
   for act in activities:
     if l3Exportable(act.name):
       result.add((act.handleType,
