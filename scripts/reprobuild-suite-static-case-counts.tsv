@@ -449,6 +449,8 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_expression_setters.nim	nim	4
+libs/repro_project_dsl/tests/dsl_port/t_dsl_service_setter_surface_is_typed.nim	nim	5
+libs/repro_project_dsl/tests/dsl_port/t_dsl_service_typed_edges.nim	nim	19
 libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim	nim	9
 libs/repro_project_dsl/tests/dsl_port/t_dsl_uses_staged.nim	nim	16
@@ -490,6 +492,8 @@ libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
+libs/repro_project_dsl/tests/t_service_config_is_a_cached_build_output.nim	nim	3
+libs/repro_project_dsl/tests/t_service_lowers_typed_edges_into_the_graph_fragment.nim	nim	11
 libs/repro_project_dsl/tests/t_source_cache_identity.nim	nim	2
 libs/repro_project_dsl/tests/t_source_cache_identity_refuses_an_empty_provider_revision.nim	nim	7
 libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim	nim	2

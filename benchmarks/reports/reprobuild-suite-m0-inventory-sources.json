@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1776,
+    "nimTestBinaries": 1780,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 591,
+    "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1790
+    "testEntries": 1794
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -385,7 +385,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 41,
+      "count": 42,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -414,6 +414,7 @@
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_expression_setters.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_typed_edges.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim",
         "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
         "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
@@ -1078,10 +1079,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 913,
+      "integration": 914,
       "platform/destructive": 117,
-      "pure unit": 591,
-      "unclassified": 158
+      "pure unit": 592,
+      "unclassified": 160
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1229,9 +1230,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1776,
+    "nimTestBinaryCount": 1780,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1790
+    "testEntryCount": 1794
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14276,6 +14277,42 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dsl_service_setter_surface_is_typed",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_setter_surface_is_typed.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dsl_service_typed_edges",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_typed_edges.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dsl_shell_action",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -14991,6 +15028,47 @@
       "source": "libs/repro_project_dsl/tests/t_multi_package_macro.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_service_config_is_a_cached_build_output",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": true,
+      "source": "libs/repro_project_dsl/tests/t_service_config_is_a_cached_build_output.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_service_lowers_typed_edges_into_the_graph_fragment",
+      "class": "unclassified",
+      "classificationReason": "imports `service_fragment_fixtures`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_service_lowers_typed_edges_into_the_graph_fragment.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

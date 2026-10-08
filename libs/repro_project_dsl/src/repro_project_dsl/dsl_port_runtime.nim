@@ -1291,6 +1291,35 @@ type
       ## setters out of this string OR re-walk the partitioned section
       ## list. Same model M3/M4 use for their ``bodyRepr`` captures.
     # ---------------------------------------------------------------
+    # Shared-Development-Services L1 — the TYPED service record.
+    #
+    # ``Shared-Development-Services.md`` §1 states the defect these
+    # fields close: "A dev-env service is declared with
+    # `servicePlaceholder(name, metadata, activities)` — a name, an
+    # activity list and an **opaque metadata string** the engine
+    # interprets. There is no composition, no typed reference".
+    #
+    # ``executableRef`` / ``args`` above stay byte-identical (they are
+    # the M5 acceptance surface); the fields below carry what a string
+    # cannot: WHICH EDGE produces each path. ``servicePayload`` encodes
+    # them into the ``gnkService`` graph node and
+    # ``buildPackageFragment`` emits one ``gekDependsOn`` /
+    # ``gekConsumes`` edge per producer.
+    # ---------------------------------------------------------------
+    executableTyped*: ServiceExecutableRef
+      ## The typed ``executable <expr>`` edge. ``sxkUnset`` when the
+      ## body has no ``executable`` setter.
+    typedArgs*: seq[ServiceArgDef]
+      ## ``args`` in declaration order, each tagged literal or
+      ## build-output. The parallel ``args*: seq[string]`` field holds
+      ## the same tokens' values, so an M5-era reader is unaffected.
+    runtimeFiles*: seq[ServiceRuntimeFileDef]
+      ## ``runtimeFile <buildOutput>`` setters, in declaration order.
+    triggers*: seq[ServiceTriggerDef]
+      ## ``on <trigger>:`` blocks and the short-form atoms
+      ## (``hotReload`` / ``restartOnCrash`` / ``reloadOnChange``), in
+      ## declaration order.
+    # ---------------------------------------------------------------
     # M9.C — systemd-unit metadata extensions.
     #
     # The M9 NDE-package discovery survey flagged that systemd-unit
@@ -1367,6 +1396,13 @@ type
     restart: string
     user: string
     group: string
+    # Shared-Development-Services L1 — typed edges; see DslServiceDef.
+    executableTyped: ServiceExecutableRef
+    typedArgs: seq[ServiceArgDef]
+    runtimeFiles: seq[ServiceRuntimeFileDef]
+    triggers: seq[ServiceTriggerDef]
+    openTrigger: ServiceTriggerDef
+    triggerOpen: bool
 
 var dslPortServiceRegistry: Table[string, seq[DslServiceDef]]
   ## Per-package service registry. Keyed by package name.
@@ -1380,6 +1416,71 @@ var dslPortActiveServiceContext {.threadvar.}:
   ## different threads don't cross-attribute body-setter calls. Empty
   ## when no ``service:`` block is currently open.
 
+type
+  ServiceDeclarator* = object
+    ## Shared-Development-Services L1 — one ``service <ident>:`` body,
+    ## re-runnable.
+    ##
+    ## WHY A CLOSURE AND NOT JUST THE EAGER REGISTRATION. A service's
+    ## config file is a BUILD OUTPUT, and a build output does not exist
+    ## until the ``build:`` body has run. In provider mode the ``build:``
+    ## body is deliberately NOT executed at module-init time (see the
+    ## ``when not defined(reproProviderMode)`` gate in
+    ## ``emitM4BuildActions``) — it runs inside ``buildPackageFragment``,
+    ## i.e. AFTER module init. A service body evaluated only at module
+    ## init would therefore read an unassigned handle and record an empty
+    ## path, silently.
+    ##
+    ## So the emitter registers the body here as well as running it
+    ## eagerly, and ``buildPackageFragment`` re-runs it once the build
+    ## body has produced the outputs. The eager run is retained
+    ## unchanged so every non-provider-mode reader of
+    ## ``registeredServices`` sees exactly what it saw before.
+    packageName*: string
+    serviceName*: string
+    declare*: proc () {.closure.}
+
+var dslPortServiceDeclarators: seq[ServiceDeclarator]
+  ## Declaration-ordered; one entry per ``service <ident>:`` block the
+  ## ``package`` macro expanded in this process.
+
+proc registerServiceDeclarator*(packageName, serviceName: string;
+                                declare: proc () {.closure.}) =
+  ## Record a re-runnable service body. Appended, never deduplicated: a
+  ## ``when`` arm may legitimately declare the same service name twice
+  ## and the consumer decides which arm to honour (the same rule
+  ## ``registerService`` documents).
+  dslPortServiceDeclarators.add(ServiceDeclarator(
+    packageName: packageName, serviceName: serviceName, declare: declare))
+
+proc clearRegisteredServices*(packageName: string) =
+  ## Drop every service recorded against ``packageName``, leaving other
+  ## packages alone. ``rerunServiceDeclarators`` calls this first so the
+  ## re-run replaces rather than duplicates.
+  if packageName in dslPortServiceRegistry:
+    dslPortServiceRegistry[packageName] = @[]
+
+proc rerunServiceDeclarators*(packageName: string) =
+  ## Re-evaluate ``packageName``'s service bodies against the CURRENT
+  ## build state, replacing its registry bucket. Idempotent: running it
+  ## twice with the same build state yields the same records.
+  ##
+  ## A package with no declarators (nothing declared a ``service``, or an
+  ## out-of-tree caller that only used ``registerService``) keeps its
+  ## bucket untouched — clearing it would delete rows this function
+  ## cannot reconstruct.
+  var any = false
+  for declarator in dslPortServiceDeclarators:
+    if declarator.packageName == packageName and declarator.declare != nil:
+      any = true
+      break
+  if not any:
+    return
+  clearRegisteredServices(packageName)
+  for declarator in dslPortServiceDeclarators:
+    if declarator.packageName == packageName and declarator.declare != nil:
+      declarator.declare()
+
 proc resetDslPortServiceState*() =
   ## Drop every recorded service + clear the active-context stack. Test
   ## fixtures call this between scenarios so registry entries do not
@@ -1388,6 +1489,19 @@ proc resetDslPortServiceState*() =
   ## surface without disturbing the others.
   dslPortServiceRegistry.clear()
   dslPortActiveServiceContext.setLen(0)
+  dslPortServiceDeclarators.setLen(0)
+
+proc registerServiceRecord*(def: DslServiceDef) =
+  ## Append one fully-built ``DslServiceDef`` against ``def.packageName``.
+  ##
+  ## Shared-Development-Services L1 split this out of ``registerService``
+  ## so the typed fields (``executableTyped`` / ``typedArgs`` /
+  ## ``runtimeFiles`` / ``triggers``) have a route in. ``registerService``
+  ## remains the M5/M9.C positional entry point and delegates here, so its
+  ## callers are unaffected and the registry has exactly one append site.
+  if def.packageName notin dslPortServiceRegistry:
+    dslPortServiceRegistry[def.packageName] = @[]
+  dslPortServiceRegistry[def.packageName].add(def)
 
 proc registerService*(packageName, serviceName, executableRef: string;
                      args: seq[string]; bodyRepr: string;
@@ -1417,9 +1531,7 @@ proc registerService*(packageName, serviceName, executableRef: string;
   ## ``env`` / ``restart`` / ``user`` / ``group`` parameters all
   ## default to empty so M5 callers that only pass the five original
   ## positional parameters continue to compile unchanged.
-  if packageName notin dslPortServiceRegistry:
-    dslPortServiceRegistry[packageName] = @[]
-  dslPortServiceRegistry[packageName].add(DslServiceDef(
+  registerServiceRecord(DslServiceDef(
     packageName: packageName,
     serviceName: serviceName,
     executableRef: executableRef,
@@ -1447,6 +1559,102 @@ proc registeredServices*(packageName: string): seq[DslServiceDef] =
   if packageName in dslPortServiceRegistry:
     return dslPortServiceRegistry[packageName]
   return @[]
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L1 — ``BuildOutput`` and the rendering helper.
+#
+# ``Shared-Development-Services.md`` §2: "Because `service` takes no
+# `config:` block and consumes a rendered `BuildOutput` instead, a
+# service's expensive setup becomes an ordinary cached edge. This matters
+# immediately: today the identity provider's configuration and steps files
+# are written by a shell script at run time, so its first-boot schema
+# migration and instance bootstrap — tens of seconds — are an uncacheable
+# runtime side effect redone on every reset. Declared as build outputs they
+# are keyed like anything else."
+#
+# So the helper below does not write a file. It registers a build ACTION
+# that writes the file and hands back the handle, which is why a second
+# reconcile with unchanged content is a cache hit rather than a re-render:
+# the engine keys ``reprobuild.builtin.fs writeText`` on a weak fingerprint
+# computed over the encoded payload, rendered bytes included.
+# ---------------------------------------------------------------------------
+
+proc `$`*(p: BuildOutputPath): string =
+  ## Dropping to a plain string DROPS THE CONTEXT, exactly as
+  ## interpolating a Nix string-with-context into a context-free string
+  ## does. Spelled out because the loss is silent.
+  p.value
+
+proc `&`*(a: BuildOutputPath; b: string): BuildOutputPath =
+  ## Concatenation PRESERVES the producer, so ``"--config=" & cfg.path``
+  ## and ``cfg.path & ".bak"`` still record the edge. ``producerPath``
+  ## stays the FILE's own path, which is what the graph matches on.
+  result = a
+  result.value = a.value & b
+
+proc `&`*(a: string; b: BuildOutputPath): BuildOutputPath =
+  result = b
+  result.value = a & b.value
+
+proc executableAtPath*(path: string): ServiceExecutableRef =
+  ## ``executable executableAtPath("/usr/bin/zitadel")`` — a binary named by
+  ## literal path rather than by artifact or package. Separate from the
+  ## bare-string form because ``setActiveServiceExecutable(string)`` has
+  ## always meant "an artifact of this package" and changing that would
+  ## reinterpret every existing recipe.
+  ServiceExecutableRef(kind: sxkPath, path: path)
+
+proc newBuildOutput*(packageName, actionId, filePath: string): BuildOutput =
+  ## The ONE constructor for a build-output handle: it is what keeps the
+  ## ``path`` field (the context-carrying proxy ``args`` and
+  ## ``runtimeFile`` take) in sync with ``filePath`` and the producer. A
+  ## hand-written ``BuildOutput(...)`` object constructor would compile
+  ## and leave ``path`` empty.
+  BuildOutput(
+    packageName: packageName,
+    actionId: actionId,
+    filePath: filePath,
+    path: BuildOutputPath(
+      value: filePath,
+      producerPackage: packageName,
+      producerActionId: actionId,
+      producerPath: filePath))
+
+proc buildOutputOf*(packageName, actionId, filePath: string): BuildOutput =
+  ## Construct a handle for an output produced by an action this recipe
+  ## already registered under ``actionId``. The rendering helpers are the
+  ## normal route; this is the escape hatch for an edge emitted by a
+  ## typed-tool wrapper whose handle the author did not capture.
+  newBuildOutput(packageName, actionId, filePath)
+
+proc renderConfigFile*(path: string; content: string;
+                       actionId = ""; packageName = ""): BuildOutput
+                      {.discardable.} =
+  ## Render ``content`` to ``path`` as a CACHED BUILD OUTPUT and return
+  ## its handle.
+  ##
+  ## This is the ``literalConfigFile``-shaped helper ``Package-Model.md``
+  ## §Collections names: "Configuration is the package's job:
+  ## package-level ``config:`` configurables plus rendering helpers
+  ## (``literalConfigFile``, ``configFile``, etc.) produce a
+  ## ``BuildOutput``, and the service consumes that output the same way
+  ## any other build output is consumed — either by reference on argv or
+  ## via ``runtimeFile``."
+  ##
+  ## NOT to be confused with ``configFile`` further down this module:
+  ## that one is the home-manager/profile ``fs.configFile`` registry
+  ## (M8), which records a declaration an APPLY phase materialises. This
+  ## one emits a build-graph edge, which is the thing the L1 gate
+  ## measures a cache hit on.
+  ##
+  ## ``actionId`` defaults to ``fs-writeText-<sanitised path>``, which is
+  ## a function of the path alone — so the id is stable across runs and
+  ## two renders of different paths never collide.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  let edge = ReproFs().writeText(path, content, actionId = actionId)
+  newBuildOutput(pkg, edge.id, path)
 
 # ---------------------------------------------------------------------------
 # Active-service stack: body-setter routing
@@ -1490,6 +1698,79 @@ proc setActiveServiceExecutable*(executableRef: string) =
   if dslPortActiveServiceContext.len == 0:
     return
   dslPortActiveServiceContext[^1].executableRef = executableRef
+  # Shared-Development-Services L1: the same selection, typed. The STRING
+  # form is an artifact name of this package (that is what this proc has
+  # always meant), so it lowers to ``sxkArtifact``. A literal path goes
+  # through ``executableAtPath``, a third-party binary through the
+  # ``SelectedExecutable`` overload, and a binary this graph builds
+  # through the ``BuildOutput`` one.
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkArtifact,
+    packageName: dslPortActiveServiceContext[^1].packageName,
+    executableName: executableRef)
+
+proc setActiveServiceExecutable*(value: SelectedExecutable) =
+  ## Body-setter for ``executable <pkg>.executable("<name>")`` — the
+  ## third-party form ``Package-Model.md`` names ("any other expression
+  ## that evaluates to an ``Executable[name]``, such as
+  ## ``redis.executable("redis-server")`` for third-party software pulled
+  ## in via ``uses``").
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.executableName
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkPackageExecutable,
+    packageName: value.packageName,
+    executableName: value.executableName)
+
+proc setActiveServiceExecutable*(value: ServiceExecutableRef) =
+  ## Body-setter for an explicitly constructed reference —
+  ## ``executable executableAtPath("/usr/bin/zitadel")``.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.executableName
+  dslPortActiveServiceContext[^1].executableTyped = value
+
+proc setActiveServiceExecutable*(value: BuildOutput) =
+  ## Body-setter for ``executable <buildOutput>`` — a binary THIS graph
+  ## builds. The producing action id travels with it, which is what makes
+  ## the service's dependency on its own binary an edge.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.filePath
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkBuildOutput,
+    packageName: value.packageName,
+    path: value.filePath,
+    actionId: value.actionId)
+
+proc setActiveServiceExecutable*(value: BuildOutputPath) =
+  ## ``executable <buildOutput>.path`` — same edge, reached through the
+  ## context-carrying path proxy.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.producerPath
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkBuildOutput,
+    packageName: value.producerPackage,
+    path: value.producerPath,
+    actionId: value.producerActionId)
+
+proc setActiveServiceExecutable*[T: object](handle: T) =
+  ## ``executable <pkg>.executable("<name>")`` where ``<pkg>`` is a
+  ## package handle: the ``package`` macro emits a PER-PACKAGE wrapper
+  ## type (``macros_a.nim``'s ``exeTypeName``) whose single field is the
+  ## ``SelectedExecutable``. There is no shared base type to overload on
+  ## — the type does not exist until that package's macro expands — so
+  ## the wrapper is unwrapped structurally. Concrete overloads above win
+  ## for every type that has one, so this arm only ever sees the
+  ## generated wrappers.
+  when compiles(handle.value) and handle.value is SelectedExecutable:
+    setActiveServiceExecutable(handle.value)
+  else:
+    {.error: "a service's `executable` setter takes an executable " &
+      "artifact ident, a `<pkg>.executable(\"<name>\")` handle, a " &
+      "`BuildOutput`, or `executableAtPath(\"<path>\")`".}
 
 proc addActiveServiceArg*(value: string) =
   ## Body-setter: append one positional argument to the active frame.
@@ -1498,6 +1779,316 @@ proc addActiveServiceArg*(value: string) =
   if dslPortActiveServiceContext.len == 0:
     return
   dslPortActiveServiceContext[^1].args.add(value)
+  dslPortActiveServiceContext[^1].typedArgs.add(ServiceArgDef(
+    kind: svakLiteral, value: value))
+
+proc addActiveServiceArg*(value: BuildOutputPath) =
+  ## Body-setter for a build output's path on argv. ``Package-Model.md``:
+  ## "When the file *is* passed on argv, no ``runtimeFile`` line is
+  ## needed: a ``BuildOutput.path`` reaches ``args`` as a
+  ## context-carrying string and the framework records the edge through
+  ## the typed proxy". This overload is that framework step — the
+  ## argument's producing edge is recorded alongside its text.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].args.add(value.value)
+  dslPortActiveServiceContext[^1].typedArgs.add(ServiceArgDef(
+    kind: svakBuildOutput,
+    value: value.value,
+    producerPackage: value.producerPackage,
+    producerActionId: value.producerActionId,
+    producerPath: value.producerPath))
+
+proc addActiveServiceArg*(value: BuildOutput) =
+  ## ``args <buildOutput>`` — the handle itself on argv, equivalent to
+  ## ``<buildOutput>.path``.
+  addActiveServiceArg(value.path)
+
+proc addActiveServiceRuntimeFile*(value: BuildOutput) =
+  ## Body-setter for ``runtimeFile <buildOutput>`` — "declares a build
+  ## output that the service must have alongside it at runtime even
+  ## though the path does not appear on argv" (``Package-Model.md``).
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].runtimeFiles.add(ServiceRuntimeFileDef(
+    path: value.filePath,
+    producerPackage: value.packageName,
+    producerActionId: value.actionId))
+
+proc addActiveServiceRuntimeFile*(value: BuildOutputPath) =
+  ## ``runtimeFile <buildOutput>.path`` — same edge.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].runtimeFiles.add(ServiceRuntimeFileDef(
+    path: value.producerPath,
+    producerPackage: value.producerPackage,
+    producerActionId: value.producerActionId))
+
+proc beginActiveServiceTrigger*(kind: ServiceTriggerKind;
+                                subject = ""; producerActionId = "") =
+  ## Open an ``on <trigger>:`` block on the active frame. Paired with
+  ## ``finishActiveServiceTrigger`` by the emitter's try/finally.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].triggerOpen:
+    # A nested ``on:`` is not a shape the macro emits; closing the outer
+    # one keeps its actions rather than losing them.
+    dslPortActiveServiceContext[^1].triggers.add(
+      dslPortActiveServiceContext[^1].openTrigger)
+  dslPortActiveServiceContext[^1].openTrigger = ServiceTriggerDef(
+    kind: kind, subject: subject, producerActionId: producerActionId,
+    actions: @[])
+  dslPortActiveServiceContext[^1].triggerOpen = true
+
+proc beginActiveServiceTrigger*(kind: ServiceTriggerKind;
+                                output: BuildOutput) =
+  ## ``on change <buildOutput>:`` — the watched path AND the edge that
+  ## produces it, so a lowering can order the watch after the producer.
+  beginActiveServiceTrigger(kind, output.filePath, output.actionId)
+
+proc beginActiveServiceTrigger*(kind: ServiceTriggerKind;
+                                output: BuildOutputPath) =
+  beginActiveServiceTrigger(kind, output.producerPath,
+    output.producerActionId)
+
+proc addActiveServiceTriggerAction*(kind: ServiceTriggerActionKind;
+                                    argument = "") =
+  ## Append one action to the open ``on <trigger>:`` body.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if not dslPortActiveServiceContext[^1].triggerOpen:
+    return
+  dslPortActiveServiceContext[^1].openTrigger.actions.add(
+    ServiceTriggerAction(kind: kind, argument: argument))
+
+proc finishActiveServiceTrigger*() =
+  ## Close the open ``on <trigger>:`` block and append it to the frame.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if not dslPortActiveServiceContext[^1].triggerOpen:
+    return
+  dslPortActiveServiceContext[^1].triggers.add(
+    dslPortActiveServiceContext[^1].openTrigger)
+  dslPortActiveServiceContext[^1].triggerOpen = false
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L1 — the ``gnkService`` node payload.
+#
+# ``GraphNodeKind`` has carried ``gnkService`` since the provider protocol
+# was written and NOTHING ever emitted one; services reached the engine
+# only as the opaque ``DevEnvServiceMetadata.metadata`` JSON string that
+# ``Shared-Development-Services.md`` §1 names as the defect. This codec is
+# what makes the node emittable, and it is deliberately a TYPED record
+# rather than a JSON blob: the producing action id of every path travels
+# with it, which is what ``buildPackageFragment`` turns into graph edges.
+#
+# Envelope layout matches the build-target / build-pool payloads in
+# ``runtime_core`` byte for byte (4-byte magic, u16 version, u32 length),
+# so a stale decoder reports "unsupported ... version" rather than
+# "corrupt".
+# ---------------------------------------------------------------------------
+
+const
+  ServicePayloadMagic = [byte(ord('R')), byte(ord('S')), byte(ord('V')),
+    byte(ord('C'))]
+  ServicePayloadVersion = 1'u16
+
+proc writeServiceExecutable(outp: var seq[byte]; value: ServiceExecutableRef) =
+  outp.writeByte(byte(ord(value.kind)))
+  outp.writeString(value.packageName)
+  outp.writeString(value.executableName)
+  outp.writeString(value.path)
+  outp.writeString(value.actionId)
+
+proc readServiceExecutable(bytes: openArray[byte]; pos: var int):
+    ServiceExecutableRef =
+  let kindByte = readByte(bytes, pos)
+  if kindByte > byte(ord(sxkPath)):
+    raisePayload("invalid service executable kind in service payload")
+  ServiceExecutableRef(
+    kind: ServiceExecutableKind(kindByte),
+    packageName: readString(bytes, pos),
+    executableName: readString(bytes, pos),
+    path: readString(bytes, pos),
+    actionId: readString(bytes, pos))
+
+proc encodeServicePayload*(def: DslServiceDef): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(def.packageName)
+  payload.writeString(def.serviceName)
+  payload.writeServiceExecutable(def.executableTyped)
+  # ``executableRef`` and ``args`` are written explicitly rather than
+  # DERIVED from the typed fields on decode. They can legitimately
+  # diverge: a record built through the legacy positional
+  # ``registerService`` has them populated and the typed fields empty, and
+  # for ``sxkBuildOutput`` ``executableRef`` holds the output PATH while
+  # ``executableTyped.executableName`` is empty. Deriving would have made
+  # the round-trip lossy in exactly those two cases.
+  payload.writeString(def.executableRef)
+  payload.writeStringSeq(def.args)
+  payload.writeU32Le(uint32(def.typedArgs.len))
+  for arg in def.typedArgs:
+    payload.writeByte(byte(ord(arg.kind)))
+    payload.writeString(arg.value)
+    payload.writeString(arg.producerPackage)
+    payload.writeString(arg.producerActionId)
+    payload.writeString(arg.producerPath)
+  payload.writeU32Le(uint32(def.runtimeFiles.len))
+  for file in def.runtimeFiles:
+    payload.writeString(file.path)
+    payload.writeString(file.producerPackage)
+    payload.writeString(file.producerActionId)
+  payload.writeU32Le(uint32(def.triggers.len))
+  for trigger in def.triggers:
+    payload.writeByte(byte(ord(trigger.kind)))
+    payload.writeString(trigger.subject)
+    payload.writeString(trigger.producerActionId)
+    payload.writeU32Le(uint32(trigger.actions.len))
+    for action in trigger.actions:
+      payload.writeByte(byte(ord(action.kind)))
+      payload.writeString(action.argument)
+  # The M9.C systemd-unit slice, so a lowering that writes a unit file
+  # does not have to go back to the DSL registry for it.
+  payload.writeString(def.description)
+  payload.writeString(def.serviceType)
+  payload.writeString(def.execStart)
+  payload.writeStringSeq(def.wantedBy)
+  payload.writeStringSeq(def.wants)
+  payload.writeStringSeq(def.requires)
+  payload.writeStringSeq(def.before)
+  payload.writeStringSeq(def.after)
+  payload.writeU32Le(uint32(def.env.len))
+  for entry in def.env:
+    payload.writeString(entry.key)
+    payload.writeString(entry.value)
+  payload.writeString(def.restart)
+  payload.writeString(def.user)
+  payload.writeString(def.group)
+
+  result.add(ServicePayloadMagic)
+  result.writeU16Le(ServicePayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
+  if bytes.len < 10:
+    raisePayload("truncated service payload envelope")
+  for i in 0 ..< ServicePayloadMagic.len:
+    if bytes[i] != ServicePayloadMagic[i]:
+      raisePayload("unknown service payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != ServicePayloadVersion:
+    raisePayload("unsupported service payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("service payload length mismatch")
+  result.packageName = readString(bytes, pos)
+  result.serviceName = readString(bytes, pos)
+  result.executableTyped = readServiceExecutable(bytes, pos)
+  result.executableRef = readString(bytes, pos)
+  result.executable = result.executableRef
+  result.args = readStringSeq(bytes, pos)
+  var count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(svakBuildOutput)):
+      raisePayload("invalid service argument kind in service payload")
+    result.typedArgs.add(ServiceArgDef(
+      kind: ServiceArgKind(kindByte),
+      value: readString(bytes, pos),
+      producerPackage: readString(bytes, pos),
+      producerActionId: readString(bytes, pos),
+      producerPath: readString(bytes, pos)))
+  count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    result.runtimeFiles.add(ServiceRuntimeFileDef(
+      path: readString(bytes, pos),
+      producerPackage: readString(bytes, pos),
+      producerActionId: readString(bytes, pos)))
+  count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(stkCrash)):
+      raisePayload("invalid service trigger kind in service payload")
+    var trigger = ServiceTriggerDef(
+      kind: ServiceTriggerKind(kindByte),
+      subject: readString(bytes, pos),
+      producerActionId: readString(bytes, pos))
+    let actionCount = int(readU32Le(bytes, pos))
+    for _ in 0 ..< actionCount:
+      let actionKindByte = readByte(bytes, pos)
+      if actionKindByte > byte(ord(stakNotify)):
+        raisePayload("invalid service trigger action kind in service payload")
+      trigger.actions.add(ServiceTriggerAction(
+        kind: ServiceTriggerActionKind(actionKindByte),
+        argument: readString(bytes, pos)))
+    result.triggers.add(trigger)
+  result.description = readString(bytes, pos)
+  result.serviceType = readString(bytes, pos)
+  result.execStart = readString(bytes, pos)
+  result.wantedBy = readStringSeq(bytes, pos)
+  result.wants = readStringSeq(bytes, pos)
+  result.requires = readStringSeq(bytes, pos)
+  result.before = readStringSeq(bytes, pos)
+  result.after = readStringSeq(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    let key = readString(bytes, pos)
+    let value = readString(bytes, pos)
+    result.env.add((key: key, value: value))
+  result.restart = readString(bytes, pos)
+  result.user = readString(bytes, pos)
+  result.group = readString(bytes, pos)
+  if pos != bytes.len:
+    raisePayload("trailing service payload bytes")
+
+proc servicePayload*(def: DslServiceDef): string =
+  fromBytes(encodeServicePayload(def))
+
+proc serviceProducerActionIds*(def: DslServiceDef): seq[string] =
+  ## Every build action this service depends on, deduplicated and in
+  ## declaration order: the executable's producer, then each
+  ## build-output argument's, then each runtime file's, then each watched
+  ## output's. This is the edge set ``buildPackageFragment`` emits, named
+  ## once so the emitter and any consumer agree on it.
+  proc push(ids: var seq[string]; id: string) =
+    if id.len > 0 and ids.find(id) < 0:
+      ids.add(id)
+  if def.executableTyped.actionId.len > 0:
+    result.push(def.executableTyped.actionId)
+  for arg in def.typedArgs:
+    if arg.kind == svakBuildOutput:
+      result.push(arg.producerActionId)
+  for file in def.runtimeFiles:
+    result.push(file.producerActionId)
+  for trigger in def.triggers:
+    if trigger.kind == stkChangeOutput:
+      result.push(trigger.producerActionId)
+
+proc serviceConsumedOutputs*(def: DslServiceDef):
+    seq[tuple[actionId: string; path: string]] =
+  ## Every (producing action, declared output path) pair the service
+  ## consumes — argv references, runtime files and watched outputs. One
+  ## ``gekConsumes`` edge each.
+  proc push(items: var seq[tuple[actionId: string; path: string]];
+            actionId, path: string) =
+    if actionId.len == 0 or path.len == 0:
+      return
+    for item in items:
+      if item.actionId == actionId and item.path == path:
+        return
+    items.add((actionId: actionId, path: path))
+  if def.executableTyped.kind == sxkBuildOutput:
+    result.push(def.executableTyped.actionId, def.executableTyped.path)
+  for arg in def.typedArgs:
+    if arg.kind == svakBuildOutput:
+      result.push(arg.producerActionId, arg.producerPath)
+  for file in def.runtimeFiles:
+    result.push(file.producerActionId, file.path)
+  for trigger in def.triggers:
+    if trigger.kind == stkChangeOutput:
+      result.push(trigger.producerActionId, trigger.subject)
 
 # ---------------------------------------------------------------------------
 # M9.C — systemd-unit metadata body-setters. One proc per recognised setter
@@ -1591,23 +2182,38 @@ proc finishServiceContext*() =
   ## clean.
   if dslPortActiveServiceContext.len == 0:
     return
-  let frame = dslPortActiveServiceContext[^1]
+  var frame = dslPortActiveServiceContext[^1]
   dslPortActiveServiceContext.setLen(
     dslPortActiveServiceContext.len - 1)
-  registerService(frame.packageName, frame.serviceName,
-                  frame.executableRef, frame.args, frame.bodyRepr,
-                  description = frame.description,
-                  serviceType = frame.serviceType,
-                  execStart = frame.execStart,
-                  wantedBy = frame.wantedBy,
-                  wants = frame.wants,
-                  requires = frame.requires,
-                  before = frame.before,
-                  after = frame.after,
-                  env = frame.env,
-                  restart = frame.restart,
-                  user = frame.user,
-                  group = frame.group)
+  # Shared-Development-Services L1: an ``on <trigger>:`` block left open
+  # by a malformed body is closed here rather than dropped, so its
+  # actions still reach the record and the author sees them.
+  if frame.triggerOpen:
+    frame.triggers.add(frame.openTrigger)
+    frame.triggerOpen = false
+  registerServiceRecord(DslServiceDef(
+    packageName: frame.packageName,
+    serviceName: frame.serviceName,
+    executableRef: frame.executableRef,
+    executable: frame.executableRef,
+    args: frame.args,
+    bodyRepr: frame.bodyRepr,
+    description: frame.description,
+    serviceType: frame.serviceType,
+    execStart: frame.execStart,
+    wantedBy: frame.wantedBy,
+    wants: frame.wants,
+    requires: frame.requires,
+    before: frame.before,
+    after: frame.after,
+    env: frame.env,
+    restart: frame.restart,
+    user: frame.user,
+    group: frame.group,
+    executableTyped: frame.executableTyped,
+    typedArgs: frame.typedArgs,
+    runtimeFiles: frame.runtimeFiles,
+    triggers: frame.triggers))
 
 # ---------------------------------------------------------------------------
 # DSL-port M7 — user-facing service-context accessors. Symmetric with the

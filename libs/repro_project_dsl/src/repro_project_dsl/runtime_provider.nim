@@ -78,6 +78,13 @@ when defined(reproProviderMode):
     namespace & ":output:" & sanitizeNodePart(actionId) & ":" &
       sanitizeNodePart(output)
 
+  proc serviceNode(namespace, serviceName: string): string =
+    ## Shared-Development-Services L1 — the ``gnkService`` node id.
+    ## Mirrors ``actionNode`` / ``outputNode``: namespace-scoped and
+    ## sanitised, so two packages in one namespace with the same service
+    ## name collide loudly rather than silently sharing a node.
+    namespace & ":service:" & sanitizeNodePart(serviceName)
+
   proc defaultBuildActionNode(namespace: string): string =
     namespace & ":metadata:default-build-action"
 
@@ -126,6 +133,25 @@ when defined(reproProviderMode):
     finally:
       currentProviderProjectRoot = ""
       clearCurrentOwningPackageOverride()
+    # Shared-Development-Services L1 — re-evaluate this package's
+    # ``service <ident>:`` bodies now that ``buildProc`` has run.
+    #
+    # A service's rendered configuration is a BUILD OUTPUT, and in
+    # provider mode the ``build:`` body does not execute at module-init
+    # time (``emitM4BuildActions`` gates the splice on ``not
+    # defined(reproProviderMode)``) — it runs in the line above. So a
+    # service body evaluated only at module init would read an unassigned
+    # handle and record an empty path with no diagnostic. The re-run
+    # replaces this package's registry bucket; packages that declared no
+    # service keep theirs untouched.
+    # Root fragment only, for the same reason the emission below is: a
+    # structural-iterator MEMBER's ``buildProc`` is that member's lift, not
+    # the package's ``build:`` body, so re-running the service bodies there
+    # would re-record them against whatever the last ROOT invocation left in
+    # the module-level handles.
+    let isRootFragment = request.entryPointId == rootEntryPointId(pkg)
+    if isRootFragment:
+      rerunServiceDeclarators(pkg.packageName)
     let actions = inferDeclaredActionDeps(
       registeredBuildActions(), request.arguments)
     let targets = registeredBuildTargets()
@@ -248,6 +274,71 @@ when defined(reproProviderMode):
           identity: output,
           cleanupPolicy: cplDeleteWhenUnclaimed,
           payload: action.id))
+    # Shared-Development-Services L1 — the service lane.
+    #
+    # ``GraphNodeKind.gnkService`` existed from the start of the provider
+    # protocol and nothing had ever emitted one: a service reached the
+    # engine only as ``DevEnvServiceMetadata.metadata``, the opaque JSON
+    # string ``Shared-Development-Services.md`` §1 names as the defect
+    # ("a name, an activity list and an **opaque metadata string** the
+    # engine interprets. There is no composition, no typed reference").
+    #
+    # Each service now travels as a TYPED record plus real edges:
+    #
+    #   * ``gekDependsOn`` service -> producing action, once per distinct
+    #     producer, so the service orders after everything it reads;
+    #   * ``gekConsumes`` service -> generated output, once per declared
+    #     output path it references on argv, declares as a
+    #     ``runtimeFile`` or watches with ``on change``.
+    #
+    # An edge is emitted only when the fragment actually contains the
+    # producing action; a service whose handle came from another package
+    # records the producer in its payload and is left to L3's interface
+    # lift rather than being given a dangling edge here.
+    # ROOT FRAGMENT ONLY. ``foreachDispatch`` also routes through this proc,
+    # once per structural-iterator MEMBER (``foreachDispatchCode`` in
+    # ``macros_b.nim``), and every member fragment shares the root's
+    # namespace -- so emitting here unconditionally would put N+1 copies of
+    # the same service node, under the same node id, into one snapshot. A
+    # service belongs to the PACKAGE, not to a member of one of its
+    # iterations, so it is emitted exactly where the package's own build is.
+    var fragmentActionIds: seq[string] = @[]
+    for action in actions:
+      fragmentActionIds.add(action.id)
+    for service in (if isRootFragment:
+                      registeredServices(pkg.packageName)
+                    else:
+                      @[]):
+      if service.serviceName.len == 0:
+        continue
+      let svcNodeId = serviceNode(request.namespace, service.serviceName)
+      result.nodes.add(GraphNode(
+        id: svcNodeId,
+        kind: gnkService,
+        stableName: service.serviceName,
+        payload: servicePayload(service)))
+      for producer in service.serviceProducerActionIds():
+        if fragmentActionIds.find(producer) < 0:
+          continue
+        result.edges.add(GraphEdge(
+          id: request.namespace & ":service-depends:" &
+            sanitizeNodePart(service.serviceName) & ":" &
+            sanitizeNodePart(producer),
+          kind: gekDependsOn,
+          fromNode: svcNodeId,
+          toNode: actionNode(request.namespace, producer)))
+      for consumed in service.serviceConsumedOutputs():
+        if fragmentActionIds.find(consumed.actionId) < 0:
+          continue
+        result.edges.add(GraphEdge(
+          id: request.namespace & ":service-consumes:" &
+            sanitizeNodePart(service.serviceName) & ":" &
+            sanitizeNodePart(consumed.actionId) & ":" &
+            sanitizeNodePart(consumed.path),
+          kind: gekConsumes,
+          fromNode: svcNodeId,
+          toNode: outputNode(request.namespace, consumed.actionId,
+            consumed.path)))
     result.fragmentDigest = computeGraphFragmentDigest(result)
 
   proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;

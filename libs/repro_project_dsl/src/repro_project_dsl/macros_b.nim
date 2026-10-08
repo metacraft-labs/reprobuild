@@ -1756,46 +1756,268 @@ proc m5ServiceStringLitArg(stmt: NimNode): NimNode =
     return nil
   return stmt[1].copyNimTree()
 
+proc m5ServiceTriggerActionCall(stmt: NimNode): NimNode =
+  ## Shared-Development-Services L1 — one action inside an ``on
+  ## <trigger>:`` body, lowered to its ``addActiveServiceTriggerAction``
+  ## call. ``nil`` for a statement that is not a recognised action, so
+  ## the caller can leave it to the ``bodyRepr`` capture rather than
+  ## guessing.
+  ##
+  ## The action taxonomy is ``Package-Model.md`` §"Service Lifecycle And
+  ## Reactive Triggers": ``hotReload`` / ``restart`` / ``sendSignal`` /
+  ## ``exec`` / ``notify``. Supervisor options on ``restart``
+  ## (``backoff = ...``, ``maxRetries = ...``) are carried as the
+  ## argument's source text rather than parsed: the lowering that
+  ## consumes them does not exist yet, and inventing a schema for it here
+  ## would be a second place to change when it does.
+  if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    case identText(stmt).normalize
+    of "hotreload":
+      return quote do:
+        addActiveServiceTriggerAction(stakHotReload)
+    of "restart":
+      return quote do:
+        addActiveServiceTriggerAction(stakRestart)
+    else:
+      return nil
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return nil
+  if stmt.len < 2:
+    return nil
+  let head = stmt[0]
+  if head.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return nil
+  let headName = identText(head).normalize
+  case headName
+  of "sendsignal":
+    let arg = stmt[1].copyNimTree()
+    return quote do:
+      addActiveServiceTriggerAction(stakSendSignal, `arg`)
+  of "exec":
+    let arg = stmt[1].copyNimTree()
+    return quote do:
+      addActiveServiceTriggerAction(stakExec, `arg`)
+  of "notify":
+    let arg = stmt[1].copyNimTree()
+    return quote do:
+      addActiveServiceTriggerAction(stakNotify, `arg`)
+  of "hotreload", "restart":
+    # ``restart backoff = exponential`` / ``hotReload otherwise
+    # sendSignal "SIGHUP"`` — the option text, verbatim.
+    let optionLit = newLit(stmt[1].repr)
+    let kindLit =
+      if headName == "restart": ident("stakRestart")
+      else: ident("stakHotReload")
+    return quote do:
+      addActiveServiceTriggerAction(`kindLit`, `optionLit`)
+  else:
+    return nil
+
+proc m5ServiceTriggerEmission(stmt: NimNode): NimNode =
+  ## Lower one ``on <trigger>:`` block to its begin/try/finally triple.
+  ## ``nil`` when the head is not a trigger shape this milestone
+  ## recognises.
+  ##
+  ##   on rebuild api:        -> beginActiveServiceTrigger(stkRebuild, "api")
+  ##   on change cfg:         -> beginActiveServiceTrigger(stkChangeOutput, cfg)
+  ##   on change "/var/x":    -> beginActiveServiceTrigger(stkChangePath, "/var/x")
+  ##   on start: / stop: / crash:
+  ##
+  ## ``on change <expr>`` splices ``<expr>`` VERBATIM into the
+  ## ``BuildOutput`` overload, so a misspelled handle is a type error at
+  ## the spliced call site rather than a watch that silently never fires.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return nil
+  if stmt.len < 3:
+    return nil
+  let body = stmt[^1]
+  if body.kind != nnkStmtList:
+    return nil
+  let spec = stmt[1]
+  var beginCall: NimNode = nil
+  if spec.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    case identText(spec).normalize
+    of "start":
+      beginCall = quote do:
+        beginActiveServiceTrigger(stkStart)
+    of "stop":
+      beginCall = quote do:
+        beginActiveServiceTrigger(stkStop)
+    of "crash":
+      beginCall = quote do:
+        beginActiveServiceTrigger(stkCrash)
+    else:
+      return nil
+  elif spec.kind in {nnkCall, nnkCommand} and spec.len == 2 and
+       spec[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    let subject = spec[1].copyNimTree()
+    case identText(spec[0]).normalize
+    of "rebuild":
+      # The rebuilt artifact is named by IDENT, so the macro records the
+      # text and never evaluates the node — the same rule the
+      # ``executable <ident>`` setter follows.
+      let subjectLit =
+        if subject.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+          newLit(identText(subject))
+        elif subject.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+          newLit(subject.strVal)
+        else:
+          newLit(subject.repr)
+      beginCall = quote do:
+        beginActiveServiceTrigger(stkRebuild, `subjectLit`)
+    of "change":
+      if subject.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        beginCall = quote do:
+          beginActiveServiceTrigger(stkChangePath, `subject`)
+      else:
+        beginCall = quote do:
+          beginActiveServiceTrigger(stkChangeOutput, `subject`)
+    else:
+      return nil
+  else:
+    return nil
+  let actionBody = newStmtList()
+  for inner in body:
+    let call = m5ServiceTriggerActionCall(inner)
+    if call != nil:
+      actionBody.add(call)
+  if actionBody.len == 0:
+    actionBody.add(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
+  result = quote do:
+    block:
+      `beginCall`
+      try:
+        `actionBody`
+      finally:
+        finishActiveServiceTrigger()
+
+proc m5ServiceShortFormEmission(stmt: NimNode): NimNode =
+  ## The short-form atoms of ``Package-Model.md`` §"Service Lifecycle And
+  ## Reactive Triggers":
+  ##
+  ##   hotReload                    = on rebuild <own executable>: hotReload
+  ##   restartOnCrash               = on crash: restart
+  ##   reloadOnChange cfg, "SIGHUP" = on change cfg: sendSignal "SIGHUP"
+  ##
+  ## ``nil`` when the statement is not one of them.
+  if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    case identText(stmt).normalize
+    of "hotreload":
+      # "``hotReload`` (without arguments) implicitly targets ``on
+      # rebuild`` for the service's own executable", so the subject is
+      # left empty rather than guessed: the service record already names
+      # its executable.
+      return quote do:
+        block:
+          beginActiveServiceTrigger(stkRebuild)
+          try:
+            addActiveServiceTriggerAction(stakHotReload)
+          finally:
+            finishActiveServiceTrigger()
+    of "restartoncrash":
+      return quote do:
+        block:
+          beginActiveServiceTrigger(stkCrash)
+          try:
+            addActiveServiceTriggerAction(stakRestart)
+          finally:
+            finishActiveServiceTrigger()
+    else:
+      return nil
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return nil
+  # ``restartOnCrash()`` parses as a one-child Call, so the arity guard
+  # has to precede every ``stmt[1]`` read below or the macro indexes past
+  # the node and aborts the whole package expansion.
+  if stmt.len < 2:
+    return nil
+  if stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return nil
+  case identText(stmt[0]).normalize
+  of "restartoncrash":
+    # ``restartOnCrash backoff = exponential`` — option text verbatim,
+    # for the same reason the ``restart`` action carries it that way.
+    let optionLit = newLit(stmt[1].repr)
+    return quote do:
+      block:
+        beginActiveServiceTrigger(stkCrash)
+        try:
+          addActiveServiceTriggerAction(stakRestart, `optionLit`)
+        finally:
+          finishActiveServiceTrigger()
+  of "reloadonchange":
+    if stmt.len != 3:
+      return nil
+    let subject = stmt[1].copyNimTree()
+    let signal = stmt[2].copyNimTree()
+    let beginCall =
+      if subject.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        quote do:
+          beginActiveServiceTrigger(stkChangePath, `subject`)
+      else:
+        quote do:
+          beginActiveServiceTrigger(stkChangeOutput, `subject`)
+    return quote do:
+      block:
+        `beginCall`
+        try:
+          addActiveServiceTriggerAction(stakSendSignal, `signal`)
+        finally:
+          finishActiveServiceTrigger()
+  else:
+    return nil
+
 proc m5ParseServiceBody(body: NimNode): tuple[
-    executableRef: string; argStringLits: seq[NimNode];
+    executableRef: string; executableExpr: NimNode;
+    argExprs: seq[NimNode]; runtimeFileExprs: seq[NimNode];
+    reactiveEmissions: seq[NimNode];
     descriptionLit: NimNode; typeLit: NimNode; execStartLit: NimNode;
     wantedByLits: seq[NimNode]; wantsLits: seq[NimNode];
     requiresLits: seq[NimNode]; beforeLits: seq[NimNode];
     afterLits: seq[NimNode];
     envPairs: seq[tuple[keyLit: NimNode; valueLit: NimNode]];
     restartLit: NimNode; userLit: NimNode; groupLit: NimNode] =
-  ## Walk a ``service:`` body and extract:
+  ## Walk a ``service:`` body and extract its setters.
   ##
-  ##   * ``executable <ident>`` setter → records ``executableRef`` as
-  ##     the ident's ``strVal``. Only the LAST occurrence wins (matches
-  ##     v8's behavior — v8 raises on the second occurrence, but M5
-  ##     keeps the leniency until a real recipe needs the stricter
-  ##     check; future tightening goes through the M5+ body-setter
-  ##     widening).
-  ##   * ``args "a", "b", ...`` setter → appends every string-literal
-  ##     argument to ``argStringLits`` in declaration order. Non-literal
-  ##     argument nodes are silently skipped — the variant ID surface
-  ##     (``cachePort`` ident etc.) only lands in v8 because the staged
-  ##     layer evaluates the body at runtime; M5 runs at macro-expansion
-  ##     time and can only freeze literals. M5+ widens this when the
-  ##     variant-as-string lowering arrives.
+  ## ``Package-Model.md`` §Collections is the authority for the four
+  ## setters this milestone makes real:
   ##
-  ## M9.C extensions — systemd-unit metadata setters. All accept a
-  ## single string-literal argument (caught by ``m5ServiceStringLit
-  ## Arg``); ``env`` uses the call form ``env("KEY", "VALUE")``:
-  ##   * ``description "..."`` / ``type "..."`` / ``execStart "..."``
-  ##   * ``wantedBy "..."`` / ``wants "..."`` / ``requires "..."``
-  ##   * ``before "..."`` / ``after "..."``
-  ##   * ``env("KEY", "VALUE")``  — call form (see env-form rationale
-  ##     in dsl_port_runtime.nim above ``DslServiceDef.env``)
-  ##   * ``restart "..."`` / ``user "..."`` / ``group "..."``
+  ##   * ``executable <expr>`` — "May be an in-scope ident produced by an
+  ##     ``executable`` block, or any other expression that evaluates to
+  ##     an ``Executable[name]``". The IDENT form records the ident's
+  ##     text without evaluating it (so it works before the artifact slot
+  ##     variable has a value, which is what M5 relied on and what the
+  ##     three M5 fixtures pin); any OTHER expression is spliced verbatim
+  ##     into ``setActiveServiceExecutable``, where the compiler resolves
+  ##     it against that proc's overload set.
+  ##   * ``args "...", ...`` — every argument is now spliced verbatim,
+  ##     literal or not. M5 accepted ``nnkStrLit`` only and SILENTLY
+  ##     DROPPED everything else, which is how a ``cfg.path`` reference
+  ##     would have vanished with no diagnostic. The ``args`` overload
+  ##     set distinguishes a plain ``string`` (no edge) from a
+  ##     ``BuildOutputPath`` (records the producing edge), so a type the
+  ##     setter does not accept is now a compile error at the spliced
+  ##     call site instead of an argument that is not there.
+  ##   * ``runtimeFile <buildOutput>`` — "declares a build output that
+  ##     the service must have alongside it at runtime even though the
+  ##     path does not appear on argv".
+  ##   * ``on <trigger>:`` blocks, plus the ``hotReload`` /
+  ##     ``restartOnCrash`` / ``reloadOnChange`` short-form atoms.
   ##
-  ## Other body statements (``hotReload``, ``restartOnCrash``, ``on
-  ## change ...``, ``runtimeFile``, …) are silently preserved as raw
-  ## body shape; the M5 emitter still captures the full body's ``repr``
-  ## into ``DslServiceDef.bodyRepr`` so the diagnostic surface is open
-  ## for M6+ to parse them out later.
-  result.argStringLits = @[]
+  ## ``config:`` is REFUSED here, with the reason: "``service`` does not
+  ## have a ``config:`` setter. Configuration is the package's job".
+  ##
+  ## M9.C extensions — systemd-unit metadata setters — are unchanged:
+  ## ``description`` / ``type`` / ``execStart`` / ``wantedBy`` /
+  ## ``wants`` / ``requires`` / ``before`` / ``after`` /
+  ## ``env("KEY", "VALUE")`` / ``restart`` / ``user`` / ``group``.
+  ##
+  ## Any other statement is still silently preserved as raw body shape;
+  ## the emitter captures the full body's ``repr`` into
+  ## ``DslServiceDef.bodyRepr``.
+  result.argExprs = @[]
+  result.runtimeFileExprs = @[]
+  result.reactiveEmissions = @[]
   result.wantedByLits = @[]
   result.wantsLits = @[]
   result.requiresLits = @[]
@@ -1805,6 +2027,13 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   if body.kind != nnkStmtList:
     return
   for stmt in body:
+    # The short-form reactive atoms are bare idents (``hotReload``,
+    # ``restartOnCrash``) as well as calls, so they are tried before the
+    # Call/Command filter below — which is why M5 dropped them.
+    let shortForm = m5ServiceShortFormEmission(stmt)
+    if shortForm != nil:
+      result.reactiveEmissions.add(shortForm)
+      continue
     if stmt.kind notin {nnkCall, nnkCommand}:
       continue
     if stmt.len < 2:
@@ -1818,19 +2047,38 @@ proc m5ParseServiceBody(body: NimNode): tuple[
       continue
     let headName = identText(head).normalize
     case headName
+    of "config":
+      error("`service` has no `config:` setter. Package-Model.md " &
+        "§Collections: \"Configuration is the package's job: " &
+        "package-level `config:` configurables plus rendering helpers " &
+        "(`literalConfigFile`, `configFile`, etc.) produce a " &
+        "`BuildOutput`, and the service consumes that output the same " &
+        "way any other build output is consumed -- either by reference " &
+        "on argv or via `runtimeFile`.\" Move the values to the " &
+        "package's `config:` block, render them with " &
+        "`renderConfigFile(...)`, and pass the handle on `args` or " &
+        "declare it with `runtimeFile`.", stmt)
+    of "on":
+      let emission = m5ServiceTriggerEmission(stmt)
+      if emission != nil:
+        result.reactiveEmissions.add(emission)
     of "executable":
-      # ``executable <ident>`` — record the ident's text. We accept
-      # nnkIdent / nnkSym / nnkAccQuoted; anything else is silently
-      # skipped (the diagnostic body capture still records it).
+      # ``executable <ident>`` — record the ident's text, unevaluated.
+      # Any other expression is kept as a node and spliced.
       if stmt.len >= 2 and stmt[1].kind in
           {nnkIdent, nnkSym, nnkAccQuoted}:
         result.executableRef = identText(stmt[1])
+        result.executableExpr = nil
+      else:
+        result.executableRef = ""
+        result.executableExpr = stmt[1].copyNimTree()
     of "args":
-      # ``args "a", "b", ...`` — append every string-literal argument.
+      # ``args "a", expr, ...`` — append EVERY argument node.
       for i in 1 ..< stmt.len:
-        let arg = stmt[i]
-        if arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-          result.argStringLits.add(arg.copyNimTree())
+        result.argExprs.add(stmt[i].copyNimTree())
+    of "runtimefile":
+      for i in 1 ..< stmt.len:
+        result.runtimeFileExprs.add(stmt[i].copyNimTree())
     of "description":
       let lit = m5ServiceStringLitArg(stmt)
       if lit != nil:
@@ -1901,23 +2149,36 @@ proc emitM5Services*(packageName: string;
   ## Per-entry emission shape:
   ##
   ##   block:
-  ##     beginServiceContext(<pkg>, <serviceName>, <bodyRepr>)
-  ##     try:
-  ##       setActiveServiceExecutable(<executableRef>)  # if present
-  ##       addActiveServiceArg(<arg-1>)                 # per arg
-  ##       addActiveServiceArg(<arg-2>)
-  ##       ...
-  ##     finally:
-  ##       finishServiceContext()
+  ##     proc declare() {.closure.} =
+  ##       beginServiceContext(<pkg>, <serviceName>, <bodyRepr>)
+  ##       try:
+  ##         setActiveServiceExecutable(<executable>)   # if present
+  ##         addActiveServiceArg(<arg-1>)               # per arg
+  ##         addActiveServiceRuntimeFile(<file-1>)      # per runtimeFile
+  ##         <on-trigger blocks>
+  ##       finally:
+  ##         finishServiceContext()
+  ##     registerServiceDeclarator(<pkg>, <serviceName>, declare)
+  ##     declare()
+  ##
+  ## Shared-Development-Services L1 wrapped the body in a RE-RUNNABLE
+  ## closure and registers it, as well as running it eagerly exactly as
+  ## M5 did. The eager run keeps every existing reader of
+  ## ``registeredServices`` seeing what it saw before; the registration
+  ## is what lets ``buildPackageFragment`` re-evaluate the body AFTER the
+  ## ``build:`` body has run, which is the only moment a service's
+  ## rendered-config ``BuildOutput`` exists in provider mode (the
+  ## ``build:`` splice is gated on ``not defined(reproProviderMode)`` —
+  ## see ``emitM4BuildActions``). Without the re-run a service's
+  ## ``args "--config", cfg.path`` would record an empty path in provider
+  ## mode and nothing would say so.
   ##
   ## The body-setter calls are NOT spliced from the user's body
-  ## verbatim — we parse the executable ref + args out at macro
-  ## expansion time and emit the equivalent runtime calls. This avoids
-  ## having to make the body-setter idents (``executable`` / ``args``)
-  ## bind to something callable in the lexical scope. The full body's
-  ## ``repr`` is captured into ``DslServiceDef.bodyRepr`` for
-  ## diagnostic surfacing; M6+ may pivot to a verbatim splice when the
-  ## body-setter taxonomy grows.
+  ## verbatim for the scalar setters — we parse them out at macro
+  ## expansion time and emit the equivalent runtime calls — but the
+  ## VALUE expressions are spliced verbatim, so the compiler resolves
+  ## and type-checks them. The full body's ``repr`` is captured into
+  ## ``DslServiceDef.bodyRepr`` for diagnostic surfacing.
   result = newStmtList()
   for entry in classified:
     if entry.ownership != soM5Service:
@@ -1932,15 +2193,22 @@ proc emitM5Services*(packageName: string;
     let exeRefLit = newLit(parsedBody.executableRef)
     # Build the try-clause body: one setActiveServiceExecutable call
     # (only when the body provided a ref) plus one addActiveServiceArg
-    # per recognised string-literal arg. M9.C extensions emit one
-    # body-setter call per recognised systemd-unit setter.
+    # per arg. M9.C extensions emit one body-setter call per recognised
+    # systemd-unit setter.
     let tryBody = newStmtList()
-    if parsedBody.executableRef.len > 0:
+    if parsedBody.executableExpr != nil:
+      let exeExpr = parsedBody.executableExpr
+      tryBody.add(quote do:
+        setActiveServiceExecutable(`exeExpr`))
+    elif parsedBody.executableRef.len > 0:
       tryBody.add(quote do:
         setActiveServiceExecutable(`exeRefLit`))
-    for argLit in parsedBody.argStringLits:
+    for argExpr in parsedBody.argExprs:
       tryBody.add(quote do:
-        addActiveServiceArg(`argLit`))
+        addActiveServiceArg(`argExpr`))
+    for fileExpr in parsedBody.runtimeFileExprs:
+      tryBody.add(quote do:
+        addActiveServiceRuntimeFile(`fileExpr`))
     # M9.C: scalar (last-wins) setters — only emit when the body
     # provided a literal so unused defaults stay as the runtime's
     # empty-string ground state.
@@ -1991,16 +2259,26 @@ proc emitM5Services*(packageName: string;
       let lit = parsedBody.groupLit
       tryBody.add(quote do:
         setActiveServiceGroup(`lit`))
+    # L1: the reactive surface, after the declarative setters so an
+    # ``on change cfg:`` block sees the same handle the args did.
+    for emission in parsedBody.reactiveEmissions:
+      tryBody.add(emission)
+    if tryBody.len == 0:
+      tryBody.add(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
     # The package-init block. The body-setter splice is unconditional
     # (no provider-mode gate) — see the "Risk #2" commentary above the
     # M5 emitter for the rationale.
+    let declareSym = genSym(nskProc, "declareService")
     result.add(quote do:
       block:
-        beginServiceContext(`pkgLit`, `svcNameLit`, `bodyReprLit`)
-        try:
-          `tryBody`
-        finally:
-          finishServiceContext())
+        proc `declareSym`() {.closure.} =
+          beginServiceContext(`pkgLit`, `svcNameLit`, `bodyReprLit`)
+          try:
+            `tryBody`
+          finally:
+            finishServiceContext()
+        registerServiceDeclarator(`pkgLit`, `svcNameLit`, `declareSym`)
+        `declareSym`())
 
 # ---------------------------------------------------------------------------
 # DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` lowerer.

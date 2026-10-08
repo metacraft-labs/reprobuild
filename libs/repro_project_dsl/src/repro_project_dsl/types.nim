@@ -1319,6 +1319,153 @@ type
     entries*: seq[TargetExportEntry]
     ambiguities*: seq[TargetExportAmbiguity]
 
+  BuildOutputPath* = object
+    ## A path STRING that carries its producing edge.
+    ##
+    ## ``Package-Model.md``: "a ``BuildOutput.path`` reaches ``args`` as a
+    ## context-carrying string and the framework records the edge through
+    ## the typed proxy, just as Nix's string-with-context records
+    ## derivation references inside ordinary string splices". This is that
+    ## proxy: ``&`` with a plain string keeps the context, and the
+    ## ``args`` overload set distinguishes it from a bare ``string``
+    ## (which records no edge).
+    ##
+    ## The producer is carried as three FLAT fields rather than an
+    ## embedded ``BuildOutput``, because ``BuildOutput.path`` is a FIELD of
+    ## this type and a mutual embedding would be infinitely sized. It is a
+    ## field and not an accessor proc for a measured reason: a top-level
+    ## ``proc path*`` in this module puts ``path`` into the namespace of
+    ## every recipe that imports the DSL, and
+    ## ``libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim``
+    ## asserts ``not declared(path)`` precisely to stop that — ``path`` is
+    ## a tool-provisioning vocabulary word scoped to its own expression.
+    ## Field access costs nothing in the namespace and is the spelling
+    ## ``Package-Model.md`` already uses (``cfg.path``).
+    value*: string
+    producerPackage*: string
+    producerActionId*: string
+    producerPath*: string
+      ## The producing edge's DECLARED output path, which is not the same
+      ## as ``value`` once ``&`` has been applied: ``"--config=" &
+      ## cfg.path`` has an argv token the graph cannot match on and a
+      ## producer path it can.
+
+  BuildOutput* = object
+    ## A typed handle on a file this project's build graph PRODUCES.
+    ##
+    ## Returned by the rendering helpers (``renderConfigFile``) and
+    ## consumed by a ``service`` block's ``args`` / ``runtimeFile``
+    ## setters. ``Package-Model.md`` §Collections: "`service` does not
+    ## have a `config:` setter. Configuration is the package's job:
+    ## package-level `config:` configurables plus rendering helpers
+    ## (`literalConfigFile`, `configFile`, etc.) produce a `BuildOutput`,
+    ## and the service consumes that output the same way any other build
+    ## output is consumed — either by reference on argv or via
+    ## `runtimeFile`."
+    ##
+    ## The handle carries the PRODUCING EDGE, not just a path: that is
+    ## what makes the service's reference an edge in the graph rather
+    ## than a string that happens to look like a path.
+    packageName*: string
+    actionId*: string
+      ## The id of the build action that writes ``filePath``. Empty only
+      ## for a handle built by hand (no producing edge is then recorded).
+    filePath*: string
+      ## The output path exactly as the producing action declares it, so
+      ## ``inferDeclaredActionDeps`` can match it by string equality.
+    path*: BuildOutputPath
+      ## The same path as a context-carrying string — what ``args`` and
+      ## ``runtimeFile`` take. Kept in sync by ``newBuildOutput``, which
+      ## is the only constructor recipes should use.
+
+  ServiceExecutableKind* = enum
+    ## How a ``service`` body's ``executable <expr>`` setter named its
+    ## binary. ``sxkUnset`` is the ground state for a body that has no
+    ## ``executable`` setter at all (an ``execStart``-only systemd unit).
+    sxkUnset
+    sxkArtifact
+      ## ``executable <ident>`` — an ``executable <ident>:`` artifact of
+      ## this package. The ident's TEXT is recorded; the macro never
+      ## evaluates the node, so this form works before the artifact slot
+      ## variable has a value.
+    sxkPackageExecutable
+      ## ``executable redis.executable("redis-server")`` — a typed
+      ## ``SelectedExecutable`` from a package reached through ``uses:``.
+    sxkBuildOutput
+      ## ``executable <buildOutput>`` — a binary this graph builds.
+    sxkPath
+      ## ``executable "<path>"`` — a literal path.
+
+  ServiceExecutableRef* = object
+    ## The typed executable edge of one ``service`` block.
+    kind*: ServiceExecutableKind
+    packageName*: string
+    executableName*: string
+    path*: string
+    actionId*: string
+      ## The producing action, when the executable is a build output.
+
+  ServiceArgKind* = enum
+    svakLiteral
+      ## A plain string. Records NO edge.
+    svakBuildOutput
+      ## A ``BuildOutputPath`` — the argument carries its producing edge.
+
+  ServiceArgDef* = object
+    ## One element of a ``service`` body's ``args "...", ...`` setter, in
+    ## declaration order.
+    kind*: ServiceArgKind
+    value*: string
+      ## The argv token.
+    producerPackage*: string
+    producerActionId*: string
+    producerPath*: string
+      ## The declared output path of the producing edge. Set only for
+      ## ``svakBuildOutput``.
+
+  ServiceRuntimeFileDef* = object
+    ## One ``runtimeFile <buildOutput>`` setter: a build output the
+    ## service must have alongside it at runtime even though the path
+    ## does not appear on argv.
+    path*: string
+    producerPackage*: string
+    producerActionId*: string
+
+  ServiceTriggerKind* = enum
+    ## The ``on <trigger>:`` taxonomy of ``Package-Model.md``
+    ## §"Service Lifecycle And Reactive Triggers".
+    stkRebuild        ## ``on rebuild <ident>``
+    stkChangeOutput   ## ``on change <buildOutput>``
+    stkChangePath     ## ``on change "<path>"``
+    stkStart          ## ``on start``
+    stkStop           ## ``on stop``
+    stkCrash          ## ``on crash``
+
+  ServiceTriggerActionKind* = enum
+    ## The actions legal inside an ``on <trigger>:`` body.
+    stakHotReload
+    stakRestart
+    stakSendSignal
+    stakExec
+    stakNotify
+
+  ServiceTriggerAction* = object
+    kind*: ServiceTriggerActionKind
+    argument*: string
+      ## The signal name for ``sendSignal``, the command for ``exec``,
+      ## the endpoint for ``notify``; empty for ``hotReload`` /
+      ## ``restart``.
+
+  ServiceTriggerDef* = object
+    kind*: ServiceTriggerKind
+    subject*: string
+      ## The rebuilt ident for ``stkRebuild``, the watched path for
+      ## ``stkChangeOutput`` / ``stkChangePath``, empty otherwise.
+    producerActionId*: string
+      ## The producing edge of a watched build output. ``stkChangeOutput``
+      ## only.
+    actions*: seq[ServiceTriggerAction]
+
   StateGroupDef* = object
     ## Named-Runnable-Edges N0 (spec §3.3): a named resource subgraph —
     ## the leasable/reapable unit. ``members`` are the resource addresses

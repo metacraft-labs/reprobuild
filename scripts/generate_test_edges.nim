@@ -485,6 +485,11 @@ proc isProviderModePath(path: string): bool =
     # Measures the macro's module-init startup pass over a ``build:``
     # body, which the macro emits only under this define.
     "tests/unit/t_provider_startup_body_containment.nim",
+    # Shared-Development-Services L1: drives ``buildPackageFragment`` and
+    # ``buildPackageDevEnv`` directly, and asserts on ``servicePlaceholder``
+    # -- all three exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_service_lowers_typed_edges_into_the_graph_fragment.nim",
   ]:
     if p == exact:
       return true
