@@ -1786,6 +1786,13 @@ const
     "support for it. This is the same defect the `args` setter had before " &
     "Shared-Development-Services L1, where a non-literal argument vanished " &
     "with no diagnostic."
+  m5ServiceSetterSurface = "`executable <ident>`, `args \"...\", ...`, " &
+    "`runtimeFile <buildOutput>`, the systemd-unit setters and " &
+    "`on <trigger>:` blocks"
+  m5ServiceHeadDropRule = "An extra argument here is REFUSED rather than " &
+    "dropped: it is never semchecked, so an identifier that does not " &
+    "exist compiles clean and an argument that is accepted and then not " &
+    "there is indistinguishable from support for it."
 
 const
   ## The trigger MODIFIERS ``Package-Model.md`` §"Service Lifecycle And
@@ -2384,6 +2391,27 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
   ## second, parallel service lowerer is the drift this avoids: every
   ## setter, every refusal and every typed edge L1 built would otherwise
   ## have to be kept in step across two walkers.
+  ##
+  ## Everything between the service NAME and its block body is refused
+  ## here, before the entry is parsed. ``m5ServiceEntryAst`` accepts any
+  ## arity of three or more and reads only ``stmt[1]`` and ``stmt[^1]``,
+  ## so ``service api, junkArg:`` lowered exactly as ``service api:``
+  ## would and ``junkArg`` never reached the compiler — the same defect,
+  ## in the same position, as the ``on change cfg, debounce = "200ms":``
+  ## head one level down. The refusal lives in this shared emitter
+  ## rather than in either walker so the package-level path and the
+  ## dev-env ``activity`` path cannot drift apart on it.
+  if stmt.kind in {nnkCall, nnkCommand} and stmt.len > 3 and
+      stmt[^1].kind == nnkStmtList:
+    for i in 2 ..< stmt.len - 1:
+      let extra = stmt[i]
+      error("`service <name>:` takes one name and a block body of " &
+        "setters; `" & extra.repr.strip() & "` beside the head of " &
+        "`service " & stmt[1].repr.strip() & ":` is neither. " &
+        "Package-Model.md §Collections: a service is declared by name " &
+        "and everything it carries is a setter in the body — " &
+        m5ServiceSetterSurface & ". " & m5ServiceHeadDropRule,
+        m5ServiceStmtAnchor(extra))
   let parsed = m5ServiceEntryAst(stmt)
   if not parsed.matched:
     return nil
@@ -2724,6 +2752,10 @@ const
     "that is accepted and then not there is indistinguishable from " &
     "support for it. This is the same defect the `args` setter and the " &
     "`on <trigger>:` walker had before Shared-Development-Services L1."
+  l2ActivityConfigHeadDropRule = "An extra argument here is REFUSED " &
+    "rather than dropped: it is never semchecked, so an identifier that " &
+    "does not exist compiles clean, and an argument that is accepted and " &
+    "then has no effect is indistinguishable from support for it."
 
 type
   L2ActivityParam = object
@@ -2898,6 +2930,23 @@ proc l2ParseActivityConfig(activityName: string;
       error("activity `" & activityName & "`: `config:` needs a block " &
         "body of key declarations. " & l2ActivityConfigRule & " " &
         l2NoSilentDropRule, l2StmtAnchor(stmt))
+    # ``config:`` is ``Call(config, StmtList)`` — arity two. Anything
+    # between the head and the block body was DROPPED IN SILENCE: this
+    # walk reads ``stmt[^1]`` and never looked at ``stmt[1 .. ^2]``, so
+    # ``config noSuchProc(1, 2), alsoMissing:`` compiled clean with both
+    # identifiers never semchecked. Nothing is ever legal on this head,
+    # so the refusal is arity plus the message and carries no design
+    # decision — see ``reprobuild-pm/issues/2026-10-08-activity-config-
+    # head-arguments-are-silently-dropped.md``. ``config port:`` is the
+    # plausible slip it exists for: an author reaching for a per-key
+    # head and getting an ignored one.
+    for i in 1 ..< stmt.len - 1:
+      let extra = stmt[i]
+      error("activity `" & activityName & "`: `config:` takes no " &
+        "arguments, and `" & extra.repr.strip() & "` is written on its " &
+        "head. Every key is declared INSIDE the block body. " &
+        l2ActivityConfigRule & " " & l2ActivityConfigHeadDropRule,
+        l2StmtAnchor(extra))
     var pendingDoc = ""
     for entry in stmt[^1]:
       if entry.kind == nnkCommentStmt:

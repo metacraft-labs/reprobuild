@@ -284,3 +284,92 @@ suite "L2 — the declaration shapes the walker does not recognise":
     checkpoint(probe.output)
     check not probe.ok
     check probe.mentions("passes its arguments with `=`, not `:`")
+
+suite "L2 follow-up — an extra argument on a block HEAD is refused":
+  # The defect this suite pins, measured on `8dca63efa` (the commit that
+  # introduced the walk, so a gap in new code and not a regression) and
+  # filed as `reprobuild-pm/issues/2026-10-08-activity-config-head-
+  # arguments-are-silently-dropped.md`: an arbitrary expression written
+  # on a `config` head was ACCEPTED AND DISCARDED. `l2ParseActivityConfig`
+  # reads `stmt[^1]` as the key block and never looked at
+  # `stmt[1 .. ^2]`, and `l2ActivityEmission`'s body loop skips the
+  # statement on the same head test, so nothing downstream saw the
+  # dropped children either. All three spellings below compiled with
+  # ZERO errors on that commit, with identifiers that exist nowhere in
+  # the recipe or in the DSL never semchecked.
+  #
+  # Nothing is ever legal on a `config` head, so unlike the service-body
+  # case (`reprobuild-pm/issues/2026-10-08-service-body-setters-are-
+  # silently-dropped.md`, still open) this carries no design decision:
+  # it is an arity check plus the message.
+  #
+  # Every case asserts the DIAGNOSTIC as well as the exit code, and here
+  # the exit code is load-bearing rather than vacuous: measured, all four
+  # recipes below compile with ZERO errors at `8dca63efa`, so each one's
+  # `not probe.ok` FAILS before the change and passes after. That is the
+  # opposite shape from the refusals elsewhere in this file, whose
+  # recipes already failed to compile for unrelated reasons and for
+  # which `not probe.ok` really is vacuous. The diagnostic assertions
+  # are what pin the refusal to the right token and message; the exit
+  # code is what records that the bad recipe used to build.
+
+  test "a bare identifier on the `config` head is refused":
+    const Statement = "config thisIdentifierDoesNotExistAnywhere:"
+    let source = editedSource("      config:", "      " & Statement)
+    let probe = checkRecipeSource(source, "activity-config-head-ident")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`config:` takes no arguments")
+    # The offending text verbatim — an identifier that exists nowhere,
+    # which is the whole evidence that it was never semchecked before.
+    check probe.mentions("`thisIdentifierDoesNotExistAnywhere` is " &
+      "written on its head")
+    check probe.mentions("Every key is declared INSIDE the block body")
+    check probe.mentions("activity `api`")
+    # Anchored on the offending TOKEN, column 14, not on the `config`
+    # head at column 7 — the author has to be pointed at the argument.
+    check probe.mentions(anchorTag(source, Statement, 14))
+
+  test "a call and a second argument on the `config` head are refused":
+    const Statement = "config noSuchProc(1, 2), alsoMissing:"
+    let source = editedSource("      config:", "      " & Statement)
+    let probe = checkRecipeSource(source, "activity-config-head-call")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`config:` takes no arguments")
+    check probe.mentions("`noSuchProc(1, 2)` is written on its head")
+    # `l2StmtAnchor` puts a call's refusal on the call's HEAD ident, not
+    # on the opening parenthesis Nim hangs the line info from.
+    check probe.mentions(anchorTag(source, Statement, 14))
+
+  test "`config port:` — the plausible slip — is refused, not ignored":
+    # An author reaching for a per-key head and getting one that is
+    # silently ignored: the keys under it parse exactly as they would
+    # under a bare `config:`, so on `8dca63efa` this compiled and the
+    # head had no effect whatsoever.
+    const Statement = "config port:"
+    let source = editedSource("      config:", "      " & Statement)
+    let probe = checkRecipeSource(source, "activity-config-head-key")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`config:` takes no arguments")
+    check probe.mentions("`port` is written on its head")
+    check probe.mentions(anchorTag(source, Statement, 14))
+
+  test "an extra argument on a `service` head inside an activity body":
+    # The sibling instance, and the reason both are closed at once: the
+    # refusal lives in `m5ServiceEmission`, the emitter L1's package-level
+    # walk and L2's activity walk SHARE, so this case and the
+    # package-level one in `t_dsl_service_setter_surface_is_typed.nim`
+    # measure the same guard from the two call sites. On `8dca63efa`
+    # `m5ServiceEntryAst` accepted any arity of three or more and read
+    # only `stmt[1]` and `stmt[^1]`.
+    const Statement = "service solo, junkArg:"
+    let source = editedSource("      service solo:", "      " & Statement)
+    let probe = checkRecipeSource(source, "activity-service-head")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`service <name>:` takes one name and a block " &
+      "body of setters")
+    check probe.mentions("`junkArg` beside the head of `service solo:`")
+    check probe.mentions(anchorTag(source, Statement, 21))

@@ -380,6 +380,65 @@ suite "L1 follow-up — a SPECIFIED but unimplemented modifier says so":
     check probe.mentions("takes one trigger spec and a block body")
     check probe.mentions("whatever = 3")
 
+  test "an extra argument on the SERVICE head is refused, not dropped":
+    # One level up from the trigger head above, and the same read:
+    # `m5ServiceEntryAst` accepted any arity of three or more and took
+    # only `stmt[1]` (the name) and `stmt[^1]` (the body), so on
+    # `8dca63efa` `service api, junkArg:` lowered exactly as
+    # `service api:` would and `junkArg` — an identifier that exists
+    # nowhere in the recipe — was never semchecked. Filed with its
+    # `config`-head sibling as `reprobuild-pm/issues/2026-10-08-activity-
+    # config-head-arguments-are-silently-dropped.md`.
+    #
+    # Asserted on the diagnostic AND on the exit code, and here the exit
+    # code is load-bearing: measured, this fixture compiles with zero
+    # errors at `8dca63efa`, so `not probe.ok` fails before the change
+    # and passes after. The diagnostic assertions pin the refusal to the
+    # offending token and message.
+    const Statement = "service api, junkArg:"
+    let source = editedSource("  service api:", "  " & Statement)
+    let probe = checkRecipeSource(source, "service-head-extra")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`service <name>:` takes one name and a block " &
+      "body of setters")
+    # The offending text verbatim, and the service it was written on.
+    check probe.mentions("`junkArg` beside the head of `service api:`")
+    # Where the setters go, so the author is told the remedy and not
+    # only the refusal.
+    check probe.mentions("everything it carries is a setter in the body")
+    check probe.mentions("runtimeFile <buildOutput>")
+    # The offending token's own column, 16, rather than the statement's 3.
+    check probe.mentions(anchorTag(source, Statement, 16))
+
+  test "the string-form name takes the same guard":
+    # `service "api", junkArg:` is the same defect with the other
+    # spelling of the name, and `m5ServiceNameNode` accepts both — so a
+    # guard written against the ident form only would leave half of it
+    # open.
+    const Statement = "service \"api\", junkArg:"
+    let source = editedSource("  service api:", "  " & Statement)
+    let probe = checkRecipeSource(source, "service-head-extra-strlit")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`junkArg` beside the head of `service \"api\":`")
+    check probe.mentions(anchorTag(source, Statement, 18))
+
+  test "the control: the one-name head still compiles, three ways":
+    # WITHOUT this the two refusals above are satisfiable by a guard that
+    # refuses every `service` head. It exercises the ident form (the
+    # `WellFormed` control at the top of this file already does), the
+    # STRING form, and two services in one package — the arity the guard
+    # has to keep accepting.
+    let probe = edited(
+      "  service api:\n    executable probeBin",
+      "  service \"renamed-api\":\n    executable probeBin\n" &
+        "  service second:\n    executable probeBin\n" &
+        "    args \"--second\"\n  service api:\n    executable probeBin",
+      "service-head-control")
+    checkpoint(probe.output)
+    check probe.ok
+
   test "an unspecified assignment is still an unrecognised ACTION, at col 7":
     # The other half of the class split: a spelling the spec does NOT
     # contain keeps the unrecognised-action message, so the modifier
