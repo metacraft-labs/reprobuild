@@ -98,7 +98,7 @@ proc logLines(log, prefix: string): seq[string] =
 
 suite "npm vendor action":
   let sh = findExe("sh")
-  let realSha256sum = findExe("sha256sum")
+  let realSha256sum = findExe("sha256sum", followSymlinks = false)
   let savedPath = getEnv("PATH")
 
   test "a seeded cache is verified and loaded once per batch":

@@ -660,6 +660,98 @@
           # and the packaged-runtime-compile table cannot end up pointing at a
           # different tree than the package was built against.
           codeTracerTraceFormatNimSrc = reprobuild.codeTracerTraceFormatNimSrc;
+
+          # SIBLING SOURCE VARIABLES NAME THE CHECKOUT, NOT ITS STORE COPY.
+          #
+          # The attributes of `devShells.default` below export each sibling
+          # source as `${<input>}/src`, a CONTENT-HASHED store path. These
+          # variables reach every compile: `repro.nim` puts them on each test
+          # compile's `--path:` and declared environment (the weak
+          # fingerprint), and `config.nims` reads them in every compile. So
+          # any change to that store path — a commit to an overridden sibling,
+          # or a `flake.lock` bump that moves the pin — made all ~1,866
+          # `.#test-builds` compiles miss, including those that never import
+          # the sibling (reprobuild-specs issue
+          # 2026-09-24-sibling-bump-invalidates-every-test-compile).
+          #
+          # The shell hook re-points the variable at the sibling checkout
+          # `../<input without -src>` — a path that is the same at every
+          # revision — and `repro.nim` spells it relative to the repository
+          # (`../io-mon/src`) on command lines. What a sibling change then
+          # invalidates is decided by what each compile actually read from it.
+          #
+          # THE CONDITION IS "THE CHECKOUT HOLDS WHAT THE INPUT HOLDS", in
+          # either of the two ways nix can tell us:
+          #
+          #   * the input has a clean `rev` (the pinned revision, or a clean
+          #     checkout given as an override): the checkout's HEAD is that
+          #     revision AND the checkout has no uncommitted or untracked
+          #     changes. At the pin OR off it — the pin is not consulted, so a
+          #     lock bump that moves the pin does not move the spelling. A
+          #     checkout that is dirty here keeps the store path: without an
+          #     override the input is the PINNED content, and with a clean
+          #     override the dirt arrived after the shell was evaluated, so in
+          #     both cases the working tree is not what the input holds.
+          #   * the input has a `dirtyRev` (`<rev>-dirty`): it IS a dirty
+          #     checkout given as an override, and nix copied its working tree,
+          #     dirt included. The checkout's HEAD must be `<rev>`; its dirt is
+          #     the content the input already carries.
+          #
+          # Anything else — no checkout at `../<name>` (CI), a checkout at
+          # another revision with no override, an override from elsewhere —
+          # keeps the store path, which is stable per pin.
+          siblingCheckoutSources =
+            let
+              row = var: name: sub: {
+                inherit var name sub;
+                rev = inputs.${name}.rev or "";
+                dirtyRev = inputs.${name}.dirtyRev or "";
+              };
+            in
+            [
+              (row "IO_MON_SRC" "io-mon-src" "/src")
+              (row "RUNQUOTA_SRC" "runquota-src" "")
+              (row "STACKABLE_HOOKS_SRC" "nim-stackable-hooks-src" "/src")
+              (row "SHM_GSET_SRC" "nim-shm-gset-src" "/src")
+              (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
+              (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
+              (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
+              (row "CODETRACER_PINNED_SRC" "codetracer-src" "/src")
+            ];
+          siblingCheckoutSourcesHook = ''
+            _repro_sib_top="$(${pkgs.git}/bin/git rev-parse --show-toplevel 2>/dev/null || true)"
+            if [ -n "$_repro_sib_top" ]; then
+              _repro_sib_ws="$(cd "$_repro_sib_top/.." && pwd -P)"
+              _repro_sib_rebind() {
+                # $1 variable, $2 input, $3 suffix, $4 clean rev, $5 dirty rev
+                local want dirty_ok dir head
+                if [ -n "$4" ]; then
+                  want="$4"; dirty_ok=0
+                elif [ -n "$5" ]; then
+                  want="''${5%-dirty}"; dirty_ok=1
+                else
+                  return 0
+                fi
+                dir="$_repro_sib_ws/''${2%-src}"
+                [ -e "$dir/.git" ] && [ -d "$dir$3" ] || return 0
+                head="$(${pkgs.git}/bin/git -C "$dir" rev-parse HEAD 2>/dev/null)" || return 0
+                [ "$head" = "$want" ] || return 0
+                if [ "$dirty_ok" = 0 ] && \
+                    [ -n "$(${pkgs.git}/bin/git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+                  return 0
+                fi
+                export "$1=$dir$3"
+              }
+          ''
+          + pkgs.lib.concatMapStrings (r: ''
+            _repro_sib_rebind ${r.var} ${r.name} "${r.sub}" "${r.rev}" "${r.dirtyRev}"
+          '') siblingCheckoutSources
+          + ''
+              unset -f _repro_sib_rebind
+              unset _repro_sib_ws
+            fi
+            unset _repro_sib_top
+          '';
           # The RunQuota daemon (and CLI), built from the ``runquota-src``
           # input — the same source the reprobuild client compiles against
           # (``RUNQUOTA_SRC``). Putting this on the dev-shell PATH means the
@@ -1942,7 +2034,7 @@
               pkgs.OVMF.fd
               pkgs.swtpm
             ];
-            shellHook = ''
+            shellHook = siblingCheckoutSourcesHook + ''
               # Consumers may borrow this toolchain with `nix develop PATH`.
               # Its repository checks belong only to a Reprobuild checkout.
               if PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \

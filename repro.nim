@@ -459,14 +459,20 @@ proc pinnedToolDir(root, tool, version, probe: string): string =
   if fileExists(dir / probe) or dirExists(dir / probe):
     return dir
 
+proc recipeProjectRoot(): string =
+  ## The checkout this recipe is evaluated for: the provider's request-supplied
+  ## root, or the process directory outside a provider dispatch (the recipe's
+  ## own directory in every path that reaches here).
+  result = activeProviderProjectRoot()
+  if result.len == 0:
+    result = getCurrentDir()
+
 proc loadNixFlake(): bool =
   ## ``REPRO_LOAD_NIX_FLAKE`` from the project's ``.env`` (the same file
   ## ``.envrc`` loads with ``dotenv_if_exists``). Absent file or absent key
   ## means the flake is loaded. Only an explicit ``0`` / ``false`` / ``no`` /
   ## ``off`` selects the repro-native environment.
-  var root = activeProviderProjectRoot()
-  if root.len == 0:
-    root = getCurrentDir()
+  let root = recipeProjectRoot()
   if not fileExists(root / ".env"):
     return true
   # `readDevEnvFile` records the read as an evaluation input of the dev-env
@@ -1378,7 +1384,27 @@ package reprobuild:
         "flake's pinned input; or set $IO_MON_SRC to an io-mon checkout's " &
         "`src` directory; or place a checkout at ../io-mon.")
 
-    let ioMonNimPaths = resolvedIoMonNimPaths()
+    # SIBLING SOURCE ROOTS ARE SPELLED RELATIVE TO THIS CHECKOUT.
+    #
+    # Every root below lands on the ``--path:`` of every test compile, and
+    # the declared ones in its environment too, so each is part of every
+    # test compile's weak fingerprint. Whenever the sibling checkout
+    # ``../<sibling>`` holds what the flake input holds — at the pin or off
+    # it, overridden or not (see ``siblingCheckoutSources`` in ``flake.nix``
+    # for the exact rule, including dirty trees) — the dev shell exports the
+    # CHECKOUT rather than the content-hashed store copy, and
+    # ``workspaceRelativeSourcePath`` turns that into ``../<sibling>/...``:
+    # the same string at every revision of the sibling and in every worktree
+    # laid out beside its siblings. What a sibling commit or a pin bump
+    # invalidates is then decided by what each compile READ from the sibling
+    # (the strong fingerprint), not by the sibling's store hash appearing on
+    # every command line. Before this, one sibling commit or one pin bump
+    # made all ~1,866 ``.#test-builds`` compiles miss. Store paths (CI, no
+    # sibling checkouts) are left as they are: already stable per pin.
+    let siblingSpellingRoot = recipeProjectRoot()
+    var ioMonNimPaths: seq[string] = @[]
+    for path in resolvedIoMonNimPaths():
+      ioMonNimPaths.add(workspaceRelativeSourcePath(path, siblingSpellingRoot))
     let repoParent = ".."
     var sourceOnlyNimPaths: seq[string] = @[]
     var sourceOnlyEnv: seq[(string, string)] = @[]
@@ -1422,9 +1448,11 @@ package reprobuild:
           "flake's pinned input; or place a checkout of `runquota` in the " &
           "workspace (`repro workspace enable reprobuild`)."),
     ]:
-      sourceOnlyNimPaths.add(pkg.path)
+      sourceOnlyNimPaths.add(
+        workspaceRelativeSourcePath(pkg.path, siblingSpellingRoot))
       for entry in pkg.env:
-        sourceOnlyEnv.add(entry)
+        sourceOnlyEnv.add((entry[0],
+          workspaceRelativeSourcePath(entry[1], siblingSpellingRoot)))
     let testNimPaths = ioMonNimPaths & sourceOnlyNimPaths
 
     # Suite-Modernization M4: the shared pure-unit binaries, as (path, action
