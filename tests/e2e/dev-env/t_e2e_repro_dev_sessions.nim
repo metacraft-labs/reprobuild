@@ -98,6 +98,10 @@ proc writeDevFixture(dir: string) =
     "#!/bin/sh\n" &
       "mkdir -p state\n" &
       "printf 'task:%s\\n' \"$M8_SOURCE\" >> state/watch.log\n" &
+      # Still running when the test edits the source after seeing ``task:one``:
+      # the edit lands DURING the cycle, which is the case a watcher opened
+      # only between cycles used to drop (and did, under load, at random).
+      "sleep 2\n" &
       "printf 'watch-task:%s\\n' \"$M8_SOURCE\"\n")
   writeFile(dir / "reprobuild.nim", providerText([
     (name: "worker", metadata: serviceJson(@["sh", "scripts/worker.sh"],
@@ -375,16 +379,31 @@ suite "e2e_repro_dev_sessions":
       check readFile(c.projectRoot / "state" / "watch.log").contains("task:one")
 
       writeFile(c.projectRoot / "watch-source.txt", "two\n")
+      # The second cycle starts after the first task's 2 s and re-evaluates the
+      # recipe, so the wait follows the supervisor like the "up" wait above;
+      # the cap is only the backstop for one alive and stuck.
       var sawTwo = false
-      for _ in 0 ..< 100:
+      var waitedTwoMs = 0
+      while devProcess.running() and waitedTwoMs < 300_000:
         if fileExists(c.projectRoot / "state" / "watch.log") and
             readFile(c.projectRoot / "state" / "watch.log").contains("task:two"):
           sawTwo = true
           break
         sleep(50)
+        waitedTwoMs.inc(50)
       check sawTwo
 
-      let events = sseEvents(httpBindValue, waitMs = 750)
+      # ``task:two`` is written at the START of the second task, which then
+      # sleeps; its ``watch.task.finished`` / ``watch.cycle.finished`` come
+      # after. Read the stream once the second cycle has finished (or the
+      # supervisor is gone, or the backstop passes), not at a fixed moment.
+      var events = sseEvents(httpBindValue, waitMs = 750)
+      var waitedFinishMs = 0
+      while eventKinds(events).kindCount("watch.cycle.finished") < 2 and
+          devProcess.running() and waitedFinishMs < 300_000:
+        sleep(250)
+        waitedFinishMs.inc(1000)
+        events = sseEvents(httpBindValue, waitMs = 750)
       let sseKinds = eventKinds(events)
       check "service.ready" in sseKinds
       check "watch.filesystem.changed" in sseKinds
