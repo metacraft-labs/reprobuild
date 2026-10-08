@@ -16614,6 +16614,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_sibling_source_paths_are_spelled_relative.nim",
+    binary: "build/test-bin/t_sibling_source_paths_are_spelled_relative",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_source_fetch_tool_metadata.nim",
     binary: "build/test-bin/t_source_fetch_tool_metadata",
     defines: @["reproInterfaceMode"],

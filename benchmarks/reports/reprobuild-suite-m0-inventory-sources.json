@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1867,
+    "nimTestBinaries": 1868,
     "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 594,
+    "pureUnitTests": 595,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1884
+    "testEntries": 1885
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1091,7 +1091,7 @@
       "graph-fixture": 11,
       "integration": 1003,
       "platform/destructive": 119,
-      "pure unit": 594,
+      "pure unit": 595,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1270,9 +1270,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1867,
+    "nimTestBinaryCount": 1868,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1884
+    "testEntryCount": 1885
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -39092,7 +39092,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
@@ -39425,6 +39426,23 @@
       "source": "tests/unit/t_sibling_prefix_clone.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sibling_source_paths_are_spelled_relative",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_sibling_source_paths_are_spelled_relative.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
