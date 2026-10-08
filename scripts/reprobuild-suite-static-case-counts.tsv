@@ -50,6 +50,7 @@ libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.ni
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	12
 libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim	nim	5
 libs/repro_build_engine/tests/t_cache_hit_evidence_paths_are_built_on_demand.nim	nim	4
+libs/repro_build_engine/tests/t_cache_record_for_other_outputs_is_not_served.nim	nim	6
 libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	7
 libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	30
 libs/repro_build_engine/tests/t_da6_declared_interest_keeps_every_consumer.nim	nim	9
