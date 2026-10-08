@@ -7225,13 +7225,14 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_platform"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13565,7 +13566,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_platform/tests/test_msvc_env_merge.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

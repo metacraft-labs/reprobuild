@@ -10304,6 +10304,57 @@ proc classifyActionPath*(action: BuildAction): ActionPathDeclaration =
     return if passthrough: apdInherited else: apdAbsent
   if passthrough: apdInherited else: apdHermetic
 
+proc actionUsesMsvcToolchain*(action: BuildAction;
+                              monitorCli = ""): bool =
+  ## Whether the host's MSVC developer environment is layered under
+  ## ``action``'s environment at launch (``preparedActionEnv``). Windows only
+  ## in effect — elsewhere there is no activation to layer — but pure, so it
+  ## is tested on every host.
+  ##
+  ## ## Who gets it
+  ##
+  ## * An action that takes the HOST's ``PATH`` (``apdInherited`` /
+  ##   ``apdAbsent``) gets it, as before. The engine's host is an activated
+  ##   one, and an edge that inherits the host inherits that too; its
+  ##   ``PATH`` value is unkeyed either way.
+  ## * An action that DECLARES its ``PATH`` (``apdHermetic`` / ``apdEmpty``)
+  ##   gets it only when it declares an MSVC consumer: a tool reference, or
+  ##   the executable it runs, named in ``MsvcConsumerTools``.
+  ##
+  ## ## Why the second rule
+  ##
+  ## The activation appends the MSVC and Windows SDK entries of ``PATH`` /
+  ## ``LIB`` / ``INCLUDE`` / ``LIBPATH`` to the action's own values
+  ## (``mergeActionEnvWithMsvcEnv``) — which the Rust ``cc`` crate needs,
+  ## since it trusts ``VCINSTALLDIR`` and then looks for ``cl.exe`` on
+  ## ``PATH`` alone. Applied to EVERY action, it turned a hermetic ``PATH``
+  ## (Hermetic-Builds-And-Path-Independence.md, "The action's PATH": only the
+  ## resolved tool directories, no host tail) into one with seventeen Visual
+  ## Studio, Windows SDK and .NET directories behind it (VS 2022 Community,
+  ## measured), and an empty ``PATH=`` into 1411 bytes of them. An npm
+  ## bundle edge declaring ``sh``/``npm``/``node`` searched those
+  ## directories for every command it ran, and the probes, which lie outside
+  ## every logical root, made its portable record underivable.
+  ##
+  ## Withholding it withholds the WHOLE layer, not only the search lists: a
+  ## non-consumer also gets no ``VCINSTALLDIR`` and no ``CC=cl.exe``. Keeping
+  ## those while dropping ``cl.exe``'s directory would rebuild exactly the
+  ## half-configured environment the search-list merge was written to repair.
+  ##
+  ## The executable is read through the wrapped-monitor form
+  ## (``<monitorCli> … -- <argv>``, see ``monitoredAction``) so an action's
+  ## answer does not depend on which launch path hosts its monitor.
+  if classifyActionPath(action) in {apdAbsent, apdInherited}:
+    return true
+  for refName in action.toolIdentityRefs:
+    if isMsvcConsumerTool(refName):
+      return true
+  var argv = action.argv
+  if monitorCli.len > 0 and argv.len > 0 and argv[0] == monitorCli:
+    let sep = argv.find("--")
+    argv = if sep >= 0: argv[sep + 1 .. ^1] else: @[]
+  argv.len > 0 and isMsvcConsumerTool(argv[0])
+
 proc prependPathDirsToArgvEnv(env: seq[string];
                               binDirs: openArray[string]): seq[string] =
   ## Walk an argv-style ``KEY=VALUE`` env list, collapse any
@@ -11922,7 +11973,15 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
 proc preparedActionEnv(action: BuildAction;
                        config: BuildEngineConfig;
                        auxPaths: ResolvedAuxPaths): seq[string] =
-  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
+  # The MSVC developer environment reaches an edge that inherits the host's
+  # PATH or declares an MSVC consumer, and no other; see
+  # ``actionUsesMsvcToolchain``.
+  let childEnv = launchChildEnv(action, config)
+  let mergedEnv =
+    if actionUsesMsvcToolchain(action, monitorCliPath(config)):
+      mergeActionEnvWithMsvc(childEnv)
+    else:
+      childEnv
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   result = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   result = applyResolvedAuxPathsArgv(result, auxPaths)

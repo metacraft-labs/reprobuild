@@ -57,7 +57,7 @@ libs/repro_build_engine/tests/t_da6_declared_interest_keeps_every_consumer.nim	n
 libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim	nim	2
 libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim	nim	9
 libs/repro_build_engine/tests/t_declared_depfile_absent_is_not_cacheable.nim	nim	3
-libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	13
+libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	14
 libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim	nim	6
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
 libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim	nim	1
@@ -402,7 +402,7 @@ libs/repro_peer_cache/tests/t_peer_cache_tls_mixed_mode_compat.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_ca_isolation.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_isolation.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim	nim	1
-libs/repro_platform/tests/test_msvc_env_merge.nim	nim	8
+libs/repro_platform/tests/test_msvc_env_merge.nim	nim	9
 libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	18
 libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	137
 libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2

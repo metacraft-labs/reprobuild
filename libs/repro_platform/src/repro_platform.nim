@@ -65,6 +65,20 @@ const
     "NETFXSDKDir", "FrameworkDir", "FrameworkDir64", "FrameworkDIR64"]
     ## Variables whose values are install ROOTS of the MSVC toolchain and the
     ## Windows SDK. A search-list entry is MSVC-owned iff it lies under one.
+  MsvcConsumerTools* = ["cl", "link", "lib", "ml", "ml64", "rc", "mt",
+    "nmake", "msbuild", "msvc", "cmake", "ninja", "meson", "cc", "c++",
+    "clang", "clang++", "clang-cl", "lld-link", "rust", "rustup", "cargo",
+    "rustc", "rustdoc", "cargo-nextest", "cargo-clippy", "clippy-driver",
+    "swift", "swiftc", "swift-build", "vccexe"]
+    ## Tools that reach the MSVC toolchain through the ENVIRONMENT: they run
+    ## ``cl.exe`` / ``link.exe`` found on ``PATH``, or let them search
+    ## ``INCLUDE`` / ``LIB`` / ``LIBPATH``. ``cargo`` and ``rustc`` are here
+    ## for the Rust ``cc`` crate (it trusts ``VCINSTALLDIR`` and then
+    ## searches ``PATH`` alone) and for ``link.exe``; the build-system
+    ## drivers because the compilers they configure need the search lists.
+    ## A tool that locates Visual Studio by itself (``node-gyp`` through
+    ## ``vswhere``) is not a consumer, and neither is a MinGW ``gcc``, which
+    ## must not be handed ``CC=cl.exe``.
 
 proc normalizedWinPath(p: string): string =
   ## Case-folded, backslash-separated, without a trailing separator — the
@@ -97,6 +111,23 @@ proc msvcOwnedEntries*(value: string; roots: openArray[string]): seq[string] =
         seen.add(n)
         result.add(part.strip())
         break
+
+proc isMsvcConsumerTool*(tool: string): bool =
+  ## Whether ``tool`` — a tool reference, a bare executable name or an
+  ## absolute path to one — names an ``MsvcConsumerTools`` entry. The last
+  ## path component is compared case-insensitively with a ``.exe`` /
+  ## ``.cmd`` / ``.bat`` suffix dropped, splitting on ``/`` and ``\\`` on
+  ## every host so the answer does not depend on where it is computed.
+  var name = tool.strip()
+  let slash = max(name.rfind('/'), name.rfind('\\'))
+  if slash >= 0:
+    name = name[slash + 1 .. ^1]
+  name = name.toLowerAscii()
+  for ext in [".exe", ".cmd", ".bat"]:
+    if name.endsWith(ext):
+      name.setLen(name.len - ext.len)
+      break
+  name.len > 0 and name in MsvcConsumerTools
 
 proc msvcRootsOf(env: Table[string, string]): seq[string] =
   for key in MsvcRootKeys:
@@ -460,6 +491,12 @@ proc mergeActionEnvWithMsvcEnv*(devEnv: MsvcDevEnv;
   ## then searches PATH only — failed with ``failed to find tool "cl.exe"``.
   ## Only MSVC-owned entries are added, so an ambient directory VsDevCmd
   ## merely passed through does not leak into an action that chose its PATH.
+  ##
+  ## WHICH actions are merged is the caller's decision, not this proc's: the
+  ## engine applies it only to an action that inherits the host's PATH or
+  ## declares an MSVC consumer (``isMsvcConsumerTool``; see the engine's
+  ## ``actionUsesMsvcToolchain``). Every other declared PATH — a hermetic
+  ## one, or an empty one — is the PATH the action runs with.
   ##
   ## Pure, and Windows-semantic on every host, so it is unit-tested anywhere.
   if not devEnv.available:
