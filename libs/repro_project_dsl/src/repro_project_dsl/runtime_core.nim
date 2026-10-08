@@ -966,6 +966,82 @@ proc registeredResourceTypeInterfaces*(): seq[ResourceTypeInterfaceDef]
   ## declaration order. Consumed by ``toProjectInterface``.
   resourceTypeInterfaceRegistry
 
+var activityInterfaceRegistry: seq[ActivityInterfaceDef] = @[]
+  ## Shared-Development-Services L3: module-global set of exported dev-env
+  ## activity SIGNATURES, collected for interface lifting. Shape taken
+  ## from ``resourceTypeInterfaceRegistry`` above, with one deliberate
+  ## difference: each record carries its own ``packageName``, because
+  ## activities ARE declared lexically inside a ``package`` block and the
+  ## extractor can therefore attribute them exactly rather than folding
+  ## the whole registry into whichever project is being lifted.
+  ##
+  ## Populated at MODULE INIT, outside the ``when defined(reproProviderMode)``
+  ## guard that wraps ``devEnv<Pkg>Package()``. That placement is
+  ## load-bearing and was measured: in interface mode the dev-env proc is
+  ## not even compiled, so a registration emitted inside its body would
+  ## never run and the lift would carry nothing.
+
+var serviceInterfaceRegistry: seq[ServiceInterfaceDef] = @[]
+  ## Shared-Development-Services L3: the service half of the same lift.
+  ## See ``activityInterfaceRegistry``.
+
+proc resetActivityInterfaceRegistry*() {.dynOrStatic.} =
+  activityInterfaceRegistry.setLen(0)
+
+proc registerActivityInterface*(packageName: string;
+                                def: ActivityInterfaceDef) {.dynOrStatic.} =
+  ## Append one activity signature. Emitted by the ``package`` macro's
+  ## dev-env walker at module scope, once per constructor-shaped
+  ## ``activity``. Re-registration of the same (package, name) pair
+  ## REPLACES the earlier record rather than appending a second one: a
+  ## module whose ``package`` block is expanded twice (``include``d by a
+  ## sibling shim, which is how ``usesImportCode`` consumes a workspace
+  ## producer) would otherwise lift every activity twice and move the
+  ## interface fingerprint for a reason that has nothing to do with the
+  ## producer's contract.
+  for existing in activityInterfaceRegistry.mitems:
+    if existing.packageName == packageName and existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  activityInterfaceRegistry.add(entry)
+
+proc registeredActivityInterfaces*(): seq[ActivityInterfaceDef]
+    {.dynOrStatic.} =
+  ## The activity signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  activityInterfaceRegistry
+
+proc resetServiceInterfaceRegistry*() {.dynOrStatic.} =
+  serviceInterfaceRegistry.setLen(0)
+
+proc registerServiceInterface*(packageName: string;
+                               def: ServiceInterfaceDef) {.dynOrStatic.} =
+  ## Append one service signature. Same replace-on-duplicate rule, and
+  ## the same reason, as ``registerActivityInterface``; the identity is
+  ## (package, activity, service) because two activities may each declare
+  ## a service of the same bare name.
+  for existing in serviceInterfaceRegistry.mitems:
+    if existing.packageName == packageName and
+        existing.activityName == def.activityName and
+        existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  serviceInterfaceRegistry.add(entry)
+
+proc registeredServiceInterfaces*(): seq[ServiceInterfaceDef]
+    {.dynOrStatic.} =
+  ## The service signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  serviceInterfaceRegistry
+
 proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
   ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
   ## between scenarios so registry entries don't leak across cases.

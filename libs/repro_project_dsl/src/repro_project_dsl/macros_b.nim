@@ -3346,6 +3346,568 @@ proc l2LowerDevEnvActivities(packageName: string; body: NimNode): NimNode =
 
 
 # ---------------------------------------------------------------------------
+# Shared-Development-Services L3 — services and activities travel through
+# the interface lift as typed symbols.
+#
+# `Shared-Development-Services.md` §3 is the authority:
+#
+#   "A service declared in one project is referenced in another as a
+#    **typed symbol carried by the interface lift**. … the member set a
+#    consumer compiles against is emitted by the producer's interface
+#    artifact, the **interface fingerprint** gates rebuilds, and a
+#    signature change re-lifts, re-fingerprints and invalidates
+#    consumers."
+#
+# and `Typed-Extension-Interfaces-And-Provider-Libraries.md` §2 names this
+# "a third case for the same lift", after typed tools and typed
+# extensions.
+#
+# WHAT THIS EMITS, AND WHY AT MODULE SCOPE. Three things, all top-level,
+# none of them inside `devEnv<Pkg>Package()`:
+#
+#   1. one handle TYPE per constructor-shaped activity,
+#      `<Title><Activity>Handle`, whose fields are the activity's
+#      `config:` keys (declared type, verbatim) and the services its body
+#      declares;
+#   2. one `<Title>PackageExports` object whose fields are every export —
+#      an activity handle per activity, a `LiftedServiceHandle` per
+#      PACKAGE-LEVEL service — plus `liftedExports` and one accessor proc
+#      per member, which is what makes `infra.sso` a typed symbol in a
+#      consuming recipe;
+#   3. `registerActivityInterface` / `registerServiceInterface` calls, the
+#      records `toProjectInterface` folds into
+#      `ProjectInterface.publicActivities` / `publicServices`.
+#
+# Module scope is load-bearing for (3) and measured, not assumed:
+# `buildCode` wraps its whole result in `when not
+# defined(reproInterfaceMode)` and the dev-env proc additionally in `when
+# defined(reproProviderMode)`, so a registration emitted inside the
+# dev-env body never runs in the mode that performs the lift. It would
+# have produced an interface artifact carrying no services at all, and
+# nothing would have failed to compile.
+#
+# WHY A SEPARATE PASS RATHER THAN A SECOND RETURN VALUE FROM
+# `l2LowerDevEnvActivities`. That walker's output is spliced INTO the
+# guarded dev-env proc; threading a second list out of it would mean
+# every caller keeping the two halves apart. A separate read-only pass
+# over the same body costs one more walk and cannot leak a statement into
+# the wrong guard.
+#
+# WHAT THE HANDLE DOES *NOT* CARRY. A config field is declared with its
+# type and left at that type's default — it is NOT pre-filled with the
+# `config:` default expression. `Shared-Development-Services.md` §4.6 is
+# why: "A handle is obtained by a RESOLVER, never by a constructor", and
+# §7 says the handle's values are staged configurables and computed
+# resource attributes of a RESOLVED instance. A handle minted by this
+# accessor is an address, not an instance, so pre-filling it with
+# defaults would make it read like one. The defaults themselves are not
+# dropped: they travel in `ActivityConfigInterfaceDef.defaultRepr` /
+# `hasDefault`, which is the "`config:` surface with defaults" the L3
+# gate asks the LIFT to carry, and they already reach `enable` as real
+# Nim parameter defaults through L2's generated entry point. L7 is where
+# a resolved handle's members hold values.
+# ---------------------------------------------------------------------------
+
+type
+  L3ServiceExport = object
+    ## One lifted service.
+    name: string
+    activityName: string
+    handleType: string
+    anchor: NimNode
+
+  L3ActivityExport = object
+    ## One lifted activity signature.
+    name: string
+    handleType: string
+    params: seq[L2ActivityParam]
+    config: seq[L2ActivityConfigKey]
+    services: seq[string]
+    anchor: NimNode
+
+proc l3ActivityHandleTypeName(packageName, activityName: string): string =
+  ## `<TitlePackage><TitleActivity>Handle` — `infra` + `sso` →
+  ## `InfraPackageSsoHandle`. Derived from `titleIdent` rather than from
+  ## `titleCase` alone so the handle type can never collide with the
+  ## package's own `<Title>Package` type or with a `BuildEdge` subtype
+  ## (`titleCase(exe) & titleCase(cmd) & "Edge"`), both of which share
+  ## this module's identifier namespace.
+  titleIdent(packageName) & titleCase(activityName) & "Handle"
+
+proc l3PackageExportsTypeName(packageName: string): string =
+  titleIdent(packageName) & "Exports"
+
+proc l3Exportable(name: string): bool =
+  ## Whether a declared name can become a DOT-ACCESS typed symbol.
+  ##
+  ## L1 deliberately accepts a STRING service name (`service
+  ## "renamed-api":` — `m5ServiceNameNode`, and
+  ## `t_dsl_service_setter_surface_is_typed.nim`'s "the one-name head
+  ## still compiles, three ways" pins it), and such a name cannot be a
+  ## Nim field or proc. `Shared-Development-Services.md` §3 is explicit
+  ## that the DSL reference surface is "typed symbols with dot access"
+  ## while `<package>:<name>` is "the CLI disambiguation surface" — so a
+  ## non-identifier name stays reachable at the CLI and is simply not
+  ## reachable by dot access.
+  ##
+  ## Refusing it instead would weaken L1's gate, which is why this is a
+  ## predicate and not an `error`. It is also not a SILENT drop: the
+  ## export still reaches the interface artifact (`registerServiceInterface`
+  ## / `registerActivityInterface` run for it regardless), and
+  ## `l3LiftedExportSurface` emits a compile-time `warning` naming it and
+  ## saying which surface it is missing from.
+  validGeneratedIdent(name)
+
+proc l3CollectExports(packageName: string; pkgBody: NimNode):
+    tuple[activities: seq[L3ActivityExport];
+          services: seq[L3ServiceExport]] =
+  ## Read the package body for everything L3 lifts. Read-only: it reuses
+  ## L2's parsers (`l2ActivityEntryAst`, `l2ParseActivityParams`,
+  ## `l2ParseActivityConfig`) and L1's `m5ServiceEntryAst`, so a shape
+  ## either walker refuses is refused here with the SAME message rather
+  ## than silently lifted in a second, divergent reading.
+  result.activities = @[]
+  result.services = @[]
+  for stmt in pkgBody:
+    if calleeName(stmt).normalize == "service":
+      let parsed = m5ServiceEntryAst(stmt)
+      if parsed.matched:
+        result.services.add(L3ServiceExport(
+          name: parsed.serviceName, activityName: "", handleType: "",
+          anchor: l2StmtAnchor(stmt)))
+      continue
+    if calleeName(stmt).normalize != "devenv":
+      continue
+    for devEnvStmt in stmt[stmt.len - 1]:
+      let parsed = l2ActivityEntryAst(devEnvStmt)
+      if not parsed.matched:
+        continue
+      let handleType = l3ActivityHandleTypeName(packageName,
+        parsed.activityName)
+      var entry = L3ActivityExport(
+        name: parsed.activityName,
+        handleType: handleType,
+        params: l2ParseActivityParams(parsed.activityName, parsed.paramsNode),
+        config: l2ParseActivityConfig(parsed.activityName, parsed.body),
+        services: @[],
+        anchor: l2StmtAnchor(devEnvStmt))
+      for inner in parsed.body:
+        if not l2IsHeadNamed(inner, "service"):
+          continue
+        let svc = m5ServiceEntryAst(inner)
+        if not svc.matched:
+          continue
+        entry.services.add(svc.serviceName)
+        result.services.add(L3ServiceExport(
+          name: svc.serviceName, activityName: parsed.activityName,
+          handleType: handleType, anchor: l2StmtAnchor(inner)))
+      result.activities.add(entry)
+
+proc l3CheckExportNames(packageName: string;
+                        activities: seq[L3ActivityExport];
+                        services: seq[L3ServiceExport]) =
+  ## Refuse the name clashes the emission cannot survive, naming the
+  ## clash rather than letting Nim report a redefinition in generated
+  ## code.
+  ##
+  ## Each accessor is a top-level `proc <name>*(pkg: <Title>Package)`, so
+  ## an export whose name is already a module-level VALUE in this recipe
+  ## — the package const itself (`const infra* = InfraPackage()`) or an
+  ## M9.R.2c artifact slot (`var apiBin {.inject.}: Executable`) — is a
+  ## Nim redefinition: a proc and a var cannot share a name. Skipping the
+  ## accessor instead would be the silent drop this campaign has found
+  ## seven of; the reference `infra.<name>` would simply not resolve, with
+  ## no diagnostic anywhere.
+  let pkgValue = packageValueIdent(packageName)
+  var slots: seq[string] = @[]
+  var owner: seq[string] = @[]
+  proc claim(name, kind: string; anchor: NimNode) =
+    let key = name.normalize
+    if key == pkgValue.normalize:
+      error("`" & kind & " " & name & "`: package `" & packageName &
+        "` exports it to consumers as `" & pkgValue & "." & name &
+        "`, which needs a top-level `proc " & name & "`, and the " &
+        "package's own `const " & pkgValue & "` already owns that name. " &
+        "Rename the " & kind & ". (`Shared-Development-Services.md` §3: " &
+        "\"`infra.sso` is a typed symbol\" — the symbol has to be " &
+        "nameable.)", anchor)
+    let idx = slots.find(key)
+    if idx >= 0:
+      error("`" & kind & " " & name & "`: package `" & packageName &
+        "` already exports `" & name & "` as " & owner[idx] &
+        ". Two exports of one package cannot share a name: a consumer " &
+        "writing `" & pkgValue & "." & name & "` would have no way to " &
+        "say which one it meant. `Shared-Development-Services.md` §3 " &
+        "resolves a COLLISION BETWEEN PACKAGES by union and " &
+        "`<package>:<name>` at the CLI; it says nothing about two " &
+        "exports of one package, because that is an authoring mistake.",
+        anchor)
+    slots.add(key)
+    owner.add("an " & kind)
+  for act in activities:
+    if l3Exportable(act.name):
+      claim(act.name, "activity", act.anchor)
+  for svc in services:
+    if svc.activityName.len == 0 and l3Exportable(svc.name):
+      claim(svc.name, "service", svc.anchor)
+  for act in activities:
+    # Inside ONE handle type a `config:` key and a service become fields
+    # of the same object, so they collide there rather than at module
+    # scope.
+    var fields: seq[string] = @[]
+    for c in act.config:
+      if l3Exportable(c.name):
+        fields.add(c.name.normalize)
+    for svcName in act.services:
+      if not l3Exportable(svcName):
+        continue
+      if svcName.normalize in fields:
+        error("activity `" & act.name & "`: service `" & svcName &
+          "` and `config:` key `" & svcName & "` would be the same " &
+          "member of the lifted handle type `" & act.handleType &
+          "`. Both are members a consumer reaches as `" & pkgValue & "." &
+          act.name & "." & svcName & "`, so the names have to be " &
+          "distinct.", act.anchor)
+      fields.add(svcName.normalize)
+
+proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
+  ## The whole L3 emission for one package, or an empty statement list
+  ## when the package exports no service and no constructor-shaped
+  ## activity.
+  let collected = l3CollectExports(pkg.packageName, pkgBody)
+  if collected.activities.len == 0 and collected.services.len == 0:
+    return newStmtList()
+  l3CheckExportNames(pkg.packageName, collected.activities,
+    collected.services)
+  let typeName = titleIdent(pkg.packageName)
+  let exportsType = l3PackageExportsTypeName(pkg.packageName)
+  # The non-identifier names, warned about ONCE each. Not an `error`:
+  # see `l3Exportable`. Not silence either: a name the author declared
+  # and that does not appear on the new surface is said out loud, with
+  # the surface it IS reachable from.
+  for act in collected.activities:
+    if not l3Exportable(act.name):
+      warning("activity `" & act.name & "`: `" & act.name & "` is not a " &
+        "legal Nim identifier, so package `" & pkg.packageName & "` does " &
+        "not export it for dot access -- a consumer cannot write `" &
+        packageValueIdent(pkg.packageName) & "." & act.name & "`. It is " &
+        "still declared, still lifted into the interface artifact, and " &
+        "still addressable at the CLI as `" & pkg.packageName & ":" &
+        act.name & "`. `Shared-Development-Services.md` §3 keeps those " &
+        "two surfaces apart on purpose. Rename it to a plain identifier " &
+        "to make it referenceable from a recipe.", act.anchor)
+      continue
+    for c in act.config:
+      if not l3Exportable(c.name):
+        warning("activity `" & act.name & "`: `config:` key `" & c.name &
+          "` is not a legal Nim identifier, so it is not a member of the " &
+          "lifted handle type `" & act.handleType & "` and a consumer " &
+          "cannot read it. It still reaches the interface artifact and " &
+          "still works as an `enable` override in this package.", act.anchor)
+    for svcName in act.services:
+      if not l3Exportable(svcName):
+        warning("activity `" & act.name & "`: service `" & svcName &
+          "` is not a legal Nim identifier, so it is not a member of the " &
+          "lifted handle type `" & act.handleType & "`. It is still " &
+          "declared, still lowered with its typed edges, and still " &
+          "addressable at the CLI as `" & pkg.packageName & ":" & svcName &
+          "`.", act.anchor)
+  for svc in collected.services:
+    if svc.activityName.len == 0 and not l3Exportable(svc.name):
+      warning("service `" & svc.name & "`: `" & svc.name & "` is not a " &
+        "legal Nim identifier, so package `" & pkg.packageName & "` does " &
+        "not export it for dot access. It is still declared, still " &
+        "lifted into the interface artifact, and still addressable at " &
+        "the CLI as `" & pkg.packageName & ":" & svc.name & "`.",
+        svc.anchor)
+  var code = "type\n"
+  for act in collected.activities:
+    if not l3Exportable(act.name):
+      continue
+    code.add("  " & act.handleType & "* = object\n")
+    code.add("    ## Shared-Development-Services L3: the lifted handle " &
+      "type for activity\n    ## `" & act.name & "` of package `" &
+      pkg.packageName & "`. Its FIELDS are the member set a\n" &
+      "    ## consuming recipe compiles against; their VALUES belong to a " &
+      "resolved\n    ## instance and are L7's work (see " &
+      "`Shared-Development-Services.md` §7).\n")
+    var fieldCount = 0
+    for c in act.config:
+      if not l3Exportable(c.name):
+        continue
+      code.add("    " & c.name & "*: " & c.typeNode.repr.strip() & "\n")
+      inc fieldCount
+    for svcName in act.services:
+      if not l3Exportable(svcName):
+        continue
+      code.add("    " & svcName & "*: LiftedServiceHandle\n")
+      inc fieldCount
+    if fieldCount == 0:
+      code.add("    discard\n")
+  code.add("  " & exportsType & "* = object\n")
+  code.add("    ## Shared-Development-Services L3: every service and " &
+    "activity package\n    ## `" & pkg.packageName & "` exports. Reflected " &
+    "by `liftedExportRefusal` to name\n    ## what is available when a " &
+    "consumer misspells a reference, which is why it\n    ## is an object " &
+    "with fields and not a list of accessor procs.\n")
+  var exportCount = 0
+  for act in collected.activities:
+    if not l3Exportable(act.name):
+      continue
+    code.add("    " & act.name & "*: " & act.handleType & "\n")
+    inc exportCount
+  for svc in collected.services:
+    if svc.activityName.len == 0 and l3Exportable(svc.name):
+      code.add("    " & svc.name & "*: LiftedServiceHandle\n")
+      inc exportCount
+  if exportCount == 0:
+    code.add("    discard\n")
+  code.add("proc liftedExports*(pkg: " & typeName & "): " & exportsType &
+    " =\n")
+  code.add("  ## Shared-Development-Services L3: the ADDRESSES of this " &
+    "package's\n  ## exports. Not a resolver (§4.6) and not an instance " &
+    "(§7) — it is what\n  ## makes the names typed.\n")
+  code.add("  discard pkg\n")
+  for act in collected.activities:
+    if not l3Exportable(act.name):
+      continue
+    for svcName in act.services:
+      if not l3Exportable(svcName):
+        continue
+      code.add("  result." & act.name & "." & svcName &
+        " = LiftedServiceHandle(packageName: " &
+        escForCode(pkg.packageName) & ", activityName: " &
+        escForCode(act.name) & ", serviceName: " & escForCode(svcName) &
+        ")\n")
+  for svc in collected.services:
+    if svc.activityName.len == 0 and l3Exportable(svc.name):
+      code.add("  result." & svc.name &
+        " = LiftedServiceHandle(packageName: " &
+        escForCode(pkg.packageName) & ", activityName: \"\", serviceName: " &
+        escForCode(svc.name) & ")\n")
+  for act in collected.activities:
+    if not l3Exportable(act.name):
+      continue
+    code.add("proc " & act.name & "*(pkg: " & typeName & "): " &
+      act.handleType & " =\n  pkg.liftedExports." & act.name & "\n")
+  for svc in collected.services:
+    if svc.activityName.len == 0 and l3Exportable(svc.name):
+      code.add("proc " & svc.name & "*(pkg: " & typeName &
+        "): LiftedServiceHandle =\n  pkg.liftedExports." & svc.name & "\n")
+  for act in collected.activities:
+    var params: seq[string] = @[]
+    for p in act.params:
+      let info = act.anchor.lineInfoObj()
+      params.add("ActivityParamInterfaceDef(name: " & escForCode(p.name) &
+        ", nimType: " & escForCode(p.typeNode.repr.strip()) &
+        ", sourceFile: " & escForCode(info.filename) &
+        ", sourceLine: " & $info.line & ")")
+    var configs: seq[string] = @[]
+    for c in act.config:
+      let info = act.anchor.lineInfoObj()
+      configs.add("ActivityConfigInterfaceDef(name: " & escForCode(c.name) &
+        ", nimType: " & escForCode(c.typeNode.repr.strip()) &
+        ", defaultRepr: " &
+        escForCode(if c.defaultNode == nil: ""
+                   else: c.defaultNode.repr.strip()) &
+        ", hasDefault: " & $(c.defaultNode != nil) &
+        ", description: " & escForCode(c.description) &
+        ", sourceFile: " & escForCode(info.filename) &
+        ", sourceLine: " & $info.line & ")")
+    var svcNames: seq[string] = @[]
+    for svcName in act.services:
+      svcNames.add(escForCode(svcName))
+    let info = act.anchor.lineInfoObj()
+    code.add("registerActivityInterface(" & escForCode(pkg.packageName) &
+      ", ActivityInterfaceDef(name: " & escForCode(act.name) &
+      ", handleType: " & escForCode(act.handleType) &
+      ", params: @[" & params.join(", ") & "]" &
+      ", config: @[" & configs.join(", ") & "]" &
+      ", services: @[" & svcNames.join(", ") & "]" &
+      ", sourceFile: " & escForCode(info.filename) &
+      ", sourceLine: " & $info.line & "))\n")
+  for svc in collected.services:
+    let info = svc.anchor.lineInfoObj()
+    code.add("registerServiceInterface(" & escForCode(pkg.packageName) &
+      ", ServiceInterfaceDef(name: " & escForCode(svc.name) &
+      ", activityName: " & escForCode(svc.activityName) &
+      ", handleType: " & escForCode(svc.handleType) &
+      ", sourceFile: " & escForCode(info.filename) &
+      ", sourceLine: " & $info.line & "))\n")
+  result = parseStmt(code)
+  result.copyLineInfo(pkgBody)
+
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L3 — the consumer side: a reference to a
+# dependency's export is refused by NAME, with the names that exist.
+#
+# L3's gate: "a misspelled name, an absent member and a type mismatch each
+# failing B's recipe compilation with a message naming what is
+# available". Nim already fails all three; what it does not do is name the
+# alternatives. `activityMemberRefusal` supplies that for a member of an
+# activity PARAMETER (L2); these two supply it for a reference through a
+# dependency's package const, which is the spelling §3 writes
+# (`infra.sso`, `sso.issuer`).
+#
+# The type-mismatch case is deliberately left to the compiler. Nim's own
+# diagnostic for `enable stack(sso = infra.sso)` against a parameter of
+# the wrong type names both the type it got and the type it expected,
+# which is what "naming what is available" means for a mismatch; a DSL
+# refusal could not improve on it and would have to re-implement overload
+# resolution to fire at the right times.
+# ---------------------------------------------------------------------------
+
+macro liftedExportRefusal*(ty: typedesc; anchor: untyped;
+                           packageName, packageValue,
+                           memberName: static string): untyped =
+  ## Refuse one `<dep>.<name>` reference, naming the exports `ty` has.
+  ##
+  ## Same contract as `activityMemberRefusal`: reached only from a `when
+  ## not compiles(...)` guard, so it always errors, and `anchor` is
+  ## `untyped` purely for line info so the diagnostic lands on the
+  ## recipe's own line.
+  var typeNode = ty.getTypeInst()
+  if typeNode.kind == nnkBracketExpr and typeNode.len == 2:
+    typeNode = typeNode[1]
+  var members: seq[string] = @[]
+  l2AppendTypeMemberNames(typeNode, members, 0)
+  let available =
+    if members.len == 0:
+      "package `" & packageName & "` lifts no services or activities at all"
+    else:
+      "services and activities package `" & packageName & "` exports: " &
+        members.join(", ")
+  error("`" & packageValue & "." & memberName & "`: package `" &
+    packageName & "` exports no service or activity named `" & memberName &
+    "`. " & available & ". `Shared-Development-Services.md` §3: \"`infra" &
+    ".sso` is a typed symbol. A misspelling, a member that does not " &
+    "exist, or a type that does not match is a compile error in THIS " &
+    "project's recipe compilation -- not a runtime \"no such service\".\"",
+    anchor)
+
+macro liftedMemberRefusal*(ty: typedesc; anchor: untyped;
+                           reference, memberName: static string): untyped =
+  ## Refuse one `<dep>.<export>.<member>` access, naming the members the
+  ## lifted handle type has.
+  var typeNode = ty.getTypeInst()
+  if typeNode.kind == nnkBracketExpr and typeNode.len == 2:
+    typeNode = typeNode[1]
+  var members: seq[string] = @[]
+  l2AppendTypeMemberNames(typeNode, members, 0)
+  let typeText = typeNode.repr.strip()
+  let available =
+    if members.len == 0:
+      "lifted type `" & typeText & "` has no members at all"
+    else:
+      "available members of `" & typeText & "`: " & members.join(", ")
+  error("`" & reference & "." & memberName & "`: the lifted handle `" &
+    reference & "` has no member `" & memberName & "`. " & available &
+    ". `Shared-Development-Services.md` §3: what the lift carries for " &
+    "each exported service is \"the type of its handle and that type's " &
+    "members\", so a member written here that the lifted type does not " &
+    "have is refused at the recipe's own line.", anchor)
+
+proc l3CollectDependencyReferences(node: NimNode; depValues: seq[string];
+    acc: var seq[tuple[dep, member, member2: string; anchor: NimNode]]) =
+  ## Collect `<dep>.<member>` and `<dep>.<member>.<member2>` out of a
+  ## consumer body, where `<dep>` is the package const of a declared
+  ## dependency.
+  ##
+  ## Only these two depths. A deeper chain's head is already covered by
+  ## the depth-2 entry, and `<dep>.<member>(args)` in CALLEE position is
+  ## skipped for the reason `l2WalkMemberUses` skips it: `compiles` is
+  ## false for a routine that needs more arguments, so checking it would
+  ## refuse a correct recipe.
+  if node == nil:
+    return
+  if node.kind == nnkDotExpr and node.len == 2 and
+      node[1].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    let base = node[0]
+    if base.kind in {nnkIdent, nnkSym}:
+      let baseText = identText(base).normalize
+      for dep in depValues:
+        if dep.normalize == baseText:
+          acc.add((dep: dep, member: identText(node[1]), member2: "",
+                   anchor: node))
+          return
+    elif base.kind == nnkDotExpr and base.len == 2 and
+        base[0].kind in {nnkIdent, nnkSym} and
+        base[1].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      let baseText = identText(base[0]).normalize
+      for dep in depValues:
+        if dep.normalize == baseText:
+          acc.add((dep: dep, member: identText(base[1]),
+                   member2: identText(node[1]), anchor: node))
+          return
+  if node.kind in {nnkCall, nnkCommand} and node.len > 0:
+    for i in 1 ..< node.len:
+      l3CollectDependencyReferences(node[i], depValues, acc)
+    return
+  for child in node:
+    l3CollectDependencyReferences(child, depValues, acc)
+
+proc l3DependencyReferenceChecks(pkg: PackageDef; pkgBody: NimNode): NimNode =
+  ## One guarded refusal per distinct dependency reference the package's
+  ## `devEnv:` body makes, emitted at MODULE scope so it is checked in
+  ## every compilation mode rather than only under
+  ## `-d:reproProviderMode`, which is the only mode that compiles the
+  ## dev-env proc the references live in.
+  result = newStmtList()
+  var depValues: seq[string] = @[]
+  for useDef in pkg.allToolUses():
+    if useDef.packageSelector.len == 0:
+      continue
+    let value = packageValueIdent(useDef.packageSelector)
+    if value.len > 0 and value notin depValues:
+      depValues.add(value)
+  if depValues.len == 0:
+    return
+  var refs: seq[tuple[dep, member, member2: string; anchor: NimNode]] = @[]
+  for stmt in pkgBody:
+    if calleeName(stmt).normalize != "devenv":
+      continue
+    l3CollectDependencyReferences(stmt[stmt.len - 1], depValues, refs)
+  var seen: seq[string] = @[]
+  for reference in refs:
+    let key = reference.dep & "." & reference.member & "." & reference.member2
+    if key in seen:
+      continue
+    seen.add(key)
+    let depIdent = ident(reference.dep)
+    let exportsType = ident(l3PackageExportsTypeName(reference.dep))
+    let access = newDotExpr(depIdent, ident(reference.member))
+    let nameRefusal = newCall(ident("liftedExportRefusal"),
+      newCall(ident("typeof"), newCall(ident("default"), exportsType)),
+      reference.anchor.copyNimTree(), newLit(reference.dep),
+      newLit(reference.dep), newLit(reference.member))
+    nameRefusal.copyLineInfo(reference.anchor)
+    # Guarded on `declared(<Dep>PackageExports)` as well as on the
+    # access: a dependency that lifts nothing has no type to reflect, and
+    # there Nim's own `undeclared field` is the whole of the available
+    # diagnostic.
+    if reference.member2.len == 0:
+      result.add(quote do:
+        when declared(`exportsType`) and not compiles(`access`):
+          `nameRefusal`)
+      continue
+    let fullAccess = newDotExpr(access.copyNimTree(),
+      ident(reference.member2))
+    let memberRefusal = newCall(ident("liftedMemberRefusal"),
+      newCall(ident("typeof"), access.copyNimTree()),
+      reference.anchor.copyNimTree(),
+      newLit(reference.dep & "." & reference.member),
+      newLit(reference.member2))
+    memberRefusal.copyLineInfo(reference.anchor)
+    result.add(quote do:
+      when declared(`exportsType`):
+        when not compiles(`access`):
+          `nameRefusal`
+        elif not compiles(`fullAccess`):
+          `memberRefusal`)
+
+
+# ---------------------------------------------------------------------------
 # DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` lowerer.
 #
 # v8's ``cli`` template (see ``tools/prototypes/v8/staged/package_
@@ -5441,6 +6003,18 @@ macro packageImpl*(name: untyped;
   # type-checks against the already-declared hook.
   result.add(collectImplicitTargetNameHooks(body))
   result.add(generated)
+  # Shared-Development-Services L3: the lifted service/activity surface —
+  # the handle types, the `<Title>PackageExports` reflection object, the
+  # accessor procs that make `<dep>.<service>` a typed symbol, and the
+  # `registerActivityInterface` / `registerServiceInterface` records
+  # `toProjectInterface` folds into the interface artifact. Emitted AFTER
+  # `generated` because the accessors' first parameter is the
+  # `<Title>Package` type `wrapperCode` declares there, and at module
+  # scope rather than inside `buildCode` because `buildCode`'s whole
+  # result sits under `when not defined(reproInterfaceMode)` — the one
+  # mode that performs the lift.
+  result.add(l3LiftedExportSurface(pkg, body))
+  result.add(l3DependencyReferenceChecks(pkg, body))
   # Spec-Implementation M1: emit ``let <name> = declareVariant[T](...)``
   # bindings + the trailing ``finalizeVariants()`` call at top-level
   # module scope (after the package wrapper code so the variant

@@ -289,6 +289,9 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
+libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim	nim	15
+libs/repro_interface_artifacts/tests/t_l3_lifted_symbols_compile_in_a_consumer.nim	nim	9
+libs/repro_interface_artifacts/tests/t_l3_service_activity_codec_roundtrip.nim	nim	19
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim	nim	1
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
@@ -437,6 +440,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim	
 libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_within_artifact.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_library.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_library_body_unclaimed_members.nim	nim	6
+libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_service_reference_is_typed.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_output_ref.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim	nim	13

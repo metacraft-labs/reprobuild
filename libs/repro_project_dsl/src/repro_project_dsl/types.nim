@@ -253,6 +253,110 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ActivityParamInterfaceDef* = object
+    ## Shared-Development-Services L3: one constructor-style typed
+    ## parameter of an exported dev-env activity, as DECLARED. ``nimType``
+    ## is the parameter's type expression written verbatim — the lift
+    ## carries the author's spelling, not a resolved symbol, because the
+    ## consuming compilation resolves it in its own scope exactly as the
+    ## ``InterfaceResourceAttr.nimType`` of a lifted resource attribute is
+    ## resolved there.
+    name*: string
+    nimType*: string
+    sourceFile*: string
+    sourceLine*: int
+
+  ActivityConfigInterfaceDef* = object
+    ## Shared-Development-Services L3: one ``config:`` key of an exported
+    ## dev-env activity — "the ``config:`` surface with defaults so a
+    ## consumer's ``enable`` block typechecks" (L3 ``:gate:``).
+    ##
+    ## ``hasDefault`` is a FIELD rather than ``defaultRepr.len > 0`` for
+    ## the reason L2's ``DslActivityConfigDef`` gives: ``issuer: string``
+    ## and ``issuer: string = ""`` would otherwise be the same record and
+    ## the second would read as required.
+    name*: string
+    nimType*: string
+    defaultRepr*: string
+    hasDefault*: bool
+    description*: string
+    sourceFile*: string
+    sourceLine*: int
+
+  ServiceInterfaceDef* = object
+    ## Shared-Development-Services L3: one ``service <name>:`` crossing
+    ## the interface boundary as a typed symbol.
+    ##
+    ## This record carries the service's SIGNATURE and deliberately not
+    ## its implementation. A consumer compiles against the service's name
+    ## and the handle type it is reached through; it does not compile
+    ## against the service's ``executable``, ``args``, ``runtimeFile`` or
+    ## ``on <trigger>:`` setters, which are the producer's private
+    ## business. That split is what keeps the interface fingerprint from
+    ## being a rebuild-everything hammer: changing a service's argv
+    ## re-lifts to the same digest and does not invalidate consumers,
+    ## while renaming the service does. Measured both ways in
+    ## ``t_l3_lifted_service_signature_fingerprint.nim``.
+    ##
+    ## ``activityName`` is the activity whose body declared it, or "" for
+    ## a package-level service.
+    packageName*: string
+      ## The declaring package. Set by ``registerServiceInterface``, so a
+      ## caller constructing the record never has to repeat it.
+    name*: string
+    activityName*: string
+    handleType*: string
+      ## The generated Nim type a consumer reaches this service's handle
+      ## through — ``<Title><Activity>Handle`` for a service inside an
+      ## activity. Empty for a package-level service, which no handle
+      ## type carries yet.
+    sourceFile*: string
+    sourceLine*: int
+
+  ActivityInterfaceDef* = object
+    ## Shared-Development-Services L3: one exported dev-env activity's
+    ## lifted signature — "the handle type and its members … and the
+    ## ``config:`` surface with defaults" (L3 ``:gate:``).
+    ##
+    ## WHAT IS NOT HERE, AND WHICH MILESTONE ADDS IT. L3's gate also names
+    ## "the declared identity and scope" (L4) and "the shared collections
+    ## it converges" (L8). Neither surface exists in the DSL yet, so
+    ## neither is invented here: they are ADDED as fields on this record
+    ## by those milestones, and reach the wire through one more
+    ## version-gated block in ``encodeInterfacePayload`` — the same
+    ## additive route ``publicLibraries`` took at envelope v9 and
+    ## ``publicResources`` at v12. Nothing in the shape has to be rewritten
+    ## for them.
+    packageName*: string
+      ## The declaring package. Set by ``registerActivityInterface``.
+    name*: string
+    handleType*: string
+      ## The generated handle type's name, ``<Title><Activity>Handle``.
+      ## Recorded rather than recomputed so a consumer reading the
+      ## artifact does not have to reimplement the producer's naming rule.
+    params*: seq[ActivityParamInterfaceDef]
+    config*: seq[ActivityConfigInterfaceDef]
+    services*: seq[string]
+      ## Names of the services this activity's body declares, in
+      ## declaration order. Each is also a member of the handle type.
+    sourceFile*: string
+    sourceLine*: int
+
+  LiftedServiceHandle* = object
+    ## Shared-Development-Services L3: the consumer-side value a lifted
+    ## activity handle's service member holds.
+    ##
+    ## It carries the service's ADDRESS and nothing else. A running
+    ## service's own members — its readiness, its url, the resource
+    ## attributes it mints — are §7's staged configurables and computed
+    ## resource attributes, and L7 is where they become reachable. Until
+    ## then a consumer can name a dependency's service as a typed symbol
+    ## and get a compile error for a misspelling, which is L3's claim and
+    ## the whole of it.
+    packageName*: string
+    activityName*: string
+    serviceName*: string
+
   PackageSourceDecl* = object
     ## One ``packageSource <package>, <provenance>`` declaration. See
     ## ``PackageDef.packageSources``.

@@ -74,3 +74,74 @@ proc checkRecipeSource*(source: string; tag: string):
 
 proc mentions*(probe: ServiceCompileProbeResult; text: string): bool =
   probe.output.contains(text)
+
+proc checkConsumerWithProducer*(producerSelector, producerSource,
+                                consumerSource, tag: string):
+    ServiceCompileProbeResult =
+  ## Shared-Development-Services L3: write a PRODUCER project and a
+  ## CONSUMER recipe as workspace siblings and run ``nim check`` on the
+  ## consumer.
+  ##
+  ## The layout is dictated by ``workspaceProducerLocation``
+  ## (``macros_a.nim``), which the ``uses:`` import path walks up from the
+  ## consumer's own source file looking for ``<ancestor>/<selector>/
+  ## repro.nim``::
+  ##
+  ##   build/l3-consumer-probe-<tag>-<pid>/
+  ##     <selector>/repro.nim      <- the producer
+  ##     consumer/recipe.nim       <- the consumer `nim check` is run on
+  ##
+  ## The producer's PACKAGE NAME must equal ``producerSelector``: the
+  ## consumer reaches the lifted symbols through the producer's
+  ## ``const <packageValueIdent>*`` and ``uses:`` names the directory.
+  ##
+  ## Under the repository rather than in the system temp directory for
+  ## the reason ``checkRecipeSource`` gives: Nim finds ``config.nims`` by
+  ## walking up from the compiled file, and this repo's ``config.nims``
+  ## is what puts every ``libs/*/src`` on the module path.
+  ##
+  ## ``nim c --compileOnly`` RATHER THAN ``nim check``, AND THE REASON IS
+  ## A MEASURED DEFECT IN THE MACHINERY UNDER TEST. ``usesImportCode``'s
+  ## workspace-producer branch materialises a per-sibling shim module by
+  ## calling ``createDir`` / ``writeFile`` from the Nim VM at macro
+  ## expansion, then emits an ``import`` of it. Measured on
+  ## aarch64-unaffected x86_64-linux with nim 2.3.1: under ``nim check``
+  ## those VM filesystem writes DO NOT HAPPEN — the directory and the
+  ## shim file are never created — and the emitted import then fails with
+  ## ``cannot open file: <shimdir>/repro_sib_<selector>``, so none of the
+  ## producer's symbols are in scope. Under ``nim c`` the same expansion
+  ## writes the shim and the consumer compiles. This is not specific to
+  ## L3: the pre-existing SC-9 test
+  ## ``tests/integration/
+  ## t_sc_uses_import_resolves_workspace_project_schema.nim``
+  ## reproduces it at the base commit, failing the same way for
+  ## ``repro_sib_scprod9exe``. It is reported, not worked around in the
+  ## macro, because fixing it is not L3's milestone.
+  ##
+  ## ``--compileOnly`` keeps the cost down: the properties under test are
+  ## macro-expansion-time and overload-resolution-time errors, which the
+  ## Nim half reaches, and skipping the C compiler and linker is most of
+  ## the wall clock. ``--nimcache`` is SHARED across probes on purpose —
+  ## only the consumer module differs between them, so the library half
+  ## is compiled once.
+  ##
+  ## Test-double policy: NO mocks. Two real recipes on a real filesystem,
+  ## compiled by the real ``nim``.
+  let scratch = repoRoot() / "build" /
+    ("l3-consumer-probe-" & tag & "-" & $getCurrentProcessId())
+  createDir(scratch / producerSelector)
+  createDir(scratch / "consumer")
+  defer:
+    try: removeDir(scratch)
+    except CatchableError: discard
+  writeFile(scratch / producerSelector / "repro.nim", producerSource)
+  let consumerPath = scratch / "consumer" / "recipe.nim"
+  writeFile(consumerPath, consumerSource)
+  let nimcache = repoRoot() / "build" /
+    ("l3-consumer-probe-nimcache-" & $getCurrentProcessId())
+  let (output, exitCode) = execCmdEx(
+    nimExe() & " c --compileOnly --hints:off --colors:off " &
+      "-d:reproProviderMode --nimcache:" & quoteShell(nimcache) & " " &
+      quoteShell(consumerPath),
+    workingDir = repoRoot())
+  ServiceCompileProbeResult(ok: exitCode == 0, output: output)

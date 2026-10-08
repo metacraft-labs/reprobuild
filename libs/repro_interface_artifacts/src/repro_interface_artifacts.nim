@@ -395,6 +395,79 @@ type
     entrypoints*: InterfaceResourceEntrypoints
     location*: SourceLocation
 
+  InterfaceActivityParam* = object
+    ## Shared-Development-Services L3: one constructor-style typed
+    ## parameter of a lifted dev-env activity. ``nimType`` is the
+    ## author's own type expression, carried verbatim and resolved in the
+    ## CONSUMING compilation — the same contract
+    ## ``InterfaceResourceAttr.nimType`` has.
+    name*: string
+    nimType*: string
+    location*: SourceLocation
+
+  InterfaceConfigKey* = object
+    ## Shared-Development-Services L3: one ``config:`` key of a lifted
+    ## activity, which is "the ``config:`` surface with defaults so a
+    ## consumer's ``enable`` block typechecks" (L3 ``:gate:``).
+    ##
+    ## ``hasDefault`` is carried separately from ``defaultRepr`` because
+    ## ``issuer: string`` and ``issuer: string = ""`` are different
+    ## declarations and only the first makes the key REQUIRED at the
+    ## ``enable`` site.
+    name*: string
+    nimType*: string
+    defaultRepr*: string
+    hasDefault*: bool
+    description*: string
+    location*: SourceLocation
+
+  InterfaceService* = object
+    ## Shared-Development-Services L3 (§3): a dev-env service crossing
+    ## the interface boundary as a typed contract, alongside
+    ## ``InterfaceExecutable`` / ``InterfaceLibrary`` /
+    ## ``InterfaceResource``.
+    ##
+    ## It carries the service's SIGNATURE — its name, the activity that
+    ## declares it, and the handle type a consumer reaches it through —
+    ## and deliberately NOT its implementation. A consumer compiles
+    ## against the name; it does not compile against the ``executable``,
+    ## ``args``, ``runtimeFile`` or ``on <trigger>:`` setters L1 lowers.
+    ## That split is the whole reason the fingerprint is not a
+    ## rebuild-everything hammer: a producer changing its service's argv
+    ## re-lifts to the SAME interface digest, while renaming the service
+    ## shifts it. Both directions are measured in
+    ## ``t_l3_lifted_service_signature_fingerprint.nim``.
+    name*: string
+    activityName*: string
+      ## The declaring activity, or "" for a package-level service.
+    handleType*: string
+      ## The generated Nim type the service's handle is a member of.
+      ## Empty for a package-level service.
+    location*: SourceLocation
+
+  InterfaceActivity* = object
+    ## Shared-Development-Services L3 (§3): a dev-env activity's lifted
+    ## signature — "the handle type and its members … and the ``config:``
+    ## surface with defaults".
+    ##
+    ## DEFERRED, BY MILESTONE. L3's gate also names "the declared
+    ## identity and scope" and "the shared collections it converges".
+    ## Neither surface exists in the DSL yet (``identity``/``scope`` are
+    ## L4, collections are L8), so neither is invented here. Each is added
+    ## as a field on this record plus one more version-gated block in
+    ## ``encodeInterfacePayload`` — the additive route ``publicLibraries``
+    ## took at v9 and ``publicResources`` at v12 — and nothing in this
+    ## shape has to change for them.
+    name*: string
+    handleType*: string
+    params*: seq[InterfaceActivityParam]
+    config*: seq[InterfaceConfigKey]
+    services*: seq[string]
+      ## Names of the services this activity declares, in declaration
+      ## order. Each is also a member of ``handleType``, and each has its
+      ## own ``InterfaceService`` row.
+    location*: SourceLocation
+
   InterfaceNixProvisioning* = object
     packageName*: string
     contributor*: string
@@ -498,6 +571,18 @@ type
       ## package exposes as typed contracts, lifted from ``resourceType``
       ## declarations. Encoded in the v12 codec AFTER ``publicLibraries``
       ## and BEFORE ``toolUses``; v<12 readers treat it as empty.
+    publicServices*: seq[InterfaceService]
+      ## Shared-Development-Services L3 (§3): dev-env services this
+      ## package exports as typed contracts, lifted from ``service
+      ## <name>:`` declarations. Encoded in the v21 codec AFTER
+      ## ``publicResources`` and BEFORE ``publicActivities``; v<21
+      ## readers treat it as empty.
+    publicActivities*: seq[InterfaceActivity]
+      ## Shared-Development-Services L3 (§3): dev-env activity
+      ## signatures, lifted from the constructor-shaped ``activity
+      ## <name>(...)`` declarations. Encoded in the v21 codec AFTER
+      ## ``publicServices`` and BEFORE ``toolUses``; v<21 readers treat
+      ## it as empty.
     toolUses*: seq[InterfaceToolUse]
     runtimeToolUses*: seq[InterfaceToolUse]
       ## Package-level runtime dependencies retained separately from the
@@ -670,8 +755,34 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 20'u16
-    ## v20 (current): retains ``closureManifest`` on tarball provisioning —
+  EnvelopeVersion = 21'u16
+    ## v21 (current): Shared-Development-Services L3 (§3) adds
+    ##                ``ProjectInterface.publicServices`` and
+    ##                ``ProjectInterface.publicActivities`` — dev-env
+    ##                services and activity signatures lifted from
+    ##                ``service <name>:`` / ``activity <name>(...)``
+    ##                declarations, so a consuming recipe compiles
+    ##                against ``<dep>.<service>`` as a typed symbol.
+    ##                Encoded as a ``u32`` count + per-entry rows
+    ##                appended to the interface payload AFTER the
+    ##                ``publicResources`` block and BEFORE the
+    ##                ``toolUses`` block, services first and activities
+    ##                second, matching the source field order. v20
+    ##                readers reject v21 envelopes (the ``version >
+    ##                EnvelopeVersion`` check); v21 readers accept v<21
+    ##                by treating both seqs as empty
+    ##                (``decodeInterfacePayload`` gates the reads on
+    ##                ``version >= 21``), mirroring the v11→v12
+    ##                ``publicResources`` precedent.
+    ##
+    ##                The rows carry each export's SIGNATURE only — name,
+    ##                handle type, typed parameters, ``config:`` keys with
+    ##                their defaults — and no part of a service's
+    ##                implementation. That is what makes the fingerprint
+    ##                discriminating rather than a hammer: a producer
+    ##                editing a service's ``args`` re-lifts to the same
+    ##                digest and does not invalidate its consumers.
+    ## v20:           retains ``closureManifest`` on tarball provisioning —
     ##                the committed list of additional archives realize
     ##                unpacks into the prefix. v19 payloads decode with it
     ##                empty, which is the prior behaviour of a prefix being
@@ -1031,6 +1142,77 @@ proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
       nimType: readString(bytes, pos),
       location: readLocation(bytes, pos))
 
+proc writeService(outp: var seq[byte]; svc: InterfaceService;
+                  forFingerprint = false) =
+  ## Shared-Development-Services L3. Field order matches
+  ## ``InterfaceService``; ``readService`` reads it back in the same
+  ## order, and the payload tail guard in ``decodeInterfacePayload``
+  ## catches a mis-pairing.
+  outp.writeString(svc.name)
+  outp.writeString(svc.activityName)
+  outp.writeString(svc.handleType)
+  outp.writeLocation(svc.location, forFingerprint)
+
+proc readService(bytes: openArray[byte]; pos: var int): InterfaceService =
+  result.name = readString(bytes, pos)
+  result.activityName = readString(bytes, pos)
+  result.handleType = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
+proc writeActivity(outp: var seq[byte]; act: InterfaceActivity;
+                   forFingerprint = false) =
+  ## Shared-Development-Services L3. ``forFingerprint`` is threaded into
+  ## every ``writeLocation`` below — including the per-param and per-key
+  ## ones — so TI3 holds for this block too: moving an activity
+  ## declaration down a few lines must not shift the interface
+  ## fingerprint.
+  outp.writeString(act.name)
+  outp.writeString(act.handleType)
+  outp.writeLocation(act.location, forFingerprint)
+  outp.writeU32Le(uint32(act.params.len))
+  for param in act.params:
+    outp.writeString(param.name)
+    outp.writeString(param.nimType)
+    outp.writeLocation(param.location, forFingerprint)
+  outp.writeU32Le(uint32(act.config.len))
+  for key in act.config:
+    outp.writeString(key.name)
+    outp.writeString(key.nimType)
+    outp.writeString(key.defaultRepr)
+    outp.writeByte(if key.hasDefault: 1'u8 else: 0'u8)
+    outp.writeString(key.description)
+    outp.writeLocation(key.location, forFingerprint)
+  outp.writeU32Le(uint32(act.services.len))
+  for name in act.services:
+    outp.writeString(name)
+
+proc readActivity(bytes: openArray[byte]; pos: var int): InterfaceActivity =
+  result.name = readString(bytes, pos)
+  result.handleType = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+  let paramCount = int(readU32Le(bytes, pos))
+  result.params = newSeq[InterfaceActivityParam](paramCount)
+  for i in 0 ..< paramCount:
+    result.params[i] = InterfaceActivityParam(
+      name: readString(bytes, pos),
+      nimType: readString(bytes, pos),
+      location: readLocation(bytes, pos))
+  let configCount = int(readU32Le(bytes, pos))
+  result.config = newSeq[InterfaceConfigKey](configCount)
+  for i in 0 ..< configCount:
+    var key = InterfaceConfigKey(
+      name: readString(bytes, pos),
+      nimType: readString(bytes, pos),
+      defaultRepr: readString(bytes, pos))
+    key.hasDefault = readByte(bytes, pos) == 1'u8
+    key.description = readString(bytes, pos)
+    key.location = readLocation(bytes, pos)
+    result.config[i] = key
+  let serviceCount = int(readU32Le(bytes, pos))
+  result.services = newSeq[string](serviceCount)
+  for i in 0 ..< serviceCount:
+    result.services[i] = readString(bytes, pos)
+
 proc writeNixProvisioning(outp: var seq[byte];
                           provisioning: InterfaceNixProvisioning;
                           version = EnvelopeVersion;
@@ -1305,6 +1487,19 @@ proc encodeInterfacePayload*(value: ProjectInterface;
     result.writeU32Le(uint32(value.publicResources.len))
     for res in value.publicResources:
       result.writeResource(res, forFingerprint)
+  # v21 (Shared-Development-Services L3): publicServices then
+  # publicActivities, AFTER publicResources and BEFORE toolUses, matching
+  # the ``ProjectInterface`` object literal. v<21 envelopes encode no
+  # services or activities block at all; ``decodeInterfacePayload`` gates
+  # both reads on ``version >= 21'u16`` so v20 on-disk artifacts load
+  # cleanly under the v21 reader.
+  if version >= 21'u16:
+    result.writeU32Le(uint32(value.publicServices.len))
+    for svc in value.publicServices:
+      result.writeService(svc, forFingerprint)
+    result.writeU32Le(uint32(value.publicActivities.len))
+    for act in value.publicActivities:
+      result.writeActivity(act, forFingerprint)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
     result.writeToolUse(useDef, version, forFingerprint)
@@ -1345,6 +1540,17 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     result.publicResources = newSeq[InterfaceResource](resCount)
     for i in 0 ..< resCount:
       result.publicResources[i] = readResource(bytes, pos)
+  # v21 added publicServices + publicActivities between resources and
+  # toolUses. v<21 envelopes have neither block — leave both seqs empty.
+  if version >= 21'u16:
+    let svcCount = int(readU32Le(bytes, pos))
+    result.publicServices = newSeq[InterfaceService](svcCount)
+    for i in 0 ..< svcCount:
+      result.publicServices[i] = readService(bytes, pos)
+    let actCount = int(readU32Le(bytes, pos))
+    result.publicActivities = newSeq[InterfaceActivity](actCount)
+    for i in 0 ..< actCount:
+      result.publicActivities[i] = readActivity(bytes, pos)
   let useCount = int(readU32Le(bytes, pos))
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
@@ -1834,6 +2040,50 @@ proc toProjectInterface*(pkg: PackageDef;
         location: SourceLocation(file: attr.sourceFile,
           line: attr.sourceLine)))
     result.publicResources.add(res)
+  # Shared-Development-Services L3 (§3): fold this package's dev-env
+  # service and activity SIGNATURES into the interface.
+  #
+  # Filtered on ``packageName``, unlike the resource fold above. A
+  # ``resourceType`` is declared at module scope and cannot be attributed
+  # to a package, so the extractor hands the whole registry to whichever
+  # project is being lifted; a ``service``/``activity`` is declared
+  # lexically INSIDE a ``package`` block, the registration carries the
+  # declaring package, and attributing it exactly is both possible and
+  # necessary — a test module (or a sibling shim ``include``) that expands
+  # two ``package`` blocks must not lift one package's services onto the
+  # other's contract.
+  for svc in registeredServiceInterfaces():
+    if svc.packageName != pkg.packageName:
+      continue
+    result.publicServices.add(InterfaceService(
+      name: svc.name,
+      activityName: svc.activityName,
+      handleType: svc.handleType,
+      location: SourceLocation(file: svc.sourceFile, line: svc.sourceLine)))
+  for act in registeredActivityInterfaces():
+    if act.packageName != pkg.packageName:
+      continue
+    var lifted = InterfaceActivity(
+      name: act.name,
+      handleType: act.handleType,
+      services: act.services,
+      location: SourceLocation(file: act.sourceFile, line: act.sourceLine))
+    for param in act.params:
+      lifted.params.add(InterfaceActivityParam(
+        name: param.name,
+        nimType: param.nimType,
+        location: SourceLocation(file: param.sourceFile,
+          line: param.sourceLine)))
+    for key in act.config:
+      lifted.config.add(InterfaceConfigKey(
+        name: key.name,
+        nimType: key.nimType,
+        defaultRepr: key.defaultRepr,
+        hasDefault: key.hasDefault,
+        description: key.description,
+        location: SourceLocation(file: key.sourceFile,
+          line: key.sourceLine)))
+    result.publicActivities.add(lifted)
 
   if contributions.len > 0:
     for contribution in contributions:
@@ -2128,6 +2378,9 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
   ##   * retaining each module-global ``publicResources`` contract once,
   ##     deduplicated by ``typeId`` (each package projection sees the same
   ##     resource registry);
+  ##   * CONCATENATING ``publicServices`` and ``publicActivities`` (L3) —
+  ##     these are per-package, so no projection repeats another's, and
+  ##     §3 makes a same-named activity across two packages a union;
   ##   * deduplicating ``toolUses`` by
   ##     ``(packageSelector, executableName)`` so a constraint listed in
   ##     two ``uses:`` blocks (typical for shared toolchains like
@@ -2165,6 +2418,21 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
         continue
       seenResourceTypeIds.add(resource.typeId)
       result.publicResources.add(resource)
+    # Shared-Development-Services L3: CONCATENATED, like executables and
+    # libraries, and deliberately not deduplicated like resources. The
+    # resource fold needs a dedup because every per-package projection
+    # re-reads one module-global registry and therefore repeats it;
+    # ``toProjectInterface`` filters services and activities on the
+    # declaring package, so N projections of N packages already yield
+    # each export exactly once and a dedup by name would instead DROP a
+    # second package's same-named activity — which §3 says is a union
+    # ("Where two packages declare the same bare activity name, the
+    # project-scoped activity is the union of their contributions"), not
+    # a collision.
+    for svc in projection.publicServices:
+      result.publicServices.add(svc)
+    for act in projection.publicActivities:
+      result.publicActivities.add(act)
     for use in projection.toolUses:
       let key = use.packageSelector & "\x1f" & use.executableName &
         "\x1f" & use.depKind
@@ -2481,6 +2749,121 @@ proc emitProvisioningContributionRegistrations(code: var string;
   if contributions.len > 0:
     code.add("\n")
 
+proc emitLiftedServiceSymbols(code: var string; packageName: string;
+                              services: seq[InterfaceService];
+                              activities: seq[InterfaceActivity]) =
+  ## Shared-Development-Services L3 (§3): emit this dependency's lifted
+  ## service and activity surface into the consumer stub — one handle
+  ## type per activity, a ``<Title>PackageExports`` reflection object
+  ## carrying every export, and the accessor procs that make
+  ## ``<dep>.<service>`` a typed symbol in the CONSUMING compilation.
+  ##
+  ## This is the lift's consumer half, the analog of
+  ## ``emitLiftedExtensionTypes`` for resource attrs: the type crosses the
+  ## interface boundary, not the implementation. A consumer gets the
+  ## member set and nothing that would drag the producer's executables,
+  ## argv or triggers in.
+  ##
+  ## IT MUST STAY IN STEP WITH ``l3LiftedExportSurface``
+  ## (``macros_b.nim``), which emits the same three things from the
+  ## producer's own macro expansion for the workspace-sibling import path
+  ## (``usesImportCode`` Branch C). Two emitters, one surface: a
+  ## divergence would mean a consumer compiling against a different
+  ## member set depending on how it reached the producer, and nothing
+  ## would fail. ``t_l3_lifted_symbols_compile_in_a_consumer.nim`` checks
+  ## the same consumer source against BOTH routes for exactly that
+  ## reason.
+  ##
+  ## A member whose declared TYPE cannot be regenerated here is NOT
+  ## skipped. Unlike a resource attr — where a skipped codec still leaves
+  ## a usable typed contract — a dropped handle member would make a
+  ## correct consumer reference fail with ``undeclared field``, which is
+  ## the silent-drop failure this campaign keeps finding. The author's own
+  ## type expression is emitted verbatim and resolved in the consumer's
+  ## scope; when it does not resolve there, the consumer is told so by
+  ## name.
+  ##
+  ## A member whose NAME is not a legal Nim identifier IS skipped, and
+  ## only because it cannot be spelled: L1 accepts ``service
+  ## "renamed-api":`` and §3 keeps dot access and the CLI's
+  ## ``<package>:<name>`` apart, so such a service is reachable at the CLI
+  ## and not by dot access. The producer-side emitter
+  ## (``l3Exportable`` in ``macros_b.nim``) warns at the DECLARATION
+  ## site, which is the only place that can name a line the author wrote;
+  ## here there is nothing but the artifact.
+  if services.len == 0 and activities.len == 0:
+    return
+  let typeName = titleIdent(packageName)
+  let exportsType = typeName & "Exports"
+  var typeBlock = ""
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    typeBlock.add("  " & act.handleType & "* = object\n")
+    typeBlock.add("    ## L3: the lifted handle type for activity `" &
+      act.name & "` of\n    ## package `" & packageName &
+      "`. Field VALUES belong to a resolved instance\n" &
+      "    ## and are L7's work.\n")
+    var fieldCount = 0
+    for key in act.config:
+      if not validGeneratedIdent(key.name):
+        continue
+      typeBlock.add("    " & key.name & "*: " & key.nimType & "\n")
+      inc fieldCount
+    for svcName in act.services:
+      if not validGeneratedIdent(svcName):
+        continue
+      typeBlock.add("    " & svcName & "*: LiftedServiceHandle\n")
+      inc fieldCount
+    if fieldCount == 0:
+      typeBlock.add("    discard\n")
+  typeBlock.add("  " & exportsType & "* = object\n")
+  typeBlock.add("    ## L3: every service and activity package `" &
+    packageName & "` exports.\n")
+  var exportCount = 0
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    typeBlock.add("    " & act.name & "*: " & act.handleType & "\n")
+    inc exportCount
+  for svc in services:
+    if svc.activityName.len == 0 and validGeneratedIdent(svc.name):
+      typeBlock.add("    " & svc.name & "*: LiftedServiceHandle\n")
+      inc exportCount
+  if exportCount == 0:
+    typeBlock.add("    discard\n")
+  code.add("type\n" & typeBlock & "\n")
+  code.add("proc liftedExports*(pkg: " & typeName & "): " & exportsType &
+    " =\n")
+  code.add("  discard pkg\n")
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    for svcName in act.services:
+      if not validGeneratedIdent(svcName):
+        continue
+      code.add("  result." & act.name & "." & svcName &
+        " = LiftedServiceHandle(packageName: " & escForCode(packageName) &
+        ", activityName: " & escForCode(act.name) & ", serviceName: " &
+        escForCode(svcName) & ")\n")
+  for svc in services:
+    if svc.activityName.len == 0 and validGeneratedIdent(svc.name):
+      code.add("  result." & svc.name &
+        " = LiftedServiceHandle(packageName: " & escForCode(packageName) &
+        ", activityName: \"\", serviceName: " & escForCode(svc.name) &
+        ")\n")
+  code.add("\n")
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    code.add("proc " & act.name & "*(pkg: " & typeName & "): " &
+      act.handleType & " =\n  pkg.liftedExports." & act.name & "\n")
+  for svc in services:
+    if svc.activityName.len == 0 and validGeneratedIdent(svc.name):
+      code.add("proc " & svc.name & "*(pkg: " & typeName &
+        "): LiftedServiceHandle =\n  pkg.liftedExports." & svc.name & "\n")
+  code.add("\n")
+
 proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   let pkg = artifact.projectInterface
   var code = "import repro_project_dsl\n\n"
@@ -2498,6 +2881,12 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   code.add("  discard pkg\n")
   code.add("  " & exeTypeName & "(value: selectedExecutable(\"" &
     pkg.packageName & "\", name))\n\n")
+  # Shared-Development-Services L3 (§3): the lifted service/activity
+  # symbols. Emitted AFTER the package type + const they are accessors
+  # on, and after the resource types so a handle member typed by a lifted
+  # attrs record resolves.
+  emitLiftedServiceSymbols(code, pkg.packageName, pkg.publicServices,
+    pkg.publicActivities)
   var selectedCommands: seq[string] = @[]
   for exe in pkg.publicExecutables:
     for cmd in exe.commands:
