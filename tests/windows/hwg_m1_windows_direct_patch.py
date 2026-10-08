@@ -45,6 +45,11 @@ from build_windows_agent import (  # noqa: E402
 )
 
 
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x00100000
+WAIT_OBJECT_0 = 0
+
+
 def stop_process(pid: int, stop_file: Path) -> None:
     stop_file.touch()
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -55,6 +60,49 @@ def stop_process(pid: int, stop_file: Path) -> None:
         if kernel32.WaitForSingleObject(handle, 5_000) != 0:
             kernel32.TerminateProcess(handle, 9)
             kernel32.WaitForSingleObject(handle, 5_000)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def target_status(pid: int | None) -> str:
+    """Say whether the target is still running, and if not, how it exited.
+
+    A target that died and one that is alive but silent are different
+    defects, and a timeout message is the only place anyone reads the
+    answer. The target exits 3 when it cannot reopen its observations file,
+    so that code distinguishes a lost race from a crash.
+    """
+    if pid is None:
+        return "target pid unknown"
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Declare the signatures: a HANDLE is pointer-sized, and ctypes would
+    # otherwise assume a C int and truncate it on 64-bit Windows.
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.GetExitCodeProcess.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ulong),
+    )
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid
+    )
+    if not handle:
+        return (
+            f"target pid {pid} cannot be opened "
+            f"(GetLastError={ctypes.get_last_error()}), so it has already exited"
+        )
+    try:
+        if kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0:
+            return f"target pid {pid} is still running"
+        code = ctypes.c_ulong(0)
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return f"target pid {pid} has exited; its exit code is unavailable"
+        return f"target pid {pid} exited with code {code.value}"
     finally:
         kernel32.CloseHandle(handle)
 
@@ -70,7 +118,13 @@ def observations(path: Path) -> list[int]:
     return result
 
 
-def wait_for_value(path: Path, value: int, timeout: float = 10.0) -> list[int]:
+def wait_for_value(
+    path: Path,
+    value: int,
+    timeout: float = 10.0,
+    pid: int | None = None,
+    context: str = "",
+) -> list[int]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         seen = observations(path)
@@ -78,11 +132,18 @@ def wait_for_value(path: Path, value: int, timeout: float = 10.0) -> list[int]:
             return seen
         time.sleep(0.025)
     raise AssertionError(
-        f"timed out waiting for target value {value}; saw {observations(path)}"
+        f"timed out waiting for target value {value}; saw {observations(path)}; "
+        f"{target_status(pid)}{context}"
     )
 
 
-def wait_for_count(path: Path, count: int, timeout: float = 10.0) -> list[int]:
+def wait_for_count(
+    path: Path,
+    count: int,
+    timeout: float = 10.0,
+    pid: int | None = None,
+    context: str = "",
+) -> list[int]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         seen = observations(path)
@@ -90,7 +151,8 @@ def wait_for_count(path: Path, count: int, timeout: float = 10.0) -> list[int]:
             return seen
         time.sleep(0.025)
     raise AssertionError(
-        f"timed out waiting for {count} observations; saw {observations(path)}"
+        f"timed out waiting for {count} observations; saw {observations(path)}; "
+        f"{target_status(pid)}{context}"
     )
 
 
@@ -272,7 +334,9 @@ class WindowsDirectPatchGate(unittest.TestCase):
         launcher_evidence = json.loads(launcher_output.splitlines()[-1])
         pid = int(launcher_evidence["pid"])
         try:
-            before = wait_for_value(observed, 18)
+            before = wait_for_value(
+                observed, 18, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
             self.assertGreaterEqual(before.count(18), 1)
             applied = subprocess.run(
                 self.driver_command(pid, self.target, self.pdb, report),
@@ -285,7 +349,9 @@ class WindowsDirectPatchGate(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(applied.returncode, 0, applied.stdout)
-            after = wait_for_value(observed, 77)
+            after = wait_for_value(
+                observed, 77, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
             evidence = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(evidence["outcome"], "applied")
             self.assertIn("direct-patch-injection", evidence["agentCapabilities"])
@@ -357,7 +423,9 @@ class WindowsDirectPatchGate(unittest.TestCase):
         self.assertEqual(launched.returncode, 0, launcher_output)
         pid = int(json.loads(launcher_output.splitlines()[-1])["pid"])
         try:
-            before = wait_for_count(observed, 3)
+            before = wait_for_count(
+                observed, 3, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
             self.assertEqual(set(before), {18})
             applied = subprocess.run(
                 self.driver_command(
@@ -372,7 +440,12 @@ class WindowsDirectPatchGate(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(applied.returncode, 0, applied.stdout)
-            after = wait_for_count(observed, len(before) + 10)
+            after = wait_for_count(
+                observed,
+                len(before) + 10,
+                pid=pid,
+                context=f"\nlauncher:\n{launcher_output}",
+            )
             evidence = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(evidence["outcome"], "applied")
             self.assertEqual(set(after), {18})
