@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1871,
+    "nimTestBinaries": 1873,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 595,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1888
+    "testEntries": 1890
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1089,7 +1089,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 1006,
+      "integration": 1008,
       "platform/destructive": 119,
       "pure unit": 595,
       "unclassified": 157
@@ -1270,9 +1270,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1871,
+    "nimTestBinaryCount": 1873,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1888
+    "testEntryCount": 1890
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -27933,6 +27933,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_health_push_gateway_check_reports_observed_state",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_push_gateway_check_reports_observed_state.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_health_reports_a_disagreement_between_two_repro_resolutions",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -27947,6 +27964,23 @@
       "source": "tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_health_reports_a_refusing_hook_as_not_ok",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
