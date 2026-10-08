@@ -30,15 +30,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11857,
-      "suite": 2721
+      "case": 11879,
+      "suite": 2726
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 14286,
+      "nim-unittest": 14313,
       "python-unittest": 289
     },
-    "itemsTotal": 14578,
+    "itemsTotal": 14605,
     "responseDiagnostics": {
       "info": 1,
       "warning": 34
@@ -245,21 +245,21 @@
   ],
   "reconciliation": {
     "caseCoveragePercent": 96.5,
-    "caseItemsInCatalog": 11857,
-    "casesAddressableThroughTheSurface": 11179,
+    "caseItemsInCatalog": 11879,
+    "casesAddressableThroughTheSurface": 11201,
     "collidingIdentities": 13,
-    "distinctCaseIdentities": 11844,
+    "distinctCaseIdentities": 11866,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1849,
-      "compared": 1854,
+      "agree": 1854,
+      "compared": 1859,
       "disagree": 5
     },
     "sourceCoveragePercent": 99.52,
-    "sourcesAddressableThroughTheSurface": 1854,
+    "sourcesAddressableThroughTheSurface": 1859,
     "sourcesNotAddressable": 9,
-    "trackedNimSuiteSources": 1863,
-    "trackedStaticCaseCount": 11585
+    "trackedNimSuiteSources": 1868,
+    "trackedStaticCaseCount": 11607
   },
   "schemaVersion": 1,
   "surface": {
