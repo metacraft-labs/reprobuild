@@ -15,6 +15,8 @@
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import repro_test_support/reasoned_skip
+
 import repro_project_dsl
 import repro_project_dsl/npm_vendor
 
@@ -101,7 +103,8 @@ suite "npm vendor action":
 
   test "a seeded cache is verified and loaded once per batch":
     if sh.len == 0 or realSha256sum.len == 0:
-      skip()
+      skip("sh or sha256sum not on PATH; this case runs the populate " &
+           "program against the real tools")
     else:
       let root = createTempDir("repro-npm-vendor-", "")
       defer:
@@ -135,7 +138,8 @@ suite "npm vendor action":
 
   test "a corrupted archive fails its batch before npm sees it":
     if sh.len == 0 or realSha256sum.len == 0:
-      skip()
+      skip("sh or sha256sum not on PATH; this case runs the populate " &
+           "program against the real tools")
     else:
       let root = createTempDir("repro-npm-vendor-", "")
       defer:
