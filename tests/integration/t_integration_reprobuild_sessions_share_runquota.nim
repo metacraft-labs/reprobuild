@@ -302,11 +302,25 @@ suite "integration_reprobuild_sessions_share_runquota":
       # compile that precedes the action can be slow, so poll against a
       # generous deadline rather than a fixed iteration count. If the action
       # never starts, ``check pathExists`` below still fails.
-      let startStampDeadline = nowMillis() + 300000
+      #
+      # The wait follows the first session: it ends at once if that build
+      # exits, so the cap is only the backstop for one alive and stuck. A
+      # 300 s cap was a wall-clock budget on the cold interface extraction and
+      # provider compile of the copied CodeTracer project (each case copies it
+      # to a fresh temp dir, so both always run cold): measured alone at load
+      # ~20 the action started at ~190 s (extraction ~140 s, compile ~40 s);
+      # at load 55-68 it missed 300 s while every later assertion -- the
+      # action ran, the second session queued behind it, the two intervals
+      # did not overlap -- still passed.
+      let startStampDeadline = nowMillis() + 1_200_000
       while nowMillis() < startStampDeadline:
         if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
           break
         sleep(25)
+      if not pathExists(codeStartStamp):
+        checkpoint("first session's action never started; build " &
+          (if codeBuild.peekExitCode() == -1: "still running at the backstop"
+           else: "exited with " & $codeBuild.peekExitCode()))
       check pathExists(codeStartStamp)
 
       # The two sessions must OVERLAP: the second is launched while the first
