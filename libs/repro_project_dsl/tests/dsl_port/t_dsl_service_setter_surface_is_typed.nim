@@ -68,16 +68,35 @@ package probeRecipe:
       sendSignal "SIGHUP"
 """
 
-proc edited(needle, replacement, tag: string): ServiceCompileProbeResult =
-  ## One-line edit to ``WellFormed``, compiled. Raises rather than
-  ## returning a misleading result when the needle is not present, so a
-  ## drifted fixture is a red test and not a silently vacuous one.
+proc editedSource(needle, replacement: string): string =
+  ## One-line edit to ``WellFormed``. Raises rather than returning a
+  ## misleading result when the needle is not present, so a drifted
+  ## fixture is a red test and not a silently vacuous one.
   if not WellFormed.contains(needle):
     raise newException(ValueError,
       "fixture drift: WellFormed no longer contains " & needle)
-  let source = WellFormed.replace(needle, replacement)
-  doAssert source != WellFormed
-  checkRecipeSource(source, tag)
+  result = WellFormed.replace(needle, replacement)
+  doAssert result != WellFormed
+
+proc edited(needle, replacement, tag: string): ServiceCompileProbeResult =
+  ## One-line edit to ``WellFormed``, compiled.
+  checkRecipeSource(editedSource(needle, replacement), tag)
+
+proc anchorTag(source, statement: string; column: int): string =
+  ## The ``recipe.nim(<line>, <column>)`` prefix Nim prints for the line
+  ## of ``source`` whose text is ``statement``.
+  ##
+  ## Computed from the generated source rather than hard-coded, because a
+  ## hard-coded line number turns every unrelated fixture edit into a
+  ## failure that says nothing about the anchor. The COLUMN is the thing
+  ## under test and stays literal.
+  var lineNo = 0
+  for line in source.splitLines():
+    inc lineNo
+    if line.strip() == statement:
+      return "recipe.nim(" & $lineNo & ", " & $column & ")"
+  raise newException(ValueError,
+    "fixture drift: the generated source has no line `" & statement & "`")
 
 suite "L1 — the recipe the setter surface is specified for compiles":
 
@@ -231,11 +250,18 @@ suite "L1 follow-up — an unrecognised trigger or action is refused":
     check probe.mentions("`sendSignal` takes exactly one argument")
 
   test "the control: every recognised trigger and action still compiles":
-    # The control WITHOUT which all four refusals above could be passed by a
-    # walker that refuses every `on` block. It exercises each of the five
-    # trigger spellings `Package-Model.md` recognises, each of the five
-    # actions, the supervisor-option form of `restart`, and all three
-    # short-form atoms — in one service.
+    # The control WITHOUT which all four refusals above — and the modifier
+    # refusals in the next suite — could be passed by a walker that refuses
+    # every `on` block. It exercises each of the SIX trigger spellings
+    # `Package-Model.md` recognises (`on rebuild <ident>`, `on change
+    # <buildOutput>`, `on change "<path>"`, `on start`, `on stop`,
+    # `on crash`), each of the five actions, the supervisor-option form of
+    # `restart`, and all three short-form atoms — in one service.
+    #
+    # The count used to read "five" here while the body below covered six;
+    # corrected after the review counted them. A control that miscounts its
+    # own coverage invites the next reader to add the "missing" spelling and
+    # find it already there.
     let probe = edited(
       "    on change probeConfig:\n      sendSignal \"SIGHUP\"",
       "    on change probeConfig:\n      sendSignal \"SIGHUP\"\n" &
@@ -254,5 +280,138 @@ suite "L1 follow-up — an unrecognised trigger or action is refused":
         "    hotReload\n    restartOnCrash\n" &
         "    reloadOnChange probeConfig, \"SIGHUP\"",
       "all-triggers")
+    checkpoint(probe.output)
+    check probe.ok
+
+suite "L1 follow-up — a SPECIFIED but unimplemented modifier says so":
+  # The finding this suite pins, measured on `a23bdaf37`: `debounce =
+  # "200ms"` and `coalesce` written inside an `on` body were refused — the
+  # right direction — but with the diagnostic for an unrecognised ACTION,
+  # which calls them "trigger action"s and lists only the five actions. Both
+  # are spellings `Package-Model.md` §"Service Lifecycle And Reactive
+  # Triggers" sets out verbatim, under "Modifiers attached to an `on:` block
+  # coalesce noisy signals". So an author writing the documented spelling
+  # was told it is not a thing, rather than that it is specified and not yet
+  # built — the same disservice as a silent drop, one step to the left.
+  #
+  # The refusal stays. Only the message changes, and it changes to the shape
+  # `on ready:` already uses: cite the section, say what is MISSING
+  # (`ServiceTriggerDef` has no field a modifier could be carried in, and
+  # nothing consumes a trigger yet), and name the open decision — the spec
+  # says "modifiers attached to an `on:` block" and never fixes WHERE one is
+  # written, so the in-body spelling is not established either.
+  #
+  # Which is why the head position is in this suite too: `on change cfg,
+  # debounce = "200ms":` is the spec's sentence read the other way, and on
+  # `a23bdaf37` it COMPILED, with the modifier dropped in silence — the walker
+  # read `stmt[1]` and `stmt[^1]` and nothing between them.
+
+  test "`debounce = \"200ms\"` names itself specified, not unrecognised":
+    const Statement = "debounce = \"200ms\""
+    let source = editedSource(
+      "      sendSignal \"SIGHUP\"",
+      "      " & Statement & "\n      sendSignal \"SIGHUP\"")
+    let probe = checkRecipeSource(source, "modifier-debounce")
+    checkpoint(probe.output)
+    check not probe.ok
+    # The class: a MODIFIER the spec contains, not a word the author made up.
+    check probe.mentions("`debounce` is a trigger MODIFIER")
+    check probe.mentions("does NOT implement")
+    check probe.mentions("Modifiers attached to an `on:` block")
+    # The spec's own description, so the author can tell whether the
+    # feature they wanted is the feature that is missing.
+    check probe.mentions("wait for the trigger to stop firing")
+    # What is missing, and the open decision — the two things the
+    # `on ready:` refusal carries and this one did not.
+    check probe.mentions("nowhere to be carried")
+    check probe.mentions("never fixes WHERE one is written")
+    # And the discriminator: the OLD message, which is what `a23bdaf37`
+    # printed for this spelling. Without this check the test passes against
+    # the defect it exists to pin.
+    check not probe.mentions("does not recognise the trigger action")
+    # The anchor (finding 3): the offending statement's own column, 7, not
+    # the `=` at column 16 the `nnkAsgn` node carries.
+    check probe.mentions(anchorTag(source, Statement, 7))
+    check not probe.mentions(anchorTag(source, Statement, 16))
+
+  test "`coalesce` names itself specified, not unrecognised":
+    const Statement = "coalesce"
+    let source = editedSource(
+      "      sendSignal \"SIGHUP\"",
+      "      " & Statement & "\n      sendSignal \"SIGHUP\"")
+    let probe = checkRecipeSource(source, "modifier-coalesce")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`coalesce` is a trigger MODIFIER")
+    check probe.mentions("does NOT implement")
+    check probe.mentions("run the body once more afterwards")
+    check probe.mentions("nowhere to be carried")
+    check probe.mentions("never fixes WHERE one is written")
+    check not probe.mentions("does not recognise the trigger action")
+    # A bare ident already anchored correctly; asserted so the anchor fix
+    # is shown not to have moved it.
+    check probe.mentions(anchorTag(source, Statement, 7))
+
+  test "a modifier beside the trigger head is refused, not dropped":
+    # On `a23bdaf37` this compiled clean with the modifier recorded nowhere.
+    const Statement = "on change probeConfig, debounce = \"200ms\":"
+    let source = editedSource(
+      "    on change probeConfig:",
+      "    " & Statement)
+    let probe = checkRecipeSource(source, "modifier-head")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`debounce` is a trigger MODIFIER")
+    check probe.mentions("attached to the head of `on change probeConfig:`")
+    # The modifier's own column within the head line, 28, rather than the
+    # statement's — the author has to be pointed at the token.
+    check probe.mentions(anchorTag(source, Statement, 28))
+
+  test "an extra head argument that is NOT a modifier is refused too":
+    # The same silent drop with a spelling the spec does not contain, so
+    # the head-position guard is not just a `debounce`/`coalesce` lookup.
+    const Statement = "on change probeConfig, whatever = 3:"
+    let source = editedSource(
+      "    on change probeConfig:",
+      "    " & Statement)
+    let probe = checkRecipeSource(source, "head-extra")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("takes one trigger spec and a block body")
+    check probe.mentions("whatever = 3")
+
+  test "an unspecified assignment is still an unrecognised ACTION, at col 7":
+    # The other half of the class split: a spelling the spec does NOT
+    # contain keeps the unrecognised-action message, so the modifier
+    # diagnostic cannot be reached by writing any assignment at all. It
+    # gains only the anchor fix — column 7, not the `=` at column 21.
+    const Statement = "somethingElse = 3"
+    let source = editedSource(
+      "      sendSignal \"SIGHUP\"",
+      "      " & Statement)
+    let probe = checkRecipeSource(source, "asgn-action")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions(
+      "does not recognise the trigger action `somethingElse = 3`")
+    check not probe.mentions("is a trigger MODIFIER")
+    check probe.mentions(anchorTag(source, Statement, 7))
+    check not probe.mentions(anchorTag(source, Statement, 21))
+
+  test "the control: `hotReload otherwise <action>` still compiles":
+    # `Package-Model.md` specifies this spelling in the same section, and it
+    # is accepted rather than refused — the reading is that the line is not
+    # "is it implemented" (nothing consumes any trigger yet) but "can the
+    # record HOLD it": the fallback lands in
+    # `ServiceTriggerAction.argument`, exactly where `restart`'s supervisor
+    # options land, whereas a modifier has no field at all and would be
+    # discarded. `t_dsl_service_typed_edges.nim`'s "`hotReload otherwise
+    # <action>` is RECORDED, not merely accepted" is the measurement behind
+    # that sentence; this case is only the compile half.
+    let probe = edited(
+      "    on change probeConfig:\n      sendSignal \"SIGHUP\"",
+      "    on rebuild probeBin:\n" &
+        "      hotReload otherwise sendSignal \"SIGHUP\"",
+      "hotreload-otherwise")
     checkpoint(probe.output)
     check probe.ok

@@ -1774,6 +1774,101 @@ const
     "Shared-Development-Services L1, where a non-literal argument vanished " &
     "with no diagnostic."
 
+const
+  ## The trigger MODIFIERS ``Package-Model.md`` §"Service Lifecycle And
+  ## Reactive Triggers" specifies and this release does not implement.
+  ## They are a THIRD category beside the trigger heads and the actions,
+  ## and the distinction is what the refusal below exists to say: an
+  ## unrecognised spelling is a mistake, whereas a modifier is a
+  ## documented spelling the implementation has not caught up with.
+  m5ServiceSpecifiedModifiers: array[2, tuple[name, spec: string]] = [
+    (name: "debounce",
+     spec: "`debounce = \"200ms\"` -- \"wait for the trigger to stop " &
+       "firing for the given duration before running the body\""),
+    (name: "coalesce",
+     spec: "`coalesce` -- \"if multiple triggers fire while a body is " &
+       "running, run the body once more afterwards rather than queueing " &
+       "each event\"")]
+
+proc m5ServiceStmtAnchor(stmt: NimNode): NimNode =
+  ## The node whose line info is the offending STATEMENT's own start.
+  ##
+  ## ``error(msg, node)`` reports ``node``'s line info, and for an
+  ## assignment Nim puts that on the ``=`` rather than on the statement:
+  ## a ``debounce = "200ms"`` indented by six spaces reported column 16
+  ## while every sibling refusal in this walker reports the offending
+  ## statement's own column 7. The left-hand side carries the real start,
+  ## so anchor there. Right line either way — this is about the column,
+  ## which is harmless for a one-line statement and misleading for a
+  ## wrapped one.
+  if stmt.kind in {nnkAsgn, nnkExprEqExpr} and stmt.len > 0:
+    return stmt[0]
+  stmt
+
+proc m5ServiceModifierName(stmt: NimNode): string =
+  ## The name of the ``Package-Model.md`` trigger modifier this statement
+  ## spells, or ``""`` when it is not one.
+  ##
+  ## Every shape a modifier could plausibly be written in is matched on
+  ## its HEAD identifier, deliberately: ``coalesce`` is a bare ident,
+  ## ``debounce = "200ms"`` an ``nnkAsgn`` in a body and an
+  ## ``nnkExprEqExpr`` beside a trigger head, and ``debounce "200ms"``
+  ## a command. All four are the same author intent and all four earn the
+  ## same answer — the alternative is a diagnostic that depends on which
+  ## of them the author guessed.
+  var head: NimNode = nil
+  if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    head = stmt
+  elif stmt.kind in {nnkAsgn, nnkExprEqExpr, nnkCall, nnkCommand} and
+      stmt.len > 0 and stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    head = stmt[0]
+  if head == nil:
+    return ""
+  let name = identText(head).normalize
+  for candidate in m5ServiceSpecifiedModifiers:
+    if name == candidate.name:
+      return candidate.name
+  ""
+
+proc m5ServiceUnimplementedModifier(
+    stmt: NimNode; modifier, position: string) =
+  ## Refuse a trigger modifier — ``debounce`` / ``coalesce`` — as
+  ## SPECIFIED BUT NOT IMPLEMENTED, in the shape ``on ready:`` already
+  ## uses: cite the section, say what is missing, and name the open
+  ## decision.
+  ##
+  ## Before this, both landed on ``m5ServiceUnknownAction``, whose
+  ## message calls them "trigger action"s and lists only the five
+  ## actions — so an author writing a spelling ``Package-Model.md``
+  ## §"Service Lifecycle And Reactive Triggers" sets out verbatim was
+  ## told it is not a thing, rather than that it is specified and not
+  ## yet built. Refusing is still right; only the message was wrong.
+  var specText = ""
+  for candidate in m5ServiceSpecifiedModifiers:
+    if candidate.name == modifier:
+      specText = candidate.spec
+  error("`" & modifier & "` is a trigger MODIFIER that Package-Model.md " &
+    "§\"Service Lifecycle And Reactive Triggers\" specifies and that this " &
+    "release does NOT implement, so `" & stmt.repr.strip() & "` " &
+    position & " is refused rather than accepted and discarded. The " &
+    "section lists it under \"Modifiers attached to an `on:` block " &
+    "coalesce noisy signals\": " & specText & ". What is missing: a " &
+    "modifier has nowhere to be carried -- `ServiceTriggerDef` has a " &
+    "field for the trigger, its subject and its actions and none for a " &
+    "modifier, unlike the supervisor options of `restart`, which reach " &
+    "the record as `ServiceTriggerAction.argument` text -- and nothing " &
+    "consumes a trigger yet: Shared-Development-Services L1 records " &
+    "triggers and stops there, supervisor lowering is a later milestone. " &
+    "The open decision: the section says \"modifiers attached to an " &
+    "`on:` block\" and never fixes WHERE one is written, so neither " &
+    "`debounce = \"200ms\"` inside the body nor `on <trigger>, debounce " &
+    "= \"200ms\":` beside the head is the established spelling, and that " &
+    "has to be settled before either is accepted. Until then a modifier " &
+    "is REFUSED rather than dropped: one that is accepted and never " &
+    "applied is indistinguishable from support for it. Recognised in " &
+    "this release: " & m5ServiceRecognisedTriggers & ", with the actions " &
+    m5ServiceRecognisedActions & ".", m5ServiceStmtAnchor(stmt))
+
 proc m5ServiceUnknownTrigger(stmt, spec: NimNode) =
   ## Refuse an ``on <trigger>:`` head the walker does not recognise.
   ##
@@ -1806,10 +1901,15 @@ proc m5ServiceUnknownAction(stmt: NimNode; triggerDesc: string) =
   ## the caller skipped it, so ``on crash: converge relyingParties``
   ## recorded the trigger with ZERO actions and the identifier
   ## ``relyingParties`` never reached the compiler at all.
+  ##
+  ## A spelling the SPEC contains belongs to
+  ## ``m5ServiceUnimplementedModifier`` instead; this message is for a
+  ## spelling that is in neither the implementation nor the spec.
   error("`service` does not recognise the trigger action `" &
     stmt.repr.strip() & "` inside " & triggerDesc & ". Package-Model.md " &
     "§\"Service Lifecycle And Reactive Triggers\" specifies " &
-    m5ServiceRecognisedActions & ". " & m5ServiceNoSilentDropRule, stmt)
+    m5ServiceRecognisedActions & ". " & m5ServiceNoSilentDropRule,
+    m5ServiceStmtAnchor(stmt))
 
 proc m5ServiceTriggerOptionText(stmt: NimNode): string =
   ## The supervisor options of ``restart`` / ``hotReload`` /
@@ -1849,6 +1949,11 @@ proc m5ServiceTriggerActionCall(stmt: NimNode; triggerDesc: string): NimNode =
     # A doc comment or an explicit ``discard`` is not an action and is not
     # a mistake. Everything else in the body is claimed to be one.
     return nil
+  let modifier = m5ServiceModifierName(stmt)
+  if modifier.len > 0:
+    # Specified, not implemented — and it says so, rather than claiming
+    # the author invented the word.
+    m5ServiceUnimplementedModifier(stmt, modifier, "inside " & triggerDesc)
   if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
     case identText(stmt).normalize
     of "hotreload":
@@ -1962,6 +2067,26 @@ proc m5ServiceTriggerEmission(stmt: NimNode): NimNode =
       m5ServiceUnknownTrigger(stmt, spec)
   else:
     m5ServiceUnknownTrigger(stmt, spec)
+  # Everything between the trigger spec and the body. The two reads above
+  # and below are ``stmt[1]`` and ``stmt[^1]``, so a third child was
+  # DROPPED IN SILENCE — and the head is exactly where
+  # ``Package-Model.md`` puts a modifier ("modifiers attached to an `on:`
+  # block"): `on change cfg, debounce = "200ms":` compiled clean and
+  # recorded nothing of the modifier. Same defect class as the in-body
+  # case, one position over, so it is closed with it rather than left for
+  # the first author who reads the spec's sentence the other way.
+  for i in 2 ..< stmt.len - 1:
+    let extra = stmt[i]
+    let modifier = m5ServiceModifierName(extra)
+    if modifier.len > 0:
+      m5ServiceUnimplementedModifier(extra, modifier,
+        "attached to the head of " & triggerDesc)
+    error("`on <trigger>:` takes one trigger spec and a block body of " &
+      "actions; `" & extra.repr.strip() & "` beside the head of " &
+      triggerDesc & " is neither. Package-Model.md §\"Service Lifecycle " &
+      "And Reactive Triggers\" specifies " & m5ServiceRecognisedTriggers &
+      ", with a body drawn from " & m5ServiceRecognisedActions & ". " &
+      m5ServiceNoSilentDropRule, m5ServiceStmtAnchor(extra))
   let actionBody = newStmtList()
   for inner in body:
     # ``nil`` only for a doc comment or a ``discard``; anything else that

@@ -136,6 +136,34 @@ package triggerOptionsPkg:
       restart backoff = exponential, maxRetries = 3
     restartOnCrash backoff = linear, delay = "5s"
 
+# `hotReload otherwise <action>` — the explicit not-supported branch
+# `Package-Model.md` §"Service Lifecycle And Reactive Triggers" specifies:
+# "The fallback can be replaced explicitly with `hotReload otherwise
+# <action>` when authors want a different not-supported branch (for
+# example, `hotReload otherwise sendSignal "SIGHUP"`)."
+#
+# This package exists to make the answer to "why is THIS specified-but-
+# unconsumed spelling accepted when `debounce` is refused?" a measurement
+# rather than an argument. The difference is not whether a lowering
+# consumes it -- none consumes either -- but whether the record can HOLD
+# it: the fallback lands in `ServiceTriggerAction.argument`, the same slot
+# `restart`'s supervisor options use, and travels on the wire with the
+# service. A modifier has no slot at all, so accepting one would discard
+# it. If this assertion ever reads an empty argument, `hotReload
+# otherwise` has become the silent drop the modifiers are refused for and
+# belongs in the refusal set with them.
+#
+# `otherwise` is an undeclared identifier, for the same reason
+# `exponential` is above: option text is never spliced.
+package triggerFallbackPkg:
+  executable fallbackBin:
+    build:
+      discard
+  service fallback:
+    executable fallbackBin
+    on rebuild fallbackBin:
+      hotReload otherwise sendSignal "SIGHUP"
+
 proc serviceNamed(packageName, serviceName: string): DslServiceDef =
   for svc in registeredServices(packageName):
     if svc.serviceName == serviceName:
@@ -382,3 +410,20 @@ suite "L1 follow-up — supervisor options are carried whole, not truncated":
     check svc.triggers[1].actions[0].kind == stakRestart
     check svc.triggers[1].actions[0].argument ==
       "backoff = linear, delay = \"5s\""
+
+  test "`hotReload otherwise <action>` is RECORDED, not merely accepted":
+    # The companion to the modifier refusals in
+    # `t_dsl_service_setter_surface_is_typed.nim`. This spelling is
+    # specified and unconsumed too, and it compiles -- which is only
+    # defensible because the fallback reaches the record instead of
+    # evaporating. That is what this asserts, so the distinction the
+    # refusals rest on is measured and falsifiable rather than asserted
+    # in a comment.
+    let svc = serviceNamed("triggerFallbackPkg", "fallback")
+    check svc.triggers.len == 1
+    check svc.triggers[0].kind == stkRebuild
+    check svc.triggers[0].subject == "fallbackBin"
+    check svc.triggers[0].actions.len == 1
+    check svc.triggers[0].actions[0].kind == stakHotReload
+    check svc.triggers[0].actions[0].argument ==
+      "otherwise sendSignal \"SIGHUP\""
