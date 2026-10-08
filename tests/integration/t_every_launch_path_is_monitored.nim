@@ -328,8 +328,8 @@
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
 
-import std/[algorithm, compilesettings, os, osproc, sequtils, sets, streams,
-            strutils, tables, tempfiles, unittest]
+import std/[algorithm, compilesettings, exitprocs, os, osproc, sequtils, sets,
+            streams, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
@@ -2522,21 +2522,40 @@ suite "every_launch_path_is_monitored":
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
     # The fixture's Unix socket must fit sun_path even with a deep TMPDIR.
-    let tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
-    let fixtureSource = tempRoot / "fixture.c"
-    let fixtureBin = tempRoot / "fixture"
-    writeFile(fixtureSource, FixtureSource)
-    compileFixture(fixtureSource, fixtureBin)
+    var tempRoot = ""
+    var fixtureBin = ""
 
     # One host budget of 1000 cpu-milli; the L3b actions ask for 800
     # each, so the daemon can grant exactly one at a time and the other
     # comes back `rqokQueued`.
     var daemon: DaemonHandle
     var runQuotaError = ""
-    try:
-      daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
-    except CatchableError as err:
-      runQuotaError = err.msg
+    var fixtureUp = false
+
+    proc ensureFixture() =
+      ## THE FIXTURE COMES UP INSIDE THE CASE THAT NEEDS IT, NOT AT MODULE
+      ## LEVEL. Module-level code also runs for the runner's ``--list-json``
+      ## probe and for every case process, and only the "teardown" case
+      ## stopped a daemon (its own process's), so each probe and each other
+      ## case left a ``runquotad`` and a scratch tree behind for good —
+      ## dozens accumulated on a dev host over a week of runs — and every
+      ## probe compiled the C fixture. Called from a ``test`` body, the exit
+      ## proc is registered after the protocol hook and so runs before that
+      ## hook's ``quit``, which skips anything registered earlier.
+      if fixtureUp: return
+      fixtureUp = true
+      tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
+      let fixtureSource = tempRoot / "fixture.c"
+      fixtureBin = tempRoot / "fixture"
+      writeFile(fixtureSource, FixtureSource)
+      compileFixture(fixtureSource, fixtureBin)
+      try:
+        daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
+      except CatchableError as err:
+        runQuotaError = err.msg
+      addExitProc(proc() =
+        daemon.stop()
+        if tempRoot.len > 0: removeDir(tempRoot))
 
     ## Which enumerated paths this run actually EXECUTED, as opposed to
     ## reported something about. Written by the case bodies below and
@@ -2557,6 +2576,7 @@ suite "every_launch_path_is_monitored":
       ## them, which holds only when every case runs in one process; the
       ## production runner runs each case in its own, so both saw empty sets
       ## and failed on every run.
+      ensureFixture()
       # A fresh directory per DRIVE, not per path: the coverage cases below
       # drive every path again in their own process, and a second drive that
       # reused the first one's cache root would be a cache hit, not a launch.
@@ -2636,6 +2656,7 @@ suite "every_launch_path_is_monitored":
     for launchPath in EnumeratedLaunchPaths:
       let lp = launchPath
       test "monitored evidence is complete via " & lp.name:
+        ensureFixture()
         if lp.needsRunQuota and runQuotaError.len > 0:
           # A FAILURE, NOT A SKIP, and the distinction is the whole point.
           #
@@ -2661,6 +2682,7 @@ suite "every_launch_path_is_monitored":
           driveLaunchPath(lp)
 
     test "explicit bypass is honored even with a reachable private authority":
+      ensureFixture()
       require runQuotaError.len == 0
       let workRoot = tempRoot / "explicit-bypass"
       let cacheRoot = workRoot / "cache"
@@ -2709,6 +2731,7 @@ suite "every_launch_path_is_monitored":
       ## here, so the verdict does not depend on which other cases ran in
       ## this process. A path that needs RunQuota is not driven when the
       ## fixture did not come up, and is then reported missing below.
+      ensureFixture()
       executedPaths.clear()
       recordedEvidence.setLen(0)
       for lp in EnumeratedLaunchPaths:
@@ -2747,6 +2770,7 @@ suite "every_launch_path_is_monitored":
       ## does not. Second, it is a baseline: a change to how the monitor
       ## is hosted has to reproduce this exact shape, and that is only a
       ## usable comparison if the shape was recorded before the change.
+      ensureFixture()
       if runQuotaError.len > 0:
         # Not a skip, for the reason spelled out on the per-path cases:
         # this comparison is the only place the two HOSTING MECHANISMS
@@ -3146,6 +3170,7 @@ suite "every_launch_path_is_monitored":
       ##
       ## NO MOCKS: two real builds through the real engine, and one real
       ## `repro` subprocess. The oracle is a file the monitored child wrote.
+      ensureFixture()
       const EngineRequest =
         "file-reads,path-probes,file-writes,proc,lib,env,entropy,ambient," &
         "legacy-padding,file,nondet,ipc"
@@ -3277,6 +3302,7 @@ suite "every_launch_path_is_monitored":
         "\"--interest\", interestToTokens(") == 1
 
     test "teardown":
+      ensureFixture()
       daemon.stop()
       check existsEnv("RUNQUOTA_SOCKET") == daemon.hadSocket
       check getEnv("RUNQUOTA_SOCKET") == daemon.previousSocket

@@ -22,6 +22,7 @@
 # ends when the row does -- this file is regenerated from the lock, so
 # an identity that leaves the lock leaves this file on the next
 # refresh.
+# unverifiable: https://codeberg.org/jcollie/zig-overlay.git -- a git-other repository; this gate has no client for that host, so its visibility is NOT established here
 # unverifiable: https://spectrum-os.org/git/spectrum -- a git-other repository; this gate has no client for that host, so its visibility is NOT established here
 # unverifiable: rycee/nmt -- a gitlab repository; this gate has no client for that host, so its visibility is NOT established here
 # unverifiable: ~rycee/nmd -- a sourcehut repository; this gate has no client for that host, so its visibility is NOT established here
@@ -37,16 +38,21 @@ cheatfate/nimcrypto	public
 edolstra/flake-compat	public
 enzime/nix-vm-test	public
 gerschtli/nix-formatter-pack	public
+ghostty-org/ghostty	public
 gytis-ivaskevicius/flake-utils-plus	public
 hercules-ci/flake-parts	public
 hercules-ci/gitignore.nix	public
 hercules-ci/hercules-ci-effects	public
 https://api.flakehub.com/f/pinned/edolstra/flake-compat/1.1.0/01948eb7-9cba-704f-bbf3-3fa956735b52/source.tar.gz	non-vcs
 https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz	non-vcs
+https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.xz	non-vcs
+https://codeberg.org/jcollie/zig-overlay.git	unverified-host
 https://flakehub.com/f/edolstra/flake-compat/1.tar.gz	non-vcs
-https://releases.nixos.org/nixos/unstable/nixos-26.05pre960399.9dcb002ca169/nixexprs.tar.xz	non-vcs
+https://releases.nixos.org/nixos/unstable/nixos-26.05pre985613.0726a0ecb6d4/nixexprs.tar.xz	non-vcs
+https://releases.nixos.org/nixpkgs/nixpkgs-26.05pre942631.fef9403a3e4d/nixexprs.tar.xz	non-vcs
 https://spectrum-os.org/git/spectrum	unverified-host
 ipetkov/crane	public
+jcollie/zon2nix	public
 juliosueiras-nix/nix-utils	public
 metacraft-labs/codetracer	public
 metacraft-labs/codetracer-trace-format-nim	public
@@ -62,10 +68,11 @@ metacraft-labs/nim-stackable-hooks	public
 metacraft-labs/reprobuild-ct-test-runner	public
 metacraft-labs/reprobuild-test-adapters	public
 metacraft-labs/runquota	public
-mic92/bun2nix	public
+mitchellh/zig-overlay	public
 nim-lang/checksums	public
 nim-lang/csources_v3	public
 nim-lang/nimony	public
+nix-community/bun2nix	public
 nix-community/crate2nix	public
 nix-community/disko	public
 nix-community/fenix	public
@@ -99,5 +106,4 @@ status-im/nim-bearssl	public
 status-im/nim-stew	public
 stoeffel/nix-test-runner	public
 terranix/terranix	public
-vic/import-tree	public
 ~rycee/nmd	unverified-host
