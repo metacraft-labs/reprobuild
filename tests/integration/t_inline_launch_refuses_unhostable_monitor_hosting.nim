@@ -78,7 +78,7 @@
 ## NO MOCKS. A real ``runquotad`` over a real unix socket, the real engine,
 ## real child processes, and the filesystem as the oracle.
 
-import std/[os, osproc, sets, streams, strutils, tempfiles, unittest]
+import std/[exitprocs, os, osproc, sets, streams, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
@@ -233,13 +233,30 @@ when defined(linux) or defined(macosx):
   var executed = initHashSet[string]()
 
   let repoRoot = getCurrentDir()
-  let tempRoot = createTempDir("repro-p3-refusal", "")
+  var tempRoot = ""
   var daemon: DaemonHandle
   var runQuotaError = ""
-  try:
-    daemon = startRunQuotaDaemon(repoRoot, tempRoot)
-  except CatchableError as err:
-    runQuotaError = err.msg
+  var fixtureUp = false
+
+  proc ensureFixture() =
+    ## THE DAEMON STARTS INSIDE THE CASE THAT NEEDS IT, NOT AT MODULE LEVEL.
+    ## Module-level code also runs for the runner's ``--list-json`` probe and
+    ## for every case process, and only the "teardown" case stopped a daemon
+    ## (its own process's), so each probe and each other case left a
+    ## ``runquotad`` and a scratch tree behind for good — dozens accumulated
+    ## on a dev host over a week of runs. Called from a ``test`` body, the
+    ## exit proc is registered after the protocol hook and so runs before
+    ## that hook's ``quit``, which skips anything registered earlier.
+    if fixtureUp: return
+    fixtureUp = true
+    tempRoot = createTempDir("repro-p3-refusal", "")
+    try:
+      daemon = startRunQuotaDaemon(repoRoot, tempRoot)
+    except CatchableError as err:
+      runQuotaError = err.msg
+    addExitProc(proc() =
+      daemon.stop()
+      if tempRoot.len > 0: removeDir(tempRoot))
 
   ## A template so a failed ``check`` names the caller's line. It no longer
   ## has to be one for the verdict: the ``unittest`` in use routes a ``check``
@@ -285,6 +302,7 @@ when defined(linux) or defined(macosx):
   ## would let the bypass control pass on a cache hit it did not host.
   proc driveInlineRefusal() =
     ## Test "the inline RunQuota path refuses instead of running unmonitored".
+    ensureFixture()
     if runQuotaError.len > 0:
       # A FAILURE, NOT A SKIP. ``requireRunQuotaDaemonBin`` already raises
       # when the binary is absent and ``just test`` builds it, so every
@@ -315,6 +333,7 @@ when defined(linux) or defined(macosx):
     ## and its failure mode is different too: a hosted plan here would be
     ## monitored, but launched by the engine with no RunQuota lease at
     ## all. Refusing is the same answer for both.
+    ensureFixture()
     if runQuotaError.len > 0:
       echo "[L2] the RunQuota fixture did not come up: ", runQuotaError,
         "\n  Fix the fixture; do not skip the case."
@@ -338,6 +357,7 @@ when defined(linux) or defined(macosx):
     ## the hazard by breaking hosting altogether. This case asks for
     ## hosting in the same mode on the one path that CAN host and requires
     ## it to succeed, be hosted in-process, and be monitored.
+    ensureFixture()
     let caseDir = createTempDir("bypass-", "", tempRoot)
     let workRoot = prepareWork(caseDir)
     let cacheRoot = caseDir / ".repro-cache"
@@ -434,6 +454,7 @@ when defined(linux) or defined(macosx):
         check name in executed
 
     test "teardown":
+      ensureFixture()
       daemon.stop()
       removeDir(tempRoot)
       # ``check true`` could not fail, so a teardown that silently left the
