@@ -83,6 +83,8 @@
 #   product-api 18 | compiler-is-subject 18 | dynamic-source 11
 #   mutated-artifact 4 | optional-host-tool 2 | graph-owned 7
 #   migrate-pending 34
+# Since then: t_rp3_bind_deps_and_sharing product-api -> graph-owned
+# (product-api 17, graph-owned 8).
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -281,7 +283,7 @@ tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim	migrate-pend
 tests/integration/t_runner_exclusive_phase_budget.nim	graph-owned	The reusable observation probe and real runner are built by reprobuild.test_fixtures.exclusive_phase_probe and reprobuild.test_helpers.repro_test_runner, both typed inputs of the execute edge. Copying the probe under two stems selects exclusive versus parallel execution; compilation is materialization, while the assertions measure the child environment and runner exit status.
 tests/integration/t_rp1_provider_compile_edge_materializes.nim	product-api	extractInterfaceFromModule plus two compileProviderBinary calls; the assertion is the cache HIT and ProviderCompileActionKey stability.
 tests/integration/t_rp2_provider_session_invoke.nim	product-api	The provider is compiled by the RP1 edge (compileProviderBinary); the session handshake is asserted over that product-built binary.
-tests/integration/t_rp3_bind_deps_and_sharing.nim	product-api	Three providers built through compileProviderBinary after extractInterfaceFromModule.
+tests/integration/t_rp3_bind_deps_and_sharing.nim	graph-owned	Five providers built by edges reprobuild.test_fixtures.rp3_provider_{dep,depv2,consumer_a,consumer_b,plain} from checked-in recipes under tests/fixtures/rp3-bind-deps, typed inputs of the execute edge. The body used to call extractInterfaceFromModule + compileProviderBinary into a per-process temp dir in every case; the subject is session sharing, BindDependencies and observed-input propagation across launched providers, so compiling is materialization. The session-pool key is the launched binary's CAS digest.
 tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim	compiler-is-subject	The compiler's verdict is the assertion in BOTH directions: compileConsumer (:172) nim check's a generated driver-free consumer and the test asserts good.ok (:253) and newBind.ok (:273) but also 'not staleBind.ok' (:277) -- a required compile FAILURE. The consumer text is generated per run (nonce in the filename, accessorSrc emitted by the RP5a path), so there is no static file either. Newly detected: ' check --hints:off' on a continuation line of an open execCmdEx( (:191-192).
 tests/integration/t_rp5b_resource_driver_via_protocol.nim	product-api	compileProviderBinary with the interface fingerprint; driver ops then run over the protocol in that binary.
 tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim	compiler-is-subject	The RP8 capability under test IS a nim check pass: a green check PROVES the exec-free interface path because nim check cannot run staticExec, and a reference to a non-existent public symbol must fail the check (falsifiability arm). The cold nim c --compileOnly (:208) exists so the test can grep the EMITTED C for the producer's private driver symbols -- the compiler's output is the evidence. The consumer repro.nim is generated per run by consumerRepro(). Newly detected: ' c --compileOnly' after nimExe (:208).

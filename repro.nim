@@ -189,6 +189,15 @@ const
     path: ctShimFixtureRoot & "/fixture_baseline_std_unittest",
     actionId: "reprobuild.test_fixtures.ct_shim_fixture_baseline")
 
+  rp3FixtureRecipeRoot* = "tests/fixtures/rp3-bind-deps"
+  rp3FixtureProviderRoot* = "build/test-fixtures/rp3-bind-deps"
+    ## The RP3 bind-deps fixtures: five checked-in recipes (`dep`, `depv2`,
+    ## `consumer-a`, `consumer-b`, `plain`), each compiled to a provider
+    ## binary by its own graph edge (declared in the build block), so
+    ## `t_rp3_bind_deps_and_sharing` runs providers and never compiles one.
+    ## The edge ids are `reprobuild.test_fixtures.rp3_provider_<name>` with
+    ## `-` folded to `_`.
+
   M4ConsolidationVerificationTest* =
     "tests/integration/t_m4_pure_unit_consolidation.nim"
     ## Suite-Modernization M4. The one test whose execute edge takes EVERY
@@ -242,6 +251,19 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/bin/repro-peer-cache-admin",
         actionId: "reprobuild.apps.repro-peer-cache-admin")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_rp3_bind_deps_and_sharing.nim",
+      artifacts: @[
+        TestGraphArtifact(path: rp3FixtureProviderRoot & "/dep",
+          actionId: "reprobuild.test_fixtures.rp3_provider_dep"),
+        TestGraphArtifact(path: rp3FixtureProviderRoot & "/depv2",
+          actionId: "reprobuild.test_fixtures.rp3_provider_depv2"),
+        TestGraphArtifact(path: rp3FixtureProviderRoot & "/consumer-a",
+          actionId: "reprobuild.test_fixtures.rp3_provider_consumer_a"),
+        TestGraphArtifact(path: rp3FixtureProviderRoot & "/consumer-b",
+          actionId: "reprobuild.test_fixtures.rp3_provider_consumer_b"),
+        TestGraphArtifact(path: rp3FixtureProviderRoot & "/plain",
+          actionId: "reprobuild.test_fixtures.rp3_provider_plain")]),
     TestGraphArtifacts(
       source: "tools/catalog-harvester/tests/" &
         "test_harvester_app_name_validation.nim",
@@ -2436,6 +2458,59 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/buildtype_output_probe",
       actionId = "reprobuild.test_fixtures.buildtype_output_probe"))
+
+    # RP3 bind-deps fixture providers. Each checked-in recipe is compiled the
+    # way the provider-compile edge compiles a recipe — the recipe module with
+    # `-d:reproProviderMode` against reprobuild's own libraries — into a
+    # stable path, so `t_rp3_bind_deps_and_sharing` reuses one compile per
+    # recipe across cases and runs instead of compiling five providers into a
+    # per-process temp dir every case. The library paths and runtime rpath are
+    # the ones every DSL-importing fixture above uses.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = rp3FixtureRecipeRoot & "/dep/repro.nim",
+      binary = rp3FixtureProviderRoot & "/dep",
+      defines = @["reproProviderMode"],
+      paths = sourceOnlyNimPaths,
+      passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/rp3_provider_dep",
+      actionId = "reprobuild.test_fixtures.rp3_provider_dep"))
+    reprobuildTestFixturesActions.add(nim.c(
+      source = rp3FixtureRecipeRoot & "/depv2/repro.nim",
+      binary = rp3FixtureProviderRoot & "/depv2",
+      defines = @["reproProviderMode"],
+      paths = sourceOnlyNimPaths,
+      passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/rp3_provider_depv2",
+      actionId = "reprobuild.test_fixtures.rp3_provider_depv2"))
+    reprobuildTestFixturesActions.add(nim.c(
+      source = rp3FixtureRecipeRoot & "/consumer-a/repro.nim",
+      binary = rp3FixtureProviderRoot & "/consumer-a",
+      defines = @["reproProviderMode"],
+      paths = sourceOnlyNimPaths,
+      passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/rp3_provider_consumer_a",
+      actionId = "reprobuild.test_fixtures.rp3_provider_consumer_a"))
+    reprobuildTestFixturesActions.add(nim.c(
+      source = rp3FixtureRecipeRoot & "/consumer-b/repro.nim",
+      binary = rp3FixtureProviderRoot & "/consumer-b",
+      defines = @["reproProviderMode"],
+      paths = sourceOnlyNimPaths,
+      passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/rp3_provider_consumer_b",
+      actionId = "reprobuild.test_fixtures.rp3_provider_consumer_b"))
+    reprobuildTestFixturesActions.add(nim.c(
+      source = rp3FixtureRecipeRoot & "/plain/repro.nim",
+      binary = rp3FixtureProviderRoot & "/plain",
+      defines = @["reproProviderMode"],
+      paths = sourceOnlyNimPaths,
+      passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/rp3_provider_plain",
+      actionId = "reprobuild.test_fixtures.rp3_provider_plain"))
 
     # Graph-Owned-Test-Artifacts M3: the ct_test_unittest_parallel protocol
     # fixtures.

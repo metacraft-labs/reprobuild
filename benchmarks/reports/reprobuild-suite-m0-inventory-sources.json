@@ -1,10 +1,10 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 24,
+    "graphOwnedHelperArtifacts": 29,
     "nimTestBinaries": 1863,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 592,
-    "staticallyDetectedRuntimeCompilerFlowTests": 110,
+    "staticallyDetectedRuntimeCompilerFlowTests": 109,
     "testEntries": 1880
   },
   "pureUnitConsolidationCandidates": [
@@ -1132,6 +1132,36 @@
         "kind": "test-fixture",
         "output": "build/lib/librepro_project_dsl_runtime.",
         "source": "libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.rp3_provider_consumer_a",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "dynamic"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.rp3_provider_consumer_b",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "dynamic"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.rp3_provider_dep",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "dynamic"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.rp3_provider_depv2",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "dynamic"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.rp3_provider_plain",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "dynamic"
       },
       {
         "actionId": "reprobuild.test_fixtures.shell_hook_counting_shim",
@@ -5447,44 +5477,6 @@
         }
       ],
       "source": "tests/integration/t_rp2_provider_session_invoke.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "",
-          "callableReachable": true,
-          "commandVariableExecuted": false,
-          "directExecutionLine": false,
-          "enclosingCallable": "buildProvider",
-          "executedVariables": [],
-          "line": 135,
-          "path": "tests/integration/t_rp3_bind_deps_and_sharing.nim",
-          "patterns": [
-            "repro-extract-interface"
-          ],
-          "runtimeCompilerApi": "extractInterfaceFromModule",
-          "runtimeCompilerApiModule": "repro_interface_artifacts",
-          "snippet": "let artifact = extractInterfaceFromModule(modulePath, interfacePath,"
-        },
-        {
-          "assignedCommandVariable": "",
-          "callableReachable": true,
-          "commandVariableExecuted": false,
-          "directExecutionLine": false,
-          "enclosingCallable": "buildProvider",
-          "executedVariables": [],
-          "line": 141,
-          "path": "tests/integration/t_rp3_bind_deps_and_sharing.nim",
-          "patterns": [
-            "repro-compile-provider-binary"
-          ],
-          "runtimeCompilerApi": "compileProviderBinary",
-          "runtimeCompilerApiModule": "repro_interface_artifacts",
-          "snippet": "let compiled = compileProviderBinary(modulePath, binPath,"
-        }
-      ],
-      "source": "tests/integration/t_rp3_bind_deps_and_sharing.nim"
     },
     {
       "class": "integration",
@@ -32696,16 +32688,16 @@
       "localDependencyShape": [
         "repro_core",
         "repro_hash",
-        "repro_interface_artifacts",
         "repro_project_dsl",
-        "repro_provider_runtime"
+        "repro_provider_runtime",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_rp3_bind_deps_and_sharing.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
