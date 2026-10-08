@@ -3601,6 +3601,7 @@
             "executedPaths",
             "fixtureBin",
             "fixtureSource",
+            "fixtureUp",
             "found",
             "fromEnv",
             "fromFile",
