@@ -3582,6 +3582,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_platform/tests/test_msvc_activation_multiline_env.nim",
+    binary: "build/test-bin/test_msvc_activation_multiline_env",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_platform/tests/test_msvc_env_merge.nim",
     binary: "build/test-bin/test_msvc_env_merge",
     defines: @[],

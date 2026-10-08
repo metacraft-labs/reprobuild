@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1866,
-    "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 593,
+    "nimTestBinaries": 1867,
+    "pureUnitConsolidationGroups": 49,
+    "pureUnitTests": 594,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1883
+    "testEntries": 1884
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -311,6 +311,19 @@
       "sources": [
         "libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim",
         "libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_platform"
+      ],
+      "owner": "libs/repro_platform",
+      "sources": [
+        "libs/repro_platform/tests/test_msvc_activation_multiline_env.nim",
+        "libs/repro_platform/tests/test_msvc_env_merge.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1078,7 +1091,7 @@
       "graph-fixture": 11,
       "integration": 1003,
       "platform/destructive": 119,
-      "pure unit": 593,
+      "pure unit": 594,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1257,9 +1270,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1866,
+    "nimTestBinaryCount": 1867,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1883
+    "testEntryCount": 1884
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13605,6 +13618,23 @@
       "source": "libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_msvc_activation_multiline_env",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_platform"
+      ],
+      "owner": "libs/repro_platform",
+      "requiresReproBinary": false,
+      "source": "libs/repro_platform/tests/test_msvc_activation_multiline_env.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

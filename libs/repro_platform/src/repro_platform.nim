@@ -1,4 +1,4 @@
-import std/[locks, os, osproc, streams, strutils, tables]
+import std/[locks, os, osproc, streams, strtabs, strutils, tables]
 
 type
   HostPlatform* = object
@@ -184,14 +184,81 @@ proc warnOnce(message: string) =
     writeFile(diagPath, prev & "repro: " & message & "\n")
   except CatchableError: discard
 
+proc parseCmdSetOutput*(raw: string): seq[string] =
+  ## Split a ``cmd.exe`` ``set`` dump into ``KEY=VALUE`` entries. Each line
+  ## is returned verbatim (trailing whitespace stripped); blank lines and
+  ## lines without a name are filtered. cmd.exe writes the file as CP1252 /
+  ## OEM by default but env names + values are ASCII for the variables we
+  ## consume here (PATH / INCLUDE / LIB / LIBPATH / VS* / WindowsSdk* /
+  ## VCTools* / UCRT* / etc.).
+  ##
+  ## ``set`` prints a value verbatim, so a value that spans lines is
+  ## indistinguishable from several variables. That is why the activation
+  ## shell never sees one: see ``vsDevCmdChildEnv``.
+  for line in raw.splitLines:
+    let stripped = line.strip(leading = false, trailing = true)
+    if stripped.len == 0:
+      continue
+    if stripped.find('=') <= 0:
+      continue
+    result.add(stripped)
+
+proc vsDevCmdChildEnv*(parent: openArray[(string, string)]):
+    seq[(string, string)] =
+  ## The environment the VsDevCmd activation shell is started with: the
+  ## parent's, minus every variable whose value spans lines.
+  ##
+  ## The activation's result is read back from a ``set`` dump, and ``set``
+  ## frames nothing: a value ``A=1<newline>B=2`` comes back as a variable
+  ## ``A`` holding ``1`` and an invented variable ``B`` holding ``2``. The
+  ## captured table is layered over every action environment the engine
+  ## launches, so such a value used to plant its continuation lines in every
+  ## action as real variables. A multi-line ``KEY=VALUE`` list (one entry per
+  ## line) is exactly the shape that silently overrode real settings that
+  ## way. Leaving those variables out of the shell's environment loses
+  ## nothing: VsDevCmd does not read them, the captured table then has no
+  ## entry for them, and the action inherits each one intact from the
+  ## launching process.
+  ##
+  ## Windows' hidden per-drive entries (``=C:=C:\dir``), which ``envPairs``
+  ## reports with an empty name, are left out too: they cannot be named in an
+  ## environment table, and the activation shell does not need them.
+  for (name, value) in parent:
+    if name.len == 0:
+      continue
+    if '\n' in value or '\r' in value:
+      continue
+    result.add((name, value))
+
+const MsvcSetDenylist = ["PROMPT", "_", "PWD", "OLDPWD"]
+  ## Denylist matches env.ps1 line 902. ``PROMPT`` would re-style the
+  ## daemon's shell prompt if exported to a child shell; ``_`` /
+  ## ``PWD`` / ``OLDPWD`` are bash-isms that VsDevCmd's cmd.exe parent
+  ## does not really own; filtering them mirrors env.ps1's behaviour
+  ## so the two activation paths stay observationally identical.
+
+proc msvcEnvTableFromSetLines*(envLines: openArray[string]):
+    Table[string, string] =
+  ## The captured activation table: every ``KEY=VALUE`` entry of the ``set``
+  ## dump, except the denylisted names. Later duplicates win.
+  result = initTable[string, string]()
+  for entry in envLines:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    let key = entry[0 ..< eq]
+    var skip = false
+    for banned in MsvcSetDenylist:
+      if cmpIgnoreCase(key, banned) == 0:
+        skip = true
+        break
+    if skip:
+      continue
+    result[key] = entry[eq + 1 .. ^1]
+
 when defined(windows):
   proc readSetOutputFile(path: string): seq[string] =
     ## Read the ``set`` dump that ``VsDevCmd.bat`` writes via ``> tempFile``.
-    ## Each ``KEY=VALUE`` line is returned verbatim; blank lines are
-    ## filtered. cmd.exe writes the file as CP1252 / OEM by default but
-    ## env names + values are ASCII for the variables we consume here
-    ## (PATH / INCLUDE / LIB / LIBPATH / VS* / WindowsSdk* / VCTools* /
-    ## UCRT* / etc.).
     if not fileExists(path):
       return @[]
     var raw: string
@@ -199,13 +266,7 @@ when defined(windows):
       raw = readFile(path)
     except IOError:
       return @[]
-    for line in raw.splitLines:
-      let stripped = line.strip(leading = false, trailing = true)
-      if stripped.len == 0:
-        continue
-      if stripped.find('=') <= 0:
-        continue
-      result.add(stripped)
+    parseCmdSetOutput(raw)
 
   proc locateVsWhere(): string =
     ## ``vswhere.exe`` ships with the VS Installer at a stable path under
@@ -286,8 +347,15 @@ when defined(windows):
       return @[]
     var process: Process
     try:
+      var parent: seq[(string, string)] = @[]
+      for key, value in envPairs():
+        parent.add((key, value))
+      let shellEnv = newStringTable(modeCaseInsensitive)
+      for (key, value) in vsDevCmdChildEnv(parent):
+        shellEnv[key] = value
       process = startProcess(cmdExe,
                              args = @["/D", "/C", wrapperBat],
+                             env = shellEnv,
                              options = {poUsePath, poParentStreams})
     except OSError as e:
       warnOnce("MSVC dev-env activation: failed to launch cmd.exe: " &
@@ -354,26 +422,7 @@ when defined(windows):
     if envLines.len == 0:
       return MsvcDevEnv(available: false)
 
-    # Denylist matches env.ps1 line 902. ``PROMPT`` would re-style the
-    # daemon's shell prompt if exported to a child shell; ``_`` /
-    # ``PWD`` / ``OLDPWD`` are bash-isms that VsDevCmd's cmd.exe parent
-    # does not really own; filtering them mirrors env.ps1's behaviour
-    # so the two activation paths stay observationally identical.
-    const Denylist = ["PROMPT", "_", "PWD", "OLDPWD"]
-    var table = initTable[string, string]()
-    for entry in envLines:
-      let eq = entry.find('=')
-      if eq <= 0:
-        continue
-      let key = entry[0 ..< eq]
-      var skip = false
-      for banned in Denylist:
-        if cmpIgnoreCase(key, banned) == 0:
-          skip = true
-          break
-      if skip:
-        continue
-      table[key] = entry[eq + 1 .. ^1]
+    var table = msvcEnvTableFromSetLines(envLines)
     if table.len == 0:
       warnOnce("MSVC dev-env activation: VsDevCmd.bat produced no " &
         "usable variables.")

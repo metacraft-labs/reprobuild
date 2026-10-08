@@ -404,6 +404,7 @@ libs/repro_peer_cache/tests/t_peer_cache_tls_mixed_mode_compat.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_ca_isolation.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_isolation.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim	nim	1
+libs/repro_platform/tests/test_msvc_activation_multiline_env.nim	nim	5
 libs/repro_platform/tests/test_msvc_env_merge.nim	nim	9
 libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	18
 libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	137
