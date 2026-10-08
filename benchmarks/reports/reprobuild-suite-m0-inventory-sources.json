@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1780,
+    "nimTestBinaries": 1782,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1794
+    "testEntries": 1796
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1082,7 +1082,7 @@
       "integration": 914,
       "platform/destructive": 117,
       "pure unit": 592,
-      "unclassified": 160
+      "unclassified": 162
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1230,9 +1230,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1780,
+    "nimTestBinaryCount": 1782,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1794
+    "testEntryCount": 1796
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13489,6 +13489,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dsl_activity_surface_is_typed",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_activity_surface_is_typed.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dsl_bootloader",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -14429,6 +14446,25 @@
       "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_activity_params_reach_the_services_they_declare",
+      "class": "unclassified",
+      "classificationReason": "imports `activity_params_fixtures`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

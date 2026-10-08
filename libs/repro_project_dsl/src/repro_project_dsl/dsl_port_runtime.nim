@@ -1561,6 +1561,108 @@ proc registeredServices*(packageName: string): seq[DslServiceDef] =
   return @[]
 
 # ---------------------------------------------------------------------------
+# Shared-Development-Services L2 — the dev-env activity DECLARATION record.
+#
+# ``Package-Model.md`` §"Activity declaration shape": "Activities are
+# declared with a function-call shape. Required dependencies are
+# constructor-style typed parameters; everything that has a default lives
+# in an inner ``config:`` block."
+#
+# This registry records WHAT WAS DECLARED — the parameter names with their
+# written type expressions, and the ``config:`` keys with their written
+# type and default expressions. It deliberately does NOT record VALUES:
+# the parameters and the config keys are real Nim parameters of the
+# generated activity proc, so their values live in the Nim call and reach
+# the body (and the body's rendered configuration) by ordinary parameter
+# passing, with the compiler type-checking every one. A registry of values
+# would be a second, weaker channel for the same thing.
+#
+# The declaration record exists because L3 lifts it: "``libs/repro_
+# interface_artifacts`` carries, per exported service and activity, the
+# handle type and its members, ... and the ``config:`` surface with
+# defaults". The type and default EXPRESSIONS are what a consuming
+# project's generated symbols are built from, and they are only knowable
+# at the declaration site.
+# ---------------------------------------------------------------------------
+
+type
+  DslActivityParamDef* = object
+    ## One constructor-style typed parameter of an activity.
+    name*: string
+      ## The parameter name, as written.
+    typeRepr*: string
+      ## The parameter's type EXPRESSION, as written (``ManagedPostgres``,
+      ## ``seq[string]``, ``range[1..256]``). Source text rather than a
+      ## resolved type, because the declaration is recorded at macro
+      ## expansion time where no type is resolved yet — and because that
+      ## is exactly what L3 has to re-emit into a consumer.
+
+  DslActivityConfigDef* = object
+    ## One ``config:`` key of an activity.
+    name*: string
+    typeRepr*: string
+    defaultRepr*: string
+      ## The default EXPRESSION, as written. Empty when the key was
+      ## declared without one (``externalDomain: string``), which makes
+      ## the generated parameter REQUIRED at the ``enable`` site.
+    hasDefault*: bool
+      ## Distinguishes "no default" from "a default whose source text is
+      ## the empty string" (``name: string = ""``). Without this field the
+      ## two are the same record and the second would read as required.
+    description*: string
+      ## The doc comment immediately above the key, with its ``##``
+      ## markers stripped. ``Package-Model.md``'s worked example carries
+      ## one per key ("TCP port the API server binds. 0 disables the
+      ## network listener."), and L3 lifts it to the consumer.
+
+  DslActivityDef* = object
+    ## One ``activity <name>(<params>): <body>`` declaration.
+    packageName*: string
+    activityName*: string
+    params*: seq[DslActivityParamDef]
+      ## In declaration order, which is also the generated proc's
+      ## positional parameter order.
+    config*: seq[DslActivityConfigDef]
+      ## In declaration order, after every parameter.
+    bodyRepr*: string
+      ## The activity body's source text, ``config:`` block included.
+      ## Diagnostic surface only — symmetric with
+      ## ``DslServiceDef.bodyRepr``.
+
+var dslPortActivityRegistry: Table[string, seq[DslActivityDef]]
+  ## Per-package activity-declaration registry, keyed by package name.
+  ## Separate from ``devEnvActivityRegistry`` in ``runtime_core`` on
+  ## purpose: that one is the flat list of activity NAMES the dev-env
+  ## selector gates on (``activity "default"`` appends to it and nothing
+  ## else), and a parameterised activity appends its name there too so
+  ## selection keeps working. This registry is the richer declaration
+  ## record, and nothing in the dev-env lowering reads it.
+
+proc resetActivityRegistry*() =
+  ## Drop every recorded activity declaration. Test fixtures that
+  ## re-run a package's dev-env body call this between scenarios;
+  ## production never does.
+  dslPortActivityRegistry.clear()
+
+proc registerActivityDeclaration*(def: DslActivityDef) =
+  ## Append one declaration. Re-declaring the same name in the same
+  ## package is NOT deduplicated here — the generated proc would be a
+  ## Nim redefinition error long before this runs, so a duplicate in
+  ## this registry can only come from the dev-env body being run twice,
+  ## which is a legitimate thing for a fixture to do.
+  if def.packageName notin dslPortActivityRegistry:
+    dslPortActivityRegistry[def.packageName] = @[]
+  dslPortActivityRegistry[def.packageName].add(def)
+
+proc registeredActivities*(packageName: string): seq[DslActivityDef] =
+  ## Every activity declared by ``packageName``, in declaration order.
+  ## Empty when the package declares none; callers must NOT read the
+  ## empty return as an error.
+  if packageName in dslPortActivityRegistry:
+    return dslPortActivityRegistry[packageName]
+  return @[]
+
+# ---------------------------------------------------------------------------
 # Shared-Development-Services L1 — ``BuildOutput`` and the rendering helper.
 #
 # ``Shared-Development-Services.md`` §2: "Because `service` takes no

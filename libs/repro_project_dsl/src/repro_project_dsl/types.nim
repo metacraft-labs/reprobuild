@@ -1452,9 +1452,25 @@ type
   ServiceTriggerAction* = object
     kind*: ServiceTriggerActionKind
     argument*: string
-      ## The signal name for ``sendSignal``, the command for ``exec``,
-      ## the endpoint for ``notify``; empty for ``hotReload`` /
-      ## ``restart``.
+      ## The action's trailing source text, verbatim and unparsed. The
+      ## signal name for ``sendSignal``, the command for ``exec``, the
+      ## endpoint for ``notify`` — and, for the two actions that take
+      ## named options rather than an argument, those options' own text:
+      ## ``restart backoff = exponential, maxRetries = 3`` records
+      ## ``backoff = exponential, maxRetries = 3`` and ``hotReload
+      ## otherwise sendSignal "SIGHUP"`` records ``otherwise sendSignal
+      ## "SIGHUP"``. Empty only when the action was written with nothing
+      ## after it (a bare ``restart`` / ``hotReload``).
+      ##
+      ## This comment used to say "empty for ``hotReload`` / ``restart``",
+      ## which measurement contradicts — see
+      ## ``t_dsl_service_typed_edges.nim``'s "supervisor options are
+      ## carried whole, not truncated" suite, whose three cases read
+      ## exactly those texts out of this field. The correction matters
+      ## beyond tidiness: L1's reason for ACCEPTING the unimplemented
+      ## ``hotReload otherwise <action>`` while REFUSING the unimplemented
+      ## ``debounce`` / ``coalesce`` modifiers is that this field can hold
+      ## the former and nothing can hold the latter.
 
   ServiceTriggerDef* = object
     kind*: ServiceTriggerKind

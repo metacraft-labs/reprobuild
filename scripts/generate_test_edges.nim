@@ -490,6 +490,13 @@ proc isProviderModePath(path: string): bool =
     # -- all three exist only under this define.
     "libs/repro_project_dsl/tests/" &
       "t_service_lowers_typed_edges_into_the_graph_fragment.nim",
+    # Shared-Development-Services L2: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` body declares parameterised activities, and
+    # asserts on ``servicePlaceholder`` -- the dev-env ``activity`` surface
+    # itself (``proc activity(name: string)`` included) exists only under
+    # this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_activity_params_reach_the_services_they_declare.nim",
   ]:
     if p == exact:
       return true

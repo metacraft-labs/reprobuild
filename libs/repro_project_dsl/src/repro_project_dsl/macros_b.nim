@@ -201,6 +201,13 @@ proc collectBuildStatements(pkgBody: NimNode; packageName = ""): NimNode =
           for buildStmt in filesStmt[1]:
             result.add(buildStmt)
 
+proc l2LowerDevEnvActivities(packageName: string;
+                             body: NimNode): NimNode
+  ## Forward declaration. Shared-Development-Services L2's dev-env
+  ## ``activity`` / ``enable`` walker is defined after the M5 service
+  ## emitter it reuses (``m5ServiceEmission``), which is ~2000 lines
+  ## below ``buildCode``, the only caller.
+
 proc collectDevEnvStatements(pkgBody: NimNode): NimNode =
   result = newStmtList()
   for stmt in pkgBody:
@@ -299,7 +306,13 @@ proc usesInstallMirrorBuildCall(body: NimNode): bool =
 
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let buildBody = collectBuildStatements(body, pkg.packageName)
-  let devEnvBody = collectDevEnvStatements(body)
+  # Shared-Development-Services L2: the constructor-shaped
+  # ``activity <name>(...):`` declarations and the ``enable`` call
+  # sites are lowered before the body is spliced into
+  # ``devEnv<Pkg>Package()``. ``activity "<name>"`` passes through
+  # untouched to the proc that has always handled it.
+  let devEnvBody = l2LowerDevEnvActivities(pkg.packageName,
+    collectDevEnvStatements(body))
   if buildBody.len == 0 and devEnvBody.len == 0:
     return newStmtList()
   let lifted = liftForeachStatements(pkg, buildBody)
@@ -2359,6 +2372,115 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     else:
       discard
 
+proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
+  ## Lower ONE ``service <name>:`` statement to its wrap-and-register
+  ## block, or return ``nil`` when ``stmt`` is not a recognised service
+  ## entry.
+  ##
+  ## Extracted from ``emitM5Services``' loop body by
+  ## Shared-Development-Services L2 with no change in behaviour, so that
+  ## a ``service`` written inside a dev-env ``activity`` body lowers
+  ## through exactly the same emitter as one written at package level. A
+  ## second, parallel service lowerer is the drift this avoids: every
+  ## setter, every refusal and every typed edge L1 built would otherwise
+  ## have to be kept in step across two walkers.
+  let parsed = m5ServiceEntryAst(stmt)
+  if not parsed.matched:
+    return nil
+  let parsedBody = m5ParseServiceBody(parsed.body)
+  let pkgLit = newLit(packageName)
+  let svcNameLit = newLit(parsed.serviceName)
+  let bodyReprLit = newLit(parsed.body.repr)
+  let exeRefLit = newLit(parsedBody.executableRef)
+  # Build the try-clause body: one setActiveServiceExecutable call
+  # (only when the body provided a ref) plus one addActiveServiceArg
+  # per arg. M9.C extensions emit one body-setter call per recognised
+  # systemd-unit setter.
+  let tryBody = newStmtList()
+  if parsedBody.executableExpr != nil:
+    let exeExpr = parsedBody.executableExpr
+    tryBody.add(quote do:
+      setActiveServiceExecutable(`exeExpr`))
+  elif parsedBody.executableRef.len > 0:
+    tryBody.add(quote do:
+      setActiveServiceExecutable(`exeRefLit`))
+  for argExpr in parsedBody.argExprs:
+    tryBody.add(quote do:
+      addActiveServiceArg(`argExpr`))
+  for fileExpr in parsedBody.runtimeFileExprs:
+    tryBody.add(quote do:
+      addActiveServiceRuntimeFile(`fileExpr`))
+  # M9.C: scalar (last-wins) setters — only emit when the body
+  # provided a literal so unused defaults stay as the runtime's
+  # empty-string ground state.
+  if parsedBody.descriptionLit != nil:
+    let lit = parsedBody.descriptionLit
+    tryBody.add(quote do:
+      setActiveServiceDescription(`lit`))
+  if parsedBody.typeLit != nil:
+    let lit = parsedBody.typeLit
+    tryBody.add(quote do:
+      setActiveServiceType(`lit`))
+  if parsedBody.execStartLit != nil:
+    let lit = parsedBody.execStartLit
+    tryBody.add(quote do:
+      setActiveServiceExecStart(`lit`))
+  # M9.C: repeating (append-per-occurrence) setters.
+  for lit in parsedBody.wantedByLits:
+    tryBody.add(quote do:
+      addActiveServiceWantedBy(`lit`))
+  for lit in parsedBody.wantsLits:
+    tryBody.add(quote do:
+      addActiveServiceWants(`lit`))
+  for lit in parsedBody.requiresLits:
+    tryBody.add(quote do:
+      addActiveServiceRequires(`lit`))
+  for lit in parsedBody.beforeLits:
+    tryBody.add(quote do:
+      addActiveServiceBefore(`lit`))
+  for lit in parsedBody.afterLits:
+    tryBody.add(quote do:
+      addActiveServiceAfter(`lit`))
+  # M9.C: env("KEY", "VALUE") — call form, one record per pair.
+  for pair in parsedBody.envPairs:
+    let keyLit = pair.keyLit
+    let valueLit = pair.valueLit
+    tryBody.add(quote do:
+      addActiveServiceEnv(`keyLit`, `valueLit`))
+  # M9.C: scalar (last-wins) run-as / restart setters.
+  if parsedBody.restartLit != nil:
+    let lit = parsedBody.restartLit
+    tryBody.add(quote do:
+      setActiveServiceRestart(`lit`))
+  if parsedBody.userLit != nil:
+    let lit = parsedBody.userLit
+    tryBody.add(quote do:
+      setActiveServiceUser(`lit`))
+  if parsedBody.groupLit != nil:
+    let lit = parsedBody.groupLit
+    tryBody.add(quote do:
+      setActiveServiceGroup(`lit`))
+  # L1: the reactive surface, after the declarative setters so an
+  # ``on change cfg:`` block sees the same handle the args did.
+  for emission in parsedBody.reactiveEmissions:
+    tryBody.add(emission)
+  if tryBody.len == 0:
+    tryBody.add(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
+  # The package-init block. The body-setter splice is unconditional
+  # (no provider-mode gate) — see the "Risk #2" commentary above the
+  # M5 emitter for the rationale.
+  let declareSym = genSym(nskProc, "declareService")
+  result = quote do:
+    block:
+      proc `declareSym`() {.closure.} =
+        beginServiceContext(`pkgLit`, `svcNameLit`, `bodyReprLit`)
+        try:
+          `tryBody`
+        finally:
+          finishServiceContext()
+      registerServiceDeclarator(`pkgLit`, `svcNameLit`, `declareSym`)
+      `declareSym`()
+
 proc emitM5Services*(packageName: string;
                     classified: seq[ClassifiedSection]): NimNode =
   ## Walk the classified section list for ``service:`` entries
@@ -2401,106 +2523,778 @@ proc emitM5Services*(packageName: string;
   ## VALUE expressions are spliced verbatim, so the compiler resolves
   ## and type-checks them. The full body's ``repr`` is captured into
   ## ``DslServiceDef.bodyRepr`` for diagnostic surfacing.
+  ##
+  ## The per-entry lowering itself lives in ``m5ServiceEmission``, which
+  ## L2's dev-env ``activity`` walker shares.
   result = newStmtList()
   for entry in classified:
     if entry.ownership != soM5Service:
       continue
-    let parsed = m5ServiceEntryAst(entry.stmt)
-    if not parsed.matched:
+    let emission = m5ServiceEmission(packageName, entry.stmt)
+    if emission == nil:
       continue
-    let parsedBody = m5ParseServiceBody(parsed.body)
-    let pkgLit = newLit(packageName)
-    let svcNameLit = newLit(parsed.serviceName)
-    let bodyReprLit = newLit(parsed.body.repr)
-    let exeRefLit = newLit(parsedBody.executableRef)
-    # Build the try-clause body: one setActiveServiceExecutable call
-    # (only when the body provided a ref) plus one addActiveServiceArg
-    # per arg. M9.C extensions emit one body-setter call per recognised
-    # systemd-unit setter.
-    let tryBody = newStmtList()
-    if parsedBody.executableExpr != nil:
-      let exeExpr = parsedBody.executableExpr
-      tryBody.add(quote do:
-        setActiveServiceExecutable(`exeExpr`))
-    elif parsedBody.executableRef.len > 0:
-      tryBody.add(quote do:
-        setActiveServiceExecutable(`exeRefLit`))
-    for argExpr in parsedBody.argExprs:
-      tryBody.add(quote do:
-        addActiveServiceArg(`argExpr`))
-    for fileExpr in parsedBody.runtimeFileExprs:
-      tryBody.add(quote do:
-        addActiveServiceRuntimeFile(`fileExpr`))
-    # M9.C: scalar (last-wins) setters — only emit when the body
-    # provided a literal so unused defaults stay as the runtime's
-    # empty-string ground state.
-    if parsedBody.descriptionLit != nil:
-      let lit = parsedBody.descriptionLit
-      tryBody.add(quote do:
-        setActiveServiceDescription(`lit`))
-    if parsedBody.typeLit != nil:
-      let lit = parsedBody.typeLit
-      tryBody.add(quote do:
-        setActiveServiceType(`lit`))
-    if parsedBody.execStartLit != nil:
-      let lit = parsedBody.execStartLit
-      tryBody.add(quote do:
-        setActiveServiceExecStart(`lit`))
-    # M9.C: repeating (append-per-occurrence) setters.
-    for lit in parsedBody.wantedByLits:
-      tryBody.add(quote do:
-        addActiveServiceWantedBy(`lit`))
-    for lit in parsedBody.wantsLits:
-      tryBody.add(quote do:
-        addActiveServiceWants(`lit`))
-    for lit in parsedBody.requiresLits:
-      tryBody.add(quote do:
-        addActiveServiceRequires(`lit`))
-    for lit in parsedBody.beforeLits:
-      tryBody.add(quote do:
-        addActiveServiceBefore(`lit`))
-    for lit in parsedBody.afterLits:
-      tryBody.add(quote do:
-        addActiveServiceAfter(`lit`))
-    # M9.C: env("KEY", "VALUE") — call form, one record per pair.
-    for pair in parsedBody.envPairs:
-      let keyLit = pair.keyLit
-      let valueLit = pair.valueLit
-      tryBody.add(quote do:
-        addActiveServiceEnv(`keyLit`, `valueLit`))
-    # M9.C: scalar (last-wins) run-as / restart setters.
-    if parsedBody.restartLit != nil:
-      let lit = parsedBody.restartLit
-      tryBody.add(quote do:
-        setActiveServiceRestart(`lit`))
-    if parsedBody.userLit != nil:
-      let lit = parsedBody.userLit
-      tryBody.add(quote do:
-        setActiveServiceUser(`lit`))
-    if parsedBody.groupLit != nil:
-      let lit = parsedBody.groupLit
-      tryBody.add(quote do:
-        setActiveServiceGroup(`lit`))
-    # L1: the reactive surface, after the declarative setters so an
-    # ``on change cfg:`` block sees the same handle the args did.
-    for emission in parsedBody.reactiveEmissions:
-      tryBody.add(emission)
-    if tryBody.len == 0:
-      tryBody.add(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
-    # The package-init block. The body-setter splice is unconditional
-    # (no provider-mode gate) — see the "Risk #2" commentary above the
-    # M5 emitter for the rationale.
-    let declareSym = genSym(nskProc, "declareService")
+    result.add(emission)
+
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L2 — the "names the available members"
+# refusal.
+#
+# L2's gate: "a wrong member name failing the project's recipe
+# COMPILATION with a message naming the available members". Nim's own
+# diagnostic for a missing field is ``undeclared field: 'connectionStrin'
+# for type recipe.ManagedPostgres``, which stops the build but names
+# nothing the author could have written instead. This macro supplies that
+# half, and the activity walker arranges for it to run ONLY on a member
+# the type does not have (see ``l2MemberCheckStmts``), so the type's
+# member list is computed exactly where it is about to be printed.
+# ---------------------------------------------------------------------------
+
+proc l2AppendRecListNames(recList: NimNode; acc: var seq[string]) =
+  ## Field names out of an ``nnkRecList``, including the discriminator and
+  ## every branch of a variant object.
+  for entry in recList:
+    case entry.kind
+    of nnkIdentDefs:
+      for i in 0 ..< entry.len - 2:
+        var name = entry[i]
+        if name.kind == nnkPostfix:
+          name = name[1]
+        if name.kind == nnkPragmaExpr:
+          name = name[0]
+        if name.kind == nnkPostfix:
+          name = name[1]
+        if name.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+          let text = identText(name)
+          if text.len > 0 and text notin acc:
+            acc.add(text)
+    of nnkRecCase:
+      if entry.len > 0:
+        l2AppendRecListNames(newStmtList(entry[0]), acc)
+      for i in 1 ..< entry.len:
+        let branch = entry[i]
+        if branch.len > 0 and branch[^1].kind == nnkRecList:
+          l2AppendRecListNames(branch[^1], acc)
+    of nnkRecList:
+      l2AppendRecListNames(entry, acc)
+    of nnkNilLit, nnkEmpty, nnkCommentStmt:
+      discard
+    else:
+      discard
+
+proc l2AppendTypeMemberNames(node: NimNode; acc: var seq[string];
+                             depth: int) =
+  ## Member names of whatever type ``node`` denotes. Follows ``ref`` /
+  ## ``ptr``, object inheritance and ``distinct``; ``depth`` bounds the
+  ## walk so a pathological type cannot hang the compiler.
+  if depth > 8 or node == nil:
+    return
+  var target = node
+  if target.kind == nnkBracketExpr and target.len == 2 and
+      target[0].kind in {nnkIdent, nnkSym} and
+      identText(target[0]).normalize == "typedesc":
+    target = target[1]
+  var impl: NimNode = nil
+  if target.kind in {nnkSym, nnkIdent}:
+    impl = target.getTypeImpl()
+  else:
+    impl = target
+  if impl == nil:
+    return
+  case impl.kind
+  of nnkRefTy, nnkPtrTy:
+    if impl.len > 0:
+      l2AppendTypeMemberNames(impl[0], acc, depth + 1)
+  of nnkDistinctTy:
+    if impl.len > 0:
+      l2AppendTypeMemberNames(impl[0], acc, depth + 1)
+  of nnkObjectTy:
+    if impl.len >= 3 and impl[2].kind == nnkRecList:
+      l2AppendRecListNames(impl[2], acc)
+    if impl.len >= 2 and impl[1].kind == nnkOfInherit and impl[1].len > 0:
+      l2AppendTypeMemberNames(impl[1][0], acc, depth + 1)
+  of nnkTupleTy:
+    l2AppendRecListNames(impl, acc)
+  of nnkBracketExpr:
+    # A generic instance (``MyObj[int]``): the member names live on the
+    # generic body.
+    if impl.len > 0:
+      l2AppendTypeMemberNames(impl[0], acc, depth + 1)
+  else:
+    discard
+
+macro activityMemberRefusal*(ty: typedesc; anchor: untyped;
+                             activityName, paramName,
+                             memberName: static string): untyped =
+  ## Refuse one ``<param>.<member>`` access, naming the members ``ty``
+  ## actually has.
+  ##
+  ## Invoked only from the ``when not compiles(...)`` guard the activity
+  ## walker emits, so reaching this macro at all means the access does
+  ## not typecheck. It therefore always errors; there is no success path
+  ## and no node it could return.
+  ##
+  ## ``anchor`` is the offending ``<param>.<member>`` expression from the
+  ## recipe, passed ``untyped`` so it is NOT semchecked here (it cannot
+  ## be — that is the point) and used only for its line info. Without it
+  ## the diagnostic reports against this macro's own line in the DSL,
+  ## which is the "reported against generated code" failure the message
+  ## itself warns about.
+  var inst = ty.getTypeInst()
+  var typeNode = inst
+  if typeNode.kind == nnkBracketExpr and typeNode.len == 2:
+    typeNode = typeNode[1]
+  var members: seq[string] = @[]
+  l2AppendTypeMemberNames(typeNode, members, 0)
+  let typeText = typeNode.repr.strip()
+  let available =
+    if members.len == 0:
+      "type `" & typeText & "` has no member fields at all"
+    else:
+      "available members of `" & typeText & "`: " & members.join(", ")
+  error("activity `" & activityName & "`: parameter `" & paramName &
+    "` has no member `" & memberName & "`. " & available & ". " &
+    "`Package-Model.md` §\"Activity declaration shape\": \"The body uses " &
+    "them like ordinary Nim values -- `db.connectionString`, " &
+    "`assets.bucket` -- with full typechecking\". A member written here " &
+    "that the parameter's type does not have is refused at the recipe's " &
+    "own line rather than reported against generated code.", anchor)
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L2 — the dev-env ``activity`` constructor
+# shape.
+#
+# ``Package-Model.md`` §"Activity declaration shape" is the authority:
+#
+#   "Activities are declared with a function-call shape. Required
+#    dependencies are constructor-style typed parameters; everything that
+#    has a default lives in an inner ``config:`` block."
+#   "Required dependencies (``db``, ``assets``) are typed parameters of the
+#    activity. The body uses them like ordinary Nim values —
+#    ``db.connectionString``, ``assets.bucket`` — with full typechecking and
+#    go-to-definition."
+#   "``enable myApi(db = mainDb, assets = assets): <overrides>`` is a typed
+#    call into the activity's generated entry point. Parameter names and
+#    types are checked the same way Nim checks any function call."
+#
+# WHY A WALKER RATHER THAN AN OVERLOADED ``activity`` MACRO. The obvious
+# implementation is a ``macro activity*(decl, body: untyped)`` overloading
+# today's ``proc activity*(name: string)``. Measured on this tree, that
+# does not work and cannot be made to: with both in the overload set Nim
+# semchecks the call's arguments before choosing a candidate, so
+# ``activity myApi(db: ManagedPostgres):`` fails with
+# ``undeclared identifier: 'myApi'`` — the parameter list is read as an
+# object constructor. Dropping the proc to make room for the macro is
+# exactly what L2's gate forbids ("``proc activity(name: string)``
+# continues to work for the parameterless case"), and there are real
+# callers: ``isonim-platform/repro.nim`` and ``codetracer/repro.nim``
+# declare ten bare activities between them.
+#
+# So the constructor form is lowered by the ``package`` macro's own
+# dev-env walker, the way every other block in this DSL is, and
+# ``activity "<name>"`` is left VERBATIM for the proc to handle. The
+# generated entry point even registers the name by calling that proc, so
+# the two forms share one registry.
+#
+# WHAT IS LOWERED, AND WHAT IS NOT. ``activity <name>(<p>: <T>, ...):``
+# becomes an ordinary nested Nim proc whose parameters are the declared
+# ones followed by one parameter per ``config:`` key, carrying that key's
+# default. That is the whole of the typing story: the body is spliced
+# verbatim, so ``db.connectionString`` is a real field access on a real
+# typed value, and ``enable`` is a real Nim call whose argument names and
+# types the compiler checks. Nothing here reimplements typechecking.
+#
+# A ``service <name>:`` statement in the body is lowered by
+# ``m5ServiceEmission`` — L1's emitter, shared rather than duplicated.
+# Every other statement is passed through untouched, because the spec says
+# the body is ordinary Nim.
+# ---------------------------------------------------------------------------
+
+const
+  l2ActivityHeadRule = "`Package-Model.md` §\"Activity declaration " &
+    "shape\": an activity is `activity <name>(<param>: <Type>, ...): " &
+    "<body>`, or `activity <name>: <body>` with no parameters. The " &
+    "parameterless `activity \"<name>\"` string form is unchanged and is " &
+    "not affected by this."
+  l2ActivityConfigRule = "`Package-Model.md` §\"Activity declaration " &
+    "shape\": a `config:` key is `<name>: <Type> = <default>`, or " &
+    "`<name>: <Type>` when the caller must supply it."
+  l2NoSilentDropRule = "An unrecognised spelling here is REFUSED rather " &
+    "than dropped: a parameter, a `config:` key or an `enable` override " &
+    "that is accepted and then not there is indistinguishable from " &
+    "support for it. This is the same defect the `args` setter and the " &
+    "`on <trigger>:` walker had before Shared-Development-Services L1."
+
+type
+  L2ActivityParam = object
+    ## One constructor-style typed parameter, as written.
+    name: string
+    typeNode: NimNode
+
+  L2ActivityConfigKey = object
+    ## One ``config:`` key, as written. ``defaultNode`` is ``nil`` when
+    ## the key has no default, which makes the generated parameter
+    ## required at the ``enable`` site.
+    name: string
+    typeNode: NimNode
+    defaultNode: NimNode
+    description: string
+
+var l2ActivityConfigKeyNames {.compileTime.}: Table[string, seq[string]]
+  ## ``<package>\x1f<activity>`` → its ``config:`` key names, recorded by
+  ## the activity walker and read by the ``enable`` walker so an
+  ## unrecognised override can name the keys that do exist. Compile-time
+  ## only, and per-compilation: it carries no state between recipes.
+
+var l2ActivityParamNames {.compileTime.}: Table[string, seq[string]]
+  ## Same key. Read only to tell an author who wrote a CONSTRUCTOR
+  ## parameter in the override body that it belongs in the parentheses —
+  ## a mistake that would otherwise be reported as an unknown key.
+
+proc l2ActivityKey(packageName, activityName: string): string =
+  packageName & "\x1f" & activityName
+
+proc l2ActivityEntryProcName(activityName: string): string =
+  ## The generated entry point's name. Deterministic from the activity
+  ## name alone, which is what lets the ``enable`` walker name it without
+  ## a registry: both walkers compute this same string.
+  "reproActivity_" & activityName
+
+proc l2CommentText(node: NimNode): string =
+  ## A ``nnkCommentStmt``'s text with any leading ``#`` markers stripped,
+  ## line by line. Same treatment ``collectConfigSection`` gives a
+  ## ``config:`` doc comment, for the same reason: the node's ``strVal``
+  ## is not consistently marker-free.
+  var lines: seq[string] = @[]
+  for line in node.strVal.splitLines():
+    var trimmed = line.strip()
+    while trimmed.len > 0 and trimmed[0] == '#':
+      trimmed = trimmed[1 .. ^1]
+    lines.add(trimmed.strip())
+  result = lines.join("\n").strip()
+
+proc l2StmtAnchor(stmt: NimNode): NimNode =
+  ## The node a refusal about ``stmt`` should report at.
+  ##
+  ## Nim puts a call node's line info on its opening parenthesis and an
+  ## assignment's on its ``=``, so anchoring on the statement itself
+  ## reports a column several tokens to the right of the thing the author
+  ## has to look at. Anchoring on the HEAD gives the statement's own
+  ## column. Same fix, and the same reason, as L1's
+  ## ``m5ServiceStmtAnchor``.
+  if stmt.kind in {nnkCall, nnkCommand, nnkAsgn, nnkExprEqExpr,
+                   nnkExprColonExpr, nnkObjConstr} and stmt.len > 0:
+    return stmt[0]
+  stmt
+
+proc l2IsHeadNamed(stmt: NimNode; name: string): bool =
+  ## ``stmt`` is a Call/Command whose head ident is ``name``.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return false
+  if stmt.len < 1:
+    return false
+  if stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return false
+  identText(stmt[0]).normalize == name.normalize
+
+proc l2ActivityEntryAst(stmt: NimNode): tuple[matched: bool;
+    activityName: string; paramsNode: NimNode; body: NimNode] =
+  ## Recognise ``activity <ident>: <body>`` and
+  ## ``activity <ident>(<p>: <T>, ...): <body>``.
+  ##
+  ## The parameter list parses as an ``nnkObjConstr`` (because its
+  ## children are ``nnkExprColonExpr``) and the empty list
+  ## ``activity foo():`` as an ``nnkCall``; both are accepted. A string
+  ## head (``activity "default"``) is NOT matched — that is the proc
+  ## form, and leaving it unmatched is how it keeps reaching the proc.
+  result.paramsNode = nil
+  if not l2IsHeadNamed(stmt, "activity"):
+    return
+  if stmt.len != 3:
+    # An ObjConstr head can only be a parameter list: `foo(a: b)` is not
+    # a string expression, so it can never have been meant for
+    # `proc activity(name: string)`. Refused rather than passed on,
+    # because Nim reports it as `undeclared identifier: 'foo'` -- which
+    # is true of the ACTIVITY NAME and tells the author nothing.
+    #
+    # An IDENT or CALL head at this arity is left alone on purpose:
+    # `activity someName` and `activity nameOf(x)` are both legal uses
+    # of the string-form proc, and refusing them would break the surface
+    # this milestone must preserve.
+    if stmt.len == 2 and stmt[1].kind == nnkObjConstr and
+        stmt[1].len > 0 and
+        stmt[1][0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      error("activity `" & identText(stmt[1][0]) & "`: an activity with " &
+        "parameters needs a body. " & l2ActivityHeadRule & " " &
+        l2NoSilentDropRule, l2StmtAnchor(stmt))
+    return
+  if stmt[2].kind != nnkStmtList:
+    return
+  let headNode = stmt[1]
+  case headNode.kind
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    result.matched = true
+    result.activityName = identText(headNode)
+    result.body = stmt[2]
+  of nnkObjConstr, nnkCall:
+    if headNode.len < 1 or
+        headNode[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      return
+    result.matched = true
+    result.activityName = identText(headNode[0])
+    result.paramsNode = headNode
+    result.body = stmt[2]
+  else:
+    discard
+
+proc l2ParseActivityParams(activityName: string;
+                           paramsNode: NimNode): seq[L2ActivityParam] =
+  ## ``(db: ManagedPostgres, assets: ObjectStore)`` → one entry each. The
+  ## type is kept as a NODE and spliced into the generated proc's
+  ## signature, so the compiler resolves it; this walker never interprets
+  ## it.
+  result = @[]
+  if paramsNode == nil:
+    return
+  for i in 1 ..< paramsNode.len:
+    let child = paramsNode[i]
+    if child.kind == nnkExprColonExpr and child.len == 2 and
+        child[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      result.add(L2ActivityParam(
+        name: identText(child[0]),
+        typeNode: child[1].copyNimTree()))
+    else:
+      error("activity `" & activityName & "`: `" & child.repr.strip() &
+        "` is not a typed parameter. Every parameter needs a declared " &
+        "type: `<name>: <Type>`. " & l2ActivityHeadRule & " " &
+        l2NoSilentDropRule, l2StmtAnchor(child))
+
+proc l2ConfigTypeNodeIsPlausible(node: NimNode): bool =
+  ## Whether a ``config:`` entry's single body node can be read as a TYPE
+  ## expression. The question only arises for the no-default form
+  ## (``externalDomain: string``), whose AST is otherwise
+  ## indistinguishable from a nested block (``database:`` followed by an
+  ## indented body) or from a value written where a type belongs
+  ## (``port: 8080``). Both of those are refused rather than lowered into
+  ## a parameter whose "type" the compiler will reject with a message
+  ## about generated code.
+  node.kind notin {nnkCall, nnkCommand, nnkStmtList, nnkAsgn,
+                   nnkExprEqExpr, nnkCommentStmt, nnkStrLit, nnkRStrLit,
+                   nnkTripleStrLit, nnkIntLit, nnkInt64Lit, nnkFloatLit,
+                   nnkCharLit, nnkNilLit, nnkIfStmt, nnkForStmt,
+                   nnkWhileStmt, nnkCaseStmt, nnkLetSection,
+                   nnkVarSection, nnkConstSection, nnkDiscardStmt}
+
+proc l2ParseActivityConfig(activityName: string;
+                           body: NimNode): seq[L2ActivityConfigKey] =
+  ## Walk every ``config:`` block in an activity body. More than one is
+  ## accepted and they concatenate, which costs nothing and keeps a
+  ## recipe that groups its keys from being a special case.
+  result = @[]
+  for stmt in body:
+    if not l2IsHeadNamed(stmt, "config"):
+      continue
+    if stmt.len < 2 or stmt[^1].kind != nnkStmtList:
+      error("activity `" & activityName & "`: `config:` needs a block " &
+        "body of key declarations. " & l2ActivityConfigRule & " " &
+        l2NoSilentDropRule, l2StmtAnchor(stmt))
+    var pendingDoc = ""
+    for entry in stmt[^1]:
+      if entry.kind == nnkCommentStmt:
+        if pendingDoc.len > 0:
+          pendingDoc.add("\n")
+        pendingDoc.add(l2CommentText(entry))
+        continue
+      if entry.kind == nnkCall and entry.len == 2 and
+          entry[0].kind in {nnkIdent, nnkSym, nnkAccQuoted} and
+          entry[1].kind == nnkStmtList and entry[1].len == 1:
+        let inner = entry[1][0]
+        if inner.kind == nnkAsgn and inner.len == 2:
+          result.add(L2ActivityConfigKey(
+            name: identText(entry[0]),
+            typeNode: inner[0].copyNimTree(),
+            defaultNode: inner[1].copyNimTree(),
+            description: pendingDoc))
+          pendingDoc = ""
+          continue
+        if l2ConfigTypeNodeIsPlausible(inner):
+          result.add(L2ActivityConfigKey(
+            name: identText(entry[0]),
+            typeNode: inner.copyNimTree(),
+            defaultNode: nil,
+            description: pendingDoc))
+          pendingDoc = ""
+          continue
+      # Named by KEY rather than by the entry's ``repr``: a
+      # ``name:``-with-a-block node reprs as ``name do:`` across several
+      # lines, which makes the first line of the diagnostic say nothing.
+      if entry.kind in {nnkCall, nnkCommand} and entry.len == 2 and
+          entry[0].kind in {nnkIdent, nnkSym, nnkAccQuoted} and
+          entry[1].kind == nnkStmtList:
+        var declared: seq[string] = @[]
+        for inner in entry[1]:
+          # Flattened: a nested block's ``repr`` spans lines, and a
+          # diagnostic whose first line is `host do:` says nothing.
+          declared.add(inner.repr.strip().splitLines().join(" / "))
+        error("activity `" & activityName & "`: `config:` key `" &
+          identText(entry[0]) & "` is declared as `" &
+          declared.join("; ") & "`, which is neither a type with a " &
+          "default nor a bare type. " & l2ActivityConfigRule & " " &
+          l2NoSilentDropRule, l2StmtAnchor(entry))
+      error("activity `" & activityName & "`: `" & entry.repr.strip() &
+        "` is not a `config:` key declaration. " & l2ActivityConfigRule &
+        " " & l2NoSilentDropRule, l2StmtAnchor(entry))
+
+proc l2WalkMemberUses(node: NimNode; paramNames: seq[string];
+                      calleePosition: bool;
+                      acc: var seq[tuple[param, member: string;
+                                         anchor: NimNode]]) =
+  ## Collect every ``<param>.<member>`` field access in an activity body.
+  ##
+  ## A dot expression in CALLEE position (``db.listTables(2)``) is skipped
+  ## deliberately: ``compiles(db.listTables)`` is false for a proc that
+  ## needs more arguments, so checking it would refuse a correct recipe.
+  ## Method-call syntax on a parameter is therefore left entirely to the
+  ## compiler, which reports it the way it reports any other call.
+  if node.kind == nnkDotExpr and node.len == 2 and
+      node[0].kind in {nnkIdent, nnkSym} and
+      node[1].kind in {nnkIdent, nnkSym, nnkAccQuoted} and
+      not calleePosition:
+    let base = identText(node[0]).normalize
+    for name in paramNames:
+      if name.normalize == base:
+        acc.add((param: name, member: identText(node[1]), anchor: node))
+        break
+  if node.kind in {nnkCall, nnkCommand} and node.len > 0:
+    l2WalkMemberUses(node[0], paramNames, true, acc)
+    for i in 1 ..< node.len:
+      l2WalkMemberUses(node[i], paramNames, false, acc)
+  else:
+    for child in node:
+      l2WalkMemberUses(child, paramNames, false, acc)
+
+proc l2MemberCheckStmts(activityName: string;
+                        params: seq[L2ActivityParam];
+                        body: NimNode): NimNode =
+  ## One guarded refusal per distinct ``<param>.<member>`` pair the body
+  ## uses, emitted at the TOP of the generated entry point so it is
+  ## semchecked before the body that contains the offending access.
+  ##
+  ## The guard is ``when not compiles(<param>.<member>)``, so the refusal
+  ## macro runs ONLY for a member the type does not have — and the
+  ## message it then produces can name the members the type DOES have,
+  ## which is what L2's gate asks for and what Nim's own
+  ## ``undeclared field`` error does not do.
+  result = newStmtList()
+  if params.len == 0:
+    return
+  var names: seq[string] = @[]
+  for p in params:
+    names.add(p.name)
+  var uses: seq[tuple[param, member: string; anchor: NimNode]] = @[]
+  l2WalkMemberUses(body, names, false, uses)
+  var seen: seq[string] = @[]
+  for use in uses:
+    let key = use.param & "." & use.member
+    if key in seen:
+      continue
+    seen.add(key)
+    let paramIdent = ident(use.param)
+    let access = newDotExpr(paramIdent, ident(use.member))
+    let refusal = newCall(ident("activityMemberRefusal"),
+      newCall(ident("typeof"), paramIdent), use.anchor.copyNimTree(),
+      newLit(activityName), newLit(use.param), newLit(use.member))
+    # The refusal reports at the recipe's own line rather than at
+    # generated code, which is the difference between a diagnostic an
+    # author can act on and one they have to decode.
+    refusal.copyLineInfo(use.anchor)
     result.add(quote do:
-      block:
-        proc `declareSym`() {.closure.} =
-          beginServiceContext(`pkgLit`, `svcNameLit`, `bodyReprLit`)
-          try:
-            `tryBody`
-          finally:
-            finishServiceContext()
-        registerServiceDeclarator(`pkgLit`, `svcNameLit`, `declareSym`)
-        `declareSym`())
+      when not compiles(`access`):
+        `refusal`)
+
+proc l2SeqLiteral(items: openArray[NimNode]): NimNode =
+  ## ``@[a, b]`` — or ``@[]`` when empty.
+  var bracket = nnkBracket.newTree()
+  for item in items:
+    bracket.add(item)
+  nnkPrefix.newTree(ident("@"), bracket)
+
+proc l2ActivityDefLiteral(packageName, activityName: string;
+                          params: seq[L2ActivityParam];
+                          config: seq[L2ActivityConfigKey];
+                          bodyRepr: string): NimNode =
+  ## The ``DslActivityDef`` object constructor the generated code
+  ## registers. Built as AST rather than as source text so no string
+  ## escaping stands between a recipe's own spelling and the record.
+  var paramItems: seq[NimNode] = @[]
+  for p in params:
+    paramItems.add(nnkObjConstr.newTree(ident("DslActivityParamDef"),
+      nnkExprColonExpr.newTree(ident("name"), newLit(p.name)),
+      nnkExprColonExpr.newTree(ident("typeRepr"),
+        newLit(p.typeNode.repr.strip()))))
+  var configItems: seq[NimNode] = @[]
+  for c in config:
+    configItems.add(nnkObjConstr.newTree(ident("DslActivityConfigDef"),
+      nnkExprColonExpr.newTree(ident("name"), newLit(c.name)),
+      nnkExprColonExpr.newTree(ident("typeRepr"),
+        newLit(c.typeNode.repr.strip())),
+      nnkExprColonExpr.newTree(ident("defaultRepr"),
+        newLit(if c.defaultNode == nil: "" else: c.defaultNode.repr.strip())),
+      nnkExprColonExpr.newTree(ident("hasDefault"),
+        newLit(c.defaultNode != nil)),
+      nnkExprColonExpr.newTree(ident("description"), newLit(c.description))))
+  nnkObjConstr.newTree(ident("DslActivityDef"),
+    nnkExprColonExpr.newTree(ident("packageName"), newLit(packageName)),
+    nnkExprColonExpr.newTree(ident("activityName"), newLit(activityName)),
+    nnkExprColonExpr.newTree(ident("params"), l2SeqLiteral(paramItems)),
+    nnkExprColonExpr.newTree(ident("config"), l2SeqLiteral(configItems)),
+    nnkExprColonExpr.newTree(ident("bodyRepr"), newLit(bodyRepr)))
+
+proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
+  ## Lower ONE ``activity <name>(...): <body>`` statement, or return
+  ## ``nil`` when ``stmt`` is not one.
+  let parsed = l2ActivityEntryAst(stmt)
+  if not parsed.matched:
+    return nil
+  let params = l2ParseActivityParams(parsed.activityName, parsed.paramsNode)
+  let config = l2ParseActivityConfig(parsed.activityName, parsed.body)
+  var seenNames: seq[string] = @[]
+  for p in params:
+    if p.name.normalize in seenNames:
+      error("activity `" & parsed.activityName & "`: parameter `" &
+        p.name & "` is declared twice.", stmt)
+    seenNames.add(p.name.normalize)
+  for c in config:
+    if c.name.normalize in seenNames:
+      error("activity `" & parsed.activityName & "`: `config:` key `" &
+        c.name & "` collides with a constructor parameter of the same " &
+        "name. The two become one parameter list on the generated entry " &
+        "point, so the names have to be distinct.", stmt)
+    seenNames.add(c.name.normalize)
+
+  # Record for the ``enable`` walker's diagnostics.
+  let key = l2ActivityKey(packageName, parsed.activityName)
+  var configNames: seq[string] = @[]
+  for c in config:
+    configNames.add(c.name)
+  var paramNames: seq[string] = @[]
+  for p in params:
+    paramNames.add(p.name)
+  l2ActivityConfigKeyNames[key] = configNames
+  l2ActivityParamNames[key] = paramNames
+
+  # The entry point. Parameters first, then one per ``config:`` key
+  # carrying that key's default — which is what makes ``enable`` a plain
+  # Nim call with named arguments and nothing more.
+  var formal = nnkFormalParams.newTree(newEmptyNode())
+  for p in params:
+    formal.add(nnkIdentDefs.newTree(ident(p.name), p.typeNode.copyNimTree(),
+      newEmptyNode()))
+  for c in config:
+    let default =
+      if c.defaultNode == nil: newEmptyNode()
+      else: c.defaultNode.copyNimTree()
+    formal.add(nnkIdentDefs.newTree(ident(c.name), c.typeNode.copyNimTree(),
+      default))
+
+  let procBody = newStmtList()
+  procBody.add(l2MemberCheckStmts(parsed.activityName, params, parsed.body))
+  for entry in parsed.body:
+    if l2IsHeadNamed(entry, "config"):
+      continue
+    if l2IsHeadNamed(entry, "service"):
+      let emission = m5ServiceEmission(packageName, entry)
+      if emission != nil:
+        procBody.add(emission)
+        continue
+      error("activity `" & parsed.activityName & "`: `" &
+        entry.repr.strip() & "` is not a recognised `service <name>:` " &
+        "declaration. `Package-Model.md` §Collections: a service is " &
+        "`service <name>:` with a block body of setters. " &
+        l2NoSilentDropRule, l2StmtAnchor(entry))
+    procBody.add(entry.copyNimTree())
+  if procBody.len == 0:
+    procBody.add(nnkDiscardStmt.newTree(newEmptyNode()))
+
+  let procDef = nnkProcDef.newTree(
+    ident(l2ActivityEntryProcName(parsed.activityName)),
+    newEmptyNode(), newEmptyNode(), formal,
+    newEmptyNode(), newEmptyNode(), procBody)
+  procDef.copyLineInfo(stmt)
+
+  let nameLit = newLit(parsed.activityName)
+  let defLiteral = l2ActivityDefLiteral(packageName, parsed.activityName,
+    params, config, parsed.body.repr)
+  result = newStmtList(
+    procDef,
+    # The name goes through the SAME ``proc activity(name: string)`` the
+    # string form uses, so a parameterised activity is selectable by the
+    # dev-env activity gate exactly like a bare one and there is one
+    # registry of names rather than two.
+    quote do:
+      activity(`nameLit`),
+    quote do:
+      registerActivityDeclaration(`defLiteral`))
+
+proc l2EnableEntryAst(stmt: NimNode): tuple[matched: bool;
+    activityName: string; argsNode: NimNode; overrides: NimNode] =
+  ## Recognise ``enable <name>``, ``enable <name>(<arg> = <expr>, ...)``
+  ## and either of those with a ``: <overrides>`` block.
+  result.argsNode = nil
+  result.overrides = nil
+  if stmt.len notin {2, 3}:
+    return
+  if not l2IsHeadNamed(stmt, "enable"):
+    return
+  if stmt.len == 3:
+    if stmt[2].kind != nnkStmtList:
+      return
+    result.overrides = stmt[2]
+  let headNode = stmt[1]
+  case headNode.kind
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    result.matched = true
+    result.activityName = identText(headNode)
+  of nnkCall:
+    if headNode.len < 1 or
+        headNode[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      return
+    result.matched = true
+    result.activityName = identText(headNode[0])
+    result.argsNode = headNode
+  of nnkObjConstr:
+    # ``enable myApi(db: mainDb)`` — a ``:`` where the spec writes ``=``.
+    # Refused rather than passed on, because as an object constructor it
+    # would be reported against a type the author never named.
+    error("`enable " & identText(headNode[0]) & "(...)` passes its " &
+      "arguments with `=`, not `:`: `enable " & identText(headNode[0]) &
+      "(db = mainDb, assets = assets)`. `Package-Model.md` " &
+      "§\"Systems And Enable Composition\": \"`enable myApi(db = mainDb, " &
+      "assets = assets): <overrides>` is a typed call into the " &
+      "activity's generated entry point.\"", l2StmtAnchor(stmt))
+  else:
+    discard
+
+proc l2EnableOverridePair(activityName: string; stmt: NimNode):
+    tuple[name: string; value: NimNode] =
+  ## One override statement → its key and value. ``Package-Model.md``:
+  ## "The override body uses the function-call setter form (``port
+  ## 9090``)". The assignment form (``port = 9090``) is accepted too,
+  ## because it is what an author who has just written
+  ## ``db = mainDb`` three characters earlier will reach for.
+  if stmt.kind in {nnkCommand, nnkCall, nnkAsgn, nnkExprEqExpr} and
+      stmt.len == 2 and stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    return (name: identText(stmt[0]), value: stmt[1].copyNimTree())
+  error("`enable " & activityName & "`: `" & stmt.repr.strip() &
+    "` is not an override. Each line of the override body sets ONE " &
+    "`config:` key: `<key> <value>` (or `<key> = <value>`). " &
+    l2NoSilentDropRule, l2StmtAnchor(stmt))
+
+proc l2EnableEmission(packageName: string; stmt: NimNode): NimNode =
+  ## Lower ONE ``enable ...`` statement to the typed call into the
+  ## activity's generated entry point, or return ``nil`` when ``stmt`` is
+  ## not one.
+  let parsed = l2EnableEntryAst(stmt)
+  if not parsed.matched:
+    return nil
+  let key = l2ActivityKey(packageName, parsed.activityName)
+  let known = l2ActivityConfigKeyNames.hasKey(key)
+  if not known:
+    # The generated entry point is a proc nested in this package's
+    # `devEnv<Pkg>Package()`, so an `enable` can only reach an activity
+    # this package declared ABOVE it. Nim would report the generated
+    # proc's name (`reproActivity_api`), which names an identifier the
+    # author never wrote.
+    var declared: seq[string] = @[]
+    for registryKey in l2ActivityConfigKeyNames.keys:
+      let parts = registryKey.split("\x1f")
+      if parts.len == 2 and parts[0] == packageName:
+        declared.add(parts[1])
+    let available =
+      if declared.len == 0:
+        "this package declares no constructor-shaped activities"
+      else:
+        "declared above in this `devEnv:` block: " & declared.join(", ")
+    error("`enable " & parsed.activityName & "`: package `" & packageName &
+      "` declares no activity named `" & parsed.activityName &
+      "` above this line. " & available & ". `Package-Model.md` " &
+      "§\"Systems And Enable Composition\": `enable` is \"a typed call " &
+      "into the activity's generated entry point\", so the declaration " &
+      "has to come first. (A bare `activity \"<name>\"` declares a NAME " &
+      "only and has no entry point to enable.)", l2StmtAnchor(stmt))
+  let call = newCall(ident(l2ActivityEntryProcName(parsed.activityName)))
+  if parsed.argsNode != nil:
+    for i in 1 ..< parsed.argsNode.len:
+      let child = parsed.argsNode[i]
+      if child.kind == nnkExprEqExpr and child.len == 2:
+        call.add(nnkExprEqExpr.newTree(child[0].copyNimTree(),
+          child[1].copyNimTree()))
+      else:
+        call.add(child.copyNimTree())
+  if parsed.overrides != nil:
+    var seen: seq[string] = @[]
+    for entry in parsed.overrides:
+      if entry.kind in {nnkCommentStmt, nnkEmpty}:
+        continue
+      if entry.kind == nnkDiscardStmt:
+        continue
+      let pair = l2EnableOverridePair(parsed.activityName, entry)
+      if pair.name.normalize in seen:
+        error("`enable " & parsed.activityName & "`: `" & pair.name &
+          "` is set twice in the override body.", l2StmtAnchor(entry))
+      seen.add(pair.name.normalize)
+      if known:
+        var isConfigKey = false
+        for name in l2ActivityConfigKeyNames[key]:
+          if name.normalize == pair.name.normalize:
+            isConfigKey = true
+            break
+        if not isConfigKey:
+          var isParam = false
+          for name in l2ActivityParamNames[key]:
+            if name.normalize == pair.name.normalize:
+              isParam = true
+              break
+          let available =
+            if l2ActivityConfigKeyNames[key].len == 0:
+              "activity `" & parsed.activityName &
+                "` declares no `config:` keys at all"
+            else:
+              "available `config:` keys: " &
+                l2ActivityConfigKeyNames[key].join(", ")
+          if isParam:
+            error("`enable " & parsed.activityName & "`: `" & pair.name &
+              "` is a CONSTRUCTOR PARAMETER of activity `" &
+              parsed.activityName & "`, not a `config:` key, so it is " &
+              "passed in the parentheses rather than in the override " &
+              "body: `enable " & parsed.activityName & "(" & pair.name &
+              " = ...)`. " & available & ".", l2StmtAnchor(entry))
+          error("`enable " & parsed.activityName & "`: activity `" &
+            parsed.activityName & "` has no `config:` key named `" &
+            pair.name & "`. " & available & ".", l2StmtAnchor(entry))
+      call.add(nnkExprEqExpr.newTree(ident(pair.name), pair.value))
+  call.copyLineInfo(stmt)
+  result = newStmtList(call)
+
+proc l2LowerDevEnvActivities(packageName: string; body: NimNode): NimNode =
+  ## Rewrite a ``devEnv:`` body's ``activity <name>(...):`` declarations
+  ## and ``enable ...`` call sites. Every other statement — including
+  ## ``activity "<name>"``, ``servicePlaceholder``, ``useTool``,
+  ## ``setEnv`` and ordinary Nim — is copied through verbatim.
+  result = newStmtList()
+  if body.kind != nnkStmtList:
+    return body
+  for stmt in body:
+    let activityEmission = l2ActivityEmission(packageName, stmt)
+    if activityEmission != nil:
+      result.add(activityEmission)
+      continue
+    let enableEmission = l2EnableEmission(packageName, stmt)
+    if enableEmission != nil:
+      result.add(enableEmission)
+      continue
+    result.add(stmt.copyNimTree())
+
 
 # ---------------------------------------------------------------------------
 # DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` lowerer.
