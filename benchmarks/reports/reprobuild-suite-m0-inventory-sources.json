@@ -34325,7 +34325,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

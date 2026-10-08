@@ -1567,7 +1567,7 @@ tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.ni
 tests/integration/t_tdx_agent_backend.nim	nim	28
 tests/integration/t_tdx_chain_requires_intel_root.nim	nim	17
 tests/integration/t_tdx_collateral_and_verifier_arm.nim	nim	27
-tests/integration/t_tdx_expectation_reaches_the_verifier.nim	nim	12
+tests/integration/t_tdx_expectation_reaches_the_verifier.nim	nim	13
 tests/integration/t_tdx_launch_refusals.nim	nim	41
 tests/integration/t_tdx_launch_vectors.nim	nim	21
 tests/integration/t_tdx_quote_fixture_verify.nim	nim	20
