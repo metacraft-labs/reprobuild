@@ -148,7 +148,22 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   # against an archive the manifest no longer names.
   script.add("rm -rf \"" & q(npmCache) & "\"; ")
   script.add("mkdir -p \"" & q(npmCache) & "\"; ")
-  script.add("repro_n=0; repro_batch=''; ")
+  # The per-archive body below starts NO process when the archive is
+  # already downloaded: only parameter expansion, `[ -f ]` and variable
+  # appends, all shell builtins. Each batch is verified and loaded by one
+  # subshell (`loadBatch`). Starting a process per archive is what made this
+  # step slow: with gemini-cli's 1464-entry manifest and every archive on
+  # disk, the per-archive `mkdir -p` and `printf | sha256sum -c` cost about
+  # 0.8 s an entry on a loaded Windows host unmonitored and 3.4 s monitored,
+  # against about 0.14 s an entry for `npm cache add` itself.
+  let loadBatch = "(cd \"" & q(cacheDir) & "\" && " &
+    # Verified every run, not only after a download: a cache entry
+    # corrupted in place is exactly what this catches. Verified BEFORE npm
+    # sees the batch, so a bad archive never enters the cache. `printf`
+    # repeats its format for each `<sha256> <path>` pair.
+    "printf '%s  %s\\n' $repro_sums | sha256sum -c - > /dev/null && " &
+    "npm cache add --cache \"" & q(npmCache) & "\" $repro_batch)"
+  script.add("repro_n=0; repro_batch=''; repro_sums=''; ")
   # One space-separated triple per line: <node_modules-path> <sha256> <url>.
   script.add("while read -r repro_path repro_sha repro_url; do ")
   script.add("case \"$repro_path\" in ''|'#'*) continue;; esac; ")
@@ -161,28 +176,23 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   script.add("repro_rel=\"${repro_url#*://}\"; ")
   script.add("repro_rel=\"${repro_rel#*/}\"; ")
   script.add("repro_cached=\"" & q(cacheDir) & "/$repro_rel\"; ")
-  script.add("mkdir -p \"${repro_cached%/*}\"; ")
   script.add("if [ ! -f \"$repro_cached\" ]; then ")
+  script.add("mkdir -p \"${repro_cached%/*}\"; ")
   script.add("curl -fsSL " & CurlFetchRetryArgs &
     " -o \"$repro_cached.part\" \"$repro_url\"; ")
   script.add("mv -f \"$repro_cached.part\" \"$repro_cached\"; fi; ")
-  # Verified every run, not only after a download: a cache entry corrupted
-  # in place is exactly what this catches.
-  script.add("printf '%s  %s\\n' \"$repro_sha\" \"$repro_cached\" | " &
-    "sha256sum -c - > /dev/null; ")
-  # Queue it for the npm cache. `file:` is load-bearing: without it npm
-  # reads `@scope/name/-/x.tgz` as a GitHub shorthand. The spec is relative
-  # to the download cache (the `cd` below), and npm package paths carry no
-  # whitespace, so plain word-splitting of the batch is safe.
+  # Queue it for verification and for the npm cache. `file:` is
+  # load-bearing: without it npm reads `@scope/name/-/x.tgz` as a GitHub
+  # shorthand. Both lists hold paths relative to the download cache (the
+  # `cd` in `loadBatch`), and npm package paths carry no whitespace, so
+  # plain word-splitting of them is safe.
+  script.add("repro_sums=\"$repro_sums $repro_sha $repro_rel\"; ")
   script.add("repro_batch=\"$repro_batch file:$repro_rel\"; ")
   script.add("repro_n=$((repro_n + 1)); ")
   script.add("if [ \"$repro_n\" -ge " & $NpmCacheAddBatch & " ]; then ")
-  script.add("(cd \"" & q(cacheDir) & "\" && npm cache add --cache \"" &
-    q(npmCache) & "\" $repro_batch); repro_n=0; repro_batch=''; fi; ")
+  script.add(loadBatch & "; repro_n=0; repro_batch=''; repro_sums=''; fi; ")
   script.add("done < \"" & q(manifest) & "\"; ")
-  script.add("if [ -n \"$repro_batch\" ]; then ")
-  script.add("(cd \"" & q(cacheDir) & "\" && npm cache add --cache \"" &
-    q(npmCache) & "\" $repro_batch); fi; ")
+  script.add("if [ -n \"$repro_batch\" ]; then " & loadBatch & "; fi; ")
   # A committed lock (see `NpmBuildClosureLockName`) is what the closure
   # manifest was generated from, so its content is part of the up-to-date
   # token below and the file is an input: an edit re-populates the cache.

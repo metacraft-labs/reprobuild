@@ -16434,6 +16434,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_npm_vendor_action.nim",
+    binary: "build/test-bin/t_npm_vendor_action",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_prefix_env_ops.nim",
     binary: "build/test-bin/t_prefix_env_ops",
     defines: @[],
