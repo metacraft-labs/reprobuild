@@ -296,7 +296,7 @@ type
     ## being a rebuild-everything hammer: changing a service's argv
     ## re-lifts to the same digest and does not invalidate consumers,
     ## while renaming the service does. Measured both ways in
-    ## ``t_l3_lifted_service_signature_fingerprint.nim``.
+    ## ``t_l3_lift_carries_service_and_activity_signatures.nim``.
     ##
     ## ``activityName`` is the activity whose body declared it, or "" for
     ## a package-level service.

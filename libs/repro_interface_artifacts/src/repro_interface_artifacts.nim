@@ -436,7 +436,7 @@ type
     ## rebuild-everything hammer: a producer changing its service's argv
     ## re-lifts to the SAME interface digest, while renaming the service
     ## shifts it. Both directions are measured in
-    ## ``t_l3_lifted_service_signature_fingerprint.nim``.
+    ## ``t_l3_lift_carries_service_and_activity_signatures.nim``.
     name*: string
     activityName*: string
       ## The declaring activity, or "" for a package-level service.

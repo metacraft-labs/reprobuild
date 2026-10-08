@@ -3437,6 +3437,18 @@ proc l3ActivityHandleTypeName(packageName, activityName: string): string =
 proc l3PackageExportsTypeName(packageName: string): string =
   titleIdent(packageName) & "Exports"
 
+const
+  # The FIXED module-scope names `l3LiftedExportSurface` emits, named
+  # once so the emission and `l3CheckExportNames`' reservation cannot
+  # drift apart. The two registry calls are not declarations of this
+  # module, but they are resolved at module scope in the generated code,
+  # and an accessor `proc` sharing one of their names would be an
+  # overload of an imported routine rather than the export the author
+  # asked for.
+  l3LiftedExportsProcName = "liftedExports"
+  l3RegisterActivityCallName = "registerActivityInterface"
+  l3RegisterServiceCallName = "registerServiceInterface"
+
 proc l3Exportable(name: string): bool =
   ## Whether a declared name can become a DOT-ACCESS typed symbol.
   ##
@@ -3503,6 +3515,42 @@ proc l3CollectExports(packageName: string; pkgBody: NimNode):
           handleType: handleType, anchor: l2StmtAnchor(inner)))
       result.activities.add(entry)
 
+proc l3EmittedModuleScopeNames(packageName: string;
+                               activities: seq[L3ActivityExport]):
+    seq[tuple[name, what: string]] =
+  ## Every name `l3LiftedExportSurface` puts at MODULE scope for this
+  ## package, with a phrase naming what each one is. Derived here and
+  ## consumed by `l3CheckExportNames`, so an export cannot be given a
+  ## name the lift is about to use for something else.
+  ##
+  ## It is a derivation and not a hand-kept list: the three fixed names
+  ## are the consts the emission itself interpolates, the reflection
+  ## object comes from `l3PackageExportsTypeName` and the handle types
+  ## from `l3ActivityHandleTypeName` by way of `act.handleType` — the
+  ## same calls that produce the emitted text. A new emitted name is
+  ## reserved by being added to that one source, not by being remembered
+  ## here as well.
+  ##
+  ## The ACCESSOR procs are deliberately absent: their names ARE the
+  ## export names, and `claim` already refuses two exports sharing one.
+  ## Only the handle types of EXPORTABLE activities are listed, because
+  ## those are the only ones the emission declares (see `l3Exportable`).
+  result = @[
+    (l3LiftedExportsProcName,
+     "the generated `proc " & l3LiftedExportsProcName &
+       "` that carries every export's address"),
+    (l3RegisterActivityCallName,
+     "the registry call the lift emits for each activity"),
+    (l3RegisterServiceCallName,
+     "the registry call the lift emits for each service"),
+    (l3PackageExportsTypeName(packageName),
+     "the generated reflection object `" &
+       l3PackageExportsTypeName(packageName) & "`")]
+  for act in activities:
+    if l3Exportable(act.name):
+      result.add((act.handleType,
+        "the generated handle type for activity `" & act.name & "`"))
+
 proc l3CheckExportNames(packageName: string;
                         activities: seq[L3ActivityExport];
                         services: seq[L3ServiceExport]) =
@@ -3519,10 +3567,20 @@ proc l3CheckExportNames(packageName: string;
   ## seven of; the reference `infra.<name>` would simply not resolve, with
   ## no diagnostic anywhere.
   let pkgValue = packageValueIdent(packageName)
+  let emitted = l3EmittedModuleScopeNames(packageName, activities)
   var slots: seq[string] = @[]
   var owner: seq[string] = @[]
   proc claim(name, kind: string; anchor: NimNode) =
     let key = name.normalize
+    for em in emitted:
+      if key != em.name.normalize:
+        continue
+      error("`" & kind & " " & name & "`: `" & name & "` is RESERVED -- " &
+        "the lift itself emits it at module scope for package `" &
+        packageName & "`, as " & em.what & ". Exporting it would put a " &
+        "top-level `proc " & name & "` beside that one, and Nim would " &
+        "report the clash against GENERATED code, on no line an author " &
+        "can act on. Rename the " & kind & ".", anchor)
     if key == pkgValue.normalize:
       error("`" & kind & " " & name & "`: package `" & packageName &
         "` exports it to consumers as `" & pkgValue & "." & name &
@@ -3662,8 +3720,8 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       inc exportCount
   if exportCount == 0:
     code.add("    discard\n")
-  code.add("proc liftedExports*(pkg: " & typeName & "): " & exportsType &
-    " =\n")
+  code.add("proc " & l3LiftedExportsProcName & "*(pkg: " & typeName &
+    "): " & exportsType & " =\n")
   code.add("  ## Shared-Development-Services L3: the ADDRESSES of this " &
     "package's\n  ## exports. Not a resolver (§4.6) and not an instance " &
     "(§7) — it is what\n  ## makes the names typed.\n")
@@ -3689,11 +3747,13 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
     if not l3Exportable(act.name):
       continue
     code.add("proc " & act.name & "*(pkg: " & typeName & "): " &
-      act.handleType & " =\n  pkg.liftedExports." & act.name & "\n")
+      act.handleType & " =\n  pkg." & l3LiftedExportsProcName & "." &
+      act.name & "\n")
   for svc in collected.services:
     if svc.activityName.len == 0 and l3Exportable(svc.name):
       code.add("proc " & svc.name & "*(pkg: " & typeName &
-        "): LiftedServiceHandle =\n  pkg.liftedExports." & svc.name & "\n")
+        "): LiftedServiceHandle =\n  pkg." & l3LiftedExportsProcName &
+        "." & svc.name & "\n")
   for act in collected.activities:
     var params: seq[string] = @[]
     for p in act.params:
@@ -3718,7 +3778,7 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
     for svcName in act.services:
       svcNames.add(escForCode(svcName))
     let info = act.anchor.lineInfoObj()
-    code.add("registerActivityInterface(" & escForCode(pkg.packageName) &
+    code.add(l3RegisterActivityCallName & "(" & escForCode(pkg.packageName) &
       ", ActivityInterfaceDef(name: " & escForCode(act.name) &
       ", handleType: " & escForCode(act.handleType) &
       ", params: @[" & params.join(", ") & "]" &
@@ -3728,7 +3788,7 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       ", sourceLine: " & $info.line & "))\n")
   for svc in collected.services:
     let info = svc.anchor.lineInfoObj()
-    code.add("registerServiceInterface(" & escForCode(pkg.packageName) &
+    code.add(l3RegisterServiceCallName & "(" & escForCode(pkg.packageName) &
       ", ServiceInterfaceDef(name: " & escForCode(svc.name) &
       ", activityName: " & escForCode(svc.activityName) &
       ", handleType: " & escForCode(svc.handleType) &
