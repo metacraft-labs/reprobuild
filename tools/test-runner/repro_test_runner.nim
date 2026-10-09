@@ -2523,9 +2523,22 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
         options = {poStdErrToStdOut})
       var readyLine = ""
       let waitStart = epochTime()
-      let gotLine = process.outputStream.readLine(readyLine)
+      # A read that RAISES must take the same teardown path as one that
+      # returns the wrong answer. It used to propagate straight out of this
+      # proc with the supervisor already forked and never killed: the
+      # caller's retry then started a second one, and the first lived on,
+      # orphaned, in its ``sleep`` loop. (Observed: three such orphans from
+      # a 1,200-case run when ``osproc.close``'s double close made
+      # ``outputStream``/``readLine`` fail with EBADF/EISDIR.)
+      var gotLine = false
+      var readError = ""
+      try:
+        gotLine = process.outputStream.readLine(readyLine)
+      except CatchableError as e:
+        readError = e.msg
       let waitedMs = int((epochTime() - waitStart) * 1000.0)
-      if not gotLine or readyLine != ProcessGroupReadyMarker:
+      if readError.len > 0 or not gotLine or
+          readyLine != ProcessGroupReadyMarker:
         # Collect the evidence BEFORE tearing the supervisor down — every
         # fact below used to be discarded, which is why this failure could
         # only ever report the phase and never the cause. The supervisor's
@@ -2564,7 +2577,9 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
           discard
         closeMergedProcess(process)
         let observed =
-          if not gotLine:
+          if readError.len > 0:
+            "a read error on the supervisor's stdout: " & readError
+          elif not gotLine:
             "end of stream — the supervisor's stdout closed without " &
               "delivering a single line"
           elif readyLine.len == 0:
