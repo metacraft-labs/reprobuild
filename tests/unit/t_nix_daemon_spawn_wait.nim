@@ -23,12 +23,14 @@
 ## case 1 impossible to provoke and case 2 depend on host load.
 
 import std/[os, osproc, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 import repro_build_engine
 
 when defined(windows):
   suite "nix daemon spawn wait":
     test "t_nix_daemon_spawn_wait_is_posix_only":
-      skip()
+      skip("POSIX only: both cases drive the client over a Unix-domain " &
+        "socket, which is what `exchangeWithNixDaemon` polls")
 else:
   suite "nix daemon spawn wait":
 
@@ -53,7 +55,8 @@ else:
     test "t_nix_daemon_slower_than_two_seconds_is_still_reached":
       let python = findExe("python3")
       if python.len == 0:
-        skip()
+        skip("python3 not on PATH; this case needs it to stand in for a " &
+          "daemon that binds only after the old ~2 s budget")
       else:
         let dir = createTempDir("repro-nixd-slow-", "")
         defer: removeDir(dir)

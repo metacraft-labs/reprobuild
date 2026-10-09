@@ -39127,7 +39127,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
