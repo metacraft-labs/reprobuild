@@ -48,10 +48,28 @@ pin=$(tr -d '\r' < .github/sibling-repos |
 # one the workflow itself just cloned beside this one, and every call is a
 # read (rev-parse, archive, remote get-url), so git's ownership check
 # (`safe.directory`, https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory)
-# protects nothing here -- and on a Windows runner whose service account does
-# not own the work directory it is the likeliest reason a present checkout
-# reads as absent. Scoped to these calls only; nothing is written to config.
-pkg_git() { git -c safe.directory='*' -C "$@"; }
+# protects nothing here, and on a runner whose service account does not own
+# the work directory it would make a present checkout read as absent. Scoped
+# to these calls only; nothing is written to config.
+pkg_git() { "$git_bin" -c safe.directory='*' -C "$@"; }
+
+# Resolve git once. On the Windows release leg this script runs in Git for
+# Windows' bash, whose PATH there carries `<git>/usr/bin` (bash, coreutils)
+# but not the directories holding git itself, so a bare `git` is "command not
+# found" (v0.2.8 run 37941621127). Inside that bash the install root is `/`,
+# and git lives at /cmd/git or /mingw64/bin/git
+# (https://github.com/git-for-windows/git/wiki/FAQ).
+git_bin=$(command -v git || true)
+if [[ -z "$git_bin" ]]; then
+  for candidate in /cmd/git /mingw64/bin/git /clangarm64/bin/git; do
+    if [[ -x "$candidate" || -x "$candidate.exe" ]]; then
+      git_bin=$candidate
+      break
+    fi
+  done
+fi
+[[ -n "$git_bin" ]] ||
+  fail "git is not on PATH, and none of Git for Windows' /cmd/git, /mingw64/bin/git is present"
 
 root=""
 tried=""
