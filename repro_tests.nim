@@ -1476,6 +1476,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_core/tests/t_process_close_once.nim",
+    binary: "build/test-bin/t_process_close_once",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_core/tests/t_project_file_alias.nim",
     binary: "build/test-bin/t_project_file_alias",
     defines: @[],
