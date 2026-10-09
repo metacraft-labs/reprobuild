@@ -191,7 +191,7 @@
         # 31b05a5 (io-mon#41: endpoint + peer-uid IPC records, isolated launch).
         # Bumped to b464ce1 (2026-10-03), io-mon's `agents` tip; e750199 is an
         # ancestor.
-      url = "github:metacraft-labs/io-mon/b464ce17cdf2196e61ccf4ab3e61ed0ee1a70ed2";
+      url = "github:metacraft-labs/io-mon/1053102d159a0791e1d797bec5963315d0cfd74e";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -335,7 +335,7 @@
       # is an ancestor.
       #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/3b99d26fd969a48698cf75fc90a8657010c81eec";
+      url = "github:metacraft-labs/nim-stackable-hooks/2a7c5f7b0ed0351ac6136fcc99fc1b33a087ed77";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

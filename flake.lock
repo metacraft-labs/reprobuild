@@ -240,7 +240,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "3240f37f9c3e3ecf9e81a7906b65450b02578825",
+        "rev": "d340fa71c9312252ef65b81fc9e645f6edb205d3",
         "type": "github"
       },
       "original": {
@@ -1227,17 +1227,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791046266,
-        "narHash": "sha256-jrwhAltrQliBrLHb2RYns4EwDkj1Fbv4MYVe8Z/30B8=",
+        "lastModified": 1791416916,
+        "narHash": "sha256-OVa1EXFDrH3sDPE+dtQSAWPoSq3PLUbyv27l7xKylQo=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "b464ce17cdf2196e61ccf4ab3e61ed0ee1a70ed2",
+        "rev": "1053102d159a0791e1d797bec5963315d0cfd74e",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "b464ce17cdf2196e61ccf4ab3e61ed0ee1a70ed2",
+        "rev": "1053102d159a0791e1d797bec5963315d0cfd74e",
         "type": "github"
       }
     },
@@ -1431,17 +1431,17 @@
     "nim-stackable-hooks-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791045802,
-        "narHash": "sha256-ad9rU3NvhnWxn2egq1CrTgwuOaAHOSkSaHpoRqER6Cg=",
+        "lastModified": 1791383471,
+        "narHash": "sha256-hWQtUko4H+f5wXR73xYIBxatPml7Tse/iZtSAOZ9yOU=",
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "3b99d26fd969a48698cf75fc90a8657010c81eec",
+        "rev": "2a7c5f7b0ed0351ac6136fcc99fc1b33a087ed77",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "3b99d26fd969a48698cf75fc90a8657010c81eec",
+        "rev": "2a7c5f7b0ed0351ac6136fcc99fc1b33a087ed77",
         "type": "github"
       }
     },
@@ -2453,7 +2453,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "8791ba68ae3b947fec7429839c28e1ac95424d34",
+        "rev": "da690e4ab83f1594b620ef096484a8b4d818f1da",
         "type": "github"
       },
       "original": {
@@ -2523,11 +2523,9 @@
         "release-packaging-src": []
       },
       "locked": {
-        "lastModified": 1791039972,
-        "narHash": "sha256-whxsMfdBQU/jzM3fFCSGrZmJt7iL9OHMSR+J7HVWbqM=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "4ec72e92aeaf9f6ed5caad9a8043ca703cc9df8c",
+        "rev": "bf799831a1e7898b83765784ef513e05f75135ea",
         "type": "github"
       },
       "original": {
