@@ -336,6 +336,12 @@ jobs:
         run: |
           set -euo pipefail
           dev-exec just bootstrap
+          # refresh-build-auth (next step) rewrites Nix's credentials with a
+          # Python helper, and runs outside the dev shell. The persistent macOS
+          # runners have no python3 on their own PATH (v0.2.9 run 37958588616:
+          # "python3: command not found", exit 127); hand it the dev shell's.
+          py=$(dev-exec bash -c 'command -v python3' | tail -n 1)
+          echo "REPROBUILD_BOOTSTRAP_PYTHON=${py}" >> "$GITHUB_ENV"
 
       # The installation token minted at the top of the job lives one hour
       # (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).
