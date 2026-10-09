@@ -20,7 +20,8 @@
 ##   * Pure, mock-free integration test running against the Python daemon shim
 ##     and the build engine's socket client logic.
 
-import std/[unittest, os, osproc, strutils, tempfiles]
+import std/[unittest, os, osproc, streams, strutils, strtabs, tables,
+  tempfiles, times]
 import repro_core
 import repro_core/dependency_gathering
 import repro_build_engine
@@ -89,6 +90,102 @@ when defined(posix):
     writeFile(result, "#!/bin/sh\necho should-not-run\n")
     setFilePermissions(result, {fpUserRead, fpUserWrite, fpGroupRead,
       fpOthersRead})
+
+when defined(linux):
+  from std/posix import nil
+
+  # A SHARED HELPER UNDER CONCURRENT USE. The cases at the end of the suite
+  # run the engine's real client (``executeBuiltinAction`` on a
+  # ``bakForeignProvision`` action) against helpers on a private socket
+  # directory, with a fake ``nix`` on PATH so a resolution costs milliseconds.
+
+  const StressChildEnv = "REPRO_NIXD_STRESS_CHILD"
+  const StressRequests = 12
+
+  proc foreignProvisionAction(selector, receipt, cwd: string): BuildAction =
+    BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      kind: bakForeignProvision,
+      id: "test.foreign.nix.shared." & receipt.extractFilename,
+      argv: @["nix", selector],
+      outputs: @[receipt],
+      cwd: cwd,
+      dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor))
+
+  if existsEnv(StressChildEnv):
+    # One of several client PROCESSES (the helper is shared between
+    # processes, not threads). Prints one line per request. Every request
+    # names its own selector, so each one is a resolution the helper must
+    # run rather than a cache hit.
+    let workDir = getEnv(StressChildEnv)
+    let tag = $getCurrentProcessId()
+    for i in 0 ..< StressRequests:
+      let receipt = workDir / ("receipt-" & tag & "-" & $i)
+      let res = executeBuiltinAction(foreignProvisionAction(
+        "fake#tool-" & tag & "-" & $i, receipt, workDir))
+      if res.status == asSucceeded and dirExists(readFile(receipt).strip()):
+        echo "OK"
+      else:
+        echo "FAIL ", res.stderr.strip().replace("\n", " | ")
+    quit(0)
+
+  type SharedHelperFixture = object
+    root: string        ## scratch: fake nix, fake store, wrapper, pid files
+    socketDir: string   ## short: sun_path is 108 bytes
+    saved: seq[(string, string)]
+
+  proc setEnvSaving(f: var SharedHelperFixture; key, value: string) =
+    f.saved.add((key, getEnv(key, "\0unset")))
+    putEnv(key, value)
+
+  proc ownHelperPids(f: SharedHelperFixture): seq[int] =
+    ## Helpers THIS fixture started: recorded by its wrapper, and still
+    ## naming its private socket directory on their command line.
+    for kind, path in walkDir(f.root / "pids"):
+      let pid = try: parseInt(path.extractFilename) except ValueError: 0
+      if pid <= 0:
+        continue
+      try:
+        if f.socketDir in readFile("/proc/" & $pid & "/cmdline"):
+          result.add(pid)
+      except IOError, OSError:
+        discard
+
+  proc openSharedHelperFixture(startDelay = "0"; idleMs = 2_000):
+      SharedHelperFixture =
+    result.root = createTempDir("repro-nixd-shared-", "")
+    result.socketDir = createTempDir("rnd-", "", "/tmp")
+    let daemonPath = findNixDaemon(findRepoRoot())
+    let fakeBin = result.root / "bin"
+    createDir(fakeBin)
+    createDir(result.root / "pids")
+    createDir(result.root / "store")
+    # Each resolution takes a moment, so requests are in flight when a
+    # helper is stopped.
+    writeFile(fakeBin / "nix", "#!/bin/sh\nfor last; do :; done\nsleep 0.2\n" &
+      "d=" & quoteShell(result.root / "store") &
+      "/$(printf %s \"$last\" | tr -c 'a-zA-Z0-9' '-')-$$\n" &
+      "mkdir -p \"$d/bin\" && printf '%s\\n' \"$d\"\n")
+    setFilePermissions(fakeBin / "nix", {fpUserRead, fpUserWrite, fpUserExec})
+    let wrapper = result.root / "reprobuild-nix-daemon"
+    writeFile(wrapper, "#!/bin/sh\necho $$ > " &
+      quoteShell(result.root / "pids") & "/$$\nsleep " & startDelay &
+      "\nexec " & quoteShell(daemonPath) & " \"$@\" --idle-exit-ms=" &
+      $idleMs & "\n")
+    setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+    result.setEnvSaving("PATH", fakeBin & PathSep & getEnv("PATH"))
+    result.setEnvSaving("REPROBUILD_NIX_DAEMON_BIN", wrapper)
+    result.setEnvSaving(NixDaemonSocketDirEnv, result.socketDir)
+    result.setEnvSaving("USER", "repro-nixd-shared-" & $getCurrentProcessId())
+
+  proc close(f: var SharedHelperFixture) =
+    for pid in f.ownHelperPids():
+      discard posix.kill(posix.Pid(pid), posix.SIGKILL)
+    for i in countdown(f.saved.high, 0):
+      let (key, value) = f.saved[i]
+      if value == "\0unset": delEnv(key) else: putEnv(key, value)
+    removeDir(f.root)
+    removeDir(f.socketDir)
 
 suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
@@ -210,10 +307,11 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
         setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
 
         let uniqueUser = "repro-nix-direct-loader-" & $getCurrentProcessId()
-        let socketPath = "/tmp/reprobuild-nix-daemon-" & uniqueUser & ".sock"
+        # The client names the socket (``--socket-path``, keyed by the
+        # helper's identity), so the wrapper passes its arguments through.
         let daemonWrapper = tempRoot / "reprobuild-nix-daemon"
         writeFile(daemonWrapper, "#!/bin/sh\nexec " & quoteShell(daemonPath) &
-          " \"$@\" --socket-path=" & quoteShell(socketPath) & "\n")
+          " \"$@\"\n")
         setFilePermissions(daemonWrapper,
           {fpUserRead, fpUserWrite, fpUserExec})
 
@@ -225,6 +323,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
         putEnv("LD_LIBRARY_PATH", tempRoot / "target-libraries")
         putEnv("REPROBUILD_NIX_DAEMON_BIN", daemonWrapper)
         putEnv("USER", uniqueUser)
+        let socketPath = nixDaemonSocketPath(nixDaemonHelperKey(daemonWrapper))
         defer:
           putEnv("PATH", previousPath)
           if previousLoaderPath.len > 0:
@@ -352,3 +451,93 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
     # Clean up receipt
     removeFile(receiptFile)
+
+  when defined(linux):
+    test "a helper slower to start than two seconds is waited for":
+      # Measured on a host running a full suite (load ~180 on 32 cores): the
+      # Python helper took 0.26-3.3 s from exec to listening. The client
+      # waited a fixed 2 s and reported "Failed to connect or spawn
+      # reprobuild-nix-daemon" for every slower start.
+      var f = openSharedHelperFixture(startDelay = "3")
+      defer: f.close()
+      let receipt = f.root / "receipt-slow"
+      let res = executeBuiltinAction(foreignProvisionAction("fake#slow",
+        receipt, f.root))
+      checkpoint(res.stderr)
+      check res.status == asSucceeded
+      check dirExists(readFile(receipt).strip())
+
+    test "the helper socket is keyed by the helper's identity":
+      # Every worktree, package and CI checkout resolves its own helper file,
+      # and one socket per user let whichever started first answer for all
+      # of them, older semantics included.
+      let root = createTempDir("repro-nixd-key-", "")
+      defer: removeDir(root)
+      writeFile(root / "a", "#!/bin/sh\necho a\n")
+      writeFile(root / "b", "#!/bin/sh\necho b\n")
+      writeFile(root / "c", "#!/bin/sh\necho a\n")
+      let keyA = nixDaemonHelperKey(root / "a")
+      check keyA.len == 16
+      check keyA == nixDaemonHelperKey(root / "c")
+      check keyA != nixDaemonHelperKey(root / "b")
+      check nixDaemonHelperKey(root / "missing") == ""
+      let previousDir = getEnv(NixDaemonSocketDirEnv)
+      putEnv(NixDaemonSocketDirEnv, root)
+      defer: putEnv(NixDaemonSocketDirEnv, previousDir)
+      check nixDaemonSocketPath(keyA).parentDir == root
+      check keyA in nixDaemonSocketPath(keyA).extractFilename
+      check nixDaemonSocketPath(keyA) != nixDaemonSocketPath(
+        nixDaemonHelperKey(root / "b"))
+
+    test "concurrent clients are served while helpers are stopped under them":
+      # Several client processes share one helper while it is stopped by pid
+      # (TERM, INT and KILL in turn) every few hundred milliseconds -- what a
+      # suite runner does to the helper each time the case that started it
+      # finishes, and what an agent stopping "its" helper does to everyone.
+      var f = openSharedHelperFixture(idleMs = 400)
+      defer: f.close()
+      var children: seq[Process] = @[]
+      for i in 0 ..< 4:
+        var env = newStringTable(modeCaseSensitive)
+        for key, value in envPairs():
+          env[key] = value
+        env[StressChildEnv] = f.root
+        children.add(startProcess(getAppFilename(), env = env,
+          options = {poStdErrToStdOut}))
+      # Each helper is stopped once it has been up for 1.5-3.9 s -- the
+      # lifetime of the case that happened to start it. A stopper that ends
+      # every helper before it can finish a request leaves nothing that could
+      # serve, which is not the situation being modelled.
+      var signals = 0
+      var firstSeen = initTable[int, float]()
+      while true:
+        var anyRunning = false
+        for child in children:
+          if child.running:
+            anyRunning = true
+        if not anyRunning:
+          break
+        sleep(100)
+        let now = epochTime()
+        for pid in f.ownHelperPids():
+          if pid notin firstSeen:
+            firstSeen[pid] = now
+          elif now - firstSeen[pid] >= 1.5 + float(pid mod 4) * 0.8:
+            let sig = [posix.SIGTERM, posix.SIGINT, posix.SIGKILL][signals mod 3]
+            if posix.kill(posix.Pid(pid), sig) == 0:
+              inc signals
+      var ok = 0
+      var failures: seq[string] = @[]
+      for child in children:
+        for line in child.outputStream.readAll().splitLines():
+          if line == "OK":
+            inc ok
+          elif line.len > 0:
+            failures.add(line)
+        discard child.waitForExit()
+        child.close()
+      checkpoint("helpers signalled " & $signals & " times; failures: " &
+        failures.join("\n"))
+      check signals > 0
+      check failures.len == 0
+      check ok == 4 * StressRequests

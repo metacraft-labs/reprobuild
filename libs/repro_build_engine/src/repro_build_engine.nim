@@ -14388,58 +14388,197 @@ proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
   "reprobuild-nix-daemon"
 
 when not defined(windows):
-  const NixDaemonExchangeAttempts* = 3
+  const NixDaemonExchangeAttempts* = 5
     ## How many times one request is offered to the evaluation daemon before
-    ## a dropped connection is reported as a failure.
+    ## a dropped connection is reported as a failure. Five, not three: under
+    ## a stress run that stops helpers every few hundred milliseconds (as a
+    ## suite does each time a case that started the helper finishes), three
+    ## drops in a row still failed 1-6 of 360 requests.
+  const NixDaemonStartFailures* = 3
+    ## How many helpers one connection attempt may see FAIL to start (exit
+    ## non-zero, or not exec at all) before it gives up: a helper that cannot
+    ## start must not be restarted forever.
+  const NixDaemonStartQuietExits* = 10
+    ## How many started helpers may exit 0 before one accepts. A helper that
+    ## exits 0 found a live helper at the socket and left it to serve; when
+    ## that one is stopped before this client reaches it, starting another
+    ## is the right move and is not a failure -- but it is bounded too, so a
+    ## "helper" that exits 0 without ever binding (a stub ``python3`` on
+    ## PATH) fails fast rather than spinning out the window.
+  const NixDaemonRespawnSpacingMs* = 250
+    ## A helper ended by a SIGNAL while it started was stopped by someone
+    ## else; that says nothing about whether one can start, so it counts
+    ## against neither budget above and is simply replaced -- no sooner than
+    ## this after the previous start, and only within the start window.
+  const NixDaemonStartTimeoutMs* = 60_000
+    ## How long a client waits for a helper it started to accept. The helper
+    ## is a Python script: on a host running a full suite (load average ~180
+    ## on 32 cores) its start-to-listen time was measured at 0.26-3.3 s,
+    ## and the former fixed 2 s window turned every slow start into "Failed
+    ## to connect or spawn". A helper that EXITS is noticed at once and does
+    ## not cost the whole window.
+  const NixDaemonSocketDirEnv* = "REPROBUILD_NIX_DAEMON_SOCKET_DIR"
+    ## Directory of the helper's socket (default ``/tmp``). Exists so that a
+    ## test or an experiment can run its own helpers without touching -- or
+    ## being touched by -- the helper every other reprobuild process of the
+    ## user shares.
 
-  proc nixDaemonSocketPath*(): string =
-    "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
+  proc nixDaemonHelperKey*(daemonExe: string): string =
+    ## The identity of the helper this process would START: a digest of the
+    ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
+    ## lookup) is known.
+    ##
+    ## WHY THE SOCKET IS KEYED BY IT. The helper is shared by every
+    ## reprobuild process of the user, and those processes are not one build:
+    ## every worktree, installed package and CI checkout resolves its OWN
+    ## helper file. With one socket per user, whichever build happened to
+    ## start the helper served every other build -- an older helper answered
+    ## a newer client's requests with the older helper's semantics (a helper
+    ## from before e688e1690 returns a cached store path after it was garbage
+    ## collected), and a newer protocol field reached a helper that ignored
+    ## it. Keying by content keeps the sharing that matters (every process of
+    ## one build, and every build whose helper is byte-identical) and never
+    ## lets two different helpers answer for each other.
+    if daemonExe.len == 0 or not fileExists(daemonExe):
+      return ""
+    try:
+      toHex(weakFingerprintFromText(readFile(daemonExe)).bytes)[0 ..< 16]
+    except IOError, OSError:
+      ""
+
+  proc nixDaemonSocketPath*(helperKey = ""): string =
+    let dir = getEnv(NixDaemonSocketDirEnv, "/tmp")
+    let suffix = if helperKey.len > 0: "-" & helperKey else: ""
+    dir / ("reprobuild-nix-daemon-" & getEnv("USER", "default") & suffix &
+      ".sock")
+
+  proc nixDaemonLogTail(socketPath: string): string =
+    ## The last lines of the helper's own log (it writes ``<socket>.log``),
+    ## for a failure report. Empty when there is none.
+    let logPath = socketPath & ".log"
+    try:
+      if not fileExists(logPath):
+        return ""
+      let lines = readFile(logPath).strip().splitLines()
+      lines[max(0, lines.len - 6) .. ^1].join("\n    ")
+    except IOError, OSError:
+      ""
+
+  proc tryConnectNixDaemon(socketPath: string; sock: var Socket): bool =
+    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+      protocol = IPPROTO_IP)
+    try:
+      sock.connectUnix(socketPath)
+      result = true
+    except CatchableError:
+      sock.close()
+      result = false
+
+  proc connectOrStartNixDaemon(socketPath: string;
+                               spawnDaemon: proc (): Process;
+                               sock: var Socket; diagnostic: var string):
+      bool =
+    ## Connect to the helper at ``socketPath``, starting one when nothing
+    ## accepts there. Waits for a started helper as long as it is running
+    ## (up to ``NixDaemonStartTimeoutMs``), and replaces one that exits
+    ## before anything accepts.
+    if tryConnectNixDaemon(socketPath, sock):
+      return true
+    let startedAt = epochTime()
+    var helper: Process = nil
+    var spawns = 0
+    var failures = 0
+    var quietExits = 0
+    var lastSpawnAt = 0.0
+    var lastExit = ""
+    var spawnError = ""
+    var pause = 10
+    try:
+      while (epochTime() - startedAt) * 1000.0 < NixDaemonStartTimeoutMs.float:
+        if helper != nil:
+          let code = helper.peekExitCode()
+          if code != -1:
+            # Exited. Exit 0 is a helper that found a live one at the
+            # socket; that one may since have gone. Either way, look once
+            # more before starting another.
+            lastExit = $code
+            # 128+N is a helper ended by signal N -- stopped by someone else
+            # while it started, which says nothing about whether one can
+            # start. Only an exit the helper chose (or exec's 126/127)
+            # counts against it.
+            if code == 0:
+              inc quietExits
+            elif code <= 128:
+              inc failures
+            helper.close()
+            helper = nil
+            if tryConnectNixDaemon(socketPath, sock):
+              return true
+        if helper == nil and
+            (epochTime() - lastSpawnAt) * 1000.0 >= NixDaemonRespawnSpacingMs.float:
+          if quietExits >= NixDaemonStartQuietExits or
+              failures >= NixDaemonStartFailures:
+            break
+          inc spawns
+          lastSpawnAt = epochTime()
+          try:
+            helper = spawnDaemon()
+          except OSError as err:
+            # The resolved file can vanish between resolution and exec (a
+            # worktree rebuilt or deleted under us). Counted as an attempt.
+            spawnError = err.msg
+            inc failures
+            helper = nil
+        sleep(pause)
+        pause = min(pause * 2, 100)
+        if tryConnectNixDaemon(socketPath, sock):
+          return true
+    finally:
+      if helper != nil:
+        helper.close()
+    diagnostic = "started " & $spawns & " helper(s) over " &
+      $int((epochTime() - startedAt) * 1000.0) & " ms"
+    if lastExit.len > 0:
+      diagnostic.add("; the last exited with status " & lastExit &
+        " before accepting")
+    if spawnError.len > 0:
+      diagnostic.add("; starting one failed: " & spawnError)
+    let tail = nixDaemonLogTail(socketPath)
+    if tail.len > 0:
+      diagnostic.add("; helper log " & socketPath & ".log:\n    " & tail)
+    false
 
   proc exchangeWithNixDaemon*(socketPath, request: string;
-                              spawnDaemon: proc ()):
-      tuple[connected: bool; response: string; attempts: int] =
+                              spawnDaemon: proc (): Process):
+      tuple[connected: bool; response: string; attempts: int;
+            diagnostic: string] =
     ## Send one request line to the shared ``reprobuild-nix-daemon`` and
-    ## return its one response line, spawning the daemon when nothing is
+    ## return its one response line, starting the daemon when nothing is
     ## listening.
     ##
     ## THE DAEMON IS SHARED AND IT CAN GO AWAY UNDER US. Every reprobuild
-    ## process of this user talks to the one socket, whichever process spawned
-    ## it. That process's lifetime is not the daemon's, but the daemon can
-    ## still end while it holds our request: it exits when idle (a connection
-    ## that lands between its accept timing out and its socket closing is
-    ## dropped unanswered), and whoever owns the spawning process's tree can
-    ## end it — the suite runner terminates every process carrying a finished
-    ## test's private token, and the daemon carries the token of the test that
-    ## happened to spawn it. A request in flight then reads end-of-stream: no
-    ## response at all, which is not an answer about the selector.
+    ## process of this user that resolves the same helper talks to the one
+    ## socket, whichever process spawned it. That process's lifetime is not
+    ## the daemon's, but the daemon can still end while it holds our request:
+    ## whoever owns the spawning process's tree can end it -- the suite runner
+    ## terminates every process carrying a finished test's private token, and
+    ## the daemon carries the token of the test that happened to spawn it --
+    ## and so can anyone who stops "their" helper by pid. A request in flight
+    ## then reads end-of-stream: no response at all, which is not an answer
+    ## about the selector.
     ##
     ## Resolve requests are idempotent, so a connection that ends without a
-    ## response line is offered again — to the same daemon if it is still
-    ## there, to a fresh one otherwise — up to ``NixDaemonExchangeAttempts``
+    ## response line is offered again -- to the same daemon if it is still
+    ## there, to a fresh one otherwise -- up to ``NixDaemonExchangeAttempts``
     ## times. ``response`` is empty only when every attempt was dropped.
     for attempt in 1 .. NixDaemonExchangeAttempts:
       result.attempts = attempt
-      var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
-        protocol = IPPROTO_IP)
-      var connected = false
-      try:
-        sock.connectUnix(socketPath)
-        connected = true
-      except CatchableError:
-        sock.close()
-        spawnDaemon()
-        for i in 0 .. 40:
-          sleep(50)
-          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
-            protocol = IPPROTO_IP)
-          try:
-            sock.connectUnix(socketPath)
-            connected = true
-            break
-          except CatchableError:
-            sock.close()
-      if not connected:
+      var sock: Socket
+      var diagnostic = ""
+      if not connectOrStartNixDaemon(socketPath, spawnDaemon, sock,
+          diagnostic):
         result.connected = false
+        result.diagnostic = diagnostic
         return
       result.connected = true
       var line = ""
@@ -14455,6 +14594,40 @@ when not defined(windows):
       if line.len > 0:
         result.response = line
         return
+
+  proc requestNixDaemon*(request, cwd: string):
+      tuple[socketPath: string; connected: bool; response: string;
+            attempts: int; diagnostic: string] =
+    ## THE ONE WAY a reprobuild process asks the shared Nix helper anything:
+    ## resolve the helper this process would start, address the socket that
+    ## helper's identity names, and exchange one request with it.
+    ##
+    ## THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` -- so
+    ## that the resolution order is pinned by a test rather than by an `elif`
+    ## chain. It anchors on ``cwd`` (three historical candidates, for a build
+    ## run from the reprobuild tree itself), on `REPROBUILD_SOURCE_ROOT` when
+    ## set, and on BOTH the executable's grandparent (an install prefix) and
+    ## its great-grandparent (a dev tree's repository root, where `repro`
+    ## sits two levels down at `build/bin/repro`). M1's N24/N28.
+    ##
+    ## The helper is started DETACHED (its own process group), so a terminal
+    ## interrupt of one build does not take down the helper every other build
+    ## is using, and it is told its socket path explicitly, so the address a
+    ## client waits on and the address the helper binds cannot disagree.
+    let daemonExe = resolveNixDaemonExecutable(
+      cwd = cwd,
+      exePath = getAppFilename(),
+      envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
+      envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
+    let socketPath = nixDaemonSocketPath(nixDaemonHelperKey(daemonExe))
+    createDir(socketPath.parentDir)
+    proc spawnDaemon(): Process =
+      startProcess(daemonExe, args = ["--idle-exit-ms=300000",
+        "--socket-path=" & socketPath], options = {poDaemon, poUsePath})
+    let exchange = exchangeWithNixDaemon(socketPath, request, spawnDaemon)
+    (socketPath: socketPath, connected: exchange.connected,
+     response: exchange.response, attempts: exchange.attempts,
+     diagnostic: exchange.diagnostic)
 
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
@@ -14749,36 +14922,15 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if provisioner != "nix":
           raiseEngine("Unsupported provisioner: " & provisioner)
         
-        let socketPath = nixDaemonSocketPath()
         let req = %*{
           "action": "resolve",
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        proc spawnDaemon() =
-          # Spawn daemon process detached.
-          #
-          # THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` --
-          # so that the resolution order is pinned by a test rather than by
-          # this `elif` chain. It anchors on `action.cwd` (three historical
-          # candidates, for a build run from the reprobuild tree itself), on
-          # `REPROBUILD_SOURCE_ROOT` when set, and on BOTH the executable's
-          # grandparent (an install prefix) and its great-grandparent (a dev
-          # tree's repository root, where `repro` sits two levels down at
-          # `build/bin/repro`). The single grandparent anchor this replaces
-          # resolved NEITHER layout's real location and fell through to a
-          # bare name on PATH -- M1's N24/N28.
-          let daemonExe = resolveNixDaemonExecutable(
-            cwd = action.cwd,
-            exePath = getAppFilename(),
-            envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
-            envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
-          let daemon = startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
-            options = {poDaemon, poUsePath})
-          daemon.close()
-        let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
+        let exchange = requestNixDaemon($req, action.cwd)
         if not exchange.connected:
-          raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+          raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " &
+            exchange.socketPath & ": " & exchange.diagnostic)
         let respLine = exchange.response
         
         if respLine.len == 0:
