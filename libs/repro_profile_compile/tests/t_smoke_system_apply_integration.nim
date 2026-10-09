@@ -570,7 +570,7 @@ suite "M83 Phase D: system apply round-trip via canonical text":
   test "Phase F expandArchive: build(...) lowers to an inlineExecCall BuildActionDef":
     # Windows-System-Resources Phase F — the typed `expandArchive`
     # stdlib package wraps platform-native archive tools (`unzip` /
-    # `tar` / PowerShell `Expand-Archive`) and emits a build edge
+    # `tar` / PowerShell) and emits a build edge
     # whose `call` is an `inlineExecCall(...)`. The lowering binds
     # the host's platform at profile-compile time so the resulting
     # `BuildActionDef.call` argv is deterministic per host.

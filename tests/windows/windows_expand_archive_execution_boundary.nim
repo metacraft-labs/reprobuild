@@ -3,13 +3,20 @@
 ## Test-double policy: this test uses no mocks or test doubles. It launches
 ## the exact argv emitted by ``buildZipArgvWindows`` in real, distinct Windows
 ## PowerShell processes. A real ``System.IO.FileSystemWatcher`` observes the
-## isolated temporary directory so scratch creation remains observable even
-## though the production command removes the file before exiting.
-## Cleanup-failure coverage is deterministic rather than watcher-timed: an
-## NTFS deny ACE for the current SID prevents deletion of both children and
-## their parent entry while still allowing create/read/extract. The original
-## directory DACL is restored unconditionally and fixture-child ACLs are reset
-## from that restored parent before teardown.
+## isolated temporary directory, so a scratch archive would be seen even if
+## the command removed it before exiting.
+##
+## What it pins: the lowered command extracts with the .NET zip reader
+## directly, never through the ``Expand-Archive`` cmdlet and never through a
+## scratch ``.zip`` copy under ``$env:TEMP``. The cmdlet's per-entry progress
+## records made a 12,000-entry archive take about 40 minutes, and the scratch
+## copy it needed carried its own cleanup-failure mode, which this gate used
+## to exercise with a delete-deny ACL. With no scratch file there is no
+## cleanup to fail, so what remains is: success in distinct processes,
+## no ``.zip`` created in the temporary directory on any path, non-zero exit
+## for a missing or corrupt archive, and overwrite-in-place over an existing
+## destination under Windows PowerShell 5.1's .NET Framework, whose
+## ``ExtractToDirectory`` cannot overwrite.
 ##
 ## This source intentionally is not named ``t_*.nim``: the cross-platform test
 ## graph must not turn a Windows-only gate into a Linux skip. Required PR CI
@@ -63,14 +70,14 @@ $ErrorActionPreference = 'Stop'
 function Invoke-BoundaryChild {
   $ErrorActionPreference = 'Continue'
   $PSNativeCommandUseErrorActionPreference = $false
-  & $env:REPRO_TEST_POWERSHELL -NoProfile -Command $env:REPRO_TEST_COMMAND 2>&1 |
+  & $env:REPRO_TEST_POWERSHELL -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $env:REPRO_TEST_COMMAND 2>&1 |
     ForEach-Object { [Console]::Out.WriteLine('CHILD: ' + [string]$_) }
   return $LASTEXITCODE
 }
 
 $watcher = New-Object System.IO.FileSystemWatcher
 $watcher.Path = $env:TEMP
-$watcher.Filter = 'repro-expand-archive-*.zip'
+$watcher.Filter = '*.zip'
 $watcher.IncludeSubdirectories = $false
 $watcher.EnableRaisingEvents = $true
 $subscription = Register-ObjectEvent -InputObject $watcher -EventName Created -SourceIdentifier 'repro-expand-archive-created'
@@ -80,8 +87,6 @@ try {
   $created = Wait-Event -SourceIdentifier 'repro-expand-archive-created' -Timeout 10
   if ($null -ne $created) {
     [Console]::Out.WriteLine('SCRATCH=' + $created.SourceEventArgs.FullPath)
-  } elseif ($env:REPRO_TEST_REQUIRE_CREATION -eq '1') {
-    throw 'scratch .zip creation was not observed'
   }
   [Console]::Out.WriteLine('CHILD_EXIT=' + $childExit)
   if ($childExit -ne 0) {
@@ -165,119 +170,22 @@ proc requireProcessSuccess(processResult: ProcessResult; context: string) =
       context & " exited " & $processResult.exitCode & ": " &
         processResult.output)
 
-proc readAccessSddl(path: string): string =
-  let readResult = runPowerShell(
-    "$ErrorActionPreference = 'Stop'; " &
-    "$acl = Get-Acl -LiteralPath " & powershellSingleQuotedLiteral(path) &
-      "; " &
-    "[Console]::Out.Write($acl.GetSecurityDescriptorSddlForm(" &
-      "[System.Security.AccessControl.AccessControlSections]::Access))")
-  requireProcessSuccess(readResult, "read original fixture DACL")
-  result = readResult.output.strip()
-  if result.len == 0:
-    raise newException(IOError, "read original fixture DACL returned no SDDL")
+const LoweredFlags = @["-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+  "Bypass", "-Command"]
 
-proc installDeleteDenyAcl(path: string): ProcessResult =
-  let pathLiteral = powershellSingleQuotedLiteral(path)
-  runPowerShell(
-    "$ErrorActionPreference = 'Stop'; " &
-    "$path = " & pathLiteral & "; " &
-    "$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User; " &
-    "$rights = [System.Security.AccessControl.FileSystemRights](" &
-      "[System.Security.AccessControl.FileSystemRights]::Delete -bor " &
-      "[System.Security.AccessControl.FileSystemRights]::" &
-        "DeleteSubdirectoriesAndFiles); " &
-    "$inheritance = [System.Security.AccessControl.InheritanceFlags](" &
-      "[System.Security.AccessControl.InheritanceFlags]::ContainerInherit " &
-        "-bor " &
-      "[System.Security.AccessControl.InheritanceFlags]::ObjectInherit); " &
-    "$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(" &
-      "$sid, $rights, $inheritance, " &
-      "[System.Security.AccessControl.PropagationFlags]::None, " &
-      "[System.Security.AccessControl.AccessControlType]::Deny); " &
-    "$acl = Get-Acl -LiteralPath $path; " &
-    "$acl.AddAccessRule($rule); " &
-    "Set-Acl -LiteralPath $path -AclObject $acl; " &
-    "$verified = Get-Acl -LiteralPath $path; " &
-    "$matching = @($verified.Access | Where-Object { " &
-      "-not $_.IsInherited -and " &
-      "$_.AccessControlType -eq " &
-        "[System.Security.AccessControl.AccessControlType]::Deny -and " &
-      "$_.IdentityReference.Translate(" &
-        "[System.Security.Principal.SecurityIdentifier]).Value -eq " &
-        "$sid.Value -and " &
-      "($_.FileSystemRights -band $rights) -eq $rights -and " &
-      "($_.InheritanceFlags -band $inheritance) -eq $inheritance }); " &
-    "if ($matching.Count -ne 1) { " &
-      "throw ('delete-deny ACE verification found ' + $matching.Count + " &
-        "' matches') }")
-
-proc requireDeleteIsActuallyDenied(path: string) =
-  ## PROVE THE FIXTURE BITES BEFORE RELYING ON IT.
-  ##
-  ## The deny ACE names ``WindowsIdentity.GetCurrent().User`` — the USER SID —
-  ## and nothing else. Windows grants DELETE on a child when the caller holds
-  ## ``FILE_DELETE_CHILD`` on the PARENT, whichever ACE supplied it, so on a
-  ## host where the parent already carries an inherited
-  ## ``BUILTIN\Administrators: FullControl`` ACE and the process runs with an
-  ## ELEVATED token, that allow wins and the fixture is INERT. Measured on a
-  ## developer host: the ACE installed and verified exactly as
-  ## ``installDeleteDenyAcl`` asserts, and ``Remove-Item`` deleted the file
-  ## anyway.
-  ##
-  ## Without this probe the case still fails there — but it fails as
-  ## "``failed.exitCode`` was 0" and "``retained.len`` was 0", which reads as
-  ## a PRODUCT regression and cost a full investigation to tell apart from
-  ## one. The probe turns that into a sentence naming the host property
-  ## responsible. It deliberately does NOT skip: dropping the coverage
-  ## silently is how a gate stops being one.
-  let probe = path / "delete-deny-probe.txt"
-  writeFile(probe, "N50 delete-deny fixture probe\n")
-  var deleted = false
-  try:
-    removeFile(probe)
-    deleted = true
-  except OSError, IOError:
-    deleted = false
-  if deleted:
-    raise newException(IOError,
-      "the delete-deny fixture is INERT on this host: a file under " & path &
-      " was removed even though the DACL denies Delete and " &
-      "DeleteSubdirectoriesAndFiles to this user's SID. The usual cause is " &
-      "an ELEVATED token: the parent's inherited " &
-      "BUILTIN\\Administrators:FullControl grants FILE_DELETE_CHILD, which " &
-      "permits deleting a child regardless of the child's own DACL. Run this " &
-      "gate unelevated. This is a HOST property, not an expandArchive " &
-      "regression — the product is not exercised at all before this point.")
-
-proc restoreAccessAndResetChildren(path, accessSddl: string): ProcessResult =
-  runPowerShell(
-    "$ErrorActionPreference = 'Stop'; " &
-    "$path = " & powershellSingleQuotedLiteral(path) & "; " &
-    "$acl = Get-Acl -LiteralPath $path; " &
-    "$acl.SetSecurityDescriptorSddlForm(" &
-      powershellSingleQuotedLiteral(accessSddl) & ", " &
-      "[System.Security.AccessControl.AccessControlSections]::Access); " &
-    "Set-Acl -LiteralPath $path -AclObject $acl; " &
-    "Get-ChildItem -LiteralPath $path -Force | ForEach-Object { " &
-      "& icacls.exe $_.FullName /reset /T /C /Q | Out-Null; " &
-      "if ($LASTEXITCODE -ne 0) { " &
-        "throw ('icacls reset failed for ' + $_.FullName + " &
-          "' with exit code ' + $LASTEXITCODE) } }")
-
-proc runObserved(argv: seq[string]; tempRoot: string;
-                 requireCreation: bool): ObservedRun =
-  if argv.len != 4 or argv[0] != "powershell" or
-      argv[1] != "-NoProfile" or argv[2] != "-Command":
+proc runObserved(argv: seq[string]; tempRoot: string): ObservedRun =
+  ## Runs the lowered command under the observer with ``TEMP``/``TMP``
+  ## pointed at ``tempRoot``. ``scratchPath`` is the first ``.zip`` the
+  ## watcher saw created there, if any.
+  if argv.len != LoweredFlags.len + 2 or argv[0] != "powershell" or
+      argv[1 .. ^2] != LoweredFlags:
     raise newException(ValueError,
-      "observer requires the exact four-element PowerShell argv")
+      "observer requires the exact lowered PowerShell argv, got " & $argv)
   var env = processEnvironment()
   env["TEMP"] = tempRoot
   env["TMP"] = tempRoot
   env["REPRO_TEST_POWERSHELL"] = argv[0]
-  env["REPRO_TEST_COMMAND"] = argv[3]
-  env["REPRO_TEST_REQUIRE_CREATION"] =
-    if requireCreation: "1" else: "0"
+  env["REPRO_TEST_COMMAND"] = argv[^1]
   let observed = runProcess(
     "powershell", @["-NoProfile", "-Command", ObserverCommand], env)
   result.exitCode = observed.exitCode
@@ -285,18 +193,32 @@ proc runObserved(argv: seq[string]; tempRoot: string;
   for line in observed.output.splitLines():
     if line.startsWith("SCRATCH="):
       result.scratchPath = line["SCRATCH=".len .. ^1]
-  if requireCreation and result.scratchPath.len == 0:
-    # `check` prints the expression, not the evidence. A missing SCRATCH=
-    # line means the observer never got to report one, so the observer's own
-    # transcript (including the CHILD: lines) is the only thing that can say
-    # why — emit it rather than leaving the next reader with "len was 0".
-    echo "observer emitted no SCRATCH= line; exit code ",
-      observed.exitCode, "; full observer output:"
+  if result.scratchPath.len > 0 or not observed.output.contains("CHILD_EXIT="):
+    # `check` prints the expression, not the evidence.
+    echo "observer exit code ", observed.exitCode, "; full observer output:"
     echo observed.output
 
 proc remainingScratchFiles(tempRoot: string): seq[string] =
-  for path in walkFiles(tempRoot / "repro-expand-archive-*.zip"):
+  for path in walkFiles(tempRoot / "*.zip"):
     result.add(path)
+
+proc makeArchive(root, archive: string; files: openArray[(string, string)]) =
+  ## Builds ``archive`` from ``files`` with Windows PowerShell's own
+  ## ``Compress-Archive``, which writes backslash-separated entry names. The
+  ## payload is staged in a directory of its own so the archive holds only
+  ## these files.
+  let stage = root / "payload"
+  removeDir(stage)
+  for (rel, text) in files:
+    createDir(parentDir(stage / rel))
+    writeFile(stage / rel, text)
+  let compress = runPowerShell(
+    "$ErrorActionPreference = 'Stop'; " &
+    "Compress-Archive -Path " &
+      powershellSingleQuotedLiteral(stage / "*") &
+    " -DestinationPath " & powershellSingleQuotedLiteral(archive) &
+    " -Force")
+  requireProcessSuccess(compress, "create fixture archive")
 
 suite "M3f Windows expandArchive runtime boundary":
 
@@ -309,137 +231,77 @@ suite "M3f Windows expandArchive runtime boundary":
     check captured.exitCode == 7
     check captured.output == "first" & repeat('x', 1024) & "last"
 
-  test "distinct PowerShell processes use distinct .zip scratch and clean success":
+  test "distinct PowerShell processes extract with no scratch .zip":
     let root = createTempDir("repro-expand-archive-boundary-", "")
     defer:
       if dirExists(root):
         removeDir(root)
 
-    let payload = root / "payload.txt"
     let archive = root / "source archive's.zip"
     let destinationA = root / "destination one's"
     let destinationB = root / "destination two's"
-    writeFile(payload, "M3f real Windows boundary\n")
-    let compress = runPowerShell(
-      "$ErrorActionPreference = 'Stop'; " &
-      "Compress-Archive -LiteralPath " & powershellSingleQuotedLiteral(payload) &
-      " -DestinationPath " & powershellSingleQuotedLiteral(archive) &
-      " -Force")
-    check compress.exitCode == 0
+    makeArchive(root, archive, [
+      ("payload.txt", "M3f real Windows boundary\n"),
+      ("nested\\deeper.txt", "backslash-separated entry\n")])
 
     let first = runObserved(
-      buildZipArgvWindows(archive, destinationA), root,
-      requireCreation = true)
+      buildZipArgvWindows(archive, destinationA), root)
     let second = runObserved(
-      buildZipArgvWindows(archive, destinationB), root,
-      requireCreation = true)
+      buildZipArgvWindows(archive, destinationB), root)
 
     check first.exitCode == 0
     check second.exitCode == 0
-    check first.scratchPath.len > 0
-    check second.scratchPath.len > 0
-    check first.scratchPath.extractFilename().startsWith(
-      "repro-expand-archive-")
-    check second.scratchPath.extractFilename().startsWith(
-      "repro-expand-archive-")
-    check first.scratchPath.toLowerAscii().endsWith(".zip")
-    check second.scratchPath.toLowerAscii().endsWith(".zip")
-    check first.scratchPath.extractFilename() !=
-      second.scratchPath.extractFilename()
-    check readFile(destinationA / "payload.txt") ==
-      "M3f real Windows boundary\n"
-    check readFile(destinationB / "payload.txt") ==
-      "M3f real Windows boundary\n"
-    check remainingScratchFiles(root).len == 0
+    check first.scratchPath.len == 0
+    check second.scratchPath.len == 0
+    for destination in [destinationA, destinationB]:
+      check readFile(destination / "payload.txt") ==
+        "M3f real Windows boundary\n"
+      check readFile(destination / "nested" / "deeper.txt") ==
+        "backslash-separated entry\n"
+    check remainingScratchFiles(root) == @[archive]
 
-  test "copy failure is nonzero and leaves no scratch":
-    let root = createTempDir("repro-expand-archive-copy-failure-", "")
+  test "an existing destination is overwritten in place, like -Force":
+    let root = createTempDir("repro-expand-archive-overwrite-", "")
     defer:
       if dirExists(root):
         removeDir(root)
 
-    let missingArchive = root / "missing archive's.zip"
+    let archive = root / "runner.zip"
     let destination = root / "destination"
-    let failed = runObserved(
-      buildZipArgvWindows(missingArchive, destination), root,
-      requireCreation = false)
+    makeArchive(root, archive, [("config.cmd", "new config\n")])
+    createDir(destination)
+    writeFile(destination / "config.cmd", "old config\n")
+    writeFile(destination / "keep.txt", "not in the archive\n")
 
+    let run = runObserved(buildZipArgvWindows(archive, destination), root)
+    check run.exitCode == 0
+    check run.scratchPath.len == 0
+    check readFile(destination / "config.cmd") == "new config\n"
+    check readFile(destination / "keep.txt") == "not in the archive\n"
+
+  test "a missing archive is nonzero and creates no scratch":
+    let root = createTempDir("repro-expand-archive-missing-", "")
+    defer:
+      if dirExists(root):
+        removeDir(root)
+
+    let failed = runObserved(
+      buildZipArgvWindows(root / "missing archive's.zip",
+        root / "destination"), root)
     check failed.exitCode != 0
+    check failed.scratchPath.len == 0
     check remainingScratchFiles(root).len == 0
 
-  test "extraction failure is nonzero and cleans the observed scratch":
-    let root = createTempDir("repro-expand-archive-extract-failure-", "")
+  test "a corrupt archive is nonzero and creates no scratch":
+    let root = createTempDir("repro-expand-archive-corrupt-", "")
     defer:
       if dirExists(root):
         removeDir(root)
 
     let invalidArchive = root / "invalid archive's.zip"
-    let destination = root / "destination"
     writeFile(invalidArchive, "this is not a zip archive")
     let failed = runObserved(
-      buildZipArgvWindows(invalidArchive, destination), root,
-      requireCreation = true)
-
+      buildZipArgvWindows(invalidArchive, root / "destination"), root)
     check failed.exitCode != 0
-    check failed.scratchPath.len > 0
-    check failed.scratchPath.extractFilename().startsWith(
-      "repro-expand-archive-")
-    check failed.scratchPath.toLowerAscii().endsWith(".zip")
-    check remainingScratchFiles(root).len == 0
-
-  test "cleanup failure is nonzero and retains scratch until ACL restoration":
-    let root = createTempDir("repro-expand-archive-cleanup-failure-", "")
-    var originalAccessSddl = ""
-    var restoreRequired = false
-    try:
-      let payload = root / "payload.txt"
-      let archive = root / "source archive's.zip"
-      let destination = root / "destination"
-      writeFile(payload, "M3f cleanup-failure boundary\n")
-      let compress = runPowerShell(
-        "$ErrorActionPreference = 'Stop'; " &
-        "Compress-Archive -LiteralPath " &
-          powershellSingleQuotedLiteral(payload) &
-        " -DestinationPath " & powershellSingleQuotedLiteral(archive) &
-        " -Force")
-      requireProcessSuccess(compress, "create cleanup-failure archive")
-
-      originalAccessSddl = readAccessSddl(root)
-      # Restoration is required even when installation reports a failure:
-      # Set-Acl may have completed before the verification step failed.
-      restoreRequired = true
-      let denyInstall = installDeleteDenyAcl(root)
-      requireProcessSuccess(denyInstall, "install fixture delete-deny ACL")
-      requireDeleteIsActuallyDenied(root)
-
-      var env = processEnvironment()
-      env["TEMP"] = root
-      env["TMP"] = root
-      let argv = buildZipArgvWindows(archive, destination)
-      check argv.len == 4
-      let failed = runProcess(argv[0], argv[1 .. ^1], env)
-
-      check failed.exitCode != 0
-      # Extraction completed before the finally block attempted cleanup, so
-      # the non-zero result is specifically the fail-closed Remove-Item path.
-      check readFile(destination / "payload.txt") ==
-        "M3f cleanup-failure boundary\n"
-      let retained = remainingScratchFiles(root)
-      check retained.len == 1
-      if retained.len == 1:
-        check retained[0].extractFilename().startsWith(
-          "repro-expand-archive-")
-        check retained[0].toLowerAscii().endsWith(".zip")
-        check fileExists(retained[0])
-    finally:
-      if restoreRequired:
-        let restored = restoreAccessAndResetChildren(
-          root, originalAccessSddl)
-        requireProcessSuccess(restored,
-          "restore fixture DACL and reset child ACLs")
-      for scratch in remainingScratchFiles(root):
-        removeFile(scratch)
-      check remainingScratchFiles(root).len == 0
-      if dirExists(root):
-        removeDir(root)
-    check not dirExists(root)
+    check failed.scratchPath.len == 0
+    check remainingScratchFiles(root) == @[invalidArchive]

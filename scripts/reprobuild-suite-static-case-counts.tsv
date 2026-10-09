@@ -201,6 +201,7 @@ libs/repro_dsl_stdlib/tests/t_doc_comment_malformed_directive_is_compile_error.n
 libs/repro_dsl_stdlib/tests/t_doc_comment_position_from_first_line.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim	nim	11
+libs/repro_dsl_stdlib/tests/t_expand_archive_zip_extraction_cost.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim	nim	12
@@ -271,6 +272,7 @@ libs/repro_home_apply/tests/t_builtin_adapter_installer_nsis_erlang.nim	nim	3
 libs/repro_home_apply/tests/t_builtin_adapter_launcher_emit_composer.nim	nim	4
 libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_pre_install_runner.nim	nim	10
+libs/repro_home_apply/tests/t_builtin_adapter_zip_extraction_cost.nim	nim	3
 libs/repro_home_apply/tests/t_home_gc.nim	nim	7
 libs/repro_home_apply/tests/t_junction_aware_remove.nim	nim	7
 libs/repro_home_apply/tests/t_plan_topological_sort.nim	nim	6
