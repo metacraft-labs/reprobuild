@@ -15,6 +15,7 @@ import repro_core
 # and at two in `git_actions.nim`, and a repo-wide re-export would put
 # `fsContainment` in the namespace of every module that touches `repro_core`.
 import repro_core/path_identity
+import repro_core/relocation
 # PG-14 — the managed-hook contract handshake has to run a `repro` this build
 # did NOT produce (that is the entire measurement: seventeen store paths on one
 # host, answering differently per shell). The `uncontrolled*` wrappers are the
@@ -9187,6 +9188,110 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
 # directory the raw compile writes into.
 # ---------------------------------------------------------------------
 
+proc recipeRelativeCompilePossible(recipeDir, consumerRoot: string): bool =
+  ## Whether the engine's recipe compiles for the recipe in `recipeDir` can
+  ## run recipe-relative (`extractInterfaceEdge`): POSIX, a recipe that is
+  ## its own consumer root, and a directory that can hold the edge's
+  ## outputs. `REPRO_RECIPE_RELATIVE_COMPILES=0` turns it off, for comparing
+  ## against the location-bound layout.
+  when defined(windows):
+    false
+  else:
+    if getEnv("REPRO_RECIPE_RELATIVE_COMPILES") == "0":
+      return false
+    if consumerRoot.len == 0 or
+        os.normalizedPath(absolutePath(consumerRoot)) !=
+          os.normalizedPath(recipeDir):
+      return false
+    try:
+      let reproDir = recipeDir / ".repro"
+      if dirExists(extendedPath(reproDir)):
+        createDir(extendedPath(reproDir / "interface"))
+      else:
+        # Creating `.repro` adds an entry to the recipe's ROOT directory,
+        # and a root's mtime is what an editable develop override and an
+        # on-disk sibling fold into their consumers' action keys
+        # (`computeOverrideContentIdentity`, `onDiskSiblingSourceBinding`).
+        # The edge's derived outputs are not an edit of the recipe: keep the
+        # root's mtime, or a consumer's second build would miss on every
+        # action that consumes this recipe as a producer.
+        let rootModified = getLastModificationTime(extendedPath(recipeDir))
+        createDir(extendedPath(reproDir / "interface"))
+        setLastModificationTime(extendedPath(recipeDir), rootModified)
+      true
+    except OSError, IOError:
+      false
+
+proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
+                                    compileCommand: openArray[string] = []):
+    seq[string] =
+  ## The roots a recipe compile reaches by ABSOLUTE path from wherever the
+  ## recipe lies (`repro_core/relocation`): host system directories, the Nix
+  ## store, the reprobuild libraries and the engine binary, the reprobuild
+  ## store, the catalog checkouts found beside reprobuild or named by
+  ## `REPROBUILD_PACKAGES_ROOT`, and per-user tool configuration. Inputs and
+  ## source locations under them stay absolute; everything else is named
+  ## relative to the recipe. Sorted, so the list is a stable part of the
+  ## edge's argv.
+  var roots = @["/nix", "/etc", "/usr", "/proc", "/sys", "/dev", "/run",
+    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt", "/var"]
+  if workDir.len > 0:
+    roots.add(absolutePath(workDir))
+    roots.add(parentDir(absolutePath(workDir)) / "reprobuild-packages")
+  if helperCliPath.len > 0:
+    roots.add(parentDir(absolutePath(helperCliPath)))
+  let catalog = getEnv("REPROBUILD_PACKAGES_ROOT")
+  if catalog.len > 0:
+    roots.add(absolutePath(catalog))
+  let store = resolveStoreRoot()
+  if store.len > 0:
+    roots.add(absolutePath(store))
+  let home = getHomeDir()
+  if home.len > 0:
+    for dir in [".config", ".cache", ".nix-profile", ".local", ".nimble"]:
+      roots.add(os.normalizedPath(home / dir))
+  # Every library directory the compile is TOLD about by absolute path —
+  # the reprobuild package path set includes sibling checkouts (io-mon,
+  # runquota, ...) — is reached there from every location.
+  for arg in compileCommand:
+    if arg.startsWith("--path:") and arg.len > "--path:".len:
+      let dir = arg["--path:".len .. ^1]
+      if dir.isAbsolute:
+        roots.add(dir)
+  for root in roots:
+    let normalized = os.normalizedPath(root)
+    if normalized notin result:
+      result.add(normalized)
+  result.sort()
+
+proc recipeRelativeCompileArgs(command: openArray[string];
+                               modulePath: string): seq[string] =
+  ## A provider compile command as the recipe-relative compile spells it:
+  ## the recipe module by its name and the recipe directory as `.`.
+  let absoluteModule = absolutePath(modulePath)
+  let recipeDir = parentDir(absoluteModule)
+  for arg in command:
+    if arg == absoluteModule or arg == modulePath:
+      result.add(extractFilename(modulePath))
+    elif arg == "--path:" & recipeDir:
+      result.add("--path:.")
+    else:
+      result.add(arg)
+
+proc publishIfChanged(path, content: string) =
+  ## Write `content` to `path` unless it already holds exactly that, so a
+  ## served edge does not touch the mtime every reader of `path` keys on.
+  if fileExists(extendedPath(path)):
+    try:
+      if readFile(extendedPath(path)) == content:
+        return
+    except IOError, OSError:
+      discard
+  createDir(extendedPath(parentDir(path)))
+  let staged = path & ".tmp." & $getCurrentProcessId()
+  writeFile(extendedPath(staged), content)
+  moveFile(extendedPath(staged), extendedPath(path))
+
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
   ## keyed by the edge's own identity (its argv hash).
@@ -9254,45 +9359,42 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       workDir, scratchDir, requireStub, resourceModule, extraPaths,
       consumerRoot)
 
-  var command = @[
-    helperCliPath,
-    "__repro-extract-interface",
-    "--module", modulePath,
-    "--artifact", artifactPath,
-    "--stub", stubPath,
-    "--work-dir", workDir,
-    "--consumer-root", consumerRoot,
-    "--require-stub", (if requireStub: "1" else: "0")]
-  if scratchDir.len > 0:
-    command.add("--scratch-dir")
-    command.add(scratchDir)
-  if resourceModule.len > 0:
-    command.add("--resource-module")
-    command.add(resourceModule)
-  for extra in extraPaths:
-    if extra.len > 0:
-      command.add("--extra-path")
-      command.add(extra)
-
-  createDir(extendedPath(parentDir(artifactPath)))
-  let edgeCwd =
-    if scratchDir.len > 0: scratchDir else: parentDir(artifactPath)
-  createDir(extendedPath(edgeCwd))
-  var inputs = @[modulePath]
-  if resourceModule.len > 0 and resourceModule != modulePath:
-    inputs.add(resourceModule)
-  # The action key must distinguish one consumer's extraction from another's.
-  # ``action()``'s default weak fingerprint is derived from the action ID
-  # alone, so a fixed ID would give every project in a shared action-cache
-  # root the SAME key — one consumer's interface restored into another's
-  # build. The fingerprint is taken from the ARGV instead, which already
-  # names the module, the artifact, the work dir and the consumer root. That
-  # is the property the spec is after: the command line is an input by
-  # construction, not a list somebody maintains. Content changes are caught
-  # by the engine's recorded-input revalidation on top of it.
+  # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  # compiles" (owner decision 2026-10-09): the extraction runs IN the
+  # recipe's directory and names everything beside it relative to that
+  # directory — on its argv, in its declared outputs, in its action record
+  # and in the artifact it writes. The same recipe bytes at another path, in
+  # another worktree or under another work root then form the same edge and
+  # are served by one compile. The edge's own outputs therefore live with
+  # the recipe (`.repro/interface/<variant>/`); the caller's artifact and
+  # stub paths receive a rebased copy afterwards. A recipe whose directory
+  # cannot hold them (an immutable store path, whose location is fixed
+  # anyway) keeps the location-bound layout below.
+  let recipeDir = parentDir(absolutePath(modulePath))
+  let relocatable = recipeRelativeCompilePossible(recipeDir, consumerRoot)
+  # Only anchors that do not contain the recipe: they are on the argv, and
+  # one around the recipe would name its location there.
+  let anchors =
+    if relocatable:
+      effectiveAnchors(recipeDir, recipeCompileRelocationAnchors(workDir,
+        helperCliPath, providerCompileCommand(modulePath,
+          parentDir(artifactPath) / "provider" / "project-provider",
+          workDir, scratchDir)))
+    else: @[]
+  proc recipeSpelling(path: string): string =
+    relocatableName(absolutePath(path), recipeDir, anchors)
+  # The compile configuration (defines, flags, toolchain) the recipe is
+  # compiled under, spelled as the recipe-relative provider compile spells
+  # it so it carries no location.
   let compileCommand =
     if providerCompilerCommand.len > 0:
-      providerCompilerCommand
+      if relocatable:
+        recipeRelativeCompileArgs(providerCompilerCommand, modulePath)
+      else:
+        providerCompilerCommand
+    elif relocatable:
+      providerCompileCommand(extractFilename(modulePath),
+        ".repro" / "provider" / "project-provider", workDir, "")
     else:
       providerCompileCommand(modulePath,
         parentDir(artifactPath) / "provider" / "project-provider",
@@ -9302,16 +9404,102 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # The selected catalog decides which module a catalog `uses:` imports;
   # see `catalogSelectionIdentity`. Appended only when one is selected.
   let catalogSelection = catalogSelectionIdentity()
-  let edgeIdentity = weakFingerprintFromText(command.join("\x00") &
-    "\x00provider-compile-configuration\x00" & digestHex(compileConfiguration) &
-    (if catalogSelection.len > 0: "\x00" & catalogSelection else: ""))
-  let sessionKey = toHex(edgeIdentity.bytes)
+  let keySuffix = "\x00provider-compile-configuration\x00" &
+    digestHex(compileConfiguration) &
+    (if catalogSelection.len > 0: "\x00" & catalogSelection else: "")
+  var variantArgs: seq[string] = @[]
+  variantArgs.add(@["--require-stub", (if requireStub: "1" else: "0")])
+  if resourceModule.len > 0:
+    variantArgs.add("--resource-module")
+    variantArgs.add(
+      if relocatable: recipeSpelling(resourceModule) else: resourceModule)
+  for extra in extraPaths:
+    if extra.len > 0:
+      variantArgs.add("--extra-path")
+      variantArgs.add(if relocatable: recipeSpelling(extra) else: extra)
+  var command: seq[string]
+  var edgeArtifact, edgeStub, edgeCwd: string
+  if relocatable:
+    let moduleName = extractFilename(modulePath)
+    # One directory per extraction VARIANT of this recipe, named by
+    # everything that selects the variant, so two variants never write the
+    # same outputs.
+    let variant = toHex(weakFingerprintFromText(@[moduleName, workDir,
+      helperCliPath].join("\x00") & "\x00" & variantArgs.join("\x00") &
+      "\x00" & anchors.join("\x00") & keySuffix).bytes)[0 .. 15].toLowerAscii
+    let edgeDir = ".repro" / "interface" / variant
+    edgeArtifact = edgeDir / "project-interface.rbsz"
+    edgeStub = edgeDir / "project-interface.nim"
+    edgeCwd = recipeDir
+    command = @[
+      helperCliPath,
+      "__repro-extract-interface",
+      "--recipe-relative",
+      "--module", moduleName,
+      "--artifact", edgeArtifact,
+      "--stub", edgeStub,
+      "--work-dir", workDir,
+      "--consumer-root", ".",
+      "--scratch-dir", edgeDir / "work"] & variantArgs
+    for anchor in anchors:
+      command.add("--anchor")
+      command.add(anchor)
+    createDir(extendedPath(recipeDir / edgeDir))
+  else:
+    edgeArtifact = artifactPath
+    edgeStub = stubPath
+    edgeCwd =
+      if scratchDir.len > 0: scratchDir else: parentDir(artifactPath)
+    command = @[
+      helperCliPath,
+      "__repro-extract-interface",
+      "--module", modulePath,
+      "--artifact", artifactPath,
+      "--stub", stubPath,
+      "--work-dir", workDir,
+      "--consumer-root", consumerRoot] & variantArgs
+    if scratchDir.len > 0:
+      command.add("--scratch-dir")
+      command.add(scratchDir)
+  let edgeArtifactPath = rebasedName(edgeArtifact, edgeCwd)
+  let edgeStubPath = rebasedName(edgeStub, edgeCwd)
+
+  createDir(extendedPath(parentDir(artifactPath)))
+  createDir(extendedPath(edgeCwd))
+  var inputs =
+    if relocatable: @[extractFilename(modulePath)] else: @[modulePath]
+  if resourceModule.len > 0 and resourceModule != modulePath:
+    inputs.add(if relocatable: recipeSpelling(resourceModule)
+               else: resourceModule)
+  # The action key must distinguish one consumer's extraction from another's.
+  # ``action()``'s default weak fingerprint is derived from the action ID
+  # alone, so a fixed ID would give every project in a shared action-cache
+  # root the SAME key — one consumer's interface restored into another's
+  # build. The fingerprint is taken from the ARGV instead, which names the
+  # module, the outputs, the reprobuild libraries and the consumer root —
+  # relative to the recipe when the edge is recipe-relative, so it names the
+  # same edge wherever the recipe lies. That is the property the spec is
+  # after: the command line is an input by construction, not a list somebody
+  # maintains. Content changes are caught by the engine's recorded-input
+  # revalidation on top of it.
+  # Every recipe-relative extraction of the same variant has the same argv
+  # (`--module repro.nim`), so the recipe's own bytes partition the key: the
+  # engine keeps a bounded number of records per weak fingerprint, and
+  # unrelated recipes sharing one would evict each other's.
+  let recipeContent =
+    if relocatable:
+      "\x00recipe\x00" & digestHex(blake3DomainDigest(
+        readFile(extendedPath(modulePath)).bytesOf(), hdActionFingerprint))
+    else: ""
+  let edgeIdentity = weakFingerprintFromText(command.join("\x00") & keySuffix &
+    recipeContent)
+  let sessionKey = toHex(edgeIdentity.bytes) & "\x00" & artifactPath
   if not forceRebuild and not validateExistingOnly and
       interfaceEdgeSessionResults.hasKey(sessionKey) and
       fileExists(extendedPath(artifactPath)):
     return interfaceEdgeSessionResults[sessionKey]
   let actionId = "__repro_interface_extract-" &
-    toHex(weakFingerprintFromText(absolutePath(artifactPath)).bytes)[0 .. 15]
+    toHex(weakFingerprintFromText(absolutePath(edgeArtifactPath)).bytes)[0 .. 15]
   # The extraction's own scratch is NOT an input. It reads back what it just
   # wrote there: the Nim incremental cache (``nimcache-interface``), the
   # generated extract-runner tree under ``m7-temp`` (a fresh random directory
@@ -9323,7 +9511,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # recipe, the reprobuild libs, the toolchain and the config files, all of
   # which live elsewhere and stay recorded.
   var ignoredInputPrefixes: seq[string] = @[]
-  if scratchDir.len > 0:
+  if relocatable:
+    ignoredInputPrefixes.add(recipeDir / parentDir(edgeArtifact) / "work")
+  elif scratchDir.len > 0:
     ignoredInputPrefixes.add(absolutePath(scratchDir))
   when defined(windows):
     ignoredInputPrefixes.add(
@@ -9333,15 +9523,20 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = edgeCwd,
     inputs = inputs,
-    outputs = interfaceExtractionOutputs(artifactPath, stubPath),
+    outputs = interfaceExtractionOutputs(edgeArtifact, edgeStub),
     commandStatsId = "repro interface extract edge",
     cacheable = true,
     weakFingerprint = edgeIdentity,
+    # A copy of the recipe carries new mtimes; HYBRID compares its content
+    # when the metadata moved, which is what lets that copy be served.
+    actionCachePolicy = (if relocatable: ffpHybrid else: ffpTimestamp),
     envPassthrough = ProviderCompileEnvironmentPassthrough,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy =
-      automaticMonitorGatheringPolicy(ignoredInputPrefixes))
+      automaticMonitorGatheringPolicy(ignoredInputPrefixes),
+    relocatable = relocatable,
+    relocationAnchors = anchors)
   var edgeConfig = BuildEngineConfig(
     cacheRoot: cacheRoot,
     actionCacheRoot: currentActionCacheRoot(),
@@ -9351,8 +9546,11 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     maxParallelism: 1'u32,
     stdoutLimit: 1024 * 1024,
     stderrLimit: 1024 * 1024,
-    rebuildMissingOutputsOnCacheHit: true,
-    deferLocalOutputBlobs: true,
+    # A recipe-relative edge is served at locations that have never held its
+    # outputs, so its record carries their bytes and a hit RESTORES them
+    # there. A location-bound edge keeps them in place.
+    rebuildMissingOutputsOnCacheHit: not relocatable,
+    deferLocalOutputBlobs: not relocatable,
     bypassRunQuota: bypassRunQuota,
     fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
     inlineRunQuota: true,
@@ -9371,6 +9569,11 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     skipCacheHitEvidence: skipCacheHitEvidence,
     cancelCallback: cancelCheck)
   edgeConfig.statsEnabled = statsEnabled
+  # The recipe-relative outputs are shared by every caller of this edge for
+  # this recipe; the caller's own copy is its own.
+  var edgeLock =
+    if relocatable: acquireInterfaceArtifactLock(edgeArtifactPath)
+    else: ReproFileLock()
   var artifactLock = acquireInterfaceArtifactLock(artifactPath)
   try:
     let edgeResult = runBuild(graph([extractAction]), edgeConfig)
@@ -9415,7 +9618,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
              ": " & item.reason
            else:
              ""))
-        if item.id == extractAction.id and item.status == asUpToDate:
+        # A recipe-relative edge is served by restoring (`asCacheHit`).
+        if item.id == extractAction.id and (item.status == asUpToDate or
+            (relocatable and item.status == asCacheHit)):
           validated = true
       if not validated:
         raise newException(IOError,
@@ -9424,13 +9629,29 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
              " (" & validationDetails.join("; ") & ")"
            else:
              ""))
-    if not fileExists(extendedPath(artifactPath)):
+    if not fileExists(extendedPath(edgeArtifactPath)):
       raise newException(IOError,
-        "interface extraction edge did not write artifact: " & artifactPath)
-    result = readInterfaceArtifact(artifactPath)
+        "interface extraction edge did not write artifact: " &
+        edgeArtifactPath)
+    if relocatable:
+      # The edge's artifact names the recipe's files relative to the recipe;
+      # the caller's copy names them at THIS location, which is what every
+      # reader of a project interface expects.
+      result = readInterfaceArtifactRebased(edgeArtifactPath, recipeDir)
+      let encoded = encodeProjectInterfaceArtifact(result)
+      var text = newString(encoded.len)
+      if encoded.len > 0:
+        copyMem(addr text[0], unsafeAddr encoded[0], encoded.len)
+      publishIfChanged(artifactPath, text)
+      if stubPath.len > 0 and fileExists(extendedPath(edgeStubPath)):
+        publishIfChanged(stubPath, readFile(extendedPath(edgeStubPath)))
+    else:
+      result = readInterfaceArtifact(artifactPath)
     interfaceEdgeSessionResults[sessionKey] = result
   finally:
     releaseInterfaceArtifactLock(artifactLock)
+    if relocatable:
+      releaseInterfaceArtifactLock(edgeLock)
 
 proc cacheAttributionLines*(item: ActionResult): seq[string] =
   ## The follow-on lines a `--log=actions` entry needs before a PERMANENT
@@ -11987,9 +12208,16 @@ proc runInterfaceExtractHelper(args: openArray[string]): int =
   let resourceModule = valueAfterFlag(args, "--resource-module")
   let requireStub = valueAfterFlag(args, "--require-stub") == "1"
   var extraPaths: seq[string] = @[]
+  var anchors: seq[string] = @[]
   for i in 0 ..< args.len - 1:
     if args[i] == "--extra-path" and args[i + 1].len > 0:
       extraPaths.add(args[i + 1])
+    elif args[i] == "--anchor" and args[i + 1].len > 0:
+      anchors.add(args[i + 1])
+  # A recipe-relative extraction (`extractInterfaceEdge`) runs with its cwd
+  # at the recipe and names everything beside it relative to that, so the
+  # same argv describes the compile at every location of the recipe.
+  let recipeRelative = "--recipe-relative" in args
   for (name, value) in [
     ("--module", modulePath),
     ("--artifact", artifactPath),
@@ -12005,9 +12233,16 @@ proc runInterfaceExtractHelper(args: openArray[string]): int =
     # text-closure key here could only ever overrule that decision, and it
     # would do so exactly in the cases the edge was introduced for — a
     # dependency acquired during macro expansion, which that key cannot see.
-    discard extractInterfaceFromModule(modulePath, artifactPath, stubPath,
-      workDir, scratchDir, requireStub, resourceModule, extraPaths,
-      consumerRoot, useExtractionCache = false)
+    discard extractInterfaceFromModule(absolutePath(modulePath),
+      absolutePath(artifactPath), absolutePath(stubPath),
+      absolutePath(workDir),
+      (if scratchDir.len > 0: absolutePath(scratchDir) else: ""),
+      requireStub,
+      (if resourceModule.len > 0: absolutePath(resourceModule) else: ""),
+      extraPaths.mapIt(absolutePath(it)),
+      (if consumerRoot.len > 0: absolutePath(consumerRoot) else: ""),
+      useExtractionCache = false, recipeRelative = recipeRelative,
+      relocationAnchors = anchors)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro interface extract: error: " & err.msg)
