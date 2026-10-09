@@ -1787,8 +1787,8 @@ const
     "Shared-Development-Services L1, where a non-literal argument vanished " &
     "with no diagnostic."
   m5ServiceSetterSurface = "`executable <ident>`, `args \"...\", ...`, " &
-    "`runtimeFile <buildOutput>`, the systemd-unit setters and " &
-    "`on <trigger>:` blocks"
+    "`runtimeFile <buildOutput>`, `identity <mode>`, `scope <value>`, " &
+    "the systemd-unit setters and `on <trigger>:` blocks"
   m5ServiceHeadDropRule = "An extra argument here is REFUSED rather than " &
     "dropped: it is never semchecked, so an identifier that does not " &
     "exist compiles clean and an argument that is accepted and then not " &
@@ -2208,6 +2208,261 @@ proc m5ServiceShortFormEmission(stmt: NimNode): NimNode =
   else:
     return nil
 
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L4 — `identity` and `scope`.
+#
+# §4: "Two fields answer it, and they are **orthogonal**. Conflating them
+# is the mistake this section is written to prevent." So they are two
+# setters, parsed independently, each with its own refusal.
+#
+# The reading below is SHARED between the two walkers that need it:
+# `m5ParseServiceBody` (which emits the body-setter calls) and
+# `l3CollectExports` (which lifts the declared values into the interface
+# artifact). A second, divergent reading is the drift `m5ServiceEmission`'s
+# own doc comment warns about -- the lift would then be able to report an
+# identity the lowering never recorded.
+# ---------------------------------------------------------------------------
+
+const
+  l4RecognisedIdentityModes = "`identity derived` (the default) and " &
+    "`identity stable \"<id>\"`"
+  l4RecognisedScopes = "`scope project` (the default), " &
+    "`scope workspace`, `scope user` and `scope system`"
+  l4IdentityDropRule = "A spelling this setter does not recognise is " &
+    "REFUSED rather than dropped, and the reason is sharper here than " &
+    "anywhere else in the service body: an `identity` that is accepted " &
+    "and discarded leaves the service on the DEFAULT `derived` identity, " &
+    "whose documented failure mode (Shared-Development-Services.md §4.2) " &
+    "is that a developer's database silently forks on the next " &
+    "configuration change -- \"the symptom is \"my test user is gone\" " &
+    "rather than anything pointing at the cause\"."
+
+type
+  L4ServiceIdentityScope = object
+    ## What a `service` body declared about its instance identity and
+    ## scope. The `*Declared` flags separate "the author wrote the
+    ## default" from "the author wrote nothing"; both resolve to the same
+    ## value, and only the first makes a SECOND declaration a conflict.
+    identityKind: ServiceIdentityKind
+    stableId: string
+    identityDeclared: bool
+    identityAnchor: NimNode
+    scope: ServiceScope
+    scopeDeclared: bool
+    scopeAnchor: NimNode
+
+proc l4NewIdentityScope(): L4ServiceIdentityScope =
+  L4ServiceIdentityScope(
+    identityKind: sikDerived, stableId: "", identityDeclared: false,
+    identityAnchor: nil, scope: sscProject, scopeDeclared: false,
+    scopeAnchor: nil)
+
+proc l4ScopeFromName(name: string):
+    tuple[found: bool; scope: ServiceScope] =
+  ## Map a `scope` argument's ident text to its enum value. Derived from
+  ## the enum rather than from a hand-kept list, so a fifth scope cannot
+  ## be added to `ServiceScope` and silently stay unspellable.
+  for candidate in ServiceScope:
+    if name == ($candidate)[3 .. ^1].normalize:
+      return (true, candidate)
+  (false, sscProject)
+
+proc l4ScopeSpellings(): string =
+  ## Every scope word, derived from the enum. Used only in diagnostics.
+  var parts: seq[string] = @[]
+  for candidate in ServiceScope:
+    parts.add("`" & ($candidate)[3 .. ^1].normalize & "`")
+  parts.join(", ")
+
+proc l4IdentityScopeHeadName(stmt: NimNode): string =
+  ## `"identity"` / `"scope"` when `stmt` spells one of the two L4
+  ## setters in a shape the setter walk would otherwise SKIP, else `""`.
+  ##
+  ## Which shapes those are is not hypothetical. `m5ParseServiceBody`
+  ## continues past anything that is not an `nnkCall`/`nnkCommand` with
+  ## at least two children, so a bare `identity` and an `identity =
+  ## derived` both compiled clean and recorded nothing at all. This is
+  ## the same family as the nine dropped constructs this campaign has
+  ## found, caught before it shipped rather than after.
+  var head: NimNode = nil
+  if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    head = stmt
+  elif stmt.kind in {nnkAsgn, nnkExprEqExpr} and stmt.len > 0 and
+      stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    head = stmt[0]
+  elif stmt.kind in {nnkCall, nnkCommand} and stmt.len == 1 and
+      stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    head = stmt[0]
+  if head == nil:
+    return ""
+  let name = identText(head).normalize
+  if name == "identity" or name == "scope":
+    return name
+  ""
+
+proc l4ParseIdentitySetter(stmt: NimNode;
+                           acc: var L4ServiceIdentityScope) =
+  ## Read one `identity <mode>` setter into `acc`, or refuse it.
+  if acc.identityDeclared:
+    error("`service` already declares its identity as `" &
+      (if acc.identityKind == sikStable:
+         "stable \"" & acc.stableId & "\""
+       else: "derived") & "`; `" & stmt.repr.strip() & "` is a SECOND " &
+      "`identity` declaration. Shared-Development-Services.md §4.2 gives " &
+      "a service one identity -- \"There is one instance per `(id, " &
+      "scope)`\" -- so two declarations have no meaning to pick between. " &
+      "Last-wins is refused rather than implemented because it would " &
+      "make the field that decides whether durable state survives a " &
+      "redefinition depend on statement order. Delete one.",
+      m5ServiceStmtAnchor(stmt))
+  if stmt.len != 2:
+    error("`identity` takes exactly one mode; `" & stmt.repr.strip() &
+      "` has " & $(stmt.len - 1) & " argument(s). " &
+      "Shared-Development-Services.md §4.2 specifies " &
+      l4RecognisedIdentityModes & ". " & l4IdentityDropRule, stmt)
+  let arg = stmt[1]
+  if arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("`identity` takes a MODE, not a string; `" &
+      stmt.repr.strip() & "` quotes its argument. If " &
+      escForCode(arg.strVal) & " is the IDENTIFIER, write `identity " &
+      "stable " & escForCode(arg.strVal) & "`. If it is the MODE, " &
+      "unquote it: Shared-Development-Services.md §4.2 specifies " &
+      l4RecognisedIdentityModes & ".", stmt)
+  if arg.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    case identText(arg).normalize
+    of "derived":
+      acc.identityKind = sikDerived
+      acc.stableId = ""
+      acc.identityDeclared = true
+      acc.identityAnchor = stmt
+      return
+    of "stable":
+      error("`identity stable` needs the identifier: `identity stable " &
+        "\"<id>\"`. Shared-Development-Services.md §4.2: \"The author " &
+        "assigns a stable identifier, independent of the build. There is " &
+        "one instance per `(id, scope)`, and it survives redefinition.\" " &
+        "Without the id there is no key to share an instance under, and " &
+        "the service would fall back to `derived` -- the mode `stable` " &
+        "exists to avoid. The id is a name, not a secret: a " &
+        "reverse-DNS-style string or a GUID.", stmt)
+    else:
+      error("`service` does not recognise the identity mode `" &
+        arg.repr.strip() & "`. Shared-Development-Services.md §4.2 " &
+        "specifies " & l4RecognisedIdentityModes & ", and the rule for " &
+        "choosing: \"a service declares `stable` if and only if it owns " &
+        "state that must outlive a change to its own definition. " &
+        "Everything else takes `derived`.\" " & l4IdentityDropRule, stmt)
+  if arg.kind notin {nnkCall, nnkCommand} or arg.len != 2 or
+      arg[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("`service` does not recognise the identity mode `" &
+      arg.repr.strip() & "`. Shared-Development-Services.md §4.2 " &
+      "specifies " & l4RecognisedIdentityModes & ". " &
+      l4IdentityDropRule, stmt)
+  let mode = identText(arg[0]).normalize
+  let idNode = arg[1]
+  if mode == "derived":
+    error("`identity derived` takes no identifier; `" &
+      stmt.repr.strip() & "` supplies one. " &
+      "Shared-Development-Services.md §4.2: a `derived` identity \"is a " &
+      "digest of the service's materialised definition: the executable, " &
+      "the rendered configuration outputs, the arguments\" -- there is " &
+      "nothing for an author-supplied id to mean, and recording one the " &
+      "resolver ignores would read as support for it. Write `identity " &
+      "stable " & idNode.repr.strip() & "` to declare that identifier, " &
+      "or `identity derived` to keep the digest.", stmt)
+  if mode != "stable":
+    error("`service` does not recognise the identity mode `" &
+      arg.repr.strip() & "`. Shared-Development-Services.md §4.2 " &
+      "specifies " & l4RecognisedIdentityModes & ". " &
+      l4IdentityDropRule, stmt)
+  if idNode.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("`identity stable` needs a STRING LITERAL identifier; `" &
+      idNode.repr.strip() & "` is not one. " &
+      "Shared-Development-Services.md §4.2: the identifier \"is not " &
+      "derived from a path, because a path is what distinguishes the " &
+      "worktrees that are supposed to share the instance\", and it is " &
+      "\"independent of the build\". An expression could be neither -- " &
+      "`getCurrentDir()` and a build output both type-check -- and the " &
+      "failure would be invisible: the service would simply not be the " &
+      "same instance in the next worktree. A literal cannot be either, " &
+      "so the restriction is the guarantee. Write `identity stable " &
+      "\"<id>\"`.", stmt)
+  if idNode.strVal.strip().len == 0:
+    error("`identity stable \"\"` declares an EMPTY identifier. " &
+      "Shared-Development-Services.md §4.2: the identifier \"is chosen " &
+      "to be globally unique by construction -- a reverse-DNS-style " &
+      "string, or a GUID\". The empty string is the opposite: every " &
+      "service that wrote it would share one instance and one state " &
+      "directory.", stmt)
+  acc.identityKind = sikStable
+  acc.stableId = idNode.strVal
+  acc.identityDeclared = true
+  acc.identityAnchor = stmt
+
+proc l4ParseScopeSetter(stmt: NimNode;
+                        acc: var L4ServiceIdentityScope) =
+  ## Read one `scope <value>` setter into `acc`, or refuse it.
+  if acc.scopeDeclared:
+    error("`service` already declares its scope as `" &
+      ($acc.scope)[3 .. ^1].normalize & "`; `" & stmt.repr.strip() &
+      "` is a SECOND `scope` declaration. Shared-Development-" &
+      "Services.md §4.1 gives a service one scope -- the table reads " &
+      "\"One instance per\" -- so two have nothing to pick between. " &
+      "Delete one.", m5ServiceStmtAnchor(stmt))
+  if stmt.len != 2:
+    error("`scope` takes exactly one value; `" & stmt.repr.strip() &
+      "` has " & $(stmt.len - 1) & " argument(s). " &
+      "Shared-Development-Services.md §4.1 specifies " &
+      l4RecognisedScopes & ". " & l4IdentityDropRule, stmt)
+  let arg = stmt[1]
+  if arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("`scope` takes one of the words " & l4ScopeSpellings() &
+      ", not a string; `" & stmt.repr.strip() & "` quotes it. Write " &
+      "`scope " & arg.strVal & "`.", stmt)
+  if arg.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("`service` does not recognise the scope `" &
+      arg.repr.strip() & "`. Shared-Development-Services.md §4.1 " &
+      "specifies " & l4RecognisedScopes & ". " & l4IdentityDropRule,
+      stmt)
+  let resolved = l4ScopeFromName(identText(arg).normalize)
+  if not resolved.found:
+    error("`service` does not recognise the scope `" &
+      arg.repr.strip() & "`. Shared-Development-Services.md §4.1 " &
+      "specifies " & l4RecognisedScopes & " -- the words are " &
+      l4ScopeSpellings() & ". `project` and `workspace` are this " &
+      "campaign's two narrower additions; `user` and `system` are the " &
+      "lease scopes Ephemeral-State-Leases.md §4.1 already resolved, " &
+      "routing to the user and system daemon respectively. " &
+      l4IdentityDropRule, stmt)
+  acc.scope = resolved.scope
+  acc.scopeDeclared = true
+  acc.scopeAnchor = stmt
+
+proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
+  ## THE reading of a `service` body's `identity` and `scope` setters.
+  ## Both walkers call this one proc; see the section comment above.
+  result = l4NewIdentityScope()
+  if body == nil or body.kind != nnkStmtList:
+    return
+  for stmt in body:
+    let dropped = l4IdentityScopeHeadName(stmt)
+    if dropped.len > 0:
+      error("`" & stmt.repr.strip() & "` is not a shape `" & dropped &
+        "` is written in, and this walker would otherwise SKIP it " &
+        "entirely -- no diagnostic, no record, the service left on the " &
+        "default. Shared-Development-Services.md §4 spells the two " &
+        "setters as commands: " & l4RecognisedIdentityModes & " and " &
+        l4RecognisedScopes & ". " & l4IdentityDropRule,
+        m5ServiceStmtAnchor(stmt))
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      continue
+    case identText(stmt[0]).normalize
+    of "identity": l4ParseIdentitySetter(stmt, result)
+    of "scope": l4ParseScopeSetter(stmt, result)
+    else: discard
+
 proc m5ParseServiceBody(body: NimNode): tuple[
     executableRef: string; executableExpr: NimNode;
     argExprs: seq[NimNode]; runtimeFileExprs: seq[NimNode];
@@ -2217,7 +2472,8 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     requiresLits: seq[NimNode]; beforeLits: seq[NimNode];
     afterLits: seq[NimNode];
     envPairs: seq[tuple[keyLit: NimNode; valueLit: NimNode]];
-    restartLit: NimNode; userLit: NimNode; groupLit: NimNode] =
+    restartLit: NimNode; userLit: NimNode; groupLit: NimNode;
+    identityScope: L4ServiceIdentityScope] =
   ## Walk a ``service:`` body and extract its setters.
   ##
   ## ``Package-Model.md`` §Collections is the authority for the four
@@ -2245,6 +2501,15 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   ##   * ``on <trigger>:`` blocks, plus the ``hotReload`` /
   ##     ``restartOnCrash`` / ``reloadOnChange`` short-form atoms.
   ##
+  ## Shared-Development-Services L4 adds two more, read by the SHARED
+  ## ``l4ServiceIdentityScope`` so the interface lift reads them the same
+  ## way this walker does:
+  ##
+  ##   * ``identity derived`` (the default) / ``identity stable "<id>"``
+  ##     — §4.2's two identity modes.
+  ##   * ``scope project`` (the default) / ``workspace`` / ``user`` /
+  ##     ``system`` — §4.1's four scopes.
+  ##
   ## ``config:`` is REFUSED here, with the reason: "``service`` does not
   ## have a ``config:`` setter. Configuration is the package's job".
   ##
@@ -2265,8 +2530,14 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   result.beforeLits = @[]
   result.afterLits = @[]
   result.envPairs = @[]
+  result.identityScope = l4NewIdentityScope()
   if body.kind != nnkStmtList:
     return
+  # L4: `identity` / `scope` are read by the shared walker, which also
+  # raises every refusal for them. Done BEFORE the setter loop so an
+  # unrecognised identity is reported at the `identity` statement rather
+  # than at whatever the loop reaches first.
+  result.identityScope = l4ServiceIdentityScope(body)
   for stmt in body:
     # The short-form reactive atoms are bare idents (``hotReload``,
     # ``restartOnCrash``) as well as calls, so they are tried before the
@@ -2376,6 +2647,12 @@ proc m5ParseServiceBody(body: NimNode): tuple[
       let lit = m5ServiceStringLitArg(stmt)
       if lit != nil:
         result.groupLit = lit
+    of "identity", "scope":
+      # L4: already read (and validated) by `l4ServiceIdentityScope`
+      # above. Named here rather than left to the `else` so the two are
+      # visibly ACCOUNTED FOR by this walker; falling through to
+      # `discard` would read as "not a setter".
+      discard
     else:
       discard
 
@@ -2488,6 +2765,25 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
     let lit = parsedBody.groupLit
     tryBody.add(quote do:
       setActiveServiceGroup(`lit`))
+  # L4: identity and scope. Emitted only when the body DECLARED them --
+  # the runtime frame is already initialised to `sikDerived` /
+  # `sscProject`, so an unconditional call would make a recipe that said
+  # nothing indistinguishable from one that wrote the default, and
+  # `setActiveServiceIdentity`'s first-wins guard would then be armed by
+  # the macro rather than by the author.
+  if parsedBody.identityScope.identityDeclared:
+    let kindLit =
+      if parsedBody.identityScope.identityKind == sikStable:
+        ident("sikStable")
+      else:
+        ident("sikDerived")
+    let idLit = newLit(parsedBody.identityScope.stableId)
+    tryBody.add(quote do:
+      setActiveServiceIdentity(`kindLit`, `idLit`))
+  if parsedBody.identityScope.scopeDeclared:
+    let scopeLit = ident($parsedBody.identityScope.scope)
+    tryBody.add(quote do:
+      setActiveServiceScope(`scopeLit`))
   # L1: the reactive surface, after the declarative setters so an
   # ``on change cfg:`` block sees the same handle the args did.
   for emission in parsedBody.reactiveEmissions:
@@ -3414,6 +3710,11 @@ type
     name: string
     activityName: string
     handleType: string
+    identityScope: L4ServiceIdentityScope
+      ## Shared-Development-Services L4: the declared identity and scope,
+      ## read by the SHARED `l4ServiceIdentityScope` -- the same proc
+      ## `m5ParseServiceBody` reads them with, so the lift cannot report
+      ## an identity the lowering never recorded.
     anchor: NimNode
 
   L3ActivityExport = object
@@ -3486,6 +3787,7 @@ proc l3CollectExports(packageName: string; pkgBody: NimNode):
       if parsed.matched:
         result.services.add(L3ServiceExport(
           name: parsed.serviceName, activityName: "", handleType: "",
+          identityScope: l4ServiceIdentityScope(parsed.body),
           anchor: l2StmtAnchor(stmt)))
       continue
     if calleeName(stmt).normalize != "devenv":
@@ -3512,7 +3814,9 @@ proc l3CollectExports(packageName: string; pkgBody: NimNode):
         entry.services.add(svc.serviceName)
         result.services.add(L3ServiceExport(
           name: svc.serviceName, activityName: parsed.activityName,
-          handleType: handleType, anchor: l2StmtAnchor(inner)))
+          handleType: handleType,
+          identityScope: l4ServiceIdentityScope(svc.body),
+          anchor: l2StmtAnchor(inner)))
       result.activities.add(entry)
 
 proc l3EmittedModuleScopeNames(packageName: string;
@@ -3807,10 +4111,17 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       ", sourceLine: " & $info.line & "))\n")
   for svc in collected.services:
     let info = svc.anchor.lineInfoObj()
+    # L4: the declared identity and scope travel with the signature.
+    # Written as the enum's own name rather than as an ordinal so the
+    # generated code is readable and a reordered enum cannot silently
+    # re-map a declaration.
     code.add(l3RegisterServiceCallName & "(" & escForCode(pkg.packageName) &
       ", ServiceInterfaceDef(name: " & escForCode(svc.name) &
       ", activityName: " & escForCode(svc.activityName) &
       ", handleType: " & escForCode(svc.handleType) &
+      ", identityKind: " & $svc.identityScope.identityKind &
+      ", identityStableId: " & escForCode(svc.identityScope.stableId) &
+      ", scope: " & $svc.identityScope.scope &
       ", sourceFile: " & escForCode(info.filename) &
       ", sourceLine: " & $info.line & "))\n")
   result = parseStmt(code)

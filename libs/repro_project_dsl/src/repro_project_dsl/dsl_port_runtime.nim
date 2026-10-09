@@ -1320,6 +1320,28 @@ type
       ## (``hotReload`` / ``restartOnCrash`` / ``reloadOnChange``), in
       ## declaration order.
     # ---------------------------------------------------------------
+    # Shared-Development-Services L4 — INSTANCE IDENTITY AND SCOPE.
+    #
+    # ``Shared-Development-Services.md`` §4: "Two fields answer it, and
+    # they are **orthogonal**. Conflating them is the mistake this
+    # section is written to prevent. Identity answers *are these the
+    # same instance?* Scope answers *how widely is one instance
+    # shared?*"
+    #
+    # Both are ground-state-zero (``sikDerived`` / ``sscProject``), so a
+    # record that never saw the setters -- every pre-L4 recipe, and the
+    # legacy positional ``registerService`` -- carries the DEFAULT, which
+    # is also "today's only behaviour". There is no third "unset" state,
+    # deliberately: §4.1 and §4.2 both name a default, so an unset value
+    # would be a state the spec does not have.
+    # ---------------------------------------------------------------
+    identity*: ServiceIdentityDef
+      ## ``identity derived`` (the default) or ``identity stable
+      ## "<id>"``.
+    scope*: ServiceScope
+      ## ``scope project`` (the default) | ``workspace`` | ``user`` |
+      ## ``system``.
+    # ---------------------------------------------------------------
     # M9.C — systemd-unit metadata extensions.
     #
     # The M9 NDE-package discovery survey flagged that systemd-unit
@@ -1403,6 +1425,16 @@ type
     triggers: seq[ServiceTriggerDef]
     openTrigger: ServiceTriggerDef
     triggerOpen: bool
+    # Shared-Development-Services L4 — see DslServiceDef.
+    identity: ServiceIdentityDef
+    scope: ServiceScope
+    identityDeclared: bool
+      ## Whether this body already ran an ``identity`` setter. The macro
+      ## refuses a second one at expansion time, so this is the runtime
+      ## half of the same guard: a body reaching the setter twice through
+      ## some other route must not have the first declaration silently
+      ## replaced.
+    scopeDeclared: bool
 
 var dslPortServiceRegistry: Table[string, seq[DslServiceDef]]
   ## Per-package service registry. Keyed by package name.
@@ -1789,7 +1821,47 @@ proc beginServiceContext*(packageName, serviceName, bodyRepr: string) =
     env: @[],
     restart: "",
     user: "",
-    group: ""))
+    group: "",
+    identity: ServiceIdentityDef(kind: sikDerived, stableId: ""),
+    scope: sscProject,
+    identityDeclared: false,
+    scopeDeclared: false))
+
+proc setActiveServiceIdentity*(kind: ServiceIdentityKind;
+                               stableId = "") =
+  ## Body-setter for ``identity derived`` / ``identity stable "<id>"``
+  ## (Shared-Development-Services §4.2).
+  ##
+  ## The empty-stack case is a silent no-op, matching every other
+  ## body-setter in this module (see ``setActiveServiceExecutable``).
+  ##
+  ## A SECOND declaration is DROPPED here rather than overwriting the
+  ## first, and that is not the silent drop this campaign keeps finding:
+  ## the macro refuses a second ``identity`` setter at expansion time
+  ## with a diagnostic, so this branch is unreachable from a recipe. It
+  ## exists because the proc is public, and last-wins would make
+  ## ``identity`` the one setter whose value depends on evaluation order
+  ## -- on the field that decides whether a developer's database
+  ## survives.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].identityDeclared:
+    return
+  dslPortActiveServiceContext[^1].identity = ServiceIdentityDef(
+    kind: kind,
+    stableId: (if kind == sikStable: stableId else: ""))
+  dslPortActiveServiceContext[^1].identityDeclared = true
+
+proc setActiveServiceScope*(scope: ServiceScope) =
+  ## Body-setter for ``scope project`` | ``workspace`` | ``user`` |
+  ## ``system`` (§4.1). Same first-wins rule, same reason, as
+  ## ``setActiveServiceIdentity``.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].scopeDeclared:
+    return
+  dslPortActiveServiceContext[^1].scope = scope
+  dslPortActiveServiceContext[^1].scopeDeclared = true
 
 proc setActiveServiceExecutable*(executableRef: string) =
   ## Body-setter: select the referenced executable artifact. Mirrors
@@ -1993,7 +2065,22 @@ proc finishActiveServiceTrigger*() =
 const
   ServicePayloadMagic = [byte(ord('R')), byte(ord('S')), byte(ord('V')),
     byte(ord('C'))]
-  ServicePayloadVersion = 1'u16
+  ServicePayloadVersion = 2'u16
+    ## v2 (current): Shared-Development-Services L4 appends the declared
+    ## INSTANCE IDENTITY and SCOPE (§4.1 / §4.2) -- one identity-kind
+    ## byte, the stable id string, one scope byte -- after the M9.C
+    ## systemd slice, which is the payload's tail. Appended rather than
+    ## inserted for the reason ``BuildTargetKind`` gives one type section
+    ## up: every field before it is positional, so a v1 body has to keep
+    ## decoding unchanged.
+    ##
+    ## v1 bodies DO still decode: ``decodeServicePayload`` gates the new
+    ## reads on ``version >= 2`` and leaves the zero values
+    ## (``sikDerived`` / ``sscProject``), which are the §4 DEFAULTS, so a
+    ## v1 payload decodes to exactly the behaviour it described. A version
+    ## ABOVE the current one is still refused rather than misread -- that
+    ## property is what the magic+version envelope exists for, and
+    ## widening the check to a range keeps it for v3.
 
 proc writeServiceExecutable(outp: var seq[byte]; value: ServiceExecutableRef) =
   outp.writeByte(byte(ord(value.kind)))
@@ -2066,6 +2153,12 @@ proc encodeServicePayload*(def: DslServiceDef): seq[byte] =
   payload.writeString(def.restart)
   payload.writeString(def.user)
   payload.writeString(def.group)
+  # v2 (L4): the declared identity and scope. Written unconditionally --
+  # this encoder only ever emits the CURRENT version, and a reader of an
+  # older body is the compatibility direction (see the decoder).
+  payload.writeByte(byte(ord(def.identity.kind)))
+  payload.writeString(def.identity.stableId)
+  payload.writeByte(byte(ord(def.scope)))
 
   result.add(ServicePayloadMagic)
   result.writeU16Le(ServicePayloadVersion)
@@ -2080,7 +2173,7 @@ proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
       raisePayload("unknown service payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != ServicePayloadVersion:
+  if version == 0'u16 or version > ServicePayloadVersion:
     raisePayload("unsupported service payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2142,6 +2235,21 @@ proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
   result.restart = readString(bytes, pos)
   result.user = readString(bytes, pos)
   result.group = readString(bytes, pos)
+  # v2 (L4). A v1 body ends here; the identity and scope fields keep
+  # their zero values, which ARE the §4 defaults -- ``identity derived``
+  # and ``scope project`` -- so a v1 payload decodes to the behaviour it
+  # described rather than to an invented "unset".
+  if version >= 2'u16:
+    let identityKindByte = readByte(bytes, pos)
+    if identityKindByte > byte(ord(sikStable)):
+      raisePayload("invalid service identity kind in service payload")
+    result.identity = ServiceIdentityDef(
+      kind: ServiceIdentityKind(identityKindByte),
+      stableId: readString(bytes, pos))
+    let scopeByte = readByte(bytes, pos)
+    if scopeByte > byte(ord(sscSystem)):
+      raisePayload("invalid service scope in service payload")
+    result.scope = ServiceScope(scopeByte)
   if pos != bytes.len:
     raisePayload("trailing service payload bytes")
 
@@ -2315,7 +2423,9 @@ proc finishServiceContext*() =
     executableTyped: frame.executableTyped,
     typedArgs: frame.typedArgs,
     runtimeFiles: frame.runtimeFiles,
-    triggers: frame.triggers))
+    triggers: frame.triggers,
+    identity: frame.identity,
+    scope: frame.scope))
 
 # ---------------------------------------------------------------------------
 # DSL-port M7 — user-facing service-context accessors. Symmetric with the

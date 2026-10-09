@@ -292,6 +292,7 @@ libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim	nim	15
 libs/repro_interface_artifacts/tests/t_l3_lifted_symbols_compile_in_a_consumer.nim	nim	9
 libs/repro_interface_artifacts/tests/t_l3_service_activity_codec_roundtrip.nim	nim	19
+libs/repro_interface_artifacts/tests/t_l4_identity_and_scope_cross_the_lift.nim	nim	22
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim	nim	1
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
@@ -455,6 +456,8 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_expression_setters.nim	nim	4
+libs/repro_project_dsl/tests/dsl_port/t_dsl_service_identity_scope_lowered.nim	nim	15
+libs/repro_project_dsl/tests/dsl_port/t_dsl_service_identity_scope_surface.nim	nim	23
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_setter_surface_is_typed.nim	nim	19
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_typed_edges.nim	nim	22
 libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim	nim	8
@@ -512,6 +515,7 @@ libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_l1_state_store.nim	nim	6
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	5
 libs/repro_resources/tests/t_l3_reaper.nim	nim	10
+libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	46
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4

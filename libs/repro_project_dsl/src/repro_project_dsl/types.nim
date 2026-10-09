@@ -283,6 +283,60 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ServiceIdentityKind* = enum
+    ## Shared-Development-Services L4 (§4.2): the two identity modes, and
+    ## the choice between them "is forced by durable state".
+    ##
+    ## ``sikDerived`` is ordinal 0 on purpose. It is the DEFAULT and it is
+    ## also today's behaviour, so a record built by the legacy positional
+    ## ``registerService``, and a v1 ``RSVC`` payload that carries no
+    ## identity block at all, both decode to it without a special case.
+    sikDerived
+      ## ``identity derived`` — "a digest of the service's materialised
+      ## definition: the executable, the rendered configuration outputs,
+      ## the arguments". Two worktrees that build the same closure share
+      ## one instance. Unsafe for a service that owns durable state, which
+      ## is why the other mode exists.
+    sikStable
+      ## ``identity stable "<id>"`` — "The author assigns a stable
+      ## identifier, independent of the build. There is one instance per
+      ## ``(id, scope)``, and it survives redefinition."
+
+  ServiceScope* = enum
+    ## Shared-Development-Services L4 (§4.1): how widely one instance is
+    ## shared. ORTHOGONAL to ``ServiceIdentityKind`` -- identity answers
+    ## "are these the same instance?", scope answers "how widely is one
+    ## instance shared?", and §4 is written to prevent the two being
+    ## conflated.
+    ##
+    ## The two WIDER values extend the lease scope
+    ## ``Ephemeral-State-Leases.md`` §4.1 already resolved (``user`` vs
+    ## ``system``, routing to the user vs system daemon); that resolution
+    ## is not re-decided here. ``sscProject`` is ordinal 0 because it is
+    ## the default and "today's only behaviour", for the same
+    ## ground-state reason ``sikDerived`` is.
+    sscProject    ## one instance per project root — the default
+    sscWorkspace  ## one instance per workspace (D-SS3)
+    sscUser       ## one instance per OS user, via the user daemon
+    sscSystem     ## one instance per machine, via the system daemon
+
+  ServiceIdentityDef* = object
+    ## One ``service`` block's declared identity.
+    ##
+    ## ``stableId`` is meaningful only for ``sikStable`` and is the
+    ## empty string otherwise; the macro refuses ``identity derived
+    ## "<id>"`` rather than recording an id the resolver would ignore.
+    kind*: ServiceIdentityKind
+    stableId*: string
+      ## The author's identifier, verbatim. §4.2: "A stable identifier is
+      ## a name, not a secret, and it is chosen to be globally unique by
+      ## construction -- a reverse-DNS-style string, or a GUID. It is not
+      ## derived from a path, because a path is what distinguishes the
+      ## worktrees that are supposed to share the instance." The macro
+      ## enforces the last sentence as far as a macro can: the id must be
+      ## a STRING LITERAL, so it cannot be computed from the build or
+      ## from the invocation directory.
+
   ServiceInterfaceDef* = object
     ## Shared-Development-Services L3: one ``service <name>:`` crossing
     ## the interface boundary as a typed symbol.
@@ -310,6 +364,25 @@ type
       ## through — ``<Title><Activity>Handle`` for a service inside an
       ## activity. Empty for a package-level service, which no handle
       ## type carries yet.
+    identityKind*: ServiceIdentityKind
+      ## Shared-Development-Services L4: the DECLARED identity mode. L3's
+      ## gate names "the declared identity and scope" as part of what the
+      ## lift carries and deferred it here, because the DSL had no such
+      ## surface until L4 added one.
+      ##
+      ## It belongs to the SIGNATURE and not to the implementation, which
+      ## is the test ``ServiceInterfaceDef``'s own doc comment sets: a
+      ## consumer resolving a shared service has to know whether it is
+      ## being handed an instance keyed by a declared id or one keyed by
+      ## a digest of somebody else's build, because that is the
+      ## difference between "my state survives" and "my state forks".
+      ## Changing it therefore MUST move the interface fingerprint, and a
+      ## change to ``args`` still must not.
+    identityStableId*: string
+      ## The declared id for ``sikStable``; empty for ``sikDerived``.
+    scope*: ServiceScope
+      ## The DECLARED scope. Also signature, for the same reason: it is
+      ## half of the instance key a consumer resolves against.
     sourceFile*: string
     sourceLine*: int
 
@@ -320,13 +393,25 @@ type
     ##
     ## WHAT IS NOT HERE, AND WHICH MILESTONE ADDS IT. L3's gate also names
     ## "the declared identity and scope" (L4) and "the shared collections
-    ## it converges" (L8). Neither surface exists in the DSL yet, so
-    ## neither is invented here: they are ADDED as fields on this record
-    ## by those milestones, and reach the wire through one more
-    ## version-gated block in ``encodeInterfacePayload`` — the same
-    ## additive route ``publicLibraries`` took at envelope v9 and
-    ## ``publicResources`` at v12. Nothing in the shape has to be rewritten
-    ## for them.
+    ## it converges" (L8).
+    ##
+    ## L4 HAS LANDED, AND IT PUT IDENTITY AND SCOPE ON THE SERVICE RECORD
+    ## RATHER THAN ON THIS ONE. ``identity`` and ``scope`` are setters of
+    ## a ``service`` block, not of an ``activity``: one activity may
+    ## declare several services and §4 keys an INSTANCE, which is a
+    ## service, by ``(identity, scope)``. Every service this activity
+    ## declares already has its own ``ServiceInterfaceDef`` row carrying
+    ## them (``identityKind`` / ``identityStableId`` / ``scope``), so a
+    ## copy here would be a second place for the same fact to disagree
+    ## with itself. ``services`` below names the rows.
+    ##
+    ## ``the shared collections it converges`` (L8) is still absent and is
+    ## still not invented: it is ADDED as a field here, reaching the wire
+    ## through one more version-gated block in
+    ## ``encodeInterfacePayload`` — the same additive route
+    ## ``publicLibraries`` took at envelope v9, ``publicResources`` at
+    ## v12 and L4's identity/scope at v22. Nothing in the shape has to be
+    ## rewritten for it.
     packageName*: string
       ## The declaring package. Set by ``registerActivityInterface``.
     name*: string

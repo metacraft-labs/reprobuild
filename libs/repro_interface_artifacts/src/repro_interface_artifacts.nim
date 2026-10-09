@@ -421,6 +421,25 @@ type
     description*: string
     location*: SourceLocation
 
+  InterfaceServiceIdentityMode* = enum
+    ## Shared-Development-Services L4 (§4.2): the lifted mirror of the
+    ## DSL's ``ServiceIdentityKind``. A separate enum for the reason
+    ## ``InterfaceResourceDeterminism`` is one: this module must not
+    ## import the DSL's type graph, and the artifact's wire format is
+    ## versioned independently of it. The ordinals line up and
+    ## ``toProjectInterface`` maps ordinal-for-ordinal.
+    isimDerived  ## ``identity derived`` — a digest of the definition
+    isimStable   ## ``identity stable "<id>"`` — an author-assigned id
+
+  InterfaceServiceScope* = enum
+    ## Shared-Development-Services L4 (§4.1): the lifted mirror of the
+    ## DSL's ``ServiceScope``. ``issProject`` is ordinal 0, matching the
+    ## DSL default, so a v<22 payload decodes to it.
+    issProject
+    issWorkspace
+    issUser
+    issSystem
+
   InterfaceService* = object
     ## Shared-Development-Services L3 (§3): a dev-env service crossing
     ## the interface boundary as a typed contract, alongside
@@ -443,6 +462,24 @@ type
     handleType*: string
       ## The generated Nim type the service's handle is a member of.
       ## Empty for a package-level service.
+    identityMode*: InterfaceServiceIdentityMode
+      ## Shared-Development-Services L4: the DECLARED identity mode. This
+      ## is the one part of §4 that is signature rather than
+      ## implementation, and the distinction is worth stating because the
+      ## paragraph above spends itself on the opposite point: a consumer
+      ## does not care HOW the service is built, and it must care whether
+      ## the instance it is handed is keyed by a declared id or by a
+      ## digest of somebody else's build — that is the difference between
+      ## "my state survives their edit" and "my state forks on it"
+      ## (§4.2). So renaming the service moves the fingerprint, changing
+      ## its ``args`` does not, and changing ``identity`` or ``scope``
+      ## does. All three are measured in
+      ## ``t_l4_identity_and_scope_cross_the_lift.nim``.
+    identityStableId*: string
+      ## The declared id when ``identityMode`` is ``isimStable``; empty
+      ## for ``isimDerived``.
+    scope*: InterfaceServiceScope
+      ## The DECLARED scope — the other half of §4's instance key.
     location*: SourceLocation
 
   InterfaceActivity* = object
@@ -452,12 +489,21 @@ type
     ##
     ## DEFERRED, BY MILESTONE. L3's gate also names "the declared
     ## identity and scope" and "the shared collections it converges".
-    ## Neither surface exists in the DSL yet (``identity``/``scope`` are
-    ## L4, collections are L8), so neither is invented here. Each is added
-    ## as a field on this record plus one more version-gated block in
-    ## ``encodeInterfacePayload`` — the additive route ``publicLibraries``
-    ## took at v9 and ``publicResources`` at v12 — and nothing in this
-    ## shape has to change for them.
+    ##
+    ## L4 landed the first of those and put it on ``InterfaceService``,
+    ## NOT here. ``identity`` and ``scope`` are setters of a ``service``
+    ## block: one activity may declare several services, and §4 keys an
+    ## INSTANCE — a service — by ``(identity, scope)``. Every service
+    ## named in ``services`` below has its own row carrying them, so a
+    ## copy here would be a second place for one fact to disagree with
+    ## itself.
+    ##
+    ## "The shared collections it converges" (L8) is still absent and is
+    ## still not invented. It is added as a field here plus one more
+    ## version-gated block in ``encodeInterfacePayload`` — the additive
+    ## route ``publicLibraries`` took at v9, ``publicResources`` at v12
+    ## and L4's identity/scope at v22 — and nothing in this shape has to
+    ## change for it.
     name*: string
     handleType*: string
     params*: seq[InterfaceActivityParam]
@@ -753,10 +799,59 @@ type
     evidence: FileStamp
     artifact: ProjectInterfaceArtifact
 
+# Shared-Development-Services L4: ``toProjectInterface`` maps the DSL's
+# ``ServiceIdentityKind`` / ``ServiceScope`` onto the two interface enums
+# above BY ORDINAL, so the four pairings below are the coupling. The
+# shape (and the reason) is taken from ``repro_resources/run_edge.nim``'s
+# ``RunEdgeLeaseKind``/``LeaseKind`` assert: reordering one enum without
+# the other would not fail to compile, it would silently re-map a
+# declared identity — a ``stable`` service lifted as ``derived`` is
+# exactly the state §4.2 says forks a developer's database.
+static:
+  doAssert ord(isimDerived) == ord(sikDerived),
+    "InterfaceServiceIdentityMode/ServiceIdentityKind drift: derived"
+  doAssert ord(isimStable) == ord(sikStable),
+    "InterfaceServiceIdentityMode/ServiceIdentityKind drift: stable"
+  doAssert ord(high(InterfaceServiceIdentityMode)) ==
+      ord(high(ServiceIdentityKind)),
+    "InterfaceServiceIdentityMode/ServiceIdentityKind cardinality drift"
+  doAssert ord(issProject) == ord(sscProject),
+    "InterfaceServiceScope/ServiceScope drift: project"
+  doAssert ord(issWorkspace) == ord(sscWorkspace),
+    "InterfaceServiceScope/ServiceScope drift: workspace"
+  doAssert ord(issUser) == ord(sscUser),
+    "InterfaceServiceScope/ServiceScope drift: user"
+  doAssert ord(issSystem) == ord(sscSystem),
+    "InterfaceServiceScope/ServiceScope drift: system"
+  doAssert ord(high(InterfaceServiceScope)) == ord(high(ServiceScope)),
+    "InterfaceServiceScope/ServiceScope cardinality drift"
+
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 21'u16
-    ## v21 (current): Shared-Development-Services L3 (§3) adds
+  EnvelopeVersion = 22'u16
+    ## v22 (current): Shared-Development-Services L4 (§4.1 / §4.2) retains
+    ##                the DECLARED INSTANCE IDENTITY AND SCOPE on each
+    ##                ``publicServices`` row — ``identityMode``
+    ##                (``derived`` | ``stable``), ``identityStableId`` and
+    ##                ``scope`` (``project`` | ``workspace`` | ``user`` |
+    ##                ``system``). This is the first PLANNED use of the
+    ##                extension route L3 left behind ("add a field plus
+    ##                one version-gated block"), and it is taken exactly
+    ##                as described: the three values are appended to the
+    ##                tail of the existing service row rather than given a
+    ##                block of their own, because the row is already
+    ##                length-free and positional. v21 payloads decode with
+    ##                ``isimDerived`` / ``""`` / ``issProject``, which are
+    ##                §4's own defaults, so a v21 artifact describes the
+    ##                same behaviour under the v22 reader.
+    ##
+    ##                Identity and scope are SIGNATURE, so they are inside
+    ##                the fingerprint projection: a consumer resolving a
+    ##                shared service has to recompile when the instance it
+    ##                would attach to stops being keyed the way it
+    ##                compiled against. A producer editing the service's
+    ##                ``args`` still re-lifts to the same digest.
+    ## v21:           Shared-Development-Services L3 (§3) adds
     ##                ``ProjectInterface.publicServices`` and
     ##                ``ProjectInterface.publicActivities`` — dev-env
     ##                services and activity signatures lifted from
@@ -1143,21 +1238,46 @@ proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
       location: readLocation(bytes, pos))
 
 proc writeService(outp: var seq[byte]; svc: InterfaceService;
-                  forFingerprint = false) =
+                  version: uint16; forFingerprint = false) =
   ## Shared-Development-Services L3. Field order matches
   ## ``InterfaceService``; ``readService`` reads it back in the same
   ## order, and the payload tail guard in ``decodeInterfacePayload``
   ## catches a mis-pairing.
+  ##
+  ## v22 (L4) appends the declared identity and scope AFTER
+  ## ``location``, which is the row's tail — the same append-not-insert
+  ## rule every earlier retained field followed (``exportedPath`` on a
+  ## library at v11, ``launcher`` on tarball provisioning at v19), so a
+  ## v21 row keeps decoding byte for byte.
   outp.writeString(svc.name)
   outp.writeString(svc.activityName)
   outp.writeString(svc.handleType)
   outp.writeLocation(svc.location, forFingerprint)
+  if version >= 22'u16:
+    outp.writeByte(byte(ord(svc.identityMode)))
+    outp.writeString(svc.identityStableId)
+    outp.writeByte(byte(ord(svc.scope)))
 
-proc readService(bytes: openArray[byte]; pos: var int): InterfaceService =
+proc readService(bytes: openArray[byte]; pos: var int;
+                 version: uint16): InterfaceService =
   result.name = readString(bytes, pos)
   result.activityName = readString(bytes, pos)
   result.handleType = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
+  # v<22 rows carry no identity block. The zero values — ``isimDerived``
+  # / ``issProject`` — are §4's own defaults, so such a row decodes to
+  # the behaviour it described rather than to an invented "unset".
+  if version >= 22'u16:
+    let mode = readByte(bytes, pos)
+    if mode > byte(ord(isimStable)):
+      raiseEnvelopeError(eeMalformed,
+        "invalid interface service identity mode")
+    result.identityMode = InterfaceServiceIdentityMode(mode)
+    result.identityStableId = readString(bytes, pos)
+    let scope = readByte(bytes, pos)
+    if scope > byte(ord(issSystem)):
+      raiseEnvelopeError(eeMalformed, "invalid interface service scope")
+    result.scope = InterfaceServiceScope(scope)
 
 proc writeActivity(outp: var seq[byte]; act: InterfaceActivity;
                    forFingerprint = false) =
@@ -1496,7 +1616,7 @@ proc encodeInterfacePayload*(value: ProjectInterface;
   if version >= 21'u16:
     result.writeU32Le(uint32(value.publicServices.len))
     for svc in value.publicServices:
-      result.writeService(svc, forFingerprint)
+      result.writeService(svc, version, forFingerprint)
     result.writeU32Le(uint32(value.publicActivities.len))
     for act in value.publicActivities:
       result.writeActivity(act, forFingerprint)
@@ -1546,7 +1666,7 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     let svcCount = int(readU32Le(bytes, pos))
     result.publicServices = newSeq[InterfaceService](svcCount)
     for i in 0 ..< svcCount:
-      result.publicServices[i] = readService(bytes, pos)
+      result.publicServices[i] = readService(bytes, pos, version)
     let actCount = int(readU32Le(bytes, pos))
     result.publicActivities = newSeq[InterfaceActivity](actCount)
     for i in 0 ..< actCount:
@@ -2059,6 +2179,14 @@ proc toProjectInterface*(pkg: PackageDef;
       name: svc.name,
       activityName: svc.activityName,
       handleType: svc.handleType,
+      # L4: ordinal-for-ordinal, the way ``determinismOrd`` is mapped
+      # above. The two enum pairs are kept in step by the static asserts
+      # beside ``InterfaceServiceIdentityMode``'s declaration, so a
+      # reorder of either is a build error rather than a silently
+      # re-mapped identity.
+      identityMode: InterfaceServiceIdentityMode(ord(svc.identityKind)),
+      identityStableId: svc.identityStableId,
+      scope: InterfaceServiceScope(ord(svc.scope)),
       location: SourceLocation(file: svc.sourceFile, line: svc.sourceLine)))
   for act in registeredActivityInterfaces():
     if act.packageName != pkg.packageName:
