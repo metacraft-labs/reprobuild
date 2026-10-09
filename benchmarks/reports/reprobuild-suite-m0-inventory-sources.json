@@ -39146,8 +39146,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_measurement_axes.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 15,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40040,7 +40040,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_cmake_generator_competitiveness_bench.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1837,7 +1837,7 @@ tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_manifest_editor_edge_cases.nim	nim	21
 tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
-tests/unit/t_measurement_axes.nim	nim	15
+tests/unit/t_measurement_axes.nim	nim	17
 tests/unit/t_msi_archive_type.nim	nim	2
 tests/unit/t_nimcache_is_worktree_local.nim	nim	0
 tests/unit/t_nix_daemon_spawn_wait.nim	nim	3
@@ -1887,7 +1887,7 @@ tests/unit/t_voice_model_packages.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/test_build_report_attribution.py	python	12
-tests/unit/test_cmake_generator_competitiveness_bench.py	python	9
+tests/unit/test_cmake_generator_competitiveness_bench.py	python	18
 tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_dev_shell_hook_scope.py	python	6
