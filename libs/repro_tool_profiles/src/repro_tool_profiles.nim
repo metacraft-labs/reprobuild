@@ -1574,7 +1574,6 @@ else:
       return cached.profile
 
     # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
-    let socketPath = nixDaemonSocketPath()
     let req = %*{
       "action": "resolve",
       "selector": selector,
@@ -1582,41 +1581,31 @@ else:
       "workspaceRoot": getCurrentDir(),
       "evaluateOnly": true
     }
-    proc spawnDaemon() =
-      # Spawn daemon process detached.
-      #
-      # ONE RESOLVER, THE ENGINE'S. This used to be a private candidate chain
-      # of its own -- ``getCurrentDir()``'s ``build/``, ``tools/`` and a
-      # sibling, then ``REPROBUILD_SOURCE_ROOT``'s ``tools/`` before its
-      # ``build/`` -- which had drifted from ``resolveNixDaemonExecutable``
-      # (the ``bakForeignProvision`` path) in two ways that mattered. It never
-      # considered the STAGED helper ``build/bin/reprobuild-nix-daemon``,
-      # whose ``#!`` names the interpreter pinned at build time; and it
-      # preferred the checked-in ``tools/`` script, whose ``#!/usr/bin/env
-      # python3`` resolves ``python3`` through the build's PATH. Under a PATH
-      # that carries a ``python3`` that is not Python (CodeTracer's in-place
-      # project tests put a version-answering stub there) the "daemon" exited
-      # 0 at once, never bound its socket, and the recipe's C compiler could
-      # not be provisioned: "Failed to connect or spawn reprobuild-nix-daemon".
-      # The engine's resolver tries the staged helper first and refuses a
-      # script whose interpreter is missing, with a message naming it.
-      let daemonExe =
-        try:
-          resolveNixDaemonExecutable(
-            cwd = getCurrentDir(),
-            exePath = getAppFilename(),
-            envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
-            envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
-        except BuildEngineError as err:
-          raise newException(OSError, err.msg)
-      # Detached like the engine's spawn: the daemon serves every reprobuild
-      # process of this user, so it must not sit in this build's process
-      # group and go down with it on a terminal interrupt.
-      startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
-        options = {poDaemon}).close()
-    let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
+    # ONE RESOLVER AND ONE CLIENT, THE ENGINE'S. This used to carry a private
+    # candidate chain of its own -- ``getCurrentDir()``'s ``build/``,
+    # ``tools/`` and a sibling, then ``REPROBUILD_SOURCE_ROOT``'s ``tools/``
+    # before its ``build/`` -- which had drifted from
+    # ``resolveNixDaemonExecutable`` (the ``bakForeignProvision`` path). It
+    # never considered the STAGED helper ``build/bin/reprobuild-nix-daemon``,
+    # whose ``#!`` names the interpreter pinned at build time; and it
+    # preferred the checked-in ``tools/`` script, whose ``#!/usr/bin/env
+    # python3`` resolves ``python3`` through the build's PATH. Under a PATH
+    # that carries a ``python3`` that is not Python (CodeTracer's in-place
+    # project tests put a version-answering stub there) the "daemon" exited
+    # 0 at once, never bound its socket, and the recipe's C compiler could
+    # not be provisioned: "Failed to connect or spawn reprobuild-nix-daemon".
+    # ``requestNixDaemon`` resolves through the engine's resolver, which tries
+    # the staged helper first and refuses a script whose interpreter is
+    # missing, and it starts the helper the same way the engine does.
+    let exchange =
+      try:
+        requestNixDaemon($req, getCurrentDir())
+      except BuildEngineError as err:
+        raise newException(OSError, err.msg)
     if not exchange.connected:
-      raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+      raise newException(OSError, "Failed to connect or spawn " &
+        "reprobuild-nix-daemon at " & exchange.socketPath & ": " &
+        exchange.diagnostic)
     let respLine = exchange.response
 
     if respLine.len == 0:
