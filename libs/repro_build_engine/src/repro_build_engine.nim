@@ -14392,12 +14392,44 @@ when not defined(windows):
     ## How many times one request is offered to the evaluation daemon before
     ## a dropped connection is reported as a failure.
 
+  const NixDaemonBindTimeoutMs* = 30_000
+    ## How long a freshly spawned daemon may take to bind its socket while it
+    ## is still running. It was a fixed ~2 s (41 x 50 ms) whether or not the
+    ## daemon was alive: a Python process that needed longer on a loaded
+    ## runner was reported exactly like one that had crashed. A daemon that
+    ## EXITS stops the wait at once, so the long ceiling costs nothing in the
+    ## failure case it is not about.
+
   proc nixDaemonSocketPath*(): string =
     "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
 
+  proc describeUnboundNixDaemon(daemon: Process; waitedMs: int): string =
+    ## Why a spawned daemon never accepted a connection: it exited (with its
+    ## status and whatever it printed), or it is still running and never
+    ## bound. Reading the output is safe only once the process has exited --
+    ## a running daemon holds the pipe open and a read would block.
+    let code = peekExitCode(daemon)
+    if code == -1:
+      return "the daemon (pid " & $processID(daemon) & ") is still running " &
+        "but did not bind the socket within " & $waitedMs & " ms"
+    var output = ""
+    try:
+      output = daemon.outputStream.readAll().strip()
+    except CatchableError:
+      discard
+    if output.len > 2000:
+      output = "..." & output[^2000 .. ^1]
+    result = "the daemon exited with status " & $code &
+      " before binding the socket"
+    if output.len > 0:
+      result.add("; its output:\n" & output)
+    else:
+      result.add(" and printed nothing")
+
   proc exchangeWithNixDaemon*(socketPath, request: string;
-                              spawnDaemon: proc ()):
-      tuple[connected: bool; response: string; attempts: int] =
+                              spawnDaemon: proc (): Process):
+      tuple[connected: bool; response: string; attempts: int;
+            diagnostic: string] =
     ## Send one request line to the shared ``reprobuild-nix-daemon`` and
     ## return its one response line, spawning the daemon when nothing is
     ## listening.
@@ -14427,9 +14459,14 @@ when not defined(windows):
         connected = true
       except CatchableError:
         sock.close()
-        spawnDaemon()
-        for i in 0 .. 40:
+        # ``spawnDaemon`` hands back the process it started (output captured,
+        # stderr merged into stdout) so the wait below can tell a daemon that
+        # is slow to bind from one that is already gone.
+        let daemon = spawnDaemon()
+        var waitedMs = 0
+        while true:
           sleep(50)
+          waitedMs += 50
           sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
             protocol = IPPROTO_IP)
           try:
@@ -14438,6 +14475,15 @@ when not defined(windows):
             break
           except CatchableError:
             sock.close()
+          # A daemon that exited will never bind. Another process's daemon
+          # may still have bound meanwhile, so the connect above is tried
+          # once more before giving up; the ceiling bounds a daemon that runs
+          # but never binds.
+          if peekExitCode(daemon) != -1 or waitedMs >= NixDaemonBindTimeoutMs:
+            break
+        if not connected:
+          result.diagnostic = describeUnboundNixDaemon(daemon, waitedMs)
+        daemon.close()
       if not connected:
         result.connected = false
         return
@@ -14755,7 +14801,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        proc spawnDaemon() =
+        proc spawnDaemon(): Process =
           # Spawn daemon process detached.
           #
           # THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` --
@@ -14773,12 +14819,13 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
             exePath = getAppFilename(),
             envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
             envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
-          let daemon = startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
-            options = {poDaemon, poUsePath})
-          daemon.close()
+          startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
+            options = {poDaemon, poUsePath, poStdErrToStdOut})
         let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
         if not exchange.connected:
-          raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+          raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " &
+            socketPath & (if exchange.diagnostic.len > 0:
+              ": " & exchange.diagnostic else: ""))
         let respLine = exchange.response
         
         if respLine.len == 0:

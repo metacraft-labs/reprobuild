@@ -16434,6 +16434,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_nix_daemon_spawn_wait.nim",
+    binary: "build/test-bin/t_nix_daemon_spawn_wait",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_nix_propagated_store_paths.nim",
     binary: "build/test-bin/t_nix_propagated_store_paths",
     defines: @[],

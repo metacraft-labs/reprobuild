@@ -1582,7 +1582,7 @@ else:
       "workspaceRoot": getCurrentDir(),
       "evaluateOnly": true
     }
-    proc spawnDaemon() =
+    proc spawnDaemon(): Process =
       # Spawn daemon process detached.
       #
       # ONE RESOLVER, THE ENGINE'S. This used to be a private candidate chain
@@ -1613,10 +1613,12 @@ else:
       # process of this user, so it must not sit in this build's process
       # group and go down with it on a terminal interrupt.
       startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
-        options = {poDaemon}).close()
+        options = {poDaemon, poStdErrToStdOut})
     let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
     if not exchange.connected:
-      raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+      raise newException(OSError, "Failed to connect or spawn " &
+        "reprobuild-nix-daemon at " & socketPath &
+        (if exchange.diagnostic.len > 0: ": " & exchange.diagnostic else: ""))
     let respLine = exchange.response
 
     if respLine.len == 0:
