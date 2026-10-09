@@ -330,12 +330,34 @@ jobs:
       #
       # `just bootstrap` still runs scripts/build_apps.sh directly -- unmonitored,
       # and the only way to get an engine binary in the first place.
-      - name: Bootstrap and Build (POSIX)
+      - name: Bootstrap (POSIX)
         if: matrix.os-name != 'windows'
         shell: bash
         run: |
           set -euo pipefail
           dev-exec just bootstrap
+
+      # The installation token minted at the top of the job lives one hour
+      # (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).
+      # The Linux bootstrap alone takes over two hours on the release lane, and
+      # the build below then fetches the pinned nixpkgs through Nix with that
+      # token: v0.2.8 run 37941621127 failed there with "unable to download
+      # 'https://api.github.com/repos/NixOS/nixpkgs/tarball/...': HTTP error
+      # 401". Re-mint it, and re-point Git's and Nix's job-scoped credentials
+      # at the new one, between the two phases.
+      - name: Refresh build authentication (POSIX)
+        if: matrix.os-name != 'windows'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Build (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
           dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#release
 
       - name: Bootstrap and Build (Windows)
