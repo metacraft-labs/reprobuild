@@ -5201,7 +5201,7 @@
             "runtimeBin",
             "runtimeRoot"
           ],
-          "line": 179,
+          "line": 181,
           "path": "tests/integration/t_repro_test_runner_catalog_selection.nim",
           "patterns": [
             "nim-c"
@@ -5220,7 +5220,7 @@
             "runtimeBin",
             "runtimeRoot"
           ],
-          "line": 190,
+          "line": 192,
           "path": "tests/integration/t_repro_test_runner_catalog_selection.nim",
           "patterns": [
             "nim-c"
@@ -5239,7 +5239,7 @@
             "runtimeBin",
             "runtimeRoot"
           ],
-          "line": 799,
+          "line": 806,
           "path": "tests/integration/t_repro_test_runner_catalog_selection.nim",
           "patterns": [
             "nim-c"
