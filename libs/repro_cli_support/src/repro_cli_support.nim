@@ -41005,8 +41005,14 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # own checkout, which is a mutation — so a dry run skips it and resolves
   # against the on-disk manifest as-is (stale manifest data is acceptable
   # for a preview).
+  #
+  # ``includeWorkspaceRoot``: in the flat shape the workspace root IS the
+  # manifest checkout, and a sync that never advanced it reconciled every
+  # machine against whatever manifest it last pulled by hand — a moved
+  # ``path`` or a declared rename published upstream was simply not seen.
   if not args.dryRun:
-    let refresh = refreshManifestLayers(args.workspaceRoot)
+    let refresh = refreshManifestLayers(args.workspaceRoot,
+      includeWorkspaceRoot = true)
     for entry in refresh.layers:
       report.manifestLayers.add(WorkspaceSyncManifestLayerEntry(
         index: entry.index,
@@ -43002,9 +43008,11 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
   var report: WorkspacePullReport
   report.workspaceRoot = args.workspaceRoot
 
-  # Step 1: manifest-layer refresh — advances the manifest repo. The
+  # Step 1: manifest-layer refresh — advances the manifest repo (including
+  # the workspace root when it is the manifest checkout, as in sync). The
   # before→after SHAs are recorded; this advance is NEVER rolled back.
-  let refresh = refreshManifestLayers(args.workspaceRoot)
+  let refresh = refreshManifestLayers(args.workspaceRoot,
+    includeWorkspaceRoot = true)
   var manifestAdvanced = false
   for entry in refresh.layers:
     if entry.beforeSha.len > 0 and entry.afterSha.len > 0 and

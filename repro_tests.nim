@@ -13932,6 +13932,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_sync_refreshes_flat_workspace_root.nim",
+    binary: "build/test-bin/t_sync_refreshes_flat_workspace_root",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim",
     binary: "build/test-bin/t_sync_reports_partial_manifest_advance_without_rollback",
     defines: @[],
