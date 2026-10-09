@@ -2592,6 +2592,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_l6_compatibility_major_crosses_the_lift.nim",
+    binary: "build/test-bin/t_l6_compatibility_major_crosses_the_lift",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_multi_package_merge.nim",
     binary: "build/test-bin/t_multi_package_merge",
     defines: @[],
@@ -4176,6 +4185,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_l6_service_compatibility_surface.nim",
+    binary: "build/test-bin/t_l6_service_compatibility_surface",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim",
     binary: "build/test-bin/t_activity_params_reach_the_services_they_declare",
     defines: @["reproProviderMode"],
@@ -4628,6 +4646,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
     binary: "build/test-bin/t_l5_environment_is_in_the_instance_key",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim",
+    binary: "build/test-bin/t_l6_attach_decision_has_three_outcomes",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

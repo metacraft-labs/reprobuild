@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1796,
+    "nimTestBinaries": 1799,
     "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 598,
+    "pureUnitTests": 600,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1810
+    "testEntries": 1813
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -240,7 +240,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -252,6 +252,7 @@
       "sources": [
         "libs/repro_interface_artifacts/tests/t_l3_service_activity_codec_roundtrip.nim",
         "libs/repro_interface_artifacts/tests/t_l4_identity_and_scope_cross_the_lift.nim",
+        "libs/repro_interface_artifacts/tests/t_l6_compatibility_major_crosses_the_lift.nim",
         "libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim",
         "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim"
       ],
@@ -1099,8 +1100,8 @@
       "graph-fixture": 12,
       "integration": 914,
       "platform/destructive": 117,
-      "pure unit": 598,
-      "unclassified": 169
+      "pure unit": 600,
+      "unclassified": 170
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1248,9 +1249,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1796,
+    "nimTestBinaryCount": 1799,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1810
+    "testEntryCount": 1813
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11559,6 +11560,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l6_compatibility_major_crosses_the_lift",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_l6_compatibility_major_crosses_the_lift.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_multi_package_merge",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -14691,6 +14712,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l6_service_compatibility_surface",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_l6_service_compatibility_surface.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_activity_params_reach_the_services_they_declare",
       "class": "unclassified",
       "classificationReason": "imports `activity_params_fixtures`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
@@ -15599,6 +15637,25 @@
       "source": "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 17,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_l6_attach_decision_has_three_outcomes",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim",
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 40,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

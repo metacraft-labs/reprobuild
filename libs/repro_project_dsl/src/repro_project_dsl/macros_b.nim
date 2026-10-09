@@ -2230,6 +2230,16 @@ const
     "`identity stable \"<id>\"`"
   l4RecognisedScopes = "`scope project` (the default), " &
     "`scope workspace`, `scope user` and `scope system`"
+  l6RecognisedCompatibility = "`compatibility <n>`, where `<n>` is an " &
+    "integer literal greater than zero"
+  l6CompatibilityNearMisses = ["compatibilitymajor", "major",
+    "interfacemajor", "majorcompatibility", "compat", "compatmajor"]
+    ## Spellings an author plausibly reaches for that `normalize` does
+    ## NOT fold onto `compatibility`, so the head matcher would miss them
+    ## and `m5ParseServiceBody`'s closing `else: discard` would drop them
+    ## in silence. Every entry is already in normal form (lowercase, no
+    ## underscores), which is what the matcher compares against -- the
+    ## asymmetry L5's blocking defect was.
   l4IdentityDropRule = "A spelling this setter does not recognise is " &
     "REFUSED rather than dropped, and the reason is sharper here than " &
     "anywhere else in the service body: an `identity` that is accepted " &
@@ -2252,12 +2262,23 @@ type
     scope: ServiceScope
     scopeDeclared: bool
     scopeAnchor: NimNode
+    # Shared-Development-Services L6 (§4.3): the MAJOR COMPATIBILITY
+    # FIELD. It lives on this record, and is read by this record's
+    # walker, for the reason the walker exists at all: a SECOND,
+    # divergent reading of a `service` body would let the lift report a
+    # value the refusals never validated. The type keeps its L4 name
+    # because every call site is keyed on it; what it holds is "what the
+    # body declared about its INSTANCE", and the major is that.
+    compatibilityMajor: uint32
+    compatibilityDeclared: bool
+    compatibilityAnchor: NimNode
 
 proc l4NewIdentityScope(): L4ServiceIdentityScope =
   L4ServiceIdentityScope(
     identityKind: sikDerived, stableId: "", identityDeclared: false,
     identityAnchor: nil, scope: sscProject, scopeDeclared: false,
-    scopeAnchor: nil)
+    scopeAnchor: nil, compatibilityMajor: 0'u32,
+    compatibilityDeclared: false, compatibilityAnchor: nil)
 
 proc l4ScopeFromName(name: string):
     tuple[found: bool; scope: ServiceScope] =
@@ -2276,30 +2297,93 @@ proc l4ScopeSpellings(): string =
     parts.add("`" & ($candidate)[3 .. ^1].normalize & "`")
   parts.join(", ")
 
+proc l4HeadWordOf(node: NimNode): string =
+  ## The FIRST ident of a head expression — `identity` for `identity`,
+  ## for `identity.stable` and for `identity.stable.v2` alike — or `""`
+  ## when the node is not an ident-or-dot path.
+  ##
+  ## The dotted case is why this is a separate proc. It is the open
+  ## escalation on
+  ## `issues/2026-10-08-service-body-setters-are-silently-dropped.md`:
+  ## `identity.stable "com.example.sso"` and `scope.workspace` compile
+  ## with ZERO errors and leave the service on the DEFAULT identity,
+  ## because the previous matcher covered ident, sym, accent-quoted,
+  ## assignment and single-child-call shapes and not `nnkDotExpr`.
+  case node.kind
+  of nnkIdent, nnkSym, nnkAccQuoted: identText(node)
+  of nnkDotExpr:
+    if node.len == 2: l4HeadWordOf(node[0]) else: ""
+  else: ""
+
 proc l4IdentityScopeHeadName(stmt: NimNode): string =
-  ## `"identity"` / `"scope"` when `stmt` spells one of the two L4
-  ## setters in a shape the setter walk would otherwise SKIP, else `""`.
+  ## `"identity"` / `"scope"` / `"compatibility"` when `stmt` spells one
+  ## of the three instance-declaration setters in a shape the setter walk
+  ## would otherwise SKIP, else `""`.
   ##
   ## Which shapes those are is not hypothetical. `m5ParseServiceBody`
   ## continues past anything that is not an `nnkCall`/`nnkCommand` with
   ## at least two children, so a bare `identity` and an `identity =
   ## derived` both compiled clean and recorded nothing at all. This is
-  ## the same family as the nine dropped constructs this campaign has
+  ## the same family as the nineteen dropped constructs this campaign has
   ## found, caught before it shipped rather than after.
+  ##
+  ## L6 adds two shapes to the list, and one of them was already a filed
+  ## defect:
+  ##
+  ##   * `compatibility` in any of those shapes, for the new setter; and
+  ##   * a DOTTED head for ANY of the three — `identity.stable "x"`,
+  ##     `scope.workspace`, `compatibility.major 2`. A dotted head is not
+  ##     a statement at the wrong level, it is a *spelling* of the right
+  ##     one, and the three setters §4 owns are the ones whose silent
+  ##     loss costs a durable-state decision. The issue's GENERAL case
+  ##     (`description.x "..."`, `totallyMadeUp = 3`) is untouched and
+  ##     stays open: what a blanket refusing `else` arm should say about a
+  ##     statement recognised at a DIFFERENT level is the judgement that
+  ##     issue was filed to defer.
   var head: NimNode = nil
-  if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+  if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr}:
     head = stmt
-  elif stmt.kind in {nnkAsgn, nnkExprEqExpr} and stmt.len > 0 and
-      stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+  elif stmt.kind in {nnkAsgn, nnkExprEqExpr} and stmt.len > 0:
     head = stmt[0]
-  elif stmt.kind in {nnkCall, nnkCommand} and stmt.len == 1 and
-      stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+  elif stmt.kind in {nnkCall, nnkCommand} and stmt.len == 1:
+    head = stmt[0]
+  elif stmt.kind in {nnkCall, nnkCommand} and stmt.len >= 2 and
+      stmt[0].kind == nnkDotExpr:
+    # `identity.stable "x"` — a CALL with arguments, which the walk below
+    # skips on `stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}`.
     head = stmt[0]
   if head == nil:
     return ""
-  let name = identText(head).normalize
-  if name == "identity" or name == "scope":
+  let name = l4HeadWordOf(head).normalize
+  if name == "identity" or name == "scope" or name == "compatibility":
     return name
+  ""
+
+proc l6CompatibilityNearMiss(stmt: NimNode): string =
+  ## The author's spelling when `stmt`'s head is a NEAR MISS for
+  ## `compatibility`, else `""`.
+  ##
+  ## `compatibilityMajor` normalizes to `compatibilitymajor`, which the
+  ## head matcher does not recognise, so the setter walk's closing
+  ## `else: discard` would drop it with no diagnostic and the service
+  ## would carry major 0 — the undeclared value — while its author
+  ## believed otherwise. That is the silently-dropped family on a surface
+  ## this milestone adds, which the campaign's standing hunt requires be
+  ## probed rather than hoped about.
+  var head: NimNode = nil
+  if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr}:
+    head = stmt
+  elif stmt.kind in {nnkAsgn, nnkExprEqExpr, nnkCall, nnkCommand} and
+      stmt.len > 0:
+    head = stmt[0]
+  if head == nil:
+    return ""
+  let name = l4HeadWordOf(head).normalize
+  if name.len == 0:
+    return ""
+  for candidate in l6CompatibilityNearMisses:
+    if name == candidate:
+      return l4HeadWordOf(head)
   ""
 
 proc l4ParseIdentitySetter(stmt: NimNode;
@@ -2440,21 +2524,113 @@ proc l4ParseScopeSetter(stmt: NimNode;
   acc.scopeDeclared = true
   acc.scopeAnchor = stmt
 
+proc l6ParseCompatibilitySetter(stmt: NimNode;
+                                acc: var L4ServiceIdentityScope) =
+  ## Read one `compatibility <n>` setter into `acc`, or refuse it.
+  ##
+  ## §4.3's third outcome is the only one not decided on the
+  ## fingerprint, and the only one that REFUSES. So every way of getting
+  ## the field wrong is refused here rather than resolved to a default:
+  ## a service whose major silently read 0 when its author wrote
+  ## something else would attach to an instance of a different generation
+  ## and be handed a handle whose members it cannot use, which is the
+  ## damage §4.3's bottom row exists to prevent.
+  if acc.compatibilityDeclared:
+    error("`service` already declares its major compatibility as `" &
+      $acc.compatibilityMajor & "`; `" & stmt.repr.strip() & "` is a " &
+      "SECOND `compatibility` declaration. Shared-Development-" &
+      "Services.md §4.3 compares ONE major per service -- \"major " &
+      "compatibility field differs | Refuse\" -- so two have nothing to " &
+      "pick between, and last-wins would make the field that decides a " &
+      "REFUSAL depend on statement order. Delete one.",
+      m5ServiceStmtAnchor(stmt))
+  if stmt.len != 2:
+    error("`compatibility` takes exactly one major; `" &
+      stmt.repr.strip() & "` has " & $(stmt.len - 1) & " argument(s). " &
+      "Shared-Development-Services.md §4.3 compares a single major " &
+      "compatibility field; the spelling is " & l6RecognisedCompatibility &
+      ". " & l4IdentityDropRule, stmt)
+  let arg = stmt[1]
+  if arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("`compatibility` takes a NUMBER, not a string; `" &
+      stmt.repr.strip() & "` quotes it. The major is compared for " &
+      "EQUALITY against a running instance's (§4.3), and comparing it " &
+      "as text would make `\"2\"` and `\" 2\"` different generations of " &
+      "the same service. Write `compatibility " & arg.strVal & "`.", stmt)
+  # THE LITERAL-KIND SET IS A RANGE AND NOT `nnkIntLit`, AND THAT IS A
+  # DEFECT THIS MILESTONE'S OWN PROBE SWEEP FOUND BEFORE IT SHIPPED.
+  # Nim's parser widens an integer literal that does not fit `int32` to
+  # `nnkInt64Lit`: `compatibility 4294967295` -- a legal major, since the
+  # field is a u32 -- arrived here as `nnkInt64Lit` and was refused with
+  # "needs an INTEGER LITERAL; `4294967295'i64` is not one", a message
+  # that contradicts itself, while the does-not-fit refusal below was
+  # UNREACHABLE. Measured with `nim check` over 36 generated spellings.
+  # The unsigned kinds are accepted too, because `compatibility 2'u32`
+  # spells the field's own type and refusing it would be arbitrary.
+  if arg.kind notin {nnkIntLit .. nnkInt64Lit, nnkUIntLit .. nnkUInt64Lit}:
+    error("`compatibility` needs an INTEGER LITERAL; `" &
+      arg.repr.strip() & "` is not one. " & l6RecognisedCompatibility &
+      " is the whole of the surface, and the restriction is the " &
+      "guarantee: §4.3's refusal is the one outcome that stops a build, " &
+      "and a major computed from an expression -- a const, a `when`, a " &
+      "build output -- could differ between the consumer's compilation " &
+      "and the producer's without either author seeing why the attach " &
+      "was refused. A literal cannot.", stmt)
+  # A value above `high(int64)` arrives with a NEGATIVE `intVal`, so the
+  # fit check has to come FIRST or such a literal would be reported as
+  # "not a whole number greater than zero" -- true of the bit pattern and
+  # false of what the author wrote.
+  if arg.intVal > int64(high(uint32)) or
+      (arg.kind in {nnkUIntLit .. nnkUInt64Lit} and arg.intVal < 0):
+    error("`compatibility " & arg.repr.strip() & "` does not fit the " &
+      "field; the major is a 32-bit unsigned number on the wire " &
+      "(`ServiceInterfaceDef.compatibilityMajor` and the v23 interface " &
+      "envelope), and a value that wrapped would compare EQUAL to a " &
+      "different generation -- which is §4.3's refusal failing to fire. " &
+      "The largest major is " & $high(uint32) & ".", stmt)
+  if arg.intVal <= 0:
+    error("`compatibility " & $arg.intVal & "` declares " &
+      (if arg.intVal == 0: "the UNDECLARED major"
+       else: "a major that is not a whole number greater than zero") &
+      ". 0 is what a service that wrote NO `compatibility` setter " &
+      "carries, and what every interface artifact written before this " &
+      "field existed decodes to -- so `compatibility 0` is " &
+      "indistinguishable from not declaring it, and a setter whose " &
+      "value cannot be observed is the silent drop this surface is " &
+      "written to avoid. Write `compatibility 1` for the first " &
+      "generation, or delete the line.", stmt)
+  acc.compatibilityMajor = uint32(arg.intVal)
+  acc.compatibilityDeclared = true
+  acc.compatibilityAnchor = stmt
+
 proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
-  ## THE reading of a `service` body's `identity` and `scope` setters.
-  ## Both walkers call this one proc; see the section comment above.
+  ## THE reading of a `service` body's `identity`, `scope` and
+  ## `compatibility` setters. Both walkers call this one proc; see the
+  ## section comment above.
   result = l4NewIdentityScope()
   if body == nil or body.kind != nnkStmtList:
     return
   for stmt in body:
+    let nearMiss = l6CompatibilityNearMiss(stmt)
+    if nearMiss.len > 0:
+      error("`service` does not recognise the setter `" & nearMiss &
+        "`; did you mean `compatibility`? " & l6RecognisedCompatibility &
+        " is the spelling Shared-Development-Services.md §4.3's major " &
+        "compatibility field is declared with. This is refused rather " &
+        "than skipped because the setter walk's closing `else: discard` " &
+        "would drop it in silence and leave the service on the " &
+        "UNDECLARED major 0 -- so a service the author believed was " &
+        "generation 2 would compare equal to every service that " &
+        "declared nothing.", m5ServiceStmtAnchor(stmt))
     let dropped = l4IdentityScopeHeadName(stmt)
     if dropped.len > 0:
       error("`" & stmt.repr.strip() & "` is not a shape `" & dropped &
         "` is written in, and this walker would otherwise SKIP it " &
         "entirely -- no diagnostic, no record, the service left on the " &
-        "default. Shared-Development-Services.md §4 spells the two " &
-        "setters as commands: " & l4RecognisedIdentityModes & " and " &
-        l4RecognisedScopes & ". " & l4IdentityDropRule,
+        "default. Shared-Development-Services.md §4 spells the three " &
+        "setters as commands: " & l4RecognisedIdentityModes & ", " &
+        l4RecognisedScopes & ", and " & l6RecognisedCompatibility & ". " &
+        l4IdentityDropRule,
         m5ServiceStmtAnchor(stmt))
     if stmt.kind notin {nnkCall, nnkCommand}:
       continue
@@ -2463,6 +2639,7 @@ proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
     case identText(stmt[0]).normalize
     of "identity": l4ParseIdentitySetter(stmt, result)
     of "scope": l4ParseScopeSetter(stmt, result)
+    of "compatibility": l6ParseCompatibilitySetter(stmt, result)
     else: discard
 
 proc m5ParseServiceBody(body: NimNode): tuple[
@@ -2649,11 +2826,20 @@ proc m5ParseServiceBody(body: NimNode): tuple[
       let lit = m5ServiceStringLitArg(stmt)
       if lit != nil:
         result.groupLit = lit
-    of "identity", "scope":
-      # L4: already read (and validated) by `l4ServiceIdentityScope`
-      # above. Named here rather than left to the `else` so the two are
+    of "identity", "scope", "compatibility":
+      # L4 / L6: already read (and validated) by `l4ServiceIdentityScope`
+      # above. Named here rather than left to the `else` so the three are
       # visibly ACCOUNTED FOR by this walker; falling through to
       # `discard` would read as "not a setter".
+      #
+      # `compatibility` is read by this walker and NOT carried onto
+      # `DslServiceDef`: §4.4/§6.5 key an instance by
+      # `(identity, scope, environment)` and the major is not in that
+      # key, so the lowered `gnkService` payload -- whose job is to
+      # materialise -- has no reader for it. The LIFT carries it (see
+      # `ServiceInterfaceDef.compatibilityMajor`), which is where §4.3
+      # compares it. The reading is still shared, so the refusals above
+      # fire for a recipe whether or not it is being lifted.
       discard
     else:
       discard
@@ -5421,6 +5607,12 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       ", identityKind: " & $svc.identityScope.identityKind &
       ", identityStableId: " & escForCode(svc.identityScope.stableId) &
       ", scope: " & $svc.identityScope.scope &
+      # L6: the declared MAJOR COMPATIBILITY FIELD. 0 when the body
+      # declared none, which is the undeclared value every pre-v23
+      # interface artifact decodes to -- see
+      # `ServiceInterfaceDef.compatibilityMajor`.
+      ", compatibilityMajor: " & $svc.identityScope.compatibilityMajor &
+      "'u32" &
       ", sourceFile: " & escForCode(info.filename) &
       ", sourceLine: " & $info.line & "))\n")
   result = parseStmt(code)

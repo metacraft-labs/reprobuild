@@ -383,6 +383,34 @@ type
     scope*: ServiceScope
       ## The DECLARED scope. Also signature, for the same reason: it is
       ## half of the instance key a consumer resolves against.
+    compatibilityMajor*: uint32
+      ## Shared-Development-Services L6 (§4.3): the DECLARED MAJOR
+      ## COMPATIBILITY FIELD, from ``compatibility <n>``.
+      ##
+      ## It is the input to the ONE outcome of §4.3's three that is not
+      ## decided on the fingerprint: "| major compatibility field differs
+      ## | **Refuse.** Attaching would hand the consumer a handle whose
+      ## members it cannot use; a warning there would be a defect report
+      ## written after the damage |". Without a field for it the table's
+      ## bottom row has no input and the decision collapses to two
+      ## outcomes, which is the design §4.3 exists to reject.
+      ##
+      ## ``0`` means UNDECLARED, and it is the zero value on purpose:
+      ## every artifact written before the envelope carried this field
+      ## decodes to 0, so a cached pre-v23 artifact and a freshly lifted
+      ## definition that declared nothing AGREE rather than refusing each
+      ## other over a format boundary. The DSL consequently refuses
+      ## ``compatibility 0`` — declaring it would be unobservable.
+      ##
+      ## IT IS NOT ON ``DslServiceDef`` AND THAT IS DELIBERATE. §4.4 and
+      ## §6.5 key an instance by ``(identity, scope, environment)``; the
+      ## major is not in that key, nothing about MATERIALISING a service
+      ## reads it, and the lowered ``gnkService`` payload exists to
+      ## materialise. Copying it there would be a second place for one
+      ## fact to disagree with itself — the same argument L4 made for
+      ## keeping identity off ``ActivityInterfaceDef``. The lift reads it
+      ## from the body AST through the shared ``identity``/``scope``
+      ## walker, so there is exactly one reading.
     sourceFile*: string
     sourceLine*: int
 

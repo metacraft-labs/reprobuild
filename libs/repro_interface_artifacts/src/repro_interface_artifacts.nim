@@ -480,6 +480,34 @@ type
       ## for ``isimDerived``.
     scope*: InterfaceServiceScope
       ## The DECLARED scope — the other half of §4's instance key.
+    compatibilityMajor*: uint32
+      ## Shared-Development-Services L6 (§4.3): the DECLARED MAJOR
+      ## COMPATIBILITY FIELD, from ``compatibility <n>``.
+      ##
+      ## It is the input to the one outcome of §4.3's three that is NOT
+      ## decided on the fingerprint: "| major compatibility field differs
+      ## | **Refuse.** Attaching would hand the consumer a handle whose
+      ## members it cannot use; a warning there would be a defect report
+      ## written after the damage |". Without a field for it the table's
+      ## bottom row has no input at all and the decision degenerates to
+      ## two outcomes — the design §4.3 is written to reject.
+      ##
+      ## SIGNATURE, like identity and scope and for the same reason: it
+      ## is a fact about what the consumer may DO with the handle, not
+      ## about how the producer builds it. So it is inside the
+      ## fingerprint projection, and a producer editing the service's
+      ## ``args`` still re-lifts to the same digest.
+      ##
+      ## ``0`` means undeclared and is the zero value on purpose: a v<23
+      ## payload carries no major, so it decodes to 0 and compares EQUAL
+      ## to every freshly lifted definition that declared none. Were the
+      ## default 1, the decision's only refusing outcome would fire at an
+      ## artifact-format boundary rather than at an incompatibility. The
+      ## DSL therefore refuses ``compatibility 0``.
+      ##
+      ## ``repro_resources/service_attach`` is what compares it; this
+      ## module only carries it, which is the split that keeps the
+      ## comparison out of the artifact codec.
     location*: SourceLocation
 
   InterfaceActivity* = object
@@ -828,8 +856,30 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 22'u16
-    ## v22 (current): Shared-Development-Services L4 (§4.1 / §4.2) retains
+  EnvelopeVersion = 23'u16
+    ## v23 (current): Shared-Development-Services L6 (§4.3) retains the
+    ##                DECLARED MAJOR COMPATIBILITY FIELD on each
+    ##                ``publicServices`` row — ``compatibilityMajor``, a
+    ##                u32 appended after ``scope`` at the row's tail. The
+    ##                SECOND planned use of the extension route L3 left
+    ##                behind, taken the same way v22 took it: a field
+    ##                plus one version-gated block, appended rather than
+    ##                inserted, so a v22 row keeps decoding byte for
+    ##                byte and decodes to ``0`` — the undeclared major,
+    ##                which compares equal to every definition that
+    ##                declares none. See
+    ##                ``InterfaceService.compatibilityMajor`` for why 0
+    ##                and not 1.
+    ##
+    ##                The major is SIGNATURE, so it is inside the
+    ##                fingerprint projection: a consumer must recompile
+    ##                when the generation of the interface it would
+    ##                attach to changes. §4.3's refusal is decided on
+    ##                this field BEFORE the fingerprint is compared,
+    ##                which is why the field has to be retained
+    ##                separately rather than merely folded into the
+    ##                digest.
+    ## v22:           Shared-Development-Services L4 (§4.1 / §4.2) retains
     ##                the DECLARED INSTANCE IDENTITY AND SCOPE on each
     ##                ``publicServices`` row — ``identityMode``
     ##                (``derived`` | ``stable``), ``identityStableId`` and
@@ -1253,10 +1303,15 @@ proc writeService(outp: var seq[byte]; svc: InterfaceService;
   outp.writeString(svc.activityName)
   outp.writeString(svc.handleType)
   outp.writeLocation(svc.location, forFingerprint)
+  ## v23 (L6) appends the declared MAJOR COMPATIBILITY FIELD after
+  ## ``scope``, at the row's new tail — the same append-not-insert rule,
+  ## so a v22 row keeps decoding byte for byte.
   if version >= 22'u16:
     outp.writeByte(byte(ord(svc.identityMode)))
     outp.writeString(svc.identityStableId)
     outp.writeByte(byte(ord(svc.scope)))
+  if version >= 23'u16:
+    outp.writeU32Le(svc.compatibilityMajor)
 
 proc readService(bytes: openArray[byte]; pos: var int;
                  version: uint16): InterfaceService =
@@ -1278,6 +1333,14 @@ proc readService(bytes: openArray[byte]; pos: var int;
     if scope > byte(ord(issSystem)):
       raiseEnvelopeError(eeMalformed, "invalid interface service scope")
     result.scope = InterfaceServiceScope(scope)
+  # v<23 rows carry no major. 0 — the zero value — is §4.3's UNDECLARED
+  # major, so such a row compares equal to every definition that declares
+  # none rather than refusing it over a format boundary. There is no
+  # range check because every u32 is a legal major: the DSL refuses 0 at
+  # the DECLARATION site, and a 0 that arrives here is the legitimate
+  # "declared nothing" case a v22 artifact must still produce.
+  if version >= 23'u16:
+    result.compatibilityMajor = readU32Le(bytes, pos)
 
 proc writeActivity(outp: var seq[byte]; act: InterfaceActivity;
                    forFingerprint = false) =
@@ -2187,6 +2250,10 @@ proc toProjectInterface*(pkg: PackageDef;
       identityMode: InterfaceServiceIdentityMode(ord(svc.identityKind)),
       identityStableId: svc.identityStableId,
       scope: InterfaceServiceScope(ord(svc.scope)),
+      # L6: carried verbatim. No enum mapping and so no drift assert —
+      # it is a number the author declared, and 0 means undeclared on
+      # both sides.
+      compatibilityMajor: svc.compatibilityMajor,
       location: SourceLocation(file: svc.sourceFile, line: svc.sourceLine)))
   for act in registeredActivityInterfaces():
     if act.packageName != pkg.packageName:
