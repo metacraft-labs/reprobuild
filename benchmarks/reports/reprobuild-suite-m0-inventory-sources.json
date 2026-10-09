@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1877,
+    "nimTestBinaries": 1878,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 599,
+    "pureUnitTests": 600,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1894
+    "testEntries": 1895
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -23,7 +23,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_build_engine"
@@ -32,6 +32,7 @@
       "sources": [
         "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
         "libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim",
+        "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
         "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
         "libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim"
       ],
@@ -1105,7 +1106,7 @@
       "graph-fixture": 11,
       "integration": 1008,
       "platform/destructive": 119,
-      "pure unit": 599,
+      "pure unit": 600,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1284,9 +1285,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1877,
+    "nimTestBinaryCount": 1878,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1894
+    "testEntryCount": 1895
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7776,6 +7777,23 @@
       "source": "libs/repro_build_engine/tests/t_scratch_dirs.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_self_written_set_is_derived",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -39174,7 +39192,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,

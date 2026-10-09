@@ -84,6 +84,7 @@ libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim	nim
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	4
 libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	4
+libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
 libs/repro_build_engine/tests/t_whole_graph_prefix_refuses_free_before_statting.nim	nim	2
