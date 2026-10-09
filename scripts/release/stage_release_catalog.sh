@@ -44,26 +44,45 @@ pin=$(tr -d '\r' < .github/sibling-repos |
 [[ -n "$pin" ]] ||
   fail ".github/sibling-repos pins no 40-hex reprobuild-packages revision"
 
+# Every git call on the catalog checkout goes through this. The checkout is
+# one the workflow itself just cloned beside this one, and every call is a
+# read (rev-parse, archive, remote get-url), so git's ownership check
+# (`safe.directory`, https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory)
+# protects nothing here -- and on a Windows runner whose service account does
+# not own the work directory it is the likeliest reason a present checkout
+# reads as absent. Scoped to these calls only; nothing is written to config.
+pkg_git() { git -c safe.directory='*' -C "$@"; }
+
 root=""
+tried=""
 for candidate in "${REPROBUILD_PACKAGES_ROOT:-}" ../reprobuild-packages; do
-  if [[ -n "$candidate" ]] &&
-      git -C "$candidate" rev-parse --verify --quiet "${pin}^{commit}" >/dev/null 2>&1; then
+  [[ -n "$candidate" ]] || continue
+  # Keep git's own answer: "not a git repository", "dubious ownership" and
+  # "unknown revision" each need a different remedy, and discarding stderr
+  # left a CI log that could only say the checkout was not there.
+  if why=$(pkg_git "$candidate" rev-parse --verify --quiet "${pin}^{commit}" 2>&1 >/dev/null); then
     root=$candidate
     break
   fi
+  if [[ ! -e "$candidate" ]]; then
+    why="does not exist"
+  elif [[ -z "$why" ]]; then
+    why="commit not present (shallow clone of another revision?)"
+  fi
+  tried+=$'\n'"  $candidate: ${why//$'\n'/ }"
 done
 [[ -n "$root" ]] ||
-  fail "no git checkout holding reprobuild-packages $pin (tried \$REPROBUILD_PACKAGES_ROOT='${REPROBUILD_PACKAGES_ROOT:-}' and ../reprobuild-packages); clone it there, or fetch that commit into it"
+  fail "no git checkout holding reprobuild-packages $pin; clone it at ../reprobuild-packages or set \$REPROBUILD_PACKAGES_ROOT, or fetch that commit into it. Tried:$tried"
 
 echo "stage_release_catalog: reprobuild-packages <- $root @ $pin"
 rm -rf "$dest"
 mkdir -p "$dest"
 # Extract from inside the destination: given `-C C:\...`, a tar reads the
 # drive letter as a remote host.
-git -C "$root" archive --format=tar "$pin" packages/interfaces |
+pkg_git "$root" archive --format=tar "$pin" packages/interfaces |
   (cd "$dest" && tar -x)
 # The fetch url, without any credentials a CI clone embedded in it.
-url=$(git -C "$root" remote get-url origin 2>/dev/null |
+url=$(pkg_git "$root" remote get-url origin 2>/dev/null |
   sed -E 's#^([a-z+]+://)[^/@]*@#\1#; s#\.git$##' || true)
 [[ -n "$url" ]] || url="https://github.com/metacraft-labs/reprobuild-packages"
 printf 'url=%s\nrevision=%s\n' "$url" "$pin" > "$dest/catalog-revision"
