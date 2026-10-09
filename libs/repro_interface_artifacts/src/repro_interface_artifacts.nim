@@ -88,6 +88,7 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
+import repro_core/relocation
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
@@ -930,6 +931,14 @@ proc providerCompileEdge*(inputSources: openArray[string];
     declaredOutputs: declaredOutputs,
     actionFingerprint: fingerprint)
 
+var
+  locationBase {.threadvar.}: string
+    ## Non-empty while `writeInterfaceArtifactRecipeRelative` /
+    ## `readInterfaceArtifactRebased` run: the recipe directory source
+    ## locations are named relative to.
+  locationAnchors {.threadvar.}: seq[string]
+  locationsRelative {.threadvar.}: bool
+
 proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
                    forFingerprint = false) =
   ## Serialises a ``SourceLocation``. When ``forFingerprint`` is true the
@@ -945,11 +954,23 @@ proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
     outp.writeString("")
     outp.writeU32Le(0'u32)
   else:
-    outp.writeString(loc.file)
+    let file =
+      if locationBase.len > 0 and locationsRelative:
+        relocatableName(loc.file, locationBase, locationAnchors)
+      else:
+        loc.file
+    outp.writeString(file)
     outp.writeU32Le(uint32(max(loc.line, 0)))
 
 proc readLocation(bytes: openArray[byte]; pos: var int): SourceLocation =
-  SourceLocation(file: readString(bytes, pos), line: int(readU32Le(bytes, pos)))
+  let file = readString(bytes, pos)
+  SourceLocation(
+    file:
+      if locationBase.len > 0 and not locationsRelative:
+        rebasedName(file, locationBase)
+      else:
+        file,
+    line: int(readU32Le(bytes, pos)))
 
 proc writeParam(outp: var seq[byte]; param: InterfaceParam;
                 forFingerprint = false) =
@@ -1562,6 +1583,36 @@ proc writeInterfaceArtifact*(path: string; artifact: ProjectInterfaceArtifact) =
 
 proc readInterfaceArtifact*(path: string): ProjectInterfaceArtifact =
   decodeProjectInterfaceArtifact(fromByteString(readFile(extendedPath(path))))
+
+proc writeInterfaceArtifactRecipeRelative*(path: string;
+    artifact: ProjectInterfaceArtifact; recipeDir: string;
+    anchors: openArray[string]) =
+  ## Write `artifact` with every source location outside `anchors` named
+  ## relative to `recipeDir` (`repro_core/relocation`). This is the form the
+  ## recipe-relative extraction edge produces, so the bytes it caches
+  ## describe whichever copy of the recipe restores them; a reader rebases
+  ## them with `readInterfaceArtifactRebased`. The interface fingerprint is
+  ## unaffected: it never contains locations.
+  locationBase = absolutePath(recipeDir)
+  locationAnchors = effectiveAnchors(locationBase, anchors)
+  locationsRelative = true
+  try:
+    writeInterfaceArtifact(path, artifact)
+  finally:
+    locationBase = ""
+    locationAnchors = @[]
+
+proc readInterfaceArtifactRebased*(path, recipeDir: string):
+    ProjectInterfaceArtifact =
+  ## Read an artifact written by `writeInterfaceArtifactRecipeRelative`,
+  ## resolving its relative source locations against `recipeDir` — the
+  ## recipe as it lies at THIS location.
+  locationBase = absolutePath(recipeDir)
+  locationsRelative = false
+  try:
+    result = readInterfaceArtifact(path)
+  finally:
+    locationBase = ""
 
 proc writeProviderCompileArtifact*(path: string;
     artifact: ProviderCompileArtifact) =
@@ -5727,7 +5778,9 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  resourceModule = "";
                                  extraPaths: openArray[string] = [];
                                  consumerRoot = "";
-                                 useExtractionCache = true):
+                                 useExtractionCache = true;
+                                 recipeRelative = false;
+                                 relocationAnchors: openArray[string] = []):
     ProjectInterfaceArtifact =
   ## ``useExtractionCache`` controls the built-in warm short-circuit. It is
   ## ``false`` for exactly one caller: the child of the extraction EDGE.
@@ -5776,6 +5829,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
 
   let moduleDir = parentDir(modulePath)
+  let absoluteModuleDir = parentDir(absolutePath(modulePath))
   # Windows: the extract_runner.nim path is passed verbatim to a child
   # `nim c` invocation, and nim opens it via the non-extended Win32 API,
   # so paths longer than MAX_PATH (260 chars) cause `Error: cannot open
@@ -5825,6 +5879,13 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # ``resourceType`` macro emits a module-init proc calling
   # ``registerResourceTypeInterface``; that side effect only executes if the
   # module is actually imported into the extraction runner's compilation unit.
+  # A recipe-relative extraction names the recipe relative to the runner,
+  # so the runner it compiles is the same text wherever the recipe lies.
+  let recipeImportPath =
+    if recipeRelative:
+      relativePath(absoluteModulePath, tempParent).replace('\\', '/')
+    else:
+      absoluteModulePath
   var resourceImport = ""
   if resourceModule.len > 0:
     let absoluteResourceModule =
@@ -5836,9 +5897,17 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "import repro_project_dsl\n" &
     "import repro_dsl_stdlib/constructors\n" &
     resourceImport &
-    "import \"" & absoluteModulePath & "\"\n\n" &
+    "import \"" & recipeImportPath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
-    "writeInterfaceArtifact(paramStr(1), artifact)\n" &
+    (if recipeRelative:
+       # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+       # compiles": source locations travel relative to the recipe.
+       "var anchors: seq[string] = @[]\n" &
+       "for i in 5 .. paramCount(): anchors.add(paramStr(i))\n" &
+       "writeInterfaceArtifactRecipeRelative(paramStr(1), artifact, " &
+       "paramStr(4), anchors)\n"
+     else:
+       "writeInterfaceArtifact(paramStr(1), artifact)\n") &
     "writeNimInterfaceStub(paramStr(2), artifact)\n"
   # CONTENT-KEYED, and therefore stable across invocations.
   #
@@ -5964,13 +6033,18 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
         buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
           positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
             hostFlags, libFlags)
+  # A recipe-relative extraction compiles IN the recipe directory, so the
+  # paths that belong to the recipe are spelled relative to it.
+  proc spelled(path: string): string =
+    if recipeRelative: relativePath(absolutePath(path), absoluteModuleDir)
+    else: path
   var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
-    "--path:" & moduleDir,
-    "--nimcache:" & nimcache,
-    "--out:" & runnerBin,
-    runnerPath
+    "--path:" & (if recipeRelative: "." else: moduleDir),
+    "--nimcache:" & spelled(nimcache),
+    "--out:" & spelled(runnerBin),
+    spelled(runnerPath)
   ])
   command.insert(hostFlags, 2)
   command.insert(externalHashFlags(workDir), 2)
@@ -6008,7 +6082,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # not a valid compiler working directory: Nim writes relative linker response
   # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
   # Keep response files and binaries in the extraction's private directory.
-  let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
+  let compileExecution = runInterfaceCompilerCommand(command,
+    cwd = (if recipeRelative: absoluteModuleDir else: tempRoot))
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
     # `runCommand` already raises on non-zero exit, so reaching this branch
@@ -6034,17 +6109,24 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # lives in a temp tree with no DLLs of its own. See the proc's docstring.
   stageHostDynlibsBesideBinary(parentDir(runnerExe))
   ensureExecutable(runnerExe)
-  let execution = runCommand(@[
+  var runnerArgs = @[
     runnerExe,
     absolutePath(artifactPath),
     absolutePath(stubPath),
-    absoluteModulePath
-  ], cwd = tempRoot)
+    absoluteModulePath]
+  if recipeRelative:
+    runnerArgs.add(absoluteModuleDir)
+    for anchor in relocationAnchors:
+      runnerArgs.add(anchor)
+  let execution = runCommand(runnerArgs, cwd = tempRoot)
   if not fileExists(extendedPath(artifactPath)):
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
         "\n" & execution.output)
-  result = readInterfaceArtifactWithWarm(artifactPath)
+  result =
+    if recipeRelative: readInterfaceArtifactRebased(artifactPath,
+      absoluteModuleDir)
+    else: readInterfaceArtifactWithWarm(artifactPath)
   writeFile(extendedPath(interfaceExtractionCachePath(artifactPath)), toHex(
       inputFingerprint.bytes))
   writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,
@@ -6564,7 +6646,10 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
     # toolchain can opt into bounded concurrency through the environment.
     "--define:reproProviderMode",
-    "--path:" & parentDir(modulePath),
+    # A recipe-relative compile names the module by its file name and runs
+    # in its directory; its search path is then that directory, `.`.
+    "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)
+                 else: "."),
     "--nimcache:" & nimcache,
     "--out:" & outputBinaryPath,
     modulePath
