@@ -1845,6 +1845,7 @@ tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	4
 tests/unit/t_repo_relocation_move_ordering.nim	nim	10
 tests/unit/t_run_consumes.nim	nim	6
+tests/unit/t_runner_closes_merged_pipes_once.nim	nim	4
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
 tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2

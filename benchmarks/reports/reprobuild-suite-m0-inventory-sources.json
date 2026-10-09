@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1867,
+    "nimTestBinaries": 1868,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 594,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1884
+    "testEntries": 1885
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1089,7 +1089,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 1003,
+      "integration": 1004,
       "platform/destructive": 119,
       "pure unit": 594,
       "unclassified": 157
@@ -1270,9 +1270,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1867,
+    "nimTestBinaryCount": 1868,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1884
+    "testEntryCount": 1885
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -39092,7 +39092,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
@@ -39266,6 +39267,23 @@
       "source": "tests/unit/t_run_consumes.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_runner_closes_merged_pipes_once",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_runner_closes_merged_pipes_once.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

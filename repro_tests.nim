@@ -16533,6 +16533,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_runner_closes_merged_pipes_once.nim",
+    binary: "build/test-bin/t_runner_closes_merged_pipes_once",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_runquota_endpoint_paths.nim",
     binary: "build/test-bin/t_runquota_endpoint_paths",
     defines: @[],
