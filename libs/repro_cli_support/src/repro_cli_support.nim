@@ -63604,111 +63604,6 @@ proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
       return true
   false
 
-proc ensureRemoteEntry(projectFile, remoteName, fetchUrl: string) =
-  ## Append a ``[[remote]]`` entry naming ``fetchUrl`` if the project file
-  ## does not already declare a remote with that name. The new entry is
-  ## inserted right before the ``includes = [`` array so it sits with the
-  ## other remotes; when no includes array is present it is appended.
-  let content = readFile(projectFile)
-  if ("name = \"" & remoteName & "\"") in content:
-    return
-  let remoteBlock = "[[remote]]\nname = \"" & remoteName & "\"\nfetch = \"" &
-    fetchUrl & "\"\n\n"
-  let idx = content.find("includes")
-  if idx >= 0:
-    writeFile(projectFile, content[0 ..< idx] & remoteBlock & content[idx .. ^1])
-  else:
-    writeFile(projectFile, content & "\n" & remoteBlock)
-
-proc appendFragmentInclude(projectFile, includePath: string): bool =
-  ## Append ``"<includePath>",`` to the project's ``includes = [ … ]`` array.
-  ## Returns true when the include was added; false when it was already
-  ## present (idempotent). The append preserves the existing array entries.
-  let content = readFile(projectFile)
-  let quoted = "\"" & includePath & "\""
-  if quoted in content:
-    return false
-  var outLines: seq[string]
-  var inserted = false
-  for line in content.splitLines():
-    # Insert before the closing ``]`` of the includes array. The closing
-    # bracket sits alone on its own line in the canonical multi-line form.
-    if not inserted and line.strip() == "]":
-      outLines.add("  " & quoted & ",")
-      inserted = true
-    outLines.add(line)
-  if not inserted:
-    # No multi-line includes array to extend — append a fresh one.
-    outLines.add("")
-    outLines.add("includes = [")
-    outLines.add("  " & quoted & ",")
-    outLines.add("]")
-  writeFile(projectFile, outLines.join("\n"))
-  true
-
-proc addDependsEdge(fragmentPath, depName: string): bool =
-  ## Add ``depName`` to the ``depends`` array of the repo fragment at
-  ## ``fragmentPath`` (RA-21 develop-set edge). Returns true when the edge
-  ## was added; false when it was already present. Rewrites/creates the
-  ## ``depends = [ … ]`` inline array under ``[repo]``.
-  let content = readFile(fragmentPath)
-  var lines = content.splitLines()
-  var dependsIdx = -1
-  for idx, line in lines:
-    if line.strip().startsWith("depends"):
-      dependsIdx = idx
-      break
-  if dependsIdx >= 0:
-    let line = lines[dependsIdx]
-    if ("\"" & depName & "\"") in line:
-      return false
-    let open = line.find('[')
-    let close = line.rfind(']')
-    if open < 0 or close < 0 or close <= open:
-      raise newException(ValueError,
-        "malformed `depends` array in fragment: " & fragmentPath)
-    let inner = line[open + 1 ..< close].strip()
-    let newInner =
-      if inner.len == 0: "\"" & depName & "\""
-      else: inner & ", \"" & depName & "\""
-    lines[dependsIdx] = line[0 .. open] & newInner & line[close .. ^1]
-    writeFile(fragmentPath, lines.join("\n"))
-    return true
-  # No `depends` key yet — append one to the `[repo]` table. The fragment's
-  # `[repo]` table is the last table in the file, so a trailing append lands
-  # inside it.
-  var trimmed = content
-  while trimmed.len > 0 and trimmed[^1] in {'\n', '\r'}:
-    trimmed.setLen(trimmed.len - 1)
-  writeFile(fragmentPath,
-    trimmed & "\ndepends = [\"" & depName & "\"]\n")
-  true
-
-proc appendBinaryDependency(projectFile, name, remoteUrl, revision: string):
-    bool =
-  ## Record a BINARY-mode dependency in the project manifest as a
-  ## ``[[binary_dependency]]`` entry. A binary dependency is NEVER an
-  ## ``includes`` repo fragment, so it is never cloned, synced, or part of
-  ## the checkout GC graph. Returns true when the entry was added; false when
-  ## an entry of the same name already existed (idempotent).
-  let content = readFile(projectFile)
-  if ("name = \"" & name & "\"") in content and
-      "[[binary_dependency]]" in content:
-    # A binary_dependency or remote with this name may already exist; only
-    # skip when a binary_dependency block already names it.
-    for blk in content.split("[[binary_dependency]]"):
-      if ("name = \"" & name & "\"") in blk:
-        return false
-  var entry = "\n[[binary_dependency]]\nname = \"" & name & "\"\nremote = \"" &
-    remoteUrl & "\"\n"
-  if revision.len > 0:
-    entry.add("revision = \"" & revision & "\"\n")
-  var trimmed = content
-  while trimmed.len > 0 and trimmed[^1] in {'\n', '\r'}:
-    trimmed.setLen(trimmed.len - 1)
-  writeFile(projectFile, trimmed & "\n" & entry)
-  true
-
 proc cloneAddSibling(workspaceRoot, repoPath, fetchUrl, revision: string;
                      identity: GitToolIdentity):
     tuple[ok: bool; diagnostic: string] =
@@ -63785,9 +63680,18 @@ proc executeAdd(parsed: AddArgs): AddReport =
         "' as a BINARY dependency of project '" & resolved.projectName &
         "' (no checkout)")
       return
+    # A BINARY-mode dependency is a `[[binary_dependency]]` entry, never an
+    # `includes` fragment, so it is never cloned, synced, or part of the
+    # checkout GC graph. The editor adds it only when no entry of the same
+    # name exists (idempotent), in whichever spelling the file already uses.
+    var binaryFields = @[tomlField("name", tomlStr(parsed.target)),
+                         tomlField("remote", tomlStr(parsed.remoteUrl))]
+    if revision.len > 0:
+      binaryFields.add(tomlField("revision", tomlStr(revision)))
+    var projectDoc = loadManifestDoc(resolved.projectFile)
     result.declarationChanged =
-      appendBinaryDependency(resolved.projectFile, parsed.target,
-        parsed.remoteUrl, revision)
+      projectDoc.ensureArrayTableEntry("binary_dependency", binaryFields)
+    projectDoc.saveManifestDoc()
     result.exitCode = 0
   of amDevelop, amNoMembership:
     let isMembership = mode == amDevelop
@@ -63854,8 +63758,15 @@ proc executeAdd(parsed: AddArgs): AddReport =
     if remoteName.len == 0:
       remoteName = parsed.target & "-origin"
       remoteFetch = parsed.remoteUrl
+    # The project file is edited through the manifest editor: the `[[remote]]`
+    # entry is added only when no remote of that name exists, and lands after
+    # the last `[[remote]]` block (never above a top-level key, which would
+    # re-bind that key to the remote table).
+    var projectDoc = loadManifestDoc(resolved.projectFile)
     if remoteFetch.len > 0:
-      ensureRemoteEntry(resolved.projectFile, remoteName, remoteFetch)
+      discard projectDoc.ensureArrayTableEntry("remote",
+        @[tomlField("name", tomlStr(remoteName)),
+          tomlField("fetch", tomlStr(remoteFetch))])
     let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
@@ -63870,15 +63781,13 @@ proc executeAdd(parsed: AddArgs): AddReport =
     let pinRevision =
       parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
-      writeFile(fragmentAbs,
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-        "[repo]\n" &
-        "name = \"" & parsed.target & "\"\n" &
-        "path = \"" & repoPath & "\"\n" &
-        "remote = \"" & remoteName & "\"\n" &
-        (if pinRevision: "revision = \"" & revision & "\"\n" else: ""))
-    result.declarationChanged =
-      appendFragmentInclude(resolved.projectFile, fragmentRel)
+      writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
+        schema: schemaRepoFragmentV1,
+        repo: RepoBody(name: parsed.target, path: repoPath,
+          remote: some(remoteName),
+          revision: (if pinRevision: some(revision) else: none(string))))))
+    result.declarationChanged = projectDoc.appendInclude(fragmentRel)
+    projectDoc.saveManifestDoc()
     # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
     # that the named repo depends on the newly added one.
     if parsed.dependsOf.len > 0:
@@ -63892,7 +63801,10 @@ proc executeAdd(parsed: AddArgs): AddReport =
         result.diagnostic = "`--depends-of` names '" & parsed.dependsOf &
           "' which is not a repo in project '" & resolved.projectName & "'"
         return
-      if addDependsEdge(dependentFragment, parsed.target):
+      # The edge goes in `[repo] depends` — the array NAMED `depends` in the
+      # `[repo]` table, created inline when the fragment has none.
+      if addArrayMemberInFile(dependentFragment, "repo", "depends",
+          parsed.target, alInline):
         result.dependsEdgeOn = parsed.dependsOf
     result.exitCode = 0
 
@@ -64030,34 +63942,6 @@ proc resolveRemoveProject(parsed: RemoveArgs): ResolvedProject =
   ## raising — every manifest-present path is byte-unchanged.
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
     "`repro remove <repo>`").resolved
-
-proc dropFragmentInclude(projectFile, fragmentAbs: string): bool =
-  ## Remove the ``includes`` entry that resolves to ``fragmentAbs`` from
-  ## ``projectFile`` by rewriting the include list textually. Returns
-  ## true when a line was dropped. The match is on the resolved absolute
-  ## fragment path so a ``repos/<repo>.toml`` entry is identified even if
-  ## another repo shares a name prefix.
-  let content = readFile(projectFile)
-  var outLines: seq[string]
-  var dropped = false
-  for line in content.splitLines():
-    let trimmed = line.strip()
-    # An include line looks like ``"repos/<repo>.toml",`` (inside the
-    # ``includes = [ ... ]`` array). Extract the quoted path and compare
-    # its resolved form to the target fragment.
-    if trimmed.startsWith("\""):
-      let closeIdx = trimmed.find('"', 1)
-      if closeIdx > 1:
-        let raw = trimmed[1 ..< closeIdx]
-        let manifestRoot = parentDir(parentDir(absolutePath(projectFile)))
-        let resolvedInc = manifestRoot / raw.replace('/', DirSep)
-        if absolutePath(resolvedInc) == absolutePath(fragmentAbs):
-          dropped = true
-          continue
-    outLines.add(line)
-  if dropped:
-    writeFile(projectFile, outLines.join("\n"))
-  dropped
 
 proc reachableExcluding(repos: seq[ResolvedRepo];
                         rootNames: HashSet[string];
@@ -64419,7 +64303,20 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # tree). Only the target's include is dropped; transitive develop-set
   # siblings are GC'd as CHECKOUTS (their fragments are not the user's direct
   # dependency, so the declaration drop is scoped to the named target).
-  let changed = dropFragmentInclude(resolved.projectFile, target.fragmentPath)
+  #
+  # The `includes` entry is matched on its RESOLVED absolute fragment path,
+  # so a `repos/<repo>.toml` entry is identified even if another repo shares
+  # a name prefix, and only the `includes` array is edited.
+  var changed = false
+  block dropInclude:
+    var projectDoc = loadManifestDoc(resolved.projectFile)
+    let includeRoot = parentDir(parentDir(absolutePath(resolved.projectFile)))
+    for raw in projectDoc.arrayMembers("", "includes"):
+      let resolvedInc = includeRoot / raw.replace('/', DirSep)
+      if absolutePath(resolvedInc) == absolutePath(target.fragmentPath):
+        if projectDoc.removeArrayMember("", "includes", raw):
+          changed = true
+    projectDoc.saveManifestDoc()
   result.declarationChanged = changed
   for p in plan:
     if p.rejection.len > 0:
@@ -76084,80 +75981,6 @@ type
     memberSets: seq[string]
     memberRepos: seq[string]
 
-proc renderMemberArray(key: string; members: openArray[string]): string =
-  ## One membership array, one entry per line — the shape `editSetMember`
-  ## expects to find later, so a seeded set stays editable by the same CLI that
-  ## created it.
-  result = key & " = [\n"
-  for m in members:
-    result.add("  \"" & m & "\",\n")
-  result.add("]\n")
-
-proc projectManifestStub(project: string; seed: MembershipSeed): string =
-  ## A NEW project has no remotes yet, so the stub carries none.
-  ##
-  ## The membership arrays are written BEFORE the `[project]` table, and the
-  ## order is load-bearing rather than stylistic: a bare `member_sets = [ … ]`
-  ## written AFTER `[project]` is standard-TOML-bound to that table, the strict
-  ## decode then rejects `project.member_sets`, and the file stops parsing.
-  ## (The old `includes` array had the same problem and was simply omitted from
-  ## the stub; a template has content to place, so it is placed where it
-  ## parses. Verified against the pinned reader in both orders.)
-  ##
-  ## Both keys are written whenever a template applies, even when it seeds only
-  ## one, because which one an entry belongs in is the whole point:
-  ## `member_sets` and `member_repos` are two NAMESPACES, and a file carrying
-  ## only one would invite the next entry into whichever happened to be there.
-  ##
-  ## No `default_revision`. The model removes it: revision is lock territory,
-  ## and the value it carried was org branching policy restated once per
-  ## project. A stub that keeps emitting it re-seeds, into every project
-  ## authored from now on, exactly the field a manifest conversion has just
-  ## finished deleting — and the next conversion would have to delete it again.
-  ## The reader still ACCEPTS the key, so manifests that predate the conversion
-  ## keep parsing; what stops is this tool authoring new ones.
-  ##
-  ## `trunk` stays. It is not the same kind of field: it is live data with no
-  ## other declaration site, selecting the workspace branch for `repro branch`,
-  ## `repro switch` and `workspace init`.
-  let membership =
-    if seed.memberSets.len > 0 or seed.memberRepos.len > 0:
-      renderMemberArray("member_sets", seed.memberSets) & "\n" &
-      renderMemberArray("member_repos", seed.memberRepos) & "\n"
-    else:
-      ""
-  "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  membership &
-  "[project]\n" &
-  "name = \"" & project & "\"\n" &
-  "trunk = \"main\"\n"
-
-proc repoSetManifestStub(name: string; seed: MembershipSeed): string =
-  ## Workspace-Membership-Model.md — a NEW repo-set: a name and an empty
-  ## membership list, and nothing else. There is no `default_revision` and no
-  ## `default_remote` to stub, deliberately: a set that carried them would make
-  ## a member resolve differently depending on who referenced it, and a repo
-  ## fragment fully determining its own checkout is the invariant that makes it
-  ## portable between workspaces.
-  ##
-  ## Unlike `projectManifestStub`, the membership arrays ARE written out. A
-  ## repo-set manifest has no array-of-tables for a bare key to attach itself
-  ## to, so the "written after `[[remote]]` and read as a field of the last
-  ## remote" trap that forced the project stub to omit `includes` cannot arise
-  ## here — verified against the pinned reader in both key orders.
-  ##
-  ## Both keys are stubbed even though a new set has neither, because which one
-  ## an entry belongs in is the whole point: `member_sets` and `member_repos`
-  ## are two NAMESPACES, and a stub carrying only one would invite the next
-  ## entry into whichever happened to be there. A template seeds those same two
-  ## arrays; an empty seed leaves them empty, which is the pre-template stub
-  ## byte for byte.
-  "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
-  "[repo-set]\n" &
-  "name = \"" & name & "\"\n\n" &
-  renderMemberArray("member_sets", seed.memberSets) & "\n" &
-  renderMemberArray("member_repos", seed.memberRepos)
-
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
@@ -76210,26 +76033,6 @@ proc commitAndPushManifest(identity: GitToolIdentity;
   if push.code != 0:
     return (code: push.code, diagnostic: "git push failed: " & push.output)
   (code: 0, diagnostic: "committed and pushed to " & upstream)
-
-proc removeFragmentInclude(projectFile, includePath: string): bool =
-  ## Drop ``"<includePath>",`` from the project's ``includes = [ … ]`` array.
-  ## Returns true when an entry was removed; false when none was present
-  ## (idempotent, the mirror of ``appendFragmentInclude``).
-  let content = readFile(projectFile)
-  let quoted = "\"" & includePath & "\""
-  if quoted notin content:
-    return false
-  var outLines: seq[string]
-  var removed = false
-  for line in content.splitLines():
-    if line.strip().startsWith(quoted):
-      removed = true
-      continue
-    outLines.add(line)
-  if not removed:
-    return false
-  writeFile(projectFile, outLines.join("\n"))
-  true
 
 proc projectFilesUnder(manifestRoot: string): seq[string] =
   ## Absolute paths of every ``projects/*.toml`` under the manifest root,
@@ -76334,110 +76137,24 @@ type
     pesMembers   ## declares `member_sets` and/or `member_repos`
 
 proc projectEdgeStyle(projectFile: string): ProjectEdgeStyle =
-  ## The spelling in `projectFile`, decided the same way `editSetMember`
-  ## locates an array — by a line whose key opens a multi-line array — so the
-  ## style that is reported and the array that is then edited cannot disagree.
+  ## The spelling in `projectFile`, answered by the manifest editor — the same
+  ## module that then edits the array — so the style that is reported and the
+  ## array that is edited cannot disagree. A key counts whichever layout its
+  ## array has (inline or one element per line).
   ##
   ## `member_*` wins over `includes` in a half-converted manifest: the
   ## conversion direction is includes -> members, and a new edge belongs with
   ## the spelling the file is moving to.
-  result = pesNone
-  var content: string
+  var doc: ManifestDoc
   try:
-    content = readFile(projectFile)
-  except CatchableError:
-    return pesNone
-  for line in content.splitLines():
-    let stripped = line.strip()
-    if not stripped.endsWith("["):
-      continue
-    if stripped.startsWith(memberReposKey) or
-        stripped.startsWith(memberSetsKey):
+    doc = loadManifestDoc(projectFile)
+    if doc.hasKey("", memberReposKey) or doc.hasKey("", memberSetsKey):
       return pesMembers
-    if stripped.startsWith(includesKey):
-      result = pesIncludes
-
-proc editSetMember(setFile, key, member: string; add: bool): bool =
-  ## Add or drop ``"<member>",`` in the named membership array of a repo-set.
-  ## Returns true when the file changed, false when it already said what was
-  ## asked (idempotent) — the two-key mirror of ``appendFragmentInclude`` /
-  ## ``removeFragmentInclude``.
-  ##
-  ## The array is located by its KEY rather than by "the next line that is a
-  ## lone ``]``": a repo-set carries two arrays, so the positional rule the
-  ## include helpers can afford would put half the entries in the wrong
-  ## namespace.
-  let content = readFile(setFile)
-  let quoted = "\"" & member & "\""
-  var lines = content.splitLines()
-  var arrayStart = -1
-  for idx, line in lines:
-    let stripped = line.strip()
-    if stripped.startsWith(key) and stripped.endsWith("["):
-      arrayStart = idx
-      break
-  var arrayEnd = -1
-  if arrayStart >= 0:
-    for idx in arrayStart + 1 ..< lines.len:
-      if lines[idx].strip() == "]":
-        arrayEnd = idx
-        break
-
-  if add:
-    if arrayStart >= 0 and arrayEnd >= 0:
-      for idx in arrayStart + 1 ..< arrayEnd:
-        if lines[idx].strip().startsWith(quoted):
-          return false
-      lines.insert("  " & quoted & ",", arrayEnd)
-      writeFile(setFile, lines.join("\n"))
-      return true
-    # No such array yet — write a fresh one rather than guessing that the
-    # other key's array was meant.
-    #
-    # WHERE it goes is load-bearing rather than cosmetic. Appended at the END
-    # of the file, a bare `key = [ … ]` sits AFTER the last `[table]` header,
-    # and standard TOML binds a bare key to the table that precedes it: the
-    # strict decode then sees `project.member_repos`, rejects it, and the whole
-    # manifest stops parsing. This is the same trap `projectManifestStub`
-    # documents when it writes the membership arrays BEFORE `[project]`, and a
-    # freshly scaffolded project — which declares no array for this code to
-    # find — is exactly the file that reaches this branch.
-    #
-    # So the array is inserted ahead of the FIRST table header (where a bare
-    # key is top-level), and appended only when the file declares no table.
-    let fresh = @[key & " = [", "  " & quoted & ",", "]"]
-    var headerIdx = -1
-    for idx, line in lines:
-      if line.strip().startsWith("["):
-        headerIdx = idx
-        break
-    var outLines: seq[string]
-    if headerIdx < 0:
-      outLines = lines
-      outLines.add("")
-      for f in fresh: outLines.add(f)
-    else:
-      for idx in 0 ..< headerIdx: outLines.add(lines[idx])
-      for f in fresh: outLines.add(f)
-      outLines.add("")
-      for idx in headerIdx ..< lines.len: outLines.add(lines[idx])
-    writeFile(setFile, outLines.join("\n"))
-    return true
-
-  if arrayStart < 0 or arrayEnd < 0:
-    return false
-  var outLines: seq[string]
-  var removed = false
-  for idx, line in lines:
-    if idx > arrayStart and idx < arrayEnd and
-        line.strip().startsWith(quoted):
-      removed = true
-      continue
-    outLines.add(line)
-  if not removed:
-    return false
-  writeFile(setFile, outLines.join("\n"))
-  true
+    if doc.hasKey("", includesKey):
+      return pesIncludes
+  except CatchableError:
+    discard
+  pesNone
 
 proc projectsIncludingFragment(manifestRoot, fragmentRel: string): seq[string] =
   ## Which projects carry an ``includes`` edge to ``fragmentRel``. This is the
@@ -76715,9 +76432,28 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     createDir(manifestRoot / addDir)
     let fileRel = addDir & "/" & name & ".toml"
     let fileAbs = manifestRoot / addDir / (name & ".toml")
-    writeFile(fileAbs,
-      if addDir == "repo-sets": repoSetManifestStub(name, seed)
-      else: projectManifestStub(name, seed))
+    # Rendered from a typed value by the manifest editor, which places the
+    # membership arrays above the identity table (the key-order rule) and
+    # writes them as a pair whenever a template seeds either: `member_sets`
+    # and `member_repos` are two namespaces, and a file carrying only one
+    # would invite the next entry into whichever happened to be there.
+    #
+    # A new repo-set carries only a name and its membership — no
+    # `default_revision` / `default_remote`, which would make a member resolve
+    # differently depending on who referenced it. A new project carries no
+    # remotes and no `default_revision` either: revision is lock territory, and
+    # a stub that kept emitting it would re-seed the field every manifest
+    # conversion deletes. `trunk` stays: it is live data with no other
+    # declaration site (`repro branch`, `repro switch`, `workspace init`).
+    writeWorkspaceManifestFile(fileAbs,
+      if addDir == "repo-sets":
+        repoSetText(RepoSetManifest(schema: schemaRepoSetV1,
+          `repo-set`: RepoSetBody(name: name),
+          member_sets: seed.memberSets, member_repos: seed.memberRepos))
+      else:
+        projectManifestText(ProjectManifest(schema: schemaProjectManifestV1,
+          project: ProjectBody(name: name, trunk: some("main")),
+          member_sets: seed.memberSets, member_repos: seed.memberRepos)))
     var paths = @[fileRel]
     if desc.len > 0:
       let docRel = addDir & "/" & name & ".md"
@@ -77223,29 +76959,25 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if plan.mintedUrl.len > 0:
           createDir(manifestRoot / "url-prefixes")
           let prefixRel = "url-prefixes/" & plan.prefixName & ".toml"
-          writeFile(manifestRoot / prefixRel,
-            "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n" &
-            "[url-prefix]\n" &
-            "name = \"" & plan.prefixName & "\"\n" &
-            "url = \"" & plan.mintedUrl & "\"\n")
+          writeWorkspaceManifestFile(manifestRoot / prefixRel,
+            urlPrefixText(UrlPrefixManifest(schema: schemaUrlPrefixV1,
+              `url-prefix`: UrlPrefixBody(name: plan.prefixName,
+                url: plan.mintedUrl))))
           paths.add(prefixRel)
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
-          writeFile(fragmentAbs,
-            "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-            "[repo]\n" &
-            "name = \"" & repo & "\"\n" &
-            "path = \"" & effectivePath & "\"\n" &
-            (if branch.len > 0: "branch = \"" & branch & "\"\n"
-             elif revision.len > 0: "revision = \"" & revision & "\"\n"
-             else: "") &
-            "url_prefix = \"" & plan.prefixName & "\"\n" &
-            # `url_suffix` is written only when it differs from `name` — the
-            # point of the split is that identity stops carrying URL structure,
-            # so restating it would put the coupling straight back.
-            (if plan.urlSuffix != repo:
-               "url_suffix = \"" & plan.urlSuffix & "\"\n"
-             else: ""))
+          writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
+            schema: schemaRepoFragmentV1,
+            repo: RepoBody(name: repo, path: effectivePath,
+              branch: (if branch.len > 0: some(branch) else: none(string)),
+              revision: (if branch.len == 0 and revision.len > 0: some(revision)
+                         else: none(string)),
+              url_prefix: some(plan.prefixName),
+              # `url_suffix` is written only when it differs from `name` — the
+              # point of the split is that identity stops carrying URL
+              # structure, so restating it would put the coupling straight back.
+              url_suffix: (if plan.urlSuffix != repo: some(plan.urlSuffix)
+                           else: none(string))))))
           paths.add(fragmentRel)
           fragmentExisted = true
         # The fragment was just written, so the name resolves to a repo and the
@@ -77258,7 +76990,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
             (manifestRoot / "repos" / (repo & ".toml")) &
             "); refusing to guess which membership key it belongs under")
           return 2
-        discard editSetMember(target.abs, memberKey, repo, add = true)
+        discard addArrayMemberInFile(target.abs, "", memberKey, repo)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.prefixName &
           (if plan.mintedUrl.len > 0: " (new prefix, url " & plan.mintedUrl & ")"
@@ -77283,18 +77015,21 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           return 1
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
-          writeFile(fragmentAbs,
-            "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-            "[repo]\n" &
-            "name = \"" & plan.repoName & "\"\n" &
-            "path = \"" & effectivePath & "\"\n" &
-            "remote = \"" & plan.remoteName & "\"\n" &
-            (if branch.len > 0: "branch = \"" & branch & "\"\n" else: "") &
-            (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
+          writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
+            schema: schemaRepoFragmentV1,
+            repo: RepoBody(name: plan.repoName, path: effectivePath,
+              remote: some(plan.remoteName),
+              branch: (if branch.len > 0: some(branch) else: none(string)),
+              revision: (if revision.len > 0: some(revision)
+                         else: none(string))))))
           paths.add(fragmentRel)
           fragmentExisted = true
         if plan.mintedFetch.len > 0:
-          ensureRemoteEntry(target.abs, plan.remoteName, plan.mintedFetch)
+          var projectDoc = loadManifestDoc(target.abs)
+          discard projectDoc.ensureArrayTableEntry("remote",
+            @[tomlField("name", tomlStr(plan.remoteName)),
+              tomlField("fetch", tomlStr(plan.mintedFetch))])
+          projectDoc.saveManifestDoc()
         # THE EDGE. Declaring the fragment is only half of `repos add`: the
         # project has to say it participates, or the manifest is left
         # incoherent — a fragment nothing references (CLI/workspace.md
@@ -77325,7 +77060,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         #
         # Conversely, writing an `includes` path unconditionally is the
         # regression `t_repos_add_records_project_membership_by_key` pins: in
-        # a converted manifest the positional `appendFragmentInclude` put the
+        # a converted manifest a positional include-append put the
         # path inside `member_sets` and the project stopped resolving
         # entirely. Neither spelling is right for both shapes; the file's own
         # is.
@@ -77339,8 +77074,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           # new is authored into it (see `pesNone` below); a manifest that
           # still carries it is edited in place until someone converts it
           # deliberately.
-          discard editSetMember(target.abs, includesKey, fragmentRel,
-            add = true)
+          discard addArrayMemberInFile(target.abs, "", includesKey,
+            fragmentRel)
         of pesNone, pesMembers:
           # Same rule as the repo-set branch above: the membership key is read
           # off what the name resolves to, and the array is located BY ITS KEY.
@@ -77354,14 +77089,13 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           # would create, on every `projects add`, the one shape a conversion
           # exists to remove.
           #
-          # There is no array for `editSetMember` to find in a freshly
-          # scaffolded file, so it takes its new-array fallback — which
-          # inserts ahead of the FIRST table header, because a bare
-          # `member_repos = [ … ]` written after `[project]` is
+          # A freshly scaffolded file has no array to extend, so the manifest
+          # editor creates one — ahead of the FIRST table header, because a
+          # bare `member_repos = [ … ]` written after `[project]` is
           # TOML-bound to that table and the strict decode then rejects
-          # `project.member_repos`. That placement is the same one
-          # `projectManifestStub` documents, and a `pesNone` project is
-          # precisely the file that reaches it.
+          # `project.member_repos`. The editor enforces that placement for
+          # every top-level key, and a `pesNone` project is precisely the
+          # file that needs it.
           let memberKey = membershipKeyFor(manifestRoot, repo)
           if memberKey != memberReposKey:
             stderr.writeLine("repro workspace repos add: '" & repo &
@@ -77369,7 +77103,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
               (manifestRoot / "repos" / (repo & ".toml")) &
               "); refusing to guess which membership key it belongs under")
             return 2
-          discard editSetMember(target.abs, memberKey, repo, add = true)
+          discard addArrayMemberInFile(target.abs, "", memberKey, repo)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.remoteName &
           (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
@@ -77445,7 +77179,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
             "); refusing to guess which membership key to edit in " &
             target.rel)
           return 2
-        dropped = editSetMember(target.abs, memberKey, repo, add = false)
+        dropped = removeArrayMemberInFile(target.abs, "", memberKey, repo)
       of mkProject:
         # Mirrors the add path, and has to mirror BOTH of its spellings: a
         # project declares its repos either as fragment paths under `includes`
@@ -77458,7 +77192,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # dropping only the spelling that `projectEdgeStyle` prefers would
         # leave the other edge behind — the repo would still be declared after
         # a command that reported it removed.
-        if editSetMember(target.abs, includesKey, fragmentRel, add = false):
+        if removeArrayMemberInFile(target.abs, "", includesKey, fragmentRel):
           dropped = true
         let memberKey = membershipKeyFor(manifestRoot, repo)
         if memberKey.len == 0:
@@ -77470,7 +77204,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
               "); refusing to guess which membership key to edit in " &
               target.rel)
             return 2
-        elif editSetMember(target.abs, memberKey, repo, add = false):
+        elif removeArrayMemberInFile(target.abs, "", memberKey, repo):
           dropped = true
       if dropped:
         droppedFrom.add(project)
