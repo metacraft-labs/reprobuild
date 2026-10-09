@@ -416,7 +416,7 @@
       # that a developer editing the seam in a workspace checkout sees the edit
       # immediately and an unset variable still means unset. Exporting the pin
       # as ``CODETRACER_SRC`` would put it permanently ahead of both.
-      url = "github:metacraft-labs/codetracer/732c9551011a06dd010fbbf73168a76f1baf4889";
+      url = "github:metacraft-labs/codetracer/847c4630edfdd861306da7e35556f074caa18471";
       flake = false;
     };
 
