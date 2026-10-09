@@ -416,3 +416,116 @@ suite "L5 — REFUSAL TWO OF TWO: the SELECTED environment leaves a required key
     # Proves the refusal is about the binding and not about the fixture.
     let msg = reqRefusalMessage("dev")
     check msg == ""
+
+## ---------------------------------------------------------------------
+## THE SHAPE EXPANSION CANNOT DECIDE. `l5RefuseUnsatisfiableRequiredKeys`
+## decides a POSITIONAL `enable` argument by ARITY -- the argument at
+## call-argument-list index `i` binds the parameter at index `i` -- and
+## one shape defeats that: a `varargs` constructor parameter, which
+## matches GREEDILY, so every later parameter's position moves with the
+## argument count. Measured: for
+## `g2(extras: varargs[string], a = "A", b = "B")`, `g2("x", "y")` binds
+## `"y"` to **b** and leaves `a` at its default, so an index rule is
+## wrong in both directions there.
+##
+## `l5VarargsPkg` is that shape with NOTHING satisfying its required
+## key, and it COMPILES (asserted out-of-process in
+## `dsl_port/t_dsl_environment_surface_is_typed.nim`). So the question
+## this suite answers is the one that matters: does the value then go
+## missing in silence? It must not -- the resolution-time refusal is
+## what covers the gap, and that is why the expansion skip is a
+## narrowing and not a hole.
+## ---------------------------------------------------------------------
+
+proc varargsPkgDef(): PackageDef =
+  for pkg in registeredPackages():
+    if pkg.packageName == "l5VarargsPkg":
+      return pkg
+  raise newException(ValueError, "fixture drift: l5VarargsPkg missing")
+
+proc varargsRefusalMessage(): string =
+  ## Resolve `l5VarargsPkg` with no environment selected -- it declares
+  ## none -- and return the refusal's message, or "" if none was raised.
+  let pkg = varargsPkgDef()
+  clearRegisteredServices("l5VarargsPkg")
+  resetConfigurable("l5VarargsPkg.sso.externalDomain")
+  delEnv(ReproEnvironmentEnvVar)
+  try:
+    discard buildPackageDevEnv(pkg, ProviderGraphRequest(
+      kind: prkGraphInvocation,
+      providerArtifactId: "test-provider",
+      entryPointId: "l5VarargsPkg.dev-env",
+      entryPointBodyHash: "l5VarargsPkg.build.v1",
+      reason: girExplicitUserRequest,
+      arguments: "/tmp/l5-varargs-fixture-root",
+      namespace: "project-l5VarargsPkg",
+      activity: "sso"), devEnvL5VarargsPkgPackage)
+    result = ""
+  except EDslPortUnsatisfiedRequired as err:
+    result = err.msg
+  finally:
+    clearRegisteredServices("l5VarargsPkg")
+    resetConfigurable("l5VarargsPkg.sso.externalDomain")
+
+suite "L5 — the `varargs` shape expansion cannot decide is still caught at RESOLUTION":
+
+  test "the fixture really is the undecidable shape: a required key behind a `varargs` parameter":
+    # Fixture drift guard. If somebody gives `externalDomain` a default,
+    # or drops the `varargs` parameter, the assertion below stops being
+    # about the gap it exists to cover.
+    discard varargsRefusalMessage()
+    var ssoDef: DslActivityDef
+    for item in registeredActivities("l5VarargsPkg"):
+      if item.activityName == "sso":
+        ssoDef = item
+    check ssoDef.activityName == "sso"
+    var required: seq[string] = @[]
+    for key in ssoDef.config:
+      if not key.hasDefault: required.add(key.name)
+    check required == @["externalDomain"]
+    # And the package declares NO environment, so expansion's silence
+    # here can only be the varargs skip.
+    check registeredEnvironmentNames("l5VarargsPkg").len == 0
+
+  test "resolution REFUSES it, naming the key and both routes":
+    # THE WHOLE POINT OF THE SKIP BEING A NARROWING AND NOT A HOLE.
+    let msg = varargsRefusalMessage()
+    checkpoint(msg)
+    check msg.len > 0
+    check msg.contains("required `config:` key `sso.externalDomain`")
+    check msg.contains("IS UNSATISFIED")
+    check msg.contains("NO environment is selected")
+    check msg.contains("No environment of package `l5VarargsPkg` binds it.")
+    check msg.contains("environment <name>: sso.externalDomain = <value>")
+    check msg.contains("enable sso(externalDomain = <value>)")
+    # The EXPANSION refusal's sentence stays absent: a reader has to be
+    # able to tell which of the two failures they have.
+    check not msg.contains("NOTHING CAN EVER SATISFY IT")
+
+  test "THE CONTROL: once something satisfies the key, the same resolution does not raise":
+    # Proves the refusal is about the key being unsatisfied and not
+    # about the fixture being unresolvable for some other reason.
+    clearRegisteredServices("l5VarargsPkg")
+    setConfigurable("l5VarargsPkg.sso.externalDomain", "login.varargs.test")
+    var raised = false
+    try:
+      discard buildPackageDevEnv(varargsPkgDef(), ProviderGraphRequest(
+        kind: prkGraphInvocation,
+        providerArtifactId: "test-provider",
+        entryPointId: "l5VarargsPkg.dev-env",
+        entryPointBodyHash: "l5VarargsPkg.build.v1",
+        reason: girExplicitUserRequest,
+        arguments: "/tmp/l5-varargs-fixture-root",
+        namespace: "project-l5VarargsPkg",
+        activity: "sso"), devEnvL5VarargsPkgPackage)
+    except EDslPortUnsatisfiedRequired:
+      raised = true
+    check not raised
+    var argv: seq[string] = @[]
+    for svc in registeredServices("l5VarargsPkg"):
+      if svc.serviceName == "zitadel":
+        for arg in svc.typedArgs:
+          argv.add(arg.value)
+    check argv == @["start-from-init", "--domain", "login.varargs.test"]
+    resetConfigurable("l5VarargsPkg.sso.externalDomain")
+    clearRegisteredServices("l5VarargsPkg")

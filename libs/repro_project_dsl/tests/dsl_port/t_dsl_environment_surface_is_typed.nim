@@ -268,6 +268,134 @@ package l5reqnoenable:
     sso.externalDomain = "login.metacraft-labs.test"
 """
 
+## ---------------------------------------------------------------------
+## THE POSITIONAL-`enable` fixtures. The required-key check decides
+## "does this site supply the key?" by NAME **and by ARITY**, and these
+## five are the shapes that arithmetic has to get right.
+##
+## An earlier revision skipped any `enable` site passing a POSITIONAL
+## argument, on the ground that which parameter it binds cannot be
+## decided from a name. True, and beside the point: it can be decided
+## from an INDEX, and the macro emitted the parameter list. The skip hid
+## `PositionalHidesRequiredKey` below -- measured compiling clean at
+## `nim check` exit 0 while nothing could ever satisfy `externalDomain`.
+##
+## THE RULE, measured on nim 2.3.1 rather than assumed: Nim binds the
+## argument written at call-argument-list index `i` to the parameter at
+## index `i`, whatever named arguments sit beside it. `f(a = 1, "y")`
+## binds `"y"` to the SECOND parameter; `f(b = "x", "pos")` is refused
+## as "positional param was already given as named param".
+## `l2ActivityEmission` emits the constructor parameters first and then
+## one per `config:` key in declaration order, so a required key's
+## position is `<parameter count> + <index among the config keys>`.
+## ---------------------------------------------------------------------
+
+const PositionalHidesRequiredKey = """
+import repro_project_dsl
+
+type L5PosDb = object
+  host*: string
+
+const L5PosDbValue = L5PosDb(host: "h")
+
+package l5posbad:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso(db: L5PosDb):
+      config:
+        externalDomain: string
+
+      service zitadel:
+        args "--domain", externalDomain
+
+    enable sso(L5PosDbValue)
+"""
+
+const PositionalSatisfiesRequiredKey = """
+import repro_project_dsl
+
+type L5PosDb = object
+  host*: string
+
+const L5PosDbValue = L5PosDb(host: "h")
+
+package l5posgood:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso(db: L5PosDb):
+      config:
+        externalDomain: string
+
+      service zitadel:
+        args "--domain", externalDomain
+
+    enable sso(L5PosDbValue, "login.metacraft-labs.test")
+"""
+
+const PositionalOnActivityWithNoRequiredKeys = """
+import repro_project_dsl
+
+type L5PosDb = object
+  host*: string
+
+const L5PosDbValue = L5PosDb(host: "h")
+
+package l5posnone:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso(db: L5PosDb):
+      config:
+        externalDomain: string = "localhost"
+
+      service zitadel:
+        args "--domain", externalDomain
+
+    enable sso(L5PosDbValue)
+"""
+
+const PositionalReachesOnlyTheFirstConfigSlot = """
+import repro_project_dsl
+
+type L5PosDb = object
+  host*: string
+
+const L5PosDbValue = L5PosDb(host: "h")
+
+package l5posarity:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso(db: L5PosDb, replica: L5PosDb):
+      config:
+        externalDomain: string
+        adminUser: string
+
+      service zitadel:
+        args "--domain", externalDomain, "--admin", adminUser
+
+    enable sso(L5PosDbValue, L5PosDbValue, "login.metacraft-labs.test")
+"""
+
+const PositionalWithVarargsIsUndecidable = """
+import repro_project_dsl
+
+package l5posvarargs:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso(extras: varargs[string]):
+      config:
+        externalDomain: string
+
+      service zitadel:
+        args "--domain", externalDomain
+
+    enable sso("a")
+"""
+
 const UnsupportedTypeBound = """
 import repro_project_dsl
 
@@ -460,6 +588,89 @@ suite "L5 — a REQUIRED `config:` key: both routes compile, and nothing else do
     check probe.mentions("NOTHING CAN EVER SATISFY IT")
     check not probe.mentions("IS UNSATISFIED")
     check not probe.mentions("the selected environment")
+
+  test "A POSITIONAL `enable` ARGUMENT THAT LANDS ON THE WRONG PARAMETER is refused":
+    # MEASURED COMPILING CLEAN (`nim check` exit 0) under the blanket
+    # positional skip this replaces, although nothing can ever satisfy
+    # `externalDomain`: the single positional lands on `db`, parameter
+    # index 0, and the required key is parameter index 1. The arity was
+    # available the whole time, because the macro emitted the parameter
+    # list -- which is why this is a refusal and not a documented
+    # under-refusal.
+    let probe = checkRecipeSource(PositionalHidesRequiredKey,
+      "l5-required-positional-bad")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("WITHOUT A DEFAULT, which makes it REQUIRED")
+    check probe.mentions("NOTHING CAN EVER SATISFY IT")
+    check probe.mentions("`config:` key `externalDomain`")
+    # BOTH routes named, as for every other spelling of this refusal.
+    check probe.mentions("environment <name>: sso.externalDomain = <value>")
+    check probe.mentions("enable sso(externalDomain = <value>)")
+    # The RESOLUTION refusal's sentences stay absent from this one.
+    check not probe.mentions("IS UNSATISFIED")
+    check not probe.mentions("the selected environment")
+
+  test "THE POSITIVE CONTROL: a positional argument that DOES reach the required key compiles":
+    # The same recipe with one more positional. `externalDomain` is
+    # parameter index 1 and the site now fills index 1, so it IS
+    # supplied and the refusal must not fire. This is the control that
+    # makes the refusal above mean something: a guard that fired on any
+    # positional site would redden here.
+    let probe = checkRecipeSource(PositionalSatisfiesRequiredKey,
+      "l5-required-positional-good")
+    checkpoint(probe.output)
+    check probe.ok
+
+  test "THE SECOND CONTROL: a positional `enable` on an activity with NO required keys compiles":
+    # Every `config:` key here has a default, so there is no required
+    # key to decide and the arity arithmetic must not be consulted at
+    # all. The pre-existing positional probe L.2 records -- no
+    # constructor parameter, one positional supplying the key -- is
+    # the mirror of this and is exercised by the standing-hunt probes.
+    let probe = checkRecipeSource(PositionalOnActivityWithNoRequiredKeys,
+      "l5-required-positional-nonreq")
+    checkpoint(probe.output)
+    check probe.ok
+
+  test "THE ARITY IS COUNTED, not guessed: three positionals over two parameters and two required keys":
+    # `sso(db, replica)` plus `externalDomain`, `adminUser` is the
+    # parameter list `[db, replica, externalDomain, adminUser]`. Three
+    # positionals fill indices 0, 1 and 2, so `externalDomain` IS
+    # supplied and `adminUser` is NOT. The refusal must name
+    # `adminUser` and must not name `externalDomain` as the unsatisfied
+    # key -- a check that only asked "is there a positional?" or "is
+    # there one per config key?" would get this wrong in one direction
+    # or the other.
+    let probe = checkRecipeSource(PositionalReachesOnlyTheFirstConfigSlot,
+      "l5-required-positional-arity")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("`config:` key `adminUser`")
+    check probe.mentions("NOTHING CAN EVER SATISFY IT")
+    check not probe.mentions("`config:` key `externalDomain`")
+
+  test "THE ONE SHAPE THE ARITY CANNOT DECIDE -- a `varargs` parameter -- still compiles":
+    # `varargs` matches GREEDILY, so every later parameter's position
+    # moves with the argument count and the index arithmetic is unsound
+    # in BOTH directions. Measured on nim 2.3.1: for
+    # `g2(extras: varargs[string], a = "A", b = "B")`, `g2("x", "y")`
+    # binds `"y"` to **b** and leaves `a` at its default -- so an index
+    # rule would call `a` supplied when nothing supplied it AND `b`
+    # unsupplied when something did. The second of those would refuse a
+    # working recipe, which is why this is a skip and not a refusal.
+    #
+    # This recipe is the gap made concrete: `externalDomain` is
+    # required, the one positional lands in `extras`, NOTHING supplies
+    # it, and expansion still says nothing. What covers it is the
+    # RESOLUTION-time refusal, asserted on the same shape in
+    # `libs/repro_project_dsl/tests/
+    # t_l5_environment_reaches_the_service_argv.nim` ("the `varargs`
+    # shape expansion cannot decide is still caught at RESOLUTION").
+    let probe = checkRecipeSource(PositionalWithVarargsIsUndecidable,
+      "l5-required-positional-varargs")
+    checkpoint(probe.output)
+    check probe.ok
 
   test "a key whose TYPE the configurable lane does not carry is refused, naming the type":
     # `emitM2ConfigDefaults` filters package-level entries through

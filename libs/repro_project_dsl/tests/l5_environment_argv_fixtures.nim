@@ -137,3 +137,58 @@ package l5ReqPkg:
 
   environment bare:
     sso.externalSecure = false
+
+## ---------------------------------------------------------------------
+## THE SHAPE THE EXPANSION-TIME CHECK CANNOT DECIDE, and the proof that
+## resolution still catches it.
+##
+## `l5RefuseUnsatisfiableRequiredKeys` decides whether an `enable` site
+## supplies a required key by NAME and by ARITY: a positional argument
+## at call-argument-list index `i` binds the parameter at index `i`.
+## ONE shape defeats that arithmetic -- a `varargs` constructor
+## parameter, which consumes an unbounded RUN of positional arguments,
+## so no parameter after it has a fixed position.
+##
+## This package is that shape, with NOTHING satisfying `externalDomain`:
+## no environment is declared at all, and the `enable` site passes only
+## positionals that land in `extras`. The expansion-time refusal is
+## therefore SILENT here *and only because of the varargs skip* -- the
+## same package with `enable sso` (no positional) IS refused at
+## expansion, which is what makes this fixture about the skip rather
+## than about the check being absent.
+##
+## What must then hold is that the key is not silently zero: resolution
+## raises `EDslPortUnsatisfiedRequired`. Asserted in
+## `t_l5_environment_reaches_the_service_argv.nim`.
+
+const VarargsConfigPath* = "etc/sso-varargs/config.yaml"
+
+package l5VarargsPkg:
+  executable l5VarargsBin:
+    build:
+      output("bin/sso-varargs")
+
+  devEnv:
+    activity sso(extras: varargs[string]):
+      config:
+        ## NO DEFAULT, so REQUIRED -- and nothing in this package
+        ## supplies it.
+        externalDomain: string
+
+      service zitadel:
+        executable l5VarargsBin
+        args "start-from-init", "--domain", externalDomain
+        identity stable "com.metacraft-labs.sso-varargs"
+        scope workspace
+
+    ## ONE POSITIONAL argument, which lands in `extras` -- measured:
+    ## `proc g(extras: varargs[string], tail: string = "T")` called as
+    ## `g("a")` gives `extras == @["a"]` and `tail == "T"`. So nothing
+    ## supplies `externalDomain`, and the expansion check still cannot
+    ## say so, because `varargs` makes the index of a later parameter
+    ## unsound in BOTH directions: with TWO parameters after it,
+    ## `g2(extras: varargs[string], a = "A", b = "B")` called as
+    ## `g2("x", "y")` binds `"y"` to **b**, not to `a`, so an index rule
+    ## would call `a` supplied when it is not AND `b` unsupplied when it
+    ## is. Refusing on that arithmetic would refuse working recipes.
+    enable sso("a")

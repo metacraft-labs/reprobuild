@@ -13899,7 +13899,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_surface_is_typed.nim",
       "sourceSuiteCount": 8,
-      "staticCaseCount": 48,
+      "staticCaseCount": 53,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15237,8 +15237,8 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_l5_environment_reaches_the_service_argv.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 18,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

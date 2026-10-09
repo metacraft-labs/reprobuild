@@ -981,8 +981,10 @@ proc m2SeqElementRepr(typeRepr: string): string =
   return inner
 
 proc m2TypeReprIsSupportedScalar(typeRepr: string): bool =
-  ## True iff the ``T`` from a ``name: T = default`` entry names one of
-  ## the shapes M2 (post-M9.D) handles:
+  ## True iff the ``T`` from a ``config:`` entry -- ``name: T = default``
+  ## or, since Shared-Development-Services L5 made a key with no default
+  ## a REQUIRED configurable, a bare ``name: T`` -- names one of the
+  ## shapes M2 (post-M9.D) handles:
   ##   * a primitive scalar (``bool`` / ``int`` / ``string`` / ``float``
   ##     + sized variants), or
   ##   * a bare identifier (presumed to be an enum type — the runtime's
@@ -3061,8 +3063,20 @@ type
 
   L2ActivityConfigKey = object
     ## One ``config:`` key, as written. ``defaultNode`` is ``nil`` when
-    ## the key has no default, which makes the generated parameter
-    ## required at the ``enable`` site.
+    ## the key has no default, which makes the key a REQUIRED
+    ## CONFIGURABLE (Shared-Development-Services L5, §6): the slot
+    ## exists and has no seed.
+    ##
+    ## IT NO LONGER MAKES THE GENERATED PARAMETER REQUIRED AT THE
+    ## ``enable`` SITE, which is what this comment said before L5.
+    ## ``l2ActivityEmission`` gives such a parameter the default
+    ## ``requiredConfigurableValue[T](...)``, so an ``enable`` site may
+    ## leave it out and have the SELECTED ENVIRONMENT supply it -- that
+    ## is §6's first route, and the ``enable`` argument is its second.
+    ## A site that supplies neither is refused: at expansion by
+    ## ``l5RefuseUnsatisfiableRequiredKeys`` when nothing can ever
+    ## satisfy it, and at resolution by ``requiredConfigurableValue``
+    ## otherwise.
     name: string
     typeNode: NimNode
     defaultNode: NimNode
@@ -3816,6 +3830,25 @@ type
     typeNode: NimNode
     defaultNode: NimNode
       ## `nil` when the key has no default.
+    paramIndex: int
+      ## This key's POSITION in the generated entry point's parameter
+      ## list, or `-1` for a package-level key (which has no entry
+      ## point). `l2ActivityEmission` emits the constructor parameters
+      ## first and then one parameter per `config:` key in declaration
+      ## order, so the position is
+      ## `<constructor parameter count> + <index among the config keys>`
+      ## -- and that is what lets the required-key check decide a
+      ## POSITIONAL `enable` argument, which carries no name.
+    positionalUndecidable: bool
+      ## True when the declaring activity's parameter list makes the
+      ## "argument at list index `i` binds the parameter at index `i`"
+      ## rule unsound, which in this tree means exactly one thing: a
+      ## `varargs` constructor parameter, whose greedy matching moves
+      ## every later parameter's position with the argument count. The
+      ## check then says nothing about a positional site for this
+      ## activity -- see `l5ParamsDefeatPositionalIndexing` for the
+      ## measurement and `l5RefuseUnsatisfiableRequiredKeys` for the
+      ## consequence.
 
   L5Binding = object
     key: string
@@ -3848,6 +3881,52 @@ proc l5DottedPath(node: NimNode; parts: var seq[string]): bool =
   else:
     result = false
 
+proc l5ParamsDefeatPositionalIndexing(params: seq[L2ActivityParam]): bool =
+  ## Whether this activity's CONSTRUCTOR parameters make Nim's
+  ## positional-argument rule undecidable at expansion.
+  ##
+  ## Nim's rule, measured rather than assumed (nim 2.3.1, x86_64-linux):
+  ## an argument at call-argument-list index `i` binds the parameter at
+  ## index `i`, whatever named arguments sit beside it. `f(a = 1, "y")`
+  ## binds `"y"` to the SECOND parameter, and `f(b = "x", "pos")` is
+  ## refused with "positional param was already given as named param".
+  ## So a name is not needed to decide where a positional lands -- an
+  ## INDEX is, and the macro has it, because it emitted the parameter
+  ## list.
+  ##
+  ## `varargs` is the one shape that breaks it, and it breaks it in
+  ## BOTH directions -- measured, which is why this is a skip and not a
+  ## refusal. For `g2(extras: varargs[string], a = "A", b = "B")`,
+  ## `g2("x", "y")` binds `"y"` to **b** and leaves `a` at its default;
+  ## `g2("x", "y", "z")` binds `a = "y"`, `b = "z"`. So an index rule
+  ## would call `a` SUPPLIED when nothing supplied it (an
+  ## under-refusal, which hides) and `b` UNSUPPLIED when something did
+  ## (an over-refusal, which refuses a working recipe). Neither is
+  ## acceptable, so a positional site on a `varargs` activity is not
+  ## decided here at all.
+  ##
+  ## Not a hypothetical in this tree: `activity sso(extras:
+  ## varargs[string])` with `enable sso("a")` compiles today with
+  ## `externalDomain` required and unsupplied, which is the fixture
+  ## `l5VarargsPkg` in
+  ## `libs/repro_project_dsl/tests/l5_environment_argv_fixtures.nim`.
+  ## A required `config:` key behind such a parameter is left to the
+  ## resolution-time refusal, and that refusal is asserted on that
+  ## fixture rather than assumed.
+  ##
+  ## The test is on the type's `repr` and not on a resolved type,
+  ## because at expansion the type is still an unsemchecked node the
+  ## author wrote (`l2ParseActivityParams` splices it verbatim and never
+  ## interprets it). An alias that resolves to `varargs` would be missed
+  ## -- an UNDER-detection in the direction of this proc's conservative
+  ## answer, and the resolution refusal still covers it.
+  for p in params:
+    for word in p.typeNode.repr.split({' ', '\t', '[', ']', ',', '(', ')',
+                                       '.', ';'}):
+      if word.len > 0 and word.normalize == "varargs":
+        return true
+  false
+
 proc l5CollectDeclaredConfigurables(sectionStmts: NimNode):
     seq[L5ConfigDecl] =
   ## Every configurable THIS package declares, from both authoring
@@ -3869,16 +3948,29 @@ proc l5CollectDeclaredConfigurables(sectionStmts: NimNode):
     if head == "config" and stmt.len >= 2 and stmt[^1].kind == nnkStmtList:
       for entry in collectM2ConfigEntries(stmt[^1]):
         result.add(L5ConfigDecl(qualifier: "", name: entry.name,
-          typeNode: entry.typeNode, defaultNode: entry.defaultNode))
+          typeNode: entry.typeNode, defaultNode: entry.defaultNode,
+          paramIndex: -1, positionalUndecidable: false))
     elif head == "devenv" and stmt.len >= 2 and stmt[^1].kind == nnkStmtList:
       for devStmt in stmt[^1]:
         let parsed = l2ActivityEntryAst(devStmt)
         if not parsed.matched:
           continue
+        # THE SAME READING `l2ActivityEmission` USES for the generated
+        # parameter list, which is what makes `paramIndex` the position
+        # an `enable` site's positional argument actually lands on.
+        # A second reading of the parameter list here would be the
+        # asymmetry this milestone's review found twice.
+        let params = l2ParseActivityParams(parsed.activityName,
+          parsed.paramsNode)
+        let undecidable = l5ParamsDefeatPositionalIndexing(params)
+        var configIndex = 0
         for key in l2ParseActivityConfig(parsed.activityName, parsed.body):
           result.add(L5ConfigDecl(qualifier: parsed.activityName,
             name: key.name, typeNode: key.typeNode,
-            defaultNode: key.defaultNode))
+            defaultNode: key.defaultNode,
+            paramIndex: params.len + configIndex,
+            positionalUndecidable: undecidable))
+          inc configIndex
 
 proc l5ContainsNormalized(names: openArray[string]; name: string): bool =
   ## Membership under NIM IDENTIFIER EQUALITY, not byte equality.
@@ -4492,12 +4584,25 @@ type
     supplied: seq[string]
       ## The `config:` key / parameter names this site passes BY NAME,
       ## from the parenthesised arguments and from the override body.
-    positional: bool
-      ## This site passes at least one argument POSITIONALLY, so which
-      ## parameter it lands on cannot be decided from the name. The
-      ## check then treats the site as possibly supplying anything and
-      ## says nothing about it -- the conservative direction, because
-      ## the alternative is refusing a recipe that works.
+    positionalIndices: seq[int]
+      ## The PARAMETER POSITIONS this site fills POSITIONALLY. Nim binds
+      ## an argument written at call-argument-list index `i` to the
+      ## parameter at index `i` -- measured, see
+      ## `l5ParamsDefeatPositionalIndexing` -- so a positional argument
+      ## carries no name and still says exactly which parameter it
+      ## supplies.
+      ##
+      ## This replaces a blanket `positional: bool` skip, which was a
+      ## stated under-refusal and hid a genuinely unsatisfiable recipe:
+      ## `activity sso(db: P16Db)` with a required `externalDomain`,
+      ## `enable sso(P16DbValue)` and no environment binding the key
+      ## compiled clean although the positional demonstrably lands on
+      ## `db`. The arity was available the whole time, because the macro
+      ## emitted the parameter list.
+      ##
+      ## Only the PARENTHESISED arguments can be positional: the
+      ## override body's entries are lowered to named arguments by
+      ## `l2EnableEmission`, so they never occupy a position.
     anchor: NimNode
 
 proc l5CollectEnableSites(sectionStmts: NimNode): seq[L5EnableSite] =
@@ -4523,14 +4628,19 @@ proc l5CollectEnableSites(sectionStmts: NimNode): seq[L5EnableSite] =
       if not parsed.matched:
         continue
       var site = L5EnableSite(activity: parsed.activityName,
-        supplied: @[], positional: false, anchor: devStmt)
+        supplied: @[], positionalIndices: @[], anchor: devStmt)
       if parsed.argsNode != nil:
         for i in 1 ..< parsed.argsNode.len:
           let child = parsed.argsNode[i]
           if child.kind == nnkExprEqExpr and child.len == 2:
             site.supplied.add(identText(child[0]))
           else:
-            site.positional = true
+            # `argsNode[0]` is the activity name, so the argument
+            # written at `argsNode[i]` is argument `i - 1` of the
+            # lowered call -- and `l2EnableEmission` copies the
+            # parenthesised arguments through IN ORDER, so that index
+            # is the one Nim matches against the parameter list.
+            site.positionalIndices.add(i - 1)
       if parsed.overrides != nil:
         for entry in parsed.overrides:
           if entry.kind in {nnkCommentStmt, nnkEmpty, nnkDiscardStmt}:
@@ -4554,6 +4664,41 @@ proc l5RefuseUnsatisfiableRequiredKeys(packageName: string;
   ## `enable` site. A required key that no declared environment binds
   ## and that an `enable` site does not supply can never be satisfied,
   ## whatever is selected later.
+  ##
+  ## "DOES NOT SUPPLY" IS DECIDED BY NAME **AND BY ARITY**, which is
+  ## what this walker's first revision got wrong. It skipped any
+  ## `enable` site passing a POSITIONAL argument, on the ground that
+  ## which parameter a positional binds cannot be decided from a name
+  ## -- true, and beside the point, because it can be decided from an
+  ## INDEX and the macro emitted the parameter list. The skip hid a
+  ## genuinely unsatisfiable recipe: `activity sso(db: P16Db)` with a
+  ## required `externalDomain`, `enable sso(P16DbValue)` and no
+  ## environment binding the key compiled clean at `nim check` although
+  ## the positional demonstrably lands on `db`.
+  ##
+  ## THE ARITY RULE, measured on nim 2.3.1 rather than assumed: Nim
+  ## binds the argument written at call-argument-list index `i` to the
+  ## parameter at index `i`, whatever named arguments sit beside it
+  ## (`f(a = 1, "y")` binds `"y"` to the second parameter, and
+  ## `f(b = "x", "pos")` is refused as "positional param was already
+  ## given as named param"). `l2ActivityEmission` emits the constructor
+  ## parameters first and then one per `config:` key in declaration
+  ## order, so a required key's position is
+  ## `<parameter count> + <index among the config keys>`
+  ## (`L5ConfigDecl.paramIndex`) and it is supplied positionally when
+  ## some positional argument reaches that position.
+  ##
+  ## WHAT IT STILL CANNOT DECIDE, and it is one shape rather than a
+  ## class: a `varargs` constructor parameter, whose greedy matching
+  ## makes the index of every later parameter wrong in BOTH directions
+  ## (see `l5ParamsDefeatPositionalIndexing` for the measurement).
+  ## `L5ConfigDecl.positionalUndecidable` carries it, a positional site
+  ## on such an activity is skipped exactly as before, and the
+  ## resolution-time refusal is what catches it -- asserted on the
+  ## `l5VarargsPkg` fixture rather than assumed. Everything else -- a
+  ## mix of positional and named in either order, an extra positional,
+  ## too few, a name repeated, a name for a parameter also given
+  ## positionally -- is decided here or is Nim's own arity error.
   ##
   ## WHY THIS IS AT EXPANSION AND NOT ONLY AT RESOLUTION, which is the
   ## constraint that killed the design this replaces. A refusal that
@@ -4603,9 +4748,14 @@ proc l5RefuseUnsatisfiableRequiredKeys(packageName: string;
     for site in enables:
       if site.activity.normalize != decl.qualifier.normalize:
         continue
-      if site.positional:
-        continue
       if l5ContainsNormalized(site.supplied, decl.name):
+        continue
+      if decl.positionalUndecidable and site.positionalIndices.len > 0:
+        # A `varargs` constructor parameter: the one shape whose
+        # positional arithmetic is unsound. Left to the resolution-time
+        # refusal rather than guessed at in either direction.
+        continue
+      if decl.paramIndex >= 0 and decl.paramIndex in site.positionalIndices:
         continue
       error("activity `" & decl.qualifier & "` of package `" &
         packageName & "` declares `config:` key `" & decl.name &

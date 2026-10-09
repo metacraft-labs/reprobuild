@@ -50,11 +50,18 @@
 ## * ``readConfigurable[T]`` — return either the override (when one is
 ##   pending) or the default. Raises ``EDslPortMissingKey`` when the
 ##   key was never registered; raises ``EDslPortTypeMismatch`` when the
-##   stored type does not match the requested ``T``.
+##   stored type does not match the requested ``T``; raises
+##   ``EDslPortUnsatisfiedRequired`` when the key is a REQUIRED
+##   configurable (declared with no default,
+##   ``recordConfigRequired[T]``) that nothing has satisfied — the
+##   stored row is then a SHAPE and not a value, and this is the one
+##   lane it can be reached through.
 ##
 ## * ``setConfigurable[T]`` — store an override against the key.
 ##
-## * ``resetConfigurable`` — drop any override so the default re-emerges.
+## * ``resetConfigurable`` — drop any override so the default
+##   re-emerges, or, for a REQUIRED key (one with no default), so the
+##   slot returns to UNSATISFIED and the next read raises.
 ##
 ## * ``registeredConfigKeys`` — list every ``<package>.<name>`` key for
 ##   diagnostic / inspection paths.
@@ -459,7 +466,13 @@ proc readConfigurable*[T](key: string): T =
   ## ``setConfigurable`` has stashed one, otherwise the registered
   ## default. Raises ``EDslPortMissingKey`` when the key is unknown;
   ## raises ``EDslPortTypeMismatch`` when ``T`` does not match the
-  ## stored kind.
+  ## stored kind; raises ``EDslPortUnsatisfiedRequired`` when the key is
+  ## REQUIRED (Shared-Development-Services L5, §6: declared in a
+  ## ``config:`` block with no default) and nothing has satisfied it.
+  ## That last one is ``dslPortLookup``'s, so it is raised before any
+  ## kind check: the row behind a required key is the type's zero kept
+  ## as a SHAPE for ``setConfigurableRaw``, and handing it back would be
+  ## the silent substitution L5 exists to stop.
   let stored = dslPortLookup(key)
   when T is bool:
     if stored.kind != dskBool:
@@ -510,6 +523,17 @@ proc readConfigurable*[E: enum](key: string; fallback: seq[E]): seq[E] =
   ## contract — the key-only overload would raise, which is the wrong
   ## shape for fixture / multi-recipe code paths that probe several
   ## possible types.
+  ##
+  ## IT DOES RAISE FOR ONE CASE, and that case is deliberate: a
+  ## REQUIRED configurable nothing has satisfied
+  ## (``EDslPortUnsatisfiedRequired``, Shared-Development-Services L5
+  ## §6). ``seq[Enum]`` is in ``recordConfigRequired``'s type set, so
+  ## this overload can meet one. The ``except`` below catches
+  ## ``EDslPortMissingKey`` ONLY, and
+  ## ``EDslPortUnsatisfiedRequired`` is deliberately not a subtype of
+  ## it, so the exception propagates rather than being answered with
+  ## ``fallback`` — answering with a fallback is exactly the silent
+  ## substitution that exception exists to prevent.
   try:
     let stored = dslPortLookup(key)
     if stored.kind != dskSeqEnum:
@@ -526,9 +550,29 @@ proc readConfigurable*[T](key: string; fallback: T): T =
   ## M9.D fallback-flavoured reader for scalar configurables. Returns
   ## the registered value when the key exists AND the stored kind
   ## matches AND (for enums) the stored type name matches ``$T``;
-  ## otherwise returns ``fallback``. Never raises — callers use this
-  ## overload when the spec calls for graceful degradation rather than
-  ## a hard type-mismatch error.
+  ## otherwise returns ``fallback``. Callers use this overload when the
+  ## spec calls for graceful degradation rather than a hard
+  ## type-mismatch error.
+  ##
+  ## RAISES ``EDslPortUnsatisfiedRequired`` FOR EXACTLY ONE CASE: a
+  ## REQUIRED configurable -- declared in a ``config:`` block with no
+  ## default, so its slot has no seed -- that nothing has satisfied
+  ## (Shared-Development-Services L5, §6). An unknown key is still
+  ## answered with ``fallback``; the ``except`` below catches
+  ## ``EDslPortMissingKey`` ONLY, and ``EDslPortUnsatisfiedRequired``
+  ## is deliberately not a subtype of it.
+  ##
+  ## THIS COMMENT SAID "Never raises" UNTIL L5's required-configurable
+  ## work, and the exception is the point rather than an oversight:
+  ## answering a required key with a fallback would substitute a value
+  ## nobody wrote for the one the author was told to supply, which is
+  ## the failure §6 names. Asserted by a test rather than left to this
+  ## comment -- ``libs/repro_project_dsl/tests/
+  ## t_l5_environment_reaches_the_service_argv.nim``, case "the seed is
+  ## a SHAPE and not a value: reading the slot directly refuses too",
+  ## which expects the raise from THIS overload and carries the control
+  ## that the same read succeeds once the environment has satisfied the
+  ## key.
   try:
     let stored = dslPortLookup(key)
     when T is bool:
@@ -556,7 +600,11 @@ proc readConfigurable*[T](key: string; fallback: T): T =
 proc inspectConfigurable*(key: string): DslScalarValue =
   ## M9.D test-side accessor: return the raw stored ``DslScalarValue``
   ## at ``key`` (override-preferred, defaults fallback), or raise
-  ## ``EDslPortMissingKey`` when the key is unknown. Tests use this to
+  ## ``EDslPortMissingKey`` when the key is unknown -- or
+  ## ``EDslPortUnsatisfiedRequired`` when the key is REQUIRED and
+  ## nothing has satisfied it, because the row behind such a key is the
+  ## type's zero kept as a SHAPE and this accessor must not be the door
+  ## it leaks out of (Shared-Development-Services L5, §6). Tests use this to
   ## verify the captured ``enumTypeName`` / ``enumValueName`` /
   ## ``seqEnumTypeName`` round-trip the macro-emitted ``$T`` / ``$value``
   ## strings byte-for-byte.
@@ -610,6 +658,15 @@ proc resetConfigurable*(key: string) =
   ## pending; the key must still be registered (we surface
   ## ``EDslPortMissingKey`` for typos so test fixtures don't silently
   ## reset the wrong slot).
+  ##
+  ## FOR A REQUIRED KEY THERE IS NO DEFAULT TO RETURN TO. Clearing the
+  ## override of a key declared with no default puts it back to
+  ## UNSATISFIED, and the next read raises
+  ## ``EDslPortUnsatisfiedRequired`` rather than returning anything
+  ## (Shared-Development-Services L5, §6). That is the intended
+  ## behaviour -- the row left behind is the type's zero kept as a
+  ## SHAPE for ``setConfigurableRaw``'s kind check -- and it is how a
+  ## test fixture resets between environments.
   if key notin dslPortDefaults:
     raise newException(EDslPortMissingKey,
       "resetConfigurable: no configurable registered for key '" & key &
