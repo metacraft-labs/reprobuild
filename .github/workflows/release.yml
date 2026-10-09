@@ -178,6 +178,26 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
+      # ── Persistent runners: let checkout clean the previous run's tree ────
+      #
+      # The macOS legs run on persistent hosts (m3-mcl-*), where the work
+      # directory survives between jobs. A release run extracts the built
+      # archive to verify it, and that tree carries read-only entries; until
+      # verify_release.sh made its trees writable before removing them, a run
+      # that stopped early left one behind. actions/checkout's workspace clean
+      # then fails on it before any step of ours runs (v0.2.7 run 37906066406:
+      # "EACCES: permission denied, unlink .../reprobuild-0.2.2-darwin-aarch64/
+      # lib/python3.13/EXTERNALLY-MANAGED"), and every later job on that host
+      # fails the same way. Making the old tree owner-writable is all checkout
+      # needs; ephemeral runners start empty, so the step is limited to macOS.
+      - name: Make the previous workspace removable (persistent macOS runners)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
+
       - uses: actions/checkout@v4
 
       # ── Windows: fail fast, and legibly, if the image has no Git ───────────
