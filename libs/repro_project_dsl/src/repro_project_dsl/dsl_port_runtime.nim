@@ -142,6 +142,24 @@ type
     ## Raised when the type-parameter ``T`` does not match the
     ## ``DslScalarKind`` the key was registered with.
 
+  EDslPortUnsatisfiedRequired* = object of CatchableError
+    ## Raised when a REQUIRED configurable is read while nothing has
+    ## satisfied it.
+    ##
+    ## Shared-Development-Services L5 (§6). A ``config:`` key declared
+    ## WITHOUT a default is a **required configurable**: the slot
+    ## exists, and it has NO SEED. Two things may satisfy it -- an
+    ## ``environment`` binding (§6) or an argument at
+    ## ``enable <activity>(...)`` (L2) -- and until one of them does,
+    ## the cell holds the type's zero value as a SHAPE and not as a
+    ## value, so reading it has to raise rather than hand back a zero
+    ## somebody could mistake for the author's intent.
+    ##
+    ## Deliberately NOT a subtype of ``EDslPortMissingKey``: the
+    ## fallback-flavoured ``readConfigurable`` overloads catch that one
+    ## and return their fallback, which is exactly the silent
+    ## substitution this exception exists to prevent.
+
 # ---------------------------------------------------------------------------
 # Module-level registries
 # ---------------------------------------------------------------------------
@@ -156,6 +174,20 @@ var dslPortOverrides: Table[string, DslScalarValue]
   ## Override table consulted by ``readConfigurable`` BEFORE the
   ## defaults table. Each ``setConfigurable`` writes one row;
   ## ``resetConfigurable`` deletes the row.
+
+var dslPortRequired: Table[string, bool]
+  ## The REQUIRED keys: a slot exists, with NO seed. Written by
+  ## ``recordConfigRequired``; a key is satisfied once ``dslPortOverrides``
+  ## carries a row for it (an ``environment`` binding goes through
+  ## ``setConfigurable``, which writes exactly that row).
+  ##
+  ## A separate registry rather than a sentinel inside
+  ## ``DslScalarValue``: the discriminated record is what
+  ## ``setConfigurableRaw``'s KIND check compares, so a required key has
+  ## to carry a real kind in ``dslPortDefaults`` for a binding to be
+  ## accepted at all. "Which kind" and "is there a seed" are two facts,
+  ## and folding them into one field would make an unsatisfied key
+  ## unbindable.
 
 var dslPortKeyOrder: seq[string]
   ## Insertion-order key list. The two ``Table[string, ...]``
@@ -222,6 +254,7 @@ proc resetDslPortConfigState*() =
   ## the other.
   dslPortDefaults.clear()
   dslPortOverrides.clear()
+  dslPortRequired.clear()
   dslPortKeyOrder.setLen(0)
 
 proc recordConfigDefaultRaw*(key: string; default: DslScalarValue) =
@@ -279,6 +312,88 @@ proc recordConfigDefault*[T](packageName, name: string; default: T) =
     {.error: "recordConfigDefault: unsupported configurable type " &
        $T & "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
 
+proc recordConfigRequiredRaw*(key: string; shape: DslScalarValue) =
+  ## Register a REQUIRED configurable: the slot exists and has NO seed.
+  ##
+  ## Shared-Development-Services L5 (§6) and the conflation this undoes.
+  ## "No default" used to mean "no slot": ``emitL5ActivityConfigDefaults``
+  ## skipped a key whose ``config:`` entry carried no ``= default``,
+  ## nothing was ever registered, and an ``environment`` binding to it
+  ## was refused at compile time -- which made
+  ## ``Shared-Development-Services.md``'s OWN worked examples (§6, line
+  ## 421; §9.1, line 646) illegal, because both declare
+  ## ``externalDomain: string`` with no default and bind it from an
+  ## ``environment`` block. A key with no default is not slotless; it is
+  ## REQUIRED.
+  ##
+  ## ``shape`` is the type's zero value and is stored for ONE reason: it
+  ## is what ``setConfigurableRaw``'s kind check compares an incoming
+  ## binding against, so without it no binding could be accepted. It is
+  ## never a readable value -- ``dslPortLookup`` raises
+  ## ``EDslPortUnsatisfiedRequired`` for a key in ``dslPortRequired``
+  ## that has no override row, so the zero cannot leak out as if the
+  ## author had written it.
+  if key notin dslPortDefaults:
+    dslPortKeyOrder.add(key)
+  dslPortDefaults[key] = shape
+  dslPortRequired[key] = true
+
+proc recordConfigRequired*[T](packageName, name: string) =
+  ## Generic facade -- the ``package`` macro emits one call per
+  ## ``config:`` key declared ``name: T`` with no ``= default``.
+  ##
+  ## The ``T`` set is the one ``recordConfigDefault`` carries, because
+  ## the slot set has to be decided by ONE predicate over both
+  ## authoring surfaces (``m2TypeReprIsSupportedScalar``). A key whose
+  ## type the configurable lane does not carry gets no slot at all,
+  ## required or not, and the environment walker refuses a binding to it
+  ## by name -- a DIFFERENT refusal from this one, and deliberately not
+  ## merged with it.
+  let key = packageName & "." & name
+  when T is bool:
+    recordConfigRequiredRaw(key, dslScalarBool(false))
+  elif T is SomeInteger:
+    recordConfigRequiredRaw(key, dslScalarInt(0))
+  elif T is string:
+    recordConfigRequiredRaw(key, dslScalarString(""))
+  elif T is SomeFloat:
+    recordConfigRequiredRaw(key, dslScalarFloat(0.0))
+  elif T is enum:
+    recordConfigRequiredRaw(key, dslScalarEnum(T.low.ord, $T, $T.low))
+  elif T is seq:
+    var probe: T
+    type Elem = typeof(probe[0])
+    when Elem is enum:
+      recordConfigRequiredRaw(key, dslScalarSeqEnum($Elem,
+        newSeq[(int, string)]()))
+    else:
+      {.error: "recordConfigRequired: unsupported configurable type " &
+         $T & "; M9.D seq support is restricted to seq[Enum]".}
+  else:
+    {.error: "recordConfigRequired: unsupported configurable type " &
+       $T & "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+
+proc configurableIsRequired*(key: string): bool =
+  ## Whether ``key`` was declared without a default -- i.e. has a slot
+  ## and no seed.
+  key in dslPortRequired
+
+proc configurableIsSatisfied*(key: string): bool =
+  ## Whether ``key`` holds a value something actually supplied.
+  ##
+  ## True for every key that is not required (its seed IS a value the
+  ## author wrote), and for a required key once a contribution has
+  ## written an override row. An ``environment`` binding is such a row,
+  ## because ``bindEnvironmentConfigurable`` delegates to
+  ## ``setConfigurable``.
+  (key notin dslPortRequired) or (key in dslPortOverrides)
+
+proc unsatisfiedRequiredConfigKeys*(): seq[string] =
+  ## Every required key nothing has satisfied, in registration order.
+  for key in dslPortKeyOrder:
+    if key in dslPortRequired and key notin dslPortOverrides:
+      result.add(key)
+
 proc configurableOverrideSnapshot*(): Table[string, DslScalarValue] =
   ## A copy of the override table, for a caller that must apply a GROUP
   ## of overrides all-or-nothing. `restoreConfigurableOverrides` puts it
@@ -315,6 +430,23 @@ proc dslPortLookup(key: string): DslScalarValue =
   ## ``EDslPortMissingKey`` when neither table knows the key.
   if key in dslPortOverrides:
     return dslPortOverrides[key]
+  if key in dslPortRequired:
+    # A REQUIRED key with no contribution. The row in
+    # ``dslPortDefaults`` is a SHAPE (the type's zero), kept only so
+    # ``setConfigurableRaw``'s kind check can accept a binding; it is
+    # not a value and must never be handed back as one. Returning the
+    # zero here is the whole failure Shared-Development-Services L5
+    # guards against: an empty external domain reads as a hostname
+    # nobody chose. The precise, routed diagnostic is
+    # ``requiredConfigurableValue``'s -- this is the funnel every other
+    # reader goes through, so nothing can reach the seed by a different
+    # door.
+    raise newException(EDslPortUnsatisfiedRequired,
+      "readConfigurable: `" & key & "` is a REQUIRED configurable -- " &
+      "declared in a `config:` block with no default, so its slot has " &
+      "no seed -- and nothing has satisfied it. Bind it in an " &
+      "`environment` block (Shared-Development-Services.md §6) or pass " &
+      "it at the `enable <activity>(...)` site.")
   if key in dslPortDefaults:
     return dslPortDefaults[key]
   raise newException(EDslPortMissingKey,
@@ -5741,6 +5873,11 @@ template environmentBoundValue*(key: string; declared: untyped): untyped =
   ## site, in the consumer's own compilation, and is not a function of
   ## this read.
   ##
+  ## THIS TEMPLATE IS FOR A KEY THAT HAS A DEFAULT. A key declared with
+  ## NO default is a REQUIRED configurable and its parameter default is
+  ## `requiredConfigurableValue` instead -- there is no `declared`
+  ## expression to fall back to, which is the whole difference.
+  ##
   ## `when compiles(...)` rather than an unconditional read: the port's
   ## configurable lane carries bool / int / string / float / enum /
   ## seq[enum], and an activity may legitimately declare a `config:` key
@@ -5748,14 +5885,15 @@ template environmentBoundValue*(key: string; declared: untyped): untyped =
   ## directly, and nothing is silently lost BECAUSE THE WALKER REFUSES
   ## THE BINDING AT THE AUTHOR'S OWN LINE -- `macros_b.nim`'s
   ## `l5ParseEnvironmentBody` refuses a target whose type the
-  ## configurable lane does not carry, and a target declared with no
-  ## default, each by name.
+  ## configurable lane does not carry, by name.
   ##
-  ## THAT SENTENCE WAS WRITTEN HERE BEFORE THE REFUSAL EXISTED, and it
-  ## was false: an activity `config:` key with no default was bindable,
-  ## compiled clean, and raised at module init only when the environment
-  ## was actually selected. It is now a statement about a check that is
-  ## tested in both directions rather than an assurance.
+  ## AN EARLIER REVISION OF THIS COMMENT ALSO CLAIMED A REFUSAL FOR A
+  ## TARGET DECLARED WITH NO DEFAULT. There was one for a while, and it
+  ## is deliberately gone: such a key is REQUIRED, not slotless, and
+  ## refusing a binding to it made §6's own example illegal. The two
+  ## refusals that replaced it are
+  ## `l5RefuseUnsatisfiableRequiredKeys` (expansion) and
+  ## `requiredConfigurableValue` (resolution).
   when compiles(readConfigurable[typeof(declared)](key, declared)):
     readConfigurable[typeof(declared)](key, declared)
   else:
@@ -5782,6 +5920,73 @@ proc canonicalEnvironmentSelection*(): string =
   ## is byte-identical to the pre-L5 one for every build that selects no
   ## environment.
   selectedEnvironmentName().normalize
+
+proc requiredConfigurableValue*[T](packageName, key,
+                                   qualifier, name: string): T =
+  ## The value of a REQUIRED `config:` key, or the RESOLUTION-TIME
+  ## refusal (Shared-Development-Services L5, §6).
+  ##
+  ## This is what L2's generated activity entry point uses as the
+  ## PARAMETER DEFAULT for a `config:` key declared with no default, the
+  ## way `environmentBoundValue` is used for one that has a default. A
+  ## parameter default is evaluated at CALL time, so an `enable
+  ## <activity>(<name> = ...)` that passes the argument explicitly never
+  ## evaluates this at all -- which is the second of §6's two routes
+  ## doing its job without this proc being involved.
+  ##
+  ## WHY THERE ARE TWO REFUSALS AND WHAT THIS ONE MEANS. The macro
+  ## refuses, at expansion, a required key that NO declared environment
+  ## binds and NO `enable` site supplies: that one means "this can never
+  ## work", and it has to be the macro's because a check that fired only
+  ## when a particular environment was SELECTED would leave the defect
+  ## silently inert for every other build. This one means "this
+  ## configuration does not work": the key IS bindable -- some
+  ## environment of this package binds it -- and the environment
+  ## actually selected does not. The two are deliberately distinguishable
+  ## in their text.
+  ##
+  ## The message names the key, the selected environment, BOTH routes,
+  ## and the environments that do bind the key, because "bind it in an
+  ## environment" is not actionable when the author's real mistake is
+  ## having selected the wrong one of three.
+  if not configurableIsSatisfied(key):
+    let selected = selectedEnvironmentName()
+    var binders: seq[string] = @[]
+    for def in registeredEnvironments(packageName):
+      for binding in def.bindings:
+        if binding.key == key and def.name notin binders:
+          binders.add(def.name)
+    let selectionText =
+      if selected.len == 0:
+        "NO environment is selected (`" & ReproEnvironmentEnvVar &
+          "` is unset)"
+      else:
+        "the selected environment `" & selected & "` does not bind it"
+    let binderText =
+      if binders.len == 0:
+        "No environment of package `" & packageName & "` binds it."
+      else:
+        "Environments of package `" & packageName &
+          "` that DO bind it: " & binders.join(", ") & "."
+    raise newException(EDslPortUnsatisfiedRequired,
+      "required `config:` key `" & qualifier & "." & name &
+      "` of package `" & packageName & "` IS UNSATISFIED: it is " &
+      "declared without a default, which makes it REQUIRED -- the slot " &
+      "exists and has no seed -- " & selectionText & ", and the " &
+      "`enable " & qualifier & "(...)` site did not pass it. " &
+      binderText & " Shared-Development-Services.md §6: \"the service " &
+      "or activity declares its configurables; an environment binds " &
+      "them\" -- so satisfy it either by binding it in the selected " &
+      "environment (`environment <name>: " & qualifier & "." & name &
+      " = <value>`) or by passing it at the enable site (`enable " &
+      qualifier & "(" & name & " = <value>)`).")
+  when compiles(readConfigurable[T](key)):
+    readConfigurable[T](key)
+  else:
+    # `seq[<enum>]`, which has no key-only `readConfigurable` overload.
+    # The fallback can never be returned here: the satisfaction check
+    # above has already established that an override row exists.
+    readConfigurable(key, default(T))
 
 proc applyEnvironment*(packageName, environmentName: string) =
   ## Apply ONE named environment's bindings for `packageName`.

@@ -41,21 +41,24 @@ package l5Owner:
       config:
         externalDomain: string = "localhost"
         externalSecure: bool = false
-        ## No default on purpose: §6 cannot bind a key that has no
-        ## slot, and L3's `hasDefault` is what makes this one REQUIRED
-        ## at the `enable` site. The environment walker refuses a
-        ## binding to it, by name, in the author's own compilation --
-        ## which is measured in BOTH directions by
-        ## `t_dsl_environment_surface_is_typed.nim`'s "an activity key
-        ## with NO default, declared AND bound in ONE fixture" case and
-        ## its control, and NOT by this file: a refusal cannot be
-        ## demonstrated by a fixture that has to compile.
+        ## No default on purpose: this is a REQUIRED configurable --
+        ## a slot with NO SEED -- and L3's `hasDefault` is what turns
+        ## that distinction on. §6 gives it two routes to a value, an
+        ## `environment` binding or an argument at `enable sso(...)`,
+        ## and THIS fixture takes the second (`enable sso(adminUser =
+        ## "root")` below) so the file keeps a required key that NO
+        ## environment binds.
         ##
-        ## The earlier revision of this comment claimed the refusal
-        ## while there was none -- the binding was accepted and the key
-        ## raised at module init only when the environment was
-        ## selected -- so what is written here is deliberately a
-        ## pointer to the measurement rather than a restatement.
+        ## Two earlier revisions of this comment were wrong, in
+        ## opposite directions. The first claimed the walker refused a
+        ## binding to such a key while there was no refusal at all --
+        ## the binding was accepted and raised at module init only when
+        ## the environment happened to be selected. The second claimed
+        ## the refusal as correct behaviour; it was not, because it made
+        ## §6's and §9.1's own worked examples illegal. Both routes, and
+        ## both of the refusals that replaced that one, are measured in
+        ## `t_dsl_environment_surface_is_typed.nim` and in
+        ## `../t_l5_environment_reaches_the_service_argv.nim`.
         adminUser: string
 
       service zitadel:

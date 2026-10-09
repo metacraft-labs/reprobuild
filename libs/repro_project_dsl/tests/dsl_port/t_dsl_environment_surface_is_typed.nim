@@ -143,19 +143,30 @@ const ForbiddenBinding = """
 """
 
 ## ---------------------------------------------------------------------
-## The NO-SLOT fixtures. Each is a WHOLE recipe rather than an edit of
-## `WellFormed`, and that is the correction: the property under test is
-## a COMBINATION (the key is declared AND bound), and two independent
-## one-line edits of a shared fixture cannot express a combination --
-## each edit starts from the unedited original. The control is the same
-## recipe with the binding removed, so the two differ by exactly the
-## binding.
+## THE REQUIRED-KEY fixtures. Each is a WHOLE recipe rather than an edit
+## of `WellFormed`, and that is deliberate: the property under test is a
+## COMBINATION (the key is declared, and something either does or does
+## not satisfy it), and two independent one-line edits of a shared
+## fixture cannot express a combination -- each edit starts from the
+## unedited original. That is the vacuous shape this suite's first
+## revision shipped, recorded at the suite below.
+##
+## A `config:` key declared with NO DEFAULT is a REQUIRED CONFIGURABLE:
+## the slot exists and has no seed, and §6 gives it exactly two routes
+## to a value -- an `environment` binding, or an argument at
+## `enable <activity>(...)`. The three fixtures are those two routes and
+## their absence.
+##
+## AN EARLIER REVISION REFUSED THE FIRST OF THEM, and the first fixture
+## below is `Shared-Development-Services.md`'s own §6 / §9.1 example, so
+## that refusal made the spec illegal. The refusals that replaced it are
+## narrower and there are two, because they mean different things.
 ## ---------------------------------------------------------------------
 
-const NoDefaultBound = """
+const RequiredBoundByEnvironment = """
 import repro_project_dsl
 
-package l5noslot:
+package l5reqenv:
   defaultToolProvisioning "path"
 
   devEnv:
@@ -165,19 +176,19 @@ package l5noslot:
         adminUser: string
 
       service zitadel:
-        args "--domain", externalDomain
+        args "--domain", externalDomain, "--admin", adminUser
 
-    enable sso(adminUser = "root")
+    enable sso
 
   environment dev:
     sso.externalDomain = "login.metacraft-labs.test"
     sso.adminUser = "root"
 """
 
-const NoDefaultDeclaredOnly = """
+const RequiredUnsatisfiable = """
 import repro_project_dsl
 
-package l5noslotctl:
+package l5requnsat:
   defaultToolProvisioning "path"
 
   devEnv:
@@ -187,9 +198,71 @@ package l5noslotctl:
         adminUser: string
 
       service zitadel:
-        args "--domain", externalDomain
+        args "--domain", externalDomain, "--admin", adminUser
+
+    enable sso
+
+  environment dev:
+    sso.externalDomain = "login.metacraft-labs.test"
+"""
+
+const RequiredSuppliedAtEnable = """
+import repro_project_dsl
+
+package l5reqenable:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso():
+      config:
+        externalDomain: string = "localhost"
+        adminUser: string
+
+      service zitadel:
+        args "--domain", externalDomain, "--admin", adminUser
 
     enable sso(adminUser = "root")
+
+  environment dev:
+    sso.externalDomain = "login.metacraft-labs.test"
+"""
+
+const RequiredSuppliedInOverrideBody = """
+import repro_project_dsl
+
+package l5reqoverride:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso():
+      config:
+        externalDomain: string = "localhost"
+        adminUser: string
+
+      service zitadel:
+        args "--domain", externalDomain, "--admin", adminUser
+
+    enable sso:
+      adminUser "root"
+
+  environment dev:
+    sso.externalDomain = "login.metacraft-labs.test"
+"""
+
+const RequiredNeverEnabled = """
+import repro_project_dsl
+
+package l5reqnoenable:
+  defaultToolProvisioning "path"
+
+  devEnv:
+    activity sso():
+      config:
+        externalDomain: string = "localhost"
+        adminUser: string
+
+      service zitadel:
+        args "--domain", externalDomain, "--admin", adminUser
 
   environment dev:
     sso.externalDomain = "login.metacraft-labs.test"
@@ -288,12 +361,18 @@ suite "L5 — §6.6: a CONSUMER may not bind an environment-owned configurable":
       "sso.externalDomain, sso.externalSecure")
     check not probe.mentions("A consumer may not bind")
 
-suite "L5 — a binding whose target has NO CONFIGURABLE SLOT is refused":
-  ## Two shapes, both measured ACCEPTED before the refusal existed, and
-  ## both reached through ONE fixture that declares and binds the key --
-  ## which is the whole correction to this suite's first revision.
+suite "L5 — a REQUIRED `config:` key: both routes compile, and nothing else does":
+  ## §6's OWN example, which an earlier revision of this walker REFUSED.
   ##
-  ## WHAT THE FIRST REVISION OF THE NO-DEFAULT CASE DID WRONG, recorded
+  ## `Shared-Development-Services.md` line 421 (§6's worked example) and
+  ## line 646 (§9.1's) both declare `externalDomain: string` -- no
+  ## default -- and bind it from an `environment` block. The refusal
+  ## that stood here made both illegal. It was right against what it
+  ## replaced (a key that was accepted and then silently had no slot)
+  ## and wrong as an end state, because it conflated "no default" with
+  ## "no slot". A key with no default is not slot-less; it is REQUIRED.
+  ##
+  ## WHAT THE FIRST REVISION OF THE NO-DEFAULT CASE DID WRONG, kept here
   ## because it is the failure mode this campaign keeps paying for. It
   ## made TWO INDEPENDENT `probeEdited` edits of `WellFormed`: one that
   ## added `adminUser: string` to the activity, and one that added
@@ -301,31 +380,86 @@ suite "L5 — a binding whose target has NO CONFIGURABLE SLOT is refused":
   ## the UNEDITED `WellFormed`, so the binding probe bound a key its own
   ## fixture never declared, and the message it asserted on -- "declares
   ## no `config:` key for" -- was the UNKNOWN-KEY refusal, not the
-  ## no-slot one. It therefore passed against an implementation under
-  ## which the combination it names compiled clean: measured, `nim
-  ## check` exit 0 on a recipe declaring `adminUser: string` and binding
-  ## `sso.adminUser`. A test whose fixture cannot express the
-  ## combination in its own name is vacuous however green it is.
+  ## no-slot one. A test whose fixture cannot express the combination in
+  ## its own name is vacuous however green it is. Every fixture in this
+  ## suite is therefore a WHOLE recipe.
 
-  test "an activity key with NO default, declared AND bound in ONE fixture, is refused":
-    let probe = checkRecipeSource(NoDefaultBound, "l5-noslot-nodefault")
-    checkpoint(probe.output)
-    check not probe.ok
-    check probe.mentions("is declared WITHOUT A DEFAULT")
-    check probe.mentions("has no configurable slot for an environment " &
-      "to bind")
-    # NOT the unknown-key message: the key IS declared, which is the
-    # distinction the vacuous version could not make.
-    check not probe.mentions("declares no `config:` key for")
-
-  test "THE CONTROL: the same fixture, the key declared and NOT bound, compiles":
-    # Without this the refusal above could be failing for anything the
-    # fixture carries -- and it is also the half §6 permits: a key with
-    # no default is REQUIRED at the `enable` site and stays legal there.
-    let probe = checkRecipeSource(NoDefaultDeclaredOnly,
-      "l5-noslot-nodefault-control")
+  test "§6's HEADLINE CASE: a required key BOUND BY AN ENVIRONMENT compiles":
+    # Measured refused at the base: `environment `dev` ... binds
+    # `sso.adminUser`, and ... is declared WITHOUT A DEFAULT`, from
+    # `macros_b.nim`'s no-default binding guard. The value actually
+    # reaching the service's argv and the rendered config is asserted in
+    # `libs/repro_project_dsl/tests/
+    # t_l5_environment_reaches_the_service_argv.nim` -- compiling is
+    # necessary and not sufficient.
+    let probe = checkRecipeSource(RequiredBoundByEnvironment,
+      "l5-required-env")
     checkpoint(probe.output)
     check probe.ok
+
+  test "THE OTHER ROUTE: a required key supplied at the `enable` site compiles":
+    let probe = checkRecipeSource(RequiredSuppliedAtEnable,
+      "l5-required-enable")
+    checkpoint(probe.output)
+    check probe.ok
+
+  test "and supplied in the `enable` OVERRIDE BODY, which is the other spelling of that route":
+    # `Package-Model.md`'s override-body form. The required-key check
+    # reads it through `l2EnableOverridePair`, the same proc
+    # `l2EnableEmission` reads, so the two cannot disagree about what a
+    # site supplies. A check that only looked at the parentheses would
+    # refuse this recipe.
+    let probe = checkRecipeSource(RequiredSuppliedInOverrideBody,
+      "l5-required-override-body")
+    checkpoint(probe.output)
+    check probe.ok
+
+  test "a required key on an activity that is DECLARED AND NEVER ENABLED compiles":
+    # The predicate is "some `enable` site leaves it unsupplied", not
+    # "no `enable` site supplies it", and this is the shape that decides
+    # it: an activity nobody enables never calls its entry point, so the
+    # key is never read and there is nothing to drop. It is a real
+    # shape, not a hypothetical -- `l3_lift_fixtures.nim`'s
+    # `l3LiftProducer` is exactly this, so the stricter predicate would
+    # have reddened L3's own fixtures.
+    let probe = checkRecipeSource(RequiredNeverEnabled,
+      "l5-required-never-enabled")
+    checkpoint(probe.output)
+    check probe.ok
+
+  test "REFUSAL ONE OF TWO: a required key NOTHING CAN SATISFY is refused at expansion":
+    # No environment of the package binds it and the `enable` site does
+    # not pass it, so no selection can ever make this work. The check is
+    # at EXPANSION precisely because it must not depend on which
+    # environment is selected: a refusal that fired only on selection
+    # would leave this defect silently inert for every other build.
+    let probe = checkRecipeSource(RequiredUnsatisfiable,
+      "l5-required-unsatisfiable")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions("WITHOUT A DEFAULT, which makes it REQUIRED")
+    check probe.mentions("NOTHING CAN EVER SATISFY IT")
+    # BOTH routes named, which is the thing the author needs.
+    check probe.mentions("environment <name>: sso.adminUser = <value>")
+    check probe.mentions("enable sso(adminUser = <value>)")
+    # NOT the unknown-key refusal: the key IS declared.
+    check not probe.mentions("declares no `config:` key for")
+    # NOT the OLD refusal, which this one replaces rather than joins.
+    check not probe.mentions("has no configurable slot for an " &
+      "environment to bind")
+
+  test "the two refusals do not share their text, because they do not mean the same thing":
+    # "This can never work" (expansion) against "this configuration does
+    # not work" (resolution, `requiredConfigurableValue`, asserted in
+    # the argv test). The resolution message's distinctive sentence must
+    # NOT appear in the expansion one, or a reader cannot tell which
+    # failure they have.
+    let probe = checkRecipeSource(RequiredUnsatisfiable,
+      "l5-required-distinct")
+    checkpoint(probe.output)
+    check probe.mentions("NOTHING CAN EVER SATISFY IT")
+    check not probe.mentions("IS UNSATISFIED")
+    check not probe.mentions("the selected environment")
 
   test "a key whose TYPE the configurable lane does not carry is refused, naming the type":
     # `emitM2ConfigDefaults` filters package-level entries through
@@ -345,6 +479,12 @@ suite "L5 — a binding whose target has NO CONFIGURABLE SLOT is refused":
     # The old failure's text, asserted ABSENT: the refusal has to
     # replace it, not arrive beside it.
     check not probe.mentions("M9.D seq support is restricted to seq[Enum]")
+    # AND NOT the required-key refusal. "No default" and "unsupported
+    # type" are two refusals and were deliberately not merged when the
+    # first of them was narrowed: this key HAS a default and is still
+    # slot-less.
+    check not probe.mentions("which makes it REQUIRED")
+    check not probe.mentions("NOTHING CAN EVER SATISFY IT")
 
   test "THE CONTROL: a `seq[<enum>]` key IS carried, and binding it compiles":
     let probe = checkRecipeSource(SupportedSeqEnumBound,

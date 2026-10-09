@@ -3502,13 +3502,37 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
     # and is not the §6.6 case -- a CONSUMER's attempt to bind is
     # refused at the binding site, in the consumer's own compilation.
     #
-    # A key WITHOUT a default keeps `newEmptyNode()` and stays REQUIRED
-    # at the enable site. L3's `InterfaceConfigKey.hasDefault` is the
-    # distinction, and an environment cannot supply the value for one:
-    # there is no slot, because `recordConfigDefault` has no honest
-    # argument to seed it with.
+    # A key WITHOUT a default is a REQUIRED configurable: the slot
+    # exists and has NO SEED, and §6 gives it TWO routes to a value --
+    # an `environment` binding, or an argument at this `enable` site.
+    # So its parameter default reads the slot through
+    # `requiredConfigurableValue`, which hands back a satisfied value
+    # and refuses an unsatisfied one BY NAME, naming both routes. An
+    # `enable` that passes the argument explicitly never evaluates the
+    # default at all, so the second route is unaffected.
+    #
+    # L3's `InterfaceConfigKey.hasDefault` still reports `false` for
+    # such a key, because that is read from `c.defaultNode` and this
+    # change does not touch `l2ParseActivityConfig`. "Required" and
+    # "has a default" remain the same distinction; what changed is that
+    # required no longer means SLOTLESS.
+    #
+    # A key whose TYPE the configurable lane does not carry gets
+    # `newEmptyNode()` and stays required at the Nim level, because
+    # there is genuinely no slot for it -- the separate refusal
+    # `m2TypeReprIsSupportedScalar` governs, and the two are not
+    # merged.
     let default =
-      if c.defaultNode == nil: newEmptyNode()
+      if c.defaultNode == nil:
+        if m2TypeReprIsSupportedScalar(c.typeNode.repr):
+          parseExpr("requiredConfigurableValue[" & c.typeNode.repr & "](" &
+            escForCode(packageName) & ", " &
+            escForCode(packageName & "." & parsed.activityName & "." &
+              c.name) & ", " &
+            escForCode(parsed.activityName) & ", " &
+            escForCode(c.name) & ")")
+        else:
+          newEmptyNode()
       else:
         let keyLit = newLit(packageName & "." & parsed.activityName & "." &
           c.name)
@@ -4188,41 +4212,35 @@ proc l5ParseEnvironmentBody(packageName, environmentName: string;
     # LEFT TO MODULE INIT. §6's ordering sentence is "the service or
     # activity declares its configurables; an environment binds them",
     # and a binding whose target was never registered as a configurable
-    # can never be in force. Before this check it was ACCEPTED: the
-    # author's recipe compiled clean, and with no environment selected
-    # NOTHING WAS SAID AT ALL -- the accepted-and-then-not-there failure
-    # `l5NoSilentDropRule` is written about -- while
-    # `environmentOwnedConfigKeys` reported the slot-less key as
-    # environment-owned for L6 to consume. Two shapes reach it, and both
-    # are named rather than merged, because the author's next move
-    # differs:
+    # can never be in force.
     #
-    #   1. an ACTIVITY `config:` key with NO DEFAULT.
-    #      `l5CollectDeclaredConfigurables` reads activity keys through
-    #      `l2ParseActivityConfig`, which returns them all, while
-    #      `emitL5ActivityConfigDefaults` registers only those with a
-    #      default -- `recordConfigDefault` has no honest argument to
-    #      seed the slot with. So the key resolves and has no slot.
-    #   2. a key whose TYPE the configurable lane does not carry.
-    #      `emitM2ConfigDefaults` filters package-level entries through
-    #      `m2TypeReprIsSupportedScalar` and silently passes the rest
-    #      through; `collectM2ConfigEntries`, which this walker reads,
-    #      does NOT. So `tags: seq[string] = @["a"]` is in `decls`, has
-    #      no slot, and binding it used to fail inside
-    #      `dsl_port_runtime.nim` as `setConfigurable: unsupported type
-    #      seq[string]` -- loud, but pointing at a library line and
-    #      saying nothing about the environment, the package or the key.
-    if decls[idx].defaultNode == nil:
-      error("environment `" & environmentName & "` of package `" &
-        packageName & "` binds `" & parts.join(".") & "`, and `" &
-        decls[idx].qualifier & "." & decls[idx].name & "` is declared " &
-        "WITHOUT A DEFAULT. A `config:` key with no default is REQUIRED " &
-        "at the `enable " & decls[idx].qualifier &
-        "(...)` site, so it has no configurable slot for an " &
-        "environment to bind -- `recordConfigDefault` has no value to " &
-        "seed one with. Give it a default to make it bindable, or pass " &
-        "it at the `enable` site. " & l5NoSilentDropRule,
-        l2StmtAnchor(stmt))
+    # ONE shape reaches this now, and it used to be two. The second --
+    # an ACTIVITY `config:` key with NO DEFAULT -- WAS REFUSED HERE AND
+    # IS NO LONGER, because refusing it conflated "no default" with "no
+    # slot" and made `Shared-Development-Services.md`'s own worked
+    # examples illegal: §6 (line 421) and §9.1 (line 646) both declare
+    # `externalDomain: string` with no default and bind it from an
+    # `environment` block, which is §6's whole argument -- the external
+    # identity is the environment's to bind, and a hostname has no
+    # sensible default. Such a key is now a REQUIRED CONFIGURABLE: a
+    # slot with no seed, registered by
+    # `emitL5ActivityConfigDefaults`, satisfiable from here or from
+    # `enable <activity>(...)`, and refused when NOTHING can satisfy it
+    # (`l5RefuseUnsatisfiableRequiredKeys`, at expansion) or when the
+    # SELECTED environment does not (`requiredConfigurableValue`, at
+    # resolution).
+    #
+    # What remains is the genuinely slot-less shape: a key whose TYPE
+    # the configurable lane does not carry. `emitM2ConfigDefaults`
+    # filters package-level entries through
+    # `m2TypeReprIsSupportedScalar` and silently passes the rest
+    # through; `collectM2ConfigEntries`, which this walker reads, does
+    # NOT. So `tags: seq[string] = @["a"]` is in `decls`, has no slot,
+    # and binding it used to fail inside `dsl_port_runtime.nim` as
+    # `setConfigurable: unsupported type seq[string]` -- loud, but
+    # pointing at a library line and saying nothing about the
+    # environment, the package or the key. "No default" and
+    # "unsupported type" are DIFFERENT refusals and are not merged.
     if not m2TypeReprIsSupportedScalar(decls[idx].typeNode.repr):
       error("environment `" & environmentName & "` of package `" &
         packageName & "` binds `" & parts.join(".") & "`, whose type `" &
@@ -4259,7 +4277,8 @@ proc l5BindingsLiteral(bindings: openArray[L5Binding]): NimNode =
 proc l5EnvironmentEmission(packageName: string; stmt: NimNode;
                            decls: seq[L5ConfigDecl];
                            variants: seq[string];
-                           seenNames: var seq[string]): NimNode =
+                           seenNames: var seq[string];
+                           boundKeys: var seq[string]): NimNode =
   ## Lower ONE `environment <name>:` statement, or return `nil` when
   ## `stmt` is not one.
   if not l5HeadName(stmt, "environment"):
@@ -4274,6 +4293,14 @@ proc l5EnvironmentEmission(packageName: string; stmt: NimNode;
   seenNames.add(envName.normalize)
   let bindings = l5ParseEnvironmentBody(packageName, envName, stmt[^1],
     decls, variants)
+  # The keys THIS package's environments bind, accumulated across every
+  # `environment` block, for `l5RefuseUnsatisfiableRequiredKeys`. Taken
+  # from the bindings the walker just resolved rather than re-read from
+  # the AST, so the required-key check and the emission cannot disagree
+  # about what is bound.
+  for b in bindings:
+    if b.key notin boundKeys:
+      boundKeys.add(b.key)
   let pkgLit = newLit(packageName)
   let nameLit = newLit(envName)
   let defLiteral = parseExpr("DslEnvironmentDef(packageName: " &
@@ -4457,6 +4484,141 @@ proc l5OverrideEmission(packageName: string; stmt: NimNode;
   result = parseStmt(code)
   result.copyLineInfo(stmt)
 
+type
+  L5EnableSite = object
+    ## One `enable <activity> ...` call site, as the required-key check
+    ## needs to see it.
+    activity: string
+    supplied: seq[string]
+      ## The `config:` key / parameter names this site passes BY NAME,
+      ## from the parenthesised arguments and from the override body.
+    positional: bool
+      ## This site passes at least one argument POSITIONALLY, so which
+      ## parameter it lands on cannot be decided from the name. The
+      ## check then treats the site as possibly supplying anything and
+      ## says nothing about it -- the conservative direction, because
+      ## the alternative is refusing a recipe that works.
+    anchor: NimNode
+
+proc l5CollectEnableSites(sectionStmts: NimNode): seq[L5EnableSite] =
+  ## Every `enable ...` site in this package's `devEnv:` body.
+  ##
+  ## ONE READING, and it is the reading `l2EnableEmission` already uses:
+  ## `l2EnableEntryAst` for the head and `l2EnableOverridePair` for each
+  ## override line. A second reading here is exactly the asymmetry this
+  ## milestone's review found twice -- a guard that disagrees with the
+  ## resolver beside it -- so there is not one.
+  ##
+  ## `l2EnableEmission` runs FIRST (it is reached from `buildCode`,
+  ## emitted before the L5 passes), so a malformed override body has
+  ## already been refused by the time this walk reaches it and
+  ## `l2EnableOverridePair` cannot be the thing that reports it.
+  for stmt in sectionStmts:
+    if calleeName(stmt).normalize != "devenv":
+      continue
+    if stmt.len < 2 or stmt[^1].kind != nnkStmtList:
+      continue
+    for devStmt in stmt[^1]:
+      let parsed = l2EnableEntryAst(devStmt)
+      if not parsed.matched:
+        continue
+      var site = L5EnableSite(activity: parsed.activityName,
+        supplied: @[], positional: false, anchor: devStmt)
+      if parsed.argsNode != nil:
+        for i in 1 ..< parsed.argsNode.len:
+          let child = parsed.argsNode[i]
+          if child.kind == nnkExprEqExpr and child.len == 2:
+            site.supplied.add(identText(child[0]))
+          else:
+            site.positional = true
+      if parsed.overrides != nil:
+        for entry in parsed.overrides:
+          if entry.kind in {nnkCommentStmt, nnkEmpty, nnkDiscardStmt}:
+            continue
+          site.supplied.add(
+            l2EnableOverridePair(parsed.activityName, entry).name)
+      result.add(site)
+
+proc l5RefuseUnsatisfiableRequiredKeys(packageName: string;
+                                      sectionStmts: NimNode;
+                                      decls: seq[L5ConfigDecl];
+                                      boundKeys: seq[string]) =
+  ## REFUSAL ONE OF TWO: a required `config:` key that NOTHING CAN EVER
+  ## SATISFY (§6).
+  ##
+  ## A `config:` key declared without a default is REQUIRED: a slot
+  ## with no seed. §6 gives it two routes to a value -- an
+  ## `environment` binding, or an argument at `enable <activity>(...)`.
+  ## At expansion the macro can see BOTH: every `environment` block of
+  ## this package (D-SS7 puts them in the owning package) and every
+  ## `enable` site. A required key that no declared environment binds
+  ## and that an `enable` site does not supply can never be satisfied,
+  ## whatever is selected later.
+  ##
+  ## WHY THIS IS AT EXPANSION AND NOT ONLY AT RESOLUTION, which is the
+  ## constraint that killed the design this replaces. A refusal that
+  ## fires only when a particular environment is SELECTED leaves the
+  ## defect silently inert for every build that selects another one, or
+  ## none -- `l5NoSilentDropRule`'s case exactly. So the check must not
+  ## depend on the selection in order to catch a key nothing can bind,
+  ## and this one depends only on what is DECLARED.
+  ##
+  ## THE PREDICATE IS "SOME `enable` SITE LEAVES IT UNSUPPLIED", NOT
+  ## "NO `enable` SITE SUPPLIES IT", and the difference is load-bearing
+  ## rather than a weakening. An activity that is DECLARED and never
+  ## enabled never calls its entry point, so its required key is never
+  ## read and there is nothing to drop -- and that is a real shape, not
+  ## a hypothetical: `l3_lift_fixtures.nim`'s `l3LiftProducer` declares
+  ## `activity sso` with `externalDomain: string` precisely so the
+  ## interface LIFT can carry a key whose `hasDefault` is false. The
+  ## unsatisfiable case is an `enable` that reaches the read with
+  ## nothing able to answer it.
+  ##
+  ## PACKAGE-LEVEL `config:` keys are not checked here, and the reason
+  ## is that they have no `enable` route at all: "required" on that
+  ## surface would mean "an environment MUST bind it", which is a
+  ## different ruling and not one §6 makes. The package-level parser
+  ## does not admit the no-default spelling in the first place -- it is
+  ## dropped in silence, which is recorded in
+  ## `reprobuild-pm/issues/2026-10-08-package-level-dsl-heads-and-
+  ## bodies-silently-drop-arguments.md`, not introduced here.
+  let enables = l5CollectEnableSites(sectionStmts)
+  for decl in decls:
+    if decl.qualifier.len == 0:
+      continue
+    if decl.defaultNode != nil:
+      continue
+    let key = packageName & "." & decl.qualifier & "." & decl.name
+    if l5ContainsNormalized(boundKeys, key):
+      continue
+    var envText = "no `environment` block in package `" & packageName &
+      "` binds `" & decl.qualifier & "." & decl.name & "`"
+    if boundKeys.len > 0:
+      envText.add(" (the environments of this package bind: ")
+      var shown: seq[string] = @[]
+      for bound in boundKeys:
+        if bound notin shown:
+          shown.add(bound)
+      envText.add(shown.join(", ") & ")")
+    for site in enables:
+      if site.activity.normalize != decl.qualifier.normalize:
+        continue
+      if site.positional:
+        continue
+      if l5ContainsNormalized(site.supplied, decl.name):
+        continue
+      error("activity `" & decl.qualifier & "` of package `" &
+        packageName & "` declares `config:` key `" & decl.name &
+        "` WITHOUT A DEFAULT, which makes it REQUIRED -- and NOTHING " &
+        "CAN EVER SATISFY IT: " & envText & ", and `enable " &
+        decl.qualifier & "` here does not pass it. A required key is " &
+        "satisfied one of exactly two ways (§6): bind it in an " &
+        "environment of this package (`environment <name>: " &
+        decl.qualifier & "." & decl.name & " = <value>`), or pass it " &
+        "at this enable site (`enable " & decl.qualifier & "(" &
+        decl.name & " = <value>)`). " & l5NoSilentDropRule,
+        l2StmtAnchor(site.anchor))
+
 proc emitL5ActivityConfigDefaults(packageName: string;
                                   sectionStmts: NimNode): NimNode =
   ## Register each activity `config:` key as a CONFIGURABLE, under
@@ -4473,26 +4635,31 @@ proc emitL5ActivityConfigDefaults(packageName: string;
   ## binding would have to invent a second lane -- exactly the new
   ## precedence model the gate forbids.
   ##
-  ## Only keys with a DEFAULT are registered: a key declared
-  ## `externalDomain: string` with no default is REQUIRED at the
-  ## `enable` site (L3's `InterfaceConfigKey.hasDefault` turns on that
-  ## distinction), so there is no value to seed the slot with and
-  ## `recordConfigDefault` has no honest argument to take.
+  ## EVERY key of a carried type is registered, with or without a
+  ## default, and the difference between them is the SEED and not the
+  ## slot. A key declared `externalDomain: string` with no default is a
+  ## REQUIRED configurable: `recordConfigRequired` gives it a slot
+  ## holding the type's zero as a SHAPE, which is what
+  ## `setConfigurableRaw`'s kind check compares a binding against, and
+  ## `dslPortLookup` refuses to hand that zero back as a value.
   ##
-  ## WHAT THAT COSTS, AND WHERE IT IS PAID. A key with no slot cannot be
-  ## bound, and that has to be REFUSED AT THE BINDING SITE or the
-  ## binding is accepted and then not in force. It is: the environment
-  ## walker refuses a binding whose target has no default and a binding
-  ## whose target's type the configurable lane does not carry, both in
-  ## the author's own compilation, by name.
+  ## IT USED TO SKIP SUCH A KEY, AND THE ENVIRONMENT WALKER REFUSED A
+  ## BINDING TO IT. That was right against what it replaced -- a key
+  ## that was accepted and then silently had no slot -- and wrong as an
+  ## end state: it conflated "no default" with "no slot", and it made
+  ## `Shared-Development-Services.md`'s own worked examples illegal
+  ## (§6 line 421 and §9.1 line 646 both declare
+  ## `externalDomain: string` with no default and bind it from an
+  ## `environment` block, which is §6's whole argument -- the external
+  ## identity is the environment's to bind, and a hostname has no
+  ## sensible default). The refusal is replaced by two narrower ones:
+  ## `l5RefuseUnsatisfiableRequiredKeys` at expansion (nothing can ever
+  ## satisfy this key) and `requiredConfigurableValue` at resolution
+  ## (this configuration does not satisfy it).
   ##
-  ## THAT REFUSAL DID NOT EXIST IN THE FIRST REVISION OF L5, AND THREE
-  ## COMMENTS INCLUDING THIS ONE CLAIMED IT DID. Measured: an activity
-  ## `config:` key with no default, bound by an environment, compiled
-  ## clean; with no environment selected nothing was said at all, and
-  ## with one selected `EDslPortMissingKey` was raised at module init
-  ## AFTER the preceding bindings had already been applied. The claim is
-  ## now true because the check exists, not because the comment says so.
+  ## L3's `InterfaceConfigKey.hasDefault` is UNCHANGED and still reports
+  ## `false` for such a key: it is read from `l2ParseActivityConfig`'s
+  ## `defaultNode`, which this change does not touch.
   ##
   ## The type filter is `m2TypeReprIsSupportedScalar`, the same
   ## predicate `emitM2ConfigDefaults` applies to the package-level
@@ -4514,22 +4681,39 @@ proc emitL5ActivityConfigDefaults(packageName: string;
       if not parsed.matched:
         continue
       for key in l2ParseActivityConfig(parsed.activityName, parsed.body):
-        if key.defaultNode == nil:
-          continue
         # THE SAME TYPE PREDICATE `emitM2ConfigDefaults` USES, so the
         # slot set is ONE predicate over both authoring surfaces rather
         # than two tests that can disagree -- and so the environment
         # walker's refusal (`m2TypeReprIsSupportedScalar` at the binding
-        # site) is exact on both. The `when compiles(...)` guard below
-        # is kept, but it is NOT the filter: it answers true for a
-        # qualified enum (`mymod.Kind`) that the package-level emitter
-        # would have skipped, which is precisely the disagreement that
-        # let a slot-less key look bindable.
+        # site) is exact on both. The `when compiles(...)` guards below
+        # are kept, but they are NOT the filter: `compiles` answers true
+        # for a qualified enum (`mymod.Kind`) that the package-level
+        # emitter would have skipped, which is precisely the
+        # disagreement that let a slot-less key look bindable.
+        #
+        # THE TYPE TEST COMES FIRST, AND THE DEFAULT TEST SECOND. It
+        # used to be the other way round, with `defaultNode == nil`
+        # answered by `continue`, so a key with no default got no slot
+        # at all -- the conflation of "no default" with "no slot" this
+        # change undoes.
         if not m2TypeReprIsSupportedScalar(key.typeNode.repr):
           continue
         let pkgLit = newLit(packageName)
         let nameLit = newLit(parsed.activityName & "." & key.name)
         let typeNode = key.typeNode.copyNimTree()
+        if key.defaultNode == nil:
+          # A REQUIRED configurable: the slot exists, with NO seed
+          # (§6). Two things may satisfy it -- an `environment`
+          # binding or an argument at `enable <activity>(...)` -- and
+          # the slot is what makes the FIRST of those possible at all.
+          # Before this, `Shared-Development-Services.md`'s own worked
+          # examples (§6's and §9.1's, both `externalDomain: string`
+          # bound from an `environment` block) were refused.
+          result.add(quote do:
+            when compiles(recordConfigRequired[`typeNode`](`pkgLit`,
+                `nameLit`)):
+              recordConfigRequired[`typeNode`](`pkgLit`, `nameLit`))
+          continue
         let defaultNode = key.defaultNode.copyNimTree()
         result.add(quote do:
           when compiles(recordConfigDefault[`typeNode`](`pkgLit`,
@@ -4582,9 +4766,10 @@ proc emitL5Environments(packageName: string;
   let variants = l5CollectVariantNames(sectionStmts)
   var seenNames: seq[string] = @[]
   var seenTargets: seq[string] = @[]
+  var boundKeys: seq[string] = @[]
   for stmt in sectionStmts:
     let envEmission = l5EnvironmentEmission(packageName, stmt, decls,
-      variants, seenNames)
+      variants, seenNames, boundKeys)
     if envEmission != nil:
       result.add(envEmission)
       continue
@@ -4592,6 +4777,14 @@ proc emitL5Environments(packageName: string;
       seenTargets)
     if overrideEmission != nil:
       result.add(overrideEmission)
+  # AFTER every `environment` block has been walked, because the check
+  # asks whether ANY of them binds the key. It runs whether or not this
+  # package declares an environment at all: a required key with no
+  # environment and an `enable` that does not pass it is the case that
+  # can never be satisfied, and a package with no `environment` block
+  # is where it is most likely to be written.
+  l5RefuseUnsatisfiableRequiredKeys(packageName, sectionStmts, decls,
+    boundKeys)
   if result.len > 0:
     let pkgLit = newLit(packageName)
     result.add(quote do:

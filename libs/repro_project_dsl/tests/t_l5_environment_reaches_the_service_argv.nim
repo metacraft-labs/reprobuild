@@ -33,7 +33,7 @@
 ## emitter appended, and the configuration text is produced by the real
 ## `renderConfigFile` from the real configurable read.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/types    # Executable, for the artifact slot var
@@ -178,3 +178,241 @@ suite "L5 — and reaches the rendered configuration's BYTES":
     check devText == "issuer = \"https://login.metacraft-labs.test\"\n"
     check prodText == "issuer = \"https://login.metacraft-labs.com\"\n"
     check devText != prodText
+
+## ---------------------------------------------------------------------
+## THE HEADLINE PROOF, and the resolution-time refusal beside it.
+##
+## `l5ReqPkg` is `Shared-Development-Services.md` §6's / §9.1's OWN
+## worked shape: `externalDomain: string` declared with NO DEFAULT and
+## bound by `environment dev:`. Until this landed the macro REFUSED that
+## recipe (`macros_b.nim`'s no-default binding guard), so the spec's own
+## example was illegal and every route it left an author -- invent a
+## default, or pass the value at `enable` -- is the inlining §6 exists
+## to replace.
+##
+## WHICH DISCRIMINATOR IS LOAD-BEARING HERE. For the headline case it is
+## the ARGV STRINGS and the RENDERED CONFIG BYTES, as above: the fixture
+## COMPILING is necessary and not sufficient, because an implementation
+## that gave the required key a slot and then read the type's ZERO out
+## of it would compile the same recipe and lower `--domain ""`. For the
+## two refusals it is the MESSAGE TEXT, because the two mean different
+## things ("this can never work" vs "this configuration does not work")
+## and an exception type alone could not tell them apart.
+## ---------------------------------------------------------------------
+
+proc reqPkgDef(): PackageDef =
+  for pkg in registeredPackages():
+    if pkg.packageName == "l5ReqPkg":
+      return pkg
+  raise newException(ValueError, "fixture drift: l5ReqPkg missing")
+
+proc reqRequest(pkg: PackageDef): ProviderGraphRequest =
+  ProviderGraphRequest(
+    kind: prkGraphInvocation,
+    providerArtifactId: "test-provider",
+    entryPointId: pkg.packageName & ".dev-env",
+    entryPointBodyHash: pkg.packageName & ".build.v1",
+    reason: girExplicitUserRequest,
+    arguments: "/tmp/l5-required-fixture-root",
+    namespace: "project-" & pkg.packageName,
+    activity: "sso")
+
+proc reqReset() =
+  clearRegisteredServices("l5ReqPkg")
+  resetBuildActionRegistry()
+  for key in ["l5ReqPkg.sso.externalDomain", "l5ReqPkg.sso.externalSecure"]:
+    resetConfigurable(key)
+
+proc reqResolve(environment: string):
+    tuple[argv: seq[string]; rendered: string] =
+  ## Resolve the ONE required-key definition under `environment` and
+  ## return the lowered service's typed argv together with the bytes
+  ## `renderConfigFile` recorded for its config action.
+  let pkg = reqPkgDef()
+  reqReset()
+  if environment.len > 0:
+    applyEnvironment("l5ReqPkg", environment)
+  discard buildPackageDevEnv(pkg, reqRequest(pkg), devEnvL5ReqPkgPackage)
+  for svc in registeredServices("l5ReqPkg"):
+    if svc.serviceName == "zitadel":
+      for arg in svc.typedArgs:
+        result.argv.add(arg.value)
+      break
+  if result.argv.len == 0:
+    raise newException(ValueError, "no `zitadel` service was lowered")
+  for action in registeredBuildActions():
+    if action.id == ReqRenderActionId:
+      let arg = callArgEncodedValue(action.call, "text")
+      if not arg.present:
+        raise newException(ValueError,
+          "the render action carries no `text` argument")
+      result.rendered = arg.value
+      return
+  raise newException(ValueError,
+    "no build action with id " & ReqRenderActionId)
+
+proc reqRefusalMessage(selection: string): string =
+  ## Resolve with `selection` SELECTED through the real
+  ## `REPRO_ENVIRONMENT` path -- not `applyEnvironment` -- and return
+  ## the refusal's message. The selection path is used because the
+  ## refusal reports the SELECTED environment, and a test that applied
+  ## one by hand would be asserting a sentence about a selection nobody
+  ## made.
+  let pkg = reqPkgDef()
+  reqReset()
+  if selection.len > 0:
+    putEnv(ReproEnvironmentEnvVar, selection)
+    doAssert applySelectedEnvironment("l5ReqPkg") == selection
+  else:
+    delEnv(ReproEnvironmentEnvVar)
+  try:
+    discard buildPackageDevEnv(pkg, reqRequest(pkg), devEnvL5ReqPkgPackage)
+    result = ""
+  except EDslPortUnsatisfiedRequired as err:
+    result = err.msg
+  finally:
+    delEnv(ReproEnvironmentEnvVar)
+    reqReset()
+
+suite "L5 — §6's OWN example: a REQUIRED `config:` key bound by an environment":
+
+  test "the fixture declares the key with NO default, and three environments bind around it":
+    # Fixture drift guard. If somebody gives `externalDomain` a default
+    # every assertion below still passes and none of them is about a
+    # required key any more.
+    # `registerActivityDeclaration` runs INSIDE the dev-env body, so the
+    # registry is empty until the body has run once.
+    discard reqResolve("dev")
+    var ssoDef: DslActivityDef
+    for item in registeredActivities("l5ReqPkg"):
+      if item.activityName == "sso":
+        ssoDef = item
+    check ssoDef.activityName == "sso"
+    var required: seq[string] = @[]
+    var defaulted: seq[string] = @[]
+    for key in ssoDef.config:
+      if key.hasDefault: defaulted.add(key.name)
+      else: required.add(key.name)
+    check required == @["externalDomain"]
+    check defaulted == @["externalSecure"]
+    check registeredEnvironmentNames("l5ReqPkg") ==
+      @["dev", "production", "bare"]
+
+  test "the required key HAS A CONFIGURABLE SLOT, and the slot has no seed":
+    # The design in one assertion: "no default" is not "no slot". The
+    # refusal this replaced rested on the slot not existing.
+    reqReset()
+    check isConfigKeyRegistered("l5ReqPkg.sso.externalDomain")
+    check configurableIsRequired("l5ReqPkg.sso.externalDomain")
+    check not configurableIsSatisfied("l5ReqPkg.sso.externalDomain")
+    # And the key WITH a default is registered and already satisfied,
+    # which is the control for the two predicates above.
+    check isConfigKeyRegistered("l5ReqPkg.sso.externalSecure")
+    check not configurableIsRequired("l5ReqPkg.sso.externalSecure")
+    check configurableIsSatisfied("l5ReqPkg.sso.externalSecure")
+
+  test "the seed is a SHAPE and not a value: reading the slot directly refuses too":
+    # THE SECOND LINE OF DEFENCE, and it needs a case of its own because
+    # it is not reachable from any assertion above.
+    # `requiredConfigurableValue` pre-checks satisfaction and raises its
+    # own routed message, so a mutation that made `dslPortLookup` hand
+    # the zero seed back as a value was NOT caught by a single case in
+    # this file -- measured, 17 OK / 0 FAILED under that mutation. Every
+    # OTHER reader of the lane goes through `dslPortLookup`, so the
+    # guard there is what stops `readConfigurable[string]` returning ""
+    # for a hostname nobody bound.
+    reqReset()
+    check not configurableIsSatisfied("l5ReqPkg.sso.externalDomain")
+    # The enumeration of unsatisfied required keys, which is the
+    # diagnostic surface a resolver (L6/L7) asks "what is still
+    # missing?" rather than key-by-key.
+    check "l5ReqPkg.sso.externalDomain" in unsatisfiedRequiredConfigKeys()
+    check "l5ReqPkg.sso.externalSecure" notin
+      unsatisfiedRequiredConfigKeys()
+    expect EDslPortUnsatisfiedRequired:
+      discard readConfigurable[string]("l5ReqPkg.sso.externalDomain")
+    # The FALLBACK-flavoured overload must not substitute either. That
+    # silent substitution is why `EDslPortUnsatisfiedRequired` is
+    # deliberately NOT a subtype of `EDslPortMissingKey`, which that
+    # overload catches and answers with the fallback.
+    expect EDslPortUnsatisfiedRequired:
+      discard readConfigurable("l5ReqPkg.sso.externalDomain", "fallback")
+    # THE CONTROL: the same two reads once the environment has satisfied
+    # the key. Without it the two refusals above could be a key that is
+    # simply unreadable.
+    applyEnvironment("l5ReqPkg", "dev")
+    check readConfigurable[string]("l5ReqPkg.sso.externalDomain") ==
+      "login.metacraft-labs.test"
+    check readConfigurable("l5ReqPkg.sso.externalDomain", "fallback") ==
+      "login.metacraft-labs.test"
+    check "l5ReqPkg.sso.externalDomain" notin
+      unsatisfiedRequiredConfigKeys()
+    reqReset()
+
+  test "the environment's binding satisfies the required key, and reaches the ARGV":
+    let under = reqResolve("dev")
+    check under.argv == @["start-from-init", "--config", ReqConfigPath,
+      "--domain", "login.metacraft-labs.test", "--secure", "false"]
+
+  test "and reaches the RENDERED CONFIG's bytes":
+    let under = reqResolve("dev")
+    check under.rendered ==
+      "ExternalDomain: login.metacraft-labs.test\nExternalSecure: false\n"
+
+  test "the SAME definition under `production` carries production's hostname":
+    let under = reqResolve("production")
+    check under.argv == @["start-from-init", "--config", ReqConfigPath,
+      "--domain", "login.metacraft-labs.com", "--secure", "true"]
+    check under.rendered ==
+      "ExternalDomain: login.metacraft-labs.com\nExternalSecure: true\n"
+
+  test "THE CONTROL: the two resolutions differ ONLY where the bindings do":
+    # `externalSecure` is bound by `dev` and NOT by `production`, so it
+    # differs for a different reason than `externalDomain` does: one is
+    # a required key the environment supplied, the other is a defaulted
+    # key one environment overrode. Without this the pair above could
+    # be reading two literals.
+    let dev = reqResolve("dev")
+    let prod = reqResolve("production")
+    check dev.argv[4] != prod.argv[4]
+    check dev.argv[4] == "login.metacraft-labs.test"
+    check prod.argv[4] == "login.metacraft-labs.com"
+    check dev.argv[6] == "false"
+    check prod.argv[6] == "true"
+    check dev.argv[0] == prod.argv[0]
+    check dev.argv[2] == prod.argv[2]
+
+suite "L5 — REFUSAL TWO OF TWO: the SELECTED environment leaves a required key unbound":
+
+  test "a selected environment that does not bind it refuses, naming it, the environment and both routes":
+    let msg = reqRefusalMessage("bare")
+    checkpoint(msg)
+    check msg.len > 0
+    check msg.contains("required `config:` key `sso.externalDomain`")
+    check msg.contains("IS UNSATISFIED")
+    check msg.contains("the selected environment `bare` does not bind it")
+    # BOTH routes, named.
+    check msg.contains("environment <name>: sso.externalDomain = <value>")
+    check msg.contains("enable sso(externalDomain = <value>)")
+    # And the environments that DO bind it, because "bind it in an
+    # environment" is not actionable when the real mistake is having
+    # selected the wrong one of three.
+    check msg.contains("that DO bind it: dev, production")
+    # NOT the expansion refusal's sentence: this one means "this
+    # configuration does not work", not "this can never work".
+    check not msg.contains("NOTHING CAN EVER SATISFY IT")
+
+  test "with NO environment selected it refuses too, and says so":
+    # The other half of the same refusal: §6.4's selection is a tracked
+    # input and "none" is a state it has. A required key is unsatisfied
+    # there as well, and silence would be the accepted-and-not-there
+    # failure this campaign hunts.
+    let msg = reqRefusalMessage("")
+    checkpoint(msg)
+    check msg.contains("NO environment is selected")
+    check msg.contains("that DO bind it: dev, production")
+
+  test "THE CONTROL: the same resolution under an environment that DOES bind it does not raise":
+    # Proves the refusal is about the binding and not about the fixture.
+    let msg = reqRefusalMessage("dev")
+    check msg == ""
