@@ -339,7 +339,12 @@ unverified archive.
     }
     $stage = Join-Path $work 'unpack'
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    Expand-Archive -LiteralPath (Join-Path $work $asset) -DestinationPath $stage -Force
+    # .NET's zip reader directly, not Expand-Archive: Windows PowerShell 5.1's
+    # cmdlet writes a progress record per entry, which makes an archive of
+    # thousands of files (the release carries its own sources) take minutes
+    # instead of seconds. $stage is fresh, so nothing needs overwriting.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $work $asset), $stage)
     $top = Join-Path $stage "reprobuild-$ver-windows-$arch"
     if (-not (Test-Path -LiteralPath $top)) {
       Die "archive did not contain the expected top-level directory reprobuild-$ver-windows-$arch"
