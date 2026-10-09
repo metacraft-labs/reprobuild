@@ -163,7 +163,10 @@ case "${os}" in
 #!/bin/sh
 # reprobuild portable launcher: run the real binary through the bundled glibc
 # loader so it does not depend on the host's /nix/store or system glibc.
-here=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+# Locate this script with shell builtins only: inside a build action PATH holds
+# just the declared tools, which need not include dirname.
+case "\$0" in */*) here=\${0%/*} ;; *) here=. ;; esac
+here=\$(CDPATH= cd -- "\$here" && pwd)
 ${engine_wrapper_line}
 exec "\${here}/../lib/${loadername}" --library-path "\${here}/../lib" "\${here}/.${base}.real" "\$@"
 EOS
