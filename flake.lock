@@ -238,15 +238,17 @@
     "codetracer-src": {
       "flake": false,
       "locked": {
+        "lastModified": 1791564002,
+        "narHash": "sha256-oOzMNLgyTX9Y0NSmVZxkxkgyWBtYsWt9g560RgZd/+o=",
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "20709978e0170f87add3fe3c48f4297c84b7b245",
+        "rev": "45aa9b52acde3dd2c6daae7255dbb1c0a5cc46fd",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
-        "ref": "dev",
         "repo": "codetracer",
+        "rev": "45aa9b52acde3dd2c6daae7255dbb1c0a5cc46fd",
         "type": "github"
       }
     },
@@ -329,17 +331,17 @@
     "ct-trace-format-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1786674317,
-        "narHash": "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=",
+        "lastModified": 1791473481,
+        "narHash": "sha256-+3Q3qbwb2/EiLjzLynPGkXLXMwZBLEV8//KD/OIuAaM=",
         "owner": "metacraft-labs",
         "repo": "codetracer-trace-format-nim",
-        "rev": "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26",
+        "rev": "051efd22b00ec3b88676fb07755a65c5a4ca8fde",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "codetracer-trace-format-nim",
-        "rev": "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26",
+        "rev": "051efd22b00ec3b88676fb07755a65c5a4ca8fde",
         "type": "github"
       }
     },
@@ -1329,17 +1331,17 @@
     "nim-fork-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790309958,
-        "narHash": "sha256-kHFM8EsJT9eakq2i470AqHplbokgnRA19donFPOoqVQ=",
+        "lastModified": 1791479597,
+        "narHash": "sha256-DCzEpcXr52up6f4JoyjmxfjrldqVKHVyljHN4EwDQDw=",
         "ref": "codetracer",
-        "rev": "1812157695c0bdeefc67e914925726c66149982a",
-        "revCount": 23107,
+        "rev": "f902ddcb7a29b262385645809aede76834015278",
+        "revCount": 23118,
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       },
       "original": {
         "ref": "codetracer",
-        "rev": "1812157695c0bdeefc67e914925726c66149982a",
+        "rev": "f902ddcb7a29b262385645809aede76834015278",
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       }

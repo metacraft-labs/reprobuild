@@ -384,12 +384,11 @@
       # shipped tool tracks a pinned/overridable source instead of whatever
       # someone hand-compiled into a sibling checkout.
       #
-      # Pinned to ``dev``, CodeTracer's active branch, mirroring the
-      # ``runquota/dev`` pin above and for the same reason: the repo's default
-      # branch is ``stable``, a release pointer that can sit behind ``dev``.
-      # (At this pin ``stable`` and ``dev`` happen to name the same commit, and
-      # that commit is a strict descendant of ``main``; all three carry
-      # ``src/ct_test``.)
+      # Pinned to an exact revision, like ``ct-trace-format-src`` below, and
+      # moved together with it: the incremental-test seam this input supplies
+      # is compiled against that trace-format source, so the two must name a
+      # CodeTracer revision built against the same trace-format revision. A
+      # branch ref would let either side move alone.
       #
       # ``flake = false`` — we want the source tree only. CodeTracer's own
       # flake drags in the Electron/frontend/db-backend toolchain, none of
@@ -417,7 +416,7 @@
       # that a developer editing the seam in a workspace checkout sees the edit
       # immediately and an unset variable still means unset. Exporting the pin
       # as ``CODETRACER_SRC`` would put it permanently ahead of both.
-      url = "github:metacraft-labs/codetracer/dev";
+      url = "github:metacraft-labs/codetracer/45aa9b52acde3dd2c6daae7255dbb1c0a5cc46fd";
       flake = false;
     };
 
@@ -488,7 +487,7 @@
     # monitored import/restore path: an initialized local could make the JS HCR
     # transform absorb the following try and emit an orphaned finally.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1812157695c0bdeefc67e914925726c66149982a";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=f902ddcb7a29b262385645809aede76834015278";
       flake = false;
     };
     nim-csources-src = {
@@ -499,7 +498,7 @@
       # CodeTracer 632fdceed imports codetracer_trace_writer/span_stream. Keep
       # this past the span-stream writer, cumulative-index, and encoder fixes;
       # the older c2f3dfc3 pin does not contain that module at all.
-      url = "github:metacraft-labs/codetracer-trace-format-nim/bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
+      url = "github:metacraft-labs/codetracer-trace-format-nim/051efd22b00ec3b88676fb07755a65c5a4ca8fde";
       flake = false;
     };
     nim-stew-src = {
