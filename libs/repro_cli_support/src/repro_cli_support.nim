@@ -9204,7 +9204,20 @@ proc recipeRelativeCompilePossible(recipeDir, consumerRoot: string): bool =
           os.normalizedPath(recipeDir):
       return false
     try:
-      createDir(extendedPath(recipeDir / ".repro" / "interface"))
+      let reproDir = recipeDir / ".repro"
+      if dirExists(extendedPath(reproDir)):
+        createDir(extendedPath(reproDir / "interface"))
+      else:
+        # Creating `.repro` adds an entry to the recipe's ROOT directory,
+        # and a root's mtime is what an editable develop override and an
+        # on-disk sibling fold into their consumers' action keys
+        # (`computeOverrideContentIdentity`, `onDiskSiblingSourceBinding`).
+        # The edge's derived outputs are not an edit of the recipe: keep the
+        # root's mtime, or a consumer's second build would miss on every
+        # action that consumes this recipe as a producer.
+        let rootModified = getLastModificationTime(extendedPath(recipeDir))
+        createDir(extendedPath(reproDir / "interface"))
+        setLastModificationTime(extendedPath(recipeDir), rootModified)
       true
     except OSError, IOError:
       false
@@ -9469,7 +9482,17 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # after: the command line is an input by construction, not a list somebody
   # maintains. Content changes are caught by the engine's recorded-input
   # revalidation on top of it.
-  let edgeIdentity = weakFingerprintFromText(command.join("\x00") & keySuffix)
+  # Every recipe-relative extraction of the same variant has the same argv
+  # (`--module repro.nim`), so the recipe's own bytes partition the key: the
+  # engine keeps a bounded number of records per weak fingerprint, and
+  # unrelated recipes sharing one would evict each other's.
+  let recipeContent =
+    if relocatable:
+      "\x00recipe\x00" & digestHex(blake3DomainDigest(
+        readFile(extendedPath(modulePath)).bytesOf(), hdActionFingerprint))
+    else: ""
+  let edgeIdentity = weakFingerprintFromText(command.join("\x00") & keySuffix &
+    recipeContent)
   let sessionKey = toHex(edgeIdentity.bytes) & "\x00" & artifactPath
   if not forceRebuild and not validateExistingOnly and
       interfaceEdgeSessionResults.hasKey(sessionKey) and

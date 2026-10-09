@@ -6033,18 +6033,13 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
         buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
           positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
             hostFlags, libFlags)
-  # A recipe-relative extraction compiles IN the recipe directory, so the
-  # paths that belong to the recipe are spelled relative to it.
-  proc spelled(path: string): string =
-    if recipeRelative: relativePath(absolutePath(path), absoluteModuleDir)
-    else: path
   var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
-    "--path:" & (if recipeRelative: "." else: moduleDir),
-    "--nimcache:" & spelled(nimcache),
-    "--out:" & spelled(runnerBin),
-    spelled(runnerPath)
+    "--path:" & moduleDir,
+    "--nimcache:" & nimcache,
+    "--out:" & runnerBin,
+    runnerPath
   ])
   command.insert(hostFlags, 2)
   command.insert(externalHashFlags(workDir), 2)
@@ -6082,8 +6077,17 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # not a valid compiler working directory: Nim writes relative linker response
   # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
   # Keep response files and binaries in the extraction's private directory.
-  let compileExecution = runInterfaceCompilerCommand(command,
-    cwd = (if recipeRelative: absoluteModuleDir else: tempRoot))
+  #
+  # This holds for a recipe-relative extraction too, whose EDGE runs in the
+  # recipe directory: Nim writes `<runner>_linkerArgs.txt` into its cwd for a
+  # long link line and deletes it again, and that transient entry in the
+  # recipe's root changes the root's mtime — which an editable develop
+  # override folds into its consumers' action keys
+  # (`computeOverrideContentIdentity`). Measured: every consumer action
+  # missed on the second build. The compiler's private cwd is under the
+  # edge's scratch, so its reads stay absolute and the edge's record names
+  # them relative to the recipe.
+  let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
     # `runCommand` already raises on non-zero exit, so reaching this branch
