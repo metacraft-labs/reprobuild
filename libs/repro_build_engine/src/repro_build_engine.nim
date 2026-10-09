@@ -103,6 +103,13 @@ else:
 
 import repro_core
 from repro_core/process_streams import drainStream
+# ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
+# second time on POSIX. This scheduler thread is not alone once the worker
+# pool is live (in-process monitor hosting: pooled ``finishMonitor`` and
+# depfile flushes open, write and rename files concurrently), so every merged
+# child it starts — converters, RunQuota helpers — is released through
+# ``closeProcessOnce``. See ``repro_core/process_close``.
+from repro_core/process_close import closeProcessOnce
 import repro_depfile
 import repro_hash
 import repro_local_store
@@ -9597,7 +9604,7 @@ proc runConverter(action: BuildAction; converterSpec: PostBuildDependencyConvert
   # identically on a silent one. See `repro_core/process_streams`.
   var output = drainStream(child.outputStream)
   let exitCode = child.waitForExit()
-  child.close()
+  closeProcessOnce(child)
   if exitCode != 0:
     var diagnostic = "converter failed with exit " & $exitCode
     if output.len > 0:
@@ -18816,7 +18823,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
       if runningItem.processKind == rpkHelperProcess:
-        runningItem.process.close()
+        closeProcessOnce(runningItem.process)
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
         if finishedUsed > runningItem.poolUnits:
@@ -19013,7 +19020,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           discard item.directProcess.cancelAndWait()
       of rpkHelperProcess:
         terminateRunningAction(item)
-        item.process.close()
+        closeProcessOnce(item.process)
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       inlineRunQuotaSession.close()

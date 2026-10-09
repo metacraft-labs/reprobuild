@@ -36,6 +36,11 @@
 import std/[os, osproc, strtabs, strutils, times]
 
 import git_tool
+# ``execCmdExCloseOnce``: ``execCmdEx`` without ``osproc.close``'s double close
+# of the merged stdout/stderr descriptor. These helpers run inside the build
+# engine's workspace-VCS executor, on the scheduler thread, while the engine's
+# worker pool may be live; see ``repro_core/process_close``.
+from repro_core/process_exec import execCmdExCloseOnce
 
 const
   AlternatesRelPath* = "objects/info/alternates"
@@ -620,7 +625,7 @@ proc runGit(gitBin: string; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir,
+  let res = execCmdExCloseOnce(cmd, workingDir = workingDir,
     env = scrubbedGitRepositoryEnv())
   (code: res.exitCode, output: res.output)
 
@@ -1303,7 +1308,8 @@ proc runGitEnv(gitBin: string; args: openArray[string];
     env.del("GIT_NO_LAZY_FETCH")
   else:
     env["GIT_NO_LAZY_FETCH"] = "1"
-  let res = execCmdEx(cmd, workingDir = workingDir, env = env, input = input)
+  let res = execCmdExCloseOnce(cmd, workingDir = workingDir, env = env,
+    input = input)
   (code: res.exitCode, output: res.output)
 
 proc isObjectId(text: string): bool =

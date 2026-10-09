@@ -90,6 +90,11 @@ export LC_ALL=C
 # build-engine library with comments and string literals removed.
 BANNED='findExe|execCmdEx|execCmd|execProcesses|execProcess|execShellCmd'
 BANNED="${BANNED}|startProcess|startDirect|launchProcess"
+# ``execCmdExCloseOnce`` (repro_core/process_exec) is ``execCmdEx`` with a
+# correct release of the child; a call to it is exactly as ambient as a call to
+# ``execCmdEx``, so switching a site to it must not take the site off the
+# ratchet.
+BANNED="${BANNED}|execCmdExCloseOnce"
 
 # Baseline: files that already contain a banned call. Regenerate with
 #   scripts/check_ambient_execution.sh --write-baseline
@@ -97,10 +102,14 @@ BASELINE="scripts/ambient-execution-baseline.txt"
 
 scan() {
   # Only production Nim sources. Tests legitimately shell out to build fixtures.
-  # The linter implementation necessarily names and wraps every banned API.
+  # The linter implementation necessarily names and wraps every banned API,
+  # and ``process_exec`` is the release-once implementation of ``execCmdEx``
+  # it delegates to: a mechanism that runs whatever its caller names, whose
+  # callers are what the ratchet counts.
   grep -rlnE "\b(${BANNED})\(" --include=*.nim libs repro.nim apps 2>/dev/null \
     | grep -v '/tests/' \
     | grep -v '^libs/repro_core/src/repro_core/ambient_execution\.nim$' \
+    | grep -v '^libs/repro_core/src/repro_core/process_exec\.nim$' \
     | sort -u
 }
 
