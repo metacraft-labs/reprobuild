@@ -6613,6 +6613,26 @@ proc canonicalVariantAssignments(): string =
   parts.sort()
   parts.join(",")
 
+proc canonicalEnvironmentSignature(): string =
+  ## Shared-Development-Services L5 (§6.4): the SELECTED ENVIRONMENT, in
+  ## the canonical form both lowered-graph cache keys fold in.
+  ##
+  ## §6.4 is a requirement on exactly this code: "The selected
+  ## environment MUST be a tracked solver input that participates in the
+  ## graph cache key. An ambient `getEnv` is silently ignored when a
+  ## lowered graph is served from cache, so an environment selected that
+  ## way could hand a developer a production issuer out of a warm cache
+  ## — a failure that is both silent and security-relevant."
+  ##
+  ## The projection itself lives in ``repro_project_dsl``
+  ## (``canonicalEnvironmentSelection``) because that is where the
+  ## ``environment`` block is declared and where the selection is read
+  ## when the bindings are applied; reading it twice, in two normal
+  ## forms, is how a cache key and the value it is supposed to track
+  ## drift apart. Empty when no environment is selected, so the key is
+  ## byte-identical to the pre-L5 one for every build that selects none.
+  canonicalEnvironmentSelection()
+
 proc providerGraphStoreRoot(base: string): string =
   ## Provider-graph snapshot store root, isolated per active variant set.
   ##
@@ -6629,7 +6649,20 @@ proc providerGraphStoreRoot(base: string): string =
   ## start (and a fresh provider invocation) when the variants change, and lets
   ## the two configurations' snapshots coexist and cache independently — the
   ## same way cargo keeps ``target/debug`` and ``target/release`` separate.
-  let sig = canonicalVariantAssignments()
+  # Shared-Development-Services L5 (§6.4): the selected ENVIRONMENT is
+  # folded in beside the variant set, for the identical reason the
+  # comment above gives for variants. An environment's bindings are
+  # applied at provider-run time (module init of the recipe), so they
+  # change the EMITTED GRAPH -- a service's argv carries the bound
+  # hostname -- while leaving ``providerArtifactId`` untouched. Two
+  # builds differing only in their environment would otherwise share one
+  # snapshot and the second would reuse the first's fragments with
+  # ``providerInvocations: 0``, which is §6.4's "production issuer out of
+  # a warm cache" in its most literal form.
+  let envSig = canonicalEnvironmentSignature()
+  let sig =
+    if envSig.len == 0: canonicalVariantAssignments()
+    else: canonicalVariantAssignments() & "|env=" & envSig
   if sig.len == 0:
     return base
   var slug = ""
@@ -6665,6 +6698,21 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(toolIdentityCacheKey(artifact, mode))
   payload.addCacheField(providerArtifactId)
   payload.addCacheField(canonicalVariantAssignments())
+  # Shared-Development-Services L5 (§6.4): the selected environment.
+  # This is the field the gate's control measures -- "a warm cache
+  # cannot serve a graph lowered for another environment".
+  #
+  # APPENDED ONLY WHEN NON-EMPTY, and that is deliberate rather than
+  # tidy. ``addCacheField("")`` is not a no-op: it appends ``"0:\n"``,
+  # so an unconditional field would change the key of every build that
+  # selects NO environment and cold-start the whole fleet's lowered-graph
+  # caches once, for a feature those builds do not use. Guarded, the
+  # no-environment key is BYTE-IDENTICAL to the pre-L5 one. There is no
+  # ambiguity cost: every field is length-prefixed, and "" is not a
+  # spellable environment name -- it IS the unselected case.
+  let environmentSignature = canonicalEnvironmentSignature()
+  if environmentSignature.len > 0:
+    payload.addCacheField(environmentSignature)
   if fileExists(extendedPath(providerSnapshotPath)):
     payload.addCacheField(fileContentDigest(providerSnapshotPath))
   else:
@@ -6998,6 +7046,30 @@ proc prewarmDaemonParentCaches*(outDir: string): DaemonParentPrewarmReport =
   result.toolIdentities = prewarmToolIdentitiesFrom(outDir, stamps)
   prewarmStamps = stamps
   prewarmedOutDir = if stamps.len > 0: outDir else: ""
+
+when defined(reproEnvironmentCacheKeyTest):
+  ## Seams for
+  ## ``libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim``.
+  ## ``loweredGraphCacheKey`` and ``providerGraphStoreRoot`` are
+  ## module-private and the property under test -- that a warm cache
+  ## cannot serve a graph lowered for another environment -- is a
+  ## property of the KEY, not of anything observable from a finished
+  ## build. Compiled in only for that test, so no shipped image carries
+  ## a second way to compute a cache key.
+  proc loweredGraphCacheKeyForTest*(artifact: ProjectInterfaceArtifact;
+                                    mode: ToolProvisioningMode;
+                                    providerArtifactId,
+                                    providerSnapshotPath,
+                                    pathEnv: string;
+                                    extensionSignature = ""): string =
+    loweredGraphCacheKey(artifact, mode, providerArtifactId,
+      providerSnapshotPath, pathEnv, extensionSignature)
+
+  proc providerGraphStoreRootForTest*(base: string): string =
+    providerGraphStoreRoot(base)
+
+  proc canonicalEnvironmentSignatureForTest*(): string =
+    canonicalEnvironmentSignature()
 
 when defined(reproDaemonParentPrewarmTest):
   ## Seams for ``t_daemon_parent_prewarm``. The warm tables and the cache

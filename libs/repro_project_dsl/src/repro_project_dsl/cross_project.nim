@@ -452,7 +452,18 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # unprovisioned name), which is a different question from
                  # "whose DSL constructors do I import". A package can be
                  # either, both, or neither.
-                 "dsldeps"]
+                 "dsldeps",
+                 # Shared-Development-Services L5 (§6): the package-level
+                 # `environment <name>:` binding set, and the consumer's
+                 # `instanceOverrides <package>.<service>:` block (§6.6).
+                 # Both MUST be listed here. An unlisted head falls into
+                 # the preserved-Nim bucket and is emitted verbatim at
+                 # module top level, where `environment dev:` fails as an
+                 # undeclared identifier -- loud, but pointing at
+                 # generated code rather than at the declaration. Listed,
+                 # the L5 walker owns them and every refusal names the
+                 # author's own line.
+                 "environment", "instanceoverrides"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.

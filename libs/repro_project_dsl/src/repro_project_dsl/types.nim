@@ -427,6 +427,129 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  EnvironmentPrecedence* = enum
+    ## Shared-Development-Services L5 (§6.1), D-SS6's second half: WHERE
+    ## an environment's binding sits in the precedence order each
+    ## configurable already declares.
+    ##
+    ## This is a MIRROR of `Configurable-System.md`'s
+    ## ``ContributionPriority`` (``prDefault`` < ``prSet`` <
+    ## ``prOverride`` < ``prForce``), declared here for the same reason
+    ## ``InterfaceServiceScope`` mirrors ``ServiceScope``: the ladder's
+    ## own type lives in ``repro_dsl_stdlib/configurables/types.nim`` and
+    ## ``repro_dsl_stdlib`` DEPENDS ON this library, so importing it here
+    ## would be a cycle. The ordinals line up, and
+    ## ``t_l5_environment_binds_configurables.nim`` carries the drift
+    ## assertion -- a test can import both.
+    ##
+    ## §6.1: an environment "needs no new staging, no new merge rules and
+    ## no new precedence model -- only a name, a binding set, and a
+    ## DECLARED POSITION in the existing precedence order". This enum is
+    ## how that position is recorded rather than re-decided.
+    epDefault   ## = ``prDefault``
+    epSet       ## = ``prSet``
+    epOverride  ## = ``prOverride`` -- where an environment binds (D-SS6)
+    epForce     ## = ``prForce``
+
+  EnvironmentBindingDef* = object
+    ## Shared-Development-Services L5 (§6): ONE binding of ONE
+    ## configurable by ONE environment. "An environment is a named set of
+    ## bindings to configurables, and nothing else", and this is one
+    ## element of that set.
+    ##
+    ## The record carries no value. It carries the author's EXPRESSION,
+    ## verbatim, because the value is produced by the emitted
+    ## ``bindEnvironmentConfigurable`` call in the author's own scope --
+    ## the same contract ``ActivityConfigInterfaceDef.defaultRepr`` has,
+    ## and for the same reason: a macro that evaluated the expression
+    ## would be re-implementing a Nim evaluator.
+    key*: string
+      ## The configurable's FULL key, ``<package>.<name>`` for a
+      ## package-level ``config:`` key and
+      ## ``<package>.<activity>.<name>`` for an activity's. The first
+      ## form is byte-identical to the key ``recordConfigDefault``
+      ## registers, which is what makes an environment a contributor into
+      ## the EXISTING table rather than a second one.
+    qualifier*: string
+      ## The declaring activity, or "" for a package-level configurable.
+    name*: string
+      ## The configurable's own name, unqualified.
+    valueRepr*: string
+      ## The bound expression as the author wrote it. Diagnostics and the
+      ## environment component of the instance key read this; nothing
+      ## evaluates it.
+    precedence*: EnvironmentPrecedence
+      ## Always ``epOverride`` today (D-SS6). A field rather than a
+      ## constant so a configurable that declares a different position
+      ## for environment contributions has somewhere to say so without a
+      ## shape change.
+    sourceFile*: string
+    sourceLine*: int
+
+  DslEnvironmentDef* = object
+    ## Shared-Development-Services L5 (§6): one ``environment <name>:``
+    ## declaration, lowered.
+    ##
+    ## It has a name and a binding set. It has no executable, no
+    ## topology, no host and no activity list, and that absence is the
+    ## design: §6.2 says an environment "is not a machine and has no
+    ## topology", and a field here that looked like one would be the
+    ## second of the two drafts §6.3 records as wrong.
+    packageName*: string
+    name*: string
+    bindings*: seq[EnvironmentBindingDef]
+    sourceFile*: string
+    sourceLine*: int
+
+  ConsumerLeaseKind* = enum
+    ## Shared-Development-Services L5, §6.6's left column: the lease
+    ## policy a CONSUMER chooses for its own consuming edge, which
+    ## ``Ephemeral-State-Leases.md`` §2.2 already allows per edge.
+    ##
+    ## A mirror of ``repro_resources/lease.nim``'s ``LeaseKind`` plus an
+    ## ``unset`` ground state, for the mirror reason
+    ## ``EnvironmentPrecedence`` gives -- ``repro_resources`` depends on
+    ## this library. ``clkUnset`` is ordinal 0 so a record that declared
+    ## nothing is distinguishable from one that declared ``keep``, which
+    ## is ``LeaseKind``'s own default and therefore NOT the same
+    ## statement.
+    clkUnset
+    clkKeep       ## ``lease keep`` -> ``lkKeep``
+    clkImmediate  ## ``lease immediate`` -> ``lkImmediate``
+    clkDelayed    ## ``lease delayed(<seconds>)`` -> ``lkDelayed``
+
+  ConsumerInstanceOverrideDef* = object
+    ## Shared-Development-Services L5 (§6.6): what a CONSUMER is allowed
+    ## to say about an instance of somebody else's service.
+    ##
+    ## §6.6's rule is one line -- "a consumer may decide what affects
+    ## only itself; the environment binds everything that defines the
+    ## instance" -- and this record is the left column of its table,
+    ## entire: the instance SCOPE (§4.1) and the consumer's OWN LEASE
+    ## POLICY. There is deliberately no field for a configurable value,
+    ## no field for a hostname, and no field for an identity: every one
+    ## of those is the right column, and the walker refuses them in the
+    ## consumer's own compilation rather than recording them here.
+    ##
+    ## NOTHING IS RESOLVED BY THIS RECORD. It takes no lease, starts
+    ## nothing, and contacts no daemon; it is the consumer's declared
+    ## intent, which L6's attach decision and L7's resolver read.
+    consumerPackage*: string
+    targetPackage*: string
+      ## The package that OWNS the service, as written.
+    targetService*: string
+    scopeDeclared*: bool
+      ## Whether ``scope`` was written. Separate from ``scope`` for L4's
+      ## reason: "the author said nothing" and "the author wrote the
+      ## default" must not be the same record, because the second is an
+      ## override of the owner's suggestion and the first is not.
+    scope*: ServiceScope
+    leaseKind*: ConsumerLeaseKind
+    leaseTtlSeconds*: int
+      ## Meaningful only for ``clkDelayed``; zero otherwise.
+    sourceFile*: string
+    sourceLine*: int
+
   LiftedServiceHandle* = object
     ## Shared-Development-Services L3: the consumer-side value a lifted
     ## activity handle's service member holds.

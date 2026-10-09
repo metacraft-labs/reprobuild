@@ -127,6 +127,7 @@ libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim	nim	4
 libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim	nim	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	3
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
+libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	13
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	7
@@ -422,6 +423,8 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_config_enum.nim	nim	7
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim	nim	3
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim	nim	5
+libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_binds_configurables.nim	nim	28
+libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_surface_is_typed.nim	nim	44
 libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_ident_form.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_action_emission.nim	nim	2
@@ -497,6 +500,7 @@ libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emi
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5
 libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	3
 libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim	nim	2
+libs/repro_project_dsl/tests/t_l5_environment_reaches_the_service_argv.nim	nim	8
 libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
@@ -516,6 +520,7 @@ libs/repro_resources/tests/t_l1_state_store.nim	nim	6
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	5
 libs/repro_resources/tests/t_l3_reaper.nim	nim	10
 libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	46
+libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	17
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4

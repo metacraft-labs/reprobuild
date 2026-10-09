@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1791,
-    "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 597,
+    "nimTestBinaries": 1796,
+    "pureUnitConsolidationGroups": 49,
+    "pureUnitTests": 598,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1805
+    "testEntries": 1810
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -470,6 +470,21 @@
         "libs/repro_resources/tests/t_l3_reaper.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "sources": [
+        "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
+        "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1084,8 +1099,8 @@
       "graph-fixture": 12,
       "integration": 914,
       "platform/destructive": 117,
-      "pure unit": 597,
-      "unclassified": 165
+      "pure unit": 598,
+      "unclassified": 169
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1233,9 +1248,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1791,
+    "nimTestBinaryCount": 1796,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1805
+    "testEntryCount": 1810
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8488,6 +8503,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l5_environment_is_in_the_graph_cache_key",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_binding_governs_per_name",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -13833,6 +13869,41 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dsl_environment_binds_configurables",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_binds_configurables.nim",
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 28,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dsl_environment_surface_is_typed",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_surface_is_typed.nim",
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 44,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dsl_executable_ident_form",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -15152,6 +15223,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l5_environment_reaches_the_service_argv",
+      "class": "unclassified",
+      "classificationReason": "imports `l5_environment_argv_fixtures`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_l5_environment_reaches_the_service_argv.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_m6_non_determinism_codec",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -15489,6 +15580,25 @@
       "source": "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
       "sourceSuiteCount": 10,
       "staticCaseCount": 46,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_l5_environment_is_in_the_instance_key",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

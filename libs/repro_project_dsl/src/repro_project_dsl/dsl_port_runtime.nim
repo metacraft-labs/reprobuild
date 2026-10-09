@@ -279,6 +279,29 @@ proc recordConfigDefault*[T](packageName, name: string; default: T) =
     {.error: "recordConfigDefault: unsupported configurable type " &
        $T & "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
 
+proc configurableOverrideSnapshot*(): Table[string, DslScalarValue] =
+  ## A copy of the override table, for a caller that must apply a GROUP
+  ## of overrides all-or-nothing. `restoreConfigurableOverrides` puts it
+  ## back.
+  ##
+  ## WHY THIS IS PUBLIC AND WHO NEEDS IT. An `environment <name>:`
+  ## applies several bindings in sequence (§6), and before this existed
+  ## a binding that raised partway left the EARLIER bindings in force:
+  ## the environment was applied PARTIALLY, which is worse than either
+  ## outcome -- the author sees an error, and the process continues with
+  ## a configuration no environment declares. `applyEnvironment` now
+  ## snapshots, applies, and restores on any failure. The snapshot is
+  ## the whole override table rather than the keys the environment names
+  ## because the restore has to undo rows the FAILING call may have
+  ## written too, and because "set" and "was already set to something
+  ## else" are different states that a per-key undo would conflate.
+  dslPortOverrides
+
+proc restoreConfigurableOverrides*(snapshot: Table[string, DslScalarValue]) =
+  ## Replace the override table with `snapshot`. See
+  ## `configurableOverrideSnapshot`.
+  dslPortOverrides = snapshot
+
 proc registeredConfigKeys*(): seq[string] =
   ## Return every ``<package>.<name>`` key in insertion order. A copy
   ## so callers cannot mutate the registry.
@@ -5444,3 +5467,393 @@ proc registeredLibraryApi*(packageName, libraryName: string): LibraryApi =
   if key in dslPortLibraryApis:
     return dslPortLibraryApis[key]
   result = LibraryApi(declared: false)
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L5 — ENVIRONMENTS.
+#
+# `Shared-Development-Services.md` §6 is the authority, and its first
+# sentence is the whole specification of this section:
+#
+#   "An environment is a named set of bindings to configurables, and
+#    nothing else. The service or activity declares its configurables; an
+#    environment binds them; the existing late-binding machinery
+#    assembles the result."
+#
+# So what is HERE is a registry of names to binding sets, plus the one
+# proc that hands those bindings to the EXISTING override lane
+# (`setConfigurableRaw`, the table `readConfigurable` consults before the
+# registered default). There is no new staging, no new merge rule and no
+# new precedence model, which is §6.1's requirement stated as a
+# constraint on this code: `applySelectedEnvironment` calls nothing that
+# did not already exist, and an environment reaches a configurable by
+# exactly the route a `setConfigurable` from any other contributor does.
+#
+# WHAT IS DELIBERATELY NOT HERE:
+#
+#   * the ATTACH DECISION (§4.3) is L6;
+#   * the instance REGISTRY and `repro up` convergence (§4.5) are L7;
+#   * the CONTRIBUTION operation axis (`append` / `replace`, §5.1) is L8.
+#     An environment binding is a `replace` at `epOverride` in the terms
+#     L8 will introduce, and this code does not pre-empt the spelling.
+# ---------------------------------------------------------------------------
+
+const
+  ReproEnvironmentEnvVar* = "REPRO_ENVIRONMENT"
+    ## The variable that SELECTS an environment for this invocation.
+    ##
+    ## §6.4 requires that the selected environment "MUST be a tracked
+    ## solver input that participates in the graph cache key. An ambient
+    ## `getEnv` is silently ignored when a lowered graph is served from
+    ## cache, so an environment selected that way could hand a developer
+    ## a production issuer out of a warm cache."
+    ##
+    ## Reading the selection from the process environment is not what
+    ## makes a selector ambient; FAILING TO FOLD IT INTO THE KEY is. This
+    ## variable is the transport, and `canonicalEnvironmentSelection`
+    ## below is the tracked projection that
+    ## `repro_cli_support`'s `loweredGraphCacheKey` and
+    ## `providerGraphStoreRoot` both fold in -- the same two places, and
+    ## the same treatment, `REPRO_VARIANTS` already gets.
+
+var dslPortEnvironmentRegistry: Table[string, seq[DslEnvironmentDef]]
+  ## Per-package environment registry, keyed by package name. Parallel in
+  ## shape to `dslPortServiceRegistry`, and separate from it on purpose:
+  ## an environment is not a member of a service and a service is not a
+  ## member of an environment (§6.2).
+
+var dslPortEnvironmentOrder: seq[string]
+  ## `<package>\x1f<environment>` in declaration order, so enumeration is
+  ## stable regardless of hash-table bucket layout -- the reason
+  ## `dslPortKeyOrder` exists beside `dslPortDefaults`.
+
+var dslPortEnvironmentAppliers: Table[string, proc () {.closure.}]
+  ## `<package>\x1f<environment>` -> the closure that performs that
+  ## environment's bindings.
+  ##
+  ## A CLOSURE and not a value table, because a binding's value is the
+  ## author's EXPRESSION and only the author's scope can evaluate it --
+  ## the same reason L1 wraps a `service` body in a re-runnable closure
+  ## (`registerServiceDeclarator`) instead of recording its argv as
+  ## strings. `DslEnvironmentDef.bindings` carries the expression's
+  ## `repr` for diagnostics and for the key; this carries the means to
+  ## evaluate it.
+
+var dslPortConsumerOverrides: seq[ConsumerInstanceOverrideDef]
+  ## §6.6's left column, in declaration order. A flat seq rather than a
+  ## table: the key would be `(consumer, target package, target service)`
+  ## and nothing reads it by key yet -- L6 and L7 do.
+
+proc dslPortEnvironmentKey(packageName, environmentName: string): string =
+  packageName & "\x1f" & environmentName
+
+proc resetDslPortEnvironmentState*() =
+  ## Drop every registered environment and consumer override. Test
+  ## fixtures call this between scenarios so registry entries do not leak
+  ## across cases. Symmetric with `resetDslPortServiceState`.
+  dslPortEnvironmentRegistry.clear()
+  dslPortEnvironmentOrder.setLen(0)
+  dslPortEnvironmentAppliers.clear()
+  dslPortConsumerOverrides.setLen(0)
+
+proc registerEnvironment*(def: DslEnvironmentDef) =
+  ## Record one `environment <name>:` declaration.
+  ##
+  ## FIRST-WINS on a repeated `(package, name)` pair, which is the
+  ## behaviour `DslServiceContextFrame`'s identity guard has and for the
+  ## same reason: the macro already refuses a second `environment dev:`
+  ## at expansion time, so this branch is unreachable from a recipe, and
+  ## if it were reachable last-wins would make which issuer a developer
+  ## gets depend on statement order.
+  let key = dslPortEnvironmentKey(def.packageName, def.name)
+  if key in dslPortEnvironmentOrder:
+    return
+  if def.packageName notin dslPortEnvironmentRegistry:
+    dslPortEnvironmentRegistry[def.packageName] = @[]
+  dslPortEnvironmentRegistry[def.packageName].add(def)
+  dslPortEnvironmentOrder.add(key)
+
+proc registerEnvironmentApplier*(packageName, environmentName: string;
+                                 applier: proc () {.closure.}) =
+  ## Record the closure that applies `(packageName, environmentName)`'s
+  ## bindings. FIRST-WINS, for `registerEnvironment`'s reason -- the two
+  ## registries must agree on which declaration won.
+  let key = dslPortEnvironmentKey(packageName, environmentName)
+  if key in dslPortEnvironmentAppliers:
+    return
+  dslPortEnvironmentAppliers[key] = applier
+
+proc registeredEnvironments*(packageName: string): seq[DslEnvironmentDef] =
+  ## Every environment `packageName` declared, in declaration order. A
+  ## copy, so a caller cannot mutate the registry.
+  if packageName in dslPortEnvironmentRegistry:
+    return dslPortEnvironmentRegistry[packageName]
+  @[]
+
+proc registeredEnvironmentNames*(packageName: string): seq[string] =
+  for def in registeredEnvironments(packageName):
+    result.add(def.name)
+
+proc registeredEnvironment*(packageName, environmentName: string):
+    DslEnvironmentDef =
+  ## The named environment, or a zero record whose `name` is empty.
+  ##
+  ## MATCHED UNDER NIM IDENTIFIER EQUALITY (`normalize` on both sides),
+  ## because every other lane that handles an environment name already
+  ## does. `l5EnvironmentEmission` refuses a second `environment Dev:`
+  ## beside `environment dev:` with `envName.normalize in seenNames`, so
+  ## the DSL has already decided those are ONE name; and
+  ## `canonicalEnvironmentSelection` normalizes, so `REPRO_ENVIRONMENT=Dev`
+  ## and `=dev` are ONE lowered-graph cache entry. A verbatim lookup here
+  ## disagreed with both: `Dev` was refused as an environment the package
+  ## does not declare, under a cache key that says it is the same build
+  ## as `dev`. Two lanes that disagree about which selections are equal
+  ## is §6.4's hazard, so there is one rule.
+  let wanted = environmentName.normalize
+  for def in registeredEnvironments(packageName):
+    if def.name.normalize == wanted:
+      return def
+  DslEnvironmentDef()
+
+proc environmentOwnedConfigKeys*(packageName: string): seq[string] =
+  ## Every configurable key SOME environment of `packageName` binds,
+  ## de-duplicated, in first-binding order.
+  ##
+  ## This is the set §6.6's right column names -- "Bind any configurable
+  ## the environment owns" -- and it is DERIVED rather than declared: a
+  ## configurable becomes environment-owned by being bound in an
+  ## environment, so there is no second place for the ownership to
+  ## disagree with the bindings.
+  for def in registeredEnvironments(packageName):
+    for binding in def.bindings:
+      if binding.key notin result:
+        result.add(binding.key)
+
+proc environmentBindingSite*(packageName, key: string): string =
+  ## `"<environment> (<file>:<line>)"` for the FIRST environment that
+  ## binds `key`, or "" when none does. The consumer-side refusal quotes
+  ## it so the author can go and read the binding that owns the value.
+  for def in registeredEnvironments(packageName):
+    for binding in def.bindings:
+      if binding.key == key:
+        return def.name & " (" & binding.sourceFile & ":" &
+          $binding.sourceLine & ")"
+  ""
+
+proc registerConsumerInstanceOverride*(def: ConsumerInstanceOverrideDef) =
+  ## Record one `instanceOverrides <package>.<service>:` block (§6.6).
+  dslPortConsumerOverrides.add(def)
+
+proc registeredConsumerInstanceOverrides*(consumerPackage: string):
+    seq[ConsumerInstanceOverrideDef] =
+  for def in dslPortConsumerOverrides:
+    if def.consumerPackage == consumerPackage:
+      result.add(def)
+
+proc consumerInstanceOverride*(consumerPackage, targetPackage,
+                               targetService: string):
+    ConsumerInstanceOverrideDef =
+  ## The override this consumer declared for that service, or a zero
+  ## record whose `targetService` is empty.
+  for def in dslPortConsumerOverrides:
+    if def.consumerPackage == consumerPackage and
+        def.targetPackage == targetPackage and
+        def.targetService == targetService:
+      return def
+  ConsumerInstanceOverrideDef()
+
+proc bindEnvironmentConfigurable*[T](packageName, environmentName,
+                                     key: string; value: T) =
+  ## Contribute ONE environment binding into the EXISTING override lane.
+  ##
+  ## `packageName` and `environmentName` are carried for the diagnostic
+  ## and are not part of the key: §6 binds a configurable that already
+  ## exists, so the key is the one `recordConfigDefault` registered and
+  ## not a per-environment variant of it. Two environments do not hold
+  ## two values at once -- ONE is selected per invocation (§6.4), and
+  ## `applySelectedEnvironment` applies that one.
+  ##
+  ## The call delegates to `setConfigurable`, which is `prOverride` in
+  ## `Configurable-System.md`'s ladder as this port implements it: the
+  ## one table `readConfigurable` consults BEFORE the registered
+  ## default. That is D-SS6's declared position (`epOverride`), and the
+  ## reason this proc introduces no merge rule, no second table and no
+  ## new staging of its own -- §6.1's "needs no new staging, no new
+  ## merge rules and no new precedence model" is a constraint on this
+  ## body, and the body satisfies it by calling nothing that L5 added.
+  ##
+  ## `epOverride` IS A RECORDED LABEL HERE, NOT AN ORDERING THIS PORT CAN
+  ## ENFORCE, and saying so is the honest version of the paragraph above.
+  ## `setConfigurableRaw` writes `dslPortOverrides[key] = value` after a
+  ## kind check and compares no priority, and `readConfigurable` consults
+  ## that one table before the defaults table. So an environment does beat
+  ## a registered DEFAULT -- there are two tables and the override one
+  ## wins -- and against any other contributor it is LAST-WRITE-WINS,
+  ## whatever rung either claims. A later `epForce` does not outrank an
+  ## `epOverride` and an earlier one is not protected from it. D-SS6's
+  ## entry in the milestone file carries the measurement and names what a
+  ## real ladder would need (a per-rung table, nobody's milestone yet);
+  ## `EnvironmentBindingDef.precedence` is provenance for whoever builds
+  ## it.
+  ##
+  ## WHY THE UNKNOWN-KEY CASE RE-RAISES WITH §6's SENTENCE RATHER THAN
+  ## CHECKING FIRST. `setConfigurable` already refuses an unregistered
+  ## key, and its message is about `config:` blocks in general. The
+  ## author here wrote an environment binding, so the sentence that
+  ## helps is §6's own ordering rule. Catching rather than pre-checking
+  ## keeps ONE registration test (`setConfigurableRaw`'s) rather than
+  ## two that can disagree.
+  try:
+    setConfigurable(key, value)
+  except EDslPortMissingKey:
+    raise newException(EDslPortMissingKey,
+      "environment `" & environmentName & "` of package `" & packageName &
+      "` binds `" & key & "`, which no `config:` block registered. " &
+      "Shared-Development-Services.md §6: \"The service or activity " &
+      "declares its configurables; an environment binds them\" -- so the " &
+      "declaration has to exist first.")
+
+template environmentBoundValue*(key: string; declared: untyped): untyped =
+  ## The value an activity `config:` key has after the selected
+  ## environment has contributed, or the author's declared default when
+  ## it has not.
+  ##
+  ## This is what L2's generated activity entry point uses as the
+  ## PARAMETER DEFAULT for each `config:` key, and the whole of what
+  ## makes §6's own example work:
+  ##
+  ##     activity sso(pg: ManagedPostgres):
+  ##       config:
+  ##         externalDomain: string
+  ##     environment dev:
+  ##       sso.externalDomain = "login.metacraft-labs.test"
+  ##
+  ## A parameter default is evaluated at CALL time, and the `enable`
+  ## call that invokes the entry point runs long after module init --
+  ## which is where `applySelectedEnvironment` ran. So the read sees the
+  ## binding with no new staging and no explicit ordering: the existing
+  ## Nim evaluation order already puts the contribution before the read.
+  ##
+  ## An `enable` override that passes the argument EXPLICITLY still
+  ## wins, because it supplies the argument and the default is then not
+  ## evaluated at all. That is the correct precedence for a SAME-PACKAGE
+  ## `enable` (the owner overriding its own environment), and it is not
+  ## a consumer-side bind: §6.6's refusal is enforced at the binding
+  ## site, in the consumer's own compilation, and is not a function of
+  ## this read.
+  ##
+  ## `when compiles(...)` rather than an unconditional read: the port's
+  ## configurable lane carries bool / int / string / float / enum /
+  ## seq[enum], and an activity may legitimately declare a `config:` key
+  ## of an object type. For such a key the declared default is used
+  ## directly, and nothing is silently lost BECAUSE THE WALKER REFUSES
+  ## THE BINDING AT THE AUTHOR'S OWN LINE -- `macros_b.nim`'s
+  ## `l5ParseEnvironmentBody` refuses a target whose type the
+  ## configurable lane does not carry, and a target declared with no
+  ## default, each by name.
+  ##
+  ## THAT SENTENCE WAS WRITTEN HERE BEFORE THE REFUSAL EXISTED, and it
+  ## was false: an activity `config:` key with no default was bindable,
+  ## compiled clean, and raised at module init only when the environment
+  ## was actually selected. It is now a statement about a check that is
+  ## tested in both directions rather than an assurance.
+  when compiles(readConfigurable[typeof(declared)](key, declared)):
+    readConfigurable[typeof(declared)](key, declared)
+  else:
+    declared
+
+proc selectedEnvironmentName*(): string =
+  ## The environment selected for this invocation, or "" when none is.
+  ##
+  ## "" is NOT a default environment: it means no environment was
+  ## selected, and the configurables keep their declared defaults. §6
+  ## gives an environment no ground state to fall back to, and inventing
+  ## one here would pick a hostname for an author who picked none.
+  getEnv(ReproEnvironmentEnvVar, "").strip()
+
+proc canonicalEnvironmentSelection*(): string =
+  ## The canonical form of the selected environment, for the cache keys.
+  ##
+  ## §6.4's requirement in one proc: `repro_cli_support` folds this into
+  ## `loweredGraphCacheKey` AND gives `providerGraphStoreRoot` its own
+  ## subdirectory per value, which is exactly what
+  ## `canonicalVariantAssignments` already does for `REPRO_VARIANTS`.
+  ## Trimmed and lowercased so `dev`, `Dev` and ` dev ` are one cache
+  ## entry rather than three; empty when nothing is selected, so the key
+  ## is byte-identical to the pre-L5 one for every build that selects no
+  ## environment.
+  selectedEnvironmentName().normalize
+
+proc applyEnvironment*(packageName, environmentName: string) =
+  ## Apply ONE named environment's bindings for `packageName`.
+  ##
+  ## Separated from `applySelectedEnvironment` so the selection and the
+  ## application are two operations rather than one. L7's resolver
+  ## needs that split -- it resolves `(identity, scope, environment)`
+  ## per consuming edge and cannot re-read the process environment per
+  ## edge -- and a test needs it to exercise two environments without
+  ## two processes. Raises `EDslPortMissingKey` when the package
+  ## declares no environment by that name, naming the ones it does.
+  let def = registeredEnvironment(packageName, environmentName)
+  if def.name.len == 0:
+    let declared = registeredEnvironmentNames(packageName)
+    raise newException(EDslPortMissingKey,
+      "package `" & packageName & "` declares no environment named `" &
+      environmentName & "`; it declares " &
+      (if declared.len == 0: "none at all"
+       else: "`" & declared.join("`, `") & "`") & ".")
+  # KEYED ON `def.name`, NOT ON `environmentName`. `registeredEnvironment`
+  # above matches under Nim identifier equality while this table is
+  # keyed on the DECLARED spelling, so looking the applier up by the
+  # caller's spelling would find the environment and then no applier --
+  # and `applier == nil` is silent. The def that was found names the key
+  # that exists.
+  let applier = dslPortEnvironmentAppliers.getOrDefault(
+    dslPortEnvironmentKey(def.packageName, def.name), nil)
+  if applier == nil:
+    return
+  # ALL-OR-NOTHING, and this is a behaviour decision rather than
+  # hygiene. An environment is "a named set of bindings" (§6); a set
+  # half of which is in force is not one of the two outcomes §6
+  # describes. Before this, a binding that raised partway -- an
+  # unregistered key, a type mismatch -- left every PRECEDING binding
+  # applied and then propagated the exception, so a recipe that refused
+  # to start also carried a configuration no environment declares. The
+  # author now sees the same error and the configurables are back where
+  # the declared defaults put them.
+  #
+  # The alternative was to validate every binding before applying any.
+  # It is rejected because a binding's value is the author's EXPRESSION
+  # and validating it means evaluating it, so a "validation" pass is the
+  # apply pass with the write suppressed -- two code paths that can
+  # disagree about what is bindable, which is the defect family this
+  # milestone keeps finding. Snapshot-and-restore needs one path.
+  let snapshot = configurableOverrideSnapshot()
+  try:
+    applier()
+  except CatchableError:
+    restoreConfigurableOverrides(snapshot)
+    raise
+
+proc applySelectedEnvironment*(packageName: string): string =
+  ## Apply the SELECTED environment's bindings for `packageName`, and
+  ## return the name applied ("" when none was).
+  ##
+  ## Raises `EDslPortMissingKey` when an environment is selected that
+  ## this package does not declare, naming the ones it does. Silence
+  ## there would be the §6.4 failure in its other form: a developer who
+  ## selected `production` and got development bindings, with nothing
+  ## said.
+  let selected = selectedEnvironmentName()
+  if selected.len == 0:
+    return ""
+  let def = registeredEnvironment(packageName, selected)
+  if def.name.len == 0:
+    let declared = registeredEnvironmentNames(packageName)
+    raise newException(EDslPortMissingKey,
+      "environment `" & selected & "` is selected (" &
+      ReproEnvironmentEnvVar & ") and package `" & packageName &
+      "` declares no environment by that name; it declares " &
+      (if declared.len == 0: "none at all"
+       else: "`" & declared.join("`, `") & "`") & ".")
+  applyEnvironment(packageName, def.name)
+  def.name

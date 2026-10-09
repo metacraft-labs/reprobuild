@@ -497,6 +497,13 @@ proc isProviderModePath(path: string): bool =
     # this define.
     "libs/repro_project_dsl/tests/" &
       "t_activity_params_reach_the_services_they_declare.nim",
+    # Shared-Development-Services L5: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` activity reads configurables an
+    # ``environment`` binds, and asserts on the argv of the service the
+    # provider lowered -- ``buildPackageDevEnv`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l5_environment_reaches_the_service_argv.nim",
   ]:
     if p == exact:
       return true

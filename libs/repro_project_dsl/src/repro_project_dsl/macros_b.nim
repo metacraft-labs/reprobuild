@@ -3357,6 +3357,56 @@ proc l2MemberCheckStmts(activityName: string;
       when not compiles(`access`):
         `refusal`)
 
+proc l2RefuseL5HeadsHere(context: string; stmt: NimNode) =
+  ## Shared-Development-Services L5, D-SS8 enforced in the OTHER
+  ## direction: an `environment <name>:` or `instanceOverrides <...>:`
+  ## written inside a `devEnv:` body or an activity body is refused BY
+  ## NAME, rather than copied through to fail as `undeclared identifier:
+  ## environment` on the author's line.
+  ##
+  ## D-SS8 resolves that `devEnv:` and an environment's bindings stay
+  ## SEPARATE SURFACES, and the L5 walker already refuses `activity` /
+  ## `enable` / `devEnv` inside an environment body. This is the mirror,
+  ## and without it the separation held in one direction only. Measured:
+  ## at the base of this milestone both shapes reached the verbatim
+  ## passthrough and produced an `undeclared identifier` error -- loud,
+  ## which is why this is an improvement rather than a defect fix, but
+  ## it said nothing about where the declaration belongs.
+  ## DOT-AWARE, for the same reason `l5RefuseDottedHeads` exists on the
+  ## package body. `environment.dev:` inside a `devEnv:` body parses as
+  ## `Call(DotExpr(environment, dev), StmtList)`, so an ident-only test
+  ## returned early here and the statement reached the verbatim
+  ## passthrough to fail as `undeclared identifier: 'environment'` --
+  ## loud, but mislocated, and it is the DOTTED shape of the standing
+  ## hunt's open issue. The dotted head gets the same named refusal as
+  ## the bare one, since the author's mistake (wrong surface) is the
+  ## same and the spelling is secondary.
+  if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 1:
+    return
+  var head = ""
+  if stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    head = identText(stmt[0]).normalize
+  elif stmt[0].kind == nnkDotExpr:
+    # The LEFTMOST segment, walked here rather than through
+    # `l5DottedPath`: that proc is declared further down the file, and a
+    # forward declaration to read one ident is more machinery than the
+    # loop.
+    var node = stmt[0]
+    while node.kind == nnkDotExpr and node.len == 2:
+      node = node[0]
+    if node.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      head = identText(node).normalize
+  if head notin ["environment", "instanceoverrides"]:
+    return
+  let spelled = if head == "environment": "environment" else: "instanceOverrides"
+  error(context & ": `" & spelled & "` is a PACKAGE-LEVEL declaration " &
+    "and does not belong here. `Shared-Development-Services.md` §6: an " &
+    "environment is \"a named set of bindings to configurables, and " &
+    "nothing else\" -- it binds the configurables an activity declares " &
+    "and is not a statement about which activities run, so the two stay " &
+    "separate surfaces (D-SS8). Move it to the package body, beside " &
+    "`devEnv:`.", l2StmtAnchor(stmt))
+
 proc l2SeqLiteral(items: openArray[NimNode]): NimNode =
   ## ``@[a, b]`` — or ``@[]`` when empty.
   var bracket = nnkBracket.newTree()
@@ -3436,9 +3486,34 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
     formal.add(nnkIdentDefs.newTree(ident(p.name), p.typeNode.copyNimTree(),
       newEmptyNode()))
   for c in config:
+    # Shared-Development-Services L5 (§6): a key WITH a default reads
+    # its default through `environmentBoundValue`, so the selected
+    # environment's binding is what the parameter defaults to.
+    #
+    # A parameter default is evaluated at CALL time, and the `enable`
+    # call that invokes this entry point runs long after module init --
+    # which is where `applySelectedEnvironment` ran. So the ordering
+    # that makes the binding visible is Nim's own evaluation order and
+    # not new staging, which is §6.1's requirement.
+    #
+    # An `enable` override that passes the argument explicitly still
+    # wins, because the default is then not evaluated at all. That is
+    # the owner overriding its own environment at its own enable site
+    # and is not the §6.6 case -- a CONSUMER's attempt to bind is
+    # refused at the binding site, in the consumer's own compilation.
+    #
+    # A key WITHOUT a default keeps `newEmptyNode()` and stays REQUIRED
+    # at the enable site. L3's `InterfaceConfigKey.hasDefault` is the
+    # distinction, and an environment cannot supply the value for one:
+    # there is no slot, because `recordConfigDefault` has no honest
+    # argument to seed it with.
     let default =
       if c.defaultNode == nil: newEmptyNode()
-      else: c.defaultNode.copyNimTree()
+      else:
+        let keyLit = newLit(packageName & "." & parsed.activityName & "." &
+          c.name)
+        let declared = c.defaultNode.copyNimTree()
+        newCall(bindSym"environmentBoundValue", keyLit, declared)
     formal.add(nnkIdentDefs.newTree(ident(c.name), c.typeNode.copyNimTree(),
       default))
 
@@ -3457,6 +3532,7 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
         "declaration. `Package-Model.md` §Collections: a service is " &
         "`service <name>:` with a block body of setters. " &
         l2NoSilentDropRule, l2StmtAnchor(entry))
+    l2RefuseL5HeadsHere("activity `" & parsed.activityName & "`", entry)
     procBody.add(entry.copyNimTree())
   if procBody.len == 0:
     procBody.add(nnkDiscardStmt.newTree(newEmptyNode()))
@@ -3638,8 +3714,888 @@ proc l2LowerDevEnvActivities(packageName: string; body: NimNode): NimNode =
     if enableEmission != nil:
       result.add(enableEmission)
       continue
+    l2RefuseL5HeadsHere("`devEnv:` of package `" & packageName & "`", stmt)
     result.add(stmt.copyNimTree())
 
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L5 — `environment <name>:`, and §6.6's line.
+#
+# `Shared-Development-Services.md` §6 is the authority and its first
+# sentence is the entire specification of the `environment` head:
+#
+#   "An environment is a named set of bindings to configurables, and
+#    nothing else."
+#
+# So the walker below accepts exactly ONE statement shape in the body --
+# `<configurable> = <expression>` -- and REFUSES everything else by
+# name, with the place the refused thing belongs. "And nothing else" is
+# not a stylistic preference: §6.2 records that putting these bindings
+# in a `system` "types correctly and it is still wrong", and §6.3
+# records the two drafts that were wrong. A body that also accepted a
+# host, a topology or an activity list would be the second of those
+# drafts wearing a different head.
+#
+# TWO HEADS LAND HERE, AND THEY ARE DELIBERATELY SEPARATE:
+#
+#   * `environment <name>:` -- the OWNER's binding set. §6.
+#   * `instanceOverrides <package>.<service>:` -- the CONSUMER's two
+#     permitted statements, §6.6's left column: the instance SCOPE
+#     (§4.1) and the consumer's OWN LEASE POLICY (which
+#     `Ephemeral-State-Leases.md` §2.2 already allows per consuming
+#     edge). A SEPARATE head and not a section of `environment`
+#     precisely because the gate says an environment binds configurables
+#     AND NOTHING ELSE; folding a scope override into it would make that
+#     false. It resolves nothing, takes no lease and starts nothing --
+#     L6's attach decision and L7's resolver read the record.
+#
+# D-SS8 is resolved by that split and by what the walker refuses:
+# `devEnv:` and an environment's bindings stay SEPARATE SURFACES.
+# `devEnv:` says which activities this project runs; an environment says
+# what the configurables those activities declare are bound to. The
+# walker refuses an `activity` or `enable` statement inside an
+# `environment` body by name, and refuses a binding inside `devEnv:`
+# nowhere -- because `devEnv:` never accepted one.
+# ---------------------------------------------------------------------------
+
+const
+  l5EnvironmentRule = "`Shared-Development-Services.md` §6: \"An " &
+    "environment is a named set of bindings to configurables, and " &
+    "nothing else.\" The body is `<configurable> = <expression>` lines " &
+    "and nothing else -- `environment <name>:` is not a machine, has " &
+    "no topology and declares no activities (§6.2)."
+  l5OwnershipRule = "`Shared-Development-Services.md` §6.6: \"a " &
+    "consumer may decide what affects only itself; the environment " &
+    "binds everything that defines the instance.\" A consumer may " &
+    "override the instance SCOPE and its own LEASE POLICY -- write " &
+    "those in `instanceOverrides <package>.<service>:` -- and may not " &
+    "bind any configurable the environment owns."
+  l5NoSilentDropRule = "An unrecognised spelling here is REFUSED " &
+    "rather than dropped: a binding that is accepted and then not in " &
+    "force is indistinguishable from support for it, and for an " &
+    "ENVIRONMENT the value that goes missing is the one deciding which " &
+    "issuer a developer talks to (§6.4). Same defect the `args` setter " &
+    "and the `on <trigger>:` walker had before L1."
+  l5OverridesRule = "`Shared-Development-Services.md` §6.6 and §4.1: " &
+    "`instanceOverrides <package>.<service>:` takes `scope project` | " &
+    "`workspace` | `user` | `system`, and `lease keep` | `immediate` | " &
+    "`delayed(<seconds>)`. Those two are the whole of what a consumer " &
+    "may say about somebody else's instance."
+
+type
+  L5ConfigDecl = object
+    ## One configurable an `environment` block may bind, as the owner
+    ## declared it.
+    qualifier: string
+      ## The declaring activity; "" for a package-level `config:` key.
+    name: string
+    typeNode: NimNode
+    defaultNode: NimNode
+      ## `nil` when the key has no default.
+
+  L5Binding = object
+    key: string
+    qualifier: string
+    name: string
+    valueNode: NimNode
+    anchor: NimNode
+
+proc l5DottedPath(node: NimNode; parts: var seq[string]): bool =
+  ## Flatten `a.b.c` into `@["a", "b", "c"]`. False when `node` is not a
+  ## pure ident-or-dot path -- a call, an index, a literal.
+  ##
+  ## THE DOTTED SHAPE IS WHY THIS PROC IS SHARED BY EVERY L5 READING.
+  ## The standing hunt's one open defect is that a DOTTED HEAD
+  ## (`identity.stable "x"`) was dropped in silence by L4's setter loop,
+  ## and an L5 binding path is dotted BY DESIGN (`sso.externalDomain`).
+  ## So every spelling that reaches a binding or a head goes through
+  ## this one reading, and a path it cannot flatten is refused rather
+  ## than skipped.
+  case node.kind
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    parts.add(identText(node))
+    result = true
+  of nnkDotExpr:
+    if node.len != 2:
+      return false
+    if not l5DottedPath(node[0], parts):
+      return false
+    result = l5DottedPath(node[1], parts)
+  else:
+    result = false
+
+proc l5CollectDeclaredConfigurables(sectionStmts: NimNode):
+    seq[L5ConfigDecl] =
+  ## Every configurable THIS package declares, from both authoring
+  ## surfaces: the package-level `config:` block, and each
+  ## `devEnv:`/`activity ...:` body's `config:` block.
+  ##
+  ## ONE READING PER SURFACE, and each is the one another walker already
+  ## uses: `collectM2ConfigEntries` for the package level (the same proc
+  ## `emitM2ConfigDefaults` reads, so a key an environment may bind is
+  ## exactly a key that got a `recordConfigDefault`) and
+  ## `l2ParseActivityConfig` for the activity level (the same proc
+  ## `l2ActivityEmission` reads, so the binding-target set and the
+  ## generated parameter list cannot disagree). L4's evidence drawer
+  ## names the alternative and why it is wrong: "a second reading would
+  ## let the interface artifact report an identity the lowering never
+  ## recorded".
+  for stmt in sectionStmts:
+    let head = calleeName(stmt).normalize
+    if head == "config" and stmt.len >= 2 and stmt[^1].kind == nnkStmtList:
+      for entry in collectM2ConfigEntries(stmt[^1]):
+        result.add(L5ConfigDecl(qualifier: "", name: entry.name,
+          typeNode: entry.typeNode, defaultNode: entry.defaultNode))
+    elif head == "devenv" and stmt.len >= 2 and stmt[^1].kind == nnkStmtList:
+      for devStmt in stmt[^1]:
+        let parsed = l2ActivityEntryAst(devStmt)
+        if not parsed.matched:
+          continue
+        for key in l2ParseActivityConfig(parsed.activityName, parsed.body):
+          result.add(L5ConfigDecl(qualifier: parsed.activityName,
+            name: key.name, typeNode: key.typeNode,
+            defaultNode: key.defaultNode))
+
+proc l5ContainsNormalized(names: openArray[string]; name: string): bool =
+  ## Membership under NIM IDENTIFIER EQUALITY, not byte equality.
+  ##
+  ## WHY EVERY L5 NAME TEST GOES THROUGH THIS. Nim identifiers are case-
+  ## and underscore-insensitive after the first character, so
+  ## `desktopKind`, `desktopkind` and `desktop_kind` are ONE identifier
+  ## -- and `l5FindDecl` already resolves a binding path that way
+  ## (`.normalize` on BOTH sides). A guard beside it that compared the
+  ## author's spelling VERBATIM was therefore false for every
+  ## alternative spelling of the same name, while the resolution it
+  ## guards still succeeded: the guard was skipped, `l5FindDecl` mapped
+  ## the alternative spelling onto the declared key, and the binding was
+  ## accepted and applied. Measured on the variant guard before this
+  ## existed: `desktopKind = @[l5dkB]` was refused and `desktopkind =
+  ## @[l5dkB]` / `desktop_kind = @[l5dkB]` compiled clean.
+  ##
+  ## That is the same asymmetry `l5HeadName` carried for
+  ## `instanceOverrides` (one normalized side against a camelCase
+  ## literal), reached from the other direction. One helper, so a new
+  ## name test cannot reintroduce it by writing `in` or `notin`.
+  let wanted = name.normalize
+  for candidate in names:
+    if candidate.normalize == wanted:
+      return true
+  false
+
+proc l5CollectVariantNames(sectionStmts: NimNode): seq[string] =
+  ## Every `config:` entry of this package that is a VARIANT -- declared
+  ## `variant <name>: T = default` or tagged with a `## @variant` doc
+  ## directive.
+  ##
+  ## Read with the SAME helpers `collectM2ConfigEntries` uses to EXCLUDE
+  ## them, so the two lists are complements by construction rather than
+  ## by two readings that could overlap or leave a gap.
+  ##
+  ## It exists for the diagnostic alone, and the diagnostic is D-SS6's
+  ## resolution made legible: an environment is NOT a variant and does
+  ## not bind one. Without this, binding a variant was refused as "this
+  ## package declares no `config:` key for it" -- true, and it sends the
+  ## author looking for a missing declaration that is in fact right
+  ## there on the next line.
+  # The THIRD spelling, and the one `collectM2ConfigEntries` does NOT
+  # exclude: a plain `config:` key with a separate top-level
+  # `variant <name>:` arm block over it (M9.E). That key reaches
+  # `recordConfigDefault` like any other, so without this it would be
+  # bindable from an environment -- and it is the one spelling a real
+  # recipe in this repository uses (`t_dsl_variant_uses.nim`). Named
+  # here so all three spellings answer the same way.
+  for stmt in sectionStmts:
+    if calleeName(stmt).normalize != "variant":
+      continue
+    if stmt.len < 2 or stmt[1].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      continue
+    let name = identText(stmt[1])
+    if not l5ContainsNormalized(result, name):
+      result.add(name)
+  for stmt in sectionStmts:
+    if calleeName(stmt).normalize != "config":
+      continue
+    if stmt.len < 2 or stmt[^1].kind != nnkStmtList:
+      continue
+    var pendingDoc = ""
+    for entry in stmt[^1]:
+      if entry.kind == nnkCommentStmt:
+        if pendingDoc.len > 0: pendingDoc.add("\n")
+        pendingDoc.add(entry.strVal)
+        continue
+      # The name is read from `entry[0]` rather than from
+      # `m2ConfigEntryAst(entry).name`, and the difference is not
+      # cosmetic: `m2ConfigEntryAst` matches only the PLAIN
+      # `name: T = default` shape, so for the explicit inner spelling
+      # (`buildKind:` / `variant string = "debug"`) it answers
+      # `matched=false` and the name would never be collected -- which
+      # is how the explicit spelling slipped past the first version of
+      # this proc, measured.
+      if entry.kind != nnkCall or entry.len != 2 or
+          entry[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted} or
+          entry[1].kind != nnkStmtList or entry[1].len != 1:
+        pendingDoc = ""
+        continue
+      let inner = entry[1][0]
+      let isVariant = m2EntryIsExplicitVariant(inner) or
+        m2EntryHasVariantDocDirective(pendingDoc)
+      pendingDoc = ""
+      let name = identText(entry[0])
+      if isVariant and not l5ContainsNormalized(result, name):
+        result.add(name)
+
+proc l5DeclaredKeyNames(decls: openArray[L5ConfigDecl]): seq[string] =
+  for decl in decls:
+    if decl.qualifier.len == 0:
+      result.add(decl.name)
+    else:
+      result.add(decl.qualifier & "." & decl.name)
+
+proc l5FindDecl(decls: openArray[L5ConfigDecl];
+                qualifier, name: string): int =
+  result = -1
+  for i, decl in decls:
+    if decl.qualifier.normalize == qualifier.normalize and
+        decl.name.normalize == name.normalize:
+      return i
+
+proc l5ActivityIsDeclared(decls: openArray[L5ConfigDecl];
+                          qualifier: string): bool =
+  for decl in decls:
+    if decl.qualifier.len > 0 and
+        decl.qualifier.normalize == qualifier.normalize:
+      return true
+  false
+
+proc l5HeadName(stmt: NimNode; headWord: string): bool =
+  ## Whether `stmt` is the `headWord` declaration head at all, refusing
+  ## the DOTTED spelling (`environment.dev:`) by name on the way past.
+  ##
+  ## `environment.dev:` parses as `Call(DotExpr(environment, dev),
+  ## StmtList)`, whose callee is not an ident, so a `calleeName`-style
+  ## test answers "" and the statement falls through to the
+  ## preserved-Nim bucket to fail as an undeclared identifier a long way
+  ## from the mistake. The standing hunt's one open defect is exactly
+  ## this shape on a service setter, so L5's heads check for it first.
+  if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 1:
+    return false
+  let callee = stmt[0]
+  if callee.kind == nnkDotExpr:
+    var parts: seq[string] = @[]
+    if l5DottedPath(callee, parts) and parts.len > 1 and
+        parts[0].normalize == headWord.normalize:
+      error("`" & headWord & "` is a declaration head, not a member: `" &
+        callee.repr.strip() & "` writes the name with a DOT. Write `" &
+        headWord & " " & parts[1 .. ^1].join(".") & ":` instead. " &
+        l5NoSilentDropRule, l2StmtAnchor(callee))
+    return false
+  if callee.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return false
+  # `.normalize` on BOTH sides. `headWord` is spelled as the author
+  # writes it (`instanceOverrides`) because every refusal message quotes
+  # it, and `normalize` lowercases -- so comparing one normalized side
+  # against a camelCase literal answered false for every
+  # `instanceOverrides` block and the head fell through to the
+  # preserved-Nim bucket. Found by this milestone's own test, which is
+  # why the test asserts on the RECORD and not on an exit code.
+  identText(callee).normalize == headWord.normalize
+
+proc l5RequireHeadArity(stmt: NimNode; headWord, rule: string) =
+  ## `Call(head, name, StmtList)` -- arity three, body last. Every other
+  ## arity is refused rather than read past: an argument written on a
+  ## head is never semchecked, so an identifier that does not exist
+  ## compiles clean, which is the defect
+  ## `reprobuild-pm/issues/2026-10-08-activity-config-head-arguments-
+  ## are-silently-dropped.md` records on the `config:` head.
+  if stmt.len == 2 and stmt[1].kind == nnkStmtList:
+    error("`" & headWord & ":` needs a NAME: `" & headWord &
+      " <name>:` with a block body. " & rule, l2StmtAnchor(stmt))
+  if stmt.len == 2:
+    error("`" & headWord & " " & stmt[1].repr.strip() &
+      "` needs a block body. " & rule, l2StmtAnchor(stmt))
+  if stmt.len < 2:
+    error("`" & headWord & "` needs a name and a block body. " & rule,
+      l2StmtAnchor(stmt))
+  if stmt[^1].kind != nnkStmtList:
+    error("`" & headWord & " " & stmt[1].repr.strip() &
+      "` needs a block body. " & rule, l2StmtAnchor(stmt))
+  if stmt.len > 3:
+    var extras: seq[string] = @[]
+    for i in 2 ..< stmt.len - 1:
+      extras.add(stmt[i].repr.strip())
+    error("`" & headWord & " " & stmt[1].repr.strip() &
+      "` takes exactly one name, and `" & extras.join(", ") &
+      "` is also written on its head. " & rule & " " &
+      l5NoSilentDropRule, l2StmtAnchor(stmt[2]))
+
+proc l5EnvironmentName(stmt: NimNode): string =
+  ## The environment's name, refusing every spelling that is not a bare
+  ## identifier. A STRING LITERAL is refused BY NAME because it is the
+  ## plausible slip -- `activity "<name>"` is a real spelling one line
+  ## away -- and because §6's example writes an identifier.
+  let nameNode = stmt[1]
+  if nameNode.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    return identText(nameNode)
+  if nameNode.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("`environment " & nameNode.repr.strip() & ":` names its " &
+      "environment with a STRING. Write `environment " & nameNode.strVal &
+      ":` -- a bare identifier, as §6 writes it. (The quoted form is " &
+      "the `activity \"<name>\"` spelling, a different declaration.)",
+      l2StmtAnchor(nameNode))
+  error("`environment " & nameNode.repr.strip() & ":` is not a name. " &
+    "An environment's name is a bare identifier. " & l5EnvironmentRule,
+    l2StmtAnchor(nameNode))
+  ""
+
+proc l5ParseEnvironmentBody(packageName, environmentName: string;
+                            body: NimNode;
+                            decls: seq[L5ConfigDecl];
+                            variants: seq[string]): seq[L5Binding] =
+  ## Read one `environment <name>:` body into its binding set, refusing
+  ## everything that is not a binding and every binding whose target is
+  ## not this package's to bind.
+  ##
+  ## THE SECOND REFUSAL IS THE MILESTONE'S POINT (the `:gate:` says so):
+  ## "a consumer-side attempt to bind an environment-owned configurable
+  ## failing the CONSUMER'S recipe compilation rather than producing a
+  ## second instance quietly -- that negative is the milestone's point,
+  ## because the permissive version of this feature passes every
+  ## positive test."
+  ##
+  ## It fires on OWNERSHIP, not on spelling. A binding path whose first
+  ## segment is neither a `config:` key of this package nor an activity
+  ## this package declares names SOMEBODY ELSE's configurable, and §6.6
+  ## puts that in the right column: "Bind any configurable the
+  ## environment owns" is what a consumer may not do. The refusal
+  ## happens in the CONSUMER's compilation because the `environment`
+  ## block being walked is in the consumer's own recipe -- there is no
+  ## route by which a consumer's binding of a foreign key becomes a
+  ## second instance, because it never becomes anything.
+  var seen: seq[string] = @[]
+  for stmt in body:
+    if stmt.kind in {nnkCommentStmt, nnkEmpty}:
+      continue
+    if stmt.kind == nnkDiscardStmt:
+      continue
+    if stmt.kind notin {nnkAsgn, nnkExprEqExpr}:
+      # Name the three shapes an author most plausibly reaches for, each
+      # with where it belongs, rather than one generic refusal. §6.2 and
+      # §6.6 are the two places the wrong instinct comes from.
+      let headWord = calleeName(stmt).normalize
+      if headWord in ["activity", "enable", "devenv"]:
+        error("environment `" & environmentName & "`: `" & headWord &
+          "` does not belong in an environment body. An environment " &
+          "BINDS the configurables an activity declares; which " &
+          "activities run is `devEnv:`'s statement and stays a separate " &
+          "surface (D-SS8). " & l5EnvironmentRule, l2StmtAnchor(stmt))
+      if headWord in ["service", "system", "host", "platforms", "scope",
+                      "lease", "identity"]:
+        error("environment `" & environmentName & "`: `" & headWord &
+          "` does not belong in an environment body. §6.2: an " &
+          "environment \"is not a machine and has no topology\"; it is " &
+          "a binding set. " &
+          (if headWord in ["scope", "lease"]:
+             "A consumer's instance scope and lease policy go in " &
+             "`instanceOverrides <package>.<service>:` (§6.6). "
+           else: "") & l5EnvironmentRule, l2StmtAnchor(stmt))
+      error("environment `" & environmentName & "`: `" &
+        stmt.repr.strip().splitLines().join(" / ") &
+        "` is not a binding. " & l5EnvironmentRule & " " &
+        l5NoSilentDropRule, l2StmtAnchor(stmt))
+    var parts: seq[string] = @[]
+    if not l5DottedPath(stmt[0], parts) or parts.len == 0:
+      error("environment `" & environmentName & "`: `" &
+        stmt[0].repr.strip() & "` is not a configurable path. Write " &
+        "`<name> = <expression>` for a package-level `config:` key or " &
+        "`<activity>.<name> = <expression>` for an activity's. " &
+        l5EnvironmentRule, l2StmtAnchor(stmt))
+    let available = l5DeclaredKeyNames(decls)
+    let availableText =
+      if available.len == 0:
+        "package `" & packageName & "` declares no configurables at all"
+      else:
+        "package `" & packageName & "` declares: " & available.join(", ")
+    # §6.6's REFUSAL, and the three spellings that reach it. The order
+    # matters: the FOREIGN-PACKAGE cases are tested before the
+    # unknown-key case, because a consumer's most plausible spelling is
+    # the fully-qualified `<dep>.<activity>.<name>` and a diagnostic
+    # about path nesting would send that author looking in the wrong
+    # place entirely.
+    if parts.len > 2:
+      # `infra.sso.externalDomain` -- the consumer's spelling. Three or
+      # more segments can only mean "somebody else's package", because
+      # a configurable of THIS package is reached as `<name>` or
+      # `<activity>.<name>` and never more deeply.
+      error("environment `" & environmentName & "` of package `" &
+        packageName & "` binds `" & parts.join(".") & "`, which names " &
+        "package `" & parts[0] & "`'s configurable. A consumer may not " &
+        "bind a configurable another package's environment owns, and " &
+        "an environment binds only the configurables its OWN package " &
+        "declares: there is one resolved configuration per `(identity, " &
+        "scope, environment)` (§6.5), and a second binding of it would " &
+        "be a request for a second instance. " & l5OwnershipRule & " " &
+        availableText & ".", l2StmtAnchor(stmt))
+    let qualifier = if parts.len == 2: parts[0] else: ""
+    let name = parts[^1]
+    if qualifier.len > 0 and not l5ActivityIsDeclared(decls, qualifier):
+      # `sso.externalDomain` where `sso` is a DEPENDENCY's activity
+      # rather than one of this package's -- the same §6.6 case reached
+      # by the shorter spelling, so it gets the same refusal.
+      error("environment `" & environmentName & "` of package `" &
+        packageName & "` binds `" & parts.join(".") & "`, and `" &
+        qualifier & "` is not an activity this package declares. An " &
+        "environment binds only the configurables its OWN package " &
+        "declares; `" & qualifier & "`'s belong to whoever declared " &
+        "it, and its own environment binds them. " & l5OwnershipRule &
+        " " & availableText & ".", l2StmtAnchor(stmt))
+    if qualifier.len == 0 and l5ContainsNormalized(variants, name):
+      # D-SS6, made legible at the one call site where the difference
+      # bites. The membership test is `l5ContainsNormalized` and NOT
+      # `name in variants`, and that is the whole of D-SS6's
+      # enforcement rather than a detail: `l5FindDecl` below normalizes
+      # BOTH sides, so with a verbatim test here `desktopkind` and
+      # `desktop_kind` skipped this guard, were resolved onto the
+      # variant's own declared key, and were ACCEPTED AND APPLIED --
+      # measured, both spellings compiling clean while `desktopKind`
+      # was refused. A guard that one spelling of its target walks past
+      # is not a guard.
+      #
+      # A VARIANT is solver-participating: the solver CHOOSES
+      # its value to satisfy constraints, and `--variant name=value`
+      # contributes to it. An environment is SELECTED, not solved, and
+      # binding a variant from one would put the selection in the SAT
+      # objective where any package in the closure could move it --
+      # which is §6.3's "consumer-overridable configuration" through a
+      # side door.
+      error("environment `" & environmentName & "` of package `" &
+        packageName & "` binds `" & name & "`, which is a VARIANT " &
+        "rather than a plain `config:` key. An environment does not " &
+        "bind a variant: a variant is solver-participating -- the " &
+        "solver chooses its value and `--variant " & name &
+        "=<value>` contributes to it -- while an environment is " &
+        "SELECTED. Binding one here would put the selection in the " &
+        "solver's objective, where any package in the closure could " &
+        "move it (D-SS6; §6.3's \"consumer-overridable " &
+        "configuration\" draft). " & availableText & ".",
+        l2StmtAnchor(stmt))
+    let idx = l5FindDecl(decls, qualifier, name)
+    if idx < 0:
+      error("environment `" & environmentName & "` of package `" &
+        packageName & "` binds `" & parts.join(".") &
+        "`, which this package declares no `config:` key for. " &
+        availableText & ". " & l5EnvironmentRule, l2StmtAnchor(stmt))
+    # THE TARGET MUST HAVE A SLOT, AND THAT IS CHECKED HERE RATHER THAN
+    # LEFT TO MODULE INIT. §6's ordering sentence is "the service or
+    # activity declares its configurables; an environment binds them",
+    # and a binding whose target was never registered as a configurable
+    # can never be in force. Before this check it was ACCEPTED: the
+    # author's recipe compiled clean, and with no environment selected
+    # NOTHING WAS SAID AT ALL -- the accepted-and-then-not-there failure
+    # `l5NoSilentDropRule` is written about -- while
+    # `environmentOwnedConfigKeys` reported the slot-less key as
+    # environment-owned for L6 to consume. Two shapes reach it, and both
+    # are named rather than merged, because the author's next move
+    # differs:
+    #
+    #   1. an ACTIVITY `config:` key with NO DEFAULT.
+    #      `l5CollectDeclaredConfigurables` reads activity keys through
+    #      `l2ParseActivityConfig`, which returns them all, while
+    #      `emitL5ActivityConfigDefaults` registers only those with a
+    #      default -- `recordConfigDefault` has no honest argument to
+    #      seed the slot with. So the key resolves and has no slot.
+    #   2. a key whose TYPE the configurable lane does not carry.
+    #      `emitM2ConfigDefaults` filters package-level entries through
+    #      `m2TypeReprIsSupportedScalar` and silently passes the rest
+    #      through; `collectM2ConfigEntries`, which this walker reads,
+    #      does NOT. So `tags: seq[string] = @["a"]` is in `decls`, has
+    #      no slot, and binding it used to fail inside
+    #      `dsl_port_runtime.nim` as `setConfigurable: unsupported type
+    #      seq[string]` -- loud, but pointing at a library line and
+    #      saying nothing about the environment, the package or the key.
+    if decls[idx].defaultNode == nil:
+      error("environment `" & environmentName & "` of package `" &
+        packageName & "` binds `" & parts.join(".") & "`, and `" &
+        decls[idx].qualifier & "." & decls[idx].name & "` is declared " &
+        "WITHOUT A DEFAULT. A `config:` key with no default is REQUIRED " &
+        "at the `enable " & decls[idx].qualifier &
+        "(...)` site, so it has no configurable slot for an " &
+        "environment to bind -- `recordConfigDefault` has no value to " &
+        "seed one with. Give it a default to make it bindable, or pass " &
+        "it at the `enable` site. " & l5NoSilentDropRule,
+        l2StmtAnchor(stmt))
+    if not m2TypeReprIsSupportedScalar(decls[idx].typeNode.repr):
+      error("environment `" & environmentName & "` of package `" &
+        packageName & "` binds `" & parts.join(".") & "`, whose type `" &
+        decls[idx].typeNode.repr.strip() & "` the configurable lane " &
+        "does not carry: it carries bool / int / string / float / a " &
+        "declared enum / `seq[<enum>]`. A key of any other type gets " &
+        "no configurable slot, so a binding to it could never be in " &
+        "force. " & l5NoSilentDropRule, l2StmtAnchor(stmt))
+    let key =
+      if qualifier.len == 0: packageName & "." & decls[idx].name
+      else: packageName & "." & decls[idx].qualifier & "." & decls[idx].name
+    if key in seen:
+      error("environment `" & environmentName & "`: `" & parts.join(".") &
+        "` is bound twice. One environment binds one configurable once " &
+        "-- a second binding in the same set would need a merge rule " &
+        "L5 deliberately does not add (§6.1).", l2StmtAnchor(stmt))
+    seen.add(key)
+    result.add(L5Binding(key: key, qualifier: decls[idx].qualifier,
+      name: decls[idx].name, valueNode: stmt[1].copyNimTree(),
+      anchor: stmt))
+
+proc l5BindingsLiteral(bindings: openArray[L5Binding]): NimNode =
+  var items: seq[string] = @[]
+  for b in bindings:
+    items.add("EnvironmentBindingDef(key: " & escForCode(b.key) &
+      ", qualifier: " & escForCode(b.qualifier) &
+      ", name: " & escForCode(b.name) &
+      ", valueRepr: " & escForCode(b.valueNode.repr.strip()) &
+      ", precedence: epOverride" &
+      ", sourceFile: " & escForCode(b.anchor.lineInfoObj.filename) &
+      ", sourceLine: " & $b.anchor.lineInfoObj.line & ")")
+  parseExpr("@[" & items.join(", ") & "]")
+
+proc l5EnvironmentEmission(packageName: string; stmt: NimNode;
+                           decls: seq[L5ConfigDecl];
+                           variants: seq[string];
+                           seenNames: var seq[string]): NimNode =
+  ## Lower ONE `environment <name>:` statement, or return `nil` when
+  ## `stmt` is not one.
+  if not l5HeadName(stmt, "environment"):
+    return nil
+  l5RequireHeadArity(stmt, "environment", l5EnvironmentRule)
+  let envName = l5EnvironmentName(stmt)
+  if envName.normalize in seenNames:
+    error("`environment " & envName & ":` is declared twice in package `" &
+      packageName & "`. Two binding sets under one name would make " &
+      "which issuer a developer gets depend on statement order, which " &
+      "is the failure §6.4 is written about.", l2StmtAnchor(stmt))
+  seenNames.add(envName.normalize)
+  let bindings = l5ParseEnvironmentBody(packageName, envName, stmt[^1],
+    decls, variants)
+  let pkgLit = newLit(packageName)
+  let nameLit = newLit(envName)
+  let defLiteral = parseExpr("DslEnvironmentDef(packageName: " &
+    escForCode(packageName) & ", name: " & escForCode(envName) &
+    ", sourceFile: " & escForCode(stmt.lineInfoObj.filename) &
+    ", sourceLine: " & $stmt.lineInfoObj.line & ")")
+  let bindingsExpr = l5BindingsLiteral(bindings)
+  let applierBody = newStmtList()
+  for b in bindings:
+    let keyLit = newLit(b.key)
+    let valueNode = b.valueNode.copyNimTree()
+    applierBody.add(quote do:
+      bindEnvironmentConfigurable(`pkgLit`, `nameLit`, `keyLit`, `valueNode`))
+  if applierBody.len == 0:
+    applierBody.add(nnkDiscardStmt.newTree(newEmptyNode()))
+  let defVar = genSym(nskVar, "l5EnvDef")
+  let inner = newStmtList()
+  inner.add(nnkVarSection.newTree(nnkIdentDefs.newTree(
+    defVar, newEmptyNode(), defLiteral)))
+  inner.add(newAssignment(nnkDotExpr.newTree(defVar, ident("bindings")),
+    bindingsExpr))
+  inner.add(newCall(ident("registerEnvironment"), defVar))
+  inner.add(newCall(ident("registerEnvironmentApplier"), pkgLit, nameLit,
+    nnkLambda.newTree(newEmptyNode(), newEmptyNode(), newEmptyNode(),
+      nnkFormalParams.newTree(newEmptyNode()), newEmptyNode(),
+      newEmptyNode(), applierBody)))
+  result = nnkBlockStmt.newTree(newEmptyNode(), inner)
+  result.copyLineInfo(stmt)
+
+proc l5ParseOverrideTarget(stmt: NimNode):
+    tuple[targetPackage, targetService: string] =
+  ## `instanceOverrides <package>.<service>:` -- the head names WHOSE
+  ## service, because a consumer's override is per consuming edge and an
+  ## unqualified service name would be ambiguous the moment two
+  ## dependencies declare one.
+  var parts: seq[string] = @[]
+  if not l5DottedPath(stmt[1], parts) or parts.len != 2:
+    error("`instanceOverrides " & stmt[1].repr.strip() & ":` names its " &
+      "target as `<package>.<service>`. " & l5OverridesRule,
+      l2StmtAnchor(stmt[1]))
+  (targetPackage: parts[0], targetService: parts[1])
+
+proc l5ParseOverrideBody(targetRepr: string; body: NimNode):
+    tuple[scopeDeclared: bool; scope: NimNode; leaseKind: string;
+          ttl: int] =
+  ## The two permitted statements of §6.6's left column, and nothing
+  ## else. Everything refused here is refused BY CATEGORY: a
+  ## configurable binding is the right column and says so; an identity
+  ## is the right column and says so.
+  result.leaseKind = "clkUnset"
+  var sawLease = false
+  for stmt in body:
+    if stmt.kind in {nnkCommentStmt, nnkEmpty} or
+        stmt.kind == nnkDiscardStmt:
+      continue
+    if stmt.kind in {nnkAsgn, nnkExprEqExpr}:
+      error("`instanceOverrides " & targetRepr & "`: `" &
+        stmt.repr.strip() & "` BINDS a configurable, and a consumer " &
+        "may not. " & l5OwnershipRule, l2StmtAnchor(stmt))
+    let head = calleeName(stmt).normalize
+    if head == "scope":
+      if result.scopeDeclared:
+        error("`instanceOverrides " & targetRepr &
+          "`: `scope` is declared twice.", l2StmtAnchor(stmt))
+      if stmt.len != 2:
+        error("`instanceOverrides " & targetRepr & "`: `" &
+          stmt.repr.strip() & "` is not `scope <word>`. " &
+          l5OverridesRule, l2StmtAnchor(stmt))
+      let word = stmt[1]
+      if word.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+        error("`instanceOverrides " & targetRepr & "`: `scope " &
+          word.repr.strip() & "` names its scope with " &
+          (if word.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+             "a STRING" else: "something that is not a bare word") &
+          ". " & l5OverridesRule, l2StmtAnchor(word))
+      let resolved = l4ScopeFromName(identText(word))
+      if not resolved.found:
+        error("`instanceOverrides " & targetRepr & "`: `" &
+          identText(word) & "` is not a scope; the scopes are " &
+          l4ScopeSpellings() & ". " & l5OverridesRule,
+          l2StmtAnchor(word))
+      result.scopeDeclared = true
+      result.scope = ident($resolved.scope)
+      continue
+    if head == "lease":
+      if sawLease:
+        error("`instanceOverrides " & targetRepr &
+          "`: `lease` is declared twice.", l2StmtAnchor(stmt))
+      if stmt.len != 2:
+        error("`instanceOverrides " & targetRepr & "`: `" &
+          stmt.repr.strip() & "` is not `lease <policy>`. " &
+          l5OverridesRule, l2StmtAnchor(stmt))
+      sawLease = true
+      let policy = stmt[1]
+      if policy.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+        case identText(policy).normalize
+        of "keep": result.leaseKind = "clkKeep"
+        of "immediate": result.leaseKind = "clkImmediate"
+        of "delayed":
+          error("`instanceOverrides " & targetRepr & "`: `lease " &
+            "delayed` needs a ttl in seconds: `lease delayed(900)`. " &
+            l5OverridesRule, l2StmtAnchor(policy))
+        else:
+          error("`instanceOverrides " & targetRepr & "`: `" &
+            identText(policy) & "` is not a lease policy. " &
+            l5OverridesRule, l2StmtAnchor(policy))
+        continue
+      if policy.kind in {nnkCall, nnkCommand} and policy.len == 2 and
+          policy[0].kind in {nnkIdent, nnkSym} and
+          identText(policy[0]).normalize == "delayed":
+        if policy[1].kind notin {nnkIntLit .. nnkInt64Lit}:
+          error("`instanceOverrides " & targetRepr & "`: `lease " &
+            "delayed(" & policy[1].repr.strip() & ")` needs an INTEGER " &
+            "LITERAL of seconds. A computed ttl would make the reap " &
+            "deadline a function of the build, which is the property " &
+            "§4.2 refuses for an identity and the same argument " &
+            "applies here. " & l5OverridesRule, l2StmtAnchor(policy[1]))
+        result.leaseKind = "clkDelayed"
+        result.ttl = int(policy[1].intVal)
+        continue
+      error("`instanceOverrides " & targetRepr & "`: `lease " &
+        policy.repr.strip() & "` is not a lease policy. " &
+        l5OverridesRule, l2StmtAnchor(policy))
+    if head in ["identity", "args", "executable", "runtimefile", "on",
+                "config"]:
+      error("`instanceOverrides " & targetRepr & "`: `" & head &
+        "` is the OWNER's statement about its own service, not a " &
+        "consumer's about an instance of it. §6.6's right column: a " &
+        "consumer may not \"Change the instance identity, or the " &
+        "environment it resolved against\". " & l5OverridesRule,
+        l2StmtAnchor(stmt))
+    error("`instanceOverrides " & targetRepr & "`: `" &
+      stmt.repr.strip().splitLines().join(" / ") &
+      "` is not a recognised statement. " & l5OverridesRule & " " &
+      l5NoSilentDropRule, l2StmtAnchor(stmt))
+
+proc l5OverrideEmission(packageName: string; stmt: NimNode;
+                        seenTargets: var seq[string]): NimNode =
+  ## Lower ONE `instanceOverrides <package>.<service>:` statement, or
+  ## return `nil` when `stmt` is not one.
+  if not l5HeadName(stmt, "instanceOverrides"):
+    return nil
+  l5RequireHeadArity(stmt, "instanceOverrides", l5OverridesRule)
+  let target = l5ParseOverrideTarget(stmt)
+  let targetRepr = target.targetPackage & "." & target.targetService
+  # A SECOND block for the same target is REFUSED, and this is a
+  # silently-dropped construct the standing hunt found rather than a
+  # hypothetical: two `instanceOverrides other.svc:` blocks compiled
+  # clean, both rows were appended, and `consumerInstanceOverride`
+  # returns the FIRST -- so the second author's `scope` was accepted and
+  # had no effect. Measured at this milestone's own working tree before
+  # the fix.
+  if targetRepr.normalize in seenTargets:
+    error("`instanceOverrides " & targetRepr & "` is declared twice in " &
+      "package `" & packageName & "`. One consuming edge has one scope " &
+      "and one lease policy; a second block would be accepted and then " &
+      "ignored, because the resolver reads the first. " &
+      l5NoSilentDropRule, l2StmtAnchor(stmt))
+  seenTargets.add(targetRepr.normalize)
+  let parsed = l5ParseOverrideBody(targetRepr, stmt[^1])
+  if not parsed.scopeDeclared and parsed.leaseKind == "clkUnset":
+    # A block that declares NEITHER says nothing about the instance, and
+    # the row it would record is indistinguishable from no row at all --
+    # so an author who wrote it and expected something got nothing.
+    error("`instanceOverrides " & targetRepr & "`: the body declares " &
+      "neither `scope` nor `lease`, so it says nothing about the " &
+      "instance and the record it would write is indistinguishable " &
+      "from no record. " & l5OverridesRule, l2StmtAnchor(stmt))
+  let scopeExpr =
+    if parsed.scopeDeclared: parsed.scope else: ident("sscProject")
+  let code = "registerConsumerInstanceOverride(" &
+    "ConsumerInstanceOverrideDef(consumerPackage: " &
+    escForCode(packageName) & ", targetPackage: " &
+    escForCode(target.targetPackage) & ", targetService: " &
+    escForCode(target.targetService) & ", scopeDeclared: " &
+    (if parsed.scopeDeclared: "true" else: "false") & ", scope: " &
+    scopeExpr.repr & ", leaseKind: " & parsed.leaseKind &
+    ", leaseTtlSeconds: " & $parsed.ttl & ", sourceFile: " &
+    escForCode(stmt.lineInfoObj.filename) & ", sourceLine: " &
+    $stmt.lineInfoObj.line & "))"
+  result = parseStmt(code)
+  result.copyLineInfo(stmt)
+
+proc emitL5ActivityConfigDefaults(packageName: string;
+                                  sectionStmts: NimNode): NimNode =
+  ## Register each activity `config:` key as a CONFIGURABLE, under
+  ## `<package>.<activity>.<name>`, at module-init time.
+  ##
+  ## WHY THIS EXISTS. L2 lowers an activity's `config:` keys to
+  ## PARAMETERS of the generated entry point, with the author's default
+  ## as the parameter default -- which is what makes `enable` a plain
+  ## Nim call. That is unchanged. What was missing is the other half of
+  ## §6.1's claim about the authoring surface: "`config:` is the
+  ## authoring surface; it lowers to CONFIGURABLES with declared type
+  ## and merge semantics". Without a registered configurable there is
+  ## nothing for §6's `sso.externalDomain = ...` to bind, and the
+  ## binding would have to invent a second lane -- exactly the new
+  ## precedence model the gate forbids.
+  ##
+  ## Only keys with a DEFAULT are registered: a key declared
+  ## `externalDomain: string` with no default is REQUIRED at the
+  ## `enable` site (L3's `InterfaceConfigKey.hasDefault` turns on that
+  ## distinction), so there is no value to seed the slot with and
+  ## `recordConfigDefault` has no honest argument to take.
+  ##
+  ## WHAT THAT COSTS, AND WHERE IT IS PAID. A key with no slot cannot be
+  ## bound, and that has to be REFUSED AT THE BINDING SITE or the
+  ## binding is accepted and then not in force. It is: the environment
+  ## walker refuses a binding whose target has no default and a binding
+  ## whose target's type the configurable lane does not carry, both in
+  ## the author's own compilation, by name.
+  ##
+  ## THAT REFUSAL DID NOT EXIST IN THE FIRST REVISION OF L5, AND THREE
+  ## COMMENTS INCLUDING THIS ONE CLAIMED IT DID. Measured: an activity
+  ## `config:` key with no default, bound by an environment, compiled
+  ## clean; with no environment selected nothing was said at all, and
+  ## with one selected `EDslPortMissingKey` was raised at module init
+  ## AFTER the preceding bindings had already been applied. The claim is
+  ## now true because the check exists, not because the comment says so.
+  ##
+  ## The type filter is `m2TypeReprIsSupportedScalar`, the same
+  ## predicate `emitM2ConfigDefaults` applies to the package-level
+  ## surface, so the slot set is ONE predicate over both surfaces and
+  ## the walker's refusal is exact on both. The `when compiles(...)`
+  ## guard below is kept beside it rather than as the filter: the port's
+  ## configurable lane carries bool / int / string / float / enum /
+  ## seq[enum], and `compiles` answers true for a qualified enum the
+  ## package-level emitter skips -- a disagreement that made a slot-less
+  ## key look bindable.
+  result = newStmtList()
+  for stmt in sectionStmts:
+    if calleeName(stmt).normalize != "devenv":
+      continue
+    if stmt.len < 2 or stmt[^1].kind != nnkStmtList:
+      continue
+    for devStmt in stmt[^1]:
+      let parsed = l2ActivityEntryAst(devStmt)
+      if not parsed.matched:
+        continue
+      for key in l2ParseActivityConfig(parsed.activityName, parsed.body):
+        if key.defaultNode == nil:
+          continue
+        # THE SAME TYPE PREDICATE `emitM2ConfigDefaults` USES, so the
+        # slot set is ONE predicate over both authoring surfaces rather
+        # than two tests that can disagree -- and so the environment
+        # walker's refusal (`m2TypeReprIsSupportedScalar` at the binding
+        # site) is exact on both. The `when compiles(...)` guard below
+        # is kept, but it is NOT the filter: it answers true for a
+        # qualified enum (`mymod.Kind`) that the package-level emitter
+        # would have skipped, which is precisely the disagreement that
+        # let a slot-less key look bindable.
+        if not m2TypeReprIsSupportedScalar(key.typeNode.repr):
+          continue
+        let pkgLit = newLit(packageName)
+        let nameLit = newLit(parsed.activityName & "." & key.name)
+        let typeNode = key.typeNode.copyNimTree()
+        let defaultNode = key.defaultNode.copyNimTree()
+        result.add(quote do:
+          when compiles(recordConfigDefault[`typeNode`](`pkgLit`,
+              `nameLit`, `defaultNode`)):
+            recordConfigDefault[`typeNode`](`pkgLit`, `nameLit`,
+              `defaultNode`))
+
+proc l5RefuseDottedHeads(body: NimNode) =
+  ## Refuse `environment.dev:` / `instanceOverrides.x:` -- a DOTTED
+  ## declaration head -- over the package's WHOLE body.
+  ##
+  ## WHY THE WHOLE BODY AND NOT THE SECTION PARTITION. A dotted head's
+  ## callee is an `nnkDotExpr`, so `isKnownPackageSection` answers false
+  ## and `partitionPackageBody` routes the statement to the
+  ## PRESERVED-NIM bucket, where it is emitted verbatim at module top
+  ## level and fails as `undeclared identifier: environment`. That is
+  ## loud rather than silent -- so it is not the standing hunt's open
+  ## defect, which is a drop -- but it points the author at generated
+  ## code instead of at their own line and says nothing about the
+  ## spelling. Measured here, and the reason this walk sees the body the
+  ## partition did not keep.
+  ##
+  ## It walks only the top level: a dotted head nested inside a
+  ## `devEnv:` or `build:` body is that walker's business, and claiming
+  ## it here would refuse a legitimate `obj.field = x` in build code.
+  if body.kind != nnkStmtList:
+    return
+  for stmt in body:
+    if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 1:
+      continue
+    if stmt[0].kind != nnkDotExpr:
+      continue
+    var parts: seq[string] = @[]
+    if not l5DottedPath(stmt[0], parts) or parts.len < 2:
+      continue
+    for headWord in ["environment", "instanceOverrides"]:
+      if parts[0].normalize == headWord.normalize:
+        error("`" & headWord & "` is a declaration head, not a member: `" &
+          stmt[0].repr.strip() & "` writes the name with a DOT. Write `" &
+          headWord & " " & parts[1 .. ^1].join(".") & ":` instead. " &
+          l5NoSilentDropRule, l2StmtAnchor(stmt[0]))
+
+proc emitL5Environments(packageName: string;
+                        sectionStmts, body: NimNode): NimNode =
+  ## Every `environment <name>:` and `instanceOverrides <...>:` section
+  ## of one package body, lowered in source order.
+  result = newStmtList()
+  l5RefuseDottedHeads(body)
+  let decls = l5CollectDeclaredConfigurables(sectionStmts)
+  let variants = l5CollectVariantNames(sectionStmts)
+  var seenNames: seq[string] = @[]
+  var seenTargets: seq[string] = @[]
+  for stmt in sectionStmts:
+    let envEmission = l5EnvironmentEmission(packageName, stmt, decls,
+      variants, seenNames)
+    if envEmission != nil:
+      result.add(envEmission)
+      continue
+    let overrideEmission = l5OverrideEmission(packageName, stmt,
+      seenTargets)
+    if overrideEmission != nil:
+      result.add(overrideEmission)
+  if result.len > 0:
+    let pkgLit = newLit(packageName)
+    result.add(quote do:
+      discard applySelectedEnvironment(`pkgLit`))
 
 # ---------------------------------------------------------------------------
 # Shared-Development-Services L3 — services and activities travel through
@@ -6478,6 +7434,14 @@ macro packageImpl*(name: untyped;
   # the entry's default expression references is already in scope.
   result.add(m2ConfigEmission)
   result.add(m2VersionsEmission)
+  # ── Shared-Development-Services L5: each dev-env activity's `config:`
+  # key becomes a CONFIGURABLE under `<package>.<activity>.<name>`, so
+  # §6's `sso.externalDomain = ...` has an existing slot to bind rather
+  # than needing a second lane. Emitted directly after M2's package-level
+  # `config:` registrations because it is the same statement about the
+  # other authoring surface, and BEFORE the environment emission below,
+  # which writes into these slots.
+  result.add(emitL5ActivityConfigDefaults(packageName, sectionStmts))
   # ── DSL-port M3: artifact registrations. Appended LAST so the
   # body repr captured at macro-expansion time is available to any
   # downstream consumer (M4+ will read this list at compile time via
@@ -6676,6 +7640,19 @@ macro packageImpl*(name: untyped;
   # no overlap with M9.R.3's so the two reset calls are independent).
   let m9r3LibraryApiEmission = emitM9R3LibraryApis(packageName, classifiedSections)
   result.add(m9r3LibraryApiEmission)
+  # ── Shared-Development-Services L5: `environment <name>:` binding
+  # sets and `instanceOverrides <package>.<service>:` consumer records.
+  # Emitted LAST of the register-* passes and before ``buildCode``, for
+  # one ordering reason that is load-bearing: the trailing
+  # ``applySelectedEnvironment`` contributes the selected environment's
+  # bindings through ``setConfigurable``, which REQUIRES the slot to
+  # exist -- so every ``recordConfigDefault`` emission (M2's package
+  # level and L5's activity level) has to have run first. Nothing below
+  # reads a configurable at module-init time, so nothing is left reading
+  # a pre-environment value.
+  let l5EnvironmentEmissionNode = emitL5Environments(packageName,
+                                                     sectionStmts, body)
+  result.add(l5EnvironmentEmissionNode)
   # M9.R.13b.3 — emit ``buildCode`` LAST so its
   # ``when defined(reproProviderMode) and isMainModule: quit
   # runPackageProvider(...)`` exit point runs AFTER every other

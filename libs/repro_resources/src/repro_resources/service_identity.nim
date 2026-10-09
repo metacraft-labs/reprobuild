@@ -47,8 +47,11 @@
 ##     (§4.5) are **L7**. This module computes the key a registry would
 ##     be keyed by; it holds no registry, starts nothing, and talks to no
 ##     daemon.
-##   * the ENVIRONMENT component of the key (§6.5 — the key becomes
-##     `(identity, scope, environment)`) is **L5**.
+## The ENVIRONMENT component of the key (§6.5 — the key becomes
+## `(identity, scope, environment)`) LANDED IN L5 and is here: see
+## `ServiceInstanceKey.environment`, `serviceInstanceKey`'s
+## `environment` parameter, and the `environment` path component of
+## `serviceStateRoot` / `serviceInstanceAddress`.
 ##
 ## § TEST-DOUBLE POLICY
 ##
@@ -160,14 +163,38 @@ type
       ## single instance".
 
   ServiceInstanceKey* = object
-    ## §4.5: "The daemon holds a registry of running instances keyed by
-    ## `(identity, scope)`". This is that key. The registry is L7.
+    ## §6.5: "The instance key is `(identity, scope, environment)`."
+    ##
+    ## L4 built the first two elements against §4.5's earlier wording
+    ## ("keyed by `(identity, scope)`"); §6.5 is the amendment and L5 is
+    ## where the third element arrives. The registry keyed by it is
+    ## still L7.
     identityKind*: ServiceIdentityKind
     identity*: string
       ## The author's id for `sikStable`, the definition digest for
       ## `sikDerived`.
     scope*: ServiceScope
     scopeKey*: string
+    environment*: string
+      ## §6.5's third element: the environment the definition was
+      ## resolved against. "" when no environment was selected, which is
+      ## NOT a default environment -- it is the key of a resolution that
+      ## bound nothing, and it is distinct from every named one.
+      ##
+      ## WHY IT IS AN ELEMENT OF THE KEY AND NOT FOLDED INTO THE
+      ## IDENTITY. For `sikDerived` the bindings already reach the
+      ## identity through the rendered outputs -- §6.5: "the digest is
+      ## taken over a definition already resolved against one
+      ## environment's bindings" -- so folding would be redundant there.
+      ## For `sikStable` the identity is an author-assigned constant
+      ## that no binding can move, so folding is IMPOSSIBLE there: a
+      ## stable service resolved under `dev` and under `production`
+      ## would be one instance, one state root and one lease address,
+      ## and a developer's `repro up` would hand them whichever issuer
+      ## started first. §6.5 calls that out as the point -- "a
+      ## development issuer and a production issuer are not
+      ## interchangeable" -- and it is the clause the separate element
+      ## exists to satisfy. Both halves are asserted.
     degradation*: string
       ## Carried through from the scope resolution so a caller holding
       ## only the key can still report it.
@@ -532,16 +559,54 @@ proc routesToSystemDaemon*(scope: ServiceScope): bool =
 # ---------------------------------------------------------------------------
 
 proc serviceInstanceKey*(def: DslServiceDef; ctx: ServiceScopeContext;
-    outputDigests: openArray[tuple[path, digest: string]] = []):
-    ServiceInstanceKey =
-  ## §4: the instance key `(identity, scope)`, resolved.
+    outputDigests: openArray[tuple[path, digest: string]] = [];
+    environment = ""): ServiceInstanceKey =
+  ## §6.5: the instance key `(identity, scope, environment)`, resolved.
+  ##
+  ## `environment` is an EXPLICIT PARAMETER and is never read from the
+  ## process environment inside this proc. §6.4 requires the selected
+  ## environment to be a tracked input, and a function that reached for
+  ## `getEnv` here would make the key a function of ambient state --
+  ## which is the exact failure mode §6.4 names ("an ambient `getEnv` is
+  ## silently ignored when a lowered graph is served from cache"). The
+  ## caller reads the selection once, through
+  ## `repro_project_dsl`'s `selectedEnvironmentName`, and threads it.
+  ## `""` is a legitimate value: no environment selected.
+  ##
+  ## WHY IT IS LAST AND DEFAULTED, which is a real tradeoff and not an
+  ## accident. Last, because L4's call sites pass `outputDigests`
+  ## POSITIONALLY and reordering would have been a silent re-meaning of
+  ## every one of them. Defaulted, because "no environment selected" is
+  ## a state §6 has -- it is what every build that selects none
+  ## resolves under -- so there is an honest value for the default to
+  ## be. The cost is that the parameter is forgettable, and the mitigation
+  ## is that forgetting it yields the `no-environment` key rather than a
+  ## named environment's: a caller that drops the selection gets a
+  ## DIFFERENT instance, never silently the production one.
   let resolved = resolveServiceScope(def.scope, ctx)
   ServiceInstanceKey(
     identityKind: def.identity.kind,
     identity: serviceIdentity(def, outputDigests),
     scope: resolved.scope,
     scopeKey: resolved.key,
+    environment: environment.strip(),
     degradation: resolved.degradation)
+
+proc environmentPathComponent*(key: ServiceInstanceKey): string =
+  ## The environment as ONE path component.
+  ##
+  ## `no-environment` for the unselected case rather than an empty
+  ## component: an empty component collapses in a path join, which would
+  ## put an unselected resolution's state at the same place as the
+  ## pre-L5 layout and make the two indistinguishable. A reader finding
+  ## `no-environment` on disk learns a true thing.
+  ##
+  ## `encodeLockPathSegment`d for the reason the identity is: an
+  ## environment name is author-chosen, and the encoder is already this
+  ## repository's injective, invertible, Windows-safe name->component
+  ## map.
+  if key.environment.len == 0: "no-environment"
+  else: encodeLockPathSegment(key.environment)
 
 proc scopeKeyDigest*(key: ServiceInstanceKey): string =
   ## The scope key as a path component. Digested rather than encoded
@@ -555,7 +620,17 @@ proc serviceStateRoot*(storeRoot: string; key: ServiceInstanceKey): string =
   ## §4.4: "A `stable` service's state directory is addressed by its
   ## identity." This is that address.
   ##
-  ##   <storeRoot>/services/<scope>/<scopeKeyDigest>/<encoded identity>
+  ##   <storeRoot>/services/<scope>/<scopeKeyDigest>/<environment>/
+  ##     <encoded identity>
+  ##
+  ## §6.5 (L5) put the ENVIRONMENT component in, ABOVE the identity.
+  ## Without it a `stable` service resolved under two environments would
+  ## share one state directory -- one database for the development
+  ## issuer and the production one -- which is the opposite of "Two
+  ## environments are two instances". It sits above the identity rather
+  ## than below it so that a reader listing one environment's directory
+  ## sees every instance of that environment, which is the question an
+  ## operator asks.
   ##
   ## The IDENTITY component is `encodeLockPathSegment`d rather than
   ## digested, and that is the §4.4 claim made legible: a stable id of
@@ -586,7 +661,8 @@ proc serviceStateRoot*(storeRoot: string; key: ServiceInstanceKey): string =
       "serviceStateRoot needs an explicit state-store root; see the " &
       "`storeRoot` note on this proc")
   storeRoot / ServiceStateDirName / scopeWord(key.scope) /
-    scopeKeyDigest(key) / encodeLockPathSegment(key.identity)
+    scopeKeyDigest(key) / environmentPathComponent(key) /
+    encodeLockPathSegment(key.identity)
 
 proc serviceInstanceAddress*(key: ServiceInstanceKey): string =
   ## The key as the resource ADDRESS a lease is taken on. `lease.nim`'s
@@ -594,7 +670,13 @@ proc serviceInstanceAddress*(key: ServiceInstanceKey): string =
   ## address, so this is what makes "one lease per holder on one
   ## instance" (§4.5) the existing lease lane's behaviour rather than new
   ## machinery.
+  ## §6.5 (L5): the ENVIRONMENT is a component, so two environments are
+  ## two addresses and therefore two reference-counted instances. A
+  ## holder of the development instance never appears in the production
+  ## instance's holder set, and `repro down` under one cannot release
+  ## the other.
   "service:" & scopeWord(key.scope) & ":" & scopeKeyDigest(key) & ":" &
+    environmentPathComponent(key) & ":" &
     identityKindWord(key.identityKind) & ":" & key.identity
 
 proc serviceLeaseHolderId*(consumingProjectRoot: string): string =
