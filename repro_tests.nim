@@ -693,6 +693,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim",
+    binary: "build/test-bin/t_relocatable_record_follows_the_working_tree",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_scratch_dirs.nim",
     binary: "build/test-bin/t_scratch_dirs",
     defines: @[],

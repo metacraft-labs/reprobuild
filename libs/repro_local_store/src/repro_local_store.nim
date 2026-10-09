@@ -2180,6 +2180,22 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+proc recordedInputLocation*(root, path: string): string =
+  ## Where a recorded input lives for the action consulting the record.
+  ##
+  ## Every record written before relocatable records existed names its
+  ## inputs by absolute path, and this is the identity for those. A
+  ## RELOCATABLE action (`BuildAction.relocatable` in the build engine)
+  ## records the inputs it observed beside its working directory relative to
+  ## that directory, so the same record describes the same computation at
+  ## another location: such a name resolves against the CONSULTING action's
+  ## cwd (`root`), exactly as its relative declared outputs already do
+  ## (`recordOutputsNotOwnedBy`, `restoreOutputs`).
+  if path.isAbsolute or root.len == 0:
+    path
+  else:
+    os.normalizedPath(root / path)
+
 const
   WitnessMagic = "RBOW"
   WitnessVersion = 2'u16
@@ -4645,8 +4661,11 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     timedRecordedInputRevalidation:
       for input in record.inputs:
         inc checkedInputs
-        if fingerprintRecordedMetadata(input.path, input.metadata,
-            metadataCache) != input.metadata:
+        # A relocatable record names inputs relative to the action's cwd
+        # (`recordedInputLocation`); `outputRoot` is that cwd.
+        if fingerprintRecordedMetadata(
+            recordedInputLocation(probe.outputRoot, input.path),
+            input.metadata, metadataCache) != input.metadata:
           return HotMetadataScan(status: hmssInputChanged,
             recordCount: totalRecords, checkedInputCount: checkedInputs)
     # Same rule as `lookupActionResultImpl`: unchanged inputs are only
@@ -4861,6 +4880,11 @@ proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
         if seen.contains(inputKey):
           continue
         seen.incl(inputKey)
+        # This batch check has no action cwd to resolve a relocatable
+        # record's cwd-relative input against, so it does not decide one:
+        # the per-edge lookup, which has it, does.
+        if not input.path.isAbsolute:
+          return false
         if fingerprintRecordedMetadata(input.path, input.metadata,
             metadataCache) != input.metadata:
           return false
@@ -4887,11 +4911,16 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   for path in enumeratedDirectories:
     enumerated.incl(path.replace('\\', '/'))
   for path in inputPaths:
-    let input =
+    # A relative input path is a relocatable record's cwd-relative name
+    # (`recordedInputLocation`): observed where it lives for THIS action,
+    # recorded under the name the record is shared by.
+    let location = recordedInputLocation(outputRoot, path)
+    var input =
       if enumerated.contains(path.replace('\\', '/')):
-        observeEnumeratedDirectory(path, policy)
+        observeEnumeratedDirectory(location, policy)
       else:
-        observeFile(path, policy, metadataCache)
+        observeFile(location, policy, metadataCache)
+    input.path = path
     if input.isRecordableInput():
       result.inputs.add(input)
   for env in envInputs:
@@ -4956,11 +4985,16 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
   for path in enumeratedDirectories:
     enumerated.incl(path.replace('\\', '/'))
   for path in inputPaths:
-    let input =
+    # A relative input path is a relocatable record's cwd-relative name
+    # (`recordedInputLocation`): observed where it lives for THIS action,
+    # recorded under the name the record is shared by.
+    let location = recordedInputLocation(outputRoot, path)
+    var input =
       if enumerated.contains(path.replace('\\', '/')):
-        observeEnumeratedDirectory(path, policy)
+        observeEnumeratedDirectory(location, policy)
       else:
-        observeFile(path, policy, metadataCache)
+        observeFile(location, policy, metadataCache)
+    input.path = path
     if input.isRecordableInput():
       result.inputs.add(input)
   for env in envInputs:
@@ -5003,13 +5037,15 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
                      changedInputPath: var string;
-                     metadataCache: ptr FileMetadataCache):
+                     metadataCache: ptr FileMetadataCache;
+                     inputRoot = ""):
                      tuple[inputs: seq[FileFingerprint],
                            reusedRecordedInputs: bool] =
   result.reusedRecordedInputs = true
   timedRecordedInputRevalidation:
     for i, recorded in record.inputs:
-      let currentMetadata = fingerprintRecordedMetadata(recorded.path,
+      let location = recordedInputLocation(inputRoot, recorded.path)
+      let currentMetadata = fingerprintRecordedMetadata(location,
         recorded.metadata, metadataCache)
       if recorded.metadata.membershipTrackedDirectory() and
           currentMetadata != recorded.metadata:
@@ -5032,7 +5068,7 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
         if not result.reusedRecordedInputs:
           result.inputs[i] = recorded
       of ffpChecksum:
-        let current = observeFileWithMetadata(recorded.path, recorded.policy,
+        let current = observeFileWithMetadata(location, recorded.policy,
           currentMetadata)
         if (not recorded.hasLocalHash) or (not current.hasLocalHash) or
             current.localHash != recorded.localHash:
@@ -5050,8 +5086,9 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
           changed = true
           changedInputPath = recorded.path
           return
-        let current = observeFileWithMetadata(recorded.path, recorded.policy,
+        var current = observeFileWithMetadata(location, recorded.policy,
           currentMetadata)
+        current.path = recorded.path
         if not current.hasLocalHash:
           changed = true
           changedInputPath = recorded.path
@@ -5106,7 +5143,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         for input in hot.record.inputs:
           if changed:
             break
-          if fingerprintRecordedMetadata(input.path, input.metadata,
+          if fingerprintRecordedMetadata(
+              recordedInputLocation(outputRoot, input.path), input.metadata,
               metadataCache) != input.metadata:
             changed = true
             changedInput = input.path
@@ -5157,7 +5195,7 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         firstChangedInput = "environment: " & changedInput
       continue
     let refreshed = refreshedInputs(record, changed, hybridCutoff,
-      changedInput, metadataCache)
+      changedInput, metadataCache, inputRoot = outputRoot)
     if changed:
       sawInputChange = true
       if firstChangedInput.len == 0:

@@ -102,6 +102,7 @@ else:
     0.0
 
 import repro_core
+import repro_core/relocation
 from repro_core/process_streams import drainStream
 import repro_depfile
 import repro_hash
@@ -365,6 +366,23 @@ type
     cacheable*: bool
     weakFingerprint*: ContentDigest
     actionCachePolicy*: FileFingerprintPolicy
+    relocatable*: bool
+      ## The action computes the same thing wherever its working directory
+      ## is, given the same content at the same cwd-relative places. Its
+      ## record then names every observed input relative to `cwd` (except
+      ## under `relocationAnchors`), its declared outputs are cwd-relative,
+      ## and its weak fingerprint is keyed on the depth of `cwd` instead of
+      ## its spelling — so a byte-identical copy of the working tree at
+      ## another path finds, revalidates against ITS OWN files, and restores
+      ## from the same record (`recordedInputNames`). Off by default; the
+      ## engine's own recipe compiles (interface extraction, provider
+      ## compile) set it. Hermetic-Builds-And-Path-Independence.md
+      ## §"Engine-internal recipe compiles".
+    relocationAnchors*: seq[string]
+      ## Absolute roots a relocatable action reaches by absolute path — the
+      ## toolchain, the reprobuild libraries, host configuration — whose
+      ## inputs stay recorded by absolute path. A root that contains `cwd`
+      ## anchors nothing.
     depfile*: string
     dynamicDepsFile*: string
     monitorDepfile*: string
@@ -2819,6 +2837,40 @@ proc keyedOnEnvironmentIsolation*(fingerprint: ContentDigest;
   framed.add($base.len & "\x1f" & base & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc cwdDepth(cwd: string): int =
+  for part in os.normalizedPath(cwd).replace('\\', '/').split('/'):
+    if part.len > 0:
+      inc result
+
+proc keyedOnRelocation*(fingerprint: ContentDigest; relocatable: bool;
+                        cwd: string): ContentDigest =
+  ## The IDENTITY for an ordinary action. A relocatable one records the
+  ## inputs it observed ABOVE its cwd — the `config.nims` a compiler looks
+  ## for in every ancestor directory — as `../`-relative names, and a name
+  ## like that only reaches the same set of ancestors from a cwd at the same
+  ## depth. Keying on the depth keeps two locations whose ancestor walks
+  ## differ in length from sharing a record that checked only one of them.
+  if not relocatable:
+    return fingerprint
+  var framed = "action-relocatable\x1e" & $cwdDepth(cwd) & "\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
+proc recordedInputNames*(action: BuildAction;
+                         paths: openArray[string]): seq[string] =
+  ## The names a record gives `paths` (absolute observed inputs). Unchanged
+  ## for an ordinary action. For a `relocatable` one every path outside the
+  ## anchors is named relative to the action's cwd, so the record is
+  ## revalidated against the consulting action's own tree
+  ## (`repro_local_store.recordedInputLocation`).
+  if not action.relocatable or action.cwd.len == 0 or
+      not action.cwd.isAbsolute:
+    return @paths
+  let anchors = effectiveAnchors(action.cwd, action.relocationAnchors)
+  for path in paths:
+    result.add(relocatableName(path, action.cwd, anchors))
+
 proc monitorPayloadArgIndex(argv: openArray[string]): int
 
 proc executedImageArgvIndex*(argv: openArray[string]): int =
@@ -3035,6 +3087,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              env: openArray[string] = [];
              envPassthrough: openArray[string] = [];
              requiresElevation = false;
+             relocatable = false;
+             relocationAnchors: openArray[string] = [];
              governingLockIdentity: LockIdentity): BuildAction =
   ## Named-Lock-Files §7.2: `governingLockIdentity` has NO DEFAULT, and that
   ## is the point. "An action constructed without a governing lock identity is
@@ -3077,14 +3131,16 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # subtracts that root's contents out of the key — see
     # `keyedOnContentAddressedToolRoot` for the measurement that showed
     # the two halves had never been connected.
-    weakFingerprint: keyedOnGoverningLock(
+    weakFingerprint: keyedOnRelocation(keyedOnGoverningLock(
       keyedOnContentAddressedToolRoot(
         keyedOnEnvironmentIsolation(
           keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
           isolateHostEnvironment),
         argv),
-      governingLockIdentity),
+      governingLockIdentity), relocatable, cwd),
     actionCachePolicy: actionCachePolicy,
+    relocatable: relocatable,
+    relocationAnchors: @relocationAnchors,
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
@@ -16486,7 +16542,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if sessionInvalidatedPaths.len == 0:
       return ""
     for input in record.inputs:
-      let materialized = materialPath(action.cwd, input.path)
+      let materialized = recordedInputLocation(action.cwd, input.path)
       if sessionInvalidatedPaths.contains(materialized):
         return materialized
     ""
@@ -17967,7 +18023,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               let record = cache.recordActionResult(cas.inner,
                 action.weakFingerprint,
                 action.actionCachePolicy,
-                action.cacheInputPaths(evidence.evidence),
+                action.recordedInputNames(
+                  action.cacheInputPaths(evidence.evidence)),
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
@@ -17982,8 +18039,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # (Incremental-Invalidation.md:814-821). The evidence was
                 # already collected two lines up; only the hand-off was
                 # missing.
-                enumeratedDirectories =
-                  action.cacheEnumeratedDirectories(evidence.evidence),
+                enumeratedDirectories = action.recordedInputNames(
+                  action.cacheEnumeratedDirectories(evidence.evidence)),
                 determinism = entryDeterminismFor(config, action))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
@@ -18180,7 +18237,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 storeOutputBlobsFor(plan.action, evidence.evidence)
               let record = cache.recordActionResult(cas.inner,
                 plan.action.weakFingerprint,
-                plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
+                plan.action.actionCachePolicy,
+                plan.action.recordedInputNames(
+                  plan.action.cacheInputPaths(evidence.evidence)),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
@@ -18192,8 +18251,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # from a converter path set or from a monitor depfile a
                 # direct engine caller prewired — both of which
                 # `collectEvidence` has already folded by this point.
-                enumeratedDirectories =
-                  plan.action.cacheEnumeratedDirectories(evidence.evidence),
+                enumeratedDirectories = plan.action.recordedInputNames(
+                  plan.action.cacheEnumeratedDirectories(evidence.evidence)),
                 determinism = entryDeterminismFor(config, plan.action))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
@@ -18792,13 +18851,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # blob payloads back out of the local CAS.
           let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
           let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
-            action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
+            action.actionCachePolicy,
+            action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,
             metadataCache = addr fileMetadataCache,
             envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-            enumeratedDirectories =
-              action.cacheEnumeratedDirectories(evidence.evidence),
+            enumeratedDirectories = action.recordedInputNames(
+              action.cacheEnumeratedDirectories(evidence.evidence)),
             determinism = entryDeterminismFor(config, action))
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
