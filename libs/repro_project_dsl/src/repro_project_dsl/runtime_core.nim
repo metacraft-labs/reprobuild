@@ -1424,6 +1424,21 @@ when defined(reproProviderMode):
       directoryEnumerationInput(material, memberEntryPointId,
         memberEntryPointBodyHash, memberArgumentRoot = material))
 
+  proc providerFileInput*(path: string) {.dynOrStatic.} =
+    ## Report a file whose CONTENT shaped the graph this evaluation emits.
+    ##
+    ## An emitter that reads a committed file at emission time and bakes
+    ## what it read into an action (a script, a token, a count) has made
+    ## that file an input of the evaluation, not only of the action: the
+    ## action re-running does not help when the program it runs is the one
+    ## emitted for the old content. Recording a `gevFileRead` here is what
+    ## makes an edit to the file invalidate the cached provider graph
+    ## (Project-Provider-Graph-Protocol, "Evaluation Input Changes").
+    ##
+    ## A missing file is recorded too, with the digest `missing`, so a file
+    ## that appears later — an optional committed lock — also invalidates.
+    providerEvaluationInputRegistry.add(fileReadInput(materialProviderPath(path)))
+
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
 
@@ -1572,6 +1587,9 @@ when defined(reproProviderMode):
 
 else:
   proc providerDirectoryInput*(path: string) {.dynOrStatic.} =
+    discard path
+
+  proc providerFileInput*(path: string) {.dynOrStatic.} =
     discard path
 
   proc providerDirectoryInput*(path, memberEntryPointId,

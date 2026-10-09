@@ -1880,6 +1880,7 @@ tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	21
 tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	nim	6
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	16
+tests/unit/t_vendor_manifest_evaluation_inputs.nim	nim	4
 tests/unit/t_version.nim	nim	2
 tests/unit/t_voice_model_packages.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2

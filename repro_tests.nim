@@ -16848,6 +16848,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_vendor_manifest_evaluation_inputs.nim",
+    binary: "build/test-bin/t_vendor_manifest_evaluation_inputs",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",
     defines: @[],
