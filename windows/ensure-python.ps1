@@ -47,7 +47,7 @@ function Ensure-Python {
   $staging = Join-Path $cacheDir ("staging-" + [Guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Path $staging | Out-Null
   try {
-    Expand-Archive -LiteralPath $archive -DestinationPath $staging
+    Expand-ZipArchive -ArchivePath $archive -Destination $staging
     $stagedExe = Join-Path $staging "python.exe"
     if ((Get-PythonRuntimeVersion -Executable $stagedExe) -ne $version) {
       throw "ensure-python: the extracted runtime does not match version $version."

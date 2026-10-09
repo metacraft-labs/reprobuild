@@ -24,15 +24,18 @@ if [[ "$archive_name" == *.zip ]]; then
   # guaranteed in the bash that runs this step: Git for Windows' bash ships a
   # GNU tar that cannot read zip, and unzip.exe is not part of every Git
   # install. Prefer unzip when present, but fall back to tools that always
-  # exist on a Windows host -- PowerShell's Expand-Archive, or the
+  # exist on a Windows host -- PowerShell with .NET's zip reader, or the
   # System32 bsdtar (libarchive tar.exe, which unlike GNU tar DOES read zip) --
   # so a missing unzip does not fail the release AFTER an hour of build time.
   if command -v unzip > /dev/null 2>&1; then
     unzip -q "$archive_path" -d "$tmp_dir"
   elif command -v powershell > /dev/null 2>&1 && command -v cygpath > /dev/null 2>&1; then
-    echo "    unzip not found; extracting with PowerShell Expand-Archive"
-    powershell -NoProfile -Command \
-      "Expand-Archive -LiteralPath '$(cygpath -w "$archive_path")' -DestinationPath '$(cygpath -w "$tmp_dir")' -Force"
+    # ZipFile.ExtractToDirectory rather than Expand-Archive, whose per-entry
+    # progress records make an archive of this size take minutes. $tmp_dir is
+    # fresh, so nothing needs overwriting.
+    echo "    unzip not found; extracting with PowerShell (System.IO.Compression.ZipFile)"
+    powershell -NoProfile -NonInteractive -Command \
+      "\$ProgressPreference = 'SilentlyContinue'; \$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('$(cygpath -w "$archive_path")', '$(cygpath -w "$tmp_dir")')"
   elif [[ -x /c/Windows/System32/tar.exe ]]; then
     printf '%s\n' '    unzip not found; extracting with Windows bsdtar (System32\tar.exe)'
     /c/Windows/System32/tar.exe -xf "$archive_path" -C "$tmp_dir"
