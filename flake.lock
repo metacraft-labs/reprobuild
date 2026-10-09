@@ -238,17 +238,17 @@
     "codetracer-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791564002,
-        "narHash": "sha256-oOzMNLgyTX9Y0NSmVZxkxkgyWBtYsWt9g560RgZd/+o=",
+        "lastModified": 1791572600,
+        "narHash": "sha256-CUaUSIyF4S7eu4exffxG5JQRBr1iayd84+fBGwR9QsA=",
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "45aa9b52acde3dd2c6daae7255dbb1c0a5cc46fd",
+        "rev": "732c9551011a06dd010fbbf73168a76f1baf4889",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "45aa9b52acde3dd2c6daae7255dbb1c0a5cc46fd",
+        "rev": "732c9551011a06dd010fbbf73168a76f1baf4889",
         "type": "github"
       }
     },
