@@ -8935,6 +8935,165 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
     except CatchableError:
       discard
 
+proc declaredWriteRootPrefixes(action: BuildAction): seq[string] =
+  ## The self-written prefix set, DERIVED from the action's own write-root
+  ## declaration rather than listed a second time beside it.
+  ##
+  ## Spec: `Filesystem-Policy-And-Observed-Inputs.md` §"The self-written set
+  ## is derived, never listed". An action's own writes are not its inputs,
+  ## and the set of directories it writes is ALREADY declared — it is
+  ## `declaredOutputs`, the M9.R.75 write roots. An author who states that
+  ## fact and then re-states it as an `ignoredInputPrefixes` entry has said
+  ## the same thing twice, and the second statement is the one that gets
+  ## forgotten. Counted at this revision: NINE prefix entries across the
+  ## tree name a path their own action also declares as a write root —
+  ## `runtime_contract`'s library edge (five lines apart),
+  ## `cmake_package`'s configure, build and install edges,
+  ## `meson_package`'s setup and compile edges, `cargo_package`'s compile
+  ## edge, `go_package`'s build edge, and `autotools_package`'s configure
+  ## edge on the branch where it adds one at all — while interface
+  ## extraction lists its scratch root and omits the directory it
+  ## publishes into.
+  ##
+  ## MATERIALIZED against `action.cwd`, unlike the explicit prefixes in
+  ## `ignoredInputRoots`, which compare raw. The asymmetry is deliberate and
+  ## it is the same argument `honouredDerivedPrefixes` makes for its side: an
+  ## explicit prefix is an author's spelling, and changing how it is read
+  ## would move keys that exist today, whereas a DERIVED root comes from a
+  ## declaration the engine already materializes everywhere else
+  ## (`portablePhysicalOutputsOf`, `isOwnOutput`, the R7 pass), so reading it
+  ## the same way here is the only consistent choice. A relative write root
+  ## therefore works, where a relative explicit prefix is inert.
+  ##
+  ## The symlinked spelling is added for the same reason, and with the same
+  ## measurement behind it, as in `ignoredInputRoots`: on macOS every path
+  ## the monitor reports comes back resolved (`/private/tmp/...`), so a root
+  ## derived from a `/tmp/...` declaration would never fire.
+  for root in action.declaredOutputs:
+    let expanded = normalizeWriteRoot(
+      materialPath(action.cwd, action.expandPolicyPath(root)))
+    if expanded.len == 0:
+      continue
+    result.add(expanded)
+    if not expanded.isAbsolute:
+      continue
+    try:
+      let resolved = normalizeWriteRoot(expandFilename(expanded))
+      if resolved.len > 0 and resolved != expanded:
+        result.add(resolved)
+    except CatchableError:
+      discard
+
+proc enumerationIgnoredRoots*(action: BuildAction): seq[string] =
+  ## The ignored-prefix set the ENUMERATION channel is filtered against: the
+  ## author's explicit `ignoredInputPrefixes` UNION the roots derived from the
+  ## action's own write-root declaration.
+  ##
+  ## Spec: `Filesystem-Policy-And-Observed-Inputs.md` §"Enumerations And
+  ## Probes Under Writable Areas" / §"The self-written set is derived, never
+  ## listed". Its testable consequence — "for any action, the set of ignored
+  ## input prefixes contains every declared output write-root" — is asserted
+  ## against THIS set, without running a build.
+  ##
+  ## WHY ENUMERATIONS AND NOT ALSO READS AND PROBES. The derivation is sound
+  ## for a directory's MEMBERSHIP and is not sound for its contents, and the
+  ## difference is not a matter of taste: it is a shipped recipe.
+  ## `autotools_package`'s configure edge declares the build tree as a write
+  ## root UNCONDITIONALLY, but adds it to `ignoredInputPrefixes` only when
+  ## there are no source patches and no bootstrap — because in those branches
+  ## the action runs BEFORE the cleanup and genuinely reads the previous
+  ## build tree (`test ! -f build/input || cp build/input src/settings`).
+  ## `tests/unit/t_configure_build_tree_cleanup.nim`'s "Autotools pre-cleanup
+  ## patches and bootstrap retain observed inputs" pins exactly that. Deriving
+  ## the ignore for the READ channel from the declaration would drop those
+  ## reads out of the key and hand that edge a hit on a build tree it had
+  ## consumed — a false hit, which is strictly worse than the miss being
+  ## fixed.
+  ##
+  ## Membership carries no such dependency. An entry LIST changes because
+  ## somebody added or removed a name, and when the action under consideration
+  ## is the one adding the name, the fact is derived from its own output. A
+  ## read or a probe can still witness prior content, so both keep the
+  ## explicit set — see `cacheInputPaths`. Dropping a directory from this
+  ## channel does NOT drop the directory from the key: it stays recorded as
+  ## `ffkDirectory` with `mtimeNs = 0`, which `membershipTrackedDirectory`
+  ## reads as "existence only", so "the directory was deleted" is still
+  ## detected. Only the self-inflicted part of the comparison goes away.
+  ##
+  ## And note which reading of `ignoredInputPrefixes` this is NOT.
+  ## `honouredDerivedPrefixes` — the S7 restore gate — keeps reading the
+  ## EXPLICIT `ignoredInputRoots`, so a declared write root does not become a
+  ## statement that the bytes under it are not product. Feeding the derived
+  ## set in there would be unsound by construction: the gate disqualifies a
+  ## prefix by comparing it against `declaredOutputs` in their declared
+  ## spelling, so the symlink-resolved derived spelling would slip past the
+  ## disqualification and exempt the product.
+  ##
+  ## AND WHY THE NINE DUPLICATE ENTRIES STAY. Because of the channel split,
+  ## none of them is merely redundant. Eight are genuinely read back —
+  ## `cmake --build` and `cmake --install` say so in their own comments, and
+  ## `cargo build`, `meson setup`/`compile`, `patchelf` and `configure` all
+  ## consume state a previous run left under the same root — so deleting the
+  ## entry would drop those reads from the key and hand the edge a hit on a
+  ## tree it had consumed. The ninth, `go_package`'s `effectiveDestdir`, is
+  ## write-only, and it is still not deletable: that recipe guards its
+  ## `setRegisteredActionDeclaredOutputs` on `projectRoot.len > 0` while the
+  ## prefix is unconditional, so with no project root the explicit entry is
+  ## the only ignore there is and the derivation has nothing to derive from.
+  ## The derivation therefore ADDS a floor; it does not license a sweep of
+  ## the recipes.
+  result = action.ignoredInputRoots()
+  for root in action.declaredWriteRootPrefixes():
+    if root notin result:
+      result.add(root)
+
+proc selfWrittenDirectoryKeys(action: BuildAction): HashSet[string] =
+  ## The directories this action writes INTO, derived from its own output
+  ## declaration: every declared write root, and the parent directory of
+  ## every declared output file.
+  ##
+  ## Same spec rule as `declaredWriteRootPrefixes`, applied to the one
+  ## channel a write-root prefix cannot reach: an action that declares
+  ## output FILES and no write root still writes a directory, and that
+  ## directory's MEMBERSHIP changes because of its own write. Interface
+  ## extraction is exactly that shape — it declares four files under
+  ## `build/repro/` and no write root — so the membership digest of a
+  ## directory it publishes into landed in its own key and the edge missed
+  ## its cache on every build of every project
+  ## (`issues/2026-10-08-interface-extraction-edge-is-keyed-on-directories-
+  ## it-writes-itself.md`).
+  ##
+  ## Deriving a PREFIX from an output file would be wrong: that would drop
+  ## every real input that merely lives next to an output, which is the
+  ## over-broad filter `selfWrittenOutputKeys` refuses for the same reason.
+  ## What is derived here is narrower and is the exact fact the declaration
+  ## supports — "I add an entry to this directory", so its entry LIST is
+  ## derived state — and it drops nothing else: file reads, probes and
+  ## enumerations of OTHER directories under the same parent are untouched,
+  ## and the files this action reads out of its own output directory stay in
+  ## the key by path.
+  ##
+  ## A directory the author DECLARED as an input is not filtered; the callers
+  ## consult `declaredInputs` first, as everywhere else in this family.
+  ##
+  ## The write-root loop below is SUBSUMED at the one caller that exists
+  ## today and is kept so the set is complete on its own terms. In
+  ## `cacheEnumeratedDirectories` a write root is already matched by
+  ## `isUnderAnyRoot(ignoredRoots)` — `enumerationIgnoredRoots` puts the
+  ## derived roots there and `isUnderAnyRoot` matches equality as well as
+  ## containment — and that test runs first, so deleting the loop changes
+  ## nothing a test can observe. Said here rather than left to be
+  ## rediscovered: "this restates something stated elsewhere" is the exact
+  ## defect this whole family is about, and an unremarked redundancy in the
+  ## fix for it is the same defect wearing the fix's clothes.
+  result = initHashSet[string]()
+  for output in action.outputs:
+    let dir = normalizeWriteRoot(parentDir(materialPath(action.cwd, output)))
+    if dir.len > 0:
+      result.incl(dir)
+  for root in action.declaredWriteRootPrefixes():
+    result.incl(root)
+
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
   for root in roots:
@@ -9073,6 +9232,10 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   declared-input carve-out that keeps the two filters from
   ##   colliding. Declared inputs are never dropped by either filter.
   let toolRoots = action.toolInputRoots()
+  # The EXPLICIT prefix set, deliberately not the derived one. The derived
+  # self-written set applies to the ENUMERATION channel only — see
+  # `enumerationIgnoredRoots` for the whole argument, and for the shipped
+  # recipe that makes the difference load-bearing.
   let ignoredRoots = action.ignoredInputRoots()
   let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
@@ -9414,8 +9577,8 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
       continue
     result.addUnique(seen, path)
 
-proc cacheEnumeratedDirectories(action: BuildAction;
-                                evidence: PathSetEvidence): seq[string] =
+proc cacheEnumeratedDirectories*(action: BuildAction;
+                                 evidence: PathSetEvidence): seq[string] =
   ## The subset of this action's recorded inputs that it ENUMERATED, in the
   ## same materialised form `cacheInputPaths` produces, so the record side
   ## can match them by path.
@@ -9425,7 +9588,8 @@ proc cacheEnumeratedDirectories(action: BuildAction;
   ## one either, or the record would carry membership for something it does
   ## not record at all.
   let toolRoots = action.toolInputRoots()
-  let ignoredRoots = action.ignoredInputRoots()
+  let ignoredRoots = action.enumerationIgnoredRoots()
+  let selfWrittenDirs = action.selfWrittenDirectoryKeys()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     declaredMaterialized.incl(
@@ -9433,8 +9597,19 @@ proc cacheEnumeratedDirectories(action: BuildAction;
   var seen = initHashSet[string]()
   for dir in evidence.monitorDirectoryEnumerations:
     let path = materialPath(action.cwd, dir)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+    if declaredMaterialized.contains(path.replace('\\', '/')):
+      result.addUnique(seen, path)
+      continue
+    if path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots):
+      continue
+    # The action's OWN output directory: its entry list changed because this
+    # action added an entry to it, so the membership digest is derived state
+    # and not an input. Derived from the output declaration — see
+    # `selfWrittenDirectoryKeys`. The directory is still dropped only from
+    # the MEMBERSHIP channel; reads and probes of paths inside it are
+    # unaffected, and the exact declared outputs stay excluded by
+    # `selfWrittenOutputKeys` as before.
+    if selfWrittenDirs.contains(normalizeWriteRoot(path)):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;

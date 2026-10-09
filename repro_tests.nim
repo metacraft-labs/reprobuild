@@ -702,6 +702,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
+    binary: "build/test-bin/t_self_written_set_is_derived",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim",
     binary: "build/test-bin/t_soft_rebuild_and_retention",
     defines: @[],
