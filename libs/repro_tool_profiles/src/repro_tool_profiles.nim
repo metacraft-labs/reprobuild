@@ -11,6 +11,11 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/host_tar
+# The tarball provisioner runs as a built-in executor on the build engine's
+# scheduler thread, possibly while the engine's worker pool is live, so its
+# extraction commands are released without ``osproc.close``'s double close of
+# the merged stdout/stderr descriptor (see ``repro_core/process_close``).
+from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
@@ -2253,7 +2258,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
   requireTarDecompressor(tarExe, archivePath, archiveType)
   let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
-      execCmdEx(command))
+      execCmdExCloseOnce(command))
   if res.exitCode != 0:
     raise newException(OSError,
       "tool-resolution failed: tar listing failed for " & archivePath &
@@ -2740,7 +2745,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     requireTarDecompressor(tarExe, archivePath, archiveType)
     let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
       proc(command: string): tuple[output: string, exitCode: int] =
-        execCmdEx(command))
+        execCmdExCloseOnce(command))
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: tar extraction failed for " & archivePath &
@@ -2748,7 +2753,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
     mergeRustInstallerComponents(destination)
   of "zip":
-    let res = execCmdEx(zipExtractCommand(resolveZipExtractor(),
+    let res = execCmdExCloseOnce(zipExtractCommand(resolveZipExtractor(),
       archivePath, destination))
     if res.exitCode != 0:
       raise newException(OSError,
@@ -2831,7 +2836,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       let payloadTar = staging / "payload.tar"
       # A provisioned executable named by absolute path: a controlled
       # execution, so `execCmdEx`, not the ambient-execution hatch.
-      let zstdRes = execCmdEx(shellCommand(
+      let zstdRes = execCmdExCloseOnce(shellCommand(
         @[zstdExe, "-d", "-f", "-q", "-o", payloadTar, archivePath]))
       if zstdRes.exitCode != 0:
         raise newException(OSError,
@@ -2859,7 +2864,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     let command = quoteShell(sevenZipExe) & " x " &
       quoteShell("-o" & destination) & " " & quoteShell(archivePath) &
       " -y -bsp0 -bso0"
-    let res = execCmdEx(command)
+    let res = execCmdExCloseOnce(command)
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: 7z extraction failed for " & archivePath &
