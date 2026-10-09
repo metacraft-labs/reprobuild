@@ -7831,6 +7831,40 @@ type
                                terminal: bool; exitCode: int;
                                watchedPaths: seq[string]; lastResult: string)
 
+  ActionDecisionTally* = object
+    ## How one invocation's actions were settled, counted from the engine's
+    ## own per-action results. Written into the ``$REPRO_STATS_DIR`` record
+    ## so a caller that cannot see the action log -- CMake runs every
+    ## TryCompile build with ``--log=quiet`` -- can still tell a cache hit
+    ## from an executed command. The timing metrics in the same record are
+    ## not a substitute: their counts say how often a timer ran, and several
+    ## timers run for both outcomes.
+    total*: int
+    launched*: int
+    cacheHit*: int
+    failed*: int
+
+proc tallyActionDecisions*(results: openArray[ActionResult]):
+    ActionDecisionTally =
+  ## ``cacheHit`` counts both reuse decisions (``cdHit`` and
+  ## ``cdHybridCutoff``); ``launched`` counts actions whose command ran.
+  for item in results:
+    inc result.total
+    if item.launched:
+      inc result.launched
+    if item.cacheDecision in {cdHit, cdHybridCutoff}:
+      inc result.cacheHit
+    if item.status in {asFailed, asBlocked}:
+      inc result.failed
+
+proc actionTallyJson*(tally: ActionDecisionTally): JsonNode =
+  %*{
+    "total": tally.total,
+    "launched": tally.launched,
+    "cacheHit": tally.cacheHit,
+    "failed": tally.failed,
+  }
+
 proc writeBuildBenchmark(path: string; outcome: BuildCommandOutcome;
                          stats: BuildStats; modeName, fastPath: string;
                          executedActions: int;
@@ -9578,6 +9612,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     progressRenderer.finishProgress()
   var invocationFastPath = ""
   var benchmarkExecutedActions = 0
+  var invocationActionTally: ActionDecisionTally
   defer:
     if benchmarkPath.len > 0:
       try:
@@ -9641,6 +9676,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "exitCode": result.exitCode,
           "mode": $mode,
           "fastPath": invocationFastPath,
+          "actions": actionTallyJson(invocationActionTally),
         }
         var metrics = newJArray()
         for metric in buildStats.metrics:
@@ -10049,10 +10085,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
-    benchmarkExecutedActions = 0
-    for item in buildResult.results:
-      if item.launched:
-        inc benchmarkExecutedActions
+    invocationActionTally = tallyActionDecisions(buildResult.results)
+    benchmarkExecutedActions = invocationActionTally.launched
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
@@ -11663,10 +11697,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
-    benchmarkExecutedActions = 0
-    for item in buildResult.results:
-      if item.launched:
-        inc benchmarkExecutedActions
+    invocationActionTally = tallyActionDecisions(buildResult.results)
+    benchmarkExecutedActions = invocationActionTally.launched
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
