@@ -88,6 +88,17 @@ type
     explicit*: bool       ## true when ``--ready-timeout`` set ``timeoutMs``.
     derivedMs*: int       ## what the declared services derive, always.
 
+  DevSessionStopBudget* = object
+    ## How long ``repro down`` will wait for the session it asked to stop to
+    ## report ``down``, and WHERE that number came from. Same shape and same
+    ## reason as ``DevSessionReadyBudget``, deliberately not the same type:
+    ## the two derivations read different declarations and the two
+    ## diagnostics name different flags, so sharing one object would make
+    ## ``describe`` lie about one of them.
+    timeoutMs*: int
+    explicit*: bool       ## true when ``--stop-timeout`` set ``timeoutMs``.
+    derivedMs*: int       ## what the session's live services derive, always.
+
   DevSessionStillStartingError* = object of CatchableError
     ## The wait expired while the session was still coming up. Distinct from
     ## ``IOError`` ON PURPOSE: the session is alive and may well be up by the
@@ -160,6 +171,36 @@ const
     ## is what stops a stack that declares 600 s from spending ten minutes
     ## discovering that its supervisor died at once. Capped by the budget,
     ## so an explicit ``--ready-timeout`` smaller than this still wins.
+
+  DevSessionServiceStopGraceMs* = 3000
+    ## The grace ONE service gets between ``terminate()`` and ``kill()`` in
+    ## ``stopService``. It was an unnamed ``3000`` in that loop; naming it is
+    ## what lets ``repro down``'s wait be derived from the number the
+    ## supervisor actually honours instead of from a second, unrelated
+    ## constant that nothing keeps in step with it.
+    ##
+    ## THIS IS NOT A DECLARED BUDGET, and the difference matters when
+    ## reading ``derivedStopTimeoutMs``. On the start side each service
+    ## declares its own ``readiness.timeoutMs`` in its supervisor metadata,
+    ## so the parent's wait is derived from what the SERVICES say. Nothing
+    ## in the service metadata schema says anything about stopping -- there
+    ## is no ``shutdown``, no ``stop.timeoutMs``, no per-service grace --
+    ## so the only honest source for a stop derivation is the supervisor's
+    ## own behaviour, which is this constant.
+
+  DevSessionStopMarginMs* = 10_000
+    ## Added ONCE to the per-service stop grace total to get ``repro
+    ## down``'s wait. It pays for the work the stop does that no service
+    ## accounts for: the control API's write of ``stop.request.json``, the
+    ## supervisor noticing it (up to 100 ms of its own poll in ``up`` mode),
+    ## the ``waitForExit`` and ``close`` after each ``kill``, the
+    ## ``writeState`` + ``emitEvent`` pair per service, and ``repro down``'s
+    ## own 100 ms poll granularity.
+    ##
+    ## 10_000 for the same reason ``DevSessionReadyMarginMs`` is 10_000: a
+    ## session with NO services derives exactly the margin, and ten seconds
+    ## is the wait ``repro down`` had before it derived anything at all, so
+    ## no stack gets a shorter wait than the one it has today.
 
   SessionSchemaId = "reprobuild.dev-session.v1"
   EventSchemaId = "reprobuild.dev-session.event.v1"
@@ -626,6 +667,114 @@ proc describe*(budget: DevSessionReadyBudget): string =
       $DevSessionReadyMarginMs & " ms margin; override with " &
       "--ready-timeout=MS)"
 
+proc derivedStopTimeoutMs*(metadata: JsonNode): int =
+  ## ``repro down``'s wait, DERIVED from the services the session says it is
+  ## running rather than fixed at ten seconds.
+  ##
+  ## THE DERIVATION IS NOT THE START-SIDE ONE, and copying that one would
+  ## have been wrong twice over. ``derivedReadyTimeoutMs`` sums what each
+  ## service DECLARES it needs to become ready; nothing in the service
+  ## metadata schema declares anything about stopping, so there is no
+  ## equivalent declaration to sum -- see ``DevSessionServiceStopGraceMs``.
+  ## And the two numbers are about different work: a service that takes ten
+  ## minutes to warm a cache still dies on the first SIGTERM.
+  ##
+  ## So the number comes from what ``stopServices`` ACTUALLY DOES. It walks
+  ## the service list in reverse, one at a time -- ``for i in
+  ## countdown(...): state.stopService(i)`` -- and each ``stopService``
+  ## allows ``DevSessionServiceStopGraceMs`` between ``terminate()`` and
+  ## ``kill()``. The sum, not the maximum, for exactly the reason the start
+  ## side sums: the stops are SEQUENTIAL, so three services that each take
+  ## the full grace cost three graces end to end, and a waiter given one
+  ## grace plus margin would abandon the third while the supervisor was
+  ## still legitimately working through it.
+  ##
+  ## Read from ``session.json``'s ``services`` array, which is the LIVE
+  ## service set rather than the declared one. That is the right list here
+  ## and the wrong one on the start side, because ``startServices`` is
+  ## sequential: the array only ever holds the services startup REACHED, so
+  ## a session that declares four and died on its second derives two graces
+  ## rather than four, and ``repro down`` does not hold a wait open for
+  ## services that were never reached at all.
+  ##
+  ## It is a CEILING, not a census, and the one place it over-counts is
+  ## worth naming because the obvious reading of "live" is wrong there.
+  ## ``startService`` appends its ``ServiceRuntime`` and writes state BEFORE
+  ## ``startProcess``, so a service whose spawn raised is in the array with
+  ## no process. ``stopService`` returns immediately on such an entry
+  ## (``runtime.process.isNil``), so it costs no grace while still being
+  ## counted -- the derivation is long by one grace, never short, and the
+  ## loop returns the moment the status reads ``down``.
+  ##
+  ## Metadata without a readable ``services`` array derives the bare margin,
+  ## which is the ten seconds this wait used to be.
+  ##
+  ## The nil checks are load-bearing, not defensive noise. ``{}`` returns a
+  ## NIL ``JsonNode`` for a key that is not there, and ``kind`` is a plain
+  ## field on a ``ref`` -- so ``metadata{"services"}.kind`` SEGVs on a
+  ## ``session.json`` that carries no ``services`` key, which is a file a
+  ## reader can legitimately meet (a hand-edited session directory, a
+  ## truncated write by an older build). ``getStr``/``getInt`` are nil-safe
+  ## and ``kind`` is not; the difference is easy to miss because every
+  ## other read in this module goes through the safe ones. Measured: a
+  ## one-line Nim program doing ``parseJson("""{"a":1}"""){"services"}.kind``
+  ## dies with ``SIGSEGV: Illegal storage access``.
+  var services = 0
+  if not metadata.isNil:
+    let list = metadata{"services"}
+    if not list.isNil and list.kind == JArray:
+      services = list.len
+  services * DevSessionServiceStopGraceMs + DevSessionStopMarginMs
+
+proc stopBudget*(metadata: JsonNode; explicitMs: int): DevSessionStopBudget =
+  ## ``explicitMs`` is ``--stop-timeout`` in milliseconds, or 0 when the user
+  ## did not pass it.
+  ##
+  ## An explicit value WINS, for the reason ``readyBudget`` gives, and the
+  ## flag exists at all because a derived default demonstrably cannot cover
+  ## every stack. In ``dev`` mode the supervisor's stop is not bounded by the
+  ## graces this derives from: the watch loop only tests ``stopRequested()``
+  ## between cycles, so a stop that arrives while a watch task is running
+  ## waits for that task, and a watch task is an arbitrary user command.
+  ## Deriving a wait from the supervisor's own per-service graces is right
+  ## for what the supervisor does once it has STARTED stopping; nothing in
+  ## this module can bound the time until it starts. A caller who knows
+  ## their stack needs longer -- or a CI step that must not hang -- has to
+  ## be able to say so.
+  ##
+  ## IN ``dev`` MODE TODAY THE FLAG CANNOT RESCUE THE STOP, and that is a
+  ## filed defect rather than a property of this derivation, so do not read
+  ## the paragraph above as "raise it and a dev session will stop". The
+  ## stop request lives under ``.repro``, which
+  ## ``watch.nim``'s ``isNonSourceOrIgnoredPath`` discards, so the watch
+  ## loop is never woken BY it: only an unrelated source edit gets it to
+  ## the ``stopRequested()`` check. No finite wait covers that. See
+  ## ``reprobuild-specs`` issue
+  ## ``2026-10-10-a-repro-dev-session-cannot-be-stopped-by-repro-down``;
+  ## it is also the deterministic cause of this suite's one red case.
+  let derived = metadata.derivedStopTimeoutMs()
+  if explicitMs > 0:
+    DevSessionStopBudget(timeoutMs: explicitMs, explicit: true,
+      derivedMs: derived)
+  else:
+    DevSessionStopBudget(timeoutMs: derived, explicit: false,
+      derivedMs: derived)
+
+proc describe*(budget: DevSessionStopBudget): string =
+  ## One clause naming the wait and whose it is, read by both the
+  ## announcement ``repro down`` prints before waiting and the diagnostic it
+  ## prints if the wait expires, so the two cannot disagree.
+  if budget.explicit:
+    $budget.timeoutMs & " ms (--stop-timeout; the session's live services " &
+      "would derive " & $budget.derivedMs & " ms)"
+  else:
+    $budget.timeoutMs & " ms (derived: " &
+      $((budget.derivedMs - DevSessionStopMarginMs) div
+        DevSessionServiceStopGraceMs) &
+      " live service(s) x " & $DevSessionServiceStopGraceMs &
+      " ms stop grace + " & $DevSessionStopMarginMs &
+      " ms margin; override with --stop-timeout=MS)"
+
 proc waitForReadyFile(path: string; timeoutMs = 5000): JsonNode =
   var waited = 0
   while waited <= timeoutMs:
@@ -703,7 +852,9 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
   ##   ``DevSessionStillStartingError``. Nothing here stops the supervisor,
   ##   so the session is left as it was, and the message says what this
   ##   proc actually OBSERVED about it -- which is not always "it is
-  ##   running": see the three arms where that exception is built.
+  ##   running": see the FOUR sites where that exception is built, one in
+  ##   phase 1 and three at the end, and the paragraph above the last three
+  ##   for which of them a real session can reach.
   let started = epochTime()
   let budgetSeconds = budget.timeoutMs.float / 1000.0
   let deadline = started + budgetSeconds
@@ -719,14 +870,41 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
     let now = epochTime()
     if now >= controlDeadline:
       if now >= deadline:
+        # WHAT THIS ARM OBSERVED: that ``http-ready.json`` is absent. That
+        # is the whole of it. No bind has been published, so no status has
+        # been read -- and none COULD be, because there is no address to
+        # read one from.
+        #
+        # So this message does not say "the session was left running",
+        # which is what it said when the readiness work landed. That is a
+        # claim about a process this arm has no witness for, and it is the
+        # same unfounded assertion the expiry diagnostic below had removed
+        # from it (see the comment there) -- reintroduced one phase
+        # earlier. ``startBackgroundSupervisor`` does not license it
+        # either: on POSIX it checks ``execShellCmd`` of a command whose
+        # last token is ``&``, so the shell reports 0 as soon as the job is
+        # BACKGROUNDED. A ``publicCliPath`` that does not exist, a
+        # supervisor that aborts in its first millisecond, and a supervisor
+        # that is alive and slow are indistinguishable from that exit code.
+        # It is a launch check, not a liveness check.
+        #
+        # What is left is the narrower statement that is true in every
+        # arm -- this process stopped nothing -- plus the one artifact that
+        # can say what the supervisor did, which is its log.
         raise newException(DevSessionStillStartingError,
           "dev session is still starting: its control API had not published " &
             readyFile & " after the parent waited " &
-            $int((now - started) * 1000.0) & " ms\n" &
+            $int((now - started) * 1000.0) & " ms, so no session status " &
+            "was read -- with no published bind there was no address to " &
+            "read one from\n" &
             "  that wait was " & budget.describe() & "\n" &
+            "  what the session is doing cannot be told from here; the " &
+            "supervisor log is the place to look: " &
+            (config.outDir.sessionDir / "supervisor.log") & "\n" &
             config.eventLogHint() & "\n" &
-            "  the session was left running: `repro down` stops it, and a " &
-            "second `repro up` would contend with it")
+            "  this command stopped nothing, so a supervisor may still be " &
+            "running: `repro down` stops it if it is, and a second `repro " &
+            "up` would contend with it if it is")
       raise newException(IOError,
         "dev session cannot start: its supervisor did not publish a control " &
           "API within " & $DevSessionControlApiTimeoutMs & " ms (" &
@@ -770,9 +948,42 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
     sleep(50)
   let waitedMs = int((epochTime() - started) * 1000.0)
 
-  # WHAT THIS MESSAGE MAY ASSERT IS BOUNDED BY WHAT THE LOOP OBSERVED, and
-  # the three arms below are the three things the loop can have seen. The
-  # version this replaces had one arm and asserted two facts it had not
+  # WHAT THIS MESSAGE MAY ASSERT IS BOUNDED BY WHAT THE LOOP OBSERVED. Two
+  # of the three arms below are things the loop can have seen through the
+  # real CLI; the middle one is a DEFENSIVE GUARD against a reply this
+  # module's own control API cannot produce, and saying so is the point of
+  # this paragraph -- it used to claim all three were reachable.
+  #
+  # Why the middle arm is unreachable here. It needs ``/status`` to answer
+  # 2xx with JSON whose ``status`` is absent or empty. The handler in this
+  # file has exactly two answers: it serves ``session.json`` verbatim, or it
+  # returns 404 when that file is missing. Every ``session.json`` this
+  # module writes comes from ``stateJson``, which stamps ``"status":
+  # state.status`` unconditionally, and ``state.status`` is already
+  # ``"starting"`` at the first ``writeState()`` before the control-API
+  # child is even spawned -- so a served body always carries a non-empty
+  # status. The 404 raises in ``httpGetJson``, a torn read of the file
+  # raises in ``parseJson``, and both land in the third arm via
+  # ``controlApiStatus``'s ``nil``.
+  #
+  # It is KEPT rather than deleted, and the rule that condemned the
+  # ``session.json`` fallback in ``controlApiStatus`` does not reach it. That
+  # fallback could turn a failure into a SUCCESS -- exit 0 on a stale
+  # file -- which is why an untested branch was not good enough for it. This
+  # arm cannot: every path out of here raises. The worst a wrong guard can
+  # do is word a diagnostic badly, and the thing it guards against is a
+  # peer answering at the published bind that is not this module's control
+  # API at all -- a port reused by something else, or a future second
+  # implementation of ``/status``. Falling into the third arm's "every poll
+  # failed" text there would be the false statement, since a poll did
+  # succeed.
+  #
+  # The guard is covered by
+  # ``e2e_dev_session_wait_reports_a_peer_that_publishes_no_status``, which
+  # stands a real loopback server in front of a real session directory,
+  # because an uncovered guard is indistinguishable from dead code.
+  #
+  # The version this replaces had one arm and asserted two facts it had not
   # established: that the session "reported `starting`" -- which was merely
   # the value ``lastStatus`` was INITIALISED to -- and that "its control API
   # is answering at <addr>", on a run where every single poll had failed and
@@ -929,7 +1140,7 @@ proc stopService(state: var SessionState; index: int) =
     if runtime.process.running():
       runtime.process.terminate()
       var waited = 0
-      while waited < 3000 and runtime.process.running():
+      while waited < DevSessionServiceStopGraceMs and runtime.process.running():
         sleep(50)
         waited.inc(50)
       if runtime.process.running():

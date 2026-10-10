@@ -318,7 +318,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS]\n       " &
           programName &
-      " down [selector] [--activity=name] [--force]\n       " &
+      " down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n       " &
           programName &
       " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS]\n       " &
           programName &
@@ -14885,14 +14885,27 @@ type
       ## ``--ready-timeout=MS``, or 0 when the user did not pass it. Reaches
       ## ``waitForDevSessionReady`` through ``readyBudget``; see
       ## ``runUpOrDevCommand``.
+    stopTimeoutMs: int
+      ## ``--stop-timeout=MS``, or 0 when the user did not pass it. Reaches
+      ## ``runDownCommand``'s wait through ``stopBudget``. The mirror image
+      ## of the field above, and accepted on exactly the opposite set of
+      ## commands.
 
 proc parseDevSessionArgs(args: openArray[string]; commandName: string;
-                         acceptReadyTimeout: bool): ParsedDevSessionCommand =
+                         acceptReadyTimeout: bool;
+                         acceptStopTimeout = false): ParsedDevSessionCommand =
   ## ``acceptReadyTimeout`` has no default because ``down`` must REFUSE
   ## ``--ready-timeout`` rather than accept and ignore it: ``down`` does not
   ## wait for readiness, so an accepted flag there would be a flag that
   ## parses and does nothing, which is the failure mode this campaign keeps
   ## finding. A new caller has to decide in writing.
+  ##
+  ## ``acceptStopTimeout`` is the same rule pointing the other way, and it
+  ## DOES default -- to false, the refusing value. ``up`` and ``dev`` do not
+  ## wait for a session to stop, so ``--stop-timeout`` there would parse and
+  ## do nothing; only ``down`` passes true. A default that refuses means a
+  ## future command gets the refusal until someone writes down that it
+  ## waits.
   var selection = DevEnvCliSelection()
   result.httpBind = "127.0.0.1:0"
   result.debounceMs = 250
@@ -14925,6 +14938,15 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       if result.readyTimeoutMs <= 0:
         raise newException(ValueError,
           "--ready-timeout must be a positive number of milliseconds")
+    elif arg == "--stop-timeout" or arg.startsWith("--stop-timeout="):
+      if not acceptStopTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.stopTimeoutMs = parseInt(valueFromFlag(args, i,
+        "--stop-timeout"))
+      if result.stopTimeoutMs <= 0:
+        raise newException(ValueError,
+          "--stop-timeout must be a positive number of milliseconds")
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported " & commandName & " flag: " & arg)
@@ -15015,7 +15037,12 @@ const DevSessionStillStartingExitCode* = 75
   ## * ``1`` -- the session CANNOT start. Unchanged: every genuine failure
   ##   to start keeps the code it had, which is what the dispatcher returns
   ##   for any ``CatchableError`` out of here.
-  ## * ``75`` -- still starting; the session was LEFT RUNNING. A script can
+  ## * ``75`` -- still starting; THIS COMMAND STOPPED NOTHING. Worded that
+  ##   way rather than "the session was left running", because that is the
+  ##   part the code can promise: nothing on this path stops a supervisor,
+  ##   but in the arm where no status was ever read nothing established that
+  ##   there is a supervisor to leave. The diagnostic draws the same
+  ##   distinction per arm; see ``waitForDevSessionReady``. A script can
   ##   now tell this from both of the above, which is the whole complaint in
   ##   the issue: ``repro up`` used to return the failure code for a session
   ##   that was about to be fine, so the caller could neither trust success
@@ -15080,7 +15107,8 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
   0
 
 proc runDownCommand(args: openArray[string]): int =
-  let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false)
+  let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false,
+    acceptStopTimeout = true)
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
     raise newException(IOError,
@@ -15110,18 +15138,77 @@ proc runDownCommand(args: openArray[string]): int =
       StopRequestFile), "{\"source\":\"force-file\"}\n")
     stderr.writeLine("repro down: HTTP stop failed; wrote stop request file: " &
       err.msg)
+  # The wait is DERIVED, from the same number the supervisor's own stop
+  # honours, rather than the hardcoded `10000` this used to be. That
+  # constant was the start side's defect one command over: a session with
+  # four services is allowed four sequential stop graces by
+  # `stopServices`, which is 12_000 ms of supervisor work this process used
+  # to abandon at 10_000 and report as a timeout. See
+  # `derivedStopTimeoutMs` for why the derivation is NOT the start side's
+  # and why `--stop-timeout` exists anyway.
+  let budget = stopBudget(metadata, parsed.stopTimeoutMs)
+  # Announced before the wait, on stderr, for the reason `repro up`
+  # announces its own: a command that may sit for half a minute should say
+  # what it is waiting for and for how long, and the number should be
+  # visible on the path where nothing goes wrong too.
+  stderr.writeLine("repro down: waiting up to " & budget.describe() &
+    " for the session to report `down`")
+  let started = epochTime()
+  # `lastStatus` exists to BOUND WHAT THE DIAGNOSTIC MAY ASSERT, exactly as
+  # its namesake does in `waitForDevSessionReady`: empty means no status was
+  # ever read, and the message must not describe a session state in that
+  # case. It is not a second source of truth for the loop's decision --
+  # that still turns on what the current read says.
+  var lastStatus = ""
   var waited = 0
-  while waited <= 10000:
+  while waited <= budget.timeoutMs:
     if fileExists(extendedPath(metadataPath)):
       let current = readJsonFileResilient(metadataPath)
-      if current{"status"}.getStr() == "down":
+      let reported = current{"status"}.getStr("")
+      if reported.len > 0:
+        lastStatus = reported
+      if lastStatus == "down":
         echo "repro down: session " & current{"sessionId"}.getStr() &
           " down"
         return 0
     sleep(100)
     waited.inc(100)
+  # WHAT THIS MESSAGE MAY ASSERT IS BOUNDED BY WHAT THE LOOP OBSERVED, the
+  # same discipline `waitForDevSessionReady`'s expiry diagnostic keeps. The
+  # text this replaces -- "timed out waiting for dev session to stop:
+  # <path>" -- named the file and nothing else: not the status the file was
+  # actually reporting, not how long the wait had been, not where that
+  # length came from, and not the one artifact that can say why the
+  # supervisor had not finished. A reader could not tell a session still
+  # working through its services from one that never heard the stop
+  # request.
+  let waitedMs = int((epochTime() - started) * 1000.0)
+  let headline =
+    if lastStatus.len > 0:
+      "it still reports `" & lastStatus & "`, not `down`, after this " &
+        "command waited " & $waitedMs & " ms"
+    else:
+      "no status was ever read from " & metadataPath & " after this " &
+        "command waited " & $waitedMs & " ms"
+  let evidence =
+    if lastStatus == "stopping":
+      "  the supervisor HAD begun stopping, so this is a wait that " &
+        "expired rather than a stop that was not heard"
+    elif lastStatus.len > 0:
+      "  the supervisor had not begun stopping: it never published " &
+        "`stopping`, so either it has not yet read the stop request or it " &
+        "is not running to read it"
+    else:
+      "  that file was absent or unreadable for the whole wait"
   raise newException(IOError,
-    "timed out waiting for dev session to stop: " & metadataPath)
+    "dev session " & metadata{"sessionId"}.getStr("(unnamed)") &
+      " did not stop: " & headline & "\n" &
+      "  that wait was " & budget.describe() & "\n" &
+      evidence & "\n" &
+      "  per-service state: " & (parsed.selection.outDir.sessionDir /
+        "events.jsonl") & "\n" &
+      "  supervisor output: " & (parsed.selection.outDir.sessionDir /
+        "supervisor.log"))
 
 proc runDevSessionSupervisorHelper(args: openArray[string];
                                    publicCliPath: string): int =

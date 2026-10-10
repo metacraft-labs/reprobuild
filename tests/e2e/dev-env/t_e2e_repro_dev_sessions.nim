@@ -11,7 +11,7 @@
 ## genuinely spends twelve seconds; see
 ## `e2e_repro_up_waits_for_a_service_slower_than_ten_seconds`.
 ##
-## TWO CASES DO NOT SPAWN `repro`, and neither substitutes a fake for
+## FOUR CASES DO NOT SPAWN `repro`, and none substitutes a fake for
 ## anything:
 ##
 ## * `e2e_dev_session_wait_names_a_control_api_that_never_answered` calls
@@ -25,9 +25,32 @@
 ##   between its publish and the parent's first poll. The proc under test,
 ##   the directory, the socket and the failure are all real; what is
 ##   narrowed is the entry point.
+## * `e2e_dev_session_wait_reports_a_supervisor_that_published_no_bind`
+##   calls `waitForDevSessionReady` in this process against a real session
+##   directory in which `http-ready.json` is genuinely absent. The
+##   condition is a supervisor that publishes no control-API bind inside
+##   the parent's budget, and it cannot be staged through the CLI without
+##   racing the control-API child, which binds within milliseconds. The
+##   directory, the absent file, the clock and the proc are all real.
+## * `e2e_dev_session_wait_reports_a_peer_that_publishes_no_status` stands
+##   a REAL loopback HTTP server, in its own process, in front of a real
+##   session directory, and calls `waitForDevSessionReady` against it. The
+##   arm under test handles a peer that answers 2xx with JSON carrying no
+##   `status`, which this module's own `/status` cannot produce (it serves
+##   `session.json`, which always carries one, or 404) -- so the peer is
+##   the thing being staged, and staging it means running a different
+##   server rather than faking anything. See `startStatuslessPeer`.
 ## * `e2e_reap_session_only_kills_pids_that_name_the_session` exercises this
 ##   file's own `reapSession` against two real `sh` processes. See its
 ##   comment.
+##
+## TWO CASES STAGE A SESSION DIRECTORY BY HAND and then drive the real
+## `repro` against it --
+## `e2e_repro_up_does_not_report_a_stale_sessions_identity`
+## and `e2e_repro_down_diagnostic_says_what_it_observed`. The files they
+## write are exactly what a previous session would have left, and the ports
+## they name are real loopback ports that are really closed; what is
+## replaced is the history, not any part of the code under test.
 
 import std/[json, net, os, osproc, sequtils, strtabs, streams, strutils,
     tempfiles, times, unittest]
@@ -138,6 +161,33 @@ proc writeReadinessFixture(dir: string; sleepSeconds: int;
     (name: "slow", metadata: serviceJson(@["sh", "scripts/slow.sh"],
       "state/slow.ready", readinessTimeoutMs = readinessTimeoutMs))
   ]))
+
+proc writeStubbornStopFixture(dir: string; services: int) =
+  ## ``services`` services that each IGNORE SIGTERM and therefore burn the
+  ## supervisor's whole per-service stop grace before it reaches ``kill()``.
+  ##
+  ## Nothing here is a stub: these are real `sh` processes with a real
+  ## `trap "" TERM`, which is a thing a real service does (a wrapper that
+  ## forwards signals to a child it is still draining, a process in an
+  ## uninterruptible write). The point is to make the supervisor's stop cost
+  ## what ``stopServices`` ALLOWS it to cost, so a waiter's budget is
+  ## observable from the outside: with the grace at 3000 ms, four services
+  ## put the supervisor's own stop past the ten seconds ``repro down`` used
+  ## to allow.
+  createDir(dir)
+  createDir(dir / "scripts")
+  var specs: seq[tuple[name, metadata: string]] = @[]
+  for i in 0 ..< services:
+    let name = "svc" & $i
+    writeExecutable(dir / "scripts" / (name & ".sh"),
+      "#!/bin/sh\n" &
+        "mkdir -p state\n" &
+        "trap '' TERM INT\n" &
+        "touch state/" & name & ".ready\n" &
+        "while :; do sleep 1; done\n")
+    specs.add((name: name, metadata: serviceJson(
+      @["sh", "scripts/" & name & ".sh"], "state/" & name & ".ready")))
+  writeFile(dir / "reprobuild.nim", providerText(specs))
 
 proc writeDevFixture(dir: string) =
   createDir(dir)
@@ -484,6 +534,63 @@ proc liveStatusAt(httpBindValue: string): JsonNode =
     parseJson(httpRequest(httpBindValue, "/status"))
   except CatchableError:
     nil
+
+type
+  StatuslessPeer = object
+    ## A real loopback HTTP server, in its own process, that answers every
+    ## request with one fixed 200 + JSON body.
+    process: Process
+    httpBind: string
+
+proc startStatuslessPeer(body: string): StatuslessPeer =
+  ## Stand a real server on a real loopback port that answers 200 with
+  ## ``body``.
+  ##
+  ## WHY A SEPARATE PROCESS AND NOT A FAKE: the thing under test is
+  ## `waitForDevSessionReady`'s middle expiry arm, which is reached only
+  ## when a *peer* at the published bind answers 2xx with JSON carrying no
+  ## usable `status`. This module's own control API cannot produce that
+  ## answer -- `/status` serves `session.json`, which `stateJson` always
+  ## stamps a non-empty `status` into, or 404 -- so the arm is a guard
+  ## against a peer that is NOT this control API: a port reused by
+  ## something else, or a second implementation of `/status`. Staging that
+  ## peer means standing up a different server; there is no version of this
+  ## case that drives it through `repro up`. Everything else stays real --
+  ## real socket, real connect, real HTTP, real `waitForDevSessionReady`,
+  ## real session directory -- and nothing the production code does is
+  ## replaced.
+  let script =
+    "import json, socket, sys\n" &
+    "body = sys.argv[1].encode()\n" &
+    "srv = socket.socket()\n" &
+    "srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n" &
+    "srv.bind(('127.0.0.1', 0))\n" &
+    "srv.listen(8)\n" &
+    "print(srv.getsockname()[1], flush=True)\n" &
+    "while True:\n" &
+    "    conn, _ = srv.accept()\n" &
+    "    try:\n" &
+    "        conn.recv(65536)\n" &
+    "        conn.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Type: " &
+      "application/json\\r\\nContent-Length: ' +\n" &
+    "            str(len(body)).encode() + b'\\r\\nConnection: close" &
+      "\\r\\n\\r\\n' + body)\n" &
+    "    finally:\n" &
+    "        conn.close()\n"
+  result.process = startProcess("python3",
+    args = @["-c", script, body],
+    options = {poUsePath})
+  let portLine = result.process.outputStream.readLine()
+  result.httpBind = "http://127.0.0.1:" & portLine.strip()
+
+proc stop(peer: StatuslessPeer) =
+  try:
+    if peer.process.running():
+      peer.process.kill()
+    discard peer.process.waitForExit()
+  except CatchableError:
+    discard
+  peer.process.close()
 
 proc requirePidGone(pid: int) =
   for _ in 0 ..< 100:
@@ -975,6 +1082,319 @@ suite "e2e_repro_dev_sessions":
       check not message.contains("it reported `")
       # And it points at the one artifact that can say what happened.
       check message.contains("supervisor.log")
+
+    test "e2e_dev_session_wait_reports_a_supervisor_that_published_no_bind":
+      # B2, PHASE ONE -- the arm the readiness work added a new instance of
+      # the same defect to. When the parent's budget expires with
+      # `http-ready.json` still absent, the only thing observed is that
+      # absence: no bind has been published, so no status has been read and
+      # none could be. The message the readiness work shipped nevertheless
+      # closed with "the session was left running", which is a claim about
+      # a process nothing in that arm has a witness for, and it pointed at
+      # `events.jsonl` -- a file the supervisor writes once it is
+      # running -- instead of at `supervisor.log`, the one artifact that
+      # can say why it is not.
+      #
+      # `startBackgroundSupervisor` does not make the claim safe either: on
+      # POSIX it checks `execShellCmd` on a command whose last token is
+      # `&`, so a shell that backgrounds a non-existent binary still exits
+      # 0. The check proves a launch was attempted, not that anything is
+      # alive.
+      #
+      # Entry point narrowed exactly as in the case below it, and for the
+      # same reason: a supervisor that never publishes a bind inside a
+      # bounded budget cannot be staged through the CLI without racing the
+      # control-API child, which binds in milliseconds. The directory, the
+      # absent file, the clock and the proc are all real.
+      let tempRoot = createTempDir("repro-m8-no-bind", "")
+      defer: removeDir(tempRoot)
+      let outDir = tempRoot / ".repro" / "dev-env" / "default"
+      let sessionDir = outDir / "session"
+      createDir(sessionDir)
+      # Deliberately NOT written: `http-ready.json`. That is the whole
+      # staging.
+      check not fileExists(sessionDir / "http-ready.json")
+      let config = DevSessionSupervisorConfig(
+        mode: dsmUp,
+        projectRoot: tempRoot,
+        outDir: outDir,
+        artifactPath: tempRoot / "no-such-dev-env-artifact.json",
+        httpBind: "127.0.0.1:0")
+      # Explicit and well under `DevSessionControlApiTimeoutMs`, so the
+      # budget is what expires: a budget longer than that constant would
+      # raise the "cannot start" IOError from the other side of this `if`
+      # instead, which is a different outcome with a different exit code.
+      let budget = DevSessionReadyBudget(timeoutMs: 600, explicit: true,
+        derivedMs: 12000)
+
+      var message = ""
+      var raised = false
+      try:
+        discard waitForDevSessionReady(config, budget)
+      except DevSessionStillStartingError as err:
+        raised = true
+        message = err.msg
+      checkpoint("diagnostic:\n" & message)
+      check raised
+      check message.contains("is still starting")
+      # What it DID observe, said as an observation.
+      check message.contains("its control API had not published")
+      check message.contains("http-ready.json")
+      check message.contains("no session status")
+      check message.contains("there was no address to read one from")
+      # The claim it must NOT make: that something is running.
+      check not message.contains("the session was left running")
+      check message.contains("this command stopped nothing")
+      # And the artifact it must point at, for a supervisor that has not
+      # reached the point of writing an event log.
+      check message.contains("supervisor.log")
+      # The budget's provenance still travels with it.
+      check message.contains("that wait was 600 ms (--ready-timeout")
+
+    test "e2e_dev_session_wait_reports_a_peer_that_publishes_no_status":
+      # COVERAGE for the middle expiry arm, which this change did not alter
+      # and which no case reached before. It is kept as a DEFENSIVE GUARD
+      # rather than made reachable through the CLI, because this module's
+      # `/status` cannot produce the answer it handles: the handler serves
+      # `session.json` verbatim or 404, and every `session.json` comes from
+      # `stateJson`, which stamps a non-empty `status` unconditionally.
+      #
+      # So this case does not change colour across the change -- it passes
+      # in both directions, and that is stated rather than hidden. What it
+      # buys is that the guard stops being indistinguishable from dead
+      # code: delete the arm and this reddens, because the third arm's text
+      # ("every poll failed") is false on a run where a poll succeeded.
+      let tempRoot = createTempDir("repro-m8-no-status-key", "")
+      defer: removeDir(tempRoot)
+      let peer = startStatuslessPeer(
+        "{\"sessionId\":\"dev-session-peer-000\",\"note\":\"no status key\"}")
+      defer: peer.stop()
+      let outDir = tempRoot / ".repro" / "dev-env" / "default"
+      let sessionDir = outDir / "session"
+      createDir(sessionDir)
+      writeFile(sessionDir / "http-ready.json", $(%*{
+        "schemaId": "reprobuild.dev-session.http.v1",
+        "httpBind": peer.httpBind,
+        "pid": 0
+      }))
+      # The peer really answers, and really answers without a `status`:
+      # asserted here as the POSITIVE CONTROL, so a case that reached the
+      # third arm because the server was dead could not pass by accident.
+      let probe = statusJson(peer.httpBind)
+      check probe{"sessionId"}.getStr() == "dev-session-peer-000"
+      check probe{"status"}.getStr() == ""
+
+      let config = DevSessionSupervisorConfig(
+        mode: dsmUp,
+        projectRoot: tempRoot,
+        outDir: outDir,
+        artifactPath: tempRoot / "no-such-dev-env-artifact.json",
+        httpBind: "127.0.0.1:0")
+      let budget = DevSessionReadyBudget(timeoutMs: 600, explicit: true,
+        derivedMs: 12000)
+
+      var message = ""
+      var raised = false
+      try:
+        discard waitForDevSessionReady(config, budget)
+      except DevSessionStillStartingError as err:
+        raised = true
+        message = err.msg
+      checkpoint("diagnostic:\n" & message)
+      check raised
+      check message.contains("is still starting")
+      check message.contains(
+        "its control API answered but never published a `status`")
+      check message.contains("it has published no `status` for the session")
+      check message.contains(peer.httpBind)
+      # The two statements that would be FALSE here, which is what makes
+      # this arm's existence load-bearing rather than decorative.
+      check not message.contains("every poll failed")
+      check not message.contains("it reported `")
+
+    test "e2e_repro_down_waits_for_the_stop_grace_its_services_imply":
+      # THE HEADLINE GATE for `runDownCommand`'s own hardcoded ten seconds --
+      # the start side's defect, one command over. `stopServices` stops
+      # services ONE AT A TIME, in reverse, and allows each one
+      # `DevSessionServiceStopGraceMs` (3000) between `terminate()` and
+      # `kill()`. Four services that ignore SIGTERM therefore cost the
+      # supervisor about twelve seconds of work it is entitled to, and
+      # `repro down` used to abandon that at 10000 ms and report a timeout
+      # for a session that stops correctly.
+      #
+      # Four, not two, because the number has to cross the old boundary:
+      # the boundary was a wall-clock constant, so this case spends real
+      # wall clock crossing it, exactly as
+      # `e2e_repro_up_waits_for_a_service_slower_than_ten_seconds` does on
+      # the start side.
+      let c = prepareCase("repro-m8-stubborn-stop", writeFixture =
+        proc (dir: string) = writeStubbornStopFixture(dir, services = 4))
+      defer:
+        reapSession(c.projectRoot)
+        removeDir(c.tempRoot)
+
+      let up = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+      checkpoint("repro up output:\n" & up.output)
+      check up.exitCode == 0
+      let metadata = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
+      check metadata["services"].len == 4
+      let pids = metadata["services"].mapIt(it["pid"].getInt())
+      check pids.allIt(it > 0)
+
+      let down = runRepro(c, @["down", c.projectRoot])
+      checkpoint("repro down output:\n" & down.output)
+      check down.exitCode == 0
+      check down.output.contains("repro down: session")
+      # The wait it held itself to is DERIVED from the services the session
+      # says it is running, and the announcement names the derivation. 13000
+      # here would mean one service; 10000 would mean the hardcoded constant
+      # came back.
+      check down.output.contains("waiting up to 22000 ms (derived: 4 live " &
+        "service(s) x 3000 ms stop grace + 10000 ms margin")
+      check not down.output.contains("did not stop")
+
+      let stopped = waitForStatus(sessionMetadataPath(c.projectRoot), "down")
+      check stopped["stopOrder"].mapIt(it.getStr()) ==
+        @["svc3", "svc2", "svc1", "svc0"]
+      check stopped["services"].allIt(it["status"].getStr() == "stopped")
+      for pid in pids:
+        requirePidGone(pid)
+      # The supervisor really did spend longer than the old ten-second
+      # ceiling stopping -- measured from the session's own event log, not
+      # from this test's clock -- and `repro down` returned 0 anyway.
+      let stopping = eventTimes(c.projectRoot, "session.stopping")
+      let downEvents = eventTimes(c.projectRoot, "session.down")
+      check stopping.len == 1
+      check downEvents.len == 1
+      let stopMs = (downEvents[0] - stopping[0]).inMilliseconds.int
+      checkpoint("supervisor spent " & $stopMs & " ms stopping")
+      check stopMs > 11_000
+
+    test "e2e_repro_down_diagnostic_says_what_it_observed":
+      # The other half of the same defect: when the wait DOES expire, the
+      # message has to say what was observed. The text this replaces was
+      # "timed out waiting for dev session to stop: <path>" -- it named the
+      # file and nothing else, so a reader could not tell a session still
+      # working through its services from one that never heard the stop
+      # request, could not see how long the wait had been, where that
+      # length came from, or which artifact to open.
+      #
+      # Staged by hand, which is what makes it deterministic rather than a
+      # kill-at-the-right-moment race: a session directory left claiming
+      # `up` with a bind on a real, really closed loopback port. `--force`
+      # is the documented path for a control API that does not answer, so
+      # the stop request goes to the file, and no supervisor exists to act
+      # on it -- which is precisely a stop that is never completed.
+      let c = prepareCase("repro-m8-down-expired", writeFixture =
+        proc (dir: string) = writeReadinessFixture(dir, sleepSeconds = 0,
+          readinessTimeoutMs = 5000))
+      defer: removeDir(c.tempRoot)
+
+      let sessionDir = c.projectRoot / ".repro" / "dev-env" / "default" /
+        "session"
+      createDir(sessionDir)
+      let deadBind = "http://127.0.0.1:" & $closedLoopbackPort()
+      writeFile(sessionDir / "session.json", $(%*{
+        "schemaId": "reprobuild.dev-session.v1",
+        "sessionId": "dev-session-never-stops-0",
+        "failure": "",
+        "mode": "up",
+        "projectRoot": c.projectRoot,
+        "httpBind": deadBind,
+        "status": "up",
+        "services": [
+          {"name": "a", "pid": 0, "status": "ready"},
+          {"name": "b", "pid": 0, "status": "ready"}
+        ],
+        "resources": [],
+        "startOrder": ["a", "b"]
+      }))
+
+      let res = runRepro(c, @["down", c.projectRoot, "--force",
+        "--stop-timeout=700"])
+      checkpoint("repro down output:\n" & res.output)
+      check res.exitCode == 1
+      # Named, and named as a session that did not stop rather than as a
+      # bare timeout against a path.
+      check res.output.contains("dev session dev-session-never-stops-0 " &
+        "did not stop")
+      # What it OBSERVED: the status the file was actually reporting.
+      check res.output.contains("it still reports `up`, not `down`")
+      # How long, and whose wait it was -- the explicit flag is attributed,
+      # and what the services would have derived is named beside it so a
+      # short wait is not mistaken for a slow stack.
+      check res.output.contains("that wait was 700 ms (--stop-timeout; the " &
+        "session's live services would derive 16000 ms)")
+      # The distinction the old message could not draw.
+      check res.output.contains("the supervisor had not begun stopping")
+      check res.output.contains("never published `stopping`")
+      # And both artifacts, by path.
+      check res.output.contains("events.jsonl")
+      check res.output.contains("supervisor.log")
+      # The text this replaces, asserted ABSENT separately. The assertions
+      # above all mention `--stop-timeout`, so on a tree without the flag
+      # they redden because the flag is refused rather than because the
+      # message is wrong; this one reddens on the message alone, which is
+      # what makes "restore the old text" a mutation this case catches.
+      check not res.output.contains(
+        "timed out waiting for dev session to stop")
+      # The stop request really was written -- the `--force` arm is the one
+      # under test here, so a run where nothing was requested would be
+      # testing nothing.
+      check fileExists(sessionDir / "stop.request.json")
+
+      # SECOND SCENARIO, same surface: metadata with NO `services` key at
+      # all. It is in this case rather than its own because it asserts the
+      # same diagnostic; what it adds is the nil path through the
+      # derivation. `{}` hands back a nil `JsonNode` for a missing key and
+      # `kind` is a plain field on a ref, so the obvious spelling of that
+      # derivation SEGVs here -- which is a crash, not a diagnostic, and
+      # `repro down` would have no way to report anything at all. The
+      # assertion that matters is therefore the EXIT CODE: 1, the refusal,
+      # not 139.
+      removeFile(sessionDir / "stop.request.json")
+      writeFile(sessionDir / "session.json", $(%*{
+        "schemaId": "reprobuild.dev-session.v1",
+        "sessionId": "dev-session-no-services-0",
+        "mode": "up",
+        "projectRoot": c.projectRoot,
+        "httpBind": deadBind,
+        "status": "up"
+      }))
+      let bare = runRepro(c, @["down", c.projectRoot, "--force"])
+      checkpoint("repro down (no services key) output:\n" & bare.output)
+      check bare.exitCode == 1
+      check bare.output.contains("dev session dev-session-no-services-0 " &
+        "did not stop")
+      # With no services to stop, the derivation is the bare margin -- the
+      # ten seconds this wait had before it derived anything.
+      check bare.output.contains("waiting up to 10000 ms (derived: 0 live " &
+        "service(s) x 3000 ms stop grace + 10000 ms margin")
+      check not bare.output.contains(
+        "timed out waiting for dev session to stop")
+
+    test "e2e_repro_down_refuses_a_stop_timeout_it_cannot_honour":
+      # `--stop-timeout` is accepted exactly where there is a stop to
+      # bound, and refused everywhere else, which is the rule
+      # `--ready-timeout` already follows in the other direction. A flag
+      # that parses and does nothing is the failure mode this campaign
+      # keeps finding.
+      let c = prepareCase("repro-m8-stop-timeout-refusals")
+      defer: removeDir(c.tempRoot)
+
+      let onUp = runRepro(c, @["up", c.projectRoot, "--stop-timeout=5000"])
+      check onUp.exitCode == 1
+      check onUp.output.contains("unsupported up flag: --stop-timeout=5000")
+
+      let onDev = runRepro(c, @["dev", c.projectRoot, "--stop-timeout=5000"])
+      check onDev.exitCode == 1
+      check onDev.output.contains("unsupported dev flag: --stop-timeout=5000")
+
+      let nonPositive = runRepro(c, @["down", c.projectRoot,
+        "--stop-timeout=0"])
+      check nonPositive.exitCode == 1
+      check nonPositive.output.contains(
+        "--stop-timeout must be a positive number of milliseconds")
 
     test "e2e_reap_session_only_kills_pids_that_name_the_session":
       # The third item: `reapSession` SIGKILLs pids read out of
