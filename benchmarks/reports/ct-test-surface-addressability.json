@@ -30,18 +30,18 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11046,
-      "suite": 2537
+      "case": 12001,
+      "suite": 2753
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 13345,
-      "python-unittest": 235
+      "nim-unittest": 14452,
+      "python-unittest": 299
     },
-    "itemsTotal": 13583,
+    "itemsTotal": 14754,
     "responseDiagnostics": {
       "info": 1,
-      "warning": 35
+      "warning": 34
     }
   },
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
@@ -49,16 +49,31 @@
   "identityCollisions": [
     {
       "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim::compressed-tool-archive-with-no-decompressor-on-path::gnu-tar-+",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
+          "startLine": 113
+        },
+        {
+          "file": "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
+          "startLine": 133
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
       "id": "nim-unittest/nim/std/unittest/tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim::integration_scoop_manifest_bin_resolution::integration_scoop_manifest_bin_resolution",
       "occurrences": 2,
       "sites": [
         {
           "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
-          "startLine": 102
+          "startLine": 103
         },
         {
           "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
-          "startLine": 108
+          "startLine": 109
         }
       ]
     },
@@ -69,11 +84,11 @@
       "sites": [
         {
           "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
-          "startLine": 117
+          "startLine": 118
         },
         {
           "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
-          "startLine": 123
+          "startLine": 124
         }
       ]
     },
@@ -84,11 +99,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 62
+          "startLine": 64
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 177
+          "startLine": 179
         }
       ]
     },
@@ -99,11 +114,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 70
+          "startLine": 72
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 265
+          "startLine": 267
         }
       ]
     },
@@ -114,11 +129,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 74
+          "startLine": 76
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 341
+          "startLine": 343
         }
       ]
     },
@@ -129,11 +144,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 66
+          "startLine": 68
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 222
+          "startLine": 224
         }
       ]
     },
@@ -144,11 +159,11 @@
       "sites": [
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 38
+          "startLine": 40
         },
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 118
+          "startLine": 120
         }
       ]
     },
@@ -159,11 +174,11 @@
       "sites": [
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 41
+          "startLine": 43
         },
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 132
+          "startLine": 134
         }
       ]
     },
@@ -174,11 +189,11 @@
       "sites": [
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 44
+          "startLine": 46
         },
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 141
+          "startLine": 143
         }
       ]
     },
@@ -189,11 +204,11 @@
       "sites": [
         {
           "file": "tests/integration/t_r2_iso_boot.nim",
-          "startLine": 181
+          "startLine": 182
         },
         {
           "file": "tests/integration/t_r2_iso_boot.nim",
-          "startLine": 213
+          "startLine": 214
         }
       ]
     },
@@ -204,11 +219,11 @@
       "sites": [
         {
           "file": "tests/integration/t_r9_systemd_boot.nim",
-          "startLine": 137
+          "startLine": 138
         },
         {
           "file": "tests/integration/t_r9_systemd_boot.nim",
-          "startLine": 167
+          "startLine": 168
         }
       ]
     },
@@ -219,39 +234,39 @@
       "sites": [
         {
           "file": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
-          "startLine": 122
+          "startLine": 124
         },
         {
           "file": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
-          "startLine": 205
+          "startLine": 207
         }
       ]
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.25,
-    "caseItemsInCatalog": 11046,
-    "casesAddressableThroughTheSurface": 10412,
-    "collidingIdentities": 12,
-    "distinctCaseIdentities": 11034,
+    "caseCoveragePercent": 96.54,
+    "caseItemsInCatalog": 12001,
+    "casesAddressableThroughTheSurface": 11314,
+    "collidingIdentities": 13,
+    "distinctCaseIdentities": 11988,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1733,
-      "compared": 1738,
+      "agree": 1877,
+      "compared": 1882,
       "disagree": 5
     },
-    "sourceCoveragePercent": 99.43,
-    "sourcesAddressableThroughTheSurface": 1738,
-    "sourcesNotAddressable": 10,
-    "trackedNimSuiteSources": 1748,
-    "trackedStaticCaseCount": 10818
+    "sourceCoveragePercent": 99.52,
+    "sourcesAddressableThroughTheSurface": 1882,
+    "sourcesNotAddressable": 9,
+    "trackedNimSuiteSources": 1891,
+    "trackedStaticCaseCount": 11720
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
-    "provenance": "metacraft-labs/codetracer a9ef983ed, the codetracer-src revision flake.lock pins, built by this repository's dev shell (ctTestTools)",
-    "resolvedBy": "environment",
-    "sha256": "d626d4212fbcefac2baaf81b36f85dfd33a8014219efe92ac5a2e6fa94f1abd3"
+    "provenance": "",
+    "resolvedBy": "PATH:ct-test",
+    "sha256": "b4716dcd246f67e610566f45ac434bc22034924d5f16443f990f6aff0c42c984"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
@@ -307,13 +322,7 @@
       "detail": "declares no literal suite/test of its own; any cases it contributes are declared in the modules it imports, which are discovered separately under their own identities",
       "inventoryStaticCaseCount": 0,
       "reason": "declares-no-cases-of-its-own",
-      "source": "tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim"
-    },
-    {
-      "detail": "declares no literal suite/test of its own; any cases it contributes are declared in the modules it imports, which are discovered separately under their own identities",
-      "inventoryStaticCaseCount": 0,
-      "reason": "declares-no-cases-of-its-own",
-      "source": "tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim"
+      "source": "tests/unit/t_nimcache_is_worktree_local.nim"
     }
   ]
 }

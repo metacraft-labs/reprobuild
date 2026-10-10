@@ -192,6 +192,26 @@ type
       ## Identifies the `repro build` invocation that wrote the entry, for
       ## §2.2's `this-build` clause. Empty when undeclared.
 
+  InputAccesses* = object
+    ## HOW the execution that produced a record accessed what it observed:
+    ## the paths it read, the ones it only probed for presence, and the
+    ## directories it enumerated, after the engine's portable recorder
+    ## filtered them (Cache-Scope P3.1).
+    ##
+    ## The record cannot say this itself. `FileFingerprint` keeps a path's
+    ## KIND and metadata, which is what a local lookup compares, and the
+    ## access is not a function of either: a directory may have been probed
+    ## or enumerated, an existing file probed or read, and a read may have
+    ## found nothing. A portable record derived from a local hit
+    ## (Cache-Scope P3.4b) needs exactly the access, so it is kept here, in a
+    ## sidecar beside the `.rec` (`InputAccessFileExt`), and read only by
+    ## that derivation -- never by a lookup.
+    ##
+    ## Physical paths, in the order the recorder produced them.
+    reads*: seq[string]
+    probes*: seq[string]
+    enumerations*: seq[string]
+
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
     policy*: FileFingerprintPolicy
@@ -351,6 +371,15 @@ type
       ## The action's cwd, used to resolve the record's relative output
       ## paths so the whole-build fast path can revalidate output state
       ## (Incremental-Invalidation.md §"Minimum check set" Step 3.3).
+    enforceOwnedOutputs*: bool
+      ## Treat a matched record whose recorded outputs are not exactly
+      ## `ownedOutputs` as if there were no record at all — see
+      ## `recordOutputsNotOwnedBy`. The engine always sets it; it is a flag
+      ## rather than implied by `ownedOutputs` because an action that declares
+      ## no outputs is a legitimate empty set.
+    ownedOutputs*: seq[string]
+      ## The action's declared outputs, as the action spells them (resolved
+      ## against `outputRoot`).
     refuseRecordWithNoInputs*: bool
       ## Treat a matched record that has NO input fingerprints and NO
       ## environment inputs as if there were no record at all.
@@ -1755,6 +1784,22 @@ proc invalidate*(cache: var FileMetadataCache; path: string) =
 proc metadataStats*(cache: FileMetadataCache): FileMetadataCacheStats =
   cache.stats
 
+proc entryCount*(cache: FileMetadataCache): int =
+  ## How many paths this cache currently holds an observation for.
+  ##
+  ## The counts in `metadataStats` are a history of what the cache DID; this is
+  ## its present contents, and the two answer different questions. AC-5 needs
+  ## the second one: the engine reports it at the whole-graph prefix's
+  ## fall-through, where "the scheduler inherits a populated cache" is the
+  ## property under test and every history row would be satisfied by a cache
+  ## that had been warmed and then thrown away.
+  ##
+  ## Not the number of distinct files OBSERVED: `fingerprintRecordedMetadataImpl`
+  ## also inserts an entry for a recorded-absent path inside an existing store
+  ## output without probing it (`storeAbsenceSkips`), and `invalidate` / `clear`
+  ## remove entries. It is exactly "paths this cache can answer for right now".
+  cache.entries.len
+
 proc attributeMetadataProbe(cache: ptr FileMetadataCache; path: string;
                             elapsedNanos: int64) =
   ## Credit one timed check to the row for the arm it took.
@@ -2135,6 +2180,22 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
+proc recordedInputLocation*(root, path: string): string =
+  ## Where a recorded input lives for the action consulting the record.
+  ##
+  ## Every record written before relocatable records existed names its
+  ## inputs by absolute path, and this is the identity for those. A
+  ## RELOCATABLE action (`BuildAction.relocatable` in the build engine)
+  ## records the inputs it observed beside its working directory relative to
+  ## that directory, so the same record describes the same computation at
+  ## another location: such a name resolves against the CONSULTING action's
+  ## cwd (`root`), exactly as its relative declared outputs already do
+  ## (`recordOutputsNotOwnedBy`, `restoreOutputs`).
+  if path.isAbsolute or root.len == 0:
+    path
+  else:
+    os.normalizedPath(root / path)
+
 const
   WitnessMagic = "RBOW"
   WitnessVersion = 2'u16
@@ -2288,6 +2349,108 @@ proc decodeDeterminism(raw: openArray[byte]):
     result.meta = meta
   except EnvelopeError, CatchableError:
     return (0'u64, EntryDeterminism())
+
+# ---------------------------------------------------------------------------
+# Input-access sidecar (Cache-Scope P3.4b).
+#
+# The third sidecar, for the reason the other two exist: the RBAR frame cannot
+# grow without locking every older `repro` sharing the cache root out of the
+# records this one writes (see `ActionRecordVersion`). It differs from them in
+# two ways, both deliberate.
+#
+# * It is keyed by the STRONG fingerprint alone, with no write-sequence
+#   back-reference. A strong fingerprint fixes the action's static description
+#   and every recorded input path with its metadata, so any `.rec` of that name
+#   -- however often it is republished, by whatever binary -- describes an
+#   execution that observed exactly those inputs; the accesses written for one
+#   such execution are a true observation of the path set. A republish by a
+#   writer that never saw the accesses (the cache daemon, a peer install)
+#   therefore leaves the sidecar alone instead of discarding it.
+# * It is not stapled onto records by `decodeRecContainer`. No lookup needs it,
+#   and a lookup is the hot path: it is read by `inputAccessesFor`, which only
+#   the portable derivation on a local hit calls.
+#
+# Paths are front-coded against their predecessor in the same list: an
+# action's observations cluster under a few directories, and the record frame
+# interns its paths for the same reason (Action-Cache-Per-Edge-Store.md §5.5
+# C4).
+# ---------------------------------------------------------------------------
+
+const
+  InputAccessMagic = "RBIA"
+  InputAccessVersion = 1'u16
+  InputAccessFileExt* = ".acc"
+    ## Exported so tests and tooling can find the sidecar without re-deriving
+    ## the extension. Not `.rec`, `.octime` or `.det`, so every older reader
+    ## of an edge directory ignores it.
+
+proc inputAccessFileName*(strongHex: string): string =
+  strongHex & InputAccessFileExt
+
+proc writeFrontCoded(outp: var seq[byte]; paths: openArray[string]) =
+  outp.writeU32Le(uint32(paths.len))
+  var previous = ""
+  for path in paths:
+    var shared = 0
+    let limit = min(previous.len, path.len)
+    while shared < limit and previous[shared] == path[shared]:
+      inc shared
+    outp.writeU32Le(uint32(shared))
+    outp.writeString(path[shared .. ^1])
+    previous = path
+
+proc readFrontCoded(raw: openArray[byte]; pos: var int): seq[string] =
+  let count = int(readU32Le(raw, pos))
+  # Each entry occupies at least 8 bytes; a count the remaining bytes cannot
+  # hold is a torn or forged file, refused before it sizes an allocation.
+  if count > (raw.len - pos) div 8:
+    raiseEnvelopeError(eeMalformed, "input-access count exceeds payload")
+  var previous = ""
+  for _ in 0 ..< count:
+    let shared = int(readU32Le(raw, pos))
+    if shared > previous.len:
+      raiseEnvelopeError(eeMalformed, "input-access prefix exceeds previous")
+    let path = previous[0 ..< shared] & readString(raw, pos)
+    result.add(path)
+    previous = path
+
+proc encodeInputAccesses*(strongHex: string;
+                          accesses: InputAccesses): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(InputAccessMagic[i])))
+  result.writeU16Le(InputAccessVersion)
+  # The record this describes, inside the payload as well as in the file
+  # name, so a sidecar copied or renamed beside another record is refused.
+  result.writeString(strongHex)
+  result.writeFrontCoded(accesses.reads)
+  result.writeFrontCoded(accesses.probes)
+  result.writeFrontCoded(accesses.enumerations)
+
+proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
+    Option[InputAccesses] =
+  ## `none` on ANY problem: a wrong magic, an unknown version (a newer
+  ## writer), a different record, trailing or missing bytes. The caller's
+  ## answer to `none` is "the accesses are unknown", never a guess.
+  if raw.len < 6:
+    return none(InputAccesses)
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(InputAccessMagic[i])):
+      return none(InputAccesses)
+  try:
+    var pos = 4
+    if readU16Le(raw, pos) != InputAccessVersion:
+      return none(InputAccesses)
+    if readString(raw, pos) != strongHex:
+      return none(InputAccesses)
+    var accesses: InputAccesses
+    accesses.reads = readFrontCoded(raw, pos)
+    accesses.probes = readFrontCoded(raw, pos)
+    accesses.enumerations = readFrontCoded(raw, pos)
+    if pos != raw.len:
+      return none(InputAccesses)
+    some(accesses)
+  except EnvelopeError:
+    none(InputAccesses)
 
 proc metaOf(records: openArray[ActionResultRecord]): EntryDeterminism =
   ## All records in one `.rec` share a strong fingerprint and therefore one
@@ -2552,6 +2715,61 @@ proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
    revalidateDirWalks: revalidateDirWalks,
    revalidateDirEntries: revalidateDirEntries,
    recordDirWalks: recordDirWalks, recordDirEntries: recordDirEntries)
+
+proc ownedOutputKey(outputRoot, path: string): string =
+  ## One spelling per output location: resolved against the action's cwd the
+  ## way `restoreOutputs` and `outputStateMismatch` resolve it, separators
+  ## folded, `.`/`..` removed, no trailing separator, and case-folded where
+  ## the filesystem is case-insensitive.
+  result = os.normalizedPath(materialPath(outputRoot, path)).replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  when defined(windows):
+    result = result.toLowerAscii()
+
+proc recordOutputsNotOwnedBy*(record: ActionResultRecord; outputRoot: string;
+                              ownedOutputs: openArray[string]): string =
+  ## Why `record` does not describe an action whose declared outputs are
+  ## `ownedOutputs` (resolved against `outputRoot`, the action's cwd), or ""
+  ## when its recorded outputs are exactly those paths.
+  ##
+  ## Incremental-Invalidation.md §"Minimum check set per target
+  ## consultation", Step 3.3 defines a hit by the action's OWN declared
+  ## outputs: they must exist and match the record, or be materialized from
+  ## it. Both halves resolve the record's output paths, so a record that
+  ## names different paths is a record of some other computation — a hit on
+  ## it would revalidate, and on restore WRITE, files the requesting action
+  ## does not own (Filesystem-Policy-And-Observed-Inputs.md §"Double
+  ## Writes": a path has one writer).
+  ##
+  ## Nothing used to check this, because a weak fingerprint was assumed to
+  ## pin the output set. It does not: `action()`'s default weak fingerprint
+  ## is derived from the id, and a caller-supplied one need not mention the
+  ## outputs at all. Two actions whose keys converge while their declared
+  ## outputs live in different places — the same edge in two checkouts, a
+  ## collision, a record installed from a peer laid out elsewhere — would
+  ## otherwise share records. Relative outputs are unaffected: they resolve
+  ## against the requesting action's cwd on both sides of the comparison.
+  ##
+  ## The comparison is of SETS: a record missing one of the action's
+  ## outputs cannot produce it either.
+  var owned = initHashSet[string]()
+  for path in ownedOutputs:
+    owned.incl(ownedOutputKey(outputRoot, path))
+  var recorded = initHashSet[string]()
+  for output in record.outputs:
+    let key = ownedOutputKey(outputRoot, output.path)
+    recorded.incl(key)
+    if key notin owned:
+      return "the cached record's output '" & output.path &
+        "' is not one of this action's declared outputs (resolved against " &
+        "'" & outputRoot & "'); the record describes another location's " &
+        "computation and is not served"
+  for key in owned:
+    if key notin recorded:
+      return "this action declares output '" & key & "' but the cached " &
+        "record does not describe it; the record is not served"
+  ""
 
 proc outputStateMismatchImpl(record: ActionResultRecord;
                              outputRoot: string): string =
@@ -3829,7 +4047,8 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
   # so a reap placed after the early return below would essentially never run.
   for kind, path in walkDir(extendedPath(dirPath)):
     if kind == pcFile and
-        (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt)):
+        (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt) or
+         path.endsWith(InputAccessFileExt)):
       let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
       if not fileExists(extendedPath(owner)):
         try:
@@ -3854,7 +4073,9 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
       for sidecar in [entries[i].path.parentDir /
                         witnessFileName(entries[i].strongHex),
                       entries[i].path.parentDir /
-                        determinismFileName(entries[i].strongHex)]:
+                        determinismFileName(entries[i].strongHex),
+                      entries[i].path.parentDir /
+                        inputAccessFileName(entries[i].strongHex)]:
         if fileExists(extendedPath(sidecar)):
           try:
             removeFile(extendedPath(sidecar))
@@ -4417,6 +4638,14 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
         record.envInputs.len == 0:
       return HotMetadataScan(status: hmssMissingRecord,
         recordCount: totalRecords, checkedInputCount: checkedInputs)
+    # A record of some other location's computation is not this action's
+    # record. Reported as `hmssMissingRecord` for the reason given just above:
+    # the full scheduler re-consults the edge, and the per-edge refusal
+    # (`unservableCacheRecordReason`) states the reason once.
+    if probe.enforceOwnedOutputs and recordOutputsNotOwnedBy(record,
+        probe.outputRoot, probe.ownedOutputs).len > 0:
+      return HotMetadataScan(status: hmssMissingRecord,
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
     # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
     # It is the whole-graph "everything is already up to date" shortcut,
     # so a record whose environment moved and is not caught HERE is served
@@ -4432,8 +4661,11 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     timedRecordedInputRevalidation:
       for input in record.inputs:
         inc checkedInputs
-        if fingerprintRecordedMetadata(input.path, input.metadata,
-            metadataCache) != input.metadata:
+        # A relocatable record names inputs relative to the action's cwd
+        # (`recordedInputLocation`); `outputRoot` is that cwd.
+        if fingerprintRecordedMetadata(
+            recordedInputLocation(probe.outputRoot, input.path),
+            input.metadata, metadataCache) != input.metadata:
           return HotMetadataScan(status: hmssInputChanged,
             recordCount: totalRecords, checkedInputCount: checkedInputs)
     # Same rule as `lookupActionResultImpl`: unchanged inputs are only
@@ -4648,6 +4880,11 @@ proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
         if seen.contains(inputKey):
           continue
         seen.incl(inputKey)
+        # This batch check has no action cwd to resolve a relocatable
+        # record's cwd-relative input against, so it does not decide one:
+        # the per-edge lookup, which has it, does.
+        if not input.path.isAbsolute:
+          return false
         if fingerprintRecordedMetadata(input.path, input.metadata,
             metadataCache) != input.metadata:
           return false
@@ -4674,11 +4911,16 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   for path in enumeratedDirectories:
     enumerated.incl(path.replace('\\', '/'))
   for path in inputPaths:
-    let input =
+    # A relative input path is a relocatable record's cwd-relative name
+    # (`recordedInputLocation`): observed where it lives for THIS action,
+    # recorded under the name the record is shared by.
+    let location = recordedInputLocation(outputRoot, path)
+    var input =
       if enumerated.contains(path.replace('\\', '/')):
-        observeEnumeratedDirectory(path, policy)
+        observeEnumeratedDirectory(location, policy)
       else:
-        observeFile(path, policy, metadataCache)
+        observeFile(location, policy, metadataCache)
+    input.path = path
     if input.isRecordableInput():
       result.inputs.add(input)
   for env in envInputs:
@@ -4743,11 +4985,16 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
   for path in enumeratedDirectories:
     enumerated.incl(path.replace('\\', '/'))
   for path in inputPaths:
-    let input =
+    # A relative input path is a relocatable record's cwd-relative name
+    # (`recordedInputLocation`): observed where it lives for THIS action,
+    # recorded under the name the record is shared by.
+    let location = recordedInputLocation(outputRoot, path)
+    var input =
       if enumerated.contains(path.replace('\\', '/')):
-        observeEnumeratedDirectory(path, policy)
+        observeEnumeratedDirectory(location, policy)
       else:
-        observeFile(path, policy, metadataCache)
+        observeFile(location, policy, metadataCache)
+    input.path = path
     if input.isRecordableInput():
       result.inputs.add(input)
   for env in envInputs:
@@ -4790,13 +5037,15 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
                      changedInputPath: var string;
-                     metadataCache: ptr FileMetadataCache):
+                     metadataCache: ptr FileMetadataCache;
+                     inputRoot = ""):
                      tuple[inputs: seq[FileFingerprint],
                            reusedRecordedInputs: bool] =
   result.reusedRecordedInputs = true
   timedRecordedInputRevalidation:
     for i, recorded in record.inputs:
-      let currentMetadata = fingerprintRecordedMetadata(recorded.path,
+      let location = recordedInputLocation(inputRoot, recorded.path)
+      let currentMetadata = fingerprintRecordedMetadata(location,
         recorded.metadata, metadataCache)
       if recorded.metadata.membershipTrackedDirectory() and
           currentMetadata != recorded.metadata:
@@ -4819,7 +5068,7 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
         if not result.reusedRecordedInputs:
           result.inputs[i] = recorded
       of ffpChecksum:
-        let current = observeFileWithMetadata(recorded.path, recorded.policy,
+        let current = observeFileWithMetadata(location, recorded.policy,
           currentMetadata)
         if (not recorded.hasLocalHash) or (not current.hasLocalHash) or
             current.localHash != recorded.localHash:
@@ -4837,8 +5086,9 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
           changed = true
           changedInputPath = recorded.path
           return
-        let current = observeFileWithMetadata(recorded.path, recorded.policy,
+        var current = observeFileWithMetadata(location, recorded.policy,
           currentMetadata)
+        current.path = recorded.path
         if not current.hasLocalHash:
           changed = true
           changedInputPath = recorded.path
@@ -4893,7 +5143,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         for input in hot.record.inputs:
           if changed:
             break
-          if fingerprintRecordedMetadata(input.path, input.metadata,
+          if fingerprintRecordedMetadata(
+              recordedInputLocation(outputRoot, input.path), input.metadata,
               metadataCache) != input.metadata:
             changed = true
             changedInput = input.path
@@ -4913,7 +5164,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         return ActionCacheLookup(
           status: aclMissInputChanged,
           record: hot.record,
-          message: "input metadata changed: " & changedInput,
+          message: "input metadata changed: " & changedInput &
+            " (1 candidate record considered)",
           changedInputPath: changedInput)
       # ffpHybrid, metadata moved: this is exactly the case the hybrid
       # policy exists for -- "compare timestamp metadata first; when the
@@ -4943,7 +5195,7 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         firstChangedInput = "environment: " & changedInput
       continue
     let refreshed = refreshedInputs(record, changed, hybridCutoff,
-      changedInput, metadataCache)
+      changedInput, metadataCache, inputRoot = outputRoot)
     if changed:
       sawInputChange = true
       if firstChangedInput.len == 0:
@@ -4983,18 +5235,30 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       cache.writePerEdgeRecord(candidate)
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
     return ActionCacheLookup(status: aclHit, record: candidate)
+  # `Action-Cache-Per-Edge-Store.md` §8.3's observability rule, applied to a
+  # miss: an edge that HAD candidates and matched none is a different event
+  # from an edge with no record at all, and the two were reported with
+  # messages a reader could not tell apart from the outside ("input changed:
+  # <path>" does not say whether one record was consulted or eight, and
+  # "no matching cache record for policy" does not say that records existed).
+  # The count is what separates a first build from a warm edge that cannot
+  # hit. It is `records.len` — every candidate the walk above could have
+  # matched, before the policy filter, because a record skipped for its
+  # policy is still a record this edge has.
+  let considered = $records.len & " candidate record" &
+    (if records.len == 1: "" else: "s") & " considered"
   if sawInputChange:
     ActionCacheLookup(
       status: aclMissInputChanged,
       message:
-        if firstChangedInput.len > 0:
+        (if firstChangedInput.len > 0:
           "input changed: " & firstChangedInput
         else:
-          "input changed",
+          "input changed") & " (" & considered & ")",
       changedInputPath: firstChangedInput)
   else:
     ActionCacheLookup(status: aclMissNoRecord,
-      message: "no matching cache record for policy")
+      message: "no matching cache record for policy (" & considered & ")")
 
 proc determinismMetaFor*(cache: ActionCache; weak, strong: ContentDigest):
     EntryDeterminism =
@@ -5022,6 +5286,44 @@ proc determinismMetaFor*(cache: ActionCache; weak, strong: ContentDigest):
     decodeDeterminism(bytes(readFile(detPath))).meta
   except OSError, IOError, EnvelopeError:
     EntryDeterminism()
+
+proc recordInputAccesses*(cache: ActionCache; weak, strong: ContentDigest;
+                          accesses: InputAccesses) =
+  ## Write the input-access sidecar for one (edge, path-set) pair, beside the
+  ## `.rec` that `recordActionResult` just published. Temp file + rename, like
+  ## every other write in the edge directory. Best-effort: a sidecar that
+  ## cannot be written costs the portable derivation on a later hit (which
+  ## then says the accesses are unknown), never the build.
+  let dirPath = cache.perEdgeDirPath(weak)
+  let strongHex = digestHex(strong)
+  let finalPath = dirPath / inputAccessFileName(strongHex)
+  let now = getTime()
+  let tmpPath = finalPath & ".tmp." & $getCurrentProcessId() & "." &
+    $now.toUnix & "." & $now.nanosecond
+  try:
+    createDir(extendedPath(dirPath))
+    writeFile(extendedPath(tmpPath),
+      byteString(encodeInputAccesses(strongHex, accesses)))
+    moveFile(extendedPath(tmpPath), extendedPath(finalPath))
+  except OSError, IOError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+
+proc inputAccessesFor*(cache: ActionCache; weak, strong: ContentDigest):
+    Option[InputAccesses] =
+  ## The accesses recorded for one (edge, path-set) pair, or `none` when no
+  ## sidecar is there or it cannot be read: a record written before the
+  ## sidecar existed, one installed from a peer, or one whose sidecar was
+  ## lost.
+  let strongHex = digestHex(strong)
+  let path = cache.perEdgeDirPath(weak) / inputAccessFileName(strongHex)
+  if not fileExists(extendedPath(path)):
+    return none(InputAccesses)
+  try:
+    decodeInputAccesses(bytes(readFile(extendedPath(path))), strongHex)
+  except OSError, IOError:
+    none(InputAccesses)
 
 proc applyRetention(cache: ActionCache; weak: ContentDigest;
                     lookup: var ActionCacheLookup;
@@ -5197,7 +5499,7 @@ proc scanCacheEntries*(cache: ActionCache;
         strongHex: strongHex,
         recPath: path,
         recordBytes: fileSizeOrZero(path))
-      for ext in [WitnessFileExt, DeterminismFileExt]:
+      for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt]:
         entry.recordBytes += fileSizeOrZero(edgeDir / (strongHex & ext))
       try:
         entry.mtimeUnix = toUnix(getLastModificationTime(extendedPath(path)))
@@ -5235,12 +5537,12 @@ proc scanCacheEntries*(cache: ActionCache;
       result.add(entry)
 
 proc removeEntry(entry: CacheEntryRef): bool =
-  ## Unlink one entry's `.rec` and both sidecars. Best-effort on the
+  ## Unlink one entry's `.rec` and its sidecars. Best-effort on the
   ## sidecars: an orphaned one is reaped by `capRecFiles` anyway, whereas a
   ## `.rec` that survives is a live cache entry, so only its removal decides
   ## success.
   let dir = entry.recPath.parentDir
-  for ext in [WitnessFileExt, DeterminismFileExt]:
+  for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt]:
     let sidecar = dir / (entry.strongHex & ext)
     if fileExists(extendedPath(sidecar)):
       try: removeFile(extendedPath(sidecar))

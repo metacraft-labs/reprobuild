@@ -1,0 +1,202 @@
+# The attestation MODULE census: every source file the attestation
+# libraries and their mutation tooling are made of, recorded by path.
+#
+# WHY THIS FILE EXISTS, stated plainly because the reason is a defect
+# this repository actually shipped. A commit removed nine source files
+# -- two library modules, a verifier module, a test harness, three
+# gates and two mutation tools -- and NOTHING went red. Every structural
+# check in the suite counts refusal sites, test cases and pinned
+# fixtures; the derived artifacts (the generated test-edge table, the
+# static case-count baseline, the source inventory) are REGENERATED from
+# a directory scan, so a deleted gate does not contradict them, it
+# simply stops appearing in them. A smaller tree is a consistent tree.
+#
+# So this is a census over the CODE, not over the fixtures. Its sibling
+# `attestation-corpus-census.tsv` records every file carrying pinned
+# BYTES; this one records every file carrying the attestation libraries'
+# own LOGIC. The gate beside it, `t_attestation_module_census.nim`,
+# requires each recorded path to be present and non-empty, requires the
+# record to match a directory scan in BOTH directions, and requires the
+# recorded umbrella wiring to be what the umbrella actually does.
+#
+# ## The columns
+#
+#   path       the file, relative to the repository root
+#   kind       `umbrella` -- a library's public face (`repro_attest.nim`,
+#              `repro_attest_verify.nim`)
+#              `library`  -- a submodule of one of those libraries
+#              `tool`     -- committed mutation / regression tooling that
+#              nothing else in the tree references, and which therefore
+#              has no other reason to stay
+#              `gate`     -- a Nim source under tests/integration whose
+#              text names an attestation library. Three of these went
+#              with the nine files above, and the derived artifacts
+#              could not see it: they are regenerated from a directory
+#              scan, so three fewer gates is three fewer rows and no
+#              disagreement anywhere
+#   umbrella   for `library` rows only: `exported` if the umbrella
+#              imports AND re-exports this module, `standalone` if it
+#              deliberately does neither. Nine modules are standalone on
+#              purpose -- a key-encapsulation primitive, a socket client,
+#              a lease holder and the quote/collateral readers that only
+#              their own callers want -- and the gate asserts the
+#              recorded value against the umbrella's own text in both
+#              directions, so a module silently unwired from its library
+#              is red even while the file is still there. That is the
+#              other half of what the commit above did.
+#   summary    the module's own first documentation line, trimmed. Prose
+#              only; nothing is asserted about it.
+#
+# ## Editing this file
+#
+# Adding a module to either library, or a tool to the mutation
+# directory, turns the gate red until a row is added here. That is the
+# point: a hand-kept list that stops tracking what it enumerates is the
+# failure this file is a response to, so the list is itself a check. The
+# gate also pins the per-directory row COUNTS as literal numbers, so
+# deleting a file and its row together is not a quiet operation either.
+#
+# path	kind	umbrella	summary
+libs/repro_attest/src/repro_attest.nim	umbrella	-	Attestation support: expected launch measurements and the documents
+libs/repro_attest/src/repro_attest/binding.nim	library	exported	The 64-byte binding discipline: the report data an attested instance
+libs/repro_attest/src/repro_attest/cloud_launch.nim	library	exported	Launching an attested image on a public cloud — described, priced in
+libs/repro_attest/src/repro_attest/cloud_lease.nim	library	standalone	Holding a billed cloud instance under a lease, and getting rid of it
+libs/repro_attest/src/repro_attest/commitment.nim	library	exported	Commitments to the private halves of an inference: the prompt, the
+libs/repro_attest/src/repro_attest/cose.nim	library	standalone	COSE signature verification — RFC 9052 (structures) over RFC 9053
+libs/repro_attest/src/repro_attest/driver.nim	library	exported	The backend driver seam: how the agent asks a root of trust for
+libs/repro_attest/src/repro_attest/edge_attestation.nim	library	exported	The ``reproos.edge-attestations.v1`` document: proofs that a build
+libs/repro_attest/src/repro_attest/event_log.nim	library	exported	The TCG event log: the record a platform keeps of what it measured
+libs/repro_attest/src/repro_attest/hpke.nim	library	standalone	Hybrid Public Key Encryption (RFC 9180) over the vendored BearSSL.
+libs/repro_attest/src/repro_attest/image_layout.nim	library	exported	The ``reproos.image-layout.v1`` record: the disk layout an image was
+libs/repro_attest/src/repro_attest/inference_statement.nim	library	exported	The ``reproos.inference-statement.v1`` document: what an agent claims
+libs/repro_attest/src/repro_attest/manifest.nim	library	exported	The ``reproos.attested-image.v1`` measurement manifest.
+libs/repro_attest/src/repro_attest/measurement.nim	library	exported	Launch-measurement precomputation for unified kernel images.
+libs/repro_attest/src/repro_attest/merkle.nim	library	exported	RFC 6962 Merkle inclusion proofs, and nothing else.
+libs/repro_attest/src/repro_attest/mock_backend.nim	library	exported	The mock backend: a root of trust that does not exist, and says so.
+libs/repro_attest/src/repro_attest/provision.nim	library	exported	The wire format a released secret travels in, and the two context
+libs/repro_attest/src/repro_attest/report.nim	library	exported	The ``reproos.attestation-report.v1`` envelope.
+libs/repro_attest/src/repro_attest/sealing.nim	library	exported	Binding a secret to a launch measurement: the policy a TPM will
+libs/repro_attest/src/repro_attest/snp_backend.nim	library	exported	The security-processor backend: the document a confidential guest's
+libs/repro_attest/src/repro_attest/snp_launch.nim	library	exported	The launch measurement an AMD SEV-SNP machine will report, computed
+libs/repro_attest/src/repro_attest/tdx_backend.nim	library	exported	The trust-domain backend: the quote a confidential guest's quoting
+libs/repro_attest/src/repro_attest/tdx_launch.nim	library	exported	The measurement registers an Intel trust domain will report
+libs/repro_attest/src/repro_attest/tpm2.nim	library	exported	TPM 2.0 structure codec: the big-endian TLV a measured-boot machine
+libs/repro_attest/src/repro_attest/tpm2_backend.nim	library	exported	The tpm2 backend: the evidence a measured-boot machine produces, and
+libs/repro_attest/src/repro_attest/tsm_report.nim	library	exported	The kernel's unified attestation-report surface, and the discipline
+libs/repro_attest/src/repro_attest/x25519_kem.nim	library	standalone	The key-encapsulation mechanism an attested instance carries: X25519
+libs/repro_attest_verify/src/repro_attest_verify.nim	umbrella	-	Verification: the half of the attestation chain that decides whether
+libs/repro_attest_verify/src/repro_attest_verify/challenge.nim	library	exported	Minting a challenge, and remembering when it was minted.
+libs/repro_attest_verify/src/repro_attest_verify/evidence.nim	library	exported	Reading backend-native evidence, and the only facts a verdict may
+libs/repro_attest_verify/src/repro_attest_verify/fetch.nim	library	standalone	Fetching a report from a running agent, over plain HTTP.
+libs/repro_attest_verify/src/repro_attest_verify/inference.nim	library	exported	What an inference statement is worth: one entry point, two trust
+libs/repro_attest_verify/src/repro_attest_verify/lifecycle.nim	library	exported	What a verifier's own inputs are worth on the day it runs.
+libs/repro_attest_verify/src/repro_attest_verify/policy.nim	library	exported	The ``reproos.attestation-policy.v1`` measurement policy.
+libs/repro_attest_verify/src/repro_attest_verify/quorum.nim	library	standalone	What a bundle of edge attestations is worth: a K-of-N quorum over
+libs/repro_attest_verify/src/repro_attest_verify/release.nim	library	exported	Releasing a secret to a machine a verdict just accepted — and
+libs/repro_attest_verify/src/repro_attest_verify/snp_chain.nim	library	exported	The endorsement chain behind an SEV-SNP report: VCEK or VLEK, its
+libs/repro_attest_verify/src/repro_attest_verify/snp_report.nim	library	exported	The AMD SEV-SNP attestation report: its structure, and the one
+libs/repro_attest_verify/src/repro_attest_verify/snp_tcb.nim	library	exported	Two decisions that sit between a verified report and a verdict: does
+libs/repro_attest_verify/src/repro_attest_verify/tdx_chain.nim	library	standalone	The endorsement chain behind an Intel TDX quote: the Provisioning
+libs/repro_attest_verify/src/repro_attest_verify/tdx_collateral.nim	library	standalone	Intel's DCAP collateral: the two signed documents that say what a
+libs/repro_attest_verify/src/repro_attest_verify/tdx_quote.nim	library	standalone	The Intel TDX attestation quote: its structure, and the three
+libs/repro_attest_verify/src/repro_attest_verify/trust.nim	library	exported	Certificate-chain trust: twelve refusals, one acceptance, and two
+libs/repro_attest_verify/src/repro_attest_verify/verdict.nim	library	exported	The verdict: every check a verifier performed, and what came of it.
+libs/repro_attest_verify/src/repro_attest_verify/verify.nim	library	exported	The verifier: thirteen checks, run in order, none of them skipped
+libs/repro_attest_verify/src/repro_attest_verify/x509.nim	library	exported	A strict DER reader for the two documents a certificate chain is made
+tools/attestation-mutations/cvm_emulator_mutations.py	tool	-	Apply each filed mutation to the confidential-computing emulator
+tools/attestation-mutations/fixture_lifecycle_mutations.py	tool	-	Apply each filed mutation, rebuild the gate it targets, RUN it, and
+tools/attestation-mutations/inference_binding_mutations.py	tool	-	Run the inference-binding mutation table: one edit at a time, rebuild AND run the gate
+tools/attestation-mutations/run_neighbour_gates.sh	tool	-	Rebuild and RUN every gate that imports the attestation libraries this
+tests/integration/attestation_agent_harness.nim	gate	-	Shared driving code for the attestation-agent gates.
+tests/integration/attestation_verifier_harness.nim	gate	-	Shared fixtures for the `repro attest verify` gates.
+tests/integration/attested_boot/provision_releaser.nim	gate	-	The verifier half of one secret release, driven against a machine
+tests/integration/attested_boot/unseal_broker.nim	gate	-	``unseal-broker`` — the entry point the evidence harness runs.
+tests/integration/attested_boot/unseal_broker_core.nim	gate	-	The broker half of a remote unseal: the party that holds a machine's
+tests/integration/attested_boot_vectors.nim	gate	-	Four attested boots, pinned: one honest, one whose kernel command
+tests/integration/cloud_lease_fake_provider.nim	gate	-	A provider whose instances are files, for the two gates about what
+tests/integration/cvm_emulator_scenarios.nim	gate	-	One emulated confidential-computing attestation, assembled end to
+tests/integration/cvm_evidence_emulator.nim	gate	-	Confidential-computing evidence emulators: production-format
+tests/integration/edge_attestation_harness.nim	gate	-	Minting edge attestations: rebuilder signatures and log inclusion
+tests/integration/emulator_scenarios.nim	gate	-	One emulated attestation, assembled end to end, with one structured
+tests/integration/evidence_emulator.nim	gate	-	A local evidence emulator: production-format measured-boot evidence
+tests/integration/inference_statement_harness.nim	gate	-	Minting authenticated inference statements: an inference-signing
+tests/integration/provisioning_harness.nim	gate	-	Shared driving code for the secret-provisioning gates.
+tests/integration/remote_unseal_harness.nim	gate	-	Standing a real broker up beside the code under test, and measuring
+tests/integration/reproos_shaped_uki.nim	gate	-	A ReproOS-shaped unified kernel image, built here from the PE
+tests/integration/software_root_test_pki.nim	gate	-	A software-root test hierarchy, in production algorithms and
+tests/integration/t_agent_abuse_bounds.nim	gate	-	Oversized bodies and burst traffic are refused or limited, without the
+tests/integration/t_agent_mock_roundtrip.nim	gate	-	The agent answers a challenge, over a socket, with a document a
+tests/integration/t_agent_replay_rejected.nim	gate	-	A stale or mismatched challenge fails.
+tests/integration/t_agent_service_unit.nim	gate	-	The service unit and the daemon it starts agree about the daemon.
+tests/integration/t_attestation_fixture_lifecycle.nim	gate	-	The fixture corpus has a lifecycle, and this gate is where it is
+tests/integration/t_attestation_module_census.nim	gate	-	The attestation surface has a census over its own CODE, and this gate
+tests/integration/t_attestation_report.nim	gate	-	The `reproos.attestation-report.v1` envelope and the 64-byte binding
+tests/integration/t_attested_image_manifest.nim	gate	-	The `reproos.attested-image.v1` measurement manifest and the PCR-11
+tests/integration/t_authenticated_inference_binding_mutations.nim	gate	-	Changing the agent, the configuration, the model, the system, the
+tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim	gate	-	The cloud launch adapter's dry-run path creates no cloud resource —
+tests/integration/t_cloud_attestation_launch_manifest_identity.nim	gate	-	Changing a launch parameter that reaches the evidence changes the
+tests/integration/t_cose_rfc9052_vectors.nim	gate	-	RFC 9052 (COSE) — the published examples, rebuilt from the document
+tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim	gate	-	The confidential-computing evidence emulators, driven through every
+tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	gate	-	A nested TLV is bounded by its PARENT, not by the buffer it sits in.
+tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim	gate	-	One verifier, two trust classes: a locally-rooted statement and a
+tests/integration/t_e2e_local_attestation_emulator_all_protocol_paths.nim	gate	-	The local evidence emulator, driven through every protocol path, on
+tests/integration/t_e2e_software_root_attestation_roundtrip.nim	gate	-	A software-root chain, carried in a real report, through the real
+tests/integration/t_edge_attestation_binding_resists_substitution.nim	gate	-	What a rebuilder's signature is a signature FOR: the claim's two
+tests/integration/t_edge_attestation_quorum_is_k_of_n.nim	gate	-	The K-of-N quorum over edge attestations, exercised from both sides
+tests/integration/t_emulator_is_not_a_verifier_bypass.nim	gate	-	With the emulator present, a genuine-tier policy still refuses
+tests/integration/t_event_log_parser_rejects_malformed.nim	gate	-	Every byte string this parser will not accept as a TCG event log
+tests/integration/t_event_log_replay_mismatch_rejected.nim	gate	-	A log with one event altered no longer reproduces the composite, and
+tests/integration/t_event_log_replay_reproduces_pcrs.nim	gate	-	Replaying a real TCG event log reproduces the registers the TPM held
+tests/integration/t_exit_codes_are_documented_and_stable.nim	gate	-	Every value `repro attest` can exit with is written down, and the ones
+tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	gate	-	A software-root confidential-computing hierarchy cannot satisfy a
+tests/integration/t_hpke_rejects_wrong_recipient.nim	gate	-	HPKE fails closed: what happens when the ciphertext, the encapsulated
+tests/integration/t_hpke_rfc9180_vectors.nim	gate	-	RFC 9180 (HPKE) — the published test vectors for every mode and suite
+tests/integration/t_inference_commitment_is_hiding_and_binding.nim	gate	-	A commitment that a verifier can check without the prompt, that a
+tests/integration/t_leaked_instance_is_reaped.nim	gate	-	An instance whose owning test is killed mid-run is destroyed by the
+tests/integration/t_mock_refused_by_prod_policy.nim	gate	-	A policy cannot both admit the mock tier and pin production
+tests/integration/t_negative_chain_fixtures.nim	gate	-	Thirteen chains, twelve of them defective, and each refused by its
+tests/integration/t_nitro_enclave_attestation_surface.nim	gate	-	AWS Nitro Enclaves attestation: five genuine documents verify through
+tests/integration/t_pcr_composite_matches_tpm.nim	gate	-	The PCR composite: what a TPM signs when it quotes a set of
+tests/integration/t_pinned_attestation_signatures.nim	gate	-	Which pinned attestation signatures can be checked, and which cannot.
+tests/integration/t_policy_fail_closed.nim	gate	-	`reproos.attestation-policy.v1` — the parser refuses what it cannot
+tests/integration/t_production_policy_rejects_all_software_roots.nim	gate	-	A test hierarchy cannot satisfy production trust, and the reason is
+tests/integration/t_provision_binding.nim	gate	-	A secret is released to ONE key agreement, established inside ONE
+tests/integration/t_provision_policy_gate.nim	gate	-	The policy is what decides whether a secret is released, and removing
+tests/integration/t_remote_unseal_boot.nim	gate	-	A machine with no key to its own disk booted, because somebody else
+tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim	gate	-	The broker said no, and the disk stayed shut.
+tests/integration/t_remote_unseal_client.nim	gate	-	Every way the early-boot client can come back without a key, and the
+tests/integration/t_reproos_uki_through_the_cvm_path.nim	gate	-	A ReproOS-shaped unified kernel image, measured by the real
+tests/integration/t_reseal_on_generation_switch.nim	gate	-	A machine seals its state key for a boot that has not happened.
+tests/integration/t_seal_survives_reboot.nim	gate	-	The machine is switched off, switched on, and its disk opens again.
+tests/integration/t_signer_roster_rotation_and_revocation.nim	gate	-	A rebuilder's key stops counting, and this is where that becomes
+tests/integration/t_snp_agent_backend.nim	gate	-	The security-processor agent backend: the document it hands over, the
+tests/integration/t_snp_chain_requires_amd_root.nim	gate	-	A chain rooted anywhere but the vendor is refused, and it is refused
+tests/integration/t_snp_digest_vectors.nim	gate	-	The launch-digest calculator reproduces an independent
+tests/integration/t_snp_evidence_reaches_the_verdict.nim	gate	-	The security-processor arm of the verifier, from a document a real
+tests/integration/t_snp_expectation_reaches_the_manifest.nim	gate	-	The computed launch measurement reaches the document a verifier reads.
+tests/integration/t_snp_fixture_verify.nim	gate	-	Genuine confidential-computing attestation reports verify, and every
+tests/integration/t_snp_launch_refusals.nim	gate	-	Every rule the launch-digest calculator has, on its own input.
+tests/integration/t_snp_tcb_policy.nim	gate	-	A platform version below the verifier's floor is refused, a grace
+tests/integration/t_tampered_uki_detected.nim	gate	-	One character of kernel command line, and the verifier says no.
+tests/integration/t_tampered_uki_fails_unseal.nim	gate	-	One character of kernel command line, and the disk does not open.
+tests/integration/t_tdx_agent_backend.nim	gate	-	The trust-domain agent backend: the quote it hands over, the bytes it
+tests/integration/t_tdx_chain_requires_intel_root.nim	gate	-	A trust-domain endorsement chain is accepted only when it ends at
+tests/integration/t_tdx_collateral_and_verifier_arm.nim	gate	-	Intel's signed collateral verifies, the trusted-computing-base
+tests/integration/t_tdx_expectation_reaches_the_verifier.nim	gate	-	The computed trust-domain expectation, from the command that writes
+tests/integration/t_tdx_launch_refusals.nim	gate	-	Every rule the trust-domain measurement refuses on, with an input.
+tests/integration/t_tdx_launch_vectors.nim	gate	-	Two genuine trust-domain quotes, and the measurements they carry
+tests/integration/t_tdx_quote_fixture_verify.nim	gate	-	Genuine Intel TDX attestation quotes verify, and every single-bit
+tests/integration/t_teardown_runs_on_failure_path.nim	gate	-	A deliberately failing test still destroys everything it created —
+tests/integration/t_tpm2_codec_rejects_malformed.nim	gate	-	Parser hardening: what the TPM 2.0 codec refuses.
+tests/integration/t_tpm2_driver_composes_and_refuses.nim	gate	-	The tpm2 arm of the backend seam: what it produces, and the four
+tests/integration/t_tpm2_evidence_composite_roundtrip.nim	gate	-	A quote, its signature and the log that explains it survive one blob
+tests/integration/t_tpm2_evidence_rejects_malformed.nim	gate	-	Every way a tpm2 evidence composite can be wrong, refused — and each
+tests/integration/t_tpm2_structure_vectors.nim	gate	-	The TPM 2.0 structure codec, against quotes a real TPM produced.
+tests/integration/t_tpm_quote_verifies.nim	gate	-	A machine attested, and the verifier accepted it.
+tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	gate	-	Transparency-log inclusion: RFC 6962 proofs, checked against a root
+tests/integration/t_tsm_report_transport.nim	gate	-	The kernel's attestation-report surface: the counter discipline, the
+tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim	gate	-	An acceptance that read its identity out of a manifest nobody pinned
+tests/integration/t_verdict_enumerates_checks.nim	gate	-	A verdict names every check it performed, and a check that was
+tests/integration/t_verify_e2e_mock.nim	gate	-	End to end: a measurement manifest, a running agent, a challenge over
+tests/integration/tcg_event_log_vectors.nim	gate	-	Pinned TCG event logs from real firmware, and the third-party
+tests/integration/tdx_launch_vectors.nim	gate	-	The corpus the trust-domain measurement gates read, and where every

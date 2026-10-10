@@ -1,4 +1,4 @@
-import std/[json, net, options, os, osproc, sequtils, strtabs, strutils, times]
+import std/[hashes, json, net, options, os, osproc, sequtils, strtabs, strutils, times]
 
 import cbor
 import repro_core
@@ -581,6 +581,40 @@ proc eventInputPaths(artifact: DevEnvArtifact; state: SessionState): seq[string]
       seen.add(normalized)
   result = seen
 
+type InputSnapshot = seq[tuple[path: string; exists: bool; digest: Hash]]
+
+proc snapshotInputs(paths: openArray[string]): InputSnapshot =
+  ## The content of each watched input as a cycle is about to read it.
+  for path in paths:
+    var entry = (path: path, exists: false, digest: Hash(0))
+    try:
+      entry.digest = hash(readFile(extendedPath(path)))
+      entry.exists = true
+    except CatchableError:
+      discard
+    result.add(entry)
+
+proc inputChangedSince(snapshot: InputSnapshot;
+                       paths: openArray[string]): string =
+  ## The first watched input whose content differs from ``snapshot``, or ""
+  ## when none does. Content, not mtime: an edit that keeps the size and lands
+  ## within the filesystem's timestamp granularity is still an edit. An input
+  ## the snapshot never saw (the cycle widened the input set) has nothing to
+  ## compare against and is not reported.
+  for path in paths:
+    var before = -1
+    for i, entry in snapshot:
+      if entry.path == path:
+        before = i
+        break
+    if before < 0:
+      continue
+    let now = snapshotInputs([path])[0]
+    if now.exists != snapshot[before].exists or
+        now.digest != snapshot[before].digest:
+      return path
+  ""
+
 proc runTaskCommand(state: var SessionState;
                     artifact: DevEnvArtifact;
                     artifactPath: string; task: DevEnvTaskSummary;
@@ -646,23 +680,57 @@ proc stopRequested(state: SessionState): bool =
 
 proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
                   artifact: var DevEnvArtifact; artifactPath: var string) =
+  # AN EDIT MADE WHILE A CYCLE RUNS MUST START ANOTHER CYCLE. The watcher is
+  # opened only after a cycle finishes, so a change written while a task was
+  # running produced no event at all: the session went idle with the task's
+  # output describing the OLD input until some later, unrelated edit. Under
+  # load the window is the whole task run. So each cycle remembers the content
+  # of the inputs it is about to read, and the next idle wait first compares
+  # them; a difference is reported as the change the watcher could not see.
+  var cycleInputs = snapshotInputs(eventInputPaths(artifact, state))
   if artifact.tasks.len > 0:
     state.runWatchCycle(config, artifact, artifactPath)
+  # THE STOP REQUEST IS POLLED, NOT WATCHED FOR. ``stop.request.json`` is in
+  # ``eventInputPaths``, but it lives under ``.repro/``, and the filesystem
+  # watcher drops every event under a ``.repro`` component as build-output
+  # noise (fc8d425a8). So the watch delivered the stop request to nobody,
+  # ``waitForEvent`` waited for a source edit that never came, and ``repro
+  # down`` timed out with the session still "up" and its services running.
+  # The cancel check is the watcher's own way out of a blocking wait; it is
+  # consulted on every poll on every platform.
+  let stopPath = state.stopRequestPath
+  let stopCheck: FilesystemWatchCancelCheck =
+    proc(): bool = fileExists(extendedPath(stopPath))
   while not state.stopRequested():
     let paths = eventInputPaths(artifact, state)
     state.emitEvent("watch.idle")
     var watcher = openFilesystemWatcher(paths)
     try:
-      let event = watcher.waitForEvent()
+      # Opened BEFORE the comparison, so an edit landing in between is caught
+      # by one or the other.
+      let missed = inputChangedSince(cycleInputs, paths)
+      let event =
+        if missed.len > 0:
+          FilesystemWatchEvent(path: missed,
+            detail: "changed while the previous cycle ran")
+        else:
+          try:
+            watcher.waitForEvent(cancelCheck = stopCheck)
+          except IOError:
+            if state.stopRequested():
+              break
+            raise
       if state.stopRequested():
         break
       if event.path == state.stopRequestPath or
           event.path.startsWith(state.sessionDir):
+        cycleInputs = snapshotInputs(paths)  # or it would be reported again
         continue
       state.lastWatchPath = event.path
       state.emitEvent("watch.filesystem.changed", watchPath = event.path,
         detail = event.detail)
       discard watcher.drainDebouncedEvents(config.debounceMs)
+      cycleInputs = snapshotInputs(paths)
     finally:
       watcher.closeFilesystemWatcher()
     if state.stopRequested():

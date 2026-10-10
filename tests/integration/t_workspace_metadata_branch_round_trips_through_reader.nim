@@ -142,7 +142,12 @@ suite "M13 — workspace branch round-trips through reader":
     writeWorkspaceBranch(workspaceRoot,
       project = "reprobuild", branch = "develop")
 
-    let parsed = readWorkspaceLocal(tomlPath)
+    # The write lands in the state file's NEW name, carrying the layers
+    # across; the old file is left as it was and is no longer read
+    # (Workspace-Settings-Files.md §8 step 1).
+    check workspaceTomlPath(workspaceRoot) == workspaceStatePath(workspaceRoot)
+    check readWorkspaceLocal(tomlPath).workspace.branch.get() == "main"
+    let parsed = readWorkspaceLocal(workspaceTomlPath(workspaceRoot))
     check parsed.workspace.project == "reprobuild"
     check parsed.workspace.branch.isSome
     check parsed.workspace.branch.get() == "develop"

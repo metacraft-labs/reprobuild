@@ -23,6 +23,7 @@
 ##
 ## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -281,3 +282,56 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
       check resFail.code != 0
       check (not fileExists(cp))
       check resFail.output.contains("no certificate")
+
+  test "an unpushed clean current HEAD is certified before push":
+    # Agents-Push-Gate.md §4.1: the receiving-side gateway (TC-6) refuses a
+    # push that carries no covering certificate, so the certificate has to
+    # exist BEFORE the push. Issuance therefore must not require the current
+    # repository's own HEAD to be published; that publication is the very push
+    # being gated. Restoring the old requirement fails ``fileExists(cp)``.
+    let gitBin = findExe("git")
+    if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
+      skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
+    else:
+      let fx = setupFixture(gitBin, "unpushed")
+      defer: removeDir(fx.scratch)
+      let libA = fx.workspaceRoot / "lib-a"
+      writeFile(libA / "feature.txt", "new\n")
+      discard requireGit(q(gitBin) & " -C " & q(libA) & " add feature.txt")
+      discard requireGit(q(gitBin) & " -C " & q(libA) & " commit -m feature")
+      let newSha = requireGit(q(gitBin) & " -C " & q(libA) &
+        " rev-parse HEAD").strip()
+      # Lock AFTER the commit, as the managed post-commit hook would, so the
+      # attested commit has a lock record for TC-7's lock-at-commit check.
+      seedLock(fx)
+
+      let fixtureJson = fx.scratch / "fixture-pass.json"
+      writeTestFixtureJson(fixtureJson, "pre-commit", "exit 0")
+      let res = runReproTest(fx, fixtureJson, @["--certify"])
+      if res.code != 0:
+        checkpoint("repro test output: " & res.output)
+      check res.code == 0
+      let cp = defaultCertificatePath(fx.workspaceRoot, newSha,
+        currentPlatformTag())
+      if not fileExists(cp):
+        checkpoint("no certificate for the clean unpushed HEAD:\n" &
+          res.output)
+      check fileExists(cp)
+      if fileExists(cp):
+        let cert = readCertificateFile(cp)
+        check cert.vcs.commit == newSha
+        check cert.vcs.clean
+        check "pre-commit" in cert.targets
+        check cert.isSigned
+      # Certifying published nothing: the origin still lacks the commit.
+      let originHas = runCmd(q(gitBin) & " --git-dir=" & q(fx.libAOrigin) &
+        " cat-file -e " & newSha & "^{commit}")
+      check originHas.code != 0
+
+      # Still REFUSED when the tree is dirty: the exemption is about
+      # publication only, never cleanliness.
+      removeFile(cp)
+      writeFile(libA / "scratch.txt", "uncommitted\n")
+      let resDirty = runReproTest(fx, fixtureJson, @["--certify"])
+      check (not fileExists(cp))
+      check resDirty.output.contains("no certificate")

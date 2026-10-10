@@ -1,4 +1,4 @@
-import std/[json, os, strutils, tables, times]
+import std/[json, options, os, strutils, tables, times]
 when defined(posix):
   # ``finishSignal`` decodes the raw wait status the process backend keeps
   # but does not interpret on its deadline branch. See the note there.
@@ -33,6 +33,12 @@ type
     memoryBytes*: uint64
     namedPool*: string
     namedPoolUnits*: uint32
+    namedPoolCapacity*: uint32
+      ## The capacity the build declares for ``namedPool`` (its
+      ## ``buildPool(name, capacity)``), sent to the daemon as a pool
+      ## declaration before the lease is requested. Zero declares nothing.
+      ## The daemon admits against it only where its host file and flags
+      ## leave the pool unsized (``declareRunQuotaPools``).
     interactive*: bool
       ## Somebody is waiting at a prompt for this lease: a dev-env activation
       ## (``repro exec``/``shell``/``run``) compiling the recipe it needs before
@@ -52,7 +58,10 @@ type
       ## from this process. Off (the zero value), ``env`` is layered over the
       ## inherited environment, which can replace a variable but never remove
       ## one. The build engine sets it for actions launched with an
-      ## allowlisted environment (``BuildEngineConfig.hermeticEnv``).
+      ## allowlisted environment (``BuildEngineConfig.hermeticEnv``) and for an
+      ## action that declares its whole environment
+      ## (``BuildAction.isolateHostEnvironment``). Carried through the helper's
+      ## argv as ``--isolated-env``.
 
   ReproRunQuotaExecution* = object
     leaseId*: uint64
@@ -405,8 +414,11 @@ proc waitAfterDenial(label, statsId, diagnostic: string;
       "runquota static-capacity deadlock for '" & id & "' after " &
       $attempt & " denied offers over " & $waitedMs & "ms: " & diagnostic &
       ". The request cannot be admitted by the current daemon configuration. " &
-      "Adjust the action resource request or restart runquotad with matching " &
-      "CPU, memory, IO, and named-pool capacities. Raise " &
+      "Adjust the action resource request, or raise the host's budget with " &
+      "`runquota config set machine.memory_bytes|machine.cpu_milli|" &
+      "pools.NAME VALUE`, which reloads the running runquotad (a key a " &
+      "runquotad flag pins is not changed by it; `runquota config show` " &
+      "lists them). Raise " &
       "REPRO_RUNQUOTA_DENIAL_TIMEOUT if the authority can deny transiently.")
   sleep(backoffMs)
 
@@ -764,6 +776,7 @@ proc helperCliArgs*(request: ReproResourceRequest;
     "--mem", $request.effectiveMemory(),
     "--pool", request.namedPool,
     "--pool-units", $request.namedPoolUnits,
+    "--pool-capacity", $request.namedPoolCapacity,
     "--cwd", command.cwd,
     "--stdout-limit", $command.stdoutLimit,
     "--stderr-limit", $command.stderrLimit
@@ -1191,11 +1204,98 @@ proc isRunQuotaDaemonReachable*(): bool =
   except CatchableError:
     false
 
+type
+  RunQuotaPoolDeclaration* = object
+    ## What declaring a build's pools to the daemon came to.
+    supported*: bool
+      ## False when the daemon predates ``DeclarePools``: nothing was sent,
+      ## and it admits only the pools its host file or ``--pool`` flags size.
+    diagnostic*: string
+      ## Why the declaration did not happen, when it did not.
+    pools*: seq[DeclaredPoolWire]
+      ## Per pool: the capacity declared, the cap in force and its source
+      ## (``flag`` / ``host-file`` / ``declared``).
+
+var poolDeclarationUnsupportedReported = false
+
+proc reportPoolDeclarationUnsupported*(declaration: RunQuotaPoolDeclaration;
+                                       pools: openArray[string]) =
+  ## Say ONCE per process that the daemon could not be told this build's
+  ## pools, naming them, so a later ``lease request exceeds named-pool
+  ## budget`` refusal has its cause on the screen beside it.
+  if declaration.supported or pools.len == 0 or
+      poolDeclarationUnsupportedReported:
+    return
+  poolDeclarationUnsupportedReported = true
+  try:
+    stderr.writeLine("repro: warning: " & declaration.diagnostic &
+      "; this build uses the pools " & pools.join(", ") & ", so its leases " &
+      "in any of them that runquotad does not size will be refused. Update " &
+      "runquotad, or size them in its host file (runquota config set " &
+      "pools.NAME N).")
+  except IOError, OSError:
+    discard
+
+proc declarePoolsOn(session: var RunQuotaSession;
+                    pools: openArray[tuple[name: string; capacity: uint32]]):
+    RunQuotaPoolDeclaration =
+  var wire: seq[NamedPoolCapWire] = @[]
+  for pool in pools:
+    if pool.name.len > 0 and pool.capacity > 0'u32:
+      wire.add(NamedPoolCapWire(name: pool.name, units: pool.capacity))
+  if wire.len == 0:
+    return RunQuotaPoolDeclaration(supported: true)
+  if not session.client[].supportsPoolDeclarations():
+    return RunQuotaPoolDeclaration(supported: false,
+      diagnostic: "the running runquotad (" &
+        session.client[].daemonVersion & ", protocol minor " &
+        $session.client[].capabilities.protocolMinor & ") predates pool " &
+        "declarations")
+  let answer = session.declarePools(wire)
+  RunQuotaPoolDeclaration(supported: true, pools: answer.pools)
+
+proc declareRunQuotaPools*(session: ReproRunQuotaSession;
+                           pools: openArray[tuple[name: string;
+                                                  capacity: uint32]]):
+    RunQuotaPoolDeclaration =
+  ## Tell the daemon the named pools this build uses and the capacity the
+  ## build declares for each (its ``buildPool(name, capacity)``), before any
+  ## lease in them is requested.
+  ##
+  ## THIS IS HOW A RECIPE'S POOLS REACH RUNQUOTA, and it replaced passing them
+  ## as ``runquotad --pool`` flags when reprobuild spawned the daemon
+  ## (reprobuild-specs/RunQuota-Host-Configuration.md, "Pools a build
+  ## declares"). Flags reached only a daemon this process started, and they
+  ## pinned the pool for that daemon's whole life against the host file and
+  ## ``runquota config set``. A declaration reaches whatever daemon serves the
+  ## host -- the installed service, or one another build started -- and sits
+  ## UNDER the host file: the operator's ``[pools]`` entry wins, and it leaves
+  ## with this session.
+  ##
+  ## A REFUSAL IS RETURNED, NOT RAISED, like ``declareRunQuotaExtension``'s:
+  ## a daemon too old to take the declaration is a reason to warn, and the
+  ## leases it then refuses carry their own diagnostic.
+  if session.isNil or not session.active:
+    return RunQuotaPoolDeclaration(supported: false,
+      diagnostic: "runquota session is not active")
+  try:
+    declarePoolsOn(session.session, pools)
+  except CatchableError as err:
+    RunQuotaPoolDeclaration(supported: false, diagnostic: err.msg)
+
 proc runWithRunQuota*(request: ReproResourceRequest;
                       command: ReproCommandSpec): ReproRunQuotaExecution =
   var client = connectDefault()
   try:
     var session = client.registerSession("reprobuild action", "0.1.0")
+    # The helper path's own session: declare the one pool this lease uses,
+    # exactly as the inline path declares the build's (see
+    # ``declareRunQuotaPools``), so the lease is admissible on a daemon this
+    # build did not start.
+    if request.namedPool.len > 0:
+      let declaration = declarePoolsOn(session,
+        [(name: request.namedPool, capacity: request.namedPoolCapacity)])
+      reportPoolDeclarationUnsupported(declaration, [request.namedPool])
     var lease = session.waitForQueuedGrant(request.toRunQuotaRequest())
     result.leaseId = lease.id.value
     try:
@@ -1671,6 +1771,22 @@ proc probeRunQuotaLiveness*(session: ReproRunQuotaSession;
   except CatchableError:
     false
 
+proc runQuotaDaemonMemoryBudget*(): Option[uint64] =
+  ## The memory budget the running daemon enforces on its local machine, from
+  ## its ``topology`` inspection subject; ``none`` when no daemon answers.
+  ## Asked only to say whether ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` matches
+  ## the daemon a command found already running.
+  try:
+    var client = connectDefault()
+    defer: client.close()
+    let topology = parseJson(client.inspectionJson("topology"))
+    for machine in topology{"machines"}:
+      if machine{"id"}.getStr == DefaultMachineId:
+        return some(uint64(machine{"memory_bytes"}.getBiggestInt))
+  except CatchableError:
+    discard
+  none(uint64)
+
 proc runQuotaEndpointText*(): string =
   ## The RunQuota endpoint this process talks to, as a reader would type it:
   ## the ``RUNQUOTA_SOCKET`` override when set, otherwise the host-wide default.
@@ -2021,6 +2137,10 @@ proc runRunQuotaHelperCli*(args: openArray[string]): int =
     of "--pool-units":
       if i + 1 >= args.len: return 2
       request.namedPoolUnits = uint32(parseUInt(args[i + 1]))
+      i += 2
+    of "--pool-capacity":
+      if i + 1 >= args.len: return 2
+      request.namedPoolCapacity = uint32(parseUInt(args[i + 1]))
       i += 2
     of "--cwd":
       if i + 1 >= args.len: return 2

@@ -1,4 +1,5 @@
 import std/[json, os, osproc, sequtils, sets, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import nimcrypto/sha2 as ncSha2
 import repro_tool_profiles
@@ -6,16 +7,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
+    "847c4630edfdd861306da7e35556f074caa18471"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-a9ef983e.nim"
+    "tests/fixtures/codetracer-subset/repro-847c4630.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-a9ef983e.nims"
+    "tests/fixtures/codetracer-subset/config-847c4630.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ecb87da01665a172128ec45b2eab00e8e97a709ccdd52f7291797207b84ee85e"
+    "44f91e98b54c2f3f7a6286bf38f9896075dfc63a59104db94fb7cbc7fc26e997"
   PinnedCodeTracerConfigPayloadSha256 =
-    "fadd0d2371f3456043db00f902d59d1c9e186b0bf97e8a52f48e10b87dd3485d"
+    "b96945ef91ba4524f30b1cbfb4c586da731a1e9d5a824a2f5da591df7f10d7ba"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by
@@ -753,8 +754,15 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
     writeFile(tailwindStyles, "{}\n")
 
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
-  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "nim-acp",
-              "nim-agent-harbor", "nim-agents", "nim-everywhere",
+  # ``isonim-tui`` is not a ``uses:`` package: CodeTracer's ``config.nims``
+  # puts ``<workspace>/isonim-tui/src`` on the compiler path when that
+  # directory exists, and its frontend imports ``isonim_tui/...`` through it
+  # (``src/frontend/viewmodel/editor/selection.nim`` since CodeTracer
+  # 8d1c99922). The fixture workspace is this temp directory, not the real
+  # one, so the sibling has to be linked here like the others or every
+  # frontend compile fails with ``cannot open file: isonim_tui/text/width``.
+  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "isonim-tui",
+              "nim-acp", "nim-agent-harbor", "nim-agents", "nim-everywhere",
               "nim-shm-gset", "nim-shm-queue", "nim-stackable-hooks"]:
     var sourcePath = codeTracerRoot.parentDir / dep
     if dep == "codetracer-trace-format-nim":
@@ -1595,7 +1603,7 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(buildDebug(projectRoot, "subwindow.js.map"))
   check fileExists(buildDebug(projectRoot, "src/subwindow.js"))
   for stylesheet in [
-    "default_white_theme.css",
+    "default_white_theme_electron.css",
     "default_dark_theme_electron.css",
     "default_dark_theme_extension.css",
     "default_dark_theme.css",
@@ -2378,7 +2386,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2431,7 +2439,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2466,7 +2474,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(changedReport, "frontend-subwindow-html")
       assertActionCacheEffective(changedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2833,7 +2841,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2863,7 +2871,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2896,7 +2904,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(htmlChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(htmlChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2939,7 +2947,7 @@ when defined(macosx) or defined(linux):
       assertAction(helperChangedReport, "frontend-src-helpers-js",
         "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3032,7 +3040,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "subwindow.html"))
       check fileExists(buildDebug(projectRoot, "src/helpers.js"))
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3073,7 +3081,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3127,7 +3135,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3158,7 +3166,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(cChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(cChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3191,7 +3199,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(headerDeletedReport, "frontend-subwindow-html")
       assertActionCacheEffective(headerDeletedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",

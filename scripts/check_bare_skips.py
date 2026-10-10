@@ -78,6 +78,21 @@ a comment or a string literal -- the lexer this scanner borrows drops those
 before it ever sees them. That last exclusion is why this scanner's total is
 LOWER than a plain ``git grep -cE 'skip\\(\\)'``; see CROSS-CHECK below.
 
+A REASON MUST ALSO COMPILE EVERYWHERE
+====================================
+
+``skip(reason)`` is the fork's signature. The stock ``std/unittest`` that
+Windows builds with declares only ``template skip*()``, so there a file that
+calls ``skip("why")`` does not compile and loses EVERY case it holds, not just
+the skipped one -- measured on Windows at 2b361c1c5, where 145 test files
+failed that way. ``repro_test_support/reasoned_skip`` supplies the
+reason-carrying form where ``std/unittest`` lacks it and nothing where it has
+it, and the protocol shim ``ct_test_unittest_parallel`` declares its own. So
+this lint also refuses a source that calls ``skip`` WITH a reason while naming
+neither module (``PORTABLE_SKIP_MODULES``). There is no baseline for that half:
+every such file was fixed when the rule was added, and the remedy is one
+import line.
+
 CROSS-CHECK AGAINST GREP
 ========================
 
@@ -166,6 +181,13 @@ SKIP_NAME = "skip"
 # ``template skip*(reason = "")``; that is the fix, not the defect.
 DECLARATION_KEYWORDS = {"template", "proc", "func", "macro", "method", "iterator",
                         "converter"}
+
+# Modules that make ``skip(reason)`` compile on a stock ``std/unittest``,
+# whose ``skip`` takes no argument. See "A REASON MUST ALSO COMPILE
+# EVERYWHERE" in the module docstring.
+PORTABLE_SKIP_MODULES = {"reasoned_skip", "ct_test_unittest_parallel"}
+
+PORTABLE_SKIP_IMPORT = "import repro_test_support/reasoned_skip"
 
 # A case that contains a bare skip but sits in no ``test`` block at all. There
 # are none today; the bucket exists so that one appearing is reported under a
@@ -462,6 +484,19 @@ def scan_source(text: str):
     return analyze(text)[1]
 
 
+def names_portable_skip(text: str) -> bool:
+    """Whether a source names a module that makes ``skip(reason)`` portable.
+
+    Read off the lexed identifiers, so a mention in a comment or a string does
+    not count. It does not prove the name sits in an ``import``; a source that
+    names ``reasoned_skip`` for any other reason is not a shape that exists.
+    """
+    for token in inventory.nim_tokens(text):
+        if token.kind == "identifier" and token.value in PORTABLE_SKIP_MODULES:
+            return True
+    return False
+
+
 def declared_nim_sources(root: pathlib.Path) -> list[str]:
     """Every Nim test source declared in ``repro_tests.nim``, bundles expanded.
 
@@ -556,6 +591,20 @@ def self_test() -> None:
     seen: dict[str, list[str]] = {}
     for _line, title, kind in scan_source(SELF_TEST_SOURCE):
         seen.setdefault(title, []).append(kind)
+    if names_portable_skip(SELF_TEST_SOURCE):
+        raise SystemExit(
+            "check_bare_skips: SELF-TEST FAILED. The fixture names no portable "
+            "skip module, yet the scanner says it does."
+        )
+    if not names_portable_skip(
+        SELF_TEST_SOURCE.replace(
+            "import std/unittest\n", "import std/unittest\n" + PORTABLE_SKIP_IMPORT + "\n"
+        )
+    ):
+        raise SystemExit(
+            "check_bare_skips: SELF-TEST FAILED. The fixture imports "
+            "repro_test_support/reasoned_skip, yet the scanner does not see it."
+        )
     if seen != SELF_TEST_EXPECTED:
         raise SystemExit(
             "check_bare_skips: SELF-TEST FAILED. The scanner does not classify "
@@ -746,6 +795,10 @@ def run_ratchet(
             '      condition:  skip("git not on PATH; this case needs a repository")',
             file=sys.stderr,
         )
+        print(
+            f"      and, so that it compiles on stock Nim too:  {PORTABLE_SKIP_IMPORT}",
+            file=sys.stderr,
+        )
         print("", file=sys.stderr)
         for source, title in arrived:
             was = recorded.get((source, title), 0)
@@ -839,6 +892,34 @@ def cross_check(root: pathlib.Path, measured_total: int) -> None:
     print("  above, line by line, and none of it is a scanner miss.")
 
 
+def report_unportable(unportable: list[str]) -> bool:
+    """Refuse sources whose ``skip(reason)`` only compiles on the Nim fork.
+
+    Returns ``True`` when the run must fail.
+    """
+    if not unportable:
+        return False
+    print(
+        "FAIL: `skip(reason)` in a source that imports nothing to make it compile on",
+        file=sys.stderr,
+    )
+    print(
+        "      a stock std/unittest, whose `skip` takes no argument. Windows builds the",
+        file=sys.stderr,
+    )
+    print(
+        "      suite with stock Nim, so there the WHOLE FILE fails to compile. Add:",
+        file=sys.stderr,
+    )
+    print(f"          {PORTABLE_SKIP_IMPORT}", file=sys.stderr)
+    print("", file=sys.stderr)
+    for site in sorted(unportable):
+        print(f"  {site}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(f"      {len(unportable)} source(s).", file=sys.stderr)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None)
@@ -876,6 +957,7 @@ def main() -> int:
     sources_scanned = 0
     cases = 0
     skip_calls = 0
+    unportable: list[str] = []
 
     for source in sources:
         path = root / source
@@ -885,6 +967,9 @@ def main() -> int:
         text = inventory.read_text(path)
         source_cases, found = analyze(text)
         cases += source_cases
+        reasoned = [line for line, _title, kind in found if kind == "with-reason"]
+        if reasoned and not names_portable_skip(text):
+            unportable.append(f"{source}:{reasoned[0]}")
         for line, title, kind in found:
             skip_calls += 1
             if kind != "bare":
@@ -918,12 +1003,14 @@ def main() -> int:
     if arguments.cross_check:
         cross_check(root, sum(measured.values()))
 
+    portability_failed = report_unportable(unportable)
+
     if arguments.paths:
         print(
             "check_bare_skips: --paths given; the baseline is not compared "
             "(a subset is not the population)."
         )
-        return 0
+        return 1 if portability_failed else 0
 
     failed = run_ratchet(
         measured,
@@ -933,7 +1020,7 @@ def main() -> int:
         skip_calls,
         write=arguments.write_baseline,
     )
-    return 1 if failed else 0
+    return 1 if failed or portability_failed else 0
 
 
 if __name__ == "__main__":

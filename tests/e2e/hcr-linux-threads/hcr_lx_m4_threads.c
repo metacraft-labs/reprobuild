@@ -63,6 +63,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <ucontext.h>
@@ -86,8 +87,8 @@ extern unsigned long long repro_hcr_lx_probe_last_original_word(void);
 extern unsigned long long repro_hcr_lx_probe_last_generation(void);
 extern long repro_hcr_lx_probe_last_membarrier_result(void);
 extern int repro_hcr_lx_probe_membarrier_sync_core(void);
-extern int repro_hcr_lx_probe_text_rwx_transition(void);
-extern int repro_hcr_lx_probe_last_transient_kept_exec(void);
+extern unsigned long long repro_hcr_lx_probe_wx_requests_refused(void);
+extern int repro_hcr_lx_probe_last_text_replaced(void);
 extern unsigned long long repro_hcr_lx_probe_membarrier_issued_count(void);
 extern unsigned long long repro_hcr_lx_probe_publication_count(void);
 extern void repro_hcr_lx_probe_set_sync_core_suppressed(int value);
@@ -99,8 +100,6 @@ extern int repro_hcr_lx_probe_quiesce_trampoline_verified(void);
 extern int repro_hcr_lx_probe_quiesce_trampoline_mismatch(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_nested_adjust_count(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_nested_frames_seen(void);
-extern long repro_hcr_lx_probe_raw_mprotect(unsigned long long address,
-                                            size_t length, int protection);
 extern size_t repro_hcr_lx_probe_page_size(void);
 extern int repro_hcr_lx_probe_last_quiesced(void);
 extern int repro_hcr_lx_probe_last_ip_adjustments(void);
@@ -122,10 +121,6 @@ extern unsigned long long repro_hcr_lx_probe_quiesce_park_ns(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_release_ns(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_adjust_count(void);
 extern int repro_hcr_lx_probe_quiesce_signo(void);
-
-#define REPRO_HCR_LX_PROT_READ 0x1
-#define REPRO_HCR_LX_PROT_WRITE 0x2
-#define REPRO_HCR_LX_PROT_EXEC 0x4
 
 /* ---- shared state ------------------------------------------------------- */
 
@@ -301,8 +296,15 @@ static size_t parse_hex(const char *text, unsigned char *out, size_t capacity) {
  *
  * This is in the fixture, not in the provider: production code must have no
  * path that publishes non-atomically, however well guarded. The control writes
- * the target's own text directly, exactly as the provider would, and therefore
- * exercises the same detector.
+ * the target's own text directly and therefore exercises the same detector.
+ *
+ * It maps the page writable AND executable for the duration, through libc's
+ * `mprotect` rather than the provider's (which refuses `PROT_WRITE|PROT_EXEC`
+ * by construction). That is deliberate and confined to this control: the tear
+ * has to be OBSERVABLE as a wrong branch, and a page that lost `PROT_EXEC`
+ * would instead fault every worker anywhere in it — a different signal that
+ * the detector would not attribute to the window. The provider never does
+ * this; `wxRequestsRefused` in the output is how the gate checks that.
  */
 static void torn_publish(unsigned long long window_address,
                          unsigned long long word) {
@@ -310,10 +312,8 @@ static void torn_publish(unsigned long long window_address,
   unsigned long long page = window_address & ~(unsigned long long)(page_size - 1);
   volatile unsigned char *bytes = (volatile unsigned char *)(uintptr_t)window_address;
   int i;
-  if (repro_hcr_lx_probe_raw_mprotect(page, page_size,
-                                      REPRO_HCR_LX_PROT_READ |
-                                          REPRO_HCR_LX_PROT_WRITE |
-                                          REPRO_HCR_LX_PROT_EXEC) != 0) {
+  if (mprotect((void *)(uintptr_t)page, page_size,
+               PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
     return;
   }
   for (i = 0; i < 8; ++i) {
@@ -321,9 +321,7 @@ static void torn_publish(unsigned long long window_address,
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     sched_yield();
   }
-  (void)repro_hcr_lx_probe_raw_mprotect(page, page_size,
-                                        REPRO_HCR_LX_PROT_READ |
-                                            REPRO_HCR_LX_PROT_EXEC);
+  (void)mprotect((void *)(uintptr_t)page, page_size, PROT_READ | PROT_EXEC);
 }
 
 /* ---- main --------------------------------------------------------------- */
@@ -701,10 +699,10 @@ int main(int argc, char **argv) {
          repro_hcr_lx_probe_publication_count());
   printf("  \"lastMembarrierResult\": %ld,\n",
          repro_hcr_lx_probe_last_membarrier_result());
-  printf("  \"textRwxTransition\": %s,\n",
-         repro_hcr_lx_probe_text_rwx_transition() ? "true" : "false");
-  printf("  \"lastTransientKeptExec\": %s,\n",
-         repro_hcr_lx_probe_last_transient_kept_exec() ? "true" : "false");
+  printf("  \"wxRequestsRefused\": %llu,\n",
+         repro_hcr_lx_probe_wx_requests_refused());
+  printf("  \"lastTextReplaced\": %s,\n",
+         repro_hcr_lx_probe_last_text_replaced() ? "true" : "false");
   printf("  \"lastGeneration\": %llu\n",
          repro_hcr_lx_probe_last_generation());
   printf("}\n");

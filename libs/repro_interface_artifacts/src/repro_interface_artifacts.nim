@@ -88,6 +88,7 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
+import repro_core/relocation
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
@@ -100,9 +101,24 @@ proc sanitizeStaticExec(val: string): string =
       cleanLines.add(s)
   if cleanLines.len > 0: cleanLines[^1] else: ""
 
-const BuiltNimCompilerPath = sanitizeStaticExec(staticExec("command -v nim"))
-const BuiltCCompilerPath =
-  sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
+# There is deliberately no build-time Nim compiler constant. The Nim that
+# compiles a recipe is the one the bootstrap provisions
+# (``repro_tool_profiles.ensureBootstrapToolchainEnv``) or the one a caller
+# names in ``REPRO_NIM_COMPILER``; it is never a path baked in when ``repro``
+# itself was built (reprobuild-specs Distribution-And-Packaging.milestones.org,
+# M5, "pin the provider-compile toolchain", rule 2). The constant that used to
+# stand here, ``staticExec("command -v nim")``, was also an error message on
+# every Windows build: ``staticExec`` runs no shell there, so ``command`` is
+# not found and the last output line is Nim's "Requested command not found".
+#
+# ``BuiltCCompilerPath`` has the same Windows defect and so is defined only
+# where its probe can work. Windows gets its recipe-compile C compiler from the
+# bootstrap or from ``REPRO_BOOTSTRAP_CC``, never from here.
+when defined(windows):
+  const BuiltCCompilerPath = ""
+else:
+  const BuiltCCompilerPath =
+    sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
 
 proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## Preserve source-only dependency roots from the environment that built
@@ -148,6 +164,28 @@ const BuiltSourcePackageRoots = [
   ("CODETRACER_PINNED_SRC", compileTimeSourceRoot("CODETRACER_PINNED_SRC")),
   ("RUNQUOTA_SRC", compileTimeSourceRoot("RUNQUOTA_SRC")),
 ]
+
+const BuiltLibraryPrefixes = [
+  ## The C library prefixes of the shell that BUILT this `repro`, baked in
+  ## for the same reason as `BuiltSourcePackageRoots`: repro provisions these
+  ## libraries, so the provider compile it runs should not depend on whether
+  ## the CALLER's shell happens to export them.
+  ##
+  ## Without them, a caller whose shell lacks `BLAKE3_PREFIX` & co. fell
+  ## through to `nixPrefix`, which enumerates all of `/nix/store` and takes
+  ## the first name match. That was 11% of the CPU of a warm `repro exec`
+  ## (perf, 2026-09-29), and it is not hermetic: which store path matches
+  ## first depends on the host. An explicit caller value still wins; this is
+  ## consulted after it and before the homebrew and store-scan fallbacks.
+  ("BLAKE3_PREFIX", compileTimeSourceRoot("BLAKE3_PREFIX")),
+  ("XXHASH_PREFIX", compileTimeSourceRoot("XXHASH_PREFIX")),
+  ("CLINGO_PREFIX", compileTimeSourceRoot("CLINGO_PREFIX")),
+]
+
+proc builtLibraryPrefix(envName: string): string =
+  for entry in BuiltLibraryPrefixes:
+    if entry[0] == envName:
+      return entry[1]
 
 proc builtSourcePackageRoot(envName: string): string =
   for entry in BuiltSourcePackageRoots:
@@ -893,6 +931,14 @@ proc providerCompileEdge*(inputSources: openArray[string];
     declaredOutputs: declaredOutputs,
     actionFingerprint: fingerprint)
 
+var
+  locationBase {.threadvar.}: string
+    ## Non-empty while `writeInterfaceArtifactRecipeRelative` /
+    ## `readInterfaceArtifactRebased` run: the recipe directory source
+    ## locations are named relative to.
+  locationAnchors {.threadvar.}: seq[string]
+  locationsRelative {.threadvar.}: bool
+
 proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
                    forFingerprint = false) =
   ## Serialises a ``SourceLocation``. When ``forFingerprint`` is true the
@@ -908,11 +954,23 @@ proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
     outp.writeString("")
     outp.writeU32Le(0'u32)
   else:
-    outp.writeString(loc.file)
+    let file =
+      if locationBase.len > 0 and locationsRelative:
+        relocatableName(loc.file, locationBase, locationAnchors)
+      else:
+        loc.file
+    outp.writeString(file)
     outp.writeU32Le(uint32(max(loc.line, 0)))
 
 proc readLocation(bytes: openArray[byte]; pos: var int): SourceLocation =
-  SourceLocation(file: readString(bytes, pos), line: int(readU32Le(bytes, pos)))
+  let file = readString(bytes, pos)
+  SourceLocation(
+    file:
+      if locationBase.len > 0 and not locationsRelative:
+        rebasedName(file, locationBase)
+      else:
+        file,
+    line: int(readU32Le(bytes, pos)))
 
 proc writeParam(outp: var seq[byte]; param: InterfaceParam;
                 forFingerprint = false) =
@@ -1525,6 +1583,36 @@ proc writeInterfaceArtifact*(path: string; artifact: ProjectInterfaceArtifact) =
 
 proc readInterfaceArtifact*(path: string): ProjectInterfaceArtifact =
   decodeProjectInterfaceArtifact(fromByteString(readFile(extendedPath(path))))
+
+proc writeInterfaceArtifactRecipeRelative*(path: string;
+    artifact: ProjectInterfaceArtifact; recipeDir: string;
+    anchors: openArray[string]) =
+  ## Write `artifact` with every source location outside `anchors` named
+  ## relative to `recipeDir` (`repro_core/relocation`). This is the form the
+  ## recipe-relative extraction edge produces, so the bytes it caches
+  ## describe whichever copy of the recipe restores them; a reader rebases
+  ## them with `readInterfaceArtifactRebased`. The interface fingerprint is
+  ## unaffected: it never contains locations.
+  locationBase = absolutePath(recipeDir)
+  locationAnchors = effectiveAnchors(locationBase, anchors)
+  locationsRelative = true
+  try:
+    writeInterfaceArtifact(path, artifact)
+  finally:
+    locationBase = ""
+    locationAnchors = @[]
+
+proc readInterfaceArtifactRebased*(path, recipeDir: string):
+    ProjectInterfaceArtifact =
+  ## Read an artifact written by `writeInterfaceArtifactRecipeRelative`,
+  ## resolving its relative source locations against `recipeDir` — the
+  ## recipe as it lies at THIS location.
+  locationBase = absolutePath(recipeDir)
+  locationsRelative = false
+  try:
+    result = readInterfaceArtifact(path)
+  finally:
+    locationBase = ""
 
 proc writeProviderCompileArtifact*(path: string;
     artifact: ProviderCompileArtifact) =
@@ -2858,12 +2946,28 @@ proc runCommand*(command: openArray[string];
     raise commandFailure(command, result, "")
 
 proc nimCompilerPath(): string =
-  if cachedNimCompilerPath.len > 0:
-    return cachedNimCompilerPath
+  ## The Nim compiler for a recipe compile.
+  ##
+  ## The ``repro`` entry points that compile a recipe run
+  ## ``ensureBootstrapToolchainEnv`` first (pinned by
+  ## ``t_provider_compile_entry_points_publish_bootstrap_toolchain``), and it
+  ## either publishes ``REPRO_NIM_COMPILER`` (a project's lock pin, the
+  ## caller's own, or the provisioned one) or stops the command. So from
+  ## those commands this returns the first arm. The ``PATH`` walk below
+  ## serves library callers that never ran the bootstrap (unit tests,
+  ## embedders); a failed provisioning does not reach it.
+  #
+  # The explicit compiler is read BEFORE the cache, every time. It is how a
+  # project's pinned provider compiler reaches the compile
+  # (`repro_cli_support/project_pins`), and a daemon worker serves projects
+  # with different pins in one process: a cached first answer would compile
+  # the second project's provider with the first project's compiler. Only the
+  # PATH search below, which costs a probe per candidate, is cached.
   let overridePath = getEnv("REPRO_NIM_COMPILER")
   if overridePath.len > 0:
-    cachedNimCompilerPath = overridePath
     return overridePath
+  if cachedNimCompilerPath.len > 0:
+    return cachedNimCompilerPath
   proc addUnique(paths: var seq[string]; path: string) =
     if path.len == 0:
       return
@@ -2885,8 +2989,6 @@ proc nimCompilerPath(): string =
     let candidate = dir / exeName
     if fileExists(extendedPath(candidate)):
       candidates.addUnique(candidate)
-  if BuiltNimCompilerPath.len > 0 and fileExists(extendedPath(BuiltNimCompilerPath)):
-    candidates.addUnique(BuiltNimCompilerPath)
   candidates.addUnique("nim")
   for candidate in candidates:
     if candidate.startsWith("/nix/store/"):
@@ -2895,11 +2997,7 @@ proc nimCompilerPath(): string =
     if looksLikeNimCompiler(candidate):
       cachedNimCompilerPath = candidate
       return candidate
-  cachedNimCompilerPath =
-    if BuiltNimCompilerPath.len > 0 and fileExists(extendedPath(BuiltNimCompilerPath)):
-      BuiltNimCompilerPath
-    else:
-      "nim"
+  cachedNimCompilerPath = "nim"
   cachedNimCompilerPath
 
 proc compiledExecutablePath(outputPath: string): string =
@@ -2989,6 +3087,14 @@ const
     ## The one knob that names the recipe-compile C compiler. Set by
     ## ``ensureBootstrapToolchainEnv`` to the pinned tool-store compiler, or by
     ## the user to override it.
+  bootstrapSdkRootEnv* = "REPRO_BOOTSTRAP_SDKROOT"
+    ## macOS only: the SDK the bootstrap's Xcode Command Line Tools clang
+    ## compiles and links against. ``ensureBootstrapToolchainEnv`` sets it next
+    ## to ``REPRO_BOOTSTRAP_CC`` when it chose that clang and ``SDKROOT`` was
+    ## unset. It is passed to the compiler as ``-isysroot`` rather than exported
+    ## as ``SDKROOT``: the recipe compile's child actions inherit this process's
+    ## environment, and an ``SDKROOT`` there would redirect every package
+    ## action's compiler (a Nix clang wrapper included) to the Xcode SDK.
   cCompilerProbeSource = """
 #include <stddef.h>
 #include <stdint.h>
@@ -3003,6 +3109,14 @@ int repro_probe(void) { return (int)(sizeof(size_t) + strlen("ok")); }
 """
 
 var cachedCCompilerProbes = initTable[string, CCompilerProbe]()
+
+proc bootstrapSysrootArgs*(): seq[string] =
+  ## The ``-isysroot`` pair for the recipe-compile C compiler, from
+  ## ``REPRO_BOOTSTRAP_SDKROOT``. Empty off macOS and when it is unset.
+  when defined(macosx):
+    let sdk = getEnv(bootstrapSdkRootEnv)
+    if sdk.len > 0:
+      result = @["-isysroot", sdk]
 
 proc cCompilerIdentity(cc: string): string =
   ## Path plus size plus mtime: what a probe verdict is keyed on. A replaced
@@ -3025,7 +3139,8 @@ proc cCompilerProbeMarkerName(identity: string): string =
     result[15 - i] = hexDigits[int((h shr (uint64(i) * 4)) and 0xF'u64)]
   result.add(".ok")
 
-proc probeCCompiler*(cc: string; cacheDir = ""): CCompilerProbe =
+proc probeCCompiler*(cc: string; cacheDir = "";
+                     extraArgs: seq[string] = @[]): CCompilerProbe =
   ## Compile a trivial translation unit that includes the standard headers
   ## Nim's generated C needs, with the host's pointer width asserted, and
   ## report whether ``cc`` can do it.
@@ -3040,7 +3155,13 @@ proc probeCCompiler*(cc: string; cacheDir = ""): CCompilerProbe =
   ## and mtime, so an activation that runs on every ``just`` recipe does not
   ## pay a compiler start-up each time. Failures are never cached: the fix is
   ## usually to the environment, and the next run must see it.
-  let identity = cCompilerIdentity(cc)
+  ##
+  ## ``extraArgs`` go on the probe's command line and into its cache key; the
+  ## macOS bootstrap passes its ``-isysroot`` here, because that is how the
+  ## recipe compile will run the compiler.
+  var identity = cCompilerIdentity(cc)
+  for arg in extraArgs:
+    identity.add("|" & arg)
   if cachedCCompilerProbes.hasKey(identity):
     return cachedCCompilerProbes[identity]
   result = CCompilerProbe(compiler: cc)
@@ -3060,7 +3181,7 @@ proc probeCCompiler*(cc: string; cacheDir = ""): CCompilerProbe =
     scratch = createTempDir("repro-cc-probe-", "")
     let source = scratch / "probe.c"
     writeFile(extendedPath(source), cCompilerProbeSource)
-    let res = runCommand(@[cc, "-c",
+    let res = runCommand(@[cc] & extraArgs & @["-c",
       "-DREPRO_PROBE_POINTER_BYTES=" & $sizeof(pointer),
       source, "-o", scratch / "probe.o"], cwd = scratch,
       raiseOnFailure = false)
@@ -3105,9 +3226,10 @@ proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
     "\n  failure: " & detail.replace("\n", "\n    ") &
     "\n  remedy: " & cCompilerOverrideRemedy()
 
-proc requireUsableCCompiler*(cc, origin: string; cacheDir = "") =
+proc requireUsableCCompiler*(cc, origin: string; cacheDir = "";
+                             extraArgs: seq[string] = @[]) =
   ## Raise ``CCompilerUnusableError`` unless ``cc`` passes ``probeCCompiler``.
-  let probe = probeCCompiler(cc, cacheDir)
+  let probe = probeCCompiler(cc, cacheDir, extraArgs)
   if not probe.usable:
     raise newException(CCompilerUnusableError,
       cCompilerUnusableMessage(probe, origin))
@@ -3189,6 +3311,94 @@ proc hostCCompilerPath(): string =
   else:
     ""
 
+const ReprobuildLibsOverrideEnvVars* = ["REPROBUILD_LIBS_DIR",
+                                       "REPROBUILD_REPO_ROOT"]
+  ## The operator overrides `reprobuildLibsRootFromEnv` reads, in precedence
+  ## order. Named once because every process boundary a recipe compile
+  ## crosses has to carry them: an isolated launch, and the dev-env cache key
+  ## that decides whether a previous extraction may be reused.
+
+proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
+  ## The environment values the provider-compile edge DECLARES, so that the
+  ## caller's shell stops deciding what the edge is.
+  ##
+  ## WHY. The edge inherits the environment of whoever started `repro`, and
+  ## its monitor records every variable the compile reads, by value. Measured
+  ## on a one-line recipe (2026-09-28): `PATH`, `TERM`, `LANG`, `HOME`,
+  ## `LD_LIBRARY_PATH` and `CXX` were all recorded. A `repro exec` started
+  ## under `perf` (which prepends its own directories to `PATH`) recompiled
+  ## the provider with `input metadata changed: PATH`, and the next plain
+  ## entry recompiled it again to switch back. The helper read `PATH` because
+  ## it resolved `nim` and `cc` from it inside the monitored edge.
+  ##
+  ## WHAT. This process, which is not monitored, resolves the compiler and the
+  ## C compiler once, and the edge is launched with:
+  ##
+  ##   * `REPRO_NIM_COMPILER` / `REPRO_BOOTSTRAP_CC`: the resolved absolute
+  ##     paths. Both are the helper's existing overrides, so it never searches
+  ##     `PATH` itself. Their identities are already in the edge's key
+  ##     (`nimCompilerIdentity`, the `--gcc.exe` flag);
+  ##   * `PATH`: only those two directories. A compile that needs a tool
+  ##     outside them fails loudly, and nothing on the caller's `PATH` can
+  ##     shadow a tool the compile does use;
+  ##   * `TERM=dumb`, `LANG=C`: diagnostics only, pinned so a terminal or a
+  ##     locale is not a cache key;
+  ##   * `HOME`: a directory owned by this edge, so a user-level
+  ##     `~/.config/nim` cannot change the compile without being an input.
+  ##
+  ## WHAT THIS DOES NOT DO. The launcher layers declared values OVER the
+  ## inherited environment (`EnvironmentInheritanceCensus`), so this pins the
+  ## names it lists and cannot remove names it does not list. The complete
+  ## fix is a launch mode that does not inherit at all (io-mon `childEnv` and
+  ## the RunQuota spawner); until then a variable nobody declared still
+  ## reaches the compile.
+  let nim = nimCompilerPath()
+  let cc =
+    try: hostCCompilerPath()
+    except CatchableError: ""
+  var dirs: seq[string] = @[]
+  for tool in [nim, cc]:
+    if tool.len > 0 and tool.isAbsolute:
+      let dir = parentDir(tool)
+      if dir notin dirs:
+        dirs.add(dir)
+  if nim.len > 0 and nim.isAbsolute:
+    result.add("REPRO_NIM_COMPILER=" & nim)
+  if cc.len > 0 and cc.isAbsolute:
+    result.add(bootstrapCCompilerEnv & "=" & cc)
+  if dirs.len > 0:
+    result.add("PATH=" & dirs.join($PathSep))
+  result.add("TERM=dumb")
+  result.add("LANG=C")
+  if homeDir.len > 0:
+    createDir(extendedPath(homeDir))
+    result.add("HOME=" & homeDir)
+  # The source roots this process resolved (baked, seeded, or a develop-mode
+  # override), declared by value: under an isolated launch the compile sees
+  # the roots repro chose and nothing a caller's shell happened to export.
+  var seenRoots: seq[string] = @[]
+  for (name, _) in BuiltSourcePackageRoots:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  for (name, _) in InstalledSourcePackageTrees:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  for name in ["REPROBUILD_SOURCE_ROOT", "CODETRACER_TRACE_FORMAT_NIM_SRC",
+               SeededSourceEnvironmentVar]:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  # And the operator's override for WHICH reprobuild libs the compile builds
+  # against (`reprobuildLibsRootFromEnv`, read by `reproLibPathFlags` INSIDE
+  # this compile). Leaving them out of an isolated launch silently reverted
+  # every recipe compile to the libs of the checkout the engine was built
+  # from, whatever the caller had asked for.
+  for name in ReprobuildLibsOverrideEnvVars:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  for name in seenRoots:
+    if existsEnv(name):
+      result.add(name & "=" & getEnv(name))
+
 proc recipeCCompilerPath*(): string =
   ## The C compiler the next recipe compile (interface extractor or provider)
   ## will hand Nim via ``--gcc.exe``: the selection ``hostCCompilerFlags``
@@ -3250,6 +3460,17 @@ proc hostCCompilerFlags(): seq[string] =
   result.add("--gcc.linkerexe:" & cc)
   result.add("--clang.exe:" & cc)
   result.add("--clang.linkerexe:" & cc)
+  # macOS: the bootstrap's Xcode clang needs the SDK named (see
+  # ``bootstrapSdkRootEnv``, which only the bootstrap sets, and only for that
+  # compiler). A compiler the caller named finds its SDK the way it always did.
+  if cc == getEnv(bootstrapCCompilerEnv):
+    let sysroot = bootstrapSysrootArgs()
+    if sysroot.len == 2:
+      let sdk =
+        if ' ' in sysroot[1]: "\"" & sysroot[1] & "\""
+        else: sysroot[1]
+      result.add("--passC:-isysroot " & sdk)
+      result.add("--passL:-isysroot " & sdk)
 
 proc walkLibSrcPathsInto(libsRoot: string; sink: var seq[string]) =
   ## Walks ``<libsRoot>/<name>/src`` and appends every existing entry to
@@ -3270,10 +3491,10 @@ proc reprobuildLibsRootFromEnv(): string =
   ## "where reprobuild's libs/ live". Set by the engine when invoking
   ## an out-of-tree provider compile; mirrors ``$REPROBUILD_REPO_ROOT``
   ## except it points at the libs dir directly. Empty when not set.
-  let direct = getEnv("REPROBUILD_LIBS_DIR")
+  let direct = getEnv(ReprobuildLibsOverrideEnvVars[0])
   if direct.len > 0:
     return direct
-  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
+  let repoRoot = getEnv(ReprobuildLibsOverrideEnvVars[1])
   if repoRoot.len > 0:
     return repoRoot / "libs"
   ""
@@ -3973,7 +4194,7 @@ proc walkLibSourcesInto(libsRoot: string; sink: var seq[string];
       if not seen.containsOrIncl(normalized):
         sink.add(normalized)
 
-proc reproLibSources(workDir: string): seq[string] =
+proc reproLibSourcesUncached(workDir: string): seq[string] =
   var seen = initHashSet[string]()
   walkLibSourcesInto(workDir / "libs", result, seen)
   # Out-of-tree consumers compile their provider/interface recipes against an
@@ -4013,8 +4234,55 @@ proc reproLibSources(workDir: string): seq[string] =
 
   result.sort(system.cmp[string])
 
-proc reproLibSourceFingerprint(workDir: string): string =
-  let paths = reproLibSources(workDir)
+proc fileStamps(paths: openArray[string]): seq[FileStamp]
+proc immutableStorePath(path: string): bool
+
+var
+  reproLibScopeDepth = 0
+  reproLibScopeSources = initTable[string, seq[string]]()
+  reproLibScopeStamps = initTable[string, seq[FileStamp]]()
+
+proc beginReproLibSourcesScope*() =
+  ## Open a scope in which the library source LIST and its STAMPS are computed
+  ## once per root and reused.
+  ##
+  ## One warm dev-env entry walked and stat-ed reprobuild's `libs/` tree
+  ## three times: the fingerprint (twice, for the provider key and the
+  ## runtime identity) and the provider freshness check. That was ~37% of a
+  ## warm `repro exec` after the fingerprint memo (perf, 2026-09-29). Within
+  ## one computation the tree is not expected to move. If it does, the
+  ## post-execution consistency check of the provider-compile edge names the
+  ## moved inputs, as it always has. Scoped rather than process-wide so a
+  ## long-lived session (`repro dev`, `repro watch`) re-reads on every
+  ## computation.
+  inc reproLibScopeDepth
+
+proc endReproLibSourcesScope*() =
+  dec reproLibScopeDepth
+  if reproLibScopeDepth <= 0:
+    reproLibScopeDepth = 0
+    reproLibScopeSources.clear()
+    reproLibScopeStamps.clear()
+
+
+proc reproLibSources(workDir: string): seq[string] =
+  if reproLibScopeDepth == 0:
+    return reproLibSourcesUncached(workDir)
+  let key = normalizedStampPath(workDir)
+  if key notin reproLibScopeSources:
+    reproLibScopeSources[key] = reproLibSourcesUncached(workDir)
+  reproLibScopeSources[key]
+
+proc reproLibSourceStamps(workDir: string; paths: openArray[string]):
+    seq[FileStamp] =
+  if reproLibScopeDepth == 0:
+    return fileStamps(paths)
+  let key = normalizedStampPath(workDir)
+  if key notin reproLibScopeStamps:
+    reproLibScopeStamps[key] = fileStamps(paths)
+  reproLibScopeStamps[key]
+
+proc hashReproLibSources(paths: openArray[string]): string =
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.lib-sources.v1")
   for path in paths:
@@ -4023,6 +4291,102 @@ proc reproLibSourceFingerprint(workDir: string): string =
     payload.writeU64Le(uint64(content.len))
     payload.add(content)
   toHex(blake3DomainDigest(payload, hdActionFingerprint).bytes)
+
+var reproLibFingerprintMemoDir = ""
+  ## Where ``reproLibSourceFingerprint`` may keep a stamp-validated record of
+  ## its last answer. EMPTY BY DEFAULT, and set only by a caller that is not
+  ## itself a monitored action (the dev-env engine, in the process that
+  ## `repro exec` / the shell hook runs). The reason is the one that decides
+  ## whether this is sound: inside a monitored edge the record would be read
+  ## and written by the edge, becoming an observed input of the very action
+  ## whose key it helps compute.
+
+proc setReproLibFingerprintMemoDir*(dir: string) =
+  ## Opt this process into the stamp-validated fingerprint memo. See
+  ## ``reproLibSourceFingerprint``.
+  reproLibFingerprintMemoDir = dir
+
+const ReproLibFingerprintMemoSchema = "reprobuild.lib-sources-memo.v1"
+
+proc reproLibFingerprintMemoPath(memoDir, workDir: string): string =
+  memoDir / (toHex(blake3DomainDigest(
+    toBytes(normalizedStampPath(workDir)), hdActionFingerprint).bytes)[0 ..< 32] &
+    ".rbsz")
+
+proc readReproLibFingerprintMemo(path: string):
+    tuple[found: bool, stamps: seq[FileStamp], digest: string] =
+  if not fileExists(extendedPath(path)):
+    return
+  try:
+    let bytes = toBytes(readFile(extendedPath(path)))
+    var pos = 0
+    if readString(bytes, pos) != ReproLibFingerprintMemoSchema:
+      return
+    result.stamps = readFileStamps(bytes, pos)
+    result.digest = readString(bytes, pos)
+    result.found = result.digest.len > 0
+  except CatchableError:
+    result.found = false
+
+proc writeReproLibFingerprintMemo(path: string; stamps: openArray[FileStamp];
+                                  digest: string) =
+  var payload: seq[byte] = @[]
+  payload.writeString(ReproLibFingerprintMemoSchema)
+  payload.writeFileStamps(stamps)
+  payload.writeString(digest)
+  try:
+    createDir(extendedPath(parentDir(path)))
+    # Write-then-rename so a concurrent reader never sees half a record; a
+    # torn record would decode as "not found" anyway, but this keeps it from
+    # being a routine event under parallel shell entries.
+    let tmp = path & "." & $getCurrentProcessId() & ".tmp"
+    writeFile(extendedPath(tmp), toByteString(payload))
+    moveFile(extendedPath(tmp), extendedPath(path))
+  except CatchableError, OSError:
+    discard
+
+proc reproLibSourceFingerprint(workDir: string): string =
+  ## Content digest of every reprobuild library source a provider compile can
+  ## import (see ``reproLibSources``). It keys the provider-compile edge, so it
+  ## is computed on EVERY dev-env entry, before any cache lookup.
+  ##
+  ## Hashing ~1,750 files (14 MB) was 75% of the CPU of a fully warm
+  ## `repro exec` (measured 2026-09-29 with `perf`; it ran twice per entry,
+  ## once for ``frontendRuntimeIdentity`` and once for
+  ## ``providerFingerprintFor``). With a memo directory set, the answer is
+  ## reused while every source's stamp (path, kind, size, mtime) is unchanged
+  ## and the set of sources is the same: a directory walk and stats instead
+  ## of reading and hashing the tree.
+  ##
+  ## SOUNDNESS. This is exactly the check this module already trusts for the
+  ## same files: ``ProviderFreshnessCacheRecord.reproLibStamps`` decides
+  ## whether a compiled provider is fresh by comparing these stamps, so the
+  ## memo introduces no weaker assumption than the freshness check it feeds.
+  ## An immutable ``/nix/store`` root is fingerprinted by its path set alone,
+  ## as ``reproLibStampsForCache`` already does.
+  let paths = reproLibSources(workDir)
+  if reproLibFingerprintMemoDir.len == 0:
+    return hashReproLibSources(paths)
+  let stamps =
+    if immutableStorePath(workDir):
+      paths.mapIt(FileStamp(path: it, kind: fskRegular))
+    else:
+      reproLibSourceStamps(workDir, paths)
+  let memoPath = reproLibFingerprintMemoPath(reproLibFingerprintMemoDir,
+    workDir)
+  let memo = readReproLibFingerprintMemo(memoPath)
+  if memo.found and memo.stamps == stamps:
+    return memo.digest
+  result = hashReproLibSources(paths)
+  # A stamp that moved WHILE we hashed must not be recorded as the stamp of
+  # the content we read: re-stamp after hashing, and record only when nothing
+  # moved in between. Otherwise the next entry would trust a digest that
+  # describes older bytes.
+  let after =
+    if immutableStorePath(workDir): stamps
+    else: fileStamps(paths)
+  if after == stamps:
+    writeReproLibFingerprintMemo(memoPath, stamps, result)
 
 proc fileStamp(path: string): FileStamp =
   result.path = normalizedStampPath(path)
@@ -4078,7 +4442,7 @@ proc immutableStorePath(path: string): bool =
 proc reproLibStampsForCache(workDir: string): seq[FileStamp] =
   if immutableStorePath(workDir):
     return @[]
-  fileStamps(reproLibSources(workDir))
+  reproLibSourceStamps(workDir, reproLibSources(workDir))
 
 proc interfaceLiftSources(modulePath, resourceModule: string;
                           extraPaths: openArray[string] = [];
@@ -4118,6 +4482,11 @@ proc interfaceExtractionContext(modulePath: string;
   for extra in extraPaths:
     if extra.len > 0:
       libPathFlags.add("--path:" & normalizedStampPath(extra))
+  # The selected catalog decides which module a catalog `uses:` imports
+  # (`catalogSelectionIdentity`); the recipe text does not change with it.
+  let catalogSelection = catalogSelectionIdentity()
+  if catalogSelection.len > 0:
+    libPathFlags.add(catalogSelection)
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
@@ -4141,6 +4510,11 @@ proc interfaceExtractionCacheContext(modulePath: string;
   for extra in extraPaths:
     if extra.len > 0:
       libPathFlags.add("--path:" & normalizedStampPath(extra))
+  # The selected catalog decides which module a catalog `uses:` imports
+  # (`catalogSelectionIdentity`); the recipe text does not change with it.
+  let catalogSelection = catalogSelectionIdentity()
+  if catalogSelection.len > 0:
+    libPathFlags.add(catalogSelection)
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
@@ -4775,7 +5149,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
 
   let blake3Prefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
+      [getEnv("BLAKE3_PREFIX"), builtLibraryPrefix("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
         "/usr/local/opt/blake3"],
       "include/blake3.h",
       ["libblake3.dylib", "libblake3.so", "libblake3.a"])
@@ -4786,12 +5160,17 @@ proc externalHashFlags(workDir = ""): seq[string] =
         ["libblake3.dylib", "libblake3.so", "libblake3.a"])
   if blake3Prefix.len > 0:
     result.add("--passC:-I" & (blake3Prefix / "include"))
-    result.add("--passL:-L" & (blake3Prefix / "lib"))
+    let libDir = firstExistingPrefixLibDir(blake3Prefix,
+      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+    result.add("--passL:-L" & libDir)
+    # The source bootstrap has no installed wrapper to supply runtime paths.
+    # The generated runner must find the same library it linked against.
+    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
     result.add("--passL:-lblake3")
 
   let xxhashPrefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
+      [getEnv("XXHASH_PREFIX"), builtLibraryPrefix("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
         "/usr/local/opt/xxhash"],
       "include/xxhash.h",
       ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
@@ -4802,7 +5181,12 @@ proc externalHashFlags(workDir = ""): seq[string] =
         ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
   if xxhashPrefix.len > 0:
     result.add("--passC:-I" & (xxhashPrefix / "include"))
-    result.add("--passL:-L" & (xxhashPrefix / "lib"))
+    let libDir = firstExistingPrefixLibDir(xxhashPrefix,
+      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+    result.add("--passL:-L" & libDir)
+    # The source bootstrap has no installed wrapper to supply runtime paths.
+    # The generated runner must find the same library it linked against.
+    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
     result.add("--passL:-lxxhash")
 
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init
@@ -4818,7 +5202,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # baked dlopen find the library (verified), the rpath is what resolves it.
   let clingoPrefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("CLINGO_PREFIX"), "/opt/homebrew/opt/clingo",
+      [getEnv("CLINGO_PREFIX"), builtLibraryPrefix("CLINGO_PREFIX"), "/opt/homebrew/opt/clingo",
         "/usr/local/opt/clingo"],
       "include/clingo.h",
       ["libclingo.dylib", "libclingo.so"])
@@ -5304,6 +5688,19 @@ proc providerDynamicEnabled(): bool =
   let raw = getEnv("REPRO_PROVIDER_DYNAMIC").toLowerAscii()
   raw in ["1", "true", "yes", "on"]
 
+const ProviderCompileIsolatedPassthrough* = [
+  # Named, not declared by value. Under the monitor's LD_PRELOAD shim the Nim
+  # compiler's `dlopen` of pcre resolves only through it (flake.nix
+  # `devShells.default.LD_LIBRARY_PATH`; io-mon's dlopen interposition is the
+  # durable fix). Its value is still recorded when the compile reads it.
+  "LD_LIBRARY_PATH",
+  # The installed wrapper's runtime search path, read by `externalHashFlags`
+  # to bake rpaths into what the compile links.
+  "REPROBUILD_RUNTIME_LIBRARY_PATH",
+]
+  ## Names an ISOLATED provider-compile launch still takes from the host, on
+  ## top of `ProviderCompileEnvironmentPassthrough`.
+
 const ProjectDslRuntimeLibStem* = "librepro_project_dsl_runtime"
   ## The shared DSL runtime library's file stem, without the platform's
   ## dynamic-library extension. Named once so the resolver below and the
@@ -5381,7 +5778,9 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  resourceModule = "";
                                  extraPaths: openArray[string] = [];
                                  consumerRoot = "";
-                                 useExtractionCache = true):
+                                 useExtractionCache = true;
+                                 recipeRelative = false;
+                                 relocationAnchors: openArray[string] = []):
     ProjectInterfaceArtifact =
   ## ``useExtractionCache`` controls the built-in warm short-circuit. It is
   ## ``false`` for exactly one caller: the child of the extraction EDGE.
@@ -5430,6 +5829,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
 
   let moduleDir = parentDir(modulePath)
+  let absoluteModuleDir = parentDir(absolutePath(modulePath))
   # Windows: the extract_runner.nim path is passed verbatim to a child
   # `nim c` invocation, and nim opens it via the non-extended Win32 API,
   # so paths longer than MAX_PATH (260 chars) cause `Error: cannot open
@@ -5484,6 +5884,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     let absoluteResourceModule =
       absolutePath(resourceModule).replace('\\', '/')
     resourceImport = "import \"" & absoluteResourceModule & "\"\n"
+  # The runner of a recipe-relative extraction (`extractInterfaceEdge`)
+  # lives OUTSIDE the recipe's tree, under the action-cache root; it imports
+  # the recipe by absolute path (scratch only — the edge's key and record
+  # name the recipe relative to its own directory). Nim reads the
+  # `config.nims` / `nim.cfg` chain of the MAIN module's directory — the
+  # runner's — not the recipe's; see
+  # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  # compiles" for what that means for a recipe's configuration.
   let runnerSource =
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
@@ -5492,7 +5900,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     resourceImport &
     "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
-    "writeInterfaceArtifact(paramStr(1), artifact)\n" &
+    (if recipeRelative:
+       # Source locations travel relative to the recipe.
+       "var anchors: seq[string] = @[]\n" &
+       "for i in 5 .. paramCount(): anchors.add(paramStr(i))\n" &
+       "writeInterfaceArtifactRecipeRelative(paramStr(1), artifact, " &
+       "paramStr(4), anchors)\n"
+     else:
+       "writeInterfaceArtifact(paramStr(1), artifact)\n") &
     "writeNimInterfaceStub(paramStr(2), artifact)\n"
   # CONTENT-KEYED, and therefore stable across invocations.
   #
@@ -5662,6 +6077,16 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # not a valid compiler working directory: Nim writes relative linker response
   # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
   # Keep response files and binaries in the extraction's private directory.
+  #
+  # This holds for a recipe-relative extraction too, whose EDGE runs in the
+  # recipe directory: Nim writes `<runner>_linkerArgs.txt` into its cwd for a
+  # long link line and deletes it again, and that transient entry in the
+  # recipe's root changes the root's mtime — which an editable develop
+  # override folds into its consumers' action keys
+  # (`computeOverrideContentIdentity`). Measured: every consumer action
+  # missed on the second build. The compiler's private cwd is under the
+  # edge's scratch, so its reads stay absolute and the edge's record names
+  # them relative to the recipe.
   let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
@@ -5688,17 +6113,24 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # lives in a temp tree with no DLLs of its own. See the proc's docstring.
   stageHostDynlibsBesideBinary(parentDir(runnerExe))
   ensureExecutable(runnerExe)
-  let execution = runCommand(@[
+  var runnerArgs = @[
     runnerExe,
     absolutePath(artifactPath),
     absolutePath(stubPath),
-    absoluteModulePath
-  ], cwd = tempRoot)
+    absoluteModulePath]
+  if recipeRelative:
+    runnerArgs.add(absoluteModuleDir)
+    for anchor in relocationAnchors:
+      runnerArgs.add(anchor)
+  let execution = runCommand(runnerArgs, cwd = tempRoot)
   if not fileExists(extendedPath(artifactPath)):
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
         "\n" & execution.output)
-  result = readInterfaceArtifactWithWarm(artifactPath)
+  result =
+    if recipeRelative: readInterfaceArtifactRebased(artifactPath,
+      absoluteModuleDir)
+    else: readInterfaceArtifactWithWarm(artifactPath)
   writeFile(extendedPath(interfaceExtractionCachePath(artifactPath)), toHex(
       inputFingerprint.bytes))
   writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,
@@ -5760,21 +6192,27 @@ const
     ## bug).
 
 var cachedNimCompilerIdentity = ""
+var cachedNimCompilerIdentityPath = ""
+  ## The compiler ``cachedNimCompilerIdentity`` describes. The identity is
+  ## cached per COMPILER, not per process, for the reason ``nimCompilerPath``
+  ## re-reads ``REPRO_NIM_COMPILER``.
 
 proc nimCompilerIdentity*(): string =
   ## Canonical identity of the Nim frontend used to compile providers:
   ## the resolved compiler path plus its ``--version`` banner. Feeds
   ## ``ProviderCompileActionKey`` so a compiler swap re-keys the compile
-  ## edge. Cached per process — the compiler does not change mid-run.
-  if cachedNimCompilerIdentity.len > 0:
-    return cachedNimCompilerIdentity
+  ## edge. Cached per compiler path, so one process compiling for two
+  ## projects with different pinned compilers keys each one correctly.
   let path = nimCompilerPath()
+  if cachedNimCompilerIdentity.len > 0 and cachedNimCompilerIdentityPath == path:
+    return cachedNimCompilerIdentity
   var banner = ""
   try:
     banner = runCommand(@[path, "--version"]).output.splitLines()[0].strip()
   except CatchableError:
     banner = ""
   cachedNimCompilerIdentity = path & "\n" & banner
+  cachedNimCompilerIdentityPath = path
   cachedNimCompilerIdentity
 
 proc frontendRuntimeIdentity*(workDir = getCurrentDir()): string =
@@ -6212,7 +6650,10 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
     # toolchain can opt into bounded concurrency through the environment.
     "--define:reproProviderMode",
-    "--path:" & parentDir(modulePath),
+    # A recipe-relative compile names the module by its file name and runs
+    # in its directory; its search path is then that directory, `.`.
+    "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)
+                 else: "."),
     "--nimcache:" & nimcache,
     "--out:" & outputBinaryPath,
     modulePath

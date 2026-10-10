@@ -56,7 +56,7 @@ import repro_core
 import repro_test_support
 import io_mon/[types, writer, capabilities, encode]
 
-const TmpDir = "build/test-tmp/t_da1i_evidence_scope"
+let TmpDir = "build/test-tmp/t_da1i_evidence_scope" / testCaseScratchSlug()
 
 const EngineModuleRelPath =
   "libs/repro_build_engine/src/repro_build_engine.nim"
@@ -122,7 +122,7 @@ proc writeCapture(name, extra: string;
   ## trailer checksum exactly as it does for a monitor-written file.
   result = TmpDir / (name & ".iomon")
   let encoded = encodeCanonical(profileWithStamps(extra) & observations)
-  writeFile(result, cast[string](encoded))
+  writeFile(result, encoded)
 
 proc readRecord(path: string): MonitorRecord =
   MonitorRecord(kind: mrFileRead, observationKind: moFileRead,

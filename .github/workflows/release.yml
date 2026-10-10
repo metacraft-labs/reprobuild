@@ -178,6 +178,26 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
+      # ── Persistent runners: let checkout clean the previous run's tree ────
+      #
+      # The macOS legs run on persistent hosts (m3-mcl-*), where the work
+      # directory survives between jobs. A release run extracts the built
+      # archive to verify it, and that tree carries read-only entries; until
+      # verify_release.sh made its trees writable before removing them, a run
+      # that stopped early left one behind. actions/checkout's workspace clean
+      # then fails on it before any step of ours runs (v0.2.7 run 37906066406:
+      # "EACCES: permission denied, unlink .../reprobuild-0.2.2-darwin-aarch64/
+      # lib/python3.13/EXTERNALLY-MANAGED"), and every later job on that host
+      # fails the same way. Making the old tree owner-writable is all checkout
+      # needs; ephemeral runners start empty, so the step is limited to macOS.
+      - name: Make the previous workspace removable (persistent macOS runners)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
+
       - uses: actions/checkout@v4
 
       # ── Windows: fail fast, and legibly, if the image has no Git ───────────
@@ -310,12 +330,40 @@ jobs:
       #
       # `just bootstrap` still runs scripts/build_apps.sh directly -- unmonitored,
       # and the only way to get an engine binary in the first place.
-      - name: Bootstrap and Build (POSIX)
+      - name: Bootstrap (POSIX)
         if: matrix.os-name != 'windows'
         shell: bash
         run: |
           set -euo pipefail
           dev-exec just bootstrap
+          # refresh-build-auth (next step) rewrites Nix's credentials with a
+          # Python helper, and runs outside the dev shell. The persistent macOS
+          # runners have no python3 on their own PATH (v0.2.9 run 37958588616:
+          # "python3: command not found", exit 127); hand it the dev shell's.
+          py=$(dev-exec bash -c 'command -v python3' | tail -n 1)
+          echo "REPROBUILD_BOOTSTRAP_PYTHON=${py}" >> "$GITHUB_ENV"
+
+      # The installation token minted at the top of the job lives one hour
+      # (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).
+      # The Linux bootstrap alone takes over two hours on the release lane, and
+      # the build below then fetches the pinned nixpkgs through Nix with that
+      # token: v0.2.8 run 37941621127 failed there with "unable to download
+      # 'https://api.github.com/repos/NixOS/nixpkgs/tarball/...': HTTP error
+      # 401". Re-mint it, and re-point Git's and Nix's job-scoped credentials
+      # at the new one, between the two phases.
+      - name: Refresh build authentication (POSIX)
+        if: matrix.os-name != 'windows'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Build (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
           dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#release
 
       - name: Bootstrap and Build (Windows)

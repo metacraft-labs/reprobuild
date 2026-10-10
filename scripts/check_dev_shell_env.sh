@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# scripts/check_dev_shell_env.sh — lint gate for the three ways this
+# scripts/check_dev_shell_env.sh — lint gate for the four ways this
 # repository's dev shell can lie about what it is built from.
 #
 # Offline and cheap by construction, because it has to run in `just lint`
@@ -30,11 +30,19 @@
 #      fifty-nine commits for `RUNQUOTA_SRC`, which is what made `just lint`
 #      fail for everyone with a spurious `undeclared identifier`.
 #
+#   4. The sources the cached shell was built from are not BEHIND the
+#      revisions `flake.lock` pins for them. Assertion 3 compares the cache
+#      against the override sources, and BOTH SIDES OF THAT COMPARISON ARE THE
+#      SAME LOCAL CHECKOUT — so it is structurally unable to notice that the
+#      checkout itself sits at an older revision than the lock names, which is
+#      the single failure mode that has now cost this repository five separate
+#      incidents. This one brings in the other side: the committed lock.
+#
 # Every assertion is positive: each one names something it must FIND, so a
 # scan that matches nothing fails rather than passing quietly.
 #
-# Two further checks, 5 and 6, are about LOADER STATE rather than about what
-# the shell is built from, and 6 is not about the shell at all — it is about
+# Two further checks, 6 and 7, are about LOADER STATE rather than about what
+# the shell is built from, and 7 is not about the shell at all — it is about
 # the monitor shim, which travels wherever an engine built here is run. They
 # are documented at length where they are, at the bottom of this file.
 
@@ -446,15 +454,248 @@ else
       printf 'dev-shell: %s\n' \
         'no sibling overrides configured; the cached shell is built from the pinned inputs, as .envrc declares.'
     else
-      printf 'dev-shell: cached shell matches all %d overridden source(s).\n' \
-        "$recorded"
+      # Deliberately says WHICH comparison passed. The bare sentence this used
+      # to print — "cached shell matches all 8 overridden source(s)" — was
+      # printed, correctly, by a shell serving an `io-mon` eighty commits
+      # behind its pin, directly above the hour of compile output that failure
+      # produced. It was true; it was read as the broader claim it does not
+      # make. Check 5 below makes the broader claim, and this line now names
+      # it so a green log cannot be over-read again.
+      printf 'dev-shell: cached shell matches all %d overridden source(s) %s\n' \
+        "$recorded" '(it is built from the sources on disk; whether those are at their flake.lock pins is check 5).'
     fi
   fi
 fi
 
-# --- 5. one glibc reaches a dev-shell subprocess ---------------------------
+# --- 5. the overridden sources are not BEHIND their flake.lock pins --------
 #
-# Checks 1-4 are all about what the shell is BUILT from. This one is about what
+# THE CHECK WHOSE TWO SIDES COME FROM TWO SOURCES. Check 4 asks "was the cache
+# built from the sources that are on disk now?", and both of its sides — the
+# recorded fingerprint and the live working tree — are the same local
+# checkout. It therefore cannot see the state that keeps costing whole days:
+# the checkout is internally consistent and the shell is faithfully built from
+# it, and it is at an OLDER REVISION than this repository's `flake.lock`
+# names. Check 4 says "matches all 8 overridden source(s)" and means it.
+#
+# WHAT THAT COSTS, measured on the incident that motivated this check: `io-mon`
+# eighty commits behind its pin and `runquota` a hundred and forty-two, one
+# upstream feature spanning both, and the result was roughly seven thousand
+# lines of compile cascade naming `repro_cli_support`, `repro_runquota`,
+# `nim-serialization`, `faststreams` and the Nim standard library's own
+# `sequtils` — not one of which was at fault, and not one of which named
+# either stale sibling. The cost is not the build; it is that the output
+# points everywhere except at the cause.
+#
+# THE DIRECTION THIS REFUSES, AND WHY ONLY THAT DIRECTION.
+#
+#   BEHIND and DIVERGED are refused. In both, the pin names commits the
+#   checkout does not contain, so the shell compiles against sources that lack
+#   symbols their consumers in this repository were written against. That is
+#   the defect, stated exactly: not "the revisions differ" but "the pin
+#   contains content the build does not".
+#
+#   AHEAD is NOT refused, and that is not a softening — it is what keeps this
+#   gate alive. Working ahead of the pin is the ordinary state of a workspace:
+#   you develop in the sibling, the shell builds the newer revision, and the
+#   commit records it afterwards. On the tree this check was written against,
+#   two inputs were ahead on published commits (`nim-shm-gset` by 9,
+#   `nixos-modules` by 68) and `flake.lock` was simply due a bump. Refusing
+#   ahead would fail this gate every day in every workspace, and a gate that
+#   cries wolf is deleted — this repository has already measured that happening
+#   to a monitor that produced thirteen standing warnings from the day it
+#   landed. `repro flake refresh-lock` is what moves a pin forward, and it is
+#   a commit-time concern, not a lint-time one.
+#
+#   UNFETCHED and UNKNOWN are refused, because neither is an answer. The
+#   second is the one worth naming: a repository whose object database has
+#   lost objects the commit-graph still lists answers `git log`, `git cat-file
+#   -e` and `git log -S` CONFIDENTLY AND WRONGLY, and only a walk that must
+#   read the objects fails. That is not hypothetical either — it is how a
+#   history search in `io-mon` reported that a symbol had never existed when
+#   it plainly had, and the remedy (`git fetch --refetch`) is in the message.
+#
+# WHY IT READS THE FINGERPRINT AND NOT THE WORKING TREE. The subject is the
+# revision the shell WAS BUILT FROM, which is what the fingerprint records;
+# the live working tree is a different question and check 4 above owns it. Use
+# the live tree here and a checkout that has been fast-forwarded to the pin
+# but not yet reloaded would be certified while the shell keeps serving the
+# old store path — the exact fiction this file exists to refuse.
+
+lock="$REPO_ROOT/flake.lock"
+if [[ ! -f "$fingerprint" ]]; then
+  # No statement to check rather than a clean one, and said so. Check 4 above
+  # already fails when a cache exists without a fingerprint; adding a second
+  # voice to that would only bury its remedy.
+  printf 'dev-shell: no %s; %s\n' "$(basename "$fingerprint")" \
+    'nothing records what the shell was built from, so there is no revision to compare against the lock.'
+elif [[ ! -f "$lock" ]]; then
+  # Announced, not silent, and not a `fail`: `scripts/check_repo_requirements.sh`
+  # owns the assertion that this repository has a flake.lock, in the same
+  # `just lint` run. Duplicating it here would stop the synthetic trees
+  # tests/integration/t_dev_shell_override_guards.nim builds from exercising
+  # the other checks.
+  printf 'dev-shell: no flake.lock here; %s\n' \
+    'there are no pins for an overridden source to be behind (check_repo_requirements.sh owns its existence).'
+elif [[ "$(grep -cve '^#' -e '^$' "$fingerprint")" -eq 0 ]]; then
+  # The fingerprint exists and records nothing: this shell overrides no
+  # sibling, so every input is built from the revision the lock pins and the
+  # question this check asks cannot have a wrong answer. Stated rather than
+  # counted as a pass, exactly as check 4 states the same shape ("no sibling
+  # overrides configured"). It is also the shape the synthetic trees in
+  # tests/integration/t_dev_shell_override_guards.nim are in, which is why the
+  # empty-parse refusal below is reached only when there IS something to
+  # excuse.
+  printf 'dev-shell: %s\n' \
+    'no sibling overrides recorded, so no overridden source can be behind a flake.lock pin.'
+else
+  declare -A lock_pin=()
+  pin_rows=0
+  while IFS=$'\t' read -r l_input l_rev; do
+    [[ -n "$l_input" ]] || continue
+    lock_pin["$l_input"]="$l_rev"
+    pin_rows=$((pin_rows + 1))
+  done < <(dev_shell_flake_lock_pins "$lock")
+
+  if [[ "$pin_rows" -eq 0 ]]; then
+    # Positive assertion, like every other one in this file. A parser that
+    # matched nothing would make every overridden input "carries no pin", and
+    # this check would then pass on every repository including the one it
+    # exists for.
+    fail "no root-node input could be parsed out of $lock, so every
+      overridden source below would be reported as carrying no pin to be
+      behind — which reads exactly like a clean result. Fix
+      dev_shell_flake_lock_pins in scripts/lib/dev_shell_overrides.sh; do not
+      accept the empty parse."
+  fi
+
+  examined=0 at=0 ahead=0 unpinned=0 bad=0
+  unpinned_names=()
+  ahead_names=()
+  while IFS=$'\t' read -r f_input f_dir f_state; do
+    [[ -n "$f_input" ]] || continue
+    [[ "$f_input" == \#* ]] && continue
+
+    if [[ "$f_state" != git:* ]]; then
+      # A non-git override source (`dev_shell_source_state` falls back to an
+      # mtime for those). It has no revision, so "behind a pin" is not a
+      # proposition about it. Named, not dropped.
+      unpinned=$((unpinned + 1))
+      unpinned_names+=("$f_input (no git revision: $f_state)")
+      continue
+    fi
+    f_head="${f_state#git:}"
+    f_head="${f_head%%+*}"
+
+    if [[ -z "${lock_pin[$f_input]+set}" ]]; then
+      fail "the dev shell overrides flake input '$f_input' with
+      $f_dir, but $lock lists no such input on its root node. Either the lock
+      is older than the flake.nix that declares the input — in which case the
+      shell is building something the lock cannot describe — or
+      dev_shell_flake_lock_pins stopped parsing this file. Remedy: refresh the
+      lock ('nix flake lock'), or fix the parser; do not drop the input."
+      bad=$((bad + 1))
+      continue
+    fi
+    if [[ "${lock_pin[$f_input]}" == "-" ]]; then
+      # A `follows`, or an input locked to something with no revision. It
+      # carries no pin of its own, so there is nothing for it to be behind —
+      # the same disposition `repro flake override-status` gives it. Counted
+      # and named separately: "no drift" and "nothing here could be checked"
+      # must not look alike.
+      unpinned=$((unpinned + 1))
+      unpinned_names+=("$f_input (no revision pinned for it in flake.lock)")
+      continue
+    fi
+
+    examined=$((examined + 1))
+    IFS=$'\t' read -r rel r_ahead r_behind r_detail < <(
+      dev_shell_pin_relation "$f_dir" "${lock_pin[$f_input]}" "$f_head")
+    case "$rel" in
+      at) at=$((at + 1)) ;;
+      ahead)
+        ahead=$((ahead + 1))
+        ahead_names+=("$f_input +$r_ahead")
+        ;;
+      behind)
+        bad=$((bad + 1))
+        fail "the dev shell is built from '$f_input' at $f_head, which is
+      $r_behind commit(s) BEHIND the revision $lock pins for it
+      (${lock_pin[$f_input]}). Every build in this shell therefore compiles
+      against a source that is MISSING content this repository's lock says is
+      there, and the compiler will not say so: it reports undeclared
+      identifiers and type mismatches in whatever module it reaches first,
+      which is routinely a third repository or the standard library. Remedy:
+      'git -C $f_dir fetch && git -C $f_dir merge --ff-only
+      ${lock_pin[$f_input]}', then 'direnv reload'. If the older revision is
+      deliberate, move the pin instead so the lock and the shell agree."
+        ;;
+      diverged)
+        bad=$((bad + 1))
+        fail "the dev shell is built from '$f_input' at $f_head, which has
+      DIVERGED from the revision $lock pins for it (${lock_pin[$f_input]}):
+      $r_ahead commit(s) ahead and $r_behind behind. The ahead half is
+      ordinary development and is not what this refuses; the BEHIND half is —
+      the pin names $r_behind commit(s) this shell is not building, so the
+      same missing-symbol failure applies. Remedy: rebase or merge
+      ${lock_pin[$f_input]} into $f_dir, then 'direnv reload'."
+        ;;
+      unfetched)
+        bad=$((bad + 1))
+        fail "the dev shell is built from '$f_input' at $f_head and $lock
+      pins ${lock_pin[$f_input]}, but the two cannot be compared: $r_detail.
+      Reported as a failure and not as a skip, because 'we could not look' is
+      the answer that lets a stale checkout through. Remedy: 'git -C $f_dir
+      fetch --all'."
+        ;;
+      unknown | *)
+        bad=$((bad + 1))
+        fail "the dev shell is built from '$f_input' at $f_head and $lock
+      pins ${lock_pin[$f_input]}, and git could not place one against the
+      other: $r_detail. A repository whose object database has lost objects
+      its commit-graph still lists presents EXACTLY like this, and it is not a
+      harmless state: 'git log', 'git cat-file -e' and 'git log -S' all answer
+      from the graph and answer confidently, so a history search in such a
+      repository reports that a symbol never existed when it plainly did.
+      Remedy: 'git -C $f_dir fetch --refetch', which rebuilds the object
+      database from the remote; if that fails, re-clone."
+        ;;
+    esac
+  done <"$fingerprint"
+
+  if [[ "$pin_rows" -gt 0 && "$examined" -eq 0 ]]; then
+    # The vacuity guard. Everything above can report zero failures by never
+    # having classified anything — an empty fingerprint, a state format that
+    # stopped matching, an input set that stopped resolving — and zero
+    # failures is what a clean run also looks like.
+    fail "no overridden source was classified against a flake.lock pin, so
+      this check asserted nothing while reporting no failures. $lock has
+      $pin_rows root input(s) and $(basename "$fingerprint") records
+      $unpinned source(s) that carry no comparable revision. Either the
+      fingerprint is empty — in which case the dev shell overrides nothing and
+      .envrc's auto arm has gone inert — or the two files stopped agreeing on
+      input names. Remedy: 'direnv reload' and re-run; if it persists, the
+      fingerprint and the lock are describing different flakes."
+  fi
+
+  printf 'dev-shell: %d overridden source(s) compared against %s: %d at pin, %d ahead, %d behind-or-worse, %d with no pin to compare.\n' \
+    "$examined" "${lock#"$REPO_ROOT"/}" "$at" "$ahead" "$bad" "$unpinned"
+  if [[ ${#ahead_names[@]} -gt 0 ]]; then
+    # Printed, never failed. See the direction rationale above: ahead is the
+    # ordinary state of a workspace under development, and the line exists so
+    # that a reader can tell "checked, and ahead" from "not checked".
+    printf 'dev-shell: %s %s\n' \
+      'ahead of their pins (ordinary; `repro flake refresh-lock` records them at commit time):' \
+      "${ahead_names[*]}"
+  fi
+  if [[ ${#unpinned_names[@]} -gt 0 ]]; then
+    printf 'dev-shell: %s %s\n' \
+      'overridden with no pin to compare against:' "${unpinned_names[*]}"
+  fi
+fi
+
+# --- 6. one glibc reaches a dev-shell subprocess ---------------------------
+#
+# Checks 1-5 are all about what the shell is BUILT from. This one is about what
 # the shell DOES to the processes started inside it, which is a separate way
 # for it to lie: `flake.nix` exports `LD_LIBRARY_PATH`, and automatic
 # monitoring `LD_PRELOAD`s `build/lib/librepro_monitor_shim.so`. Both are
@@ -568,9 +809,9 @@ case "$(uname -s)" in
     ;;
 esac
 
-# --- 6. the monitor shim imposes no C runtime on what it is preloaded into --
+# --- 7. the monitor shim imposes no C runtime on what it is preloaded into --
 #
-# Check 5 asks whether THIS SHELL hands a second C runtime to the programs
+# Check 6 asks whether THIS SHELL hands a second C runtime to the programs
 # reprobuild spawns to reach a remote. This one asks a question with a much
 # wider blast radius and no shell in it at all: does the monitor shim, wherever
 # it is preloaded and by whomever, bring its own?

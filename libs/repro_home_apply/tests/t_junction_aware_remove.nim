@@ -16,8 +16,10 @@ import std/[os, strutils, unittest]
 from repro_core/paths import extendedPath
 
 import repro_home_apply/junction_aware_remove
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-junction-aware-remove"
+let FixtureRoot = "build/test-tmp/t-junction-aware-remove" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):

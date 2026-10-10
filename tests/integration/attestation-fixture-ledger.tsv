@@ -1,0 +1,91 @@
+# The attestation fixture ledger: one row per pinned artifact, and when it stops being usable.
+#
+# THIS FILE IS A RECORD, NOT A SOURCE. Every column after `publisher` is
+# re-derived from the bytes by `t_attestation_fixture_lifecycle` and
+# compared against what is written here. Editing a digest or a date to
+# make that gate pass inverts the whole point of the file: the gate is
+# how you find out the two have diverged, and the bytes are the side
+# that is right.
+#
+# Regenerate a row rather than typing one. The gate prints the derived
+# value beside the recorded one on every mismatch.
+#
+# name              the constant, or the repo-relative path for a file fixture
+# module            where it lives
+# class             what a difference from the publisher MEANS; see `LifecycleClass`
+# publisher         a row of attestation-fixture-publishers.tsv
+# observed          when these bytes were taken, for material served live; `-` otherwise
+# bytes             the length of the DECODED artifact, not of its hexadecimal
+# sha256            of the decoded artifact
+# window            which reader states this artifact's dates, or `none`/`unreadable`
+# not_before        the instant the artifact states it became current
+# not_after         the instant it states it stops being current; `-` when it states none
+#
+# name	module	class	publisher	observed	bytes	sha256	window	not_before	not_after
+KdsMilanChainPem	snp_vectors.nim	trust-root	amd-kds	2026-09-20	4602	22e62f8d2c21a156470145fc75f7b5a377cb053ced3e97f0bd3f8d8ca5941ce6	none	-	-
+KdsMilanCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-10-02	866	dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525	amd-revocation-list	2026-09-22T07:35:42Z	2026-11-09T01:00:00Z
+KdsGenoaChainPem	snp_vectors.nim	trust-root	amd-kds	2026-09-20	4602	e6ecc853fa56d3170a624d40851f98a1036f974b50204ea69e6aec91d777aca3	none	-	-
+KdsGenoaCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-10-02	890	f242adeb201bd20fc6bf2cd5b77646619ac4a55983e53bbe34a29ae58ba0cc16	amd-revocation-list	2026-09-22T07:31:33Z	2026-11-09T01:00:00Z
+KdsTurinChainPem	snp_vectors.nim	trust-root	amd-kds	2026-09-20	4602	3bc97ef895aa1be2150b2e9fb12403f131e80c68fbc9683d2ae465220188dbfe	none	-	-
+KdsTurinCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-10-02	866	0699382acf7fb955e57c54aaa2f1e8b43908ebc3181f63d6ae5503e6cd4f604b	amd-revocation-list	2026-09-22T07:39:31Z	2026-11-09T01:00:00Z
+GsgMilanVlekChainPem	snp_vectors.nim	trust-root	go-sev-guest	-	4611	3098f7e90ee7049b8cf116448d1bdf33b08847b4250bd99507cf73b5c49d3467	none	-	-
+VirteeMilanVcekDerHex	snp_vectors.nim	genuine-capture	virtee-sev	-	1360	3bbfb6ee259f75a95d13168cfdf2e034181bb93c7c016825731cbe8ea16c95e1	amd-certificate	2023-04-03T19:23:43Z	2030-04-03T19:23:43Z
+VirteeMilanReportHex	snp_vectors.nim	genuine-capture	virtee-sev	-	1184	120d77b213c8868dd42f160ccb0114f05336ec715f6d51070f534b33c7e03f3b	none	-	-
+GsgMilanVcekDerHex	snp_vectors.nim	genuine-capture	go-sev-guest	-	1360	0d057f9b6e29a69eda9c0154b259567d291c1c08d73a11e9d31ace07c435b6d8	amd-certificate	2022-09-24T00:55:28Z	2029-09-24T00:55:28Z
+GsgMilanReportHex	snp_vectors.nim	genuine-capture	go-sev-guest	-	1184	377e6241d3b373ab1df80c0f96978594e7e21f4797dd6ea95e2957e1c1e26060	none	-	-
+VirteeTurinVcekDerHex	snp_vectors.nim	genuine-capture	virtee-sev	-	1289	a4a6abff1c435f214cfbc35e4dadae55e467454d53dc417251b3ff1a169fd7fb	amd-certificate	2024-11-06T21:14:00Z	2031-11-06T21:14:00Z
+ImpostorArkHex	snp_vectors.nim	minted-negative	this-repository	-	1639	5f4bec10a70cdeb137b599db0e459af24ad4adb5b2e1a6bc1134ad5b8ddff542	amd-certificate	2020-10-22T17:23:05Z	2045-10-22T17:23:05Z
+ImpostorAskHex	snp_vectors.nim	minted-negative	this-repository	-	1677	86c38916ed31d869f7d109adc35a728e1fc22de671be531ffa2866ef62bda9bb	amd-certificate	2020-10-22T18:24:20Z	2045-10-22T18:24:20Z
+ImpostorVcekHex	snp_vectors.nim	minted-negative	this-repository	-	1360	0d48aa172f2a211ed89763810dabac37bda51c3617186ac7c30f6366affa2df7	amd-certificate	2023-04-03T19:23:43Z	2030-04-03T19:23:43Z
+ImpostorReportHex	snp_vectors.nim	minted-negative	this-repository	-	1184	b820c130dd814e06020bed6f99c6f2ead14cf144492a5727e64643f9fe031e56	none	-	-
+GoTdxGuestSprQuoteHex	tdx_vectors.nim	genuine-capture	go-tdx-guest	-	4974	6dde5548bec99147fef832643301f113df99931547be26df8ac376c4eaa5b5a7	none	-	-
+GoTdxGuestEmrQuoteHex	tdx_vectors.nim	genuine-capture	go-tdx-guest	-	5006	cf77a6e91e48291d5d338c5f3b5d0674225a4d13e7d83ff5e537a4914bf22e1d	none	-	-
+TrusteeV5QuoteHex	tdx_vectors.nim	genuine-capture	trustee	-	5006	586c2be0dc38d3c5653ecf91a0a482d8dbfaf3d3a0bcea2947bc2d321c8108a2	none	-	-
+IntelSgxRootCaDerHex	tdx_vectors.nim	trust-root	intel-published	2026-09-21	659	44a0196b2b99f889b8e149e95b807a350e7424964399e885a7cbb8ccfab674d3	x509-certificate	2018-05-21T10:45:10Z	2049-12-31T23:59:59Z
+IntelTcbSigningCertDerHex	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-09-21	657	c0575e76d0303b61d09cde8cbdb70db34a74f38318300d7c0e6ba8cf4bf45aea	x509-certificate	2025-05-06T09:25:00Z	2032-05-06T09:25:00Z
+PcsPckCrlPlatformDerHex	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-10-02	3355	d207cf20a876bac14919974fecc76b9c139ad8439bd0a843ad8237b352bf9329	x509-revocation-list	2026-10-02T17:26:12Z	2026-11-01T17:26:12Z
+PcsPckCrlProcessorDerHex	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-10-02	1002	641a18efa76bbe81e9337b7511c98d9e79339de828e543778ab0e09da7ef4801	x509-revocation-list	2026-10-02T17:25:49Z	2026-11-01T17:25:49Z
+IntelRootCrlDerHex	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-09-21	294	c114be5d5ca7aab2d37817eca55aa8a2353853809904ff3695b31c26bcb7465b	x509-revocation-list	2026-02-26T13:04:00Z	2027-02-26T13:04:00Z
+IntelSampleRootDerHex	tdx_vectors.nim	vendor-collateral	intel-published	-	652	bf85a53fc08f84cb1f73a4f75f48af566e30ac040699ba0ec1b8d593c05b56fc	x509-certificate	2021-08-06T13:55:14Z	2049-12-31T23:59:59Z
+IntelSampleCaDerHex	tdx_vectors.nim	vendor-collateral	intel-published	-	660	e9bb54a96d1139ab18e67d41e0f82b4d696a341b59579922b07a0fcd4ea4acc9	x509-certificate	2021-08-06T13:55:14Z	2036-08-06T13:55:14Z
+IntelSampleLeafDerHex	tdx_vectors.nim	vendor-collateral	intel-published	-	1158	7d63d60ea683bb178ec67a7d5bad09266710069257aeeb877b8fa123d3a672a2	x509-certificate	2021-08-06T13:55:14Z	2028-08-06T13:55:14Z
+IntelSampleQuoteHex	tdx_vectors.nim	vendor-collateral	intel-published	-	3696	aa2cafadb32b80c51b74222bba189e311a6a49e369adfde5add67609e781989e	none	-	-
+ImpostorQuoteHex	tdx_vectors.nim	minted-negative	this-repository	-	4518	541a5bb26bafdff169fcd1e5ad0d50ac60d1801383932b94c04f1eb05ad8f076	none	-	-
+ImpostorRootDerHex	tdx_vectors.nim	minted-negative	this-repository	-	541	756fadd02decbace71efc71464e9216b6651b317f2d30f75d8be817f12d65836	x509-certificate	2026-09-21T04:44:56Z	2051-05-13T04:44:56Z
+ImpostorCaDerHex	tdx_vectors.nim	minted-negative	this-repository	-	582	0ae51e7293e1eae13b39c7990a5400e7d391b2312eeb94275cfc6214d339dd6c	x509-certificate	2026-09-21T04:44:56Z	2048-08-16T04:44:56Z
+ImpostorLeafDerHex	tdx_vectors.nim	minted-negative	this-repository	-	1160	45c20ebd04ea2ad357ccfda72cce69f436de4e6c1d612c00ee6887b24db1e13d	x509-certificate	2026-09-21T04:45:42Z	2045-11-20T04:45:42Z
+ImpostorCaNotAnAuthorityDerHex	tdx_vectors.nim	minted-negative	this-repository	-	575	ac0b623738123012e928ac76d077472b0c986b3ab79c759e6d38dbd798a1b67b	x509-certificate	2026-09-21T05:32:44Z	2048-08-16T05:32:44Z
+ImpostorCaWithoutCertSignDerHex	tdx_vectors.nim	minted-negative	this-repository	-	581	d98dbe4cbe7a7fd5b9dedd02d14d9b41e231f2d0db2e006e2e79b8c384d12fa8	x509-certificate	2026-09-21T05:32:45Z	2048-08-16T05:32:45Z
+ImpostorLeafWithoutPlatformDerHex	tdx_vectors.nim	minted-negative	this-repository	-	583	edb15a96e8e130eb5f2a8e45563569e0fed966c063a639b4f33c87fa78cb85ad	x509-certificate	2026-09-21T05:32:45Z	2045-11-20T05:32:45Z
+ImpostorLeafWithoutFmspcDerHex	tdx_vectors.nim	minted-negative	this-repository	-	1138	1d6515a524109b88b9d405493c01efa281dad6ecfbb5b2d5db3328756da8b956	x509-certificate	2026-09-21T05:32:45Z	2045-11-20T05:32:45Z
+ImpostorLeafWithoutTcbDerHex	tdx_vectors.nim	minted-negative	this-repository	-	799	a6a73220eb03e575d2bddb16e4ec9a9de31df551a25e0a15cc8faab2d1372b8f	x509-certificate	2026-09-21T05:32:45Z	2045-11-20T05:32:45Z
+ImpostorLeafWithUnknownCriticalDerHex	tdx_vectors.nim	minted-negative	this-repository	-	1174	2fc1618a25d16c79327d554a3a268b5fc55774e6437a0d02e4f9f89b80dddad0	x509-certificate	2026-09-21T05:32:46Z	2045-11-20T05:32:46Z
+PcsPckCrlPlatformWithoutNextUpdateDerHex	tdx_vectors.nim	minted-negative	this-repository	-	3340	f61e68c2c9e475bfd101abe2b174b4408ad99b9e2b71163744e4c33087a32e58	x509-revocation-list	2026-10-02T17:26:12Z	-
+GtgTcbInfoSprJson	tdx_vectors.nim	historical-vintage	go-tdx-guest	-	2401	1b96f799643d045c076fbc505c094a4fb26f51f4851feb8ac95f3fc12408f2d6	tcb-document	2023-06-18T08:42:58Z	2023-07-18T08:42:58Z
+GtgTcbInfoEmrJson	tdx_vectors.nim	historical-vintage	go-tdx-guest	-	4268	1cd562453aa7de360666f5526968f38ddc6c27bd8cbdd10695d09573fca57dfb	tcb-document	2026-02-01T14:49:26Z	2026-03-03T14:49:26Z
+GtgQeIdentityJson	tdx_vectors.nim	historical-vintage	go-tdx-guest	-	624	86239584ed47792d02cdfc051cde95cb5169a0b74dc9dcc61c1ebaeb5e59ade0	tcb-document	2023-06-08T07:24:59Z	2023-07-08T07:24:59Z
+PcsTcbInfoSprJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-10-02	7953	171fcc04b4a51c21b87c0ba348374bc64835314bf55a6f72ca5abf213f1c93fb	tcb-document	2026-10-02T17:13:18Z	2026-11-01T17:13:18Z
+PcsTcbInfoEmrJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-10-02	5679	5139688d33c1c2e0a38bdda9ccb556480e5c8a2e837808a5f72fccea4329f03a	tcb-document	2026-10-02T17:16:39Z	2026-11-01T17:16:39Z
+PcsTdxQeIdentityJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-10-02	624	4a844be6e94a233b8fa0c76c4709c642938fcb3e3627288f2cf6b54270b9a08e	tcb-document	2026-10-02T17:13:57Z	2026-11-01T17:13:57Z
+PcsSgxQeIdentityJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-10-02	1380	6111fa8be3d2d553c50c2a2ac35deb19a3644f6fe1795867f72404cfde4c2b2f	tcb-document	2026-10-02T17:28:34Z	2026-11-01T17:28:34Z
+PcsSgxTcbInfoJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-10-02	4112	ffabe7446fc16e0d6f9a86f9e40cf696b0726d5c7233726405334ce92953eb21	tcb-document	2026-10-02T17:21:21Z	2026-11-01T17:21:21Z
+AwsDocumentedPcr4Input	nitro_vectors.nim	protocol-vector	aws-docs	-	19	8e3e9913dd0d1ae26a8e0f27ef62c57617f21b09d2d5e57489e4794fed3dbe85	none	-	-
+AwsDocumentedPcr4Output	nitro_vectors.nim	protocol-vector	aws-docs	-	96	b7ed1c0d0c268ac7f8541b0e4f546a1cf595ecde37328b073d5934b96df919d8	none	-	-
+AwsDocumentedPcr3Input	nitro_vectors.nim	protocol-vector	aws-docs	-	40	f7eb85893124dd42205878ddeeb47282e9053285b0c82f930acf82ae97329857	none	-	-
+AwsDocumentedPcr3Output	nitro_vectors.nim	protocol-vector	aws-docs	-	96	f226a43cd52c7e6075749802963d5aab164e9b6ea802b91cba1a626a38e2cc2d	none	-	-
+AwsSample2023DocHex	nitro_vectors.nim	genuine-capture	aws-samples	-	4396	c9f773ce17c720028abc33639bb4ba3e61077164bbfa410510e4b545d7d1ebfe	none	-	-
+ZkvEuWest2022DocHex	nitro_vectors.nim	genuine-capture	zkverify	-	4461	8ff485d8a838b3cacf80d323ef4a1588d500032a61878833ac33f525685a351b	none	-	-
+ZkvEuWest2026DocHex	nitro_vectors.nim	genuine-capture	zkverify	-	4617	5be13c974c8c5e57a9823fc0883cb3ddcae76e59b7b07321e235c6685667b469	none	-	-
+OgUsEast2026DocHex	nitro_vectors.nim	genuine-capture	opengradient	-	4556	65ce3118757bd0428142776bc2d715ca0a785ac8b872fedf7edc1fbd9ad10070	none	-	-
+SyndUsEast2025DocHex	nitro_vectors.nim	genuine-capture	syndicate	-	4525	7260686750e70234bdff518ff3ea77c5f58bdc18534afdcd65ab9916c1f8b531	none	-	-
+NitroRootG1DerHex	nitro_vectors.nim	trust-root	aws-nitro	2026-09-27	533	641a0321a3e244efe456463195d606317ed7cdcc3c1756e09893f3c68f79bb5b	unreadable	-	-
+AwsSample2023LeafPointHex	nitro_vectors.nim	derived-reading	this-repository	-	97	c850a39d88e754d513b8ad0874457ce1dea822fcbe74092c83100b3187932515	none	-	-
+ZkvEuWest2022LeafPointHex	nitro_vectors.nim	derived-reading	this-repository	-	97	c6e11a3e82430a1b652e9782b9f4a0bb8729597a3cf8dca8b620e37706fe76db	none	-	-
+ZkvEuWest2026LeafPointHex	nitro_vectors.nim	derived-reading	this-repository	-	97	bcb6e90530ee0c7a0f1663ca60813ef8559d0353ed668612a55471dbf1a86734	none	-	-
+OgUsEast2026LeafPointHex	nitro_vectors.nim	derived-reading	this-repository	-	97	209f507fc7bc760cc8c8eb8b2ffde44cdb53abc746c960e31c1be0bdc47489f6	none	-	-
+SyndUsEast2025LeafPointHex	nitro_vectors.nim	derived-reading	this-repository	-	97	24e80d6c8e3e5647be48f5d5f50c46b8b9552dc42cec258f7021a7c652c45618	none	-	-
+fixtures/tdx/ovmf-ubuntu-2025.02-3ubuntu2.fd	fixtures/tdx/ovmf-ubuntu-2025.02-3ubuntu2.fd	vendor-collateral	ubuntu-ovmf	2026-09-22	4194304	9e807cb2cd4313406a3aa4becc0836671a5c64ca7bdc08a45e15260184b446bf	none	-	-
+fixtures/tdx/ovmf-dstack-0.5.9.fd	fixtures/tdx/ovmf-dstack-0.5.9.fd	vendor-collateral	dstack	2026-09-22	4194304	76888ce69c91aed86c43f840b913899b40b981964b7ce6018667f91ad06301f0	none	-	-
+fixtures/tdx/quote-operator-a.bin	fixtures/tdx/quote-operator-a.bin	genuine-capture	operator-a	2026-09-22	5247	214e926b905c8541fbc9192d7d42ce38a1f53ba1d89fb8833fcf7ddb2828c1ab	none	-	-
+fixtures/tdx/quote-operator-b.bin	fixtures/tdx/quote-operator-b.bin	genuine-capture	operator-b	2026-09-22	5006	585d61c63d162cd59fd42e4b53e8c6b9dac1bfdda49b42d60880f06d0f4db1b2	none	-	-
+fixtures/tdx/dstack-0.5.9-register-log.json	fixtures/tdx/dstack-0.5.9-register-log.json	genuine-capture	operator-b	2026-09-22	7357	69d46b1a6a8b7409e2aff24368e9d0a9bce50a3e44653115c7b607efa1e23bd3	none	-	-

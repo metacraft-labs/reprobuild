@@ -896,13 +896,16 @@ suite "derived IPC trust: the daemons this process spawned":
 
   test "a colliding dedup key is not forgiven by another record's exemption":
     ## FAIL-OPEN #2, and the one the trust set cannot be blamed for.
-    ## `unmonitoredSubtreeLossDetails` dedups on `pid:<peer>@<peerstart>` and
-    ## emits the text of the FIRST NON-EXEMPT record per key. Which record that
+    ## `unmonitoredSubtreeLossDetails` dedups on
+    ## `pid:<peer>@<peerstart>|dest:<endpoint>` (the endpoint joined io-mon's key
+    ## with endpoint-keyed daemon trust, so connects to DIFFERENT sockets no
+    ## longer share a key) and emits the text of the FIRST NON-EXEMPT record per
+    ## key. Which record that
     ## is differs between io-mon's run and the engine's recomputation, so the
     ## TEXT is not comparable across the two and only the KEY is.
     ##
-    ## The capture: two connects to the SAME trusted peer, sharing one dedup
-    ## key. The second carries a DUPLICATED `peerstart=` token — io-mon's
+    ## The capture: two connects to the SAME trusted peer AT THE SAME
+    ## ENDPOINT, sharing one dedup key. The second carries a DUPLICATED `peerstart=` token — io-mon's
     ## attacker-controlled-evidence signal, which its rule fails CLOSED on and
     ## never exempts, trusted peer or not. io-mon (trusting nothing, as the
     ## merge does) flagged the FIRST record and dedup-suppressed the second, so
@@ -916,7 +919,7 @@ suite "derived IPC trust: the daemons this process spawned":
     let peer = selfAsTrustedDaemon("capture-daemon")
     check peer.identity.len > 0
     let plain = ipcConnectRecord(101, peer.pid, "/ipctrust/first.sock")
-    let duplicated = ipcConnectRecord(202, peer.pid, "/ipctrust/second.sock",
+    let duplicated = ipcConnectRecord(202, peer.pid, "/ipctrust/first.sock",
       detail = "peerstart=42 peerstart=42")
     # What io-mon emitted: the FIRST record's text, under the shared key.
     let loss = ipcLossRecord(101, peer.pid, "", "/ipctrust/first.sock")

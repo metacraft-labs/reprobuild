@@ -478,15 +478,28 @@ e2e_reprobuild_cmake_m11_coverage_nightly:
 
 lint:
     mkdir -p test-logs
-    bash ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
-    bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
-    bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # The dev-shell honesty gate. Here rather than only in the suite for the
     # same reason as the case-count gate below: it reads .envrc and .direnv and
     # needs nothing compiled, and the failure it catches — a cached dev shell
-    # built from a source that has since moved — is the failure that makes
-    # every OTHER lint step below it report a fiction. First, for that reason.
-    bash ./scripts/check_dev_shell_env.sh 2>&1 | tee -a test-logs/lint.log
+    # built from a source that has since moved, or from a source behind the
+    # revision flake.lock pins for it — is the failure that makes every OTHER
+    # lint step below it report a fiction. First, for that reason.
+    #
+    # It is FIRST IN BYTES, not only in prose. This comment claimed the
+    # position for a long time while the recipe ran the gate fourth, behind
+    # check_nim_sources.sh — so the step whose output this paragraph calls
+    # worthless without the gate ran a full compile sweep BEFORE it. That cost
+    # an hour of wall clock and roughly seven thousand lines of cascade naming
+    # repositories that were not at fault, where the gate answers in seconds
+    # with one line naming the stale sibling. A rationale that the ordering
+    # contradicts is worse than no rationale: it reads as though the question
+    # had been settled. Keep this line immediately after `mkdir -p test-logs`,
+    # and note that it is the step that TRUNCATES test-logs/lint.log (`tee`,
+    # not `tee -a`) — whichever check runs first owns that.
+    bash ./scripts/check_dev_shell_env.sh 2>&1 | tee test-logs/lint.log
+    bash ./scripts/check_repo_requirements.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # The "poEvalCommand is not a shell" gate. Same shape as the ambient
     # check above and for the same reason: it is a source scan, so it can
     # answer before anything is compiled. Five defects in one campaign came
@@ -551,6 +564,14 @@ lint:
     # while that happens. Source scan, no compiler, same cost class as its
     # neighbours.
     python3 ./scripts/check_bare_skips.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse a test source that declares a FIXED scratch path at module level
+    # (`const TmpDir = "build/test-tmp/x"`). Every case runs as its own process,
+    # concurrently with the binary's other cases, so such a path is shared
+    # between them: one case's reset deletes what a sibling is still using, a
+    # fixture compiled to a fixed output is relinked under a sibling executing
+    # it. Each instance passed alone and failed only in full runs. No
+    # allowlist; source scan, no compiler, same cost class as its neighbours.
+    python3 ./scripts/check_fixed_test_scratch_dirs.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT
@@ -567,12 +588,47 @@ lint:
     # is a live walk of `tests/`, not a list, so a new file cannot be invisible
     # to it (Verification-Harness-Traps.md Sec. 35).
     python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
+    # Every attestation mutation row must still be able to NAME ITS SITE in
+    # the tree. Same class as its neighbours -- a source scan, no compiler,
+    # under a second -- and here because of what it catches, which nothing
+    # else does. A row is applied by substring replacement and reverted in a
+    # `finally`; when that revert does not happen the tree keeps the
+    # REPLACEMENT, and a weakened check still passes. Case counts are
+    # identical before and after, the suite is green, and the mutation
+    # journal says RED because it attests to the tree at the moment the row
+    # ran rather than to the tree being shipped. One such residue did ship
+    # and was caught only by re-running the table against the delivered
+    # tree; this makes that question cost a second instead of an afternoon.
+    python3 ./tools/attestation-mutations/fixture_lifecycle_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
+    python3 ./tools/attestation-mutations/cvm_emulator_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
 
 fmt: format
+
+# Regenerate the four tracked artifacts that are pure functions of the tree:
+# repro_tests.nim, scripts/reprobuild-test-shape-parity.tsv,
+# scripts/reprobuild-suite-static-case-counts.tsv and
+# benchmarks/reports/reprobuild-suite-m0-inventory-sources.json.
+#
+# THIS IS HOW YOU RESOLVE A CONFLICT IN THEM. Those four paths are `-merge`
+# in `.gitattributes` (read the block at the top of that file for why), so a
+# merge, rebase or cherry-pick where both sides moved one of them stops with
+# the path unmerged instead of text-merging a derived file into something no
+# generator ever produced. There is nothing to resolve by hand: run this, then
+# `git add` the four paths. The order matters -- the edge generator writes
+# repro_tests.nim, and both inventory writers read it.
+#
+# Not part of `just lint`, deliberately: lint CHECKS these (four gates, see
+# the `lint` recipe) and a lint that silently rewrote them would turn every
+# staleness into a no-op and leave nothing for the gates to catch.
+regen-suite-artifacts:
+    mkdir -p test-logs
+    nim r scripts/generate_test_edges.nim 2>&1 | tee test-logs/regen-suite-artifacts.log
+    python3 ./scripts/reprobuild_suite_inventory.py --write-static-case-counts 2>&1 | tee -a test-logs/regen-suite-artifacts.log
+    python3 ./scripts/reprobuild_suite_inventory.py --write-inventory-sources 2>&1 | tee -a test-logs/regen-suite-artifacts.log
 
 bump-version version:
     bash ./scripts/bump_version.sh {{version}}
@@ -628,6 +684,15 @@ bench_cmake_reprobuild_vs_ninja_medium *args:
         --output bench-results/cmake-reprobuild-vs-ninja-medium.json \
         {{args}} \
         2> >(tee test-logs/bench_cmake_reprobuild_vs_ninja_medium.log >&2)
+
+bench_cmake_cross_project_trycompile_reuse *args:
+    mkdir -p bench-results test-logs
+    bash ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+        --cross-project-only \
+        --cross-project-pair zlib:libuv \
+        --output bench-results/cmake-cross-project-trycompile-reuse.json \
+        {{args}} \
+        2> >(tee test-logs/bench_cmake_cross_project_trycompile_reuse.log >&2)
 
 e2e_reprobuild_mvp_acceptance:
     mkdir -p test-logs

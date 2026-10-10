@@ -61,6 +61,7 @@
 ## sizes.
 
 import std/[json, options, os, strutils, unittest]
+from repro_test_support import testScratchSlug
 
 when defined(linux) and defined(amd64):
   import repro_hcr_linkgraph/elf_decompress
@@ -77,7 +78,8 @@ when defined(linux) and defined(amd64):
         ". Remedy: run `just build` in this checkout.")
 
   proc workspace(repoRoot: string): string =
-    result = repoRoot / "build" / "hcr-linux-prepare"
+    # Per case: both cases compile ``patchable.raw.o`` here, concurrently.
+    result = repoRoot / "build" / "hcr-linux-prepare" / testScratchSlug()
     createDir(result)
 
   suite Gate:

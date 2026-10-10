@@ -27,8 +27,9 @@ import repro_home_apply/gc
 import repro_home_apply/junction_aware_remove
 import repro_home_generations
 import repro_local_store
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-home-gc"
+let FixtureRoot = "build/test-tmp/t-home-gc" / testCaseScratchSlug()
 
 # ---------------------------------------------------------------------------
 # Sandbox helpers.

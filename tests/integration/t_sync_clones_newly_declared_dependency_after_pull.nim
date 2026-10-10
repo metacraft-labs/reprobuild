@@ -40,6 +40,7 @@
 ## missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 
@@ -311,3 +312,34 @@ suite "RA-23 — sync clones newly-declared dependencies":
       check dDiagnostic.contains("did not substitute the remote HEAD")
       check not dDiagnostic.contains("auth / network")
       check not dDiagnostic.contains("repro remove")
+
+  test "t_sync_clones_attaches_new_repo_to_workspace_feature_branch":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+
+      # Record a workspace feature branch in .repro/workspace.toml
+      createDir(fx.workspaceRoot / ".repro")
+      writeFile(fx.workspaceRoot / ".repro" / "workspace.toml",
+        "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\nproject = \"myproject\"\nbranch = \"feature-test\"\n")
+
+      # Only lib-a is checked out
+      cloneInto(gitBin, fx.aOrigin, fx.workspaceRoot / "lib-a")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-a") &
+        " switch -c feature-test")
+
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "workspace", "sync", "--only=lib-b",
+        "--workspace-root=" & fx.workspaceRoot, "myproject",
+      ]))
+      if res.code != 0:
+        checkpoint("res output: " & res.output)
+      check res.code == 0
+      check dirExists(fx.workspaceRoot / "lib-b" / ".git")
+      # lib-b was cloned and attached to the active workspace feature branch
+      let bBranch = requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") &
+        " branch --show-current").strip()
+      check bBranch == "feature-test"

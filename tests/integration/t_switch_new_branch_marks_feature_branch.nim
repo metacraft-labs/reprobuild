@@ -343,7 +343,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
 
       # The on-disk workspace.toml carries
       # ``feature_started = true`` under ``[workspace]``.
-      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace-state.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.branch.isSome
       check parsed.workspace.branch.get() == "feature-create"
@@ -611,7 +611,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       check readWorkspaceFeatureStarted(fx.workspaceRoot) == true
       let firstReport = readReport(fx)
 
-      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace-state.toml"
       let firstBytes = readFile(tomlPath)
 
       # Second invocation: every repo is already on the requested

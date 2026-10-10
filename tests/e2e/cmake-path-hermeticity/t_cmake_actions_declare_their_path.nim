@@ -269,7 +269,16 @@ suite "CMake-generated actions declare their PATH":
 
   # The fixture lives under the repository's build tree, NOT under
   # `$TMPDIR`, so that no normalisation rule can reach a decoy directory.
-  let testRoot = repoRoot / "build" / "cmake-path-hermeticity"
+  #
+  # The root is PER PROCESS. The test runner executes every case of this
+  # suite as its own process, concurrently, and `setup` below wipes the
+  # root before each case. With one shared root, each case's `setup`
+  # deleted the source, build and work trees of whichever sibling case
+  # was mid-configure or mid-build, which surfaced as
+  # "CMAKE_C_COMPILER not set", ENOENT under `build-key/`, or
+  # "Directory not empty" depending on which step it interrupted.
+  let testRoot = repoRoot / "build" / "cmake-path-hermeticity" /
+    ("pid-" & $getCurrentProcessId())
   let sourceDir = testRoot / "source"
   let decoyDirA = testRoot / DecoyA
   let decoyDirB = testRoot / DecoyB

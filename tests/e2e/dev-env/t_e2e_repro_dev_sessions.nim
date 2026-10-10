@@ -98,6 +98,10 @@ proc writeDevFixture(dir: string) =
     "#!/bin/sh\n" &
       "mkdir -p state\n" &
       "printf 'task:%s\\n' \"$M8_SOURCE\" >> state/watch.log\n" &
+      # Still running when the test edits the source after seeing ``task:one``:
+      # the edit lands DURING the cycle, which is the case a watcher opened
+      # only between cycles used to drop (and did, under load, at random).
+      "sleep 2\n" &
       "printf 'watch-task:%s\\n' \"$M8_SOURCE\"\n")
   writeFile(dir / "reprobuild.nim", providerText([
     (name: "worker", metadata: serviceJson(@["sh", "scripts/worker.sh"],
@@ -297,38 +301,76 @@ suite "e2e_repro_dev_sessions":
       let c = prepareCase("repro-m8-dev-watch", dev = true)
       defer: removeDir(c.tempRoot)
 
-      var devProcess = startProcess(c.reproBin,
-        args = @[
-          "dev", c.projectRoot, "--foreground", "--http=127.0.0.1:0",
-          "--debounce-ms=100"
-        ],
-        workingDir = c.repoRoot,
-        env = c.envFor(),
-        options = {poUsePath, poStdErrToStdOut})
+      # THE SUPERVISOR'S OUTPUT GOES TO A FILE, NOT A PIPE THIS TEST READS TO
+      # EOF. ``repro dev`` spawns ``runquotad`` while it prepares the
+      # environment, and a child started by ``osproc.startProcess`` keeps the
+      # original pipe descriptor open beside its dup'd stdout. When the test
+      # terminated a ``repro dev`` that had not come up, that ``runquotad``
+      # was orphaned still holding the write end, so ``readAll`` never saw
+      # EOF and the case sat idle until the runner killed it at 1800s. A file
+      # is read to its current end and cannot wedge the case.
+      let devLog = c.tempRoot / "repro-dev.log"
+      let devArgs = @[
+        "dev", c.projectRoot, "--foreground", "--http=127.0.0.1:0",
+        "--debounce-ms=100"
+      ]
+      var devProcess =
+        when defined(windows):
+          startProcess("cmd.exe",
+            args = @["/c", quoteShellCommand(@[c.reproBin] & devArgs) &
+              " > " & quoteShell(devLog) & " 2>&1"],
+            workingDir = c.repoRoot,
+            env = c.envFor(),
+            options = {poUsePath, poParentStreams})
+        else:
+          startProcess("/bin/sh",
+            args = @["-c", "exec \"$0\" \"$@\" > " & q(devLog) & " 2>&1",
+              c.reproBin] & devArgs,
+            workingDir = c.repoRoot,
+            env = c.envFor(),
+            options = {poParentStreams})
+      proc devOutput(): string =
+        if fileExists(devLog): readFile(devLog) else: ""
       defer:
         try:
           if devProcess.running():
             devProcess.terminate()
+            discard devProcess.waitForExit()
         except CatchableError:
           discard
         devProcess.close()
 
+      # Up is reached after a COLD provider compile of the fixture (a fresh
+      # temp project every run): measured at 173.7s on a loaded host, past the
+      # 120s this wait used to allow, while the supervisor was compiling and
+      # making progress. So the wait follows the supervisor: it ends when the
+      # session is up, fails at once if the supervisor exits, and keeps a cap
+      # only as the backstop for a supervisor that is alive and stuck.
       let metadataPath = sessionMetadataPath(c.projectRoot)
-      let up =
-        try:
-          waitForStatus(metadataPath, "up", timeoutMs = 120000)
-        except CatchableError:
+      var up: JsonNode = nil
+      var waitedMs = 0
+      const UpCapMs = 900_000
+      while up.isNil:
+        if not devProcess.running():
+          checkpoint("dev process exited before the session came up:\n" &
+            devOutput())
+          raise newException(IOError,
+            "repro dev exited before session status up")
+        if fileExists(metadataPath):
           try:
-            if devProcess.running():
-              devProcess.terminate()
-              discard devProcess.waitForExit()
+            let node = parseJson(readFile(metadataPath))
+            if node{"status"}.getStr() == "up":
+              up = node
+              break
           except CatchableError:
-            discard
-          let output =
-            if devProcess.outputStream != nil: devProcess.outputStream.readAll()
-            else: ""
-          checkpoint("dev process output before session became up:\n" & output)
-          raise
+            discard # mid-rewrite; read it again on the next poll
+        if waitedMs >= UpCapMs:
+          checkpoint("dev process output before session became up:\n" &
+            devOutput())
+          # The original diagnostics, from one last bounded wait.
+          up = waitForStatus(metadataPath, "up", timeoutMs = 100)
+        sleep(100)
+        waitedMs.inc(100)
       let httpBindValue = up["httpBind"].getStr()
       check statusJson(httpBindValue)["services"][0]["ready"].getBool()
 
@@ -337,16 +379,31 @@ suite "e2e_repro_dev_sessions":
       check readFile(c.projectRoot / "state" / "watch.log").contains("task:one")
 
       writeFile(c.projectRoot / "watch-source.txt", "two\n")
+      # The second cycle starts after the first task's 2 s and re-evaluates the
+      # recipe, so the wait follows the supervisor like the "up" wait above;
+      # the cap is only the backstop for one alive and stuck.
       var sawTwo = false
-      for _ in 0 ..< 100:
+      var waitedTwoMs = 0
+      while devProcess.running() and waitedTwoMs < 300_000:
         if fileExists(c.projectRoot / "state" / "watch.log") and
             readFile(c.projectRoot / "state" / "watch.log").contains("task:two"):
           sawTwo = true
           break
         sleep(50)
+        waitedTwoMs.inc(50)
       check sawTwo
 
-      let events = sseEvents(httpBindValue, waitMs = 750)
+      # ``task:two`` is written at the START of the second task, which then
+      # sleeps; its ``watch.task.finished`` / ``watch.cycle.finished`` come
+      # after. Read the stream once the second cycle has finished (or the
+      # supervisor is gone, or the backstop passes), not at a fixed moment.
+      var events = sseEvents(httpBindValue, waitMs = 750)
+      var waitedFinishMs = 0
+      while eventKinds(events).kindCount("watch.cycle.finished") < 2 and
+          devProcess.running() and waitedFinishMs < 300_000:
+        sleep(250)
+        waitedFinishMs.inc(1000)
+        events = sseEvents(httpBindValue, waitMs = 750)
       let sseKinds = eventKinds(events)
       check "service.ready" in sseKinds
       check "watch.filesystem.changed" in sseKinds
@@ -358,10 +415,8 @@ suite "e2e_repro_dev_sessions":
       check statusJson(httpBindValue)["watch"]["cycles"].getInt() >= 2
 
       discard requireRepro(c, @["down", c.projectRoot])
-      let output =
-        if devProcess.outputStream != nil: devProcess.outputStream.readAll()
-        else: ""
       let exitCode = devProcess.waitForExit()
+      let output = devOutput()
       check exitCode == 0
       check output.contains("watch-task:one")
       check output.contains("watch-task:two")

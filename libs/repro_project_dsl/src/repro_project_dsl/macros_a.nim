@@ -3507,63 +3507,9 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
   ## The producer module path alone. See `workspaceProducerLocation`.
   workspaceProducerLocation(selector, consumerSourceFile).modulePath
 
-const ReprobuildPackagesRootEnv* = "REPROBUILD_PACKAGES_ROOT"
-  ## Where the `reprobuild-packages` catalog checkout lives, when it is not a
-  ## workspace sibling. The daemon already forwards it
-  ## (`DaemonExplicitForwardedEnvVars`).
-
-proc reprobuildPackagesInterfaceModule*(selector, consumerSourceFile: string):
-    string =
-  ## The module that defines package ``selector`` in the `reprobuild-packages`
-  ## catalog -- ``<root>/packages/interfaces/<selector>/repro.nim`` -- WITHOUT
-  ## its ``.nim`` extension, or "" when there is none.
-  ##
-  ## Package definitions are moving out of the engine's bundled stdlib into
-  ## `reprobuild-packages` (reprobuild-specs/Provisioning-Contributions.md,
-  ## "Repository Composition"). This is what lets a plain ``uses: "<name>"``
-  ## reach one that has moved: a name the stdlib does not bundle is looked up
-  ## here, after the stdlib and before nothing.
-  ##
-  ## The checkout is found, in order:
-  ##
-  ## 1. ``$REPROBUILD_PACKAGES_ROOT``;
-  ## 2. a ``reprobuild-packages`` directory beside the consumer's project or
-  ##    any ancestor of it -- the workspace-sibling convention, walked the
-  ##    same way as `workspaceProducerLocation`;
-  ## 3. a ``reprobuild-packages`` directory beside the reprobuild checkout
-  ##    this module was compiled from.
-  ##
-  ## A found checkout that lacks the interface is not an error here; the
-  ## selector simply stays unresolved, as it would have without this lookup.
-  if selector.len == 0:
-    return
-  for ch in selector:
-    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
-      return
-  proc probe(root: string): string =
-    if root.len == 0:
-      return ""
-    let candidate = root / "packages" / "interfaces" / selector / "repro.nim"
-    if fileExists(candidate):
-      return candidate.changeFileExt("")
-    ""
-  let fromEnv = getEnv(ReprobuildPackagesRootEnv)
-  if fromEnv.len > 0:
-    return probe(fromEnv)
-  if consumerSourceFile.len > 0:
-    var dir = consumerSourceFile.parentDir
-    for _ in 0 ..< 16:
-      let parent = dir.parentDir
-      if parent.len == 0 or parent == dir:
-        break
-      let found = probe(parent / "reprobuild-packages")
-      if found.len > 0:
-        return found
-      dir = parent
-  # <reprobuild>/libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim
-  let reprobuildRoot =
-    currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir
-  probe(reprobuildRoot.parentDir / "reprobuild-packages")
+# `reprobuildPackagesInterfaceModule` and the moved-package diagnostic live in
+# `repro_project_dsl/reprobuild_packages_catalog`, imported by
+# `repro_project_dsl.nim` so the tool resolver can share the remedy text.
 
 type
   ProducerResourceModuleDecl* = object
@@ -3971,6 +3917,42 @@ proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
       "             writable with " & DslScratchRootEnv & "=<dir>.")
   createDir(dir)
 
+proc unresolvedMovedPackageDiagnostic(pkg: PackageDef;
+    consumerSourceFile: string): string =
+  ## The compile error for a ``uses:``, ``nativeBuildDeps:`` or
+  ## ``runtimeDeps:`` entry naming a package that moved out of the bundled
+  ## stdlib into `reprobuild-packages` and that nothing resolves, or "" when
+  ## every such entry resolves. It follows `usesImportCode`'s order: an
+  ## explicit ``usesImportPath`` or a workspace project of that name takes the
+  ## selector first, and only then is a missing catalog an error. See
+  ## `MovedToReprobuildPackages` for why this is not left unresolved.
+  for base in pkg.usesImportPaths:
+    if normalizedImportBase(base).len > 0:
+      return ""
+  var reported: seq[string] = @[]
+  # All three lists: `usesImportCode` consults the catalog for each of them,
+  # so a moved package unresolved in any of them loses its provisioning the
+  # same way.
+  for (listName, uses) in [("uses", pkg.toolUses),
+      ("nativeBuildDeps", pkg.nativeBuildDeps),
+      ("runtimeDeps", pkg.runtimeDeps)]:
+    for useDef in uses:
+      let selector = useDef.packageSelector
+      if selector notin MovedToReprobuildPackages or selector in reported:
+        continue
+      if workspaceProducerModule(selector, consumerSourceFile).len > 0:
+        continue
+      let diagnostic = movedPackageUnresolvedDiagnostic(selector,
+        useDef.rawConstraint,
+        if useDef.sourceFile.len > 0: useDef.sourceFile
+        else: consumerSourceFile,
+        useDef.sourceLine, listName)
+      if diagnostic.len > 0:
+        reported.add(selector)
+        if result.len > 0:
+          result.add("\n\n")
+        result.add(diagnostic)
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
     # M29 (Provisioning catalog cleanup): autoconf, automake, bun,
@@ -4058,10 +4040,9 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # declared on the tool use" on every Linux smoke.
       "runquotad",
       "sh",
-      "shellcheck",
+      # `shellcheck`, `shfmt` and `prek` moved to reprobuild-packages, like
+      # `sqlite3`; see `reprobuildPackagesInterfaceModule`.
       "solc",
-      # `sqlite3` moved to reprobuild-packages; see
-      # `reprobuildPackagesInterfaceModule`.
       "stylus",
       "swc",
       "tmux",
@@ -4210,6 +4191,36 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # ``.nim`` extension (Nim's ``import "<path>"`` form). Re-attach it
       # so the per-sibling shim below can ``include`` the real file.
       producerModules.add((moduleAlias, selector, producerModule & ".nim"))
+  # A package named in ``nativeBuildDeps:`` / ``runtimeDeps:`` resolves from
+  # the `reprobuild-packages` catalog too (Provisioning-Contributions.md,
+  # "Catalog Lookup And Provisioning": wherever a recipe names it). Like the
+  # stdlib's dependency-only imports above, it needs module initialization
+  # (to register its provisioning) but not its typed command surface, so it
+  # is imported for its selector-specific marker alone; a selector `uses:`
+  # already imported in full is not imported again. The order follows the
+  # `uses:` branch: an explicit ``usesImportPath`` or a workspace project of
+  # that name keeps the selector, and only then is the catalog consulted.
+  var dependencyOnlyAliases: seq[string] = @[]
+  if not hasExplicitImports:
+    for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+      let selector = useDef.packageSelector
+      if isBundledStdlibSelector(selector):
+        continue
+      if workspaceProducerModule(selector, consumerSourceFile).len > 0:
+        continue
+      let catalogModule =
+        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+      if catalogModule.len == 0:
+        continue
+      let catalogAlias = selectorModuleName(selector) & "_packages_module"
+      var catalogSeen = false
+      for (existingAlias, _, _) in producerModules:
+        if existingAlias == catalogAlias:
+          catalogSeen = true
+          break
+      if not catalogSeen:
+        producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
+        dependencyOnlyAliases.add(catalogAlias)
   # Multi-Sibling interface-extraction object-collision fix.
   #
   # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per
@@ -4278,8 +4289,27 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       when defined(reproDebugProducerImports):
         echo "[producer-import] alias=", moduleAlias, " selector=", selector,
           " shim=", shimPath, " -> ", siblingReproPath
-      let shimModule = shimDir / shimStem
-      result.add("import \"" & shimModule.replace('\\', '/') & "\" as " &
+      # `nim check` runs compile-time code with file writes disabled: the
+      # `createDir` / `writeFile` above silently do nothing, so a consumer
+      # never compiled before has no shim, and a stale one would name the
+      # wrong file. The shim only exists to keep C object names apart, which a
+      # check never generates, so import the module itself when the shim on
+      # disk is not the one just asked for.
+      let shimCurrent =
+        fileExists(shimPath) and readFile(shimPath) == shimContent
+      let importedModule =
+        if shimCurrent: shimDir / shimStem
+        else: siblingReproPath.changeFileExt("")
+      if moduleAlias in dependencyOnlyAliases:
+        # A catalog package named only in a dependency list: see the
+        # dependency-only branch above, and the stdlib's dependency imports
+        # for why the ``as <alias>`` binding is load-bearing.
+        let markerName = packageMarkerName(selector)
+        result.add("from \"" & importedModule.replace('\\', '/') & "\" as " &
+          moduleAlias & "_dep import " & markerName & "\n")
+        result.add(markerName & "()\n")
+        continue
+      result.add("import \"" & importedModule.replace('\\', '/') & "\" as " &
         moduleAlias & " except package\n")
       result.add("when compiles(" & moduleAlias &
         ".reprobuildPackageMarker()):\n")

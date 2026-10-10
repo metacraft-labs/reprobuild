@@ -4,14 +4,23 @@
 ## Principle 2 (Interactive-UX): the tests STILL RUN, but no certificate is
 ## issued, and the run ends with an actionable message naming the offender and
 ## the remedy:
-##   1. DIRTY working tree → "working tree dirty" + "commit ..." remedy.
-##   2. UNPUSHED HEAD       → "unpushed" + "git push" remedy.
+##   DIRTY working tree → "working tree dirty" + "commit ..." remedy; the
+##   certificate file is NOT written even though the trivial target passes.
 ##
-## In both cases the certificate file is NOT written even though the trivial
-## test target passes.
+## A second case used to assert that an UNPUSHED but clean HEAD of the CURRENT
+## repo is refused a certificate. It was removed on 2026-10-06: that assertion
+## made a certificate impossible to obtain for the very commit the
+## receiving-side gateway (TC-6) refuses without one. The gate refused the push
+## for lack of a certificate, and issuance refused the certificate for lack of
+## a push (Agents-Push-Gate.md §4.1). The current repository's own publication
+## IS the gated push, so issuance now exempts it; every sibling in the closure
+## must still be published. The replacement is the positive case "an unpushed
+## clean current HEAD is certified before push" in
+## t_repro_test_issues_certificate_by_default_in_clean_state, which has the
+## signing key a positive issuance needs.
 ##
-## Falsifiability: if issuance were forced in a dirty/unpushed state, the
-## "cert file absent" check would fail. See the milestone note.
+## Falsifiability: forcing issuance on a dirty tree fails the "cert file
+## absent" check.
 ##
 ## Skip rule: ``git`` missing on PATH.
 
@@ -184,31 +193,3 @@ suite "TC-1 — repro test withholds the certificate on a non-publishable state"
         check res.output.contains("dirty")
         # RA-28 remedy: name a concrete next step (commit / stash).
         check (res.output.contains("commit") or res.output.contains("stash"))
-
-      # --- case 2: UNPUSHED HEAD -------------------------------------------
-      block:
-        let fx = setupFixture(gitBin, "unpushed")
-        defer: removeDir(fx.scratch)
-        # Commit a new revision in the in-scope repo but do NOT push it.
-        writeFile(fx.workspaceRoot / "lib-a" / "feature.txt", "new\n")
-        discard requireGit(q(gitBin) & " -C " &
-          q(fx.workspaceRoot / "lib-a") & " add feature.txt")
-        discard requireGit(q(gitBin) & " -C " &
-          q(fx.workspaceRoot / "lib-a") & " commit -m feature")
-        let newSha = requireGit(q(gitBin) & " -C " &
-          q(fx.workspaceRoot / "lib-a") & " rev-parse HEAD").strip()
-
-        let fixtureJson = fx.scratch / "fixture.json"
-        writePassingFixture(fixtureJson, "t-unit")
-
-        let res = runReproTest(fx, fixtureJson)
-        check res.code == 0
-        let cp = defaultCertificatePath(
-          fx.workspaceRoot, newSha, currentPlatformTag())
-        check (not fileExists(cp))
-        check res.output.contains("no certificate")
-        # Offender named + the ``git push`` remedy surfaced.
-        check (res.output.contains("unpushed") or
-               res.output.contains("unpublished") or
-               res.output.contains("push"))
-        check res.output.contains("push")

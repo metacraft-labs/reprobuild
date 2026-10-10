@@ -119,7 +119,8 @@ template expectCollateralRefusal(want: TdxCollateralErrorKind;
   check raised
 
 const
-  Now = 1_790_294_400'i64                 ## 2026-09-25T00:00:00Z.
+  Now = 1_790_985_600'i64                 ## 2026-10-03T00:00:00Z; see
+    ## `snp_vectors`'s clock rule. Derived, not chosen.
   NowMs = Now * 1000'i64
 
 let signerDer = bytesOfHex(IntelTcbSigningCertDerHex)
@@ -442,8 +443,8 @@ suite "what the vendor's documents say":
     let expected = @[
       (GtgTcbInfoSprJson, "50806f000000", 3, 2, 0, "2023-06-18T08:42:58Z"),
       (GtgTcbInfoEmrJson, "90c06f000000", 3, 3, 2, "2026-02-01T14:49:26Z"),
-      (PcsTcbInfoSprJson, "50806f000000", 3, 6, 2, "2026-09-21T04:19:36Z"),
-      (PcsTcbInfoEmrJson, "90c06f000000", 3, 4, 2, "2026-09-21T03:25:24Z")]
+      (PcsTcbInfoSprJson, "50806f000000", 3, 6, 2, "2026-10-02T17:13:18Z"),
+      (PcsTcbInfoEmrJson, "90c06f000000", 3, 4, 2, "2026-10-02T17:16:39Z")]
     var levelCounts: seq[int] = @[]
     for (body, fmspc, version, levels, modules, issued) in expected:
       checkpoint fmspc & " issued " & issued

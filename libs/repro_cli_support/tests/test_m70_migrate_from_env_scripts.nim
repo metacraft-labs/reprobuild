@@ -39,8 +39,10 @@ import std/[options, os, sets, strutils, unittest]
 
 import repro_cli_support/migrate_from_env_scripts
 import repro_cli_support/home
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/m70-migrate-from-env-scripts"
+let TmpDir = "build/test-tmp/m70-migrate-from-env-scripts" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

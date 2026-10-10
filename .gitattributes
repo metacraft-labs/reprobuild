@@ -1,3 +1,83 @@
+# GENERATED SUITE ARTIFACTS -- never merged, always regenerated.
+#
+# The four paths below are pure functions of the tree. Nothing about them is
+# authored: `scripts/reprobuild_suite_inventory.py` and
+# `scripts/generate_test_edges.nim` derive every byte from the test sources
+# the tree contains. Their correct post-merge value is therefore a function
+# of the MERGED TREE, not of the two edits -- so a textual three-way merge of
+# them is not a resolution, it is a fabrication that happens to parse.
+#
+# `-merge` makes git refuse rather than guess: when both sides changed one of
+# these relative to the merge base, the path is left unmerged (`UU`) and the
+# operation stops. Regenerate, do not resolve; see `just regen-suite-artifacts`.
+#
+# WHY `-merge` AND NOT A CUSTOM MERGE DRIVER. A driver (`merge=<name>` here
+# plus `merge.<name>.driver` in config) can regenerate instead of merging, but
+# `merge.<name>.driver` lives in `.git/config`, which is not versioned, and
+# git offers no way to require it. Measured in a throwaway repo on git 2.54.0:
+# with `merge=` declared here and no driver registered, git prints
+# "Auto-merging ..." / "Merge made by the 'ort' strategy", exits 0, and
+# produces the same silently wrong artifact as no protection at all -- no
+# warning, no exit code, nothing to notice. A protection whose absence is
+# invisible is worse than a loud conflict. `-merge` needs no out-of-band
+# config, travels with every clone and worktree, and cannot fail open.
+# Regeneration is also not affordable at merge time: `--write-inventory-sources`
+# is a single-threaded source scan over every declared test source, measured at
+# 4-7 minutes on this tree, and `--write-static-case-counts` adds ~2 more. A
+# driver that paid that on every merge would be turned off inside a week.
+#
+# WHY THIS IS NOT A CONFLICT ON EVERY INTEGRATION. `-merge` changes nothing
+# unless BOTH sides moved the file differently: a one-sided change still
+# resolves trivially, and two sides that produced identical bytes still
+# resolve trivially. Measured over the 182 two-parent merges in the last 795
+# commits of this repository: 51 of them (28%) had two-sided changes to one of
+# these files. In 43 of the 51 EVERY two-sided artifact came out matching
+# NEITHER parent -- a document assembled by git, which no generator ever
+# emitted. In the other 8 at least one artifact came out byte-identical to one
+# parent while its siblings were blended, which is worse rather than better:
+# that is precisely how the artifacts end up contradicting each other, and
+# those 8 can be shown wrong from the commit alone -- they disagree about
+# which test sources exist, by one to four sources. The rest cannot be settled
+# without regenerating a historical tree, which is the whole problem -- there
+# is nothing at the merge to notice them. Those 51 are exactly the merges this
+# line now stops.
+#
+# `-merge` does NOT imply `-diff`: these stay plain text in review, and git
+# leaves OUR content in the working tree with no conflict markers, so the
+# checkout the regeneration command runs against is coherent Nim and valid
+# JSON rather than a file with `<<<<<<<` in it. Git words the refusal
+# "warning: Cannot merge binary files: <path>" -- that is how it describes any
+# path it was told not to merge, not a claim that the file became binary;
+# `git diff` still renders it line by line.
+#
+# WHAT STILL GETS PAST IT, measured and deliberately left open. `git merge -X
+# ours` / `-X theirs` exit 0 on an unmergeable path and take the named side
+# ENTIRE -- a stale but internally coherent artifact. ONE gate catches that,
+# not four: `--check-declared-sources` is the only one that walks the TREE, so
+# it sees the test source the discarded side added; the other three derive
+# their universe from repro_tests.nim, which `-X` made stale in the same
+# direction, so all three agree with each other and pass. And that one gate is
+# Nim-only (`_is_test_shaped_source` requires a `.nim` suffix), so a `-X`
+# resolution that drops a PYTHON test source is caught by nothing here. Use
+# `just regen-suite-artifacts`, not `-X`.
+# `git merge --strategy=resolve` ignores the mark altogether and blends
+# the two sides; the default strategy is `ort`, which honours it, so that is
+# reachable only by naming a legacy strategy. Do not.
+#
+# Adding a fifth such artifact? `tests/unit/test_generated_artifact_merge_policy.py`
+# derives this list from the generators' own path constants and fails if a
+# generated artifact is missing a `-merge` mark.
+# ANCHORED with a leading slash. A git attribute pattern with no slash in it
+# matches that basename at ANY depth, so a bare `repro_tests.nim` would also
+# claim a future `libs/<lib>/repro_tests.nim` that no generator writes. The
+# three paths below carry a slash already and are anchored by that.
+/repro_tests.nim -merge
+scripts/reprobuild-test-shape-parity.tsv -merge
+scripts/reprobuild-suite-static-case-counts.tsv -merge
+benchmarks/reports/reprobuild-suite-m0-inventory-sources.json -merge
+
+# Line endings for shell payloads that are executed on a Linux target
+# regardless of the checkout's platform.
 recipes/cache/*.sh text eol=lf
 recipes/cache/systemd-units/* text eol=lf
 tools/bootstrap-linux-smoke.sh text eol=lf

@@ -116,8 +116,11 @@ when defined(linux) and defined(amd64):
       ck "all twelve workers ran", s["distinctWorkerTids"].getInt() == Workers
       ck "the signal storm delivered", s["chaosSignalsDelivered"].getInt() > 0
       ck "the host has SYNC_CORE", s["membarrierSyncCore"].getBool()
-      ck "the host permits a RW|EXEC transient",
-        s["textRwxTransition"].getBool()
+      # W^X: the provider never asked for a writable and executable mapping.
+      # Its raw `mprotect`/`mmap` refuse such a request without issuing it and
+      # count it, so this is the provider's whole surface, not a sample.
+      ck "the provider requested no writable+executable mapping",
+        s["wxRequestsRefused"].getInt() == 0
 
       let inWindow = s["parkedPcInWindow"].getInt()
       let observations = s["parkedObservations"].getInt()
@@ -134,6 +137,7 @@ when defined(linux) and defined(amd64):
       # satisfiable by something that is not a crash.
       type ArmResult = object
         crashes, runs, anomalies, publications, adjust, nested: int
+        wxRefused, textReplacedRuns, payloads: int
         strayExits: seq[int]
         inWindowFaults, outOfWindowFaults, missingWindow: int
         faultOffsets: seq[int]
@@ -178,6 +182,10 @@ when defined(linux) and defined(amd64):
             result.publications += r.payload["publicationsApplied"].getInt()
             result.adjust += r.payload["quiesceAdjustCount"].getInt()
             result.nested += r.payload["quiesceNestedAdjustCount"].getInt()
+            result.wxRefused += r.payload["wxRequestsRefused"].getInt()
+            result.payloads += 1
+            if r.payload["lastTextReplaced"].getBool():
+              result.textReplacedRuns += 1
 
       let tier2 = runArm("tier2")
       let tier1 = runArm("tier1")
@@ -235,6 +243,13 @@ when defined(linux) and defined(amd64):
 
       # -- the shippable configuration ---------------------------------------
       ck "no tier-2 run faulted", tier2.crashes == 0
+      # W^X across every publication of every tier-2 run, and the mechanism
+      # that makes it possible engaged: each run's last publication reached
+      # the live page by replacing it.
+      ck "no tier-2 publication requested a writable+executable mapping",
+        tier2.wxRefused == 0
+      ck "every tier-2 run published by page replacement",
+        tier2.payloads == Runs and tier2.textReplacedRuns == Runs
       ck "no tier-2 run observed a third return value", tier2.anomalies == 0
       ck "every tier-2 run published everything it was asked to",
         tier2.publications == Runs * Publications
@@ -287,7 +302,7 @@ when defined(linux) and defined(amd64):
           "sampleResult": s
         }))
 
-      expectCount(asserted, 42)
+      expectCount(asserted, 44)
 
     test "the AGENT chooses tier 2 over the wire for a multithreaded target":
       ## The in-process arms above prove the publication is safe under

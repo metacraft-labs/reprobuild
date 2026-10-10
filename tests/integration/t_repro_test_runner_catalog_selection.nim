@@ -121,7 +121,9 @@ if "--list-json" in probeArgs:
     quit(93)
 
   if getEnv("REPRO_CATALOG_FIXTURE_HANG") == "1":
-    sleep(3000)
+    # Far longer than any bound below, so "the runner waited the hang out"
+    # and "the runner moved on at its probe timeout" cannot be confused.
+    sleep(60_000)
   let forcedExit = getEnv("REPRO_CATALOG_FIXTURE_EXIT")
   if forcedExit.len > 0:
     quit(parseInt(forcedExit))
@@ -475,7 +477,12 @@ suite "repro_test_runner catalog fidelity and hash-difference selection":
     let timeoutElapsed = epochTime() - timeoutStarted
     checkpoint(timed.output)
     check timed.exitCode == 0
-    check timeoutElapsed < 5.0
+    # The probe hangs 60 s; a runner that waited it out takes >= 60 s. The
+    # bound only has to separate that from "moved on after 1 s and ran both
+    # binaries whole", which under a loaded full-suite host measured 5.4 and
+    # 5.8 s -- past the old 5 s bound, which against a 3 s hang could not
+    # separate the two outcomes by more than ~2 s anyway.
+    check timeoutElapsed < 40.0
     check "exceeded 1s" in timed.output
     check timed.summary{"summary"}{"total"}.getInt(-1) == 2
     var timedRows = initTable[string, JsonNode]()

@@ -257,6 +257,29 @@ suite "MAC-2 daemon parent prewarm":
       @[".", "--dry-run"], project, @[]).len == 0
     check daemonPrewarmTargetOutputDir(@["."], project, @[]).len > 0
 
+  test "report_and_stats_switches_do_not_consume_the_target":
+    # Bare `--write-report` and `--write-stats` are SWITCHES in `repro build`
+    # (only the `=PATH` spelling names a path). Both request readers used to
+    # treat them as value flags: a trailing one raised "requires a value" —
+    # which sent every M11 daemon session to the client's working directory —
+    # and a leading one swallowed the target.
+    let root = createTempDir("repro-mac2-switches", "")
+    defer: removeDir(root)
+    let project = root / "p"
+    createDir(project)
+    writeFile(project / "repro.nim", "# project\n")
+    let expected = project / ".repro" / "build" / "repro"
+    for args in [@[project, "--write-report"], @["--write-report", project],
+        @[project, "--write-stats"], @["--write-stats", project],
+        @["--write-report=" & root / "r.json", project]]:
+      checkpoint("args=" & $args)
+      check daemonRequestProjectRoot(args, root) == project
+      check daemonPrewarmTargetOutputDir(args, root, @[]) == expected
+    # A real value flag still consumes its value, so the value is never
+    # mistaken for the target.
+    check daemonRequestProjectRoot(@["--log", "summary", "p"], root) ==
+      project
+
   test "switching_projects_does_not_accumulate":
     let root = createTempDir("repro-mac2-bound", "")
     defer: removeDir(root)

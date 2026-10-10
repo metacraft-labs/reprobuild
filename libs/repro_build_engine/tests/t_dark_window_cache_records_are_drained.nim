@@ -77,8 +77,10 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_dark_window_cache_records_are_drained"
+let TmpDir = "build/test-tmp/t_dark_window_cache_records_are_drained" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
 proc weak(name: string): ContentDigest =
@@ -196,7 +198,7 @@ proc writeRmdf(f: Fixture) =
     osPid: 4242, threadId: 4242))
   all.add(MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
     osPid: 4242, threadId: 4242, path: f.observedPath))
-  writeFile(f.rmdfPath, cast[string](encodeCanonical(all)))
+  writeFile(f.rmdfPath, encodeCanonical(all))
 
 proc recFiles(f: Fixture): seq[string] =
   let hot = f.cacheRoot / "action-cache" / "hot-records"
@@ -405,7 +407,14 @@ suite "a record keyed on nothing is refused at lookup":
     let builtin = builtinAction(bakWriteText, "pkg.write_text",
       outputs = ["out.txt"], text = "hello",
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
-    check builtin.unservableCacheRecordReason(empty).len == 0
+    # Empty of INPUTS, but describing the action's own output, as every real
+    # record of this edge does — so this asserts the no-inputs exemption and
+    # nothing else (a record that does not describe the action's declared
+    # outputs is refused for that separate reason; see
+    # `recordOutputsNotOwnedBy`).
+    var emptyOfInputs = empty
+    emptyOfInputs.outputs = @[OutputBlob(path: "out.txt")]
+    check builtin.unservableCacheRecordReason(emptyOfInputs).len == 0
 
     # An edge whose evidence comes from a report its AUTHOR declared owns that
     # set; `dgRecognizedFormat` is not in `MonitorPolicyKinds`, the engine

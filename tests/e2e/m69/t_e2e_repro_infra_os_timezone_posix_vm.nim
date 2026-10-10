@@ -25,6 +25,7 @@
 import std/[os, osproc, strutils]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 when defined(posix):
   import std/posix
 

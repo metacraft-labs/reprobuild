@@ -30,8 +30,9 @@ import repro_home_apply/plan
 import repro_home_apply/catalog_lookup
 import repro_home_apply/package_catalog
 import repro_dsl_stdlib/packages_schema
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/e2e-m69-builtin-catalog"
+let TmpDir = "build/test-tmp/e2e-m69-builtin-catalog" / testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

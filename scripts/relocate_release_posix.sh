@@ -39,6 +39,12 @@ mkdir -p "${libdir}"
 
 os="$(uname -s)"
 
+# The staged helper's shebang names the build host's Python store path.
+# Bundle its interpreter and standard library before walking the native
+# closure, so extraction does not require that store on the target machine.
+script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+python3 "${script_dir}/release/stage_nix_helper_runtime.py" "${pkg_dir}"
+
 is_elf() { [ -f "$1" ] && [ "$(LC_ALL=C od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]; }
 
 case "${os}" in
@@ -157,7 +163,10 @@ case "${os}" in
 #!/bin/sh
 # reprobuild portable launcher: run the real binary through the bundled glibc
 # loader so it does not depend on the host's /nix/store or system glibc.
-here=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+# Locate this script with shell builtins only: inside a build action PATH holds
+# just the declared tools, which need not include dirname.
+case "\$0" in */*) here=\${0%/*} ;; *) here=. ;; esac
+here=\$(CDPATH= cd -- "\$here" && pwd)
 ${engine_wrapper_line}
 exec "\${here}/../lib/${loadername}" --library-path "\${here}/../lib" "\${here}/.${base}.real" "\$@"
 EOS
@@ -220,7 +229,6 @@ EOS
     # ---- 2. Rewrite install names / rpath to @loader_path/../lib -----------
     # fixup_macho_runtime.sh adds LC_RPATH entries and sets -id on libraries,
     # per-arch for universal images. Point every image at the bundled lib dir.
-    script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
     # A single @loader_path/../lib LC_RPATH resolves to pkg/lib for BOTH the
     # bin/ executables (@loader_path=bin -> ../lib) and the lib/ dylibs
     # (@loader_path=lib -> ../lib == lib). One rpath keeps the added load

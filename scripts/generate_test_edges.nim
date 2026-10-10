@@ -430,23 +430,40 @@ proc needsSslDefine(path: string): bool =
     path.endsWith("/t_repro_https_cache_end_to_end.nim")
 
 proc needsSoftwareRootTestTrustDefine(path: string): bool =
-  ## Two attestation gates are compiled with
+  ## Five attestation gates are compiled with
   ## ``--define:reproAttestSoftwareRootTestTrust``, which is what brings
   ## the chain evaluator and report driver that recognise a
   ## software-root test hierarchy's critical marker into existence.
   ##
   ## Matched by path, so the generated diff is explicit and so the set of
   ## binaries carrying that define is one list somebody has to edit on
-  ## purpose. Each has a companion gate that is deliberately NOT in this
-  ## list: those assert that the symbols do not compile, which only means
-  ## anything in a build that did not ask for them.
+  ## purpose. The first two have a companion gate that is deliberately
+  ## NOT in this list: those assert that the symbols do not compile,
+  ## which only means anything in a build that did not ask for them. The
+  ## three inference gates have no such companion, and that is said here
+  ## rather than left to be inferred from the list's shape.
   ##
-  ## The rule fails closed. A gate that needs the define and is not
-  ## named here does not compile at all, because the symbols it calls do
-  ## not exist — so a rename cannot quietly drop a binary out of the
-  ## list and leave it green.
+  ## The rule fails closed, by two different mechanisms, and the
+  ## difference matters to whoever edits this list next:
+  ##
+  ##   * The first two CALL a symbol that a build without the define does
+  ##     not have, so dropping them from this list is a compile error
+  ##     about a missing identifier.
+  ##   * The three inference gates call ``evaluateInferenceStatement``,
+  ##     which exists in every build and merely *loses an arm* without
+  ##     the define — so dropping one of them from this list would have
+  ##     produced a RUN-TIME failure that reads like a defect in the code
+  ##     under test. Each therefore carries its own
+  ##     ``static: doAssert defined(reproAttestSoftwareRootTestTrust)``,
+  ##     which turns that back into a compile error naming the define.
+  ##
+  ## Either way a rename cannot quietly drop a binary out of the list and
+  ## leave it green.
   path.endsWith("/t_e2e_software_root_attestation_roundtrip.nim") or
-    path.endsWith("/t_e2e_local_attestation_emulator_all_protocol_paths.nim")
+    path.endsWith("/t_e2e_local_attestation_emulator_all_protocol_paths.nim") or
+    path.endsWith("/t_e2e_authenticated_inference_local_and_cloud.nim") or
+    path.endsWith("/t_authenticated_inference_binding_mutations.nim") or
+    path.endsWith("/t_inference_commitment_is_hiding_and_binding.nim")
 
 proc isProviderModePath(path: string): bool =
   ## Mirrors ``scripts/run_tests.sh`` lines ~128-167. ``path`` is a
@@ -476,12 +493,14 @@ proc isProviderModePath(path: string): bool =
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
     "tests/unit/t_constructor_fetch_tool_refs.nim",
+    "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",
     "tests/unit/t_from_source_go_recognition.nim",
     "tests/unit/t_from_source_npm_recognition.nim",
     "tests/unit/t_install_mirror_optional_version.nim",
     "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
     "tests/unit/t_library_stage_alias.nim",
+    "tests/unit/t_vendor_manifest_evaluation_inputs.nim",
     # Measures the macro's module-init startup pass over a ``build:``
     # body, which the macro emits only under this define.
     "tests/unit/t_provider_startup_body_containment.nim",

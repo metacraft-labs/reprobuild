@@ -181,7 +181,17 @@ proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     # previous run's PATH entries were replayed and every tool still
     # resolved out of the default store. Nothing reported a conflict,
     # because from the key's point of view nothing had changed.
-    envVarPart("REPRO_STORE_ROOT")
+    envVarPart("REPRO_STORE_ROOT"),
+    # WHICH reprobuild libs the recipe is compiled against. The interface
+    # extraction and the provider compile both read these
+    # (`reprobuildLibsRootFromEnv`), and the extracted interface is reused
+    # whenever this key matches -- so without them, setting the override
+    # after one activation replayed an interface extracted from the OTHER
+    # libs, naming stdlib modules the requested checkout no longer has.
+    # Spelled out rather than imported: this module stays free of the
+    # interface-artifact library so the prompt-time path stays cheap.
+    envVarPart("REPROBUILD_LIBS_DIR"),
+    envVarPart("REPROBUILD_REPO_ROOT")
   ]
   let digest = actionFingerprintDigest(parts.join("\n").textBytes())
   result = newStringOfCap(32)

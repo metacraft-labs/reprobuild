@@ -328,8 +328,8 @@
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
 
-import std/[algorithm, compilesettings, os, osproc, sequtils, sets, streams,
-            strutils, tables, tempfiles, unittest]
+import std/[algorithm, compilesettings, exitprocs, os, osproc, sequtils, sets,
+            streams, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
@@ -608,7 +608,16 @@ const SpawnPrimitives: array[45, tuple[name: string; expected: int;
   ("uncontrolledExecProcess", 0, ""),
   ("execShellCmd", 0, ""),
   ("uncontrolledExecShellCmd", 0, ""),
-  ("findExe", 0, ""),
+  # A PROBE, not a launch path: `unresolvableScriptInterpreter` asks whether
+  # the nix daemon script's `#!/usr/bin/env <name>` resolves on PATH, so a
+  # missing interpreter is reported by name instead of as a bare spawn
+  # failure (d481a2c50). The path it finds is never executed; the daemon is
+  # started by the `startProcess` row above. The stdlib name because rule 5
+  # below keeps `ambient_execution` (and its `uncontrolledFindExe`) out of
+  # the engine. A second `findExe` is a new ambient lookup and moves this
+  # count.
+  ("findExe", 1,
+    "probe: the nix daemon script's env-shebang name on PATH; spawns nothing"),
   ("uncontrolledFindExe", 0, ""),
   ("launchProcess", 0, "runquota_process; what startDirect itself calls"),
   ("commandSpec", 0, "runquota_process; the spec startDirect hands it"),
@@ -830,7 +839,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "runquota_process", audit: caFullSurface,
       sourceRels: @["libs/runquota_process/src/runquota_process.nim"],
       spawning: @["commandSpec", "launchProcess"],
-      inert: @["libraryInfo", "backendProfile", "launchResult", "running",
+      inert: @["libraryInfo", "shellScriptDir", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
                "waitForExit", "cancelAndWait", "close"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
@@ -886,7 +895,17 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "runQuotaLeaseHolders", "summarizeRunQuotaLeaseHolders",
                "runQuotaEndpointText", "runQuotaQueueTimeoutMs",
                "initRunQuotaQueueWait", "stepRunQuotaQueueWait",
-               "runQuotaQueueWaitMessage", "runQuotaQueueTimeoutMessage"]),
+               "runQuotaQueueWaitMessage", "runQuotaQueueTimeoutMessage",
+               # Build-declared pools (8dd3ac277, "A RunQuota daemon
+               # reprobuild starts now follows the host's configuration").
+               # `declareRunQuotaPools` is a `DeclarePools` request over the
+               # session's existing connection; the unsupported-daemon
+               # report is one stderr line; the memory-budget read is an
+               # `inspectionJson("topology")` round trip on a
+               # `connectDefault` client, the same connect
+               # `isRunQuotaDaemonReachable` makes. None starts a process.
+               "declareRunQuotaPools", "reportPoolDeclarationUnsupported",
+               "runQuotaDaemonMemoryBudget"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
@@ -982,12 +1001,26 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # five were REFUSED on the first run after the engine change, each named
     # individually, and each had to be classified before the suite would go
     # green again.
+    #
+    # ``fcntl`` with ``F_GETFD`` / ``F_SETFD`` / ``FD_CLOEXEC`` /
+    # ``F_DUPFD_CLOEXEC`` replaced ``dup`` in the same spawn context, and were
+    # refused the same way when they arrived. They give the hosted child the
+    # descriptor table RunQuota's backend gives every other launch path —
+    # 0, 1 and 2 and nothing else — by marking the engine's other descriptors
+    # close-on-exec across io-mon's spawn and saving the stdio copies
+    # close-on-exec from birth. ``fcntl`` changes a descriptor flag and
+    # starts nothing; the other four are constants.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
-      inert: @["kill", "setpgid", "umask", "dup", "dup2", "close"],
+      # `lstat` and the `S_IS*` tests: `endpointRootOwned` reads the
+      # ownership and type of a daemon endpoint's path components
+      # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
+      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
-                        "Mode", "umask", "dup", "dup2", "close"]),
+                        "Mode", "umask", "dup2", "close", "fcntl", "F_GETFD",
+                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC",
+                        "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],
       spawning: @[],
@@ -1962,8 +1995,11 @@ suite "every_launch_path_is_monitored":
     check countOccurrences(src,
       "startBypassRunQuotaProcess(plan.action, config)") == 1          # L1
     check countOccurrences(src, "proc startRunQuotaProcess(") == 1
+    # The L2 call site takes the action pool's declared capacity as a
+    # fourth argument since 8dd3ac277 (the helper declares that pool on its
+    # own session), so the needle stops at the shared prefix.
     check countOccurrences(src,
-      "startRunQuotaProcess(plan.action, config, resultPath)") == 1    # L2
+      "startRunQuotaProcess(plan.action, config, resultPath,") == 1    # L2
     check countOccurrences(src, "offerWithRunQuotaBatch(") == 1        # L3
     check countOccurrences(src, "startGrantedWithRunQuota(") == 1      # L3b
 
@@ -2486,27 +2522,131 @@ suite "every_launch_path_is_monitored":
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
     # The fixture's Unix socket must fit sun_path even with a deep TMPDIR.
-    let tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
-    let fixtureSource = tempRoot / "fixture.c"
-    let fixtureBin = tempRoot / "fixture"
-    writeFile(fixtureSource, FixtureSource)
-    compileFixture(fixtureSource, fixtureBin)
+    var tempRoot = ""
+    var fixtureBin = ""
 
     # One host budget of 1000 cpu-milli; the L3b actions ask for 800
     # each, so the daemon can grant exactly one at a time and the other
     # comes back `rqokQueued`.
     var daemon: DaemonHandle
     var runQuotaError = ""
-    try:
-      daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
-    except CatchableError as err:
-      runQuotaError = err.msg
+    var fixtureUp = false
+
+    proc ensureFixture() =
+      ## THE FIXTURE COMES UP INSIDE THE CASE THAT NEEDS IT, NOT AT MODULE
+      ## LEVEL. Module-level code also runs for the runner's ``--list-json``
+      ## probe and for every case process, and only the "teardown" case
+      ## stopped a daemon (its own process's), so each probe and each other
+      ## case left a ``runquotad`` and a scratch tree behind for good —
+      ## dozens accumulated on a dev host over a week of runs — and every
+      ## probe compiled the C fixture. Called from a ``test`` body, the exit
+      ## proc is registered after the protocol hook and so runs before that
+      ## hook's ``quit``, which skips anything registered earlier.
+      if fixtureUp: return
+      fixtureUp = true
+      tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
+      let fixtureSource = tempRoot / "fixture.c"
+      fixtureBin = tempRoot / "fixture"
+      writeFile(fixtureSource, FixtureSource)
+      compileFixture(fixtureSource, fixtureBin)
+      try:
+        daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
+      except CatchableError as err:
+        runQuotaError = err.msg
+      addExitProc(proc() =
+        daemon.stop()
+        if tempRoot.len > 0: removeDir(tempRoot))
 
     ## Which enumerated paths this run actually EXECUTED, as opposed to
     ## reported something about. Written by the case bodies below and
     ## asserted by its own case afterwards — see that case for why a
     ## count is not a formality here.
     var executedPaths = initHashSet[LaunchPathKind]()
+
+    ## How many times a launch path has been driven in this process; see
+    ## ``driveLaunchPath``.
+    var launchPathDrives = 0
+
+    proc driveLaunchPath(lp: LaunchPath) =
+      ## The body of "monitored evidence is complete via <path>" -- a proc so
+      ## the two coverage cases below ("every enumerated launch path actually
+      ## executed", "evidence is identical across launch paths") can drive
+      ## every path again IN THEIR OWN PROCESS. They used to read
+      ## ``executedPaths`` / ``recordedEvidence`` as the per-path cases left
+      ## them, which holds only when every case runs in one process; the
+      ## production runner runs each case in its own, so both saw empty sets
+      ## and failed on every run.
+      ensureFixture()
+      # A fresh directory per DRIVE, not per path: the coverage cases below
+      # drive every path again in their own process, and a second drive that
+      # reused the first one's cache root would be a cache hit, not a launch.
+      inc launchPathDrives
+      let caseDir = tempRoot / ("case-" & $ord(lp.kind) & "-" &
+        $launchPathDrives)
+      let workRoot = caseDir / "work"
+      createDir(workRoot)
+      let cacheRoot = caseDir / ".repro-cache"
+      let config = configFor(lp, repoRoot, cacheRoot)
+
+      if lp.kind == lpInlineRunQuotaQueued:
+        # Two actions, 800 cpu-milli each against a 1000-milli host:
+        # the batch offer grants one and QUEUES the other, so the
+        # queued one is spawned from the deferred site (:5528)
+        # instead of from the batch flush.
+        var actions: seq[BuildAction] = @[]
+        for i in 0 .. 1:
+          let marker = workRoot / ("marker-" & $i & ".txt")
+          writeFile(marker, "hm4 marker payload " & $i & "\n")
+          actions.add monitoredFixtureAction("queued-" & $i, fixtureBin,
+            marker, workRoot / ("out-" & $i & ".txt"), workRoot,
+            holdMs = 400, cpuMilli = 800'u32)
+        let run = runBuild(graph(actions), config)
+        check run.results.len == 2
+
+        # The deferred site really was exercised: the queued
+        # candidate is traced as launched by a grant, which only
+        # `pollInlineRunQuotaGrants` emits.
+        if not run.hasTrace("launched", "runquota-grant"):
+          echo "[", lp.name,
+            "] no queued-then-granted launch was observed; the ",
+            "deferred spawn site was NOT exercised by this run"
+        check run.hasTrace("launched", "runquota-grant")
+
+        for i in 0 .. 1:
+          let res = run.resultById("queued-" & $i)
+          checkTookLaunchPath(lp, run, res, cacheRoot)
+          checkMonitoredEvidence(res,
+            expandFilename(workRoot / ("marker-" & $i & ".txt")),
+            lp.name & " #" & $i)
+          recordedEvidence.add (lp.name & " #" & $i,
+            res.evidenceShape(caseSubstitutions(tempRoot, caseDir,
+              workRoot, workRoot / ("marker-" & $i & ".txt"),
+              workRoot / ("out-" & $i & ".txt"))))
+      else:
+        let marker = workRoot / "marker.txt"
+        writeFile(marker, "hm4 marker payload\n")
+        let act = monitoredFixtureAction("monitored-" & $ord(lp.kind),
+          fixtureBin, marker, workRoot / "out.txt", workRoot,
+          holdMs = 0, cpuMilli = 100'u32)
+        let run = runBuild(graph([act]), config)
+        check run.results.len == 1
+        let res = run.results[0]
+        checkTookLaunchPath(lp, run, res, cacheRoot)
+        checkMonitoredEvidence(res, expandFilename(marker), lp.name)
+        recordedEvidence.add (lp.name,
+          res.evidenceShape(caseSubstitutions(tempRoot, caseDir,
+            workRoot, marker, workRoot / "out.txt")))
+
+      # RECORDED LAST, AND THE POSITION IS THE ASSERTION. Recording it
+      # on ENTRY would only prove the body STARTED: a case that
+      # returned early, or whose exception a ``try`` swallowed, would
+      # still count itself, run ZERO of the checks above, and report
+      # ``[OK]`` — the vacuous-case shape, wearing this case's
+      # approval. Both were tried against the entry-recording version
+      # and both passed it. Recorded here, after the last assertion,
+      # the set means "this path ran to the end of its checks", which
+      # is the property the case below claims.
+      executedPaths.incl lp.kind
 
     ## The monitored launch paths, parameterised over the enumeration.
     ## Looping over ``EnumeratedLaunchPaths`` rather than hand-copying a
@@ -2516,6 +2656,7 @@ suite "every_launch_path_is_monitored":
     for launchPath in EnumeratedLaunchPaths:
       let lp = launchPath
       test "monitored evidence is complete via " & lp.name:
+        ensureFixture()
         if lp.needsRunQuota and runQuotaError.len > 0:
           # A FAILURE, NOT A SKIP, and the distinction is the whole point.
           #
@@ -2538,73 +2679,10 @@ suite "every_launch_path_is_monitored":
             "Fix the fixture; do not skip the case."
           check runQuotaError.len == 0
         else:
-          let caseDir = tempRoot / ("case-" & $ord(lp.kind))
-          let workRoot = caseDir / "work"
-          createDir(workRoot)
-          let cacheRoot = caseDir / ".repro-cache"
-          let config = configFor(lp, repoRoot, cacheRoot)
-
-          if lp.kind == lpInlineRunQuotaQueued:
-            # Two actions, 800 cpu-milli each against a 1000-milli host:
-            # the batch offer grants one and QUEUES the other, so the
-            # queued one is spawned from the deferred site (:5528)
-            # instead of from the batch flush.
-            var actions: seq[BuildAction] = @[]
-            for i in 0 .. 1:
-              let marker = workRoot / ("marker-" & $i & ".txt")
-              writeFile(marker, "hm4 marker payload " & $i & "\n")
-              actions.add monitoredFixtureAction("queued-" & $i, fixtureBin,
-                marker, workRoot / ("out-" & $i & ".txt"), workRoot,
-                holdMs = 400, cpuMilli = 800'u32)
-            let run = runBuild(graph(actions), config)
-            check run.results.len == 2
-
-            # The deferred site really was exercised: the queued
-            # candidate is traced as launched by a grant, which only
-            # `pollInlineRunQuotaGrants` emits.
-            if not run.hasTrace("launched", "runquota-grant"):
-              echo "[", lp.name,
-                "] no queued-then-granted launch was observed; the ",
-                "deferred spawn site was NOT exercised by this run"
-            check run.hasTrace("launched", "runquota-grant")
-
-            for i in 0 .. 1:
-              let res = run.resultById("queued-" & $i)
-              checkTookLaunchPath(lp, run, res, cacheRoot)
-              checkMonitoredEvidence(res,
-                expandFilename(workRoot / ("marker-" & $i & ".txt")),
-                lp.name & " #" & $i)
-              recordedEvidence.add (lp.name & " #" & $i,
-                res.evidenceShape(caseSubstitutions(tempRoot, caseDir,
-                  workRoot, workRoot / ("marker-" & $i & ".txt"),
-                  workRoot / ("out-" & $i & ".txt"))))
-          else:
-            let marker = workRoot / "marker.txt"
-            writeFile(marker, "hm4 marker payload\n")
-            let act = monitoredFixtureAction("monitored-" & $ord(lp.kind),
-              fixtureBin, marker, workRoot / "out.txt", workRoot,
-              holdMs = 0, cpuMilli = 100'u32)
-            let run = runBuild(graph([act]), config)
-            check run.results.len == 1
-            let res = run.results[0]
-            checkTookLaunchPath(lp, run, res, cacheRoot)
-            checkMonitoredEvidence(res, expandFilename(marker), lp.name)
-            recordedEvidence.add (lp.name,
-              res.evidenceShape(caseSubstitutions(tempRoot, caseDir,
-                workRoot, marker, workRoot / "out.txt")))
-
-          # RECORDED LAST, AND THE POSITION IS THE ASSERTION. Recording it
-          # on ENTRY would only prove the body STARTED: a case that
-          # returned early, or whose exception a ``try`` swallowed, would
-          # still count itself, run ZERO of the checks above, and report
-          # ``[OK]`` — the vacuous-case shape, wearing this case's
-          # approval. Both were tried against the entry-recording version
-          # and both passed it. Recorded here, after the last assertion,
-          # the set means "this path ran to the end of its checks", which
-          # is the property the case below claims.
-          executedPaths.incl lp.kind
+          driveLaunchPath(lp)
 
     test "explicit bypass is honored even with a reachable private authority":
+      ensureFixture()
       require runQuotaError.len == 0
       let workRoot = tempRoot / "explicit-bypass"
       let cacheRoot = workRoot / "cache"
@@ -2648,6 +2726,18 @@ suite "every_launch_path_is_monitored":
       ## swallowed exception, or a row quietly dropped from the loop all
       ## redden HERE with the missing paths named, even if every case
       ## that did run passed.
+      ##
+      ## SELF-CONTAINED: the set is reset and every path is driven again
+      ## here, so the verdict does not depend on which other cases ran in
+      ## this process. A path that needs RunQuota is not driven when the
+      ## fixture did not come up, and is then reported missing below.
+      ensureFixture()
+      executedPaths.clear()
+      recordedEvidence.setLen(0)
+      for lp in EnumeratedLaunchPaths:
+        if lp.needsRunQuota and runQuotaError.len > 0:
+          continue
+        driveLaunchPath(lp)
       var missing: seq[string] = @[]
       for lp in EnumeratedLaunchPaths:
         if lp.kind notin executedPaths:
@@ -2680,6 +2770,7 @@ suite "every_launch_path_is_monitored":
       ## does not. Second, it is a baseline: a change to how the monitor
       ## is hosted has to reproduce this exact shape, and that is only a
       ## usable comparison if the shape was recorded before the change.
+      ensureFixture()
       if runQuotaError.len > 0:
         # Not a skip, for the reason spelled out on the per-path cases:
         # this comparison is the only place the two HOSTING MECHANISMS
@@ -2690,6 +2781,13 @@ suite "every_launch_path_is_monitored":
           "L2/L3/L3b, and the fixture did not come up: ", runQuotaError
         check runQuotaError.len == 0
       else:
+        # SELF-CONTAINED, for the same reason as the case above: record the
+        # five actions afresh in this process rather than reading what the
+        # per-path cases left behind.
+        executedPaths.clear()
+        recordedEvidence.setLen(0)
+        for lp in EnumeratedLaunchPaths:
+          driveLaunchPath(lp)
         # Five actions across the four paths, all recorded.
         check recordedEvidence.len == 5
 
@@ -3072,6 +3170,7 @@ suite "every_launch_path_is_monitored":
       ##
       ## NO MOCKS: two real builds through the real engine, and one real
       ## `repro` subprocess. The oracle is a file the monitored child wrote.
+      ensureFixture()
       const EngineRequest =
         "file-reads,path-probes,file-writes,proc,lib,env,entropy,ambient," &
         "legacy-padding,file,nondet,ipc"
@@ -3203,6 +3302,7 @@ suite "every_launch_path_is_monitored":
         "\"--interest\", interestToTokens(") == 1
 
     test "teardown":
+      ensureFixture()
       daemon.stop()
       check existsEnv("RUNQUOTA_SOCKET") == daemon.hadSocket
       check getEnv("RUNQUOTA_SOCKET") == daemon.previousSocket

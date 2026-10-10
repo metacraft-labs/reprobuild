@@ -25,8 +25,10 @@ import std/[os, strutils, unittest]
 import repro_build_engine
 import repro_hash
 import repro_local_store
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/test_no_progress_diagnostic"
+let TmpDir = "build/test-tmp/test_no_progress_diagnostic" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):
