@@ -161,7 +161,11 @@ suite "Bootstrap-And-Self-Build B3: test template emits two edges":
         if exitCode != 0:
           checkpoint(output)
         check exitCode == 0
-        check graph != nil
+        # NOT ``check graph != nil``: on failure ``check`` stringifies its
+        # operands, and ``$`` on a nil ``JsonNode`` segfaults, so a failed
+        # ``repro graph`` killed this case (SIGSEGV, no result document)
+        # instead of reporting the graph error checkpointed above.
+        check not graph.isNil
 
         var sawBuild = false
         var sawExecute = false
