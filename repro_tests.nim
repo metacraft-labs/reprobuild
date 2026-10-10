@@ -468,6 +468,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_directory_listing_above_outputs_is_the_graph_view.nim",
+    binary: "build/test-bin/t_directory_listing_above_outputs_is_the_graph_view",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
     binary: "build/test-bin/t_endpoint_daemon_trust",
     defines: @[],

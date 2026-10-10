@@ -32,7 +32,7 @@
 ## Pure over strings and the filesystem: the engine adapts its own action and
 ## evidence types to these procs, which keeps this module testable alone.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, options, os, strutils]
 
 from repro_core/paths import extendedPath
 
@@ -125,8 +125,10 @@ type
 const
   WeakDomain = "reprobuild.portable.weak.v2"
   StrongDomain = "reprobuild.portable.strong.v1"
-  ProbePresent = "present"
-  ProbeAbsent = "absent"
+  ProbePresent* = "present"
+    ## The identity of a PROBE whose target exists.
+  ProbeAbsent* = "absent"
+    ## The identity of a PROBE whose target does not exist.
 
 proc normalizeForCompare(path: string): string =
   ## Separator-normalized, and case-folded on Windows where the filesystem is
@@ -417,6 +419,15 @@ proc portableStrongFingerprint*(weakHex: string;
     payload.add(frame(input.digest))
   blake3.digest(payload).toHex()
 
+type
+  PhysicalIdentity* = proc (physical: string;
+                            kind: PortableInputKind): Option[string] {.closure.}
+    ## Supplies the identity of an observed access to a physical path in
+    ## place of the one read from disk; `none` keeps the disk's. The engine
+    ## uses it for directories above build-graph outputs, whose listing on
+    ## disk depends on which OTHER actions have run here (the graph view the
+    ## lookup side computes too).
+
 proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  argv: openArray[string]; cwd: string;
                                  env: openArray[(string, string)];
@@ -424,11 +435,14 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  reads, probes, enumerations:
                                    openArray[string];
                                  staticFields: openArray[string] = [];
-                                 observedEnv: openArray[ObservedEnv] = []):
+                                 observedEnv: openArray[ObservedEnv] = [];
+                                 identify: PhysicalIdentity = nil):
     PortableFingerprint =
   ## Everything at once. Deduplicates each observation class by logical path
   ## (the monitor reports repeats), drops untracked accesses, and marks the
   ## action not portable at the first access under no known root.
+  ## `identify`, when given, overrides the on-disk identity of a tracked
+  ## access (see `PhysicalIdentity`).
   result.portable = true
   result.weakHex = portableWeakFingerprint(roots, argv, cwd, env,
     declaredInputs, staticFields)
@@ -482,8 +496,11 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
       let key = $ord(inputKind) & "|" & render(logical)
       if key notin seen:
         seen.add(key)
+        let given =
+          if identify != nil: identify(physical, inputKind)
+          else: none(string)
         result.inputs.add(PortableInput(kind: inputKind, path: render(logical),
-          digest: identity))
+          digest: (if given.isSome: given.get() else: identity)))
   for path in reads:
     consider(path, pikRead, readIdentity(path))
   for path in probes:
