@@ -78,9 +78,31 @@ type
     status: string
     ready: bool
 
+  DevSessionReadyBudget* = object
+    ## How long ``repro up`` / ``repro dev`` will wait for the session it
+    ## detached to report ``session.up``, and WHERE that number came from.
+    ## The provenance travels with the number because the diagnostic has to
+    ## name it: a wait the user asked for and a wait the tool derived are
+    ## different failures with different remedies.
+    timeoutMs*: int
+    explicit*: bool       ## true when ``--ready-timeout`` set ``timeoutMs``.
+    derivedMs*: int       ## what the declared services derive, always.
+
+  DevSessionStillStartingError* = object of CatchableError
+    ## The wait expired while the session was still coming up. Distinct from
+    ## ``IOError`` ON PURPOSE: the session is alive and may well be up by the
+    ## time anyone reads the message, so the caller maps this to its own exit
+    ## code rather than to the one it uses for a session that cannot start.
+    ## See the exit-code comment in ``runUpOrDevCommand``.
+
   SessionState = object
     schemaId: string
     sessionId: string
+    failure: string
+      ## Set when the session could not bring its services up, and published
+      ## in ``session.json`` so the PARENT can read a terminal failure
+      ## instead of inferring one from the clock. Empty on every healthy
+      ## session.
     mode: DevSessionMode
     projectRoot: string
     artifactPath: string
@@ -102,6 +124,43 @@ type
       ## ``DevSessionProducerOpsResolver``.
 
 const
+  DefaultServiceReadinessTimeoutMs* = 5000
+    ## The readiness timeout a service that declares none is supervised
+    ## under. ``serviceSpecFromSummary`` applies it, and
+    ## ``declaredReadinessTimeoutMs`` re-reads it, so the parent's derived
+    ## wait and the supervisor's own per-service wait cannot drift apart by
+    ## disagreeing about the default.
+
+  DevSessionReadyMarginMs* = 10_000
+    ## Added ONCE to the sum of the declared service readiness timeouts to
+    ## get the parent's wait. It pays for the work the supervisor does that
+    ## no service declares: its own process spawn, its re-read of the
+    ## artifact, the control-API child's bind + ``http-ready.json`` publish
+    ## (which the supervisor itself allows 5000 ms for, in
+    ## ``runDevSessionSupervisor``), resource reconciliation, and the
+    ## parent's own 50 ms poll granularity.
+    ##
+    ## 10_000 is twice the only part of that with a declared bound, which is
+    ## the honest way to pick it: the margin's job is to absorb the
+    ## supervisor's fixed overhead on a loaded host, and the one piece of
+    ## that overhead anyone has put a number on is the 5000 ms control-API
+    ## wait. It is deliberately NOT proportional to the declared timeouts --
+    ## a stack that declares 600 s does not take proportionally longer to
+    ## fork a process -- and it is deliberately not smaller: an empty
+    ## service set derives exactly this value, which is the ten seconds
+    ## ``repro up`` waited before it derived anything at all, so a session
+    ## with no services keeps the wait it always had.
+
+  DevSessionControlApiTimeoutMs* = 30_000
+    ## A separate, SHORTER bound on the first phase of the parent's wait:
+    ## the appearance of ``http-ready.json``. That file is written by the
+    ## control-API child within milliseconds of the supervisor starting, so
+    ## its absence is evidence the supervisor did not start -- a "cannot
+    ## start", not a "still starting". Keeping it out of the derived budget
+    ## is what stops a stack that declares 600 s from spending ten minutes
+    ## discovering that its supervisor died at once. Capped by the budget,
+    ## so an explicit ``--ready-timeout`` smaller than this still wins.
+
   SessionSchemaId = "reprobuild.dev-session.v1"
   EventSchemaId = "reprobuild.dev-session.event.v1"
   HttpReadyFile = "http-ready.json"
@@ -220,6 +279,7 @@ proc stateJson(state: SessionState): JsonNode =
     "metadataPath": state.metadataPath,
     "httpBind": state.httpBind,
     "status": state.status,
+    "failure": state.failure,
     "supervisorPid": getCurrentProcessId(),
     "resources": state.resourcesJson(),
     "services": state.servicesJson(),
@@ -293,7 +353,7 @@ proc serviceSpecFromSummary(projectRoot: string;
                             service: DevEnvServiceSummary): ServiceSpec =
   result.name = service.name
   result.readinessKind = "none"
-  result.readinessTimeoutMs = 5000
+  result.readinessTimeoutMs = DefaultServiceReadinessTimeoutMs
   let text = service.metadataText.strip()
   if text.len == 0:
     raise newException(ValueError,
@@ -316,7 +376,8 @@ proc serviceSpecFromSummary(projectRoot: string;
     if result.readinessPath.len > 0 and not result.readinessPath.isAbsolute:
       result.readinessPath = projectRoot / result.readinessPath
     result.readinessUrl = readiness{"url"}.getStr("")
-    result.readinessTimeoutMs = readiness{"timeoutMs"}.getInt(5000)
+    result.readinessTimeoutMs = readiness{"timeoutMs"}.getInt(
+      DefaultServiceReadinessTimeoutMs)
   if metadata.hasKey("resources") and metadata["resources"].kind == JArray:
     for item in metadata["resources"]:
       if item.kind != JObject:
@@ -428,6 +489,143 @@ proc httpGetJson*(httpBindValue, path: string): JsonNode =
 proc readyPath(config: DevSessionSupervisorConfig): string =
   config.outDir.sessionDir / HttpReadyFile
 
+proc discardStaleControlApiBind*(config: DevSessionSupervisorConfig) =
+  ## Delete this session directory's ``http-ready.json`` BEFORE a supervisor
+  ## is started in it, so that nothing can read a previous session's bind
+  ## address out of it.
+  ##
+  ## That file is published by the control-API child and was never
+  ## invalidated by anything: ``repro down`` leaves it, a killed supervisor
+  ## leaves it, and the next ``repro up`` in the same directory therefore
+  ## finds a file naming a port that closed when the last session ended.
+  ## TWO readers take that bind at face value, which is why this has to
+  ## happen before the launch rather than inside either of them:
+  ##
+  ## * ``runDevSessionSupervisor``'s own ``waitForReadyFile`` checks for the
+  ##   file BEFORE sleeping, so a leftover file is returned on the first
+  ##   check -- every time, not as a race -- and the supervisor publishes
+  ##   that dead address as its own ``httpBind`` in ``session.json``. That
+  ##   is the address ``repro up`` prints and the address ``repro down``
+  ##   later tries to POST to.
+  ## * ``waitForDevSessionReady``'s phase 1 does the same, so the parent
+  ##   polls a closed port for its whole budget.
+  ##
+  ## Removing the file makes both of them wait for the bind THIS session's
+  ## control API publishes. Nothing else reads it: ``repro down`` takes its
+  ## ``httpBind`` from ``session.json``, so removing this file does not take
+  ## a running session's stop path away.
+  try:
+    removeFile(extendedPath(config.readyPath))
+  except OSError, IOError:
+    # Best effort, and the failure is not silent in consequence: if the
+    # stale file survives, the waiters below read a bind that does not
+    # answer and say so rather than returning success.
+    discard
+
+proc declaredReadinessTimeoutMs*(service: DevEnvServiceSummary): int =
+  ## The readiness timeout THIS service declares, read out of the same
+  ## supervisor metadata ``serviceSpecFromSummary`` reads, with the same
+  ## default.
+  ##
+  ## Deliberately LENIENT where that one is strict: metadata this cannot
+  ## parse yields the default rather than an exception. Refusing to start a
+  ## session because the number used to SIZE A WAIT could not be read would
+  ## replace a good diagnostic with a bad one -- the supervisor raises the
+  ## real ``ValueError`` for malformed metadata a moment later, and it names
+  ## the service.
+  result = DefaultServiceReadinessTimeoutMs
+  let text = service.metadataText.strip()
+  if text.len == 0:
+    return
+  try:
+    let metadata = parseJson(text)
+    if metadata.hasKey("readiness") and metadata["readiness"].kind == JObject:
+      result = metadata["readiness"]{"timeoutMs"}.getInt(
+        DefaultServiceReadinessTimeoutMs)
+  except CatchableError:
+    discard
+
+proc derivedReadyTimeoutMs*(artifact: DevEnvArtifact): int =
+  ## The parent's wait, DERIVED from the session's declared services rather
+  ## than fixed: the SUM of their declared readiness timeouts plus
+  ## ``DevSessionReadyMarginMs``.
+  ##
+  ## The sum, not the maximum, and that is the point rather than an
+  ## over-estimate. ``runDevSessionSupervisor`` starts services
+  ## SEQUENTIALLY -- ``for spec in specs: state.startService(...)``, and
+  ## ``startService`` blocks in ``spec.waitForReadiness()`` before the next
+  ## one is spawned -- so the supervisor's own worst case before it emits
+  ## ``session.up`` is the sum of what it allows each service. Two services
+  ## declaring 600_000 are supervised for up to 1_200_000 ms between them;
+  ## a parent that waited ``max + margin`` would abandon the second one
+  ## while the supervisor was still legitimately waiting for it, which is
+  ## the same defect this replaces, one service further along. For a
+  ## single-service session, which is every stack named in the issue, sum
+  ## and maximum are the same number.
+  ##
+  ## This is the ceiling the supervisor could reach, not a prediction of
+  ## what a session takes: a healthy stack returns as soon as ``/status``
+  ## says ``up``, so a generous derivation costs nothing on the happy path
+  ## and only ever buys patience on the slow one.
+  var declared = 0
+  for service in artifact.services:
+    declared.inc(service.declaredReadinessTimeoutMs)
+  declared + DevSessionReadyMarginMs
+
+proc derivedReadyTimeoutMs*(config: DevSessionSupervisorConfig): int =
+  ## The same derivation, from the artifact the caller is about to hand the
+  ## supervisor. The declared timeouts ARE available to the parent at this
+  ## point in the flow: ``runUpOrDevCommand`` has just computed the dev-env
+  ## edge and put its ``artifactPath`` on the config, which is the same file
+  ## the supervisor re-reads to build its ``ServiceSpec`` set. No new
+  ## plumbing is needed to see them -- only this read.
+  ##
+  ## An unreadable artifact falls back to the bare margin, which is the ten
+  ## seconds this wait used to be. The supervisor reads the same file and
+  ## will fail with a message that names it, so the fallback only has to
+  ## survive long enough to let that happen.
+  try:
+    derivedReadyTimeoutMs(readDevEnvArtifact(config.artifactPath))
+  except CatchableError:
+    DevSessionReadyMarginMs
+
+proc readyBudget*(config: DevSessionSupervisorConfig; explicitMs: int):
+    DevSessionReadyBudget =
+  ## ``explicitMs`` is ``--ready-timeout`` in milliseconds, or 0 when the
+  ## user did not pass it.
+  ##
+  ## An explicit value WINS, including when it is smaller than a declared
+  ## service timeout. That is not an oversight to be corrected by clamping
+  ## it up to the declared value: a caller that says "do not block me for
+  ## more than two seconds" is asking about ITS OWN patience, not making a
+  ## claim about the service, and a CI step that must not hang has no other
+  ## way to say so. What the tool owes that caller is not obedience plus
+  ## silence but obedience plus attribution -- so ``explicit`` is recorded
+  ## here and the diagnostic says the wait was theirs, and names what the
+  ## services would have been given, so nobody mistakes a short wait for a
+  ## slow stack.
+  let derived = config.derivedReadyTimeoutMs()
+  if explicitMs > 0:
+    DevSessionReadyBudget(timeoutMs: explicitMs, explicit: true,
+      derivedMs: derived)
+  else:
+    DevSessionReadyBudget(timeoutMs: derived, explicit: false,
+      derivedMs: derived)
+
+proc describe*(budget: DevSessionReadyBudget): string =
+  ## One clause naming the wait and whose it is, for the announcement the
+  ## parent prints BEFORE waiting and for the diagnostic it prints if the
+  ## wait expires. Both read from this one proc so they cannot disagree.
+  if budget.explicit:
+    $budget.timeoutMs & " ms (--ready-timeout; the declared service " &
+      "readiness timeouts would derive " & $budget.derivedMs & " ms)"
+  else:
+    $budget.timeoutMs & " ms (derived: " &
+      $(budget.derivedMs - DevSessionReadyMarginMs) &
+      " ms of declared service readiness timeouts + " &
+      $DevSessionReadyMarginMs & " ms margin; override with " &
+      "--ready-timeout=MS)"
+
 proc waitForReadyFile(path: string; timeoutMs = 5000): JsonNode =
   var waited = 0
   while waited <= timeoutMs:
@@ -438,22 +636,197 @@ proc waitForReadyFile(path: string; timeoutMs = 5000): JsonNode =
   raise newException(IOError,
     "dev session HTTP server did not become ready: " & path)
 
+proc eventLogHint(config: DevSessionSupervisorConfig): string =
+  "  per-service state: " & (config.outDir.sessionDir / EventLogFile)
+
+proc controlApiStatus(httpBindValue: string): JsonNode =
+  ## The session's published state, read ONLY through the live control API.
+  ## ``nil`` when the API does not answer.
+  ##
+  ## THERE WAS A ``session.json`` FALLBACK HERE AND IT IS DELETED, because
+  ## reading ``up`` out of the file turned a loud failure into a silent
+  ## success. ``repro up`` in a directory that still carried a previous
+  ## session's ``http-ready.json`` polled a closed port, fell through to the
+  ## file, found ``"status": "up"`` -- written either by the session that had
+  ## already ended or by the one just starting -- and exited 0 while
+  ## printing an address nothing was listening on. Exit 0 is reserved for "a
+  ## script may now use these services" (see
+  ## ``DevSessionStillStartingExitCode``), so a fallback that can satisfy it
+  ## from a stale file is worse than no fallback.
+  ##
+  ## The justification the fallback carried -- "a supervisor that died
+  ## without publishing a terminal status leaves the file as the only
+  ## witness" -- does not survive contact with the other half of this
+  ## module: the control API is a separate child that OUTLIVES the
+  ## supervisor (``runDevSessionSupervisor``'s own comment records it
+  ## answering ``starting`` forever after the supervisor exited), and it
+  ## serves ``/status`` by reading that very ``session.json``. So in the
+  ## never-ready case the API serves the ``failed`` status the supervisor
+  ## published, and the file reaches the parent anyway -- through a reader
+  ## whose answer also proves someone is still there to answer.
+  ##
+  ## What the file can still witness that the API cannot is a session whose
+  ## control API has ALSO died. No case in this suite exercises that, and an
+  ## untested branch that can convert a failure into a success does not earn
+  ## its place, so it is gone; ``waitForDevSessionReady`` now reports that
+  ## situation as what it is -- nothing answered -- instead of guessing from
+  ## a file.
+  try:
+    httpGetJson(httpBindValue, "/status")
+  except CatchableError:
+    nil
+
 proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
-                             timeoutMs = 10000): JsonNode =
-  let ready = waitForReadyFile(config.readyPath, timeoutMs)
-  let httpBindValue = ready["httpBind"].getStr()
-  var waited = 0
-  while waited <= timeoutMs:
-    try:
-      let status = httpGetJson(httpBindValue, "/status")
-      if status{"status"}.getStr() == "up":
-        return status
-    except CatchableError:
-      discard
+                             budget: DevSessionReadyBudget): JsonNode =
+  ## Wait for the session the caller detached to report ``session.up``, and
+  ## report THREE outcomes rather than two.
+  ##
+  ## ``budget`` has NO DEFAULT, on purpose. The defect this replaces was a
+  ## ``timeoutMs = 10000`` default that every call site accepted without
+  ## saying so, while each service declared its own readiness timeout --
+  ## 600_000 for ``infra``'s ``sso``, 300_000 for
+  ## ``isonim-platform``'s ``isonim-local-stack`` -- which the supervisor
+  ## honoured and this proc ignored, so a healthy session was reported as an
+  ## error. A parameter with no default cannot be accepted silently; it has
+  ## to be computed by ``readyBudget`` at a call site, which is where the
+  ## declared timeouts are visible.
+  ##
+  ## The three outcomes:
+  ##
+  ## * the session reported ``up`` -- returns its published state.
+  ## * the session reported a TERMINAL failure (``status == "failed"``, or
+  ##   its control API never appeared) -- raises ``IOError``. This is
+  ##   "cannot start", and it is raised AS SOON AS the supervisor says so
+  ##   rather than when the clock runs out, so a service that declares
+  ##   600_000 ms and fails in two seconds fails in two seconds.
+  ## * the budget expired with the session still coming up -- raises
+  ##   ``DevSessionStillStartingError``. Nothing here stops the supervisor,
+  ##   so the session is left as it was, and the message says what this
+  ##   proc actually OBSERVED about it -- which is not always "it is
+  ##   running": see the three arms where that exception is built.
+  let started = epochTime()
+  let budgetSeconds = budget.timeoutMs.float / 1000.0
+  let deadline = started + budgetSeconds
+  let readyFile = config.readyPath
+
+  # Phase 1 -- the control API's ``http-ready.json``. Bounded by
+  # ``DevSessionControlApiTimeoutMs`` AND by the budget, whichever is
+  # sooner; see that constant for why this phase is not given the whole
+  # derived budget.
+  let controlDeadline = min(deadline,
+    started + DevSessionControlApiTimeoutMs.float / 1000.0)
+  while not fileExists(extendedPath(readyFile)):
+    let now = epochTime()
+    if now >= controlDeadline:
+      if now >= deadline:
+        raise newException(DevSessionStillStartingError,
+          "dev session is still starting: its control API had not published " &
+            readyFile & " after the parent waited " &
+            $int((now - started) * 1000.0) & " ms\n" &
+            "  that wait was " & budget.describe() & "\n" &
+            config.eventLogHint() & "\n" &
+            "  the session was left running: `repro down` stops it, and a " &
+            "second `repro up` would contend with it")
+      raise newException(IOError,
+        "dev session cannot start: its supervisor did not publish a control " &
+          "API within " & $DevSessionControlApiTimeoutMs & " ms (" &
+          readyFile & " was never written)\n" &
+          "  supervisor output: " &
+          (config.outDir.sessionDir / "supervisor.log"))
     sleep(50)
-    waited.inc(50)
-  raise newException(IOError,
-    "dev session metadata did not become queryable at " & httpBindValue)
+  let httpBindValue = readJsonFileResilient(readyFile){"httpBind"}.getStr()
+
+  # Phase 2 -- the session's own status, read only from the live control
+  # API. ``statusReads`` and ``lastStatus`` exist to BOUND WHAT THE
+  # DIAGNOSTIC MAY ASSERT: see the end of this proc.
+  var statusReads = 0
+  var lastStatus = ""
+  var sessionId = ""
+  while true:
+    let status = controlApiStatus(httpBindValue)
+    if not status.isNil:
+      statusReads.inc
+      let reported = status{"status"}.getStr("")
+      if reported.len > 0:
+        lastStatus = reported
+      if status{"sessionId"}.getStr().len > 0:
+        sessionId = status{"sessionId"}.getStr()
+      if lastStatus == "up":
+        return status
+      if lastStatus == "failed":
+        let failure = status{"failure"}.getStr("a service failed to start")
+        # The waited figure is in the message so the BOUND is observable
+        # from outside: this arm exists to fail when the supervisor says
+        # so rather than when the budget runs out, and a reader (or a
+        # test) can only tell those apart if the number is published.
+        raise newException(IOError,
+          "dev session cannot start: " & failure & "\n" &
+            "  the supervisor reported that after the parent waited " &
+            $int((epochTime() - started) * 1000.0) & " ms of the " &
+            $budget.timeoutMs & " ms allowed\n" &
+            config.eventLogHint())
+    if epochTime() >= deadline:
+      break
+    sleep(50)
+  let waitedMs = int((epochTime() - started) * 1000.0)
+
+  # WHAT THIS MESSAGE MAY ASSERT IS BOUNDED BY WHAT THE LOOP OBSERVED, and
+  # the three arms below are the three things the loop can have seen. The
+  # version this replaces had one arm and asserted two facts it had not
+  # established: that the session "reported `starting`" -- which was merely
+  # the value ``lastStatus`` was INITIALISED to -- and that "its control API
+  # is answering at <addr>", on a run where every single poll had failed and
+  # nothing was listening at that address at all. Measured on a stale
+  # session directory: the port named in the message was closed.
+  #
+  # This matters more here than in most diagnostics, because the whole
+  # reason this wait was rewritten is that the old one misdirected the
+  # reader about WHERE TO LOOK. A message that invents a live control API
+  # sends them to a port instead of to the supervisor log, which is the same
+  # defect in a new place.
+  let headline =
+    if lastStatus.len > 0:
+      "it reported `" & lastStatus & "`, not `session.up`, after the " &
+        "parent waited " & $waitedMs & " ms"
+    elif statusReads > 0:
+      "its control API answered but never published a `status`, after the " &
+        "parent waited " & $waitedMs & " ms"
+    else:
+      "no status was ever read from the control API at " & httpBindValue &
+        " -- every poll failed -- after the parent waited " & $waitedMs &
+        " ms"
+  let evidence =
+    if lastStatus.len > 0:
+      "  its control API is answering at " & httpBindValue &
+        ", so this is a WAIT that expired, not a session that failed"
+    elif statusReads > 0:
+      "  its control API is answering at " & httpBindValue &
+        ", but it has published no `status` for the session, so what the " &
+        "session is doing cannot be told from here"
+    else:
+      "  nothing answered at that address, so this is EITHER a wait that " &
+        "expired or a supervisor whose control API published " &
+        HttpReadyFile & " and then died; the supervisor log is the place " &
+        "to look: " & (config.outDir.sessionDir / "supervisor.log")
+  # The closing line differs for the same reason. "Left running" is a claim
+  # about the session, and in the arm where nothing ever answered there is
+  # no evidence for it. What IS true in every arm is the narrower statement
+  # about this process: it stopped nothing.
+  let disposition =
+    if statusReads > 0:
+      "  the session was left running: `repro down` stops it, and a second " &
+        "`repro up` would contend with it"
+    else:
+      "  this command stopped nothing, so a supervisor may still be " &
+        "running: `repro down` stops it if it is, and a second `repro up` " &
+        "would contend with it if it is"
+  raise newException(DevSessionStillStartingError,
+    "dev session " & (if sessionId.len > 0: sessionId else: "(unnamed)") &
+      " is still starting: " & headline & "\n" &
+      "  that wait was " & budget.describe() & "\n" &
+      evidence & "\n" &
+      config.eventLogHint() & "\n" &
+      disposition)
 
 proc readinessOk(spec: ServiceSpec): bool =
   case spec.readinessKind.normalize()
@@ -528,6 +901,19 @@ proc startService(state: var SessionState;
   state.services[^1] = runtime
   state.writeState()
   state.emitEvent("service.ready", service = spec.name)
+
+proc recordStartFailure(state: var SessionState; service, detail: string) =
+  ## Publish a terminal start failure: ``status: "failed"`` plus the reason
+  ## in ``session.json``, and one event in ``events.jsonl``. Both surfaces,
+  ## because the parent polls the first and a human reads the second.
+  state.status = "failed"
+  state.failure =
+    if service.len > 0: "service " & service & ": " & detail
+    else: detail
+  state.writeState()
+  state.emitEvent(
+    if service.len > 0: "service.failed" else: "session.failed",
+    service = service, detail = detail)
 
 proc stopService(state: var SessionState; index: int) =
   if index < 0 or index >= state.services.len:
@@ -716,18 +1102,47 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   except OSError:
     discard
   state.writeState()
+  # Before the control-API child can publish a bind, the PREVIOUS session's
+  # published bind has to go: ``waitForReadyFile`` below checks for the file
+  # before it sleeps, so a leftover one is what it returns, and this
+  # supervisor would record a closed port as its own ``httpBind``. See
+  # ``discardStaleControlApiBind``. The parent does this too, before it
+  # launches this process, because it reads the same file.
+  config.discardStaleControlApiBind()
   config.startHttpServer()
   let ready = waitForReadyFile(config.readyPath, 5000)
   state.httpBind = ready["httpBind"].getStr()
   state.writeState()
   state.emitEvent("session.created")
 
-  let specs = serviceSpecsFromArtifact(artifact)
-  state.reconcileResources(specs)
+  # A session that cannot bring its services up is a TERMINAL condition, and
+  # until now it was invisible from outside: the exception escaped here, the
+  # supervisor exited, ``session.json`` was left saying ``starting``, and the
+  # control-API child kept answering ``starting`` forever. The only evidence
+  # reaching the parent was the clock -- which cannot tell a service that
+  # will never be ready from one that declared 600_000 ms and means it.
+  # Publishing the failure in ``session.json`` and in ``events.jsonl`` is
+  # what lets ``waitForDevSessionReady`` fail at the moment the supervisor
+  # knows, instead of at the end of its budget.
+  #
+  # The exception is RE-RAISED unchanged: this arm adds a report, it does
+  # not change what a failed start does. In particular it does NOT stop the
+  # services that did start -- that pre-existing leak is untouched here.
+  var specs: seq[ServiceSpec]
+  try:
+    specs = serviceSpecsFromArtifact(artifact)
+    state.reconcileResources(specs)
+  except CatchableError as err:
+    state.recordStartFailure("", err.msg)
+    raise
   state.writeState()
   state.emitEvent("resources.reconciled")
   for spec in specs:
-    state.startService(artifact, artifactPath, spec)
+    try:
+      state.startService(artifact, artifactPath, spec)
+    except CatchableError as err:
+      state.recordStartFailure(spec.name, err.msg)
+      raise
   state.status = "up"
   state.writeState()
   state.emitEvent("session.up")

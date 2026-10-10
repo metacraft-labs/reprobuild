@@ -316,11 +316,11 @@ proc renderUsage*(programName: string): string =
           programName &
       " shell hook bash|zsh|fish|nushell|pwsh [--repro-bin=PATH]\n       " &
           programName &
-      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT]\n       " &
+      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS]\n       " &
           programName &
       " down [selector] [--activity=name] [--force]\n       " &
           programName &
-      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N]\n       " &
+      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS]\n       " &
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n       " &
           programName &
@@ -14881,9 +14881,18 @@ type
     httpBind: string
     debounceMs: int
     force: bool
+    readyTimeoutMs: int
+      ## ``--ready-timeout=MS``, or 0 when the user did not pass it. Reaches
+      ## ``waitForDevSessionReady`` through ``readyBudget``; see
+      ## ``runUpOrDevCommand``.
 
-proc parseDevSessionArgs(args: openArray[string]; commandName: string):
-    ParsedDevSessionCommand =
+proc parseDevSessionArgs(args: openArray[string]; commandName: string;
+                         acceptReadyTimeout: bool): ParsedDevSessionCommand =
+  ## ``acceptReadyTimeout`` has no default because ``down`` must REFUSE
+  ## ``--ready-timeout`` rather than accept and ignore it: ``down`` does not
+  ## wait for readiness, so an accepted flag there would be a flag that
+  ## parses and does nothing, which is the failure mode this campaign keeps
+  ## finding. A new caller has to decide in writing.
   var selection = DevEnvCliSelection()
   result.httpBind = "127.0.0.1:0"
   result.debounceMs = 250
@@ -14907,6 +14916,15 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string):
       result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
       if result.debounceMs < 0:
         raise newException(ValueError, "--debounce-ms must be non-negative")
+    elif arg == "--ready-timeout" or arg.startsWith("--ready-timeout="):
+      if not acceptReadyTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.readyTimeoutMs = parseInt(valueFromFlag(args, i,
+        "--ready-timeout"))
+      if result.readyTimeoutMs <= 0:
+        raise newException(ValueError,
+          "--ready-timeout must be a positive number of milliseconds")
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported " & commandName & " flag: " & arg)
@@ -14984,10 +15002,46 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
       raise newException(OSError,
         "failed to launch dev session supervisor: " & command)
 
+const DevSessionStillStartingExitCode* = 75
+  ## The exit code ``repro up`` / ``repro dev`` returns when its wait expired
+  ## while the session was STILL COMING UP, as opposed to failing to start.
+  ##
+  ## The choice, stated explicitly because the issue turns on it. Three
+  ## outcomes need three codes, and the daemonised default is why:
+  ##
+  ## * ``0`` -- the session is up. Reserved for exactly that. Returning 0
+  ##   for "still starting" was the tempting fix and it is wrong: a script
+  ##   that reads 0 goes on to use the services, and they are not there yet.
+  ## * ``1`` -- the session CANNOT start. Unchanged: every genuine failure
+  ##   to start keeps the code it had, which is what the dispatcher returns
+  ##   for any ``CatchableError`` out of here.
+  ## * ``75`` -- still starting; the session was LEFT RUNNING. A script can
+  ##   now tell this from both of the above, which is the whole complaint in
+  ##   the issue: ``repro up`` used to return the failure code for a session
+  ##   that was about to be fine, so the caller could neither trust success
+  ##   nor act on failure, and a second ``repro up`` would contend with the
+  ##   first. On 75 the correct response is to keep waiting (or to raise
+  ##   ``--ready-timeout``), never to start another session.
+  ##
+  ## 75 is ``EX_TEMPFAIL`` from ``sysexits.h`` -- "the user is invited to
+  ## retry" -- which is as close to this meaning as a conventional code
+  ## gets. It is outside the 1-2 range the rest of the CLI uses for
+  ## refusals, so no existing caller can confuse it with one.
+
 proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
                        mode: DevSessionMode): int =
   let commandName = if mode == dsmDev: "dev" else: "up"
-  var parsed = parseDevSessionArgs(args, commandName)
+  var parsed = parseDevSessionArgs(args, commandName,
+    acceptReadyTimeout = true)
+  if parsed.foreground and parsed.readyTimeoutMs > 0:
+    # Refused rather than ignored. ``--foreground`` runs the supervisor in
+    # this process, so there is no parent wait for ``--ready-timeout`` to
+    # bound -- the flag would parse and do nothing, and the user would
+    # reasonably believe it had taken effect.
+    raise newException(ValueError,
+      "--ready-timeout has no effect with --foreground: a foreground " &
+        "session IS the supervisor, so there is no wait to bound. Drop one " &
+        "of the two flags.")
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
@@ -14997,15 +15051,36 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     # a required parameter precisely so these two arms cannot drift again.
     return runDevSessionSupervisor(config,
       devEnvProducerOpsResolver(parsed.selection.projectRoot))
+  let budget = config.readyBudget(parsed.readyTimeoutMs)
+  # The previous session's published control-API bind is removed BEFORE the
+  # supervisor is launched, so that neither this process's wait nor the
+  # supervisor's own can read a port that closed when the last session
+  # ended. Doing it here rather than only in the supervisor is what closes
+  # the window: the supervisor is a detached child, so between the launch
+  # below and its own removal the file is still on disk and this process is
+  # already polling. See ``discardStaleControlApiBind``.
+  config.discardStaleControlApiBind()
   config.startBackgroundSupervisor()
-  let status = waitForDevSessionReady(config)
+  # Announced BEFORE the wait, and on stderr beside the dev-env
+  # announcement, for two reasons: a `repro up` that sits for minutes should
+  # say what it is waiting for and for how long, and the number it is about
+  # to hold itself to should be visible on the SUCCESS path too -- not only
+  # in the diagnostic nobody sees when things work.
+  stderr.writeLine("repro " & commandName & ": waiting up to " &
+    budget.describe() & " for the session to report `session.up`")
+  let status =
+    try:
+      waitForDevSessionReady(config, budget)
+    except DevSessionStillStartingError as err:
+      stderr.writeLine("repro " & commandName & ": " & err.msg)
+      return DevSessionStillStartingExitCode
   echo "repro " & commandName & ": session " &
     status["sessionId"].getStr() & " " & status["status"].getStr() &
     " " & status["httpBind"].getStr()
   0
 
 proc runDownCommand(args: openArray[string]): int =
-  let parsed = parseDevSessionArgs(args, "down")
+  let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false)
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
     raise newException(IOError,
