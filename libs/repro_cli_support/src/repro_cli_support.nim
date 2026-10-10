@@ -9224,10 +9224,11 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
 
 proc recipeRelativeCompilePossible(recipeDir, consumerRoot: string): bool =
   ## Whether the engine's recipe compiles for the recipe in `recipeDir` can
-  ## run recipe-relative (`extractInterfaceEdge`): POSIX, a recipe that is
-  ## its own consumer root, and a directory that can hold the edge's
-  ## outputs. `REPRO_RECIPE_RELATIVE_COMPILES=0` turns it off, for comparing
-  ## against the location-bound layout.
+  ## run recipe-relative (`extractInterfaceEdge`): POSIX and a recipe that
+  ## is its own consumer root. Nothing is written into the recipe's tree —
+  ## the edge only RUNS there (`recipeCompileOutputDir`).
+  ## `REPRO_RECIPE_RELATIVE_COMPILES=0` turns it off, for comparing against
+  ## the location-bound layout.
   when defined(windows):
     false
   else:
@@ -9237,24 +9238,26 @@ proc recipeRelativeCompilePossible(recipeDir, consumerRoot: string): bool =
         os.normalizedPath(absolutePath(consumerRoot)) !=
           os.normalizedPath(recipeDir):
       return false
-    try:
-      let reproDir = recipeDir / ".repro"
-      if dirExists(extendedPath(reproDir)):
-        createDir(extendedPath(reproDir / "interface"))
-      else:
-        # Creating `.repro` adds an entry to the recipe's ROOT directory,
-        # and a root's mtime is what an editable develop override and an
-        # on-disk sibling fold into their consumers' action keys
-        # (`computeOverrideContentIdentity`, `onDiskSiblingSourceBinding`).
-        # The edge's derived outputs are not an edit of the recipe: keep the
-        # root's mtime, or a consumer's second build would miss on every
-        # action that consumes this recipe as a producer.
-        let rootModified = getLastModificationTime(extendedPath(recipeDir))
-        createDir(extendedPath(reproDir / "interface"))
-        setLastModificationTime(extendedPath(recipeDir), rootModified)
-      true
-    except OSError, IOError:
-      false
+    true
+
+proc recipeCompileOutputDir(kind, identity: string): string =
+  ## Where a recipe-relative compile edge writes its outputs: under the
+  ## action-cache root, beside the records that describe them, in a
+  ## directory named by the edge's location-independent identity.
+  ##
+  ## NOT in the recipe's tree. A metadata operation (`repro lock refresh`)
+  ## must leave no `.repro` in the project, and a develop-override producer
+  ## checkout is the user's source tree. The path depends only on the cache
+  ## root and the identity, so every copy of the recipe that shares the cache
+  ## declares the SAME absolute outputs: the record is that action's own
+  ## (`recordOutputsNotOwnedBy`) at any location, and a hit restores there.
+  ##
+  ## Two computations with one identity (same recipe bytes and variant,
+  ## different sibling or ancestor content) share the directory. Each edge
+  ## holds the directory's lock from execution until the CLI has copied the
+  ## outputs to the caller's own paths (`extractInterfaceEdge`), and a lookup
+  ## whose bytes on disk are another record's restores its own.
+  absolutePath(currentActionCacheRoot() / "recipe-compiles" / kind / identity)
 
 proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
                                     compileCommand: openArray[string] = []):
@@ -9277,6 +9280,9 @@ proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
   let catalog = getEnv("REPROBUILD_PACKAGES_ROOT")
   if catalog.len > 0:
     roots.add(absolutePath(catalog))
+  # The action-cache root holds the edge's own outputs and scratch
+  # (`recipeCompileOutputDir`).
+  roots.add(absolutePath(currentActionCacheRoot()))
   let store = resolveStoreRoot()
   if store.len > 0:
     roots.add(absolutePath(store))
@@ -9396,14 +9402,14 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
   # compiles" (owner decision 2026-10-09): the extraction runs IN the
   # recipe's directory and names everything beside it relative to that
-  # directory — on its argv, in its declared outputs, in its action record
-  # and in the artifact it writes. The same recipe bytes at another path, in
-  # another worktree or under another work root then form the same edge and
-  # are served by one compile. The edge's own outputs therefore live with
-  # the recipe (`.repro/interface/<variant>/`); the caller's artifact and
-  # stub paths receive a rebased copy afterwards. A recipe whose directory
-  # cannot hold them (an immutable store path, whose location is fixed
-  # anyway) keeps the location-bound layout below.
+  # directory — on its argv, in its action record and in the artifact it
+  # writes. The same recipe bytes at another path, in another worktree or
+  # under another work root then form the same edge and are served by one
+  # compile. Its OUTPUTS are not written beside the recipe: they live under
+  # the action-cache root in a directory named by the edge's
+  # location-independent identity (`recipeCompileOutputDir`), so every copy
+  # declares the same outputs and the project tree is never written. The
+  # caller's artifact and stub paths receive a rebased copy afterwards.
   let recipeDir = parentDir(absolutePath(modulePath))
   let relocatable = recipeRelativeCompilePossible(recipeDir, consumerRoot)
   # Only anchors that do not contain the recipe: they are on the argv, and
@@ -9458,10 +9464,15 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     # One directory per extraction VARIANT of this recipe, named by
     # everything that selects the variant, so two variants never write the
     # same outputs.
-    let variant = toHex(weakFingerprintFromText(@[moduleName, workDir,
+    # Named by everything that selects the computation independently of
+    # where the recipe lies — including the recipe's own bytes, so unrelated
+    # recipes never share an output directory.
+    let identity = toHex(weakFingerprintFromText(@[moduleName, workDir,
       helperCliPath].join("\x00") & "\x00" & variantArgs.join("\x00") &
-      "\x00" & anchors.join("\x00") & keySuffix).bytes)[0 .. 15].toLowerAscii
-    let edgeDir = ".repro" / "interface" / variant
+      "\x00" & anchors.join("\x00") & keySuffix & "\x00recipe\x00" &
+      digestHex(blake3DomainDigest(readFile(extendedPath(modulePath)).bytesOf(),
+        hdActionFingerprint))).bytes).toLowerAscii
+    let edgeDir = recipeCompileOutputDir("interface", identity)
     edgeArtifact = edgeDir / "project-interface.rbsz"
     edgeStub = edgeDir / "project-interface.nim"
     edgeCwd = recipeDir
@@ -9478,7 +9489,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     for anchor in anchors:
       command.add("--anchor")
       command.add(anchor)
-    createDir(extendedPath(recipeDir / edgeDir))
+    createDir(extendedPath(edgeDir))
   else:
     edgeArtifact = artifactPath
     edgeStub = stubPath
@@ -9546,7 +9557,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # which live elsewhere and stay recorded.
   var ignoredInputPrefixes: seq[string] = @[]
   if relocatable:
-    ignoredInputPrefixes.add(recipeDir / parentDir(edgeArtifact) / "work")
+    ignoredInputPrefixes.add(parentDir(edgeArtifact) / "work")
   elif scratchDir.len > 0:
     ignoredInputPrefixes.add(absolutePath(scratchDir))
   when defined(windows):
@@ -9580,11 +9591,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     maxParallelism: 1'u32,
     stdoutLimit: 1024 * 1024,
     stderrLimit: 1024 * 1024,
-    # A recipe-relative edge is served at locations that have never held its
-    # outputs, so its record carries their bytes and a hit RESTORES them
-    # there. A location-bound edge keeps them in place.
-    rebuildMissingOutputsOnCacheHit: not relocatable,
-    deferLocalOutputBlobs: not relocatable,
+    # Outputs stay in place, metadata-only records — for the recipe-relative
+    # edge too: its outputs live at ONE path for every copy of the recipe
+    # (`recipeCompileOutputDir`), so a hit at a new location finds them where
+    # the record says and nothing needs restoring. Storing their bytes in the
+    # CAS would also write payloads into a cache configured not to hold any.
+    rebuildMissingOutputsOnCacheHit: true,
+    deferLocalOutputBlobs: true,
     bypassRunQuota: bypassRunQuota,
     fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
     inlineRunQuota: true,
