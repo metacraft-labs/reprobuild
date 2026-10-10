@@ -9,6 +9,17 @@
 ## world still holds it — letting us prove the already-absent no-op and
 ## idempotency non-vacuously.
 ##
+## THE TYPED REAP HANDLER (cases 12-13) is driven with two closures
+## declared in the case bodies. They are NOT doubles of a production
+## handler: they ARE the production shape — a `ReapHandler` is a closure a
+## library supplies, and the two here supply the two answers the contract
+## has (destroyed, and declined). The real one over a real process is
+## `repro_daemon_core/instance_registry`'s, measured against real detached
+## children in
+## `libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim`;
+## what these two cases measure is the SEAM — that a handler is consulted
+## instead of the generic path, and that a decline keeps the record.
+##
 ## SESSION-TRANSPORT NOTE (honest): the reaper's `rtSession` transport
 ## dispatches destroy over the RP provider session via the SAME
 ## `observeViaSession` / `applyViaSession` procs the RP5b integration test
@@ -350,3 +361,213 @@ suite "L3: crash-safe reaper":
     check rc == 0
     check not hasStateRecord(store, "cluster")
     check destroyLog == @["cluster"]
+
+  test "(11) one unreapable record does not abort the sweep; its dependencies are held":
+    ## The defect this case pins: a sweep that RAISES on one record reaps
+    ## NOTHING. The daemon's wall-clock tick hit it on its very first record —
+    ## a `vm_harness.nic` whose attrs marshaller the daemon does not link — on
+    ## every one of 141,895 consecutive attempts over 60 days, and reaped
+    ## nothing, ever (reprobuild-specs/issues/
+    ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md).
+    ##
+    ## The store here is REAL and so is the failure: `orphan` is a genuine
+    ## record written to disk whose `attrsTypeId` has no `registerExtension`
+    ## marshaller in this process, so `reconstructInstance` raises the same
+    ## `KeyError` the live daemon logs. Nothing is stubbed to fail.
+    ##
+    ## Three reapable records, and the reverse-topo order puts the broken one
+    ## FIRST (see below), reproducing the abort exactly:
+    ##
+    ##   cluster  -- reapable, independent      -> MUST be reaped
+    ##   orphan   -- no marshaller, dependsOn base -> unreapable, record kept
+    ##   base     -- reapable, but `orphan` depends on it -> HELD, not destroyed
+    ##
+    ## `base` is held rather than reaped on purpose. `orphan` still exists, in
+    ## the store and possibly in the world, so destroying what it depends on
+    ## would tear a dependency out from under a live dependent — the exact
+    ## thing the reverse-topo order exists to prevent — and would leave
+    ## `orphan.dependsOn` dangling at a removed address.
+    let store = scratchStore("unreapable")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+
+    # Two real, reconstructable stub states, each leased by its own consumer.
+    materialize(store, "cluster", "smoke", delayed(ttl), t0)
+    materialize(store, "base", "basic", delayed(ttl), t0)
+
+    # ...and one record whose attrs typeId has NO registered marshaller. Hand
+    # written because `buildStateRecord` marshals through the registry, which
+    # is precisely the step that cannot happen for such a type. The payload is
+    # opaque bytes: `unmarshalAttrs` refuses on the typeId before reading it.
+    writeStateRecord(store, ResourceStateRecord(
+      address: "orphan",
+      typeId: "l3.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @["base"],
+      identity: "stub:orphan",
+      present: true,
+      holders: initTable[string, Time](),
+      effectiveDeadline: some(t0),
+      lastRenewed: t0))
+
+    # Order check, so this case cannot pass vacuously by reaping `cluster`
+    # before ever reaching the broken record: `reverseTopoOrder` emits
+    # [orphan, cluster, base], so the sweep meets `orphan` FIRST.
+    let selected = selectReapable(listStateRecords(store), later)
+    var order: seq[string] = @[]
+    for rec in reverseTopoOrder(selected): order.add(rec.address)
+    check order == @["orphan", "cluster", "base"]
+
+    let report = reapOnce(store, now = later)
+
+    # The reapable, unrelated record IS reaped — the sweep ran to the end.
+    check "cluster" in destroyLog
+    check not hasStateRecord(store, "cluster")
+    # The broken record is left on disk for a later sweep (in a process that
+    # DOES link the marshaller) to resume. Nothing was destroyed for it.
+    check hasStateRecord(store, "orphan")
+    check "orphan" notin destroyLog
+    # ...and so is its dependency, untouched.
+    check hasStateRecord(store, "base")
+    check "base" notin destroyLog
+    # Exactly one record was reaped, and the other two are NOT reported as
+    # healthy `kept` records: `skipped` means "inspected and correctly kept"
+    # (here, the two never-reap consumer records only). A record the reaper
+    # was asked to destroy and could not must not read as a healthy one.
+    #
+    # Deliberately asserted through the baseline API and the CLI text below
+    # rather than by naming the new report field, so reverting only the
+    # production change reddens this case at RUN time on the behaviour, not at
+    # compile time on a missing symbol.
+    check report.reaped.len == 1
+    check report.reaped[0].address == "cluster"
+    check report.skipped.len == 2
+    for a in @["orphan", "base"]:
+      check a notin report.skipped
+
+    # The `repro reap` CLI seam reports the unreapable records rather than
+    # printing "kept" and exiting 0 — the invisibility that let the daemon
+    # fail for 60 days must not be reproduced at the CLI.
+    let store2 = scratchStore("unreapable-cli")
+    materialize(store2, "cluster", "smoke", delayed(ttl), t0)
+    writeStateRecord(store2, ResourceStateRecord(
+      address: "orphan", typeId: "l3.unregistered",
+      determinism: rdVolatile, attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00", dependsOn: @[],
+      identity: "stub:orphan", present: true,
+      holders: initTable[string, Time](),
+      effectiveDeadline: some(t0), lastRenewed: t0))
+    var lines: seq[string] = @[]
+    let capture = proc (line: string) = lines.add(line)
+    let rc = runReapCli(@["--once", "--state-root=" & store2.root],
+                        now = later, echoLine = capture)
+    # Non-zero: the verb was asked to destroy this state and did not.
+    check rc == 1
+    var named = false
+    var reportedReaped = false
+    for l in lines:
+      if l.contains("orphan") and l.contains("marshaller"): named = true
+      if l == "reaped: 1": reportedReaped = true
+    check named            # the operator is told WHICH record and WHY
+    check reportedReaped   # ...and that the rest of the sweep still ran
+    check not hasStateRecord(store2, "cluster")
+    check hasStateRecord(store2, "orphan")
+
+  test "(12) a typed reap handler is used INSTEAD of the generic path":
+    ## The hook the shared-service instance registry reaches the sweep
+    ## through (`Shared-Development-Services.md` §4.5: "an instance is
+    ## reaped when its last lease lapses"). A `typeId` with a handler is
+    ## never reconstructed, so it needs no attrs marshaller and no
+    ## provider driver — which is the whole point, since the record below
+    ## has neither and case (11) shows what the generic path does with
+    ## one.
+    let store = scratchStore("handler")
+    let t0 = fromUnix(1_700_000_000)
+    var holders = initTable[string, Time]()
+    holders["smoke"] = t0
+    writeStateRecord(store, ResourceStateRecord(
+      address: "handled",
+      typeId: "l3.handled",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.no-such-attrs",
+      attrsJson: "{}",
+      dependsOn: @[], identity: "x", present: true,
+      holders: holders, effectiveDeadline: some(t0), lastRenewed: t0))
+    check reapHandlerFor("l3.handled").isNil
+
+    var handled: seq[string] = @[]
+    registerReapHandler("l3.handled",
+      proc (rec: ResourceStateRecord): ReapHandlerOutcome =
+        handled.add(rec.address)
+        ReapHandlerOutcome(destroyed: true, wasPresent: true,
+          detail: "handled by the typed hook"))
+    check "l3.handled" in registeredReapHandlerIds()
+    let report = reapOnce(store, now = t0 + initDuration(minutes = 1))
+    check handled == @["handled"]
+    check report.reaped.len == 1
+    check report.reaped[0].typeId == "l3.handled"
+    check report.reaped[0].wasPresent
+    check report.failed.len == 0
+    check not hasStateRecord(store, "handled")
+    # The generic driver was never asked, which is what "instead of"
+    # means: `reconstructInstance` would have raised about the missing
+    # marshaller before `observe` was ever reached.
+    check observeLog.len == 0
+
+    unregisterReapHandler("l3.handled")
+    check reapHandlerFor("l3.handled").isNil
+    # A nil handler is a refusal, not a way to clear the slot: reading it
+    # back as "no handler" would silently restore the generic path for a
+    # type that registered precisely to avoid it.
+    expect ValueError:
+      registerReapHandler("l3.handled", nil)
+
+  test "(13) a handler that DECLINES keeps the record and names itself":
+    ## `destroyed = false` is not a quiet success. The record stays, the
+    ## reason lands in `failed` as `rfkUnreapable` exactly as a raise
+    ## would, and the sweep carries on with the rest — the shape a
+    ## process that persists a record it cannot destroy needs. A handler
+    ## that returned "destroyed" on a failed destroy would hand the sweep
+    ## a licence to remove the record of state that still exists.
+    let store = scratchStore("handler-decline")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    materialize(store, "cluster", "smoke", delayed(ttl), t0)
+    let later = t0 + ttl + initDuration(minutes = 1)
+    var holders = initTable[string, Time]()
+    holders["smoke"] = t0
+    writeStateRecord(store, ResourceStateRecord(
+      address: "zz-declined",
+      typeId: "l3.declining",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.no-such-attrs",
+      attrsJson: "{}",
+      dependsOn: @[], identity: "x", present: true,
+      holders: holders, effectiveDeadline: some(t0), lastRenewed: t0))
+    # Reverse-topo puts `zz-declined` FIRST, so a sweep that gave up on a
+    # declining handler would never reach `cluster` and this case could
+    # not pass vacuously.
+    let selected = selectReapable(listStateRecords(store), later)
+    var order: seq[string] = @[]
+    for rec in reverseTopoOrder(selected): order.add(rec.address)
+    check order[0] == "zz-declined"
+
+    registerReapHandler("l3.declining",
+      proc (rec: ResourceStateRecord): ReapHandlerOutcome =
+        ReapHandlerOutcome(destroyed: false, wasPresent: true,
+          detail: "this process cannot destroy `" & rec.address & "`"))
+    let report = reapOnce(store, now = later)
+    unregisterReapHandler("l3.declining")
+
+    check report.failed.len == 1
+    check report.failed[0].address == "zz-declined"
+    check report.failed[0].kind == rfkUnreapable
+    check report.failed[0].reason.contains("cannot destroy")
+    check hasStateRecord(store, "zz-declined")
+    check "zz-declined" notin report.skipped
+    # And the rest of the sweep still happened.
+    check "cluster" in destroyLog
+    check not hasStateRecord(store, "cluster")

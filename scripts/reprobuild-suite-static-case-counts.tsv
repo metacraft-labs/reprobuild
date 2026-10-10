@@ -128,6 +128,7 @@ libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim	nim	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	3
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	13
+libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim	nim	19
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	7
@@ -169,7 +170,7 @@ libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	8
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
 libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	9
-libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	4
+libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	5
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
@@ -520,10 +521,11 @@ libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_l1_state_store.nim	nim	6
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	5
-libs/repro_resources/tests/t_l3_reaper.nim	nim	10
+libs/repro_resources/tests/t_l3_reaper.nim	nim	13
 libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	46
 libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	17
 libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	40
+libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim	nim	31
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4
@@ -1257,6 +1259,7 @@ tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	nim	1
 tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	2
 tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
 tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	3
+tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim	nim	5
 tests/integration/t_leaked_instance_is_reaped.nim	nim	40
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
 tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim	nim	1

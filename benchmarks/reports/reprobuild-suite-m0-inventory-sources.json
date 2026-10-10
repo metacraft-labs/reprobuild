@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1799,
+    "nimTestBinaries": 1802,
     "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 600,
+    "pureUnitTests": 601,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1813
+    "testEntries": 1816
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1098,10 +1098,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 914,
+      "integration": 915,
       "platform/destructive": 117,
-      "pure unit": 600,
-      "unclassified": 170
+      "pure unit": 601,
+      "unclassified": 171
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1249,9 +1249,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1799,
+    "nimTestBinaryCount": 1802,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1813
+    "testEntryCount": 1816
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8525,6 +8525,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l7_shared_instance_declaration_refuses_near_misses",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dev_env_artifacts",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_binding_governs_per_name",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -9275,7 +9295,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_l4_daemon_leases.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15598,7 +15618,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l3_reaper.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15656,6 +15676,26 @@
       "source": "libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim",
       "sourceSuiteCount": 10,
       "staticCaseCount": 40,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_l7_instance_registry_converges_in_any_order",
+      "class": "unclassified",
+      "classificationReason": "imports `osproc`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim",
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28628,6 +28668,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_l7_repro_up_converges_on_one_shared_instance",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

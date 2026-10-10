@@ -45,6 +45,25 @@
 ## dependency order (nics -> containers -> networks) computed from the
 ## persisted `dependsOn` edges of the records being reaped — a dependent is
 ## torn down before the state it depends on.
+##
+## ## A TYPED REAP HANDLER, FOR STATE WHOSE LIFECYCLE IS NOT THE RECONCILER'S
+##
+## `reapRecord` below reconstructs a `ResourceInstance` from the persisted
+## attrs and drives a provider DRIVER over it. That is the right shape for
+## everything the resource lane owns, and the wrong shape for state that is
+## persisted here so that THIS sweep enforces its lease while something
+## else owns its lifecycle. The first real instance is a shared service
+## INSTANCE record (`Shared-Development-Services.md` §4.5), whose destroy
+## is "signal the recorded pid, wait, escalate, and drop the daemon's
+## in-memory registry entry" rather than "ask a driver".
+##
+## So a `typeId` may register a `ReapHandler`: a closure that destroys one
+## record's real-world state and says whether it did. It is consulted
+## BEFORE anything is reconstructed, so a record whose handler is
+## installed needs no attrs marshaller and no provider driver. A handler
+## that DECLINES (`destroyed = false`) leaves the record in place and its
+## reason lands in `failed` exactly as a raise would — see
+## `registerReapHandler`.
 
 import std/[tables, options, sets, algorithm, times, sequtils, os,
   strutils]
@@ -81,10 +100,54 @@ type
     wasPresent*: bool   ## true if `observe` saw it live (a real destroy);
                         ## false = already-absent clean no-op (record still removed)
 
+  ReapFailureKind* = enum
+    ## Why a SELECTED record was not reaped by this sweep.
+    rfkUnreapable   ## attempted; the per-record op RAISED (see `reason`)
+    rfkBlocked      ## NOT attempted: a record that DEPENDS on it is unreapable,
+                    ## so destroying it would break the reverse-topo invariant
+
+  ReapFailure* = object
+    ## One record the sweep SELECTED but could not reap. Deliberately NOT
+    ## folded into `skipped`: `skipped` means "inspected and correctly kept"
+    ## (never-reap / still leased), which is a healthy outcome, while this is
+    ## a record the reaper was asked to destroy and could not. Collapsing the
+    ## two would make a permanently stuck store read as a healthy one.
+    address*: string
+    typeId*: string
+    kind*: ReapFailureKind
+    reason*: string
+      ## `rfkUnreapable`: the raised message. `rfkBlocked`: which unreapable
+      ## dependent is holding this record back.
+
+  ReapHandlerOutcome* = object
+    ## What a typed `ReapHandler` did with one record.
+    ##
+    ## `destroyed = false` is a DECLINE, not a quiet success: the record is
+    ## left in the store and `detail` is reported as an `rfkUnreapable`
+    ## finding. A handler that cannot destroy the state must say so rather
+    ## than let the record be removed, which is how a live process becomes
+    ## one nothing names.
+    destroyed*: bool
+    wasPresent*: bool              ## it existed and this call removed it
+    detail*: string                ## required when `destroyed` is false
+
+  ReapHandler* =
+    proc (rec: ResourceStateRecord): ReapHandlerOutcome {.closure.}
+    ## Destroy ONE record's real-world state, for a `typeId` whose
+    ## lifecycle is not the generic reconciler's.
+
+  ReapDeclinedError* = object of CatchableError
+    ## Raised by `reapRecord` when a typed handler declined. `reapOnce`
+    ## turns it — and every other per-record error — into an
+    ## `rfkUnreapable` `ReapFailure`; it is a distinct type so a caller
+    ## driving `reapRecord` directly can tell a handler's refusal from a
+    ## crash.
+
   ReapReport* = object
     ## The outcome of a sweep.
     reaped*: seq[ReapEvent]        ## destroyed (or already-absent) records removed, in order
     skipped*: seq[string]          ## addresses inspected but kept (still leased / never-reap)
+    failed*: seq[ReapFailure]      ## selected but NOT reaped — see `ReapFailure`
 
 proc inProcessTransport*(): ReapTransport =
   ReapTransport(kind: rtInProcess)
@@ -92,6 +155,57 @@ proc inProcessTransport*(): ReapTransport =
 proc sessionTransport*(resolve: proc (typeId: string): ProviderHandle {.closure.}):
     ReapTransport =
   ReapTransport(kind: rtSession, resolve: resolve)
+
+# ---------------------------------------------------------------------------
+# The typed reap-handler registry — a plain module global, for the reason
+# `instance.nim`'s provider registry is one: the handler must be visible to
+# whatever thread runs a sweep, regardless of which thread registered it.
+# ---------------------------------------------------------------------------
+
+var reapHandlers: Table[string, ReapHandler]
+
+proc registerReapHandler*(typeId: string; handler: ReapHandler) =
+  ## Register (or REPLACE) the typed reap handler for `typeId`.
+  ##
+  ## Replacement is the mechanism, not an accident. A library that
+  ## persists a record whose destroy it cannot itself perform registers a
+  ## DECLINING handler at module init, so the record is named for what it
+  ## is in a process that cannot reap it instead of falling through to the
+  ## generic path and raising about a missing attrs marshaller; the
+  ## process that CAN perform the destroy then replaces it with the real
+  ## one. `repro_resources/service_registry` and
+  ## `repro_daemon_core/instance_registry` are that pair.
+  ##
+  ## A `nil` handler is a REFUSAL rather than a way to clear the slot:
+  ## `reapRecord` would read it as "no handler" and reconstruct the record
+  ## generically, which for a type that registered a handler is precisely
+  ## the path the handler exists to avoid. Use `unregisterReapHandler`.
+  if handler.isNil:
+    raise newException(ValueError,
+      "a reap handler for typeId '" & typeId & "' cannot be nil; to " &
+      "remove one, call unregisterReapHandler(typeId)")
+  reapHandlers[typeId] = handler
+
+proc unregisterReapHandler*(typeId: string) =
+  ## Remove the handler for `typeId`, so records of that type fall back to
+  ## the generic reconstruct/observe/destroy path. Idempotent.
+  reapHandlers.del(typeId)
+
+proc reapHandlerFor*(typeId: string): ReapHandler =
+  ## The handler for `typeId`, or `nil` when there is none. `nil` is the
+  ## ordinary answer here — most types have no handler — which is why this
+  ## does not raise the way `lookupResourceProvider` does.
+  if reapHandlers.hasKey(typeId):
+    reapHandlers[typeId]
+  else:
+    nil
+
+proc registeredReapHandlerIds*(): seq[string] =
+  ## Test seam: every `typeId` with a registered handler, sorted.
+  result = @[]
+  for typeId in reapHandlers.keys:
+    result.add(typeId)
+  result.sort()
 
 # ---------------------------------------------------------------------------
 # Selection predicate.
@@ -212,6 +326,26 @@ proc reapRecord*(store: StateStore; transport: ReapTransport;
   ## present, `apply(rakDestroy)` tears it down. Either way the record is
   ## removed only after the op, so a crash mid-destroy leaves the record for
   ## the next sweep to resume.
+  ##
+  ## A TYPED HANDLER WINS OVER THE GENERIC PATH, and is consulted before
+  ## anything is reconstructed. A record whose `typeId` has one needs no
+  ## attrs marshaller and no provider driver, because nothing generic is
+  ## asked about it; see this module's header for why such a type exists.
+  ## A handler that declines raises `ReapDeclinedError` and the record is
+  ## NOT removed — `reapOnce` records it in `failed` and, as for any other
+  ## unreapable record, HOLDS everything it depends on.
+  let handler = reapHandlerFor(rec.typeId)
+  if not handler.isNil:
+    let outcome = handler(rec)
+    if not outcome.destroyed:
+      raise newException(ReapDeclinedError,
+        "the reap handler for typeId '" & rec.typeId &
+        "' declined to destroy `" & rec.address & "`: " &
+        (if outcome.detail.len > 0: outcome.detail
+         else: "the handler gave no detail, which is itself a defect"))
+    removeStateRecord(store, rec.address)
+    return ReapEvent(address: rec.address, typeId: rec.typeId,
+      wasPresent: outcome.wasPresent)
   let inst = reconstructInstance(rec)
   let observed = observeVia(transport, inst, none(ResourceBinding))
   var wasPresent = false
@@ -242,8 +376,39 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   ## Crash-safe: it relies ONLY on the store, so a partially-reaped group
   ## from a crashed prior run resumes (present records reaped, removed ones
   ## simply absent).
+  ##
+  ## ONE UNHANDLEABLE RECORD MUST NOT ABORT THE SWEEP. `reapRecord` can raise
+  ## for reasons that are properties of ONE record and of this process, not of
+  ## the store: no attrs marshaller registered for its `attrsTypeId`
+  ## (`reconstructInstance`), no in-process driver for its `typeId`
+  ## (`lookupResourceProvider`), a provider session that will not launch, or a
+  ## real provider whose `observe`/`apply` failed. Letting any of those unwind
+  ## the loop means the OTHER records — the ones this process can perfectly
+  ## well reap — are never reached, so the sweep reaps nothing at all and does
+  ## so again on every subsequent tick, forever. That is not hypothetical: the
+  ## daemon's wall-clock tick failed on its first record (a `vm_harness.nic`
+  ## with no linked marshaller) on every one of 141,895 consecutive attempts
+  ## over 60 days and reaped nothing, ever.
+  ##
+  ## So each record is attempted independently and a failure is RECORDED in
+  ## `failed` rather than raised. The record is left in the store (no
+  ## `removeStateRecord` ran), so a later sweep — in a process that does link
+  ## the marshaller, or once the provider is reachable — resumes it. This is
+  ## the same crash-safety contract `reapRecord` already relies on.
+  ##
+  ## …WITHOUT breaking reverse-topo. A record that cannot be reaped still
+  ## EXISTS, both in the store and (maybe) in the world, so destroying what it
+  ## `dependsOn` would tear a dependency out from under a live dependent —
+  ## exactly what the reverse-topo order exists to prevent — and
+  ## `removeStateRecord` would leave the surviving record's `dependsOn`
+  ## dangling at an address that no longer has a record. Every record the
+  ## failed one depends on (transitively, within this reap set) is therefore
+  ## HELD as `rfkBlocked` and left alone. Because the iteration order is
+  ## reverse-topo, a record's dependencies always come AFTER it, so marking
+  ## forward in one pass is sufficient.
   result.reaped = @[]
   result.skipped = @[]
+  result.failed = @[]
 
   var all = listStateRecords(store)
   if onlyAddresses.len > 0:
@@ -258,8 +423,33 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
     if rec.address notin selectedAddrs:
       result.skipped.add(rec.address)
 
-  for rec in reverseTopoOrder(selected):
-    result.reaped.add(reapRecord(store, transport, rec))
+  let ordered = reverseTopoOrder(selected)
+  # Held-back records and, for each, the unreapable dependent responsible —
+  # so the report names the blast radius rather than just its size.
+  var blockedBy = initTable[string, string]()
+
+  proc holdDependencies(rec: ResourceStateRecord; culprit: string) =
+    for dep in rec.dependsOn:
+      if dep in selectedAddrs and dep notin blockedBy:
+        blockedBy[dep] = culprit
+
+  for rec in ordered:
+    if rec.address in blockedBy:
+      result.failed.add(ReapFailure(
+        address: rec.address, typeId: rec.typeId, kind: rfkBlocked,
+        reason: "held: '" & blockedBy[rec.address] &
+          "' depends on it and could not be reaped"))
+      # Propagate the hold down the dependency chain, crediting the record
+      # that actually failed rather than this intermediate one.
+      holdDependencies(rec, blockedBy[rec.address])
+      continue
+    try:
+      result.reaped.add(reapRecord(store, transport, rec))
+    except CatchableError as err:
+      result.failed.add(ReapFailure(
+        address: rec.address, typeId: rec.typeId, kind: rfkUnreapable,
+        reason: err.msg))
+      holdDependencies(rec, rec.address)
 
 # ---------------------------------------------------------------------------
 # Reconcile-start opportunistic hook (§4.3 fallback (a)).
@@ -374,4 +564,14 @@ proc runReapCli*(args: seq[string];
     emit("  - " & ev.address & " (" & ev.typeId & ")" &
          (if ev.wasPresent: "" else: " [already-absent]"))
   emit("kept: " & $report.skipped.len)
-  0
+  # A selected record the sweep could NOT reap is reported, never swallowed:
+  # dropping it here would reproduce, at the CLI, the same invisibility that
+  # let the daemon's tick fail for 60 days unnoticed. It is also why the exit
+  # code is non-zero — `repro reap` was asked to destroy this state and did
+  # not, and an operator (or CI) scripting the verb has to be able to tell.
+  if report.failed.len == 0:
+    return 0
+  emit("unreapable: " & $report.failed.len)
+  for f in report.failed:
+    emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
+  1

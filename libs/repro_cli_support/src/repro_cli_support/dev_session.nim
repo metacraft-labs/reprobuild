@@ -6,6 +6,9 @@ import repro_dev_env_activation
 import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_provider_runtime
+import repro_project_dsl                 # ServiceIdentityDef / ServiceScope
+import repro_resources/service_identity  # the (identity, scope, environment) key
+import repro_resources/service_registry  # the snapshot codec + lease words
 import repro_cli_support/watch
 
 type
@@ -70,6 +73,74 @@ type
     readinessUrl: string
     readinessTimeoutMs: int
     resources: seq[tuple[kind, path: string]]
+
+  SharedServiceInstanceDeclaration* = object
+    ## Shared-Development-Services L7 (§4.5): the dev-session service
+    ## metadata's `instance` block — the declaration that makes a service
+    ## a SHARED INSTANCE held in the daemon's registry rather than a
+    ## process this session owns.
+    ##
+    ## WHY IT ARRIVES THROUGH THE SERVICE METADATA AND NOT THROUGH THE
+    ## TYPED `service` BLOCK, SAID PLAINLY BECAUSE IT IS A LIMITATION AND
+    ## NOT A DESIGN. L1-L6 lowered the typed `service` block's identity
+    ## and scope onto `DslServiceDef`, into the `gnkService` graph node
+    ## (payload v2) and into the interface lift — but NOTHING routes them
+    ## into `DevEnvArtifact.services`, which is the only service channel
+    ## the dev-session supervisor reads. Measured at `478abb590` plus
+    ## this tree: `registeredServices` has exactly ONE non-test caller,
+    ## the graph-fragment emitter
+    ## (`repro_project_dsl/runtime_provider.nim:309`); every other
+    ## reference is a test or this module's own prose.
+    ## `service_identity.nim` does NOT reference it at all — an earlier
+    ## draft of this comment said it did, and that was simply wrong.
+    ##
+    ## The GAP is unchanged by that correction, and it is the gap that
+    ## matters: `DevEnvServiceSummary` carries only `name`,
+    ## `activityRequirements`, `supervisorPlanRef`,
+    ## `hasSupervisorPlanRef` and `metadata`. There is no field an
+    ## identity or a scope could travel in, so no amount of routing on
+    ## the producing side would deliver them — the typed interface has
+    ## to reach the CONSUMING path first. So L7 reads the declaration
+    ## from the channel that exists, and the plumbing is handed on; the
+    ## milestone drawer names which milestone owns it.
+    ##
+    ## THE IDENTITY AND THE SCOPE ARE NOT DECLARED HERE. They are
+    ## declared on the typed `service` block (`identity stable "<id>"` /
+    ## `scope workspace`, which L4 added) and travel through the real
+    ## interface lift, so `repro up` reads them from the lifted row. An
+    ## earlier draft of this block carried them as JSON keys and was
+    ## wrong for a reason worth recording: a recipe would then state its
+    ## identity TWICE, the two statements could disagree, and the one
+    ## that decided which instance a consumer reached would be the JSON
+    ## one — so the `service` block's `identity stable` would become
+    ## decoration. `identity` and `scope` are therefore REFUSED BY NAME
+    ## here, which is the opposite of ignoring them.
+    ##
+    ## Every field is parsed by `parseSharedServiceInstance`, which
+    ## REFUSES an unrecognised key by name rather than ignoring it.
+    declared*: bool
+      ## False when the service metadata carried no `instance` block at
+      ## all, which is the ordinary session-owned service.
+    serviceName*: string
+    environment*: string
+    leaseTtlSeconds*: int64
+      ## The holder's lease policy in the daemon wire encoding (negative
+      ## = `keep`, 0 = `immediate`, positive = `delayed(n)`). Defaults to
+      ## `keep`; see `SharedServiceInstanceDefaultTtlSeconds`.
+      ##
+      ## THE INTERFACE SNAPSHOT IS NOT HERE, and that is deliberate. §4.3
+      ## decides attach-or-refuse on the service's LIFTED interface
+      ## fingerprint, and the honest source of that is the project
+      ## interface artifact `repro up` has already produced
+      ## (`DevEnvEdgeResult.interfacePath`) -- not this metadata blob. A
+      ## snapshot carried here would be a second, author-maintained copy
+      ## of a lift output; a snapshot INVENTED from the argv would warn on
+      ## an implementation-only change, which §4.3 forbids in the one
+      ## control L6's gate names. So `repro up` reads it from the lift by
+      ## the service's name, and a service that declares an `instance`
+      ## but is not in the lift is a named refusal
+      ## (`serviceInterfaceSnapshot` already lists what the lift does
+      ## declare).
 
   ServiceRuntime = object
     spec: ServiceSpec
@@ -390,6 +461,206 @@ proc stringArray(node: JsonNode): seq[string] =
   else:
     return @[]
 
+const
+  SharedServiceInstanceDefaultTtlSeconds* = -1'i64
+    ## D-SS5, DECIDED HERE: a shared development service instance's
+    ## holder takes a `keep` lease by default (`-1` is the wire spelling
+    ## of `keep`).
+    ##
+    ## The open decision asked for "reap semantics for a `stable`,
+    ## state-owning service" and expected `keep`: "`delayed(ttl)` would
+    ## destroy exactly the state `stable` exists to preserve". That is
+    ## the choice taken, and the cost is named rather than hidden: a
+    ## `keep` holder's consumer id is not written into a lease record
+    ## (`mergeHolderDeadlines` drops it), so a daemon restart cannot
+    ## enumerate the holders of an instance held only by `keep` holders,
+    ## and §4.5 rule 1 then REFUSES `--replace` and refuses to decide a
+    ## release. That refusal is the designed behaviour of the default,
+    ## not a surprise: the alternative — a dated default — trades a
+    ## refusal for a reaped database.
+    ##
+    ## A recipe that wants the other trade declares `"lease": "delayed",
+    ## "ttlSeconds": <n>` and gets a holder the rebuild can name.
+
+  SharedServiceInstanceKeys = ["environment", "lease", "ttlSeconds"]
+    ## The complete set of keys `instance` accepts. Enumerated so an
+    ## unrecognised key is a REFUSAL: this campaign's dominant finding is
+    ## "constructs that are declared, look wired, and are silently
+    ## dropped", and a JSON block read with `node{"x"}` accessors drops
+    ## every misspelling in silence. `"schemaid"` / `"Scope"` /
+    ## `"enviroment"` all land here.
+
+proc refuseInstanceDeclaration(serviceName, detail: string) {.noreturn.} =
+  raise newException(ValueError,
+    "service `" & serviceName & "`: the `instance` block of its " &
+    "dev-session metadata " & detail)
+
+proc parseSharedServiceInstance*(serviceName, metadataText: string):
+    SharedServiceInstanceDeclaration =
+  ## Parse the `instance` block out of one service's dev-session
+  ## metadata. ONE implementation, exported, because `repro up`, `repro
+  ## down` and the supervisor all have to agree about which services are
+  ## daemon-owned — three readers of one JSON blob is how they stop
+  ## agreeing.
+  ##
+  ## A service with no `instance` block yields `declared = false` and no
+  ## error: that is every service that existed before L7.
+  result = SharedServiceInstanceDeclaration(serviceName: serviceName,
+    leaseTtlSeconds: SharedServiceInstanceDefaultTtlSeconds)
+  let text = metadataText.strip()
+  if text.len == 0:
+    return
+  let metadata =
+    try:
+      parseJson(text)
+    except CatchableError as err:
+      refuseInstanceDeclaration(serviceName,
+        "could not be read because the metadata is not JSON: " & err.msg)
+  if metadata.kind != JObject:
+    return
+  let node = metadata{"instance"}
+  if node.isNil:
+    return
+  if node.kind != JObject:
+    refuseInstanceDeclaration(serviceName,
+      "must be a JSON object; it is a " & $node.kind &
+      ". A non-object `instance` is refused rather than ignored, " &
+      "because ignoring it would leave the service session-owned while " &
+      "its author believed it was shared.")
+  result.declared = true
+  # `identity` and `scope` are refused BEFORE the generic unknown-key
+  # sweep below, so the message can say where they belong instead of
+  # only that they are not accepted.
+  #
+  # THE ORDER IS LOAD-BEARING AND WAS MEASURED WRONG FIRST. With these
+  # two checks placed after the sweep, the sweep refused them as ordinary
+  # unknown keys and the two specific messages were UNREACHABLE -- a
+  # construct that was declared, looked wired and did nothing, found by
+  # the probe set in
+  # `t_l7_shared_instance_declaration_refuses_near_misses.nim` and not by
+  # reading the code.
+  if node.hasKey("identity"):
+    refuseInstanceDeclaration(serviceName,
+      "declares `identity`. An instance's identity is declared on the " &
+      "typed `service` block -- `identity stable \"<id>\"` " &
+      "(Shared-Development-Services.md §4.2) -- and reaches `repro up` " &
+      "through the interface lift. Declaring it here too would give one " &
+      "service two answers to `are these the same instance?`, and the " &
+      "JSON one would win, which would make the `service` block's " &
+      "declaration decoration.")
+  if node.hasKey("scope"):
+    refuseInstanceDeclaration(serviceName,
+      "declares `scope`. Like the identity, the scope is declared on " &
+      "the typed `service` block (`scope project|workspace|user|" &
+      "system`, §4.1) and read from the lift.")
+  for key in node.keys:
+    if SharedServiceInstanceKeys.find(key) < 0:
+      refuseInstanceDeclaration(serviceName,
+        "carries the key `" & key & "`, which nothing reads. The keys " &
+        "it accepts are " & SharedServiceInstanceKeys.join(", ") &
+        ". Refused rather than ignored: a key that parses and does " &
+        "nothing is the silent drop this campaign exists to find.")
+  let environmentNode = node{"environment"}
+  if not environmentNode.isNil:
+    if environmentNode.kind != JString:
+      refuseInstanceDeclaration(serviceName,
+        "declares `environment` as a " & $environmentNode.kind &
+        "; it must be a string.")
+    result.environment = environmentNode.getStr("").strip()
+  let leaseNode = node{"lease"}
+  if not leaseNode.isNil:
+    if leaseNode.kind != JString:
+      refuseInstanceDeclaration(serviceName,
+        "declares `lease` as a " & $leaseNode.kind &
+        "; it must be one of the words keep, immediate, delayed.")
+    case leaseNode.getStr("").strip()
+    of "keep": result.leaseTtlSeconds = -1'i64
+    of "immediate": result.leaseTtlSeconds = 0'i64
+    of "delayed":
+      let ttl = node{"ttlSeconds"}
+      if ttl.isNil or ttl.kind != JInt or ttl.getBiggestInt(0) <= 0:
+        refuseInstanceDeclaration(serviceName,
+          "declares `lease: \"delayed\"` without a positive " &
+          "`ttlSeconds`. A delayed lease with no ttl is an immediate " &
+          "one wearing the wrong name.")
+      result.leaseTtlSeconds = int64(ttl.getBiggestInt(0))
+    else:
+      refuseInstanceDeclaration(serviceName,
+        "declares `lease: \"" & leaseNode.getStr("") & "\"`, which is " &
+        "not one of keep, immediate, delayed.")
+  if node.hasKey("ttlSeconds") and result.leaseTtlSeconds <= 0:
+    # `ttlSeconds` is read ONLY by `lease: "delayed"`. Anywhere else it
+    # parses, looks effective and is read by nothing -- including beside
+    # an explicit `lease: "keep"`, which is the spelling that slipped
+    # through the first draft of this guard: it checked only for a
+    # MISSING `lease`, so `{"lease":"keep","ttlSeconds":3600}` was
+    # accepted and the number silently ignored. Measured by this
+    # milestone's own probe set, which is the point of having one.
+    refuseInstanceDeclaration(serviceName,
+      "declares `ttlSeconds`, which is read only by `lease: " &
+      "\"delayed\"`. The lease here is " &
+      (if node.hasKey("lease"): "`" & node{"lease"}.getStr("") & "`"
+       else: "the default, `keep`") &
+      ", which has no deadline, so the ttl would be read by nothing.")
+
+proc sharedServiceInstanceOf*(service: DevEnvServiceSummary):
+    SharedServiceInstanceDeclaration =
+  ## The declaration of one dev-env service. The single entry point every
+  ## caller uses, so `repro up`, `repro down` and the supervisor cannot
+  ## read the blob differently.
+  parseSharedServiceInstance(service.name, service.metadataText)
+
+proc sharedServiceInstancesOf*(artifact: DevEnvArtifact):
+    seq[SharedServiceInstanceDeclaration] =
+  ## Every shared-instance declaration in one dev-env artifact, in
+  ## declaration order.
+  result = @[]
+  for service in artifact.services:
+    let declaration = sharedServiceInstanceOf(service)
+    if declaration.declared:
+      result.add(declaration)
+
+proc sharedServiceInstanceKey*(
+    declaration: SharedServiceInstanceDeclaration;
+    projectRoot: string;
+    identity: ServiceIdentityDef;
+    scope: ServiceScope): ServiceInstanceKey =
+  ## The `(identity, scope, environment)` key, through the REAL
+  ## `serviceInstanceKey` over the REAL `discoverServiceScopeContext` —
+  ## so the scope resolution, including its two reported degradations, is
+  ## L4's and not a second copy.
+  ##
+  ## `identity` and `scope` come from the LIFTED service row (see the
+  ## declaration type's note on why they are not in the JSON), and
+  ## `environment` from the declaration. The `DslServiceDef` assembled
+  ## here carries only the fields `serviceIdentity` reads for a
+  ## `sikStable` service: the package and service names, which appear
+  ## only in its refusal message, and the identity itself. That is safe
+  ## ONLY because a `derived` identity is refused by the caller --
+  ## `derivedServiceIdentity` reads `executable`, `args` and the
+  ## rendered outputs, and a dev-session declaration carries none of
+  ## them as outputs. A caller that forgot that refusal would get a
+  ## digest over an empty definition, which every service would share.
+  if identity.kind != sikStable:
+    refuseInstanceDeclaration(declaration.serviceName,
+      "names a service whose declared identity is `derived`. A DERIVED " &
+      "identity is a digest of the service's materialised definition " &
+      "(Shared-Development-Services.md §4.2) -- the executable, the " &
+      "rendered configuration outputs, the arguments -- and `repro up`'s " &
+      "dev-session path has no materialised closure here to digest, so " &
+      "resolving one would invent a second, disagreeing answer to " &
+      "`what is this service's identity`. Declare `identity stable " &
+      "\"<id>\"` on the `service` block, which §4.2 requires of a " &
+      "service that owns durable state anyway.")
+  serviceInstanceKey(
+    DslServiceDef(
+      packageName: "dev-session",
+      serviceName: declaration.serviceName,
+      identity: identity,
+      scope: scope),
+    discoverServiceScopeContext(projectRoot),
+    environment = declaration.environment)
+
 proc serviceSpecFromSummary(projectRoot: string;
                             service: DevEnvServiceSummary): ServiceSpec =
   result.name = service.name
@@ -429,6 +700,21 @@ proc serviceSpecFromSummary(projectRoot: string;
       result.resources.add((kind: item{"kind"}.getStr("directory"),
         path: path))
 
+proc sharedServiceInstanceLaunch*(projectRoot: string;
+    service: DevEnvServiceSummary):
+    tuple[command: seq[string]; workingDir: string] =
+  ## The argv and working directory a shared instance is materialised
+  ## with, read through the SAME `serviceSpecFromSummary` the supervisor
+  ## uses for a session-owned service.
+  ##
+  ## Reused rather than re-parsed so that the command the daemon runs and
+  ## the command the supervisor would have run are the same bytes,
+  ## including the `cwd` resolution against the project root. Two readers
+  ## of `{"command": [...]}` is how an instance gets started with a
+  ## relative path one of them resolved and the other did not.
+  let spec = serviceSpecFromSummary(projectRoot, service)
+  (command: spec.command, workingDir: spec.cwd)
+
 proc serviceIndex(services: openArray[ServiceSpec]; name: string): int =
   for i, service in services:
     if service.name == name:
@@ -462,8 +748,23 @@ proc serviceStartOrder(services: openArray[ServiceSpec]): seq[ServiceSpec] =
     visitService(i, services, temporary, permanent, result)
 
 proc serviceSpecsFromArtifact(artifact: DevEnvArtifact): seq[ServiceSpec] =
+  ## Shared-Development-Services L7 (§4.5): a service that declares an
+  ## `instance` block is NOT started by this session. It is materialised
+  ## once, by the daemon, under its `(identity, scope, environment)` key,
+  ## and this session holds a reference-counted lease on it.
+  ##
+  ## THE SKIP IS HERE, IN THE ONE PLACE THE SPEC LIST IS BUILT, and that
+  ## is deliberate: `serviceSpecsFromArtifact` feeds the start order, the
+  ## readiness budget (`derivedReadyTimeoutMs`), the stop sequence and
+  ## the published session state, so skipping anywhere downstream would
+  ## leave a session waiting for the readiness of a service it never
+  ## started. A session that started its own copy would also defeat the
+  ## whole design: three projects would run three instances while the
+  ## registry recorded one.
   var specs: seq[ServiceSpec] = @[]
   for service in artifact.services:
+    if sharedServiceInstanceOf(service).declared:
+      continue
     specs.add(serviceSpecFromSummary(artifact.projectRoot, service))
   serviceStartOrder(specs)
 
@@ -608,8 +909,20 @@ proc derivedReadyTimeoutMs*(artifact: DevEnvArtifact): int =
   ## what a session takes: a healthy stack returns as soon as ``/status``
   ## says ``up``, so a generous derivation costs nothing on the happy path
   ## and only ever buys patience on the slow one.
+  # Shared-Development-Services L7 (§4.5): a service that declares an
+  # `instance` block is EXCLUDED, and the exclusion is load-bearing
+  # rather than tidy. The supervisor does not start it
+  # (`serviceSpecsFromArtifact` skips it), so its declared readiness
+  # timeout is not time the supervisor can spend -- counting it would
+  # make the parent wait for a service nothing is waiting on, which is
+  # the SAME disagreement-between-two-processes-about-a-duration defect
+  # the derivation itself replaced, pointing the other way. The two
+  # skips read the ONE declaration parser so they cannot disagree about
+  # which services those are.
   var declared = 0
   for service in artifact.services:
+    if sharedServiceInstanceOf(service).declared:
+      continue
     declared.inc(service.declaredReadinessTimeoutMs)
   declared + DevSessionReadyMarginMs
 

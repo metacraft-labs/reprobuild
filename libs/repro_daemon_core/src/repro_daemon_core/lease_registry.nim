@@ -306,6 +306,27 @@ proc runLeaseReapTick*(scope: DaemonLeaseScope = dlsUser;
   let t = if transport.isSome: transport.get else: buildLeaseReapTransport()
   reapExpiredAtReconcileStart(store, now, t)
 
+proc leaseReapFindingLines*(report: ReapReport): seq[string] =
+  ## Render one tick's ``failed`` records as ready-to-log sentences.
+  ##
+  ## This rendering lives HERE rather than in ``runtime.nim`` for the reason
+  ## stated at the top of this module: ``lease_registry`` is the ONE module in
+  ## ``repro_daemon_core`` that links ``repro_resources``, so the event loop
+  ## cannot name ``ReapFailureKind`` to decide a verb. Same translation duty as
+  ## the ``ttlSeconds`` <-> ``LeasePolicy`` encoding above — the resource lane's
+  ## vocabulary stops at this module.
+  ##
+  ## Each line is stable for a given finding, so the caller can also use it as
+  ## the de-duplication key for "report this once" (``runScopedLeaseReapTick``).
+  result = @[]
+  for f in report.failed:
+    let verb =
+      case f.kind
+      of rfkUnreapable: "cannot reap"
+      of rfkBlocked: "holding"
+    result.add(verb & " address=" & f.address & " typeId=" & f.typeId &
+      ": " & f.reason)
+
 # ---------------------------------------------------------------------------
 # L5 deferral (ii): the concrete consume-site renew hook.
 #

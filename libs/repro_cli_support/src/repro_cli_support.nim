@@ -98,6 +98,12 @@ import repro_local_store
 import repro_cas_store
 import repro_store_daemon
 import repro_daemon_core
+import repro_resources/service_registry
+  # Shared-Development-Services L7 (§4.5): the instance registry's key
+  # codec and outcome vocabulary. It re-exports `service_attach` and
+  # `service_identity`, so this one import brings
+  # `serviceInterfaceSnapshot`, `serviceLeaseHolderId` and
+  # `degradationReport` with it.
 import repro_resources          # Named-Runnable-Edges N2: ResourceInstance / StateStore / decodeResourceGraphPayload / toLeasedDep (the leased-consumes bridge)
 import repro_launch_plan
 import repro_hcr_agent
@@ -316,11 +322,11 @@ proc renderUsage*(programName: string): string =
           programName &
       " shell hook bash|zsh|fish|nushell|pwsh [--repro-bin=PATH]\n       " &
           programName &
-      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS]\n       " &
+      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS] [--replace [--force]]\n       " &
           programName &
       " down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n       " &
           programName &
-      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS]\n       " &
+      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n       " &
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n       " &
           programName &
@@ -14881,6 +14887,19 @@ type
     httpBind: string
     debounceMs: int
     force: bool
+    replace: bool
+      ## Shared-Development-Services L7 / §4.3's explicit takeover:
+      ## ``repro up --replace`` stops the running instance of a shared
+      ## service and starts THIS definition. Accepted only by ``up`` and
+      ## ``dev`` -- ``down`` refuses it, because ``down`` takes nothing
+      ## over.
+      ##
+      ## L6 deliberately did NOT add this flag, and said why: there was
+      ## no registry to resolve against, so a flag that parsed and then
+      ## did nothing "would be a silently-dropped construct added by the
+      ## milestone whose standing hunt is for silently-dropped
+      ## constructs". L7 is the milestone that supplies the registry, so
+      ## the flag arrives with the behaviour.
     readyTimeoutMs: int
       ## ``--ready-timeout=MS``, or 0 when the user did not pass it. Reaches
       ## ``waitForDevSessionReady`` through ``readyBudget``; see
@@ -14893,12 +14912,17 @@ type
 
 proc parseDevSessionArgs(args: openArray[string]; commandName: string;
                          acceptReadyTimeout: bool;
-                         acceptStopTimeout = false): ParsedDevSessionCommand =
+                         acceptStopTimeout = false;
+                         acceptReplace = false): ParsedDevSessionCommand =
   ## ``acceptReadyTimeout`` has no default because ``down`` must REFUSE
   ## ``--ready-timeout`` rather than accept and ignore it: ``down`` does not
   ## wait for readiness, so an accepted flag there would be a flag that
   ## parses and does nothing, which is the failure mode this campaign keeps
   ## finding. A new caller has to decide in writing.
+  ##
+  ## ``acceptReplace`` follows the same rule and the same default-to-
+  ## refusing convention: ``down`` must REFUSE ``--replace`` rather than
+  ## accept and ignore it, because ``down`` takes no instance over.
   ##
   ## ``acceptStopTimeout`` is the same rule pointing the other way, and it
   ## DOES default -- to false, the refusing value. ``up`` and ``dev`` do not
@@ -14923,6 +14947,11 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       result.foreground = true
     elif arg == "--force":
       result.force = true
+    elif arg == "--replace":
+      if not acceptReplace:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.replace = true
     elif arg == "--http" or arg.startsWith("--http="):
       result.httpBind = valueFromFlag(args, i, "--http")
     elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
@@ -15055,11 +15084,293 @@ const DevSessionStillStartingExitCode* = 75
   ## gets. It is outside the 1-2 range the rest of the CLI uses for
   ## refusals, so no existing caller can confuse it with one.
 
+const
+  SharedInstanceLedgerFile = "shared-instances.json"
+    ## Where `repro up` records the shared service instances THIS session
+    ## took a holder on, so `repro down` releases exactly those.
+  SharedInstanceLedgerSchemaId =
+    "reprobuild.dev-session.shared-instances.v1"
+
+proc sharedInstanceLedgerPath(outDir: string): string =
+  outDir.sessionDir / SharedInstanceLedgerFile
+
+proc writeSharedInstanceLedger(outDir, holderId: string;
+    entries: openArray[tuple[serviceName, keyJson, address: string]]) =
+  ## Record what was converged.
+  ##
+  ## WHY A LEDGER RATHER THAN RE-READING THE RECIPE AT `repro down` TIME.
+  ## `down` must release the holder this session TOOK, and the recipe can
+  ## have changed since -- an identity renamed, a scope widened, an
+  ## `instance` block deleted. Re-resolving would then release a
+  ## different instance (or none) and leave this project counted as a
+  ## holder of the real one forever, which is the one failure that cannot
+  ## be recovered from without a daemon restart. The ledger is also why
+  ## `down` needs no dev-env edge: it does not have to evaluate the
+  ## provider to know what to let go of.
+  createDir(extendedPath(outDir.sessionDir))
+  var instances = newJArray()
+  for entry in entries:
+    instances.add(%*{"serviceName": entry.serviceName,
+      "keyJson": entry.keyJson, "address": entry.address})
+  let doc = %*{"schemaId": SharedInstanceLedgerSchemaId,
+    "holderId": holderId}
+  doc["instances"] = instances
+  writeFile(extendedPath(outDir.sharedInstanceLedgerPath), $doc & "\n")
+
+proc readSharedInstanceLedger(outDir: string):
+    tuple[holderId: string;
+          entries: seq[tuple[serviceName, keyJson, address: string]]] =
+  ## Read the ledger back. A missing ledger is the ordinary case (a
+  ## session with no shared services) and yields an empty result; a
+  ## ledger that is present and unreadable RAISES, because silently
+  ## releasing nothing is how a holder becomes permanent.
+  result.entries = @[]
+  let path = outDir.sharedInstanceLedgerPath
+  if not fileExists(extendedPath(path)):
+    return
+  let doc = readJsonFileResilient(path)
+  if doc.isNil or doc.kind != JObject:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " is not a JSON object; " &
+      "this session's holders cannot be released without it")
+  let schemaId = doc{"schemaId"}.getStr("")
+  if schemaId != SharedInstanceLedgerSchemaId:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " carries schemaId `" &
+      schemaId & "`; this build reads `" & SharedInstanceLedgerSchemaId &
+      "` only")
+  result.holderId = doc{"holderId"}.getStr("")
+  if result.holderId.len == 0:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " names no holder, so " &
+      "there is no reference to drop")
+  let instances = doc{"instances"}
+  if not instances.isNil and instances.kind == JArray:
+    for item in instances:
+      if item.kind != JObject:
+        continue
+      result.entries.add((
+        serviceName: item{"serviceName"}.getStr(""),
+        keyJson: item{"keyJson"}.getStr(""),
+        address: item{"address"}.getStr("")))
+
+proc liftedServiceDeclaration(interfacePath, serviceName: string):
+    tuple[snapshot: ServiceInterfaceSnapshot;
+          identity: ServiceIdentityDef; scope: ServiceScope] =
+  ## Everything `repro up` needs about a shared service, out of the REAL
+  ## project interface artifact the dev-env edge just produced -- the
+  ## same lift L3 built, L4 put the identity and scope on, and L6
+  ## decides over. Not reconstructed and not approximated.
+  ##
+  ## ONE READ, THREE FACTS, so the interface fingerprint and the instance
+  ## key cannot come from different revisions of the same recipe. The
+  ## enum mappings are ordinal-for-ordinal on pairs that
+  ## `repro_interface_artifacts` keeps in step with static asserts.
+  if not fileExists(extendedPath(interfacePath)):
+    raise newException(IOError,
+      "service `" & serviceName & "` declares a shared `instance`, and " &
+      "the project interface artifact that carries its interface " &
+      "fingerprint, identity and scope is not at " & interfacePath &
+      ". Shared-Development-Services.md §4.3 decides attach-or-refuse " &
+      "on that fingerprint, so there is nothing to decide with.")
+  let bytes = readFile(extendedPath(interfacePath))
+  var raw = newSeq[byte](bytes.len)
+  if bytes.len > 0:
+    copyMem(addr raw[0], unsafeAddr bytes[0], bytes.len)
+  let artifact = decodeProjectInterfaceArtifact(raw)
+  result.snapshot = serviceInterfaceSnapshot(artifact.projectInterface,
+    serviceName)
+  for svc in artifact.projectInterface.publicServices:
+    if svc.name != serviceName:
+      continue
+    result.identity = ServiceIdentityDef(
+      kind: ServiceIdentityKind(ord(svc.identityMode)),
+      stableId: svc.identityStableId)
+    result.scope = ServiceScope(ord(svc.scope))
+    return
+  # Unreachable in practice: `serviceInterfaceSnapshot` above already
+  # raises `ServiceAttachError` naming every service the interface
+  # declares. Stated rather than left implicit, because a silent
+  # fall-through here would hand back the DEFAULT identity (`derived`,
+  # empty id) and the default scope -- a key every service would share.
+  raise newException(ServiceAttachError,
+    "the lifted interface carries a snapshot for service `" &
+    serviceName & "` but no row for it, which cannot happen; refusing " &
+    "rather than resolving a default identity")
+
+proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
+                                    edge: DevEnvEdgeResult;
+                                    commandName: string): int =
+  ## Shared-Development-Services L7 (§4.5): converge every shared service
+  ## instance this project declares, BEFORE the supervisor is launched.
+  ##
+  ## Before, and not after, for a reason that is not ordering taste: a
+  ## session-owned service may depend on the shared instance being up,
+  ## and a refusal (§4.3's major mismatch, §4.5 rule 1) has to stop the
+  ## session rather than arrive after it published `session.up`.
+  ##
+  ## Returns 0 when every declaration converged, and 1 when any refused.
+  ## A non-zero return means NOTHING was started: the supervisor has not
+  ## been launched yet at this point in `runUpOrDevCommand`.
+  let artifact =
+    try:
+      readDevEnvArtifact(edge.artifactPath)
+    except CatchableError as err:
+      raise newException(IOError,
+        "could not read the dev-env artifact at " & edge.artifactPath &
+        " to find shared service instances: " & err.msg)
+  var declarations: seq[tuple[declaration: SharedServiceInstanceDeclaration;
+    service: DevEnvServiceSummary]] = @[]
+  for service in artifact.services:
+    let declaration = sharedServiceInstanceOf(service)
+    if declaration.declared:
+      declarations.add((declaration: declaration, service: service))
+  if declarations.len == 0:
+    # No shared services. The ledger is removed rather than left behind:
+    # a stale ledger from a previous `repro up` of a recipe that has since
+    # dropped its `instance` block would make the next `repro down`
+    # release a holder this session never took.
+    try:
+      removeFile(extendedPath(
+        parsed.selection.outDir.sharedInstanceLedgerPath))
+    except OSError, IOError:
+      discard
+    return 0
+  if parsed.replace and declarations.len == 0:
+    return 0
+  let projectRoot = parsed.selection.projectRoot
+  let holderId = serviceLeaseHolderId(projectRoot)
+  var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
+  var refused = 0
+  for item in declarations:
+    let lifted = liftedServiceDeclaration(edge.interfacePath,
+      item.declaration.serviceName)
+    let snapshot = lifted.snapshot
+    let key = sharedServiceInstanceKey(item.declaration, projectRoot,
+      lifted.identity, lifted.scope)
+    if key.degradationReport().len > 0:
+      # Reported, never swallowed. L4's own note: a caller that reports
+      # nothing "turns a narrower-than-declared sharing boundary into a
+      # silent one".
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & key.degradationReport())
+
+    let launch = sharedServiceInstanceLaunch(projectRoot, item.service)
+    let response = requestUserDaemonServiceConverge(
+      DaemonServiceConvergeRequest(
+        scope: dlsUser,
+        keyJson: encodeServiceInstanceKey(key),
+        snapshotJson: encodeServiceInterfaceSnapshot(snapshot),
+        holderId: holderId,
+        ttlSeconds: item.declaration.leaseTtlSeconds,
+        command: launch.command,
+        workingDir: launch.workingDir,
+        replace: parsed.replace,
+        force: parsed.force))
+    let outcome =
+      try:
+        parseConvergeOutcome(response.outcome)
+      except CatchableError as err:
+        raise newException(ValueError,
+          "the daemon answered `repro " & commandName &
+          "` with an outcome this build does not know: " & err.msg)
+    if not response.ok or convergeRefused(outcome):
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & response.diagnostic)
+      refused.inc
+      continue
+    if response.diagnostic.len > 0:
+      # §4.3 row 2's warning, and §4.5 rule 2's forced-override notice.
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & response.diagnostic)
+    stderr.writeLine("repro " & commandName & ": service `" &
+      item.declaration.serviceName & "` " & outcomeWord(outcome) &
+      " at " & response.address & " pid " & $response.pid &
+      " with " & $response.holders.len & " holder" &
+      (if response.holders.len == 1: "" else: "s"))
+    ledger.add((serviceName: item.declaration.serviceName,
+      keyJson: encodeServiceInstanceKey(key), address: response.address))
+  # The ledger records what was CONVERGED, including on a run where
+  # another declaration refused: this project really does hold those
+  # instances, and a `repro down` that did not release them would leave
+  # them held forever.
+  writeSharedInstanceLedger(parsed.selection.outDir, holderId, ledger)
+  if refused > 0: 1 else: 0
+
+proc releaseSharedServiceInstances(outDir: string): int =
+  ## L7 (§4.5): drop this project's holder on every instance the ledger
+  ## records. Returns 0 when every release was decided, 1 when any
+  ## refused or failed.
+  let ledger =
+    try:
+      readSharedInstanceLedger(outDir)
+    except CatchableError as err:
+      stderr.writeLine("repro down: " & err.msg)
+      return 1
+  if ledger.entries.len == 0:
+    return 0
+  var failed = 0
+  var released = 0
+  for entry in ledger.entries:
+    let response = requestUserDaemonServiceRelease(
+      DaemonServiceReleaseRequest(
+        scope: dlsUser, keyJson: entry.keyJson,
+        holderId: ledger.holderId))
+    if not response.ok:
+      stderr.writeLine("repro down: service `" & entry.serviceName &
+        "`: " & response.diagnostic)
+      failed.inc
+      continue
+    if response.diagnostic.len > 0:
+      stderr.writeLine("repro down: service `" & entry.serviceName &
+        "`: " & response.diagnostic)
+    let outcome =
+      try:
+        parseReleaseOutcome(response.outcome)
+      except CatchableError as err:
+        stderr.writeLine("repro down: " & err.msg)
+        failed.inc
+        continue
+    if outcome == srlRefuseUnknownHolders:
+      failed.inc
+      continue
+    stderr.writeLine("repro down: service `" & entry.serviceName & "` " &
+      outcomeWord(outcome) & " at " & response.address & "; " &
+      $response.remainingHolders.len & " holder" &
+      (if response.remainingHolders.len == 1: "" else: "s") & " remain" &
+      (if response.remainingHolders.len == 1: "s" else: ""))
+    released.inc
+  if failed > 0:
+    # The ledger is KEPT when anything refused, so a later `repro down`
+    # can retry the releases that did not happen. Deleting it would make
+    # this project a permanent holder of whatever was left.
+    return 1
+  try:
+    removeFile(extendedPath(outDir.sharedInstanceLedgerPath))
+  except OSError, IOError:
+    discard
+  0
+
 proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
                        mode: DevSessionMode): int =
   let commandName = if mode == dsmDev: "dev" else: "up"
   var parsed = parseDevSessionArgs(args, commandName,
-    acceptReadyTimeout = true)
+    acceptReadyTimeout = true, acceptReplace = true)
+  if parsed.force and not parsed.replace:
+    # REFUSED, not ignored, and this closes a silent drop that was
+    # present at the base commit: `parseDevSessionArgs` set
+    # `result.force` for every command and only `runDownCommand` ever
+    # read it, so `repro up --force` and `repro dev --force` parsed
+    # cleanly and did nothing at all. §4.3 gives `--force` exactly one
+    # meaning on `up` -- "proceeds under `--force`" over other holders of
+    # a shared instance -- and that meaning needs `--replace` to be
+    # about anything.
+    raise newException(ValueError,
+      "--force has no effect on `repro " & commandName &
+        "` without --replace: its only meaning here is to override the " &
+        "live holders of a shared service instance that `--replace` is " &
+        "taking over (Shared-Development-Services.md §4.3). Pass both, " &
+        "or neither.")
   if parsed.foreground and parsed.readyTimeoutMs > 0:
     # Refused rather than ignored. ``--foreground`` runs the supervisor in
     # this process, so there is no parent wait for ``--ready-timeout`` to
@@ -15071,6 +15382,12 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
         "of the two flags.")
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
+  # Shared-Development-Services L7 (§4.5): converge the shared service
+  # instances this project declares before anything in this session is
+  # started. A refusal returns here, with nothing launched.
+  let converged = convergeSharedServiceInstances(parsed, edge, commandName)
+  if converged != 0:
+    return converged
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
     # W2 — the SAME resolver the detached arm re-creates in
@@ -15170,7 +15487,12 @@ proc runDownCommand(args: openArray[string]): int =
       if lastStatus == "down":
         echo "repro down: session " & current{"sessionId"}.getStr() &
           " down"
-        return 0
+        # Shared-Development-Services L7 (§4.5): drop this project's
+        # holder on every shared instance, AFTER the session is down.
+        # After, because a session-owned service may still have been
+        # talking to the instance a moment ago, and §4.5's point is that
+        # this release stops nothing unless it was the last reference.
+        return releaseSharedServiceInstances(parsed.selection.outDir)
     sleep(100)
     waited.inc(100)
   # WHAT THIS MESSAGE MAY ASSERT IS BOUNDED BY WHAT THE LOOP OBSERVED, the
