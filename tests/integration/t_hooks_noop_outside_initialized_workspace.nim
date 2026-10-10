@@ -616,7 +616,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check dirExists(store.path / "projects")
       check dirExists(store.path / "repos")
       check dirExists(store.path / "locks")
-      check not fileExists(store.path / ".repro" / "workspace.toml")
+      check not fileExists(store.path / ".repro" / "workspace-state.toml") and
+        not fileExists(store.path / ".repro" / "workspace.toml")
       check not fileExists(store.path / "repro.lock")
 
       # Real managed hooks, installed by the real installer into the store
@@ -743,7 +744,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
         "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n")
       writeFile(root / "repos" / "lib-a.toml", libAFragmentToml)
       writeFile(root / "repos" / "lib-b.toml", libBFragmentToml)
-      check not fileExists(root / ".repro" / "workspace.toml")
+      check not fileExists(root / ".repro" / "workspace-state.toml") and
+        not fileExists(root / ".repro" / "workspace.toml")
 
       let inited = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "lib-a",
@@ -759,7 +761,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check dirExists(root / "lib-b" / ".git")
 
       # THE MARKER. Falsifiable: the previous engine leaves this absent.
-      check fileExists(root / ".repro" / "workspace.toml")
+      check fileExists(root / ".repro" / "workspace-state.toml")
       check readWorkspaceProjects(root) == @["lib-a"]
       check isInitializedWorkspace(root)
       check hasResolvedManifestCheckout(root)
@@ -851,7 +853,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       # behaviour had somewhere to file), the root is NOT a workspace by the
       # canonical marker, and the tree is clean.
       check dirExists(plain / ".repro")
-      check not fileExists(plain / ".repro" / "workspace.toml")
+      check not fileExists(plain / ".repro" / "workspace-state.toml") and
+        not fileExists(plain / ".repro" / "workspace.toml")
       check not fileExists(plain / "repro.lock")
       check not isInitializedWorkspace(plain)
       check not hasResolvedManifestCheckout(plain)

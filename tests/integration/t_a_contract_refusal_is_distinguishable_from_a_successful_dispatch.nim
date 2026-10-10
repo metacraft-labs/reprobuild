@@ -326,7 +326,7 @@ suite "a contract refusal is distinguishable from a successful dispatch":
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
         "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
       writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
-      check fileExists(workspaceRoot / ".repro" / "workspace.toml")
+      check fileExists(workspaceRoot / ".repro" / "workspace-state.toml")
 
       # A manifest-backed lock route must be DECLARED, not inferred, so the
       # manifest layer is a real git checkout of its own. Without it the
@@ -569,7 +569,7 @@ suite "a contract refusal is distinguishable from a successful dispatch":
       # The shell materializes. This is what `repro workspace init` writes, and
       # what any first `--write-report` into this root would have created.
       writeWorkspaceBranch(lateRoot, project = "p", branch = "main")
-      check fileExists(lateRoot / ".repro" / "workspace.toml")
+      check fileExists(lateRoot / ".repro" / "workspace-state.toml")
 
       let lateSecond = ensureOutcomes(reproBin, lateRoot)
       checkpoint("(I) run 2 outcomes: " & lateSecond.outcomes.join(",") &

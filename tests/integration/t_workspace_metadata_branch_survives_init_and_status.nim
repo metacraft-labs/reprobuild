@@ -174,7 +174,7 @@ suite "M13 — workspace branch survives init and status":
 
       # The metadata-only workspace.toml must now exist with the
       # resolver's trunk recorded as the active branch.
-      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace-state.toml"
       check fileExists(tomlPath)
 
       let recorded = readWorkspaceBranch(fx.workspaceRoot)
@@ -258,7 +258,7 @@ suite "M13 — workspace branch survives init and status":
       ]))
       check res1.code == 0
       let firstBytes = readFile(
-        fx.workspaceRoot / ".repro" / "workspace.toml")
+        fx.workspaceRoot / ".repro" / "workspace-state.toml")
 
       # Second invocation must NOT clobber the metadata. The
       # workspace.toml bytes round-trip identically when the
@@ -270,5 +270,5 @@ suite "M13 — workspace branch survives init and status":
       ]))
       check res2.code == 0
       let secondBytes = readFile(
-        fx.workspaceRoot / ".repro" / "workspace.toml")
+        fx.workspaceRoot / ".repro" / "workspace-state.toml")
       check firstBytes == secondBytes

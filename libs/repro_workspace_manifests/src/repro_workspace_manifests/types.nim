@@ -7,7 +7,7 @@
 # unknown-field rejection (Workspace-Manifests.md §"Common Conventions" +
 # §"Future Extensions").
 
-import std/[options, tables]
+import std/[options, strutils, tables]
 import toml_serialization
 import toml_serialization/types as toml_types
 
@@ -71,6 +71,15 @@ type
 
 const
   schemaRepoFragmentV1*     = "reprobuild.workspace.repo.v1"
+    ## The fragment schema whose one branch key is `branch`. Still read — it
+    ## maps `branch` onto the mainline — but no writer emits it any more.
+  schemaRepoFragmentV2*     = "reprobuild.workspace.repo.v2"
+    ## Workspace-Branch-Roles.md §3.1 / §3.6 — `branch` renamed `mainline`,
+    ## plus the five optional built-in role keys, `profile`, and a
+    ## `[repo.branch-roles]` sub-table of custom roles. A schema BUMP rather
+    ## than new keys under v1, so an older `repro` reading a v2 fragment fails
+    ## with "unknown major schema version" (which names the problem) instead
+    ## of "unknown key `mainline`" (which does not).
   schemaRepoSetV1*          = "reprobuild.workspace.repo-set.v1"
     ## Workspace-Membership-Model.md — a named membership list. A repo-set that
     ## is enabled in a workspace is what used to be called a project; there is
@@ -93,14 +102,128 @@ const
   schemaLockIndexV1*        = "reprobuild.workspace.lock-index.v1"
   schemaSnapshotV1*         = "reprobuild.workspace.snapshot.v1"
   schemaWorkspaceLocalV1*   = "reprobuild.workspace.local.v1"
+    ## The schema of the OLD per-checkout state file `.repro/workspace.toml`.
+    ## Still read (Workspace-Settings-Files.md §8 step 1); never written.
+  schemaWorkspaceStateV1*   = "reprobuild.workspace.state.v1"
+    ## Workspace-Settings-Files.md §5 — the per-checkout state file
+    ## `.repro/workspace-state.toml`: the `[workspace]` table of the old file
+    ## under a name that says what it is.
   schemaDevelopOverridesV1* = "reprobuild.workspace.develop-overrides.v1"
   schemaWorkspaceBootstrapV1* = "reprobuild.workspace.bootstrap.v1"
+    ## The schema of the OLD host bootstrap config `.repro-workspace.toml`
+    ## (and of its `.repro-workspace-private.toml` companion). Still read;
+    ## never written.
+  schemaWorkspaceSettingsV1* = "reprobuild.workspace.settings.v1"
+    ## Workspace-Settings-Files.md §3 — the shared, committed workspace
+    ## settings file `repro-workspace.toml`.
+  schemaWorkspaceSettingsLocalV1* = "reprobuild.workspace.settings-local.v1"
+    ## Workspace-Settings-Files.md §4 — the per-user, never-committed
+    ## `repro-workspace.local.toml`. Carries `[[manifest]]` layers only.
   schemaReprobuildConfigV1* = "reprobuild.config.v1"
     ## HL-1 (Unified-Locking-And-Hooks) — the layered configuration file read
     ## by the system-config (layer 2), user-dotfiles (layer 3), and
     ## VCS-private (layer 5) layers, plus every file an `apply_if`
     ## directive references. A `reprobuild.config.v1` file may carry `apply_if`
     ## path-scoped bindings (inline-table array) and/or `[locking]` routes.
+
+type
+  # --- branch roles (Workspace-Branch-Roles.md §2–§3) -------------------------
+
+  BranchRoleValueKind* = enum
+    ## What one declarer says about one role.
+    brvUndeclared  ## the key is absent: this declarer says nothing
+    brvBranch      ## the key names a branch
+    brvAbsent      ## the key is `false`: the tier is declared ABSENT, so the
+                   ## role falls back exactly as if nothing declared it — but
+                   ## the absence is written down and reviewable (§3.1)
+
+  BranchRoleValue* = object
+    ## The value of one role key — a branch name, or the boolean `false`.
+    ##
+    ## Decoded by a custom `readValue` (below) because the strict decoder has
+    ## no "string or false" type. A value of any other shape (`true`, a number,
+    ## a table) is recorded in `rejected` rather than raised from inside the
+    ## decoder, where the key path would be lost; the reader then names the
+    ## file and key (`rejectBadRoleValues`).
+    kind*: BranchRoleValueKind
+    branch*: string        ## the branch when `kind == brvBranch`
+    rejected*: string      ## non-empty: the value had an illegal shape
+
+  CustomRoleTable* = object
+    ## A `branch-roles` sub-table: custom role name -> branch name or `false`
+    ## (Workspace-Branch-Roles.md §2.4, §3.1). Kept in declaration order.
+    entries*: seq[(string, BranchRoleValue)]
+
+  BranchRoleDecls* = object
+    ## The role declarations ONE declarer makes: a repo fragment's `[repo]`,
+    ## a `[profiles.<name>]` table, or the settings file's `[workspace]` table
+    ## (the root repo, §3.4). Resolving them — fragment, then its profile,
+    ## then the default profile, then the fallback chain (§3.3) — is the
+    ## resolver's job, not the reader's; the reader only reports what is
+    ## written.
+    mainline*: Option[string]
+      ## Required to RESOLVE (every repo has a mainline) but optional to
+      ## DECLARE, because a profile may supply it. Never `false`.
+    unstable*: BranchRoleValue
+    staging*: BranchRoleValue
+    stable*: BranchRoleValue
+    production*: BranchRoleValue
+    lts*: BranchRoleValue
+    custom*: seq[(string, BranchRoleValue)]
+      ## The `branch-roles` sub-table, in declaration order.
+
+const
+  builtinOptionalRoleNames* = ["unstable", "staging", "stable", "production",
+                               "lts"]
+    ## The five optional built-in roles (§2.1). `mainline` is the sixth and
+    ## the only required one; it is not in this list because it alone may not
+    ## be `false`.
+
+proc isDeclared*(v: BranchRoleValue): bool = v.kind != brvUndeclared
+
+proc roleBranch*(v: string): BranchRoleValue =
+  BranchRoleValue(kind: brvBranch, branch: v)
+
+proc roleAbsent*(): BranchRoleValue =
+  BranchRoleValue(kind: brvAbsent)
+
+proc branchRoleValueFromToml*(node: TomlValueRef): BranchRoleValue =
+  ## Classify one TOML value as a role value. Never raises: an illegal shape
+  ## lands in `rejected` for the caller to report with its key path.
+  if node.isNil:
+    return BranchRoleValue(kind: brvUndeclared)
+  case node.kind
+  of TomlKind.String:
+    BranchRoleValue(kind: brvBranch, branch: node.stringVal)
+  of TomlKind.Bool:
+    if node.boolVal:
+      BranchRoleValue(kind: brvUndeclared,
+        rejected: "`true` is not a role value; a role is a branch name, or " &
+          "`false` to declare the tier absent")
+    else:
+      BranchRoleValue(kind: brvAbsent)
+  else:
+    BranchRoleValue(kind: brvUndeclared,
+      rejected: "a role is a branch name or `false`, not a " &
+        ($node.kind).toLowerAscii())
+
+proc readValue*(r: var TomlReader, v: var BranchRoleValue) =
+  ## Strict-decoder hook for one role key; see `BranchRoleValue`.
+  var inner: TomlValueRef
+  r.readValue(inner)
+  v = branchRoleValueFromToml(inner)
+
+proc readValue*(r: var TomlReader, v: var CustomRoleTable) =
+  ## Strict-decoder hook for the INLINE spelling of a `branch-roles` table
+  ## (`branch-roles = { beta = "beta" }`). The header spelling
+  ## (`[repo.branch-roles]`) never reaches this hook — the pinned
+  ## toml-serialization silently drops dotted sub-table headers of a typed
+  ## record — so the reader re-reads that spelling from the generic TOML tree
+  ## (`reader.nim`, `fillRoleSubTables`).
+  parseTable(r, key):
+    var inner: TomlValueRef
+    r.readValue(inner)
+    v.entries.add((key, branchRoleValueFromToml(inner)))
 
 type
   # --- repos/<repo>.toml -----------------------------------------------------
@@ -198,9 +321,30 @@ type
     remotes*: seq[RepoRemoteEntry]
     revision*: Option[string]      ## deprecated; split into `branch` + the lock.
     branch*: Option[string]
-      ## The branch this repo follows. Only ever a branch name — never a commit
-      ## id and never a fully-qualified ref, so it is always a legal argument to
-      ## `git clone --branch`. Pins live in lock files.
+      ## `repo.v1` ONLY: the branch this repo follows — its mainline. Only ever
+      ## a branch name — never a commit id and never a fully-qualified ref, so
+      ## it is always a legal argument to `git clone --branch`. Pins live in
+      ## lock files. A `repo.v2` fragment carrying it is rejected; read the
+      ## mainline through `mainlineBranch`, which answers for both schemas.
+    mainline*: Option[string]
+      ## `repo.v2` (Workspace-Branch-Roles.md §3.1): the same value `branch`
+      ## held in v1, under the name of the role it now is. Same constraint.
+      ## Set only when the file says `mainline`; a v1 file leaves it `none`.
+      ## Read the mainline through `mainlineBranch`, never this field alone.
+    unstable*: BranchRoleValue
+    staging*: BranchRoleValue
+    stable*: BranchRoleValue
+    production*: BranchRoleValue
+    lts*: BranchRoleValue
+      ## `repo.v2`: the five optional built-in roles (§2.1), each a branch
+      ## name or `false` (§3.1).
+    profile*: Option[string]
+      ## `repo.v2`: the `[profiles.<name>]` of the settings file this repo
+      ## follows (§3.2).
+    `branch-roles`*: CustomRoleTable
+      ## `repo.v2`: custom roles (`[repo.branch-roles]`), name -> branch name
+      ## or `false` (§3.1). Under a sub-table so a workspace-chosen word can
+      ## never collide with a present or future `[repo]` key.
     url_prefix*: Option[string]
     url_suffix*: Option[string]
     vcs*: Option[string]
@@ -250,6 +394,25 @@ type
     schema*: string
     repo*: RepoBody
     extensions*: Extensions
+
+proc mainlineBranch*(body: RepoBody): Option[string] =
+  ## The repo's declared mainline, whichever schema declared it: `mainline`
+  ## (v2) or `branch` (v1). THE single source of truth for that question —
+  ## the reader deliberately does not copy one key into the other, so a
+  ## record says which key its file used and this accessor reconciles them. `none` when the fragment declares neither — a
+  ## profile may still supply it (BR2's resolver), and until then such a repo
+  ## resolves exactly as a v1 fragment without `branch` always has.
+  if body.mainline.isSome: body.mainline
+  else: body.branch
+
+proc roleDecls*(body: RepoBody): BranchRoleDecls =
+  ## The role declarations this fragment itself makes (§3.3 step 1).
+  BranchRoleDecls(mainline: body.mainlineBranch,
+    unstable: body.unstable, staging: body.staging, stable: body.stable,
+    production: body.production, lts: body.lts,
+    custom: body.`branch-roles`.entries)
+
+type
 
   # --- url-prefixes/<name>.toml ----------------------------------------------
 
@@ -496,16 +659,37 @@ type
       ## (backward-compatible with workspaces written before M16).
 
   ManifestLayer* = object
+    ## One manifest layer the composer acquires. Decoded from the `[[manifest]]`
+    ## entries of a state file (the pre-settings-file location of the layer
+    ## list) and BUILT from the settings files' `[[manifest]]` entries
+    ## (`composeSettingsLayers`). `name` and `revision` exist only in the
+    ## settings files, so the state-file reader rejects them.
     url*: Option[string]
     local_path*: Option[string]
     visibility*: string
     branch*: Option[string]
+    name*: Option[string]
+      ## The settings-file layer name (Workspace-Settings-Files.md §3–§4).
+      ## Also marks the root repo's own base layer (`workspaceRootLayerName`).
+    revision*: Option[string]
+      ## A settings-file layer pin (§3): the layer is cloned AT this revision
+      ## (`git clone --branch`, so a tag or a branch) and its HEAD is verified
+      ## to resolve to it — the RA-17 pin check, applied per layer.
 
   WorkspaceLocal* = object
+    ## The per-checkout state file: `.repro/workspace-state.toml`
+    ## (`state.v1`), or the old `.repro/workspace.toml` (`local.v1`) it
+    ## replaces. Both decode into this record.
     schema*: string
     workspace*: WorkspaceBody
     manifest*: seq[ManifestLayer]
+      ## Layers recorded in the STATE file — where `local.v1` kept them. Still
+      ## honoured, and carried across when the state file is rewritten under
+      ## its new name, until `repro health --fix` moves them to
+      ## `repro-workspace.local.toml` (Workspace-Settings-Files.md §8 step 2).
+      ## No writer adds one.
     extensions*: Extensions
+
 
   # --- <workspace-root>/.repro/develop-overrides.toml ------------------------
 
@@ -691,6 +875,90 @@ type
     foreign_env*: BootstrapForeignEnvBody
     extensions*: Extensions
 
+  # --- repro-workspace.toml / repro-workspace.local.toml ----------------------
+  #
+  # Workspace-Settings-Files.md §3–§4. Both files are decoded from the generic
+  # TOML tree by `settings.nim` rather than by the typed strict decoder: the
+  # pinned toml-serialization drops dotted sub-table headers
+  # (`[profiles.product]`, `[profiles.product.branch-roles]`) of a typed record
+  # without an error, and fails with an empty message on several shapes this
+  # file uses. The records below are the decoded result, not decode targets.
+
+  WorkspaceRootSettings* = object
+    ## `[workspace]` — the ROOT repo's own branch roles (Branch-Roles §3.4)
+    ## plus the workspace default profile (§3.2).
+    profile*: Option[string]
+    default_profile*: Option[string]
+    roles*: BranchRoleDecls
+
+  WorkspaceRecordsSettings* = object
+    ## `[records]` — the record store (generated lock records). Absent means
+    ## committed-lock-only.
+    url*: Option[string]
+    branch*: Option[string]
+    publish_locks*: Option[bool]
+      ## MO-14 — opt-in to central lock PUBLICATION; see
+      ## `BootstrapManifestBody.publish_locks`, whose meaning it keeps.
+
+  SettingsManifestLayer* = object
+    ## One `[[manifest]]` entry as a settings file declares it. Composed into
+    ## `ManifestLayer`s by `composeSettingsLayers` (§4 "Layer resolution").
+    name*: Option[string]
+    url*: Option[string]
+    branch*: Option[string]
+    visibility*: Option[string]
+    revision*: Option[string]
+    local_path*: Option[string]
+
+  CustomRoleDecl* = object
+    ## `[branch-roles.<name>]` (Branch-Roles §2.4).
+    name*: string
+    fallback*: string
+
+  WorkspaceSettings* = object
+    ## The workspace settings, whichever file they came from. A
+    ## `settings.v1` `repro-workspace.toml` fills every field; an old
+    ## `bootstrap.v1` `.repro-workspace.toml` is MAPPED onto this record
+    ## (`settings.nim`) so every consumer reads one shape during the
+    ## transition:
+    ##
+    ##   old `[manifest] url` / `branch` / `publish_locks` -> `records`
+    ##     (the old key named the record store or the workspace repo itself,
+    ##     and every consumer used it as the record/manifest source, which is
+    ##     exactly what `[records]` is);
+    ##   old `[manifest] private_url` (+ the private companion file)
+    ##     -> `privateManifestUrl`;
+    ##   old `[manifest] revision` -> `manifestRevision` (the RA-17 pin);
+    ##   `[projects]`, `[verify]`, `[develop]`, `[locking]`, `[foreign_env]`
+    ##     -> unchanged.
+    path*: string
+      ## The settings file that was read.
+    schema*: string
+      ## `settings.v1`, or `bootstrap.v1` for the old file.
+    localPath*: string
+      ## The `repro-workspace.local.toml` read beside `path`, or "".
+    workspace*: WorkspaceRootSettings
+    projects*: BootstrapProjectsBody
+    records*: WorkspaceRecordsSettings
+    privateManifestUrl*: Option[string]
+      ## `bootstrap.v1` only. `settings.v1` replaces it with a named layer
+      ## whose url the local file supplies (§3).
+    manifestRevision*: Option[string]
+      ## `bootstrap.v1` only: the RA-17 `[manifest] revision` pin.
+    sharedLayers*: seq[SettingsManifestLayer]
+      ## `[[manifest]]` of the shared file, in file order.
+    localLayers*: seq[SettingsManifestLayer]
+      ## `[[manifest]]` of the local file, in file order.
+    profiles*: seq[(string, BranchRoleDecls)]
+      ## `[profiles.<name>]`, sorted by name (TOML tables are unordered).
+    customRoles*: seq[CustomRoleDecl]
+      ## `[branch-roles.<name>]`, sorted by name.
+    verify*: BootstrapVerifyBody
+    develop*: BootstrapDevelopBody
+    locking*: BootstrapLockingBody
+    foreign_env*: BootstrapForeignEnvBody
+    extensions*: Extensions
+
   # --- reprobuild.config.v1 (HL-1 layered configuration file) -----------------
   #
   # The file the system-config (layer 2), user-dotfiles (layer 3), and
@@ -772,3 +1040,7 @@ type
   # just the top-level `schema` value, returning the string and ignoring
   # the rest of the file. That avoids defining a parallel probe record
   # whose shape would have to track every schema variant.
+
+proc isLegacySettings*(s: WorkspaceSettings): bool =
+  ## True when the settings came from the old `.repro-workspace.toml`.
+  s.schema == schemaWorkspaceBootstrapV1

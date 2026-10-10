@@ -17,11 +17,12 @@
 #      its own (status-im/nim-toml-serialization silently default-initialises
 #      missing scalar fields).
 
-import std/[options, os, strutils]
+import std/[algorithm, options, os, strutils]
 import toml_serialization
 import toml_serialization/types as toml_types
 import types
 import diagnostics
+import manifest_editor
 
 # ---- helpers --------------------------------------------------------------
 
@@ -40,12 +41,13 @@ proc slurpManifest(path, expectedSchema: string): string =
   except OSError as e:
     raiseManifestError(path, "", expectedSchema, "", e.msg)
 
-proc validateSchema(path, content, expectedSchema: string) =
+proc probeSchema(path, content, expectedSchema: string): string =
   ## Permissive probe: extracts the top-level `schema` value via
   ## `Toml.decode(..., string, "schema")`, which navigates to just that
   ## key and ignores the rest of the file. Raises
-  ## `WorkspaceManifestParseError` on schema-version mismatch, on a missing
-  ## `schema` key (observed = ""), or on a probe-level TOML parse failure.
+  ## `WorkspaceManifestParseError` on a missing `schema` key (observed = ""),
+  ## or on a probe-level TOML parse failure. `expectedSchema` only frames the
+  ## diagnostic; the caller decides whether the observed value is acceptable.
   ##
   ## When the top-level `schema` key itself is missing, the toml-serialization
   ## parser raises `TomlError` with the canonical message
@@ -67,10 +69,45 @@ proc validateSchema(path, content, expectedSchema: string) =
   if observed.len == 0:
     raiseManifestError(path, "schema", expectedSchema, "",
       "top-level `schema` key is missing or empty")
+  observed
 
+proc validateSchema(path, content, expectedSchema: string) =
+  ## `probeSchema`, then require exactly `expectedSchema`.
+  let observed = probeSchema(path, content, expectedSchema)
   if observed != expectedSchema:
     raiseManifestError(path, "schema", expectedSchema, observed,
       "schema version mismatch")
+
+proc validateSchemaOneOf(path, content: string;
+                         accepted: openArray[string]): string =
+  ## `probeSchema`, then require one of `accepted`, returning the one found.
+  ## `accepted[0]` is the CURRENT schema: it is what a mismatch reports as
+  ## expected, because it is what a new file should say. The others are older
+  ## schemas still read during a rename (Workspace-Settings-Files.md §8,
+  ## Workspace-Branch-Roles.md §6).
+  let observed = probeSchema(path, content, accepted[0])
+  for candidate in accepted:
+    if observed == candidate:
+      return observed
+  raiseManifestError(path, "schema", accepted[0], observed,
+    "schema version mismatch (this repro reads " & accepted.join(", ") & ")")
+
+proc decodeTree*(path, content, expectedSchema: string): TomlValueRef =
+  ## The whole file as a generic TOML tree. Used where the typed strict decoder
+  ## cannot see what is written: the pinned toml-serialization silently drops
+  ## a dotted sub-table header (`[repo.branch-roles]`) of a typed record, so
+  ## those tables are read — and unknown ones refused — from the tree.
+  try:
+    result = Toml.decode(content, TomlValueRef)
+  except TomlError as e:
+    raiseManifestError(path, "", expectedSchema, expectedSchema,
+      if e.msg.len > 0: e.msg else: "malformed TOML")
+  except CatchableError as e:
+    raiseManifestError(path, "", expectedSchema, expectedSchema,
+      if e.msg.len > 0: e.msg else: "malformed TOML")
+  if result.isNil or result.kind notin {TomlKind.Table, TomlKind.InlineTable}:
+    raiseManifestError(path, "", expectedSchema, expectedSchema,
+      "the file is not a TOML table")
 
 proc fallbackTomlMessage(): string =
   ## Synthetic diagnostic for the case where status-im/nim-toml-serialization
@@ -573,16 +610,149 @@ proc previousIdentities*(path: string; extensions: Extensions):
           "optional but an entry must name at least one")
     result.add(entry)
 
+const
+  repoV2OnlyKeys* = ["mainline", "unstable", "staging", "stable",
+                     "production", "lts", "profile", "branch-roles"]
+    ## The `[repo]` keys `reprobuild.workspace.repo.v2` added
+    ## (Workspace-Branch-Roles.md §3.1). A v1 fragment carrying one is
+    ## rejected rather than read: under v1 a pre-BR1 `repro` would fail on it
+    ## with an unhelpful "unknown key", which is the outage the schema bump
+    ## exists to prevent (§3.6).
+  builtinRoleNames* = ["mainline", "unstable", "staging", "stable",
+                       "production", "lts"]
+    ## Every built-in role name (§2.1). A custom role may not reuse one.
+
+proc customRoleNameRejection*(name: string): string =
+  ## Why `name` cannot be a custom role name, or "" when it can
+  ## (Workspace-Branch-Roles.md §2.4: lowercase, hyphen-separated, and not a
+  ## built-in name).
+  if name.len == 0:
+    return "a custom role name must not be empty"
+  if name in builtinRoleNames:
+    return "'" & name & "' is a built-in role; declare it as its own key, " &
+      "not under `branch-roles`"
+  if not name.allCharsInSet({'a'..'z', '0'..'9', '-'}) or
+      name[0] == '-' or name[^1] == '-' or "--" in name:
+    return "custom role name '" & name & "' must be lowercase words " &
+      "separated by single hyphens"
+  ""
+
+proc roleValueRejection(value: BranchRoleValue): string =
+  ## Why a decoded role value is unusable, or "".
+  if value.rejected.len > 0:
+    return value.rejected
+  if value.kind == brvBranch and value.branch.len == 0:
+    return "a role's branch name must not be empty; write `false` to " &
+      "declare the tier absent"
+  ""
+
+proc customRoleTableFromTree*(path, schema, keyPath: string;
+                              node: TomlValueRef): seq[(string, BranchRoleValue)] =
+  ## Decode a `branch-roles` sub-table from the generic tree, refusing an
+  ## illegal name or value with its key path. Sorted by name: the header
+  ## spelling reaches us through an unordered TOML table, so name order is the
+  ## only order both spellings can share.
+  if node.isNil:
+    return
+  if node.kind notin {TomlKind.Table, TomlKind.InlineTable}:
+    raiseManifestError(path, keyPath, schema, schema,
+      "`branch-roles` must be a table of custom role name -> branch name " &
+        "or `false`")
+  var names: seq[string]
+  for k, _ in node.tableVal[]:
+    names.add(k)
+  names.sort()
+  for name in names:
+    let nameRejection = customRoleNameRejection(name)
+    if nameRejection.len > 0:
+      raiseManifestError(path, keyPath & "." & name, schema, schema,
+        nameRejection)
+    let value = branchRoleValueFromToml(node.tableVal[name])
+    let valueRejection = roleValueRejection(value)
+    if valueRejection.len > 0:
+      raiseManifestError(path, keyPath & "." & name, schema, schema,
+        valueRejection)
+    result.add((name, value))
+
+proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
+  ## The `[repo]` checks the typed decoder cannot make (Branch-Roles §3.1,
+  ## §3.6), run against the generic tree of the same text:
+  ##
+  ## * v1 carrying a v2-only key, or v2 carrying `branch`, is refused naming
+  ##   the key — a fragment is in ONE schema, never a mix;
+  ## * v2 refuses any `[repo.<sub-table>]` it does not define, which the typed
+  ##   decoder would otherwise drop without a word;
+  ## * `branch-roles` is read from the tree (both spellings), and every role
+  ##   value is checked;
+  ## * nothing is copied between `branch` and `mainline`; read the mainline
+  ##   through `mainlineBranch`, the one accessor that answers for both.
+  let tree = decodeTree(path, content, schema)
+  let repoNode =
+    if "repo" in tree.tableVal: tree.tableVal["repo"] else: nil
+  var repoKeys: seq[string]
+  if not repoNode.isNil and repoNode.kind in {TomlKind.Table, TomlKind.InlineTable}:
+    for k, _ in repoNode.tableVal[]:
+      repoKeys.add(k)
+  if schema == schemaRepoFragmentV1:
+    for k in repoV2OnlyKeys:
+      if k in repoKeys:
+        raiseManifestError(path, "repo." & k, schema, schema,
+          "`" & k & "` is a " & schemaRepoFragmentV2 & " key, but this " &
+            "fragment declares " & schemaRepoFragmentV1 & ". A fragment is " &
+            "in one schema: change `schema` to \"" & schemaRepoFragmentV2 &
+            "\" and rename `branch` to `mainline`, or remove `" & k & "`")
+    # Deliberately NO copy of `branch` into `mainline`: the record keeps the
+    # key the file actually used, and `mainlineBranch` (types.nim) is the
+    # single place that answers "what is the mainline" for both schemas.
+    return
+  if "branch" in repoKeys:
+    raiseManifestError(path, "repo.branch", schema, schema,
+      "`branch` is the " & schemaRepoFragmentV1 & " spelling; a " &
+        schemaRepoFragmentV2 & " fragment names its mainline `mainline`")
+  var known: seq[string]
+  for name, _ in fieldPairs(RepoBody()):
+    known.add(name)
+  for k in repoKeys:
+    if k notin known:
+      raiseManifestError(path, "repo." & k, schema, schema,
+        schemaSkewMessage(path, k, "RepoBody"))
+  for (role, value) in [("unstable", fragment.repo.unstable),
+                        ("staging", fragment.repo.staging),
+                        ("stable", fragment.repo.stable),
+                        ("production", fragment.repo.production),
+                        ("lts", fragment.repo.lts)]:
+    let rejection = roleValueRejection(value)
+    if rejection.len > 0:
+      raiseManifestError(path, "repo." & role, schema, schema, rejection)
+  if fragment.repo.profile.isSome and fragment.repo.profile.get().len == 0:
+    raiseManifestError(path, "repo.profile", schema, schema,
+      "`profile` must name a `[profiles.<name>]` table, not be empty")
+  fragment.repo.`branch-roles`.entries = customRoleTableFromTree(path, schema,
+    "repo.branch-roles",
+    if "branch-roles" in repoKeys: repoNode.tableVal["branch-roles"] else: nil)
+
 proc readRepoFragment*(path: string): RepoFragment =
-  let content = slurpManifest(path, schemaRepoFragmentV1)
-  validateSchema(path, content, schemaRepoFragmentV1)
-  result = decodeStrict(path, content, schemaRepoFragmentV1, RepoFragment)
-  requireNonEmpty(path, schemaRepoFragmentV1, "repo.name", result.repo.name)
-  requireNonEmpty(path, schemaRepoFragmentV1, "repo.path", result.repo.path)
+  ## Read `repos/<repo>.toml` in either schema: `repo.v2` (`mainline` and the
+  ## role keys) or `repo.v1` (`branch`). The record keeps the key the file
+  ## used; `mainlineBranch` is the mainline for both, so nothing downstream
+  ## needs to know which schema the file used.
+  let content = slurpManifest(path, schemaRepoFragmentV2)
+  let schema = validateSchemaOneOf(path, content,
+    [schemaRepoFragmentV2, schemaRepoFragmentV1])
+  # The typed decoder refuses the header spelling `[repo.branch-roles]` of a
+  # sub-table of a typed record, so that table is blanked for the typed pass
+  # and decoded from the generic tree by `checkRepoRoles`, which also refuses
+  # it in a v1 fragment with a diagnostic that says why.
+  let typedContent =
+    try: blankTable(content, "repo.branch-roles")
+    except ManifestEditError: content  # let the decoder report the syntax
+  result = decodeStrict(path, typedContent, schema, RepoFragment)
+  checkRepoRoles(path, content, schema, result)
+  requireNonEmpty(path, schema, "repo.name", result.repo.name)
+  requireNonEmpty(path, schema, "repo.path", result.repo.path)
   let rejection = declaredCheckoutPathRejection(result.repo.path)
   if rejection.len > 0:
-    raiseManifestError(path, "repo.path", schemaRepoFragmentV1,
-      schemaRepoFragmentV1,
+    raiseManifestError(path, "repo.path", schema, schema,
       "checkout path '" & result.repo.path & "' " & rejection)
   # Declared-Repository-Renames.md §2.3 — the two validator rules that are
   # answerable from THIS fragment alone. The three cross-fragment rules (a
@@ -601,8 +771,8 @@ proc readRepoFragment*(path: string): RepoFragment =
     if prior.path.len > 0:
       let priorRejection = declaredCheckoutPathRejection(prior.path)
       if priorRejection.len > 0:
-        raiseManifestError(path, keyBase & ".path", schemaRepoFragmentV1,
-          schemaRepoFragmentV1,
+        raiseManifestError(path, keyBase & ".path", schema,
+          schema,
           "previous checkout path '" & prior.path & "' " & priorRejection)
     # Rule 1: an entry that merely restates `[repo]` makes the CURRENT path a
     # "prior" path, which would make the relocation check consider the live
@@ -613,8 +783,8 @@ proc readRepoFragment*(path: string): RepoFragment =
       (prior.url_prefix.len > 0 and prior.url_prefix != declaredUrlPrefix) or
       (prior.url_suffix.len > 0 and prior.url_suffix != declaredUrlSuffix)
     if not differs:
-      raiseManifestError(path, keyBase, schemaRepoFragmentV1,
-        schemaRepoFragmentV1,
+      raiseManifestError(path, keyBase, schema,
+        schema,
         "`previously` entry restates the present identity (name '" &
           result.repo.name & "', path '" & result.repo.path &
           "'); an entry must differ from `[repo]` in at least one field, " &
@@ -796,27 +966,46 @@ proc readSnapshot*(path: string): Snapshot =
         schemaSnapshotV1, schemaSnapshotV1,
         "required key `repo[].revision` is missing or empty")
 
-# ---- .repro/workspace.toml -------------------------------------------------
+# ---- .repro/workspace-state.toml (and the old .repro/workspace.toml) -------
 
 proc readWorkspaceLocal*(path: string): WorkspaceLocal =
-  let content = slurpManifest(path, schemaWorkspaceLocalV1)
-  validateSchema(path, content, schemaWorkspaceLocalV1)
-  result = decodeStrict(path, content, schemaWorkspaceLocalV1, WorkspaceLocal)
-  requireNonEmpty(path, schemaWorkspaceLocalV1, "workspace.project",
+  ## Read a per-checkout state file: `.repro/workspace-state.toml`
+  ## (`reprobuild.workspace.state.v1`) or the old `.repro/workspace.toml`
+  ## (`reprobuild.workspace.local.v1`) it replaces. Both carry the same
+  ## `[workspace]` table and decode into the same record, so a caller does not
+  ## care which file the state came from. Which file to read is decided by
+  ## `workspaceTomlPath` (`workspace_branch.nim`), not here.
+  ##
+  ## `[[manifest]]` layers are still accepted in either schema: the old file
+  ## kept the layer list here, and the state-file writer carries an existing
+  ## list across when it rewrites the state under the new name, so a
+  ## checkout's layers survive until `repro health --fix` moves them to
+  ## `repro-workspace.local.toml` (Workspace-Settings-Files.md §8 step 2).
+  ## `name` and `revision` are settings-file layer keys and are refused here.
+  let content = slurpManifest(path, schemaWorkspaceStateV1)
+  let schema = validateSchemaOneOf(path, content,
+    [schemaWorkspaceStateV1, schemaWorkspaceLocalV1])
+  result = decodeStrict(path, content, schema, WorkspaceLocal)
+  requireNonEmpty(path, schema, "workspace.project",
                   result.workspace.project)
   for i, m in result.manifest:
     let hasUrl = m.url.isSome and m.url.get().len > 0
     let hasLocal = m.local_path.isSome and m.local_path.get().len > 0
     if not hasUrl and not hasLocal:
       raiseManifestError(path,
-        "manifest[" & $i & "].url|local_path",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        "manifest[" & $i & "].url|local_path", schema, schema,
         "manifest layer needs either `url` or `local_path`")
     if m.visibility.len == 0:
       raiseManifestError(path,
-        "manifest[" & $i & "].visibility",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        "manifest[" & $i & "].visibility", schema, schema,
         "required key `manifest[].visibility` is missing or empty")
+    for (key, present) in [("name", m.name.isSome),
+                           ("revision", m.revision.isSome)]:
+      if present:
+        raiseManifestError(path, "manifest[" & $i & "]." & key, schema, schema,
+          "`" & key & "` is a key of a `repro-workspace.toml` / " &
+            "`repro-workspace.local.toml` layer, not of a layer recorded in " &
+            "the state file")
 
 # ---- .repro/develop-overrides.toml -----------------------------------------
 
@@ -847,9 +1036,14 @@ proc readDevelopOverrides*(path: string): DevelopOverrides =
 
 const
   bootstrapConfigFileName* = ".repro-workspace.toml"
-    ## Canonical file name of the committed host bootstrap config.
+    ## The OLD name of the workspace settings file (`bootstrap.v1`). Still read
+    ## — through `settings.nim`, which prefers `repro-workspace.toml` — until
+    ## the old names are retired (Workspace-Settings-Files.md §8 step 4).
   bootstrapPrivateConfigFileName* = ".repro-workspace-private.toml"
-    ## Sibling file carrying credentialed/SSH manifest URLs.
+    ## Sibling of the OLD settings file carrying credentialed/SSH manifest
+    ## URLs. Applies only beside `.repro-workspace.toml`; `settings.v1`
+    ## replaces it with named layers whose url `repro-workspace.local.toml`
+    ## supplies.
 
 proc readWorkspaceBootstrapPrivate*(path: string): WorkspaceBootstrapPrivate =
   ## Read the private companion config (`.repro-workspace-private.toml`). The

@@ -93,8 +93,9 @@ includes = [
 ]
 """
 
-# A hand-written sibling fragment — the shape every generated fragment must
-# match.
+# A hand-written sibling fragment, in the repo.v1 spelling every existing
+# workspace still uses. It is the INPUT fixture written into the workspace:
+# a v1 workspace receiving a new fragment is the realistic case.
 const siblingFragment = """schema = "reprobuild.workspace.repo.v1"
 
 [repo]
@@ -102,6 +103,19 @@ name = "nim-shm-queue"
 path = "nim-shm-queue"
 remote = "metacraft-labs"
 branch = "dev"
+"""
+
+# What `repos add` must generate for a repo shaped like the sibling: the same
+# keys in the same order, but in the repo.v2 spelling — every writer emits
+# `schema = "…repo.v2"` and `mainline` (Workspace-Branch-Roles.md §3.1), even
+# into a workspace whose existing fragments are still v1.
+const siblingFragmentV2 = """schema = "reprobuild.workspace.repo.v2"
+
+[repo]
+name = "nim-shm-queue"
+path = "nim-shm-queue"
+remote = "metacraft-labs"
+mainline = "dev"
 """
 
 # The hand-written THIRD-PARTY shape (`repos/llvm-project.toml`,
@@ -112,13 +126,17 @@ branch = "dev"
 # except for its nested `path` (which `repos add` derives from the
 # `<repo>` argument) and its pinned `revision` (this project has a
 # `default_revision` to inherit).
-const thirdPartyFragment = """schema = "reprobuild.workspace.repo.v1"
+#
+# Only ever an EXPECTED output here (nothing writes it into the workspace), so
+# it is spelled the way `repos add` must now generate it: repo.v2, `mainline`
+# where the hand-written v1 file says `branch`.
+const thirdPartyFragmentV2 = """schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "llvm/llvm-project"
 path = "llvm-project"
 remote = "github"
-branch = "main"
+mainline = "main"
 """
 
 type Fixture = object
@@ -208,7 +226,7 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       # single-use `nim-shm-lease-origin`.
       let generated = readFile(fx.workspaceRoot / "repos" /
         "nim-shm-lease.toml")
-      let expected = siblingFragment.replace("nim-shm-queue", "nim-shm-lease")
+      let expected = siblingFragmentV2.replace("nim-shm-queue", "nim-shm-lease")
       check generated == expected
 
       # No new `[[remote]]` was appended, and the single-use name never
@@ -263,7 +281,7 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check res.code == 0
 
       check readFile(fx.workspaceRoot / "repos" / "llvm-project.toml") ==
-        thirdPartyFragment
+        thirdPartyFragmentV2
 
       # Nothing was appended to the shared remote table: no `llvm` org remote,
       # no single-use `llvm-project-origin`.
@@ -318,7 +336,7 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
         "[[remote]]\nname = \"acme\"\nfetch = \"https://git.example.invalid/acme\"")
       check not projectText.contains("first-lib-origin")
       check readFile(fx.workspaceRoot / "repos" / "first-lib.toml") ==
-        siblingFragment.replace("nim-shm-queue", "first-lib")
+        siblingFragmentV2.replace("nim-shm-queue", "first-lib")
           .replace("metacraft-labs", "acme")
       check fetchUrlOf(fx.projectFile, "first-lib") ==
         "https://git.example.invalid/acme/first-lib"
@@ -336,7 +354,7 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check second.code == 0
       check countRemotes(fx.projectFile) == remotesBefore + 1
       check readFile(fx.workspaceRoot / "repos" / "second-lib.toml") ==
-        siblingFragment.replace("nim-shm-queue", "second-lib")
+        siblingFragmentV2.replace("nim-shm-queue", "second-lib")
           .replace("metacraft-labs", "acme")
       check revisionOf(fx.projectFile, "second-lib") == "dev"
 
@@ -383,8 +401,12 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       # default, and the revision follows it because no exact pin was given.
       check resolved.repos[0].branch == "dev"
       check resolved.repos[0].revision == "dev"
-      check readFile(fx.workspaceRoot / "repos" / "brand-new-lib.toml")
-        .contains("branch = \"dev\"")
+      # Written as a repo.v2 fragment: `--branch` lands as `mainline`
+      # (Workspace-Branch-Roles.md §3.1); no writer emits `branch` any more.
+      let written = readFile(fx.workspaceRoot / "repos" / "brand-new-lib.toml")
+      check written.startsWith("schema = \"reprobuild.workspace.repo.v2\"")
+      check written.contains("mainline = \"dev\"")
+      check not written.contains("branch = ")
 
   test "test_repo_add_without_a_branch_is_refused_and_writes_nothing":
     # Workspace-Membership-Model.md — "every repo fragment declares its own

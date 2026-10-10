@@ -9,10 +9,11 @@
 ##      under `[extensions]`) raises `WorkspaceManifestParseError` whose
 ##      `keyPath` names the offending key.
 ##   3. Schema-version mismatch — a TOML whose `schema` value is a
-##      different version (`reprobuild.workspace.repo.v2`) raises
-##      `WorkspaceManifestParseError` with `keyPath = "schema"`,
-##      `expectedSchema = "reprobuild.workspace.repo.v1"`, and
-##      `observedSchema = "reprobuild.workspace.repo.v2"`.
+##      version this repro does not read (`reprobuild.workspace.repo.v3`)
+##      raises `WorkspaceManifestParseError` with `keyPath = "schema"`,
+##      `expectedSchema = "reprobuild.workspace.repo.v2"` (the current
+##      schema; v1 is still read), and
+##      `observedSchema = "reprobuild.workspace.repo.v3"`.
 ##   4. Missing required key — a TOML that omits `repo.path` raises
 ##      `WorkspaceManifestParseError` whose `keyPath` names the missing key.
 ##   5. (Bonus) An `[extensions]` table with arbitrary forward-compat keys
@@ -48,7 +49,7 @@ path = "y"
 """
 
 const wrongSchemaToml = """
-schema = "reprobuild.workspace.repo.v2"
+schema = "reprobuild.workspace.repo.v3"
 
 [repo]
 name = "x"
@@ -136,8 +137,8 @@ suite "M5 — RepoFragment round-trip":
       raised = true
       check e.path == path
       check e.keyPath == "schema"
-      check e.expectedSchema == "reprobuild.workspace.repo.v1"
-      check e.observedSchema == "reprobuild.workspace.repo.v2"
+      check e.expectedSchema == "reprobuild.workspace.repo.v2"
+      check e.observedSchema == "reprobuild.workspace.repo.v3"
     check raised
 
   test "missing required key is reported":

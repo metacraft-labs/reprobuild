@@ -103,7 +103,9 @@ suite "M5 — WorkspaceLocal round-trip":
     except WorkspaceManifestParseError as e:
       raised = true
       check e.keyPath == "schema"
-      check e.expectedSchema == "reprobuild.workspace.local.v1"
+      # The CURRENT state schema is what a mismatch names as expected; the
+      # old `local.v1` is still read (Workspace-Settings-Files.md §8).
+      check e.expectedSchema == "reprobuild.workspace.state.v1"
       check e.observedSchema == "reprobuild.workspace.local.v2"
     check raised
 

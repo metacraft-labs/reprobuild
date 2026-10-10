@@ -4,7 +4,7 @@
 ## THE DEFECT. When ``resolveWorkspaceProjectShared`` (and its sibling in
 ## ``repro workspace lock``) could name no project, it raised one sentence:
 ##
-##   <op> requires either `.repro/workspace.toml` or a <project> argument;
+##   <op> requires either `.repro/workspace-state.toml` or a <project> argument;
 ##   neither was present at <root>
 ##
 ## The sentence names the two things that were ABSENT and says nothing about
@@ -167,7 +167,7 @@ proc runRepro(reproBin, cwd: string; args: openArray[string]):
 # the shape is the record store / a bare manifests clone, and that it is not a
 # workspace.
 const
-  originalRefusal = "requires either `.repro/workspace.toml`"
+  originalRefusal = "requires either `.repro/workspace-state.toml`"
   storeRefusalMarkers = [
     "membership manifest data",
     "is not a workspace",
@@ -297,7 +297,8 @@ suite "workspace resolution names the manifest data it found":
       writeMembershipManifests(workspace)
       createDir(workspace / ".repro")
       check dirExists(workspace / ".repro")
-      check not fileExists(workspace / ".repro" / "workspace.toml")
+      check not fileExists(workspace / ".repro" / "workspace-state.toml") and
+        not fileExists(workspace / ".repro" / "workspace.toml")
       check fileExists(workspace / "projects" / "app.toml")
 
       checkOriginalDiagnostic("workspace sync(workspace)",

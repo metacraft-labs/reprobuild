@@ -8,7 +8,7 @@
 ##
 ## * **Create a file from a typed value** — ``repoFragmentText``,
 ##   ``repoSetText``, ``projectManifestText``, ``urlPrefixText``,
-##   ``workspaceBootstrapText`` and ``workspaceStateText`` render a record in
+##   ``workspaceSettingsText`` and ``workspaceStateText`` render a record in
 ##   the canonical layout, and ``writeWorkspaceManifestFile`` puts the text on disk.
 ## * **Edit an existing file in place** — ``loadManifestDoc`` reads a file
 ##   into a ``ManifestDoc``; ``setKey`` / ``removeKey`` change one key of one
@@ -334,18 +334,53 @@ proc copyLinkRows(entries: seq[CopyLinkFileEntry]): seq[seq[TomlEditField]] =
   for e in entries:
     result.add(@[tomlField("src", tomlStr(e.src)), tomlField("dest", tomlStr(e.dest))])
 
+proc roleEditValue(v: BranchRoleValue): Option[TomlEditValue] =
+  ## A role value as written: a branch name, `false`, or nothing.
+  case v.kind
+  of brvUndeclared: none(TomlEditValue)
+  of brvBranch: some(tomlStr(v.branch))
+  of brvAbsent: some(tomlBool(false))
+
+proc addRole(entries: var seq[RenderEntry]; key: string; v: BranchRoleValue) =
+  let value = roleEditValue(v)
+  if value.isSome:
+    entries.add(entry(key, value.get()))
+
+proc roleEntries(decls: BranchRoleDecls): seq[RenderEntry] =
+  ## The six built-in role keys of one declarer, in role order.
+  result.addOpt("mainline", decls.mainline)
+  result.addRole("unstable", decls.unstable)
+  result.addRole("staging", decls.staging)
+  result.addRole("stable", decls.stable)
+  result.addRole("production", decls.production)
+  result.addRole("lts", decls.lts)
+
+proc customRoleBlock(header: string;
+                     custom: seq[(string, BranchRoleValue)]): seq[RenderBlock] =
+  ## A `[<declarer>.branch-roles]` block, or nothing when there are none.
+  var e: seq[RenderEntry]
+  for (name, value) in custom:
+    e.addRole(name, value)
+  if e.len > 0:
+    result.add(RenderBlock(header: header, entries: e))
+
 proc repoFragmentText*(fragment: RepoFragment): string =
-  ## ``repos/<repo>.toml`` from a typed value. Keys under ``[repo]`` are
-  ## written in a fixed order — identity (``name``, ``path``), where it comes
-  ## from (``remote``), what it follows (``branch``, ``revision``), then the
-  ## URL split, then every optional key — so two fragments written by two
-  ## verbs read alike.
+  ## ``repos/<repo>.toml`` from a typed value, ALWAYS as
+  ## ``reprobuild.workspace.repo.v2`` (Workspace-Branch-Roles.md §3.1): the
+  ## mainline is written as ``mainline`` — taken from ``mainline``, or from a
+  ## v1-style ``branch`` on the record — and never as ``branch``. Keys under
+  ## ``[repo]`` are written in a fixed order — identity (``name``, ``path``),
+  ## where it comes from (``remote``), what it follows (``profile``, the
+  ## roles, ``revision``), then the URL split, then every optional key — so
+  ## two fragments written by two verbs read alike. Custom roles go in a
+  ## ``[repo.branch-roles]`` block after ``[repo]``.
   let r = fragment.repo
   var e: seq[RenderEntry]
   e.add(entry("name", tomlStr(r.name)))
   e.add(entry("path", tomlStr(r.path)))
   e.addOpt("remote", r.remote)
-  e.addOpt("branch", r.branch)
+  e.addOpt("profile", r.profile)
+  for re in roleEntries(r.roleDecls): e.add(re)
   e.addOpt("revision", r.revision)
   e.addOpt("url_prefix", r.url_prefix)
   e.addOpt("url_suffix", r.url_suffix)
@@ -365,9 +400,9 @@ proc repoFragmentText*(fragment: RepoFragment): string =
     e.add(entry("linkfile", tomlInlineTables(copyLinkRows(r.linkfile))))
   e.addNonEmpty("tags", r.tags)
   e.addNonEmpty("depends", r.depends)
-  let schema = if fragment.schema.len > 0: fragment.schema
-               else: schemaRepoFragmentV1
-  assemble(schema, @[], @[RenderBlock(header: "[repo]", entries: e)],
+  var blocks = @[RenderBlock(header: "[repo]", entries: e)]
+  blocks.add(customRoleBlock("[repo.branch-roles]", r.`branch-roles`.entries))
+  assemble(schemaRepoFragmentV2, @[], blocks,
     extensionsBlock(fragment.extensions))
 
 proc repoSetText*(manifest: RepoSetManifest): string =
@@ -435,22 +470,55 @@ proc urlPrefixText*(manifest: UrlPrefixManifest): string =
       entry("url", tomlStr(manifest.`url-prefix`.url))])],
     extensionsBlock(manifest.extensions))
 
-proc workspaceBootstrapText*(cfg: WorkspaceBootstrap): string =
-  ## The host bootstrap config (``.repro-workspace.toml``) from a typed value.
-  ## A table is written only when it carries something.
+proc settingsLayerEntries(layer: SettingsManifestLayer): seq[RenderEntry] =
+  result.addOpt("name", layer.name)
+  result.addOpt("url", layer.url)
+  result.addOpt("local_path", layer.local_path)
+  result.addOpt("branch", layer.branch)
+  result.addOpt("visibility", layer.visibility)
+  result.addOpt("revision", layer.revision)
+
+proc workspaceSettingsText*(cfg: WorkspaceSettings): string =
+  ## The shared settings file ``repro-workspace.toml``
+  ## (``reprobuild.workspace.settings.v1``, Workspace-Settings-Files.md §3)
+  ## from a typed value. A table is written only when it carries something.
+  ## Always ``settings.v1``: a record mapped from an old ``bootstrap.v1`` file
+  ## is written in the new shape (its record store under ``[records]``), never
+  ## the old one. ``privateManifestUrl`` and ``manifestRevision`` have no
+  ## ``settings.v1`` spelling and are refused rather than dropped.
+  if cfg.privateManifestUrl.isSome or cfg.manifestRevision.isSome:
+    raise editError(cfg.path, "manifest",
+      "a bootstrap.v1 `[manifest] private_url` / `revision` has no " &
+        "settings.v1 spelling: declare a named `[[manifest]]` layer (its url " &
+        "supplied by repro-workspace.local.toml) with its own `revision`")
   var blocks: seq[RenderBlock]
-  var m: seq[RenderEntry]
-  if cfg.manifest.url.len > 0:
-    m.add(entry("url", tomlStr(cfg.manifest.url)))
-  m.addOpt("branch", cfg.manifest.branch)
-  m.addOpt("private_url", cfg.manifest.private_url)
-  m.addOpt("revision", cfg.manifest.revision)
-  m.addOpt("publish_locks", cfg.manifest.publish_locks)
-  if m.len > 0: blocks.add(RenderBlock(header: "[manifest]", entries: m))
+  var w: seq[RenderEntry]
+  w.addOpt("profile", cfg.workspace.profile)
+  w.addOpt("default_profile", cfg.workspace.default_profile)
+  for re in roleEntries(cfg.workspace.roles): w.add(re)
+  if w.len > 0: blocks.add(RenderBlock(header: "[workspace]", entries: w))
+  blocks.add(customRoleBlock("[workspace.branch-roles]",
+    cfg.workspace.roles.custom))
   var p: seq[RenderEntry]
   p.addNonEmpty("default", cfg.projects.default)
   p.addOpt("default_template", cfg.projects.default_template)
   if p.len > 0: blocks.add(RenderBlock(header: "[projects]", entries: p))
+  var rec: seq[RenderEntry]
+  rec.addOpt("url", cfg.records.url)
+  rec.addOpt("branch", cfg.records.branch)
+  rec.addOpt("publish_locks", cfg.records.publish_locks)
+  if rec.len > 0: blocks.add(RenderBlock(header: "[records]", entries: rec))
+  for layer in cfg.sharedLayers:
+    blocks.add(RenderBlock(header: "[[manifest]]",
+      entries: settingsLayerEntries(layer)))
+  for (name, decls) in cfg.profiles:
+    let header = "profiles." & renderKey(name)
+    blocks.add(RenderBlock(header: "[" & header & "]",
+      entries: roleEntries(decls)))
+    blocks.add(customRoleBlock("[" & header & ".branch-roles]", decls.custom))
+  for role in cfg.customRoles:
+    blocks.add(RenderBlock(header: "[branch-roles." & renderKey(role.name) & "]",
+      entries: @[entry("fallback", tomlStr(role.fallback))]))
   var v: seq[RenderEntry]
   if cfg.verify.require_signature:
     v.add(entry("require_signature", tomlBool(true)))
@@ -476,9 +544,8 @@ proc workspaceBootstrapText*(cfg: WorkspaceBootstrap): string =
   f.addOpt("auto_load_envrc", cfg.foreign_env.auto_load_envrc)
   f.addOpt("auto_load_flake", cfg.foreign_env.auto_load_flake)
   if f.len > 0: blocks.add(RenderBlock(header: "[foreign_env]", entries: f))
-  let schema = if cfg.schema.len > 0: cfg.schema
-               else: schemaWorkspaceBootstrapV1
-  assemble(schema, @[], blocks, extensionsBlock(cfg.extensions))
+  assemble(schemaWorkspaceSettingsV1, @[], blocks,
+    extensionsBlock(cfg.extensions))
 
 proc stateWorkspaceEntries(body: WorkspaceBody): seq[RenderEntry] =
   ## The ``[workspace]`` table of the state file, in its fixed key order. The
@@ -495,9 +562,12 @@ proc stateWorkspaceEntries(body: WorkspaceBody): seq[RenderEntry] =
     result.add(entry("feature_started", tomlBool(true)))
 
 proc workspaceStateText*(local: WorkspaceLocal): string =
-  ## The per-checkout state file (``.repro/workspace.toml``) from a typed
-  ## value: ``[workspace]`` then one ``[[manifest]]`` block per layer. Refuses
-  ## an empty project name, which the strict reader would reject later.
+  ## The per-checkout state file (``.repro/workspace-state.toml``,
+  ## ``reprobuild.workspace.state.v1``) from a typed value: ``[workspace]``
+  ## then one ``[[manifest]]`` block per layer the record carries (only a
+  ## layer list carried over from an old ``.repro/workspace.toml`` — no writer
+  ## adds one). Always ``state.v1``, whatever ``local.schema`` says. Refuses an
+  ## empty project name, which the strict reader would reject later.
   if local.workspace.project.len == 0:
     raise editError("", "workspace.project",
       "refusing to write a workspace state file with an empty project name")
@@ -513,9 +583,7 @@ proc workspaceStateText*(local: WorkspaceLocal): string =
     if layer.branch.isSome and layer.branch.get().len > 0:
       e.add(entry("branch", tomlStr(layer.branch.get())))
     blocks.add(RenderBlock(header: "[[manifest]]", entries: e))
-  let schema = if local.schema.len > 0: local.schema
-               else: schemaWorkspaceLocalV1
-  assemble(schema, @[], blocks, extensionsBlock(local.extensions))
+  assemble(schemaWorkspaceStateV1, @[], blocks, extensionsBlock(local.extensions))
 
 proc writeWorkspaceManifestFile*(path, text: string) =
   ## Write ``text`` to ``path`` (creating the parent directory) through a
@@ -1098,6 +1166,88 @@ proc insertEntry(doc: var ManifestDoc; s: DocScan; table: string;
 
 # ---- edits: keys -----------------------------------------------------------
 
+proc stringValue*(doc: ManifestDoc; table, key: string): Option[string] =
+  ## The value of ``key`` in ``table`` when it is a string, else ``none``.
+  let s = doc.scan
+  let idx = doc.findEntry(s, table, key)
+  if idx >= 0 and s.entries[idx].value.kind == pvString:
+    return some(s.entries[idx].value.s)
+  none(string)
+
+proc renameKey*(doc: var ManifestDoc; table, oldKey, newKey: string): bool =
+  ## Rename ``oldKey`` of ``table`` to ``newKey`` in place: the value, the
+  ## spacing after ``=`` and a trailing comment are kept byte for byte; only
+  ## the key text changes. Returns false when ``oldKey`` is absent. Refuses
+  ## when ``newKey`` is already present, which would declare it twice.
+  let s = doc.scan
+  let idx = doc.findEntry(s, table, oldKey)
+  if idx < 0:
+    return false
+  if doc.findEntry(s, table, newKey) >= 0:
+    raise editError(doc.path, (if table.len > 0: table & "." else: "") & newKey,
+      "cannot rename `" & oldKey & "`: `" & newKey & "` is already declared")
+  let e = s.entries[idx]
+  let line = doc.lines[e.first]
+  let indent = line.len - line.strip(trailing = false).len
+  var cur = Cursor(l: e.first, c: indent)
+  discard doc.parseKeySegments(cur, {'='})
+  # ``cur`` now sits on the ``=``; keep it and everything after it.
+  var newLines = @[line[0 ..< indent] & renderDottedKey(newKey) & " " &
+    line[cur.c .. ^1]]
+  doc.replaceLines(e.first, e.first, newLines)
+  true
+
+proc repoFragmentSchema(doc: ManifestDoc): string =
+  ## The fragment schema the document declares, or "" when it is not a repo
+  ## fragment.
+  let schema = doc.stringValue("", "schema").get("")
+  if schema in [schemaRepoFragmentV1, schemaRepoFragmentV2]: schema else: ""
+
+proc upgradeRepoFragmentToV2*(doc: var ManifestDoc): bool =
+  ## Rewrite a ``repo.v1`` fragment as ``repo.v2`` — the schema line and the
+  ## ``branch`` key renamed ``mainline`` — in one in-memory edit, so the file
+  ## that is saved is wholly one schema or the other, never a mix. Returns
+  ## false when the document is not a v1 fragment. Comments, key order and
+  ## the value of the renamed key survive.
+  if doc.repoFragmentSchema != schemaRepoFragmentV1:
+    return false
+  let s = doc.scan
+  let idx = doc.findEntry(s, "", "schema")
+  doc.replaceValue(s.entries[idx].value, @[tomlQuote(schemaRepoFragmentV2)])
+  discard doc.renameKey("repo", "branch", "mainline")
+  true
+
+proc guardFragmentSchema(doc: var ManifestDoc; table, key: string) =
+  ## The one-schema rule for repo fragments, enforced HERE rather than by
+  ## callers (Workspace-Branch-Roles.md §3.6; the reader refuses a mixed
+  ## fragment):
+  ##
+  ## * writing a ``repo.v2``-only key (``mainline``, a role, ``profile``, a
+  ##   custom role) into a v1 fragment first upgrades the WHOLE file to v2;
+  ## * writing ``branch`` into a v2 fragment is refused.
+  ##
+  ## Why an edit of a key both schemas share (``depends``, ``tags`` …) does
+  ## NOT upgrade a v1 file: the schema bump is what makes a pre-BR1 ``repro``
+  ## refuse the file ("unknown major schema version"). Upgrading every
+  ## fragment a verb happens to touch would turn an unrelated ``repro add``
+  ## into an outage for every machine still on an older pin; a workspace's
+  ## fragments move to v2 when it migrates, deliberately and all at once.
+  let schema = doc.repoFragmentSchema
+  if schema.len == 0:
+    return
+  let v2Only =
+    (table == "repo" and key in ["mainline", "unstable", "staging", "stable",
+                                 "production", "lts", "profile",
+                                 "branch-roles"]) or
+    table == "repo.branch-roles"
+  if v2Only and schema == schemaRepoFragmentV1:
+    discard doc.upgradeRepoFragmentToV2()
+  elif table == "repo" and key == "branch" and schema == schemaRepoFragmentV2:
+    raise editError(doc.path, "repo.branch",
+      "a " & schemaRepoFragmentV2 & " fragment names its mainline " &
+        "`mainline`; `branch` is the " & schemaRepoFragmentV1 & " spelling")
+
+
 proc setKey*(doc: var ManifestDoc; table, key: string; value: TomlEditValue;
              layout = alInline; after: openArray[string] = []): bool =
   ## Set ``key`` in ``table`` (``""`` for the top level) to ``value``.
@@ -1112,6 +1262,9 @@ proc setKey*(doc: var ManifestDoc; table, key: string; value: TomlEditValue;
   ##   (first in the table when none is present), or after the table's last
   ##   key when ``after`` is empty. A new top-level key goes above the first
   ##   table header. A missing table is appended to the file.
+  ## * In a repo fragment, a ``repo.v2``-only key upgrades a v1 file first and
+  ##   ``branch`` is refused in a v2 file (``guardFragmentSchema``).
+  doc.guardFragmentSchema(table, key)
   let s = doc.scan
   let idx = doc.findEntry(s, table, key)
   if idx >= 0:
@@ -1331,6 +1484,25 @@ proc ensureArrayTableEntry*(doc: var ManifestDoc; name: string;
     dec endLine
   doc.insertBlock(endLine + 1, blockLines, padBefore = true, padAfter = true)
   true
+
+proc blankTable*(text, table: string): string =
+  ## ``text`` with every ``[table]`` block — header and body, up to the next
+  ## header — replaced by EMPTY lines, so line numbers in any later diagnostic
+  ## still point at the original file. For the reader: the pinned typed
+  ## decoder refuses a dotted sub-table header (``[repo.branch-roles]``) of a
+  ## typed record, so that table is blanked for the typed decode and read from
+  ## the generic tree instead. Raises ``ManifestEditError`` on a line the
+  ## editor cannot parse.
+  var doc = manifestDocFromText(text)
+  let s = doc.scan
+  for idx, h in s.headers:
+    if h.name != table or h.isArray:
+      continue
+    let last = if idx + 1 < s.headers.len: s.headers[idx + 1].line - 1
+               else: doc.lines.len - 1
+    for l in h.line .. last:
+      doc.lines[l] = ""
+  doc.manifestDocText
 
 # ---- file-level conveniences -----------------------------------------------
 

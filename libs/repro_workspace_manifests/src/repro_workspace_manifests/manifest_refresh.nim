@@ -40,12 +40,12 @@ import std/[options, os, osproc, strutils, tables]
 
 import types
 import resolver
-import reader
 
 import repro_build_engine
 import git_tool
 import git_actions
 import workspace_branch
+import settings
 
 type
   ManifestLayerRefreshStatus* = enum
@@ -370,7 +370,7 @@ proc refreshManifestLayers*(workspaceRoot: string;
                             includeWorkspaceRoot = false):
     ManifestRefreshReport =
   ## Refresh every ``url``-backed manifest layer declared in
-  ## ``<workspaceRoot>/.repro/workspace.toml``. Returns a per-layer
+  ## the workspace (state file and settings files). Returns a per-layer
   ## report. Raises ``WorkspaceManifestParseError`` if the workspace
   ## TOML itself is missing or malformed; per-layer failures are
   ## reported in the result, NOT raised (sync should continue even if
@@ -394,15 +394,22 @@ proc refreshManifestLayers*(workspaceRoot: string;
     if rootEntry.status != mrsSkippedAbsent:
       result.layers.add(rootEntry)
   if not fileExists(workspaceTomlPath):
-    # No workspace.toml means M6/M7 single-project mode: nothing to
+    # No state file means M6/M7 single-project mode: nothing to
     # refresh. Return an empty report; the caller treats that as a
     # successful no-op.
     return
-  let workspaceLocal = readWorkspaceLocal(workspaceTomlPath)
+  # The SAME layer list the composer acquires — the state file's own layers
+  # and the settings files' — so a layer's position, and with it the
+  # `manifests-<i>-…` directory it was cloned into, agrees between the two.
+  let workspaceLocal = effectiveWorkspaceLocal(absRoot)
   if workspaceLocal.manifest.len == 0:
     return
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   for layerIdx, entry in workspaceLocal.manifest:
+    if entry.name == some(workspaceRootLayerName):
+      # The root repository's base layer; `includeWorkspaceRoot` decides
+      # whether the root is refreshed, above.
+      continue
     let hasUrl = entry.url.isSome and entry.url.get().len > 0
     if hasUrl:
       result.layers.add(refreshOneUrlLayer(identity, absRoot, dotRepo,

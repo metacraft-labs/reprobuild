@@ -193,7 +193,10 @@ suite "manifest editor edge cases":
     let f = readRepoFragment(dir / "repos" / "llvm-project.toml")
     check f.repo.name == "llvm-project"
     check f.repo.url_suffix == some("llvm/llvm-project")
-    check f.repo.branch == some("main")
+    # Every writer emits repo.v2: the v1-style `branch` lands as `mainline`.
+    check f.schema == schemaRepoFragmentV2
+    check f.repo.mainline == some("main")
+    check f.repo.branch.isNone
     check f.repo.tags == @["refs"]
     check f.repo.depends == @["mold"]
     check f.repo.copyfile.len == 1 and f.repo.copyfile[0].dest == "b"
@@ -213,19 +216,22 @@ suite "manifest editor edge cases":
     check p.binary_dependency[0].revision == some("v1")
     check p.project.trunk == some("main")
 
-    var cfg = WorkspaceBootstrap(schema: schemaWorkspaceBootstrapV1)
-    cfg.manifest.url = "https://github.com/example/repro-workspace.git"
-    cfg.manifest.publish_locks = some(true)
+    # The settings file is written only as settings.v1 (repro-workspace.toml);
+    # the old bootstrap.v1 renderer is gone.
+    var cfg = WorkspaceSettings()
+    cfg.records.url = some("https://github.com/example/repro-workspace.git")
+    cfg.records.publish_locks = some(true)
     cfg.projects.default = @["reprobuild"]
     cfg.develop.org_urls = @["https://github.com/example/"]
     cfg.locking.route = @[LockingRouteEntry(visibility: "team",
       backend: "git-checkout", path: some(".repro/manifests"),
       repos: @["a", "b"])]
-    writeWorkspaceManifestFile(dir / ".repro-workspace.toml",
-      workspaceBootstrapText(cfg))
-    let b = readWorkspaceBootstrap(dir / ".repro-workspace.toml")
-    check b.manifest.url == cfg.manifest.url
-    check b.manifest.publish_locks == some(true)
+    writeWorkspaceManifestFile(dir / "repro-workspace.toml",
+      workspaceSettingsText(cfg))
+    let b = readWorkspaceSettings(dir / "repro-workspace.toml")
+    check b.schema == schemaWorkspaceSettingsV1
+    check b.records.url == cfg.records.url
+    check b.records.publish_locks == some(true)
     check b.projects.default == @["reprobuild"]
     check b.develop.org_urls == cfg.develop.org_urls
     check b.locking.route.len == 1
@@ -245,7 +251,7 @@ suite "manifest editor edge cases":
   test "the renderers reproduce the layouts the CLI stubs used to write":
     check repoFragmentText(RepoFragment(repo: RepoBody(name: "r", path: "r",
       remote: some("origin"), revision: some("main")))) ==
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"r\"\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"r\"\n" &
       "path = \"r\"\nremote = \"origin\"\nrevision = \"main\"\n"
     check urlPrefixText(UrlPrefixManifest(`url-prefix`: UrlPrefixBody(
       name: "gh", url: "https://github.com/o"))) ==
@@ -272,7 +278,7 @@ suite "manifest editor edge cases":
     defer: removeDir(dir)
     createDir(dir / ".repro")
     let path = workspaceTomlPath(dir)
-    let src = "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+    let src = "schema = \"reprobuild.workspace.state.v1\"\n\n" &
       "# managed by repro; this comment is mine\n[workspace]\n" &
       "project = \"a\"\nbranch = \"main\"\n"
     writeFile(path, src)

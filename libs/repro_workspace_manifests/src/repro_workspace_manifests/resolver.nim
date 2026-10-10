@@ -1063,8 +1063,9 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
   # legal `git clone --branch` argument. Overwriting instead meant a fragment
   # carrying both silently discarded its SHA: the pin was recorded in the
   # manifest but bound nothing, which reads as protected while floating.
-  let fragmentBranch =
-    if fragment.repo.branch.isSome: fragment.repo.branch.get() else: ""
+  # The mainline, whichever schema declared it (`mainline` in repo.v2,
+  # `branch` in repo.v1 — `readRepoFragment` maps one onto the other).
+  let fragmentBranch = fragment.repo.mainlineBranch.get("")
   let fragmentRevision =
     if fragment.repo.revision.isSome: fragment.repo.revision.get() else: ""
   result.branch = fragmentBranch

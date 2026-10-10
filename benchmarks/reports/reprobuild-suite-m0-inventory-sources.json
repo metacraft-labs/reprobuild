@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1878,
+    "nimTestBinaries": 1887,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 600,
+    "pureUnitTests": 606,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1895
+    "testEntries": 1904
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -970,6 +970,26 @@
       "targetOs": "soAny"
     },
     {
+      "count": 9,
+      "defines": [],
+      "dependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_local_file_cannot_declare_policy.nim",
+        "tests/unit/t_local_name_without_shared_layer_is_an_error.nim",
+        "tests/unit/t_manifest_editor_edge_cases.nim",
+        "tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim",
+        "tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim",
+        "tests/unit/t_manifest_editor_preserves_unrelated_text.nim",
+        "tests/unit/t_repo_fragment_role_keys.nim",
+        "tests/unit/t_repo_v1_and_v2_resolve_identically.nim",
+        "tests/unit/t_workspace_settings_v1_decode.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 2,
       "defines": [],
       "dependencyShape": [
@@ -1046,20 +1066,6 @@
       "count": 3,
       "defines": [],
       "dependencyShape": [
-        "repro_workspace_manifests"
-      ],
-      "owner": "tests/unit",
-      "sources": [
-        "tests/unit/t_manifest_editor_edge_cases.nim",
-        "tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim",
-        "tests/unit/t_manifest_editor_preserves_unrelated_text.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 3,
-      "defines": [],
-      "dependencyShape": [
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
@@ -1104,9 +1110,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 1008,
+      "integration": 1011,
       "platform/destructive": 119,
-      "pure unit": 600,
+      "pure unit": 606,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1285,9 +1291,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1878,
+    "nimTestBinaryCount": 1887,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1895
+    "testEntryCount": 1904
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30637,6 +30643,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_named_layer_url_supplied_locally",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_named_layer_url_supplied_locally.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -30826,6 +30851,24 @@
       "source": "tests/integration/t_no_runtime_compilation_in_tests.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_old_names_read_until_retired",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_old_names_read_until_retired.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33865,6 +33908,24 @@
       "source": "tests/integration/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_state_file_skew_is_reported",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_state_file_skew_is_reported.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37587,6 +37648,40 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_local_file_cannot_declare_policy",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_local_file_cannot_declare_policy.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_local_name_without_shared_layer_is_an_error",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_local_name_without_shared_layer_is_an_error.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_m21_history_fed_scheduling",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -39100,6 +39195,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_manifest_editor_keeps_a_fragment_in_one_schema",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_manifest_editor_member_edits_target_the_named_array",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -39387,6 +39499,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repo_fragment_role_keys",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_repo_fragment_role_keys.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repo_relocation_move_ordering",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -39400,6 +39529,23 @@
       "source": "tests/unit/t_repo_relocation_move_ordering.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repo_v1_and_v2_resolve_identically",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_repo_v1_and_v2_resolve_identically.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40011,6 +40157,23 @@
       "source": "tests/unit/t_workspace_root_for_repo_managed_worktree.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_workspace_settings_v1_decode",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_workspace_settings_v1_decode.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

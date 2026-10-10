@@ -29,7 +29,6 @@ import std/[options, os, strutils, tables]
 
 import types
 import diagnostics
-import reader
 import resolver
 import compose
 import workspace_branch
@@ -47,7 +46,7 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string):
   ## to see, not a repo set to silently narrow.
   if isCompositionalWorkspaceToml(workspaceRoot):
     let absToml = absolutePath(workspaceTomlPath(workspaceRoot))
-    var workspaceLocal = readWorkspaceLocal(absToml)
+    var workspaceLocal = effectiveWorkspaceLocal(workspaceRoot)
     # Compose the NAMED project across the same layer stack. Only the selected
     # project name changes; the layer list, visibilities and branches are the
     # workspace's own.
@@ -91,8 +90,8 @@ proc raiseProjectSetConflict(workspaceRoot, path: string;
   var e = newException(WorkspaceProjectSetConflictError, "")
   e.path = workspaceTomlPath(workspaceRoot)
   e.keyPath = "workspace.projects"
-  e.expectedSchema = schemaWorkspaceLocalV1
-  e.observedSchema = schemaWorkspaceLocalV1
+  e.expectedSchema = schemaWorkspaceStateV1
+  e.observedSchema = schemaWorkspaceStateV1
   e.innerMessage = inner
   e.msg = "[" & e.path & "] at key 'workspace.projects': " & inner
   raise e

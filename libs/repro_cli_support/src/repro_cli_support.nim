@@ -28938,7 +28938,8 @@ proc resolveDevelopWorkspacePrimary(
       return resolveProject(candidates[0])
   raise newException(ValueError,
     "`repro develop` could not resolve a project from workspace root '" &
-      workspaceRoot & "' (no .repro/workspace.toml and no single " &
+      workspaceRoot & "' (no .repro/workspace-state.toml or older " &
+      ".repro/workspace.toml, and no single " &
       "projects/*.toml at the workspace root)")
 
 proc resolveDevelopWorkspaceProject(
@@ -33496,27 +33497,20 @@ proc gitRemoteOriginUrl(identity: GitToolIdentity; repoPath: string): string =
   else:
     ""
 
+const stateFileWording = "`.repro/workspace-state.toml` (or the older " &
+    "`.repro/workspace.toml`)"
+  ## How diagnostics name the per-checkout state file while both names are
+  ## read (Workspace-Settings-Files.md §8 step 1).
+
 proc findBootstrapConfigPath(workspaceRoot: string): string =
-  ## RA-8 — locate the host bootstrap config (``.repro-workspace.toml``).
-  ## Resolution of the FILE PATH:
-  ##   1. ``REPRO_WORKSPACE_CONFIG`` env override (an explicit path).
-  ##   2. ``<workspaceRoot>/.repro-workspace.toml`` and then each ancestor
-  ##      directory (the host product repo committing the config may be a
-  ##      parent of the directory ``init`` runs in).
-  ## Returns the empty string when no config file is found.
-  let override = getEnv("REPRO_WORKSPACE_CONFIG")
-  if override.len > 0:
-    return (if fileExists(override): absolutePath(override) else: "")
-  var dir = absolutePath(workspaceRoot)
-  while true:
-    let candidate = dir / bootstrapConfigFileName
-    if fileExists(candidate):
-      return candidate
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  ""
+  ## Locate the workspace settings file: ``REPRO_WORKSPACE_CONFIG`` when set,
+  ## else ``repro-workspace.toml`` — or, until the old name is retired, the
+  ## old host bootstrap config ``.repro-workspace.toml`` — in
+  ## ``workspaceRoot`` or the nearest ancestor that has one, the new name
+  ## winning within one directory (Workspace-Settings-Files.md §6). Returns
+  ## the empty string when there is none. The one implementation is
+  ## ``findWorkspaceSettingsPath``; this name is kept for the many call sites.
+  findWorkspaceSettingsPath(workspaceRoot)
 
 proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ## RA-8 — resolve the manifest URL/branch (+ default projects) for ``init``
@@ -33524,8 +33518,10 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ##
   ## Resolution order for the manifest URL/branch:
   ##   1. explicit ``--manifest-url`` / ``--manifest-branch`` (RA-11 flags);
-  ##   2. the host bootstrap config ``.repro-workspace.toml``
-  ##      (``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo);
+  ##   2. the workspace settings file's record store (``repro-workspace.toml``
+  ##      ``[records] url`` / ``branch``, or the old ``.repro-workspace.toml``
+  ##      ``[manifest] url`` / ``branch`` it maps from), found through
+  ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo;
   ##   3. the host repo's own ``remote.origin.url``.
   ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
   ## NO built-in/hardcoded manifest URL fallback.
@@ -33540,13 +33536,13 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   # a private URL from the config below without overriding the URL/branch.
   let configPath = findBootstrapConfigPath(args.workspaceRoot)
   if configPath.len > 0:
-    let cfg = readWorkspaceBootstrap(configPath)
+    let cfg = readWorkspaceSettings(configPath)
     if not args.manifestUrlExplicit:
-      args.manifestUrl = cfg.manifest.url
-      if cfg.manifest.branch.isSome and args.manifestBranch.len == 0:
-        args.manifestBranch = cfg.manifest.branch.get()
-    if args.privateManifestUrl.len == 0 and cfg.manifest.private_url.isSome:
-      args.privateManifestUrl = cfg.manifest.private_url.get()
+      args.manifestUrl = cfg.records.url.get("")
+      if cfg.records.branch.isSome and args.manifestBranch.len == 0:
+        args.manifestBranch = cfg.records.branch.get()
+    if args.privateManifestUrl.len == 0 and cfg.privateManifestUrl.isSome:
+      args.privateManifestUrl = cfg.privateManifestUrl.get()
     if cfg.projects.default.len > 0:
       args.defaultProjects = cfg.projects.default
     # Fill the project-to-init from the config default when no positional
@@ -34298,8 +34294,8 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       not isCompositionalWorkspaceToml(args.workspaceRoot):
     raise newException(ValueError,
       "no manifest configured for `repro workspace init`: pass " &
-        "`--manifest-url=…`, commit a `" & bootstrapConfigFileName &
-        "` host bootstrap config (or set `REPRO_WORKSPACE_CONFIG`), or run " &
+        "`--manifest-url=…`, commit a `" & settingsFileName &
+        "` with a `[records] url` (or set `REPRO_WORKSPACE_CONFIG`), or run " &
         "inside a host repo whose `origin` is the manifest source. `repro` " &
         "ships no built-in manifest URL.")
   if args.projectName.len == 0:
@@ -35491,7 +35487,7 @@ proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
   let manifest = standaloneMembershipManifestCheckout(workspaceRoot)
   if manifest.len == 0 or hasCommittedLockWorkspaceMarker(workspaceRoot):
     return newException(ValueError,
-      opLabel & " requires either `.repro/workspace.toml` or a <project> " &
+      opLabel & " requires either " & stateFileWording & " or a <project> " &
         "argument; neither was present at " & workspaceRoot)
   newException(ValueError,
     opLabel & ": found membership manifest data at " & workspaceRoot &
@@ -35501,7 +35497,7 @@ proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
       "store: it holds the membership and lock records FOR a workspace and " &
       "is not a workspace itself, and with no committed `repro.lock` at " &
       workspaceRoot & " the manifest-optional (MO-2) route to a project is " &
-      "not open here either. Do NOT hand-create `.repro/workspace.toml` " &
+      "not open here either. Do NOT hand-create a `.repro/` state file " &
       "here: that makes this checkout claim to BE the workspace it " &
       "describes, which Unified-Locking-And-Hooks.md section 10 forbids. " &
       "Passing a <project> does not get past this either -- it only makes " &
@@ -35529,7 +35525,7 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   let workspaceToml = workspaceTomlPath(workspaceRoot)
   if isCompositionalWorkspaceToml(workspaceRoot):
     let absToml = absolutePath(workspaceToml)
-    let wl = readWorkspaceLocal(absToml)
+    let wl = effectiveWorkspaceLocal(workspaceRoot)
     # PS-2 — layers compose WITHIN the project; the active project set unions
     # ACROSS projects. Both axes apply, layers first.
     return (extendWithActiveProjectSet(workspaceRoot,
@@ -37100,7 +37096,7 @@ type
     clkBuiltinDefault    ## layer 1 — a bare public repo ⇒ the in-repo committed lock
     clkSystem            ## layer 2 — IT/system config (e.g. /etc/reprobuild)
     clkUserDotfiles      ## layer 3 — user dotfiles (~/.config/reprobuild)
-    clkParentWorkspace   ## layer 4 — parent ``.repro-workspace.toml`` [locking]
+    clkParentWorkspace   ## layer 4 — parent workspace settings file [locking]
     clkVcsPrivate        ## layer 5 — VCS-private dir (<git-common-dir>/repro)
     clkInvocation        ## DS-8 — layer 6, THIS INVOCATION's
                          ## ``--lock-store=<kind>:<location>``. Above every
@@ -37355,7 +37351,7 @@ proc resolveRepoBackends*(locking: BootstrapLockingBody;
           "Add a `[[locking.route]]` entry with visibility=\"" &
           lockingTierLabel(repo.visibility) & "\" (e.g. backend=" &
           "\"git-checkout\" or backend=\"external-cli\") to " &
-          bootstrapConfigFileName & ".")
+          settingsFileName & ".")
     else:
       let entry = route.get()
       let kind = entry.backend.strip().toLowerAscii()
@@ -37481,7 +37477,7 @@ proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
   ## empty-default keeps the no-``[locking]`` operations byte-unchanged.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0: return BootstrapLockingBody()
-  let cfg = readWorkspaceBootstrap(configPath)
+  let cfg = readWorkspaceSettings(configPath)
   cfg.locking
 
 # ---------------------------------------------------------------------------
@@ -37656,10 +37652,11 @@ proc composeForeignEnvAutoLoad*(projectRoot: string; gitBin = ""):
   for path in [systemConfigPath(), userConfigPath()]:
     if path.len > 0 and fileExists(extendedPath(path)):
       foldForeignEnvLayer(readReprobuildConfig(path).foreign_env, result)
-  # Layer 4 — the parent workspace's `.repro-workspace.toml`.
+  # Layer 4 — the parent workspace's settings file (`repro-workspace.toml`,
+  # or the old `.repro-workspace.toml`).
   let bootstrapPath = findBootstrapConfigPath(root)
   if bootstrapPath.len > 0:
-    foldForeignEnvLayer(readWorkspaceBootstrap(bootstrapPath).foreign_env,
+    foldForeignEnvLayer(readWorkspaceSettings(bootstrapPath).foreign_env,
       result)
   # Layer 5 — the VCS-private, never-pushed config.
   let privatePath = vcsPrivateConfigPath(root, gitBin)
@@ -37795,7 +37792,7 @@ proc resolveRepoBackends*(composed: ComposedRouting;
           "Add a `[locking] route` entry with visibility=\"" &
           lockingTierLabel(repo.visibility) & "\" (e.g. backend=" &
           "\"git-checkout\" or backend=\"external-cli\") to a configuration " &
-          "layer (e.g. " & bootstrapConfigFileName & ", a system/dotfiles " &
+          "layer (e.g. " & settingsFileName & ", a system/dotfiles " &
           "reprobuild config, or an `apply_if`-referenced routes file).")
     else:
       let tier = claims[0].tier
@@ -43703,7 +43700,7 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = readWorkspaceLocal(absToml)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -49323,11 +49320,12 @@ proc runManifestRefreshHookCommand*(hookName: string;
 
   let workspaceToml = workspaceTomlPath(workspaceRoot)
   if not fileExists(workspaceToml):
-    # No workspace.toml means M6/M7 single-project mode (or a freshly-
+    # No state file means M6/M7 single-project mode (or a freshly-
     # initialised .repro): nothing to refresh. Log once so the operator
     # can correlate; never raise.
     appendManifestRefreshLog(timestamp & " " & hookName &
-      " skipped: no workspace.toml at " & workspaceRoot)
+      " skipped: no workspace state file (.repro/workspace-state.toml or " &
+      "the older .repro/workspace.toml) at " & workspaceRoot)
     reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
@@ -53643,7 +53641,7 @@ proc observeWorkspaceGateways*(workspaceRoot: string; cacheRoot = "";
         elif result.optOutScope == "machine": "per-machine opt-out (" &
           gatewayOptOutEnvVar & ")"
         else: "per-workspace opt-out (push_gateway in " &
-          bootstrapConfigFileName & ")"
+          extractFilename(findBootstrapConfigPath(workspaceRoot)) & ")"
       inc result.optedOut
       result.repos.add(one)
       continue
@@ -56142,8 +56140,9 @@ proc perBackendPublishTargets(parsed: CheckArgs; recordStoreRoot: string;
 
 proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## MO-14 — central lock PUBLICATION is OPT-IN. Return true ONLY when the host
-  ## bootstrap config (`.repro-workspace.toml`) explicitly sets
-  ## `[manifest] publish_locks = true`. Absent config file, absent key, or an
+  ## settings file explicitly sets `[records] publish_locks = true`
+  ## (`repro-workspace.toml`; the old `.repro-workspace.toml` spelled it
+  ## `[manifest] publish_locks`). Absent config file, absent key, or an
   ## explicit `false` all mean COMMITTED-LOCK-ONLY: the pre-push gate still
   ## writes/refreshes and passes, but must NOT publish to the central manifest
   ## repo. Any read/parse error is treated as "not enabled" (fail closed toward
@@ -56151,14 +56150,15 @@ proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## affects manifest FETCH / refresh / augmentation.
   # Resolve the config the SAME way ``loadLockingRouting`` resolves the
   # ``[locking]`` table (``findBootstrapConfigPath``: ``REPRO_WORKSPACE_CONFIG``
-  # override → ``<workspaceRoot>/.repro-workspace.toml`` → ancestors), since
+  # override → ``<workspaceRoot>/repro-workspace.toml`` (or the old
+  # ``.repro-workspace.toml``) → ancestors), since
   # ``publish_locks`` lives in that very file.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0: return false
   try:
-    let cfg = readWorkspaceBootstrap(configPath)
-    result = cfg.manifest.publish_locks.isSome and
-             cfg.manifest.publish_locks.get()
+    let cfg = readWorkspaceSettings(configPath)
+    result = cfg.records.publish_locks.isSome and
+             cfg.records.publish_locks.get()
   except CatchableError:
     result = false
 
@@ -58758,7 +58758,7 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
       return extendWithActiveProjectSet(parsed.workspaceRoot,
         resolveWorkspaceListProject(withProject))
     raise newException(ValueError,
-      "`repro workspace list` requires either `.repro/workspace.toml` " &
+      "`repro workspace list` requires either " & stateFileWording & " " &
         "or a <project> argument; neither was present at " &
         parsed.workspaceRoot)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
@@ -60368,7 +60368,8 @@ proc renderManifestsTextLines*(report: WorkspaceManifestsReport):
         report.workspaceTomlPath)
     else:
       result.add("workspace manifests: no workspace metadata " &
-        "(.repro/workspace.toml not present at " & report.workspaceRoot & ")")
+        "(no .repro/workspace-state.toml or older .repro/workspace.toml at " &
+        report.workspaceRoot & ")")
     return
   result.add("workspace manifests: project=" & report.project &
     " layers=" & $report.layers.len)
@@ -60480,7 +60481,7 @@ proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
   # init / sync / lock / status / list and treat such a file the same
   # way we treat a missing workspace.toml.
   let absToml = absolutePath(workspaceToml)
-  let workspaceLocal = readWorkspaceLocal(absToml)
+  let workspaceLocal = effectiveWorkspaceLocal(args.workspaceRoot)
   if workspaceLocal.manifest.len == 0:
     report.hasLayeredWorkspace = false
     report.project = workspaceLocal.workspace.project
@@ -61747,7 +61748,7 @@ proc resolveBranchProject(parsed: BranchArgs):
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = readWorkspaceLocal(absToml)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -61765,7 +61766,7 @@ proc resolveBranchProject(parsed: BranchArgs):
       discard
   if projectName.len == 0:
     raise newException(ValueError,
-      "`repro branch <name>` requires either `.repro/workspace.toml` " &
+      "`repro branch <name>` requires either " & stateFileWording & " " &
         "or a project name recoverable from one; neither was present at " &
         parsed.workspaceRoot)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
@@ -62590,7 +62591,7 @@ proc resolveSwitchProject(parsed: SwitchArgs):
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = readWorkspaceLocal(absToml)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -62608,7 +62609,7 @@ proc resolveSwitchProject(parsed: SwitchArgs):
       discard
   if projectName.len == 0:
     raise newException(ValueError,
-      "this command requires either `.repro/workspace.toml` " &
+      "this command requires either " & stateFileWording & " " &
         "or a project name recoverable from one; neither was present at " &
         parsed.workspaceRoot)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
@@ -63598,7 +63599,7 @@ proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return false
-  let cfg = readWorkspaceBootstrap(configPath)
+  let cfg = readWorkspaceSettings(configPath)
   for prefix in cfg.develop.org_urls:
     if prefix.len > 0 and remoteUrl.startsWith(prefix):
       return true
@@ -63782,7 +63783,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
       parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
       writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-        schema: schemaRepoFragmentV1,
+        schema: schemaRepoFragmentV2,
         repo: RepoBody(name: parsed.target, path: repoPath,
           remote: some(remoteName),
           revision: (if pinRevision: some(revision) else: none(string))))))
@@ -64849,14 +64850,16 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # The ROOT repo carries the membership manifests, so cutting it from a stale
     # local state while every member repo starts at trunk would hand back a
     # workspace whose bill of materials disagrees with its contents. Its
-    # mainline is a declaration too: the bootstrap config's
-    # ``[manifest] branch``, else the root repo's own ``origin/HEAD``.
+    # mainline is a declaration too: the settings file's ``[workspace]``
+    # mainline (or its profile's; Workspace-Branch-Roles.md §3.4) — for the
+    # old ``.repro-workspace.toml``, its ``[manifest] branch`` — else the root
+    # repo's own ``origin/HEAD``.
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
     if bootstrapPath.len > 0:
       try:
-        let cfg = readWorkspaceBootstrap(bootstrapPath)
-        if cfg.manifest.branch.isSome:
-          rootMainlineBranch = cfg.manifest.branch.get().strip()
+        let declared = rootMainline(readWorkspaceSettings(bootstrapPath))
+        if declared.isSome:
+          rootMainlineBranch = declared.get().strip()
       except CatchableError:
         # An unreadable bootstrap config is not this command's error to raise;
         # fall through to ``origin/HEAD`` and, failing that, to the refusal
@@ -64873,9 +64876,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           else: value
     if rootMainlineBranch.len == 0:
       rootMainlineRefusal = "the workspace root '" & parsed.workspaceRoot &
-        "' declares no mainline: `.repro-workspace.toml` sets no " &
-        "`[manifest] branch` and the root repo has no `origin/HEAD` to read " &
-        "one from. Set `[manifest] branch`, or drop `--from-mainlines`"
+        "' declares no mainline: `" & settingsFileName & "` sets no " &
+        "`[workspace] mainline` (the old `.repro-workspace.toml`: no " &
+        "`[manifest] branch`) and the root repo has no `origin/HEAD` to read " &
+        "one from. Set `[workspace] mainline`, or drop `--from-mainlines`"
 
   if parsed.fromMainlines and parsed.fetch:
     var fetchActions: seq[BuildAction]
@@ -70137,7 +70141,7 @@ proc promptCacheStaleness(workspaceRoot, cachePath, cacheBranch,
   #    sharper than any heuristic: whatever touched `workspace.toml` also
   #    plausibly changed the repo set.
   try:
-    let markerPath = workspaceRoot / ".repro" / "workspace.toml"
+    let markerPath = workspaceTomlPath(workspaceRoot)
     if fileExists(extendedPath(markerPath)) and
         fileExists(extendedPath(cachePath)) and
         getLastModificationTime(extendedPath(markerPath)) >
@@ -70774,7 +70778,7 @@ proc readDefaultTemplateFromHostConfig(workspaceRoot: string): string =
   if configPath.len == 0:
     return ""
   try:
-    let cfg = readWorkspaceBootstrap(configPath)
+    let cfg = readWorkspaceSettings(configPath)
     return cfg.projects.default_template.get("")
   except CatchableError:
     return ""
@@ -70787,7 +70791,7 @@ proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   if configPath.len == 0:
     return @[]
   try:
-    let cfg = readWorkspaceBootstrap(configPath)
+    let cfg = readWorkspaceSettings(configPath)
     return cfg.projects.default
   except CatchableError:
     return @[]
@@ -76404,7 +76408,12 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     var templateSource = "--template"
     if templateName.len == 0 and not noTemplate:
       templateName = readDefaultTemplateFromHostConfig(workspaceRoot)
-      templateSource = bootstrapConfigFileName & " [projects] default_template"
+      # Name the file the default actually came from — `repro-workspace.toml`,
+      # or the old `.repro-workspace.toml` still read during the rename.
+      let configName = extractFilename(findBootstrapConfigPath(workspaceRoot))
+      templateSource =
+        (if configName.len > 0: configName else: settingsFileName) &
+        " [projects] default_template"
     var seed = MembershipSeed()
     if templateName.len > 0:
       let templateRel = "templates/" & templateName & ".toml"
@@ -76731,7 +76740,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # a half-converted manifest repo shows what is there rather than a
         # blank column for every converted fragment.
         remote = m.repo.url_prefix.get(m.repo.remote.get(""))
-        revision = m.repo.branch.get(m.repo.revision.get(""))
+        revision = m.repo.mainlineBranch.get(m.repo.revision.get(""))
       except CatchableError:
         discard
       if scopeSet.len > 0 and repoPath notin scopePaths:
@@ -76879,8 +76888,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       if revision.len > 0 and existing.repo.revision.get("") != revision:
         conflicts.add("revision (" & existing.repo.revision.get("(inherited)") &
           " vs " & revision & ")")
-      if branch.len > 0 and existing.repo.branch.get("") != branch:
-        conflicts.add("branch (" & existing.repo.branch.get("(none)") &
+      if branch.len > 0 and existing.repo.mainlineBranch.get("") != branch:
+        conflicts.add("mainline (" & existing.repo.mainlineBranch.get("(none)") &
           " vs " & branch & ")")
       if conflicts.len > 0:
         stderr.writeLine("repro workspace repos add: '" & repo &
@@ -76967,9 +76976,10 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            schema: schemaRepoFragmentV1,
+            schema: schemaRepoFragmentV2,
+            # `--branch` is written as the v2 `mainline` (Branch-Roles §3.1).
             repo: RepoBody(name: repo, path: effectivePath,
-              branch: (if branch.len > 0: some(branch) else: none(string)),
+              mainline: (if branch.len > 0: some(branch) else: none(string)),
               revision: (if branch.len == 0 and revision.len > 0: some(revision)
                          else: none(string)),
               url_prefix: some(plan.prefixName),
@@ -77016,10 +77026,10 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            schema: schemaRepoFragmentV1,
+            schema: schemaRepoFragmentV2,
             repo: RepoBody(name: plan.repoName, path: effectivePath,
               remote: some(plan.remoteName),
-              branch: (if branch.len > 0: some(branch) else: none(string)),
+              mainline: (if branch.len > 0: some(branch) else: none(string)),
               revision: (if revision.len > 0: some(revision)
                          else: none(string))))))
           paths.add(fragmentRel)

@@ -281,8 +281,19 @@ proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
     seq[(string, string)] =
   ## Ask NF-1 for the actual develop bindings instead of duplicating its resolver.
   var root = absolutePath(projectRoot)
-  while not fileExists(extendedPath(root / ".repro-workspace.toml")) and
-      not fileExists(extendedPath(root / ".repro" / "workspace.toml")):
+  # A workspace root is marked by its settings file or its state file, each
+  # under its current name or the old one still read during the rename
+  # (Workspace-Settings-Files.md §6, §8). The literals are repeated here
+  # rather than imported because this stdlib module does not depend on the
+  # workspace-manifest library.
+  proc marksWorkspaceRoot(dir: string): bool =
+    for marker in [dir / "repro-workspace.toml", dir / ".repro-workspace.toml",
+                   dir / ".repro" / "workspace-state.toml",
+                   dir / ".repro" / "workspace.toml"]:
+      if fileExists(extendedPath(marker)):
+        return true
+    false
+  while not marksWorkspaceRoot(root):
     let parent = parentDir(root)
     if parent == root or parent.len == 0:
       return
