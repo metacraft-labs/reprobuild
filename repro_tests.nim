@@ -11781,6 +11781,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_refuses_an_unreadable_recipe.nim",
+    binary: "build/test-bin/t_lock_refresh_refuses_an_unreadable_recipe",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim",
     binary: "build/test-bin/t_lock_refresh_reuses_monitored_provider_metadata",
     defines: @[],

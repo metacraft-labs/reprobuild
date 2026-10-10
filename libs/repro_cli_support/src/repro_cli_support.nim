@@ -69368,6 +69368,14 @@ proc foldProviderSolverInputs(projectDir: string;
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
 
+proc unreadableRecipeLockRefusal(recipe, failure: string): string =
+  ## Why a refresh refuses to write: the recipe's solve could not be read,
+  ## so no lock written now would carry its packages or producer pins.
+  "could not read the solve of " & recipe & ", so a lock written now " &
+    "would record none of its packages or the workspace producers its " &
+    "uses resolve from; refusing to write one (the committed lock is " &
+    "left as it is): " & failure
+
 proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
@@ -69387,6 +69395,12 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     let fromProvider = solverInputsFromCompiledProvider(projectDir,
       allowEmptySolve = true, failure = addr probeFailure)
     if fromProvider.isSome:
+      if probeFailure.len > 0:
+        # The interface was read but the solve behind it failed: what came
+        # back is the EMPTY answer, not the recipe's. Writing it would drop
+        # every package and producer pin the committed lock carries.
+        raise newException(IOError, unreadableRecipeLockRefusal(
+          projectDir, probeFailure))
       var p = fromProvider.get()
       let emptySolve = p.variants.len == 0 and p.packages.len == 0
       foldProviderSolverInputs(projectDir, p)
@@ -69415,12 +69429,15 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
       except CatchableError: ""
     if recipe.len > 0:
       if probeFailure.len > 0:
-        # Without the recipe's interface the lock cannot name the workspace
-        # producers and catalogs its tool uses resolve from; say so rather
-        # than write a lock that looks complete.
-        stderr.writeLine("repro lock refresh: could not read the tool uses " &
-          "of " & recipe & ", so this lock records none of the workspace " &
-          "producers or catalogs they resolve from: " & probeFailure)
+        # Without the recipe's interface the lock cannot name a package or a
+        # workspace producer its uses resolve from. This used to WARN and
+        # write the empty solve anyway, exit 0: a lock that looks complete
+        # and pins nothing. reprobuild 9ceb532d0 committed exactly that
+        # (`packages = []`, the FNV-1a offset basis as `inputs_digest`, only
+        # the repo's own dep), and every `uses:` sibling then fell through
+        # to PATH. A recipe this refresh cannot read is a failed refresh.
+        raise newException(IOError, unreadableRecipeLockRefusal(
+          recipe, probeFailure))
       return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[])
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
