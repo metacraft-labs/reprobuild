@@ -30,15 +30,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11883,
-      "suite": 2727
+      "case": 11973,
+      "suite": 2743
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 14318,
-      "python-unittest": 289
+      "nim-unittest": 14414,
+      "python-unittest": 299
     },
-    "itemsTotal": 14610,
+    "itemsTotal": 14716,
     "responseDiagnostics": {
       "info": 1,
       "warning": 34
@@ -244,29 +244,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.5,
-    "caseItemsInCatalog": 11883,
-    "casesAddressableThroughTheSurface": 11205,
+    "caseCoveragePercent": 96.53,
+    "caseItemsInCatalog": 11973,
+    "casesAddressableThroughTheSurface": 11286,
     "collidingIdentities": 13,
-    "distinctCaseIdentities": 11870,
+    "distinctCaseIdentities": 11960,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1855,
-      "compared": 1860,
+      "agree": 1867,
+      "compared": 1872,
       "disagree": 5
     },
     "sourceCoveragePercent": 99.52,
-    "sourcesAddressableThroughTheSurface": 1860,
+    "sourcesAddressableThroughTheSurface": 1872,
     "sourcesNotAddressable": 9,
-    "trackedNimSuiteSources": 1869,
-    "trackedStaticCaseCount": 11611
+    "trackedNimSuiteSources": 1881,
+    "trackedStaticCaseCount": 11692
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "3bf0e401561f0567a41e00384fb1278bb1ca867146f2a77080efc569948bcf05"
+    "sha256": "b4716dcd246f67e610566f45ac434bc22034924d5f16443f990f6aff0c42c984"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [

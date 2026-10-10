@@ -468,6 +468,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_directory_listing_above_outputs_is_the_graph_view.nim",
+    binary: "build/test-bin/t_directory_listing_above_outputs_is_the_graph_view",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
     binary: "build/test-bin/t_endpoint_daemon_trust",
     defines: @[],
@@ -686,6 +695,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim",
     binary: "build/test-bin/t_portable_record_from_local_hit",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim",
+    binary: "build/test-bin/t_relocatable_record_follows_the_working_tree",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -1478,6 +1496,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_core/tests/t_nim_dep_scanner.nim",
     binary: "build/test-bin/t_nim_dep_scanner",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_core/tests/t_process_close_once.nim",
+    binary: "build/test-bin/t_process_close_once",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

@@ -360,3 +360,108 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       socketDeleted = true
     check socketDeleted
     pProcess.close()
+
+  # THE HELPER IS SHARED by every reprobuild process of the user, so starting
+  # one, stopping one and one going idle all happen while other processes are
+  # connecting. The three cases below pin the socket-path discipline that
+  # keeps a connecting client from finding the path gone; each was red on
+  # the helper before it took the path under ``<socket>.lock``.
+  when defined(linux):
+    proc shortSocketRoot(): string =
+      # sun_path is 108 bytes; the suite's TMPDIR can be deeper than that.
+      createTempDir("rnd-", "", "/tmp")
+
+    proc waitForSocket(path: string; timeoutMs = 20_000): bool =
+      let deadline = epochTime() + timeoutMs.float / 1000.0
+      while epochTime() < deadline:
+        var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+          protocol = IPPROTO_IP)
+        try:
+          sock.connectUnix(path)
+          sock.close()
+          return true
+        except CatchableError:
+          sock.close()
+        sleep(25)
+      false
+
+    proc awaitExit(p: Process; timeoutMs: int): int =
+      let deadline = epochTime() + timeoutMs.float / 1000.0
+      while epochTime() < deadline:
+        let code = p.peekExitCode()
+        if code != -1:
+          return code
+        sleep(25)
+      -1
+
+    proc socketInode(path: string): int64 =
+      try:
+        int64(getFileInfo(path, followSymlink = false).id.file)
+      except OSError:
+        -1
+
+    proc startHelper(daemonPath, socketPath: string; idleMs: int): Process =
+      startProcess(daemonPath, args = ["--idle-exit-ms=" & $idleMs,
+        "--socket-path=" & socketPath], options = {})
+
+    proc stopHelper(p: Process) =
+      if p.running:
+        p.kill()
+        discard p.waitForExit()
+      p.close()
+
+    test "a helper started beside a live one leaves the live socket alone":
+      # Two clients that both find no helper both start one. The second used
+      # to unlink the first's socket and bind its own, orphaning the first.
+      let daemonPath = findNixDaemon(findRepoRoot())
+      let root = shortSocketRoot()
+      defer: removeDir(root)
+      let socketPath = root / "s.sock"
+      let first = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(first)
+      check waitForSocket(socketPath)
+      let boundInode = socketInode(socketPath)
+      let second = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(second)
+      check awaitExit(second, 20_000) == 0
+      check first.running
+      check socketInode(socketPath) == boundInode
+      check waitForSocket(socketPath, 1_000)
+
+    test "a helper going idle unlinks only its own socket":
+      # The helper that lost a start race used to unlink THE PATH when it went
+      # idle -- by then the winner's socket -- so a client that had just
+      # started a fresh helper found nothing to connect to.
+      let daemonPath = findNixDaemon(findRepoRoot())
+      let root = shortSocketRoot()
+      defer: removeDir(root)
+      let socketPath = root / "s.sock"
+      let older = startHelper(daemonPath, socketPath, 1_500)
+      defer: stopHelper(older)
+      check waitForSocket(socketPath)
+      # The older helper is now unreachable (as if its path had been taken
+      # over); a newer helper binds the path.
+      removeFile(socketPath)
+      let newer = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(newer)
+      check waitForSocket(socketPath)
+      let newerInode = socketInode(socketPath)
+      check awaitExit(older, 20_000) == 0
+      check newer.running
+      check socketInode(socketPath) == newerInode
+      check waitForSocket(socketPath, 1_000)
+
+    test "a stopped helper releases its socket":
+      # SIGTERM -- what a suite runner sends a finished case's processes, and
+      # what anyone stopping "their" helper sends -- used to end the helper
+      # without unlinking, leaving a socket file nothing listens on.
+      let daemonPath = findNixDaemon(findRepoRoot())
+      let root = shortSocketRoot()
+      defer: removeDir(root)
+      let socketPath = root / "s.sock"
+      let helper = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(helper)
+      check waitForSocket(socketPath)
+      helper.terminate()
+      check awaitExit(helper, 20_000) == 0
+      check not fileExists(socketPath) and socketInode(socketPath) == -1

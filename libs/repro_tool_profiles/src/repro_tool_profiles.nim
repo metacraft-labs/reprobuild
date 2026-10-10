@@ -11,6 +11,11 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/host_tar
+# The tarball provisioner runs as a built-in executor on the build engine's
+# scheduler thread, possibly while the engine's worker pool is live, so its
+# extraction commands are released without ``osproc.close``'s double close of
+# the merged stdout/stderr descriptor (see ``repro_core/process_close``).
+from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
@@ -1574,7 +1579,6 @@ else:
       return cached.profile
 
     # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
-    let socketPath = nixDaemonSocketPath()
     let req = %*{
       "action": "resolve",
       "selector": selector,
@@ -1582,43 +1586,31 @@ else:
       "workspaceRoot": getCurrentDir(),
       "evaluateOnly": true
     }
-    proc spawnDaemon(): Process =
-      # Spawn daemon process detached.
-      #
-      # ONE RESOLVER, THE ENGINE'S. This used to be a private candidate chain
-      # of its own -- ``getCurrentDir()``'s ``build/``, ``tools/`` and a
-      # sibling, then ``REPROBUILD_SOURCE_ROOT``'s ``tools/`` before its
-      # ``build/`` -- which had drifted from ``resolveNixDaemonExecutable``
-      # (the ``bakForeignProvision`` path) in two ways that mattered. It never
-      # considered the STAGED helper ``build/bin/reprobuild-nix-daemon``,
-      # whose ``#!`` names the interpreter pinned at build time; and it
-      # preferred the checked-in ``tools/`` script, whose ``#!/usr/bin/env
-      # python3`` resolves ``python3`` through the build's PATH. Under a PATH
-      # that carries a ``python3`` that is not Python (CodeTracer's in-place
-      # project tests put a version-answering stub there) the "daemon" exited
-      # 0 at once, never bound its socket, and the recipe's C compiler could
-      # not be provisioned: "Failed to connect or spawn reprobuild-nix-daemon".
-      # The engine's resolver tries the staged helper first and refuses a
-      # script whose interpreter is missing, with a message naming it.
-      let daemonExe =
-        try:
-          resolveNixDaemonExecutable(
-            cwd = getCurrentDir(),
-            exePath = getAppFilename(),
-            envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
-            envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
-        except BuildEngineError as err:
-          raise newException(OSError, err.msg)
-      # Detached like the engine's spawn: the daemon serves every reprobuild
-      # process of this user, so it must not sit in this build's process
-      # group and go down with it on a terminal interrupt.
-      startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
-        options = {poDaemon, poStdErrToStdOut})
-    let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
+    # ONE RESOLVER AND ONE CLIENT, THE ENGINE'S. This used to carry a private
+    # candidate chain of its own -- ``getCurrentDir()``'s ``build/``,
+    # ``tools/`` and a sibling, then ``REPROBUILD_SOURCE_ROOT``'s ``tools/``
+    # before its ``build/`` -- which had drifted from
+    # ``resolveNixDaemonExecutable`` (the ``bakForeignProvision`` path). It
+    # never considered the STAGED helper ``build/bin/reprobuild-nix-daemon``,
+    # whose ``#!`` names the interpreter pinned at build time; and it
+    # preferred the checked-in ``tools/`` script, whose ``#!/usr/bin/env
+    # python3`` resolves ``python3`` through the build's PATH. Under a PATH
+    # that carries a ``python3`` that is not Python (CodeTracer's in-place
+    # project tests put a version-answering stub there) the "daemon" exited
+    # 0 at once, never bound its socket, and the recipe's C compiler could
+    # not be provisioned: "Failed to connect or spawn reprobuild-nix-daemon".
+    # ``requestNixDaemon`` resolves through the engine's resolver, which tries
+    # the staged helper first and refuses a script whose interpreter is
+    # missing, and it starts the helper the same way the engine does.
+    let exchange =
+      try:
+        requestNixDaemon($req, getCurrentDir())
+      except BuildEngineError as err:
+        raise newException(OSError, err.msg)
     if not exchange.connected:
       raise newException(OSError, "Failed to connect or spawn " &
-        "reprobuild-nix-daemon at " & socketPath &
-        (if exchange.diagnostic.len > 0: ": " & exchange.diagnostic else: ""))
+        "reprobuild-nix-daemon at " & exchange.socketPath & ": " &
+        exchange.diagnostic)
     let respLine = exchange.response
 
     if respLine.len == 0:
@@ -2255,7 +2247,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
   requireTarDecompressor(tarExe, archivePath, archiveType)
   let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
-      execCmdEx(command))
+      execCmdExCloseOnce(command))
   if res.exitCode != 0:
     raise newException(OSError,
       "tool-resolution failed: tar listing failed for " & archivePath &
@@ -2742,7 +2734,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     requireTarDecompressor(tarExe, archivePath, archiveType)
     let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
       proc(command: string): tuple[output: string, exitCode: int] =
-        execCmdEx(command))
+        execCmdExCloseOnce(command))
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: tar extraction failed for " & archivePath &
@@ -2750,7 +2742,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
     mergeRustInstallerComponents(destination)
   of "zip":
-    let res = execCmdEx(zipExtractCommand(resolveZipExtractor(),
+    let res = execCmdExCloseOnce(zipExtractCommand(resolveZipExtractor(),
       archivePath, destination))
     if res.exitCode != 0:
       raise newException(OSError,
@@ -2833,7 +2825,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       let payloadTar = staging / "payload.tar"
       # A provisioned executable named by absolute path: a controlled
       # execution, so `execCmdEx`, not the ambient-execution hatch.
-      let zstdRes = execCmdEx(shellCommand(
+      let zstdRes = execCmdExCloseOnce(shellCommand(
         @[zstdExe, "-d", "-f", "-q", "-o", payloadTar, archivePath]))
       if zstdRes.exitCode != 0:
         raise newException(OSError,
@@ -2861,7 +2853,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     let command = quoteShell(sevenZipExe) & " x " &
       quoteShell("-o" & destination) & " " & quoteShell(archivePath) &
       " -y -bsp0 -bso0"
-    let res = execCmdEx(command)
+    let res = execCmdExCloseOnce(command)
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: 7z extraction failed for " & archivePath &

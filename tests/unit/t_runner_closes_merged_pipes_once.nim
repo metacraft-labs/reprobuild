@@ -17,14 +17,15 @@
 ## worker's ``pipe()``/``open()`` did — and then observe whether the release
 ## path closes the victim. The first case proves the instrument discriminates
 ## (``osproc.close`` does kill the victim); the rest hold the runner's
-## ``closeMergedProcess`` to never doing so.
+## ``closeProcessOnce`` (``repro_core/process_close``, shared with the build
+## engine) to never doing so.
 
 import std/[osproc, streams, unittest]
 import repro_test_support/reasoned_skip
 
 when defined(posix):
   import std/posix
-  import "../../tools/test-runner/merged_process"
+  import repro_core/process_close
 
   const Marker = "READY"
 
@@ -66,7 +67,7 @@ suite "runner closes merged child pipes once":
     else:
       skip("not POSIX — the double close is in osproc's POSIX close(Process)")
 
-  test "closeMergedProcess never closes a re-issued descriptor number":
+  test "closeProcessOnce never closes a re-issued descriptor number":
     when defined(posix):
       let p = spawnMerged()
       check readMarkerAndReap(p)
@@ -74,25 +75,25 @@ suite "runner closes merged child pipes once":
       let input = cint(p.inputHandle)
       p.outputStream.close()
       let victim = placeVictimAt(merged)
-      closeMergedProcess(p)
+      closeProcessOnce(p)
       check isOpen(victim)
       check not isOpen(input)
       discard posix.close(victim)
     else:
       skip("not POSIX — the double close is in osproc's POSIX close(Process)")
 
-  test "closeMergedProcess releases both pipes and is safe to repeat":
+  test "closeProcessOnce releases both pipes and is safe to repeat":
     when defined(posix):
       let p = spawnMerged()
       check readMarkerAndReap(p)
       let merged = cint(p.outputHandle)
       let input = cint(p.inputHandle)
-      closeMergedProcess(p)
+      closeProcessOnce(p)
       check not isOpen(merged)
       check not isOpen(input)
       let victimOut = placeVictimAt(merged)
       let victimIn = placeVictimAt(input)
-      closeMergedProcess(p)
+      closeProcessOnce(p)
       check isOpen(victimOut)
       check isOpen(victimIn)
       discard posix.close(victimOut)
@@ -100,13 +101,13 @@ suite "runner closes merged child pipes once":
     else:
       skip("not POSIX — the double close is in osproc's POSIX close(Process)")
 
-  test "closeMergedProcess releases a child whose output was never read":
+  test "closeProcessOnce releases a child whose output was never read":
     when defined(posix):
       let p = spawnMerged()
       discard p.waitForExit()
       let merged = cint(p.outputHandle)
       let input = cint(p.inputHandle)
-      closeMergedProcess(p)
+      closeProcessOnce(p)
       check not isOpen(merged)
       check not isOpen(input)
     else:

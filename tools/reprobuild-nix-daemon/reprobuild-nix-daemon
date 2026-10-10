@@ -3,11 +3,19 @@ import argparse
 import errno
 import hashlib
 import json
+import signal
 import os
 from pathlib import Path
 import socket
 import subprocess
 import sys
+import threading
+import time
+
+try:
+    import fcntl
+except ImportError:  # Windows: the helper never serves there
+    fcntl = None
 
 
 HOST_DYNAMIC_LOADER_ENV = (
@@ -188,7 +196,9 @@ def resolve_selector(
     }
 
 
-def response_for(line: bytes, cache: dict) -> dict:
+def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
+    """The response to one request line. With ``cached_only``, ``None`` when
+    answering needs a resolution (nothing valid is cached)."""
     try:
         req = json.loads(line.decode("utf-8"))
     except Exception as exc:
@@ -226,61 +236,350 @@ def response_for(line: bytes, cache: dict) -> dict:
     # Nix owns these outputs independently of this process's response cache.
     # A surviving evaluation key does not keep its realized paths alive after
     # store removal. Reacquire through Nix instead of returning stale success.
-    cached = cache.get(key)
-    if cached is None or not cached["paths"] or not all(
-        Path(path).exists() for path in cached["paths"]
-    ):
-        cache[key] = resolve_selector(
+    if cached_only:
+        return cache.peek(key)
+    return cache.get_or_resolve(
+        key,
+        lambda: resolve_selector(
             selector, workspace_root, dependencies, expression_file
-        )
-    return cache[key]
+        ),
+    )
 
 
-def serve(socket_path: str, idle_exit_ms: int) -> int:
-    path = Path(socket_path)
-    if path.exists():
-        try:
-            path.unlink()
-        except OSError:
-            pass
-    path.parent.mkdir(parents=True, exist_ok=True)
+# THE HELPER IS SHARED. Every reprobuild process of the user that resolves the
+# same helper talks to one socket: builds in every worktree, test cases, the
+# repro daemon. Any of them may start a helper, several may start one at the
+# same moment, and any of them -- or whoever cleans up a process tree the
+# helper happened to be started in -- may end one. Everything below exists so
+# that none of those events can leave a connecting client without a helper:
+#
+# * TAKING OVER THE SOCKET PATH, AND GIVING IT UP, HAPPEN UNDER ONE LOCK
+#   (``<socket>.lock``, flock). A starting helper probes the path under the
+#   lock and, when a live helper answers there, exits: it never unlinks a
+#   live helper's socket. Unlinking a path that answers nothing (a helper that
+#   was SIGKILLed leaves its socket file behind) is the only takeover.
+# * A HELPER UNLINKS ONLY ITS OWN SOCKET. It remembers the inode it bound and
+#   unlinks the path on exit only while the path is still that inode. Before
+#   this, the helper that lost a start race unlinked the winner's socket when
+#   it went idle, and a client that had just started a fresh helper found the
+#   path gone from under it.
+# * IDLE EXIT CANNOT DROP A CONNECTING CLIENT. The path is unlinked first, so
+#   no new client can reach this helper, and only then is the listen queue
+#   drained and answered: a client that connected between the accept timing
+#   out and the socket closing used to be dropped unanswered.
+# * REQUESTS ARE SERVED CONCURRENTLY. A ``nix build`` of a compiler can take
+#   minutes; one client's request no longer queues every other client's
+#   behind it, and a client that connects and never sends cannot wedge the
+#   helper (each connection has a read deadline).
 
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(socket_path)
-    server.listen(16)
-    server.settimeout(max(idle_exit_ms, 1) / 1000.0)
+TRANSITION_LOCK_TIMEOUT_S = 60.0
+CONNECTION_READ_TIMEOUT_S = 60.0
+INLINE_READ_TIMEOUT_S = 0.5
+MAX_REQUEST_BYTES = 1 << 20
+LOG_TRUNCATE_BYTES = 256 * 1024
 
-    cache = {}
+
+def log(message: str) -> None:
     try:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        sys.stderr.write(f"{stamp} pid {os.getpid()}: {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+class ResolveCache:
+    """The dependency-keyed response cache, safe to share between requests
+    served concurrently. One resolution per key runs at a time, so two
+    clients asking for the same tool at once cause one ``nix build``."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict = {}
+        self._key_locks: dict = {}
+
+    @staticmethod
+    def _valid(cached) -> bool:
+        # Nix owns these outputs independently of this process's response
+        # cache. A surviving evaluation key does not keep its realized paths
+        # alive after store removal. Reacquire through Nix instead of
+        # returning stale success.
+        return cached is not None and bool(cached["paths"]) and all(
+            Path(path).exists() for path in cached["paths"]
+        )
+
+    def peek(self, key):
+        """The cached response for ``key`` if it is still valid, else None."""
+        with self._lock:
+            cached = self._entries.get(key)
+        return cached if self._valid(cached) else None
+
+    def get_or_resolve(self, key, resolve) -> dict:
+        with self._lock:
+            key_lock = self._key_locks.setdefault(key, threading.Lock())
+        with key_lock:
+            with self._lock:
+                cached = self._entries.get(key)
+            if not self._valid(cached):
+                cached = resolve()
+                with self._lock:
+                    self._entries[key] = cached
+            return cached
+
+
+class TransitionLock:
+    """Exclusive flock on ``<socket>.lock`` for taking over or giving up the
+    socket path. The lock file itself is never removed: removing a lock file
+    is what lets two processes each hold "the" lock."""
+
+    def __init__(self, socket_path: str, timeout_s: float = TRANSITION_LOCK_TIMEOUT_S):
+        self.path = socket_path + ".lock"
+        self.timeout_s = timeout_s
+        self.fd = -1
+
+    def __enter__(self):
+        if fcntl is None:
+            return self
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(self.fd)
+                    self.fd = -1
+                    raise TimeoutError(f"could not lock {self.path} in {self.timeout_s}s")
+                time.sleep(0.02)
+
+    def __exit__(self, *exc) -> None:
+        if self.fd >= 0:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = -1
+
+
+def live_helper_at(socket_path: str) -> bool:
+    """Does a live helper accept connections at ``socket_path``? Only a
+    refused or absent endpoint is dead; a full listen queue is a live,
+    busy helper."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(2.0)
+    try:
+        probe.connect(socket_path)
+        return True
+    except (BlockingIOError, InterruptedError, socket.timeout):
+        return True
+    except OSError:
+        # ENOENT, ECONNREFUSED (a dead helper's socket file), ENOTSOCK.
+        return False
+    finally:
+        probe.close()
+
+
+def path_identity(path: str):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+class Server:
+    def __init__(self, socket_path: str, idle_exit_ms: int) -> None:
+        self.socket_path = socket_path
+        self.idle_s = max(idle_exit_ms, 1) / 1000.0
+        self.cache = ResolveCache()
+        self.state_lock = threading.Lock()
+        self.active = 0
+        self.last_activity = time.monotonic()
+        self.server = None
+        self.identity = None
+
+    def take_over(self) -> bool:
+        """Bind the socket path, or answer False when a live helper already
+        serves it."""
+        with TransitionLock(self.socket_path):
+            if live_helper_at(self.socket_path):
+                return False
+            try:
+                os.unlink(self.socket_path)
+            except FileNotFoundError:
+                pass
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(self.socket_path)
+            server.listen(128)
+            self.identity = path_identity(self.socket_path)
+            self.server = server
+        return True
+
+    def give_up_path(self) -> None:
+        """Unlink the socket path if, and only if, it is still ours."""
+        if self.identity is None:
+            return
+        try:
+            with TransitionLock(self.socket_path):
+                if path_identity(self.socket_path) == self.identity:
+                    os.unlink(self.socket_path)
+        except (OSError, TimeoutError) as exc:
+            log(f"could not release {self.socket_path}: {exc}")
+        self.identity = None
+
+    @staticmethod
+    def read_request(conn: socket.socket, data: bytes) -> bytes:
+        while not data.endswith(b"\n") and len(data) < MAX_REQUEST_BYTES:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        return data
+
+    @staticmethod
+    def reply(conn: socket.socket, resp: dict) -> None:
+        conn.sendall((json.dumps(resp, separators=(",", ":")) + "\n").encode("utf-8"))
+
+    def finished(self) -> None:
+        with self.state_lock:
+            self.active -= 1
+            self.last_activity = time.monotonic()
+
+    def finish(self, conn: socket.socket, data: bytes) -> None:
+        """Read the rest of a request and answer it, resolving if needed.
+        Runs on its own thread."""
+        try:
+            with conn:
+                conn.settimeout(CONNECTION_READ_TIMEOUT_S)
+                data = self.read_request(conn, data)
+                if not data.strip():
+                    return
+                try:
+                    resp = response_for(data.strip(), self.cache)
+                except Exception as exc:
+                    resp = {"status": "error", "error": str(exc)}
+                self.reply(conn, resp)
+        except OSError:
+            # The client went away (or never sent): nothing to answer.
+            pass
+        finally:
+            self.finished()
+
+    def dispatch(self, conn: socket.socket) -> None:
+        """Answer a cached request on the accepting thread -- a thread
+        hand-off costs milliseconds on a loaded host, which a warm request
+        must not pay -- and hand everything else (a resolution, a client slow
+        to send) to a thread of its own."""
+        conn.setblocking(True)
+        with self.state_lock:
+            self.active += 1
+            self.last_activity = time.monotonic()
+        data = b""
+        try:
+            conn.settimeout(INLINE_READ_TIMEOUT_S)
+            data = self.read_request(conn, data)
+            if not data.strip():
+                conn.close()
+                self.finished()
+                return
+            try:
+                resp = response_for(data.strip(), self.cache, cached_only=True)
+            except Exception as exc:
+                resp = {"status": "error", "error": str(exc)}
+            if resp is not None:
+                try:
+                    self.reply(conn, resp)
+                except OSError:
+                    pass
+                conn.close()
+                self.finished()
+                return
+        except socket.timeout:
+            pass
+        except OSError:
+            conn.close()
+            self.finished()
+            return
+        threading.Thread(target=self.finish, args=(conn, data), daemon=True).start()
+
+    def idle(self) -> bool:
+        with self.state_lock:
+            return self.active == 0 and (
+                time.monotonic() - self.last_activity >= self.idle_s
+            )
+
+    def run(self) -> int:
+        server = self.server
+        server.settimeout(min(self.idle_s, 0.5))
         while True:
             try:
                 conn, _ = server.accept()
             except socket.timeout:
+                if self.idle():
+                    break
+                continue
+            self.dispatch(conn)
+        # Idle exit. Unreachable first, then answer whatever already queued.
+        self.give_up_path()
+        server.setblocking(False)
+        while True:
+            try:
+                conn, _ = server.accept()
+            except (BlockingIOError, InterruptedError):
                 break
-            with conn:
-                data = b""
-                while not data.endswith(b"\n"):
-                    chunk = conn.recv(65536)
-                    if not chunk:
-                        break
-                    data += chunk
-                if not data:
-                    continue
-                try:
-                    resp = response_for(data.strip(), cache)
-                except Exception as exc:
-                    resp = {"status": "error", "error": str(exc)}
-                conn.sendall(
-                    (json.dumps(resp, separators=(",", ":")) + "\n").encode("utf-8")
-                )
-    finally:
+            self.dispatch(conn)
+        while True:
+            with self.state_lock:
+                if self.active == 0:
+                    break
+            time.sleep(0.05)
         server.close()
-        try:
-            path.unlink()
-        except OSError:
-            pass
-    return 0
+        log(f"idle; exited and released {self.socket_path}")
+        return 0
 
+
+def redirect_output(socket_path: str) -> None:
+    """The launcher closes its ends of the helper's stdio pipes at once, so
+    anything the helper writes would fail with EPIPE. Keep a log beside the
+    socket instead; the client quotes its tail when a start fails."""
+    log_path = socket_path + ".log"
+    try:
+        if os.path.getsize(log_path) > LOG_TRUNCATE_BYTES:
+            os.truncate(log_path, 0)
+    except OSError:
+        pass
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        devnull = os.open(os.devnull, os.O_RDONLY)
+    except OSError:
+        return
+    os.dup2(devnull, 0)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
+    os.close(devnull)
+
+
+class Terminated(BaseException):
+    pass
+
+
+def on_terminate(signum, _frame):
+    raise Terminated(signum)
+
+
+def serve(socket_path: str, idle_exit_ms: int) -> int:
+    server = Server(socket_path, idle_exit_ms)
+    if not server.take_over():
+        log(f"a live helper already serves {socket_path}; not starting another")
+        return 0
+    log(f"serving {socket_path}")
+    try:
+        return server.run()
+    except Terminated as exc:
+        log(f"signal {exc.args[0]}; released {socket_path}")
+        return 0
+    finally:
+        server.give_up_path()
 
 def main(argv: list[str]) -> int:
     close_inherited_descriptors()
@@ -288,6 +587,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--idle-exit-ms", type=int, default=300000)
     parser.add_argument("--socket-path", default=default_socket_path())
     args = parser.parse_args(argv)
+    Path(args.socket_path).parent.mkdir(parents=True, exist_ok=True)
+    redirect_output(args.socket_path)
+    signal.signal(signal.SIGTERM, on_terminate)
+    signal.signal(signal.SIGINT, on_terminate)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, on_terminate)
     return serve(args.socket_path, args.idle_exit_ms)
 
 

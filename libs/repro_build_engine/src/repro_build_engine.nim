@@ -102,7 +102,15 @@ else:
     0.0
 
 import repro_core
+import repro_core/relocation
 from repro_core/process_streams import drainStream
+# ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
+# second time on POSIX. This scheduler thread is not alone once the worker
+# pool is live (in-process monitor hosting: pooled ``finishMonitor`` and
+# depfile flushes open, write and rename files concurrently), so every merged
+# child it starts — converters, RunQuota helpers — is released through
+# ``closeProcessOnce``. See ``repro_core/process_close``.
+from repro_core/process_close import closeProcessOnce
 import repro_depfile
 import repro_hash
 import repro_local_store
@@ -365,6 +373,23 @@ type
     cacheable*: bool
     weakFingerprint*: ContentDigest
     actionCachePolicy*: FileFingerprintPolicy
+    relocatable*: bool
+      ## The action computes the same thing wherever its working directory
+      ## is, given the same content at the same cwd-relative places. Its
+      ## record then names every observed input relative to `cwd` (except
+      ## under `relocationAnchors`), its declared outputs are cwd-relative,
+      ## and its weak fingerprint is keyed on the depth of `cwd` instead of
+      ## its spelling — so a byte-identical copy of the working tree at
+      ## another path finds, revalidates against ITS OWN files, and restores
+      ## from the same record (`recordedInputNames`). Off by default; the
+      ## engine's own recipe compiles (interface extraction, provider
+      ## compile) set it. Hermetic-Builds-And-Path-Independence.md
+      ## §"Engine-internal recipe compiles".
+    relocationAnchors*: seq[string]
+      ## Absolute roots a relocatable action reaches by absolute path — the
+      ## toolchain, the reprobuild libraries, host configuration — whose
+      ## inputs stay recorded by absolute path. A root that contains `cwd`
+      ## anchors nothing.
     depfile*: string
     dynamicDepsFile*: string
     monitorDepfile*: string
@@ -2819,6 +2844,40 @@ proc keyedOnEnvironmentIsolation*(fingerprint: ContentDigest;
   framed.add($base.len & "\x1f" & base & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc cwdDepth(cwd: string): int =
+  for part in os.normalizedPath(cwd).replace('\\', '/').split('/'):
+    if part.len > 0:
+      inc result
+
+proc keyedOnRelocation*(fingerprint: ContentDigest; relocatable: bool;
+                        cwd: string): ContentDigest =
+  ## The IDENTITY for an ordinary action. A relocatable one records the
+  ## inputs it observed ABOVE its cwd — the `config.nims` a compiler looks
+  ## for in every ancestor directory — as `../`-relative names, and a name
+  ## like that only reaches the same set of ancestors from a cwd at the same
+  ## depth. Keying on the depth keeps two locations whose ancestor walks
+  ## differ in length from sharing a record that checked only one of them.
+  if not relocatable:
+    return fingerprint
+  var framed = "action-relocatable\x1e" & $cwdDepth(cwd) & "\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
+proc recordedInputNames*(action: BuildAction;
+                         paths: openArray[string]): seq[string] =
+  ## The names a record gives `paths` (absolute observed inputs). Unchanged
+  ## for an ordinary action. For a `relocatable` one every path outside the
+  ## anchors is named relative to the action's cwd, so the record is
+  ## revalidated against the consulting action's own tree
+  ## (`repro_local_store.recordedInputLocation`).
+  if not action.relocatable or action.cwd.len == 0 or
+      not action.cwd.isAbsolute:
+    return @paths
+  let anchors = effectiveAnchors(action.cwd, action.relocationAnchors)
+  for path in paths:
+    result.add(relocatableName(path, action.cwd, anchors))
+
 proc monitorPayloadArgIndex(argv: openArray[string]): int
 
 proc executedImageArgvIndex*(argv: openArray[string]): int =
@@ -3035,6 +3094,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              env: openArray[string] = [];
              envPassthrough: openArray[string] = [];
              requiresElevation = false;
+             relocatable = false;
+             relocationAnchors: openArray[string] = [];
              governingLockIdentity: LockIdentity): BuildAction =
   ## Named-Lock-Files §7.2: `governingLockIdentity` has NO DEFAULT, and that
   ## is the point. "An action constructed without a governing lock identity is
@@ -3077,14 +3138,16 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # subtracts that root's contents out of the key — see
     # `keyedOnContentAddressedToolRoot` for the measurement that showed
     # the two halves had never been connected.
-    weakFingerprint: keyedOnGoverningLock(
+    weakFingerprint: keyedOnRelocation(keyedOnGoverningLock(
       keyedOnContentAddressedToolRoot(
         keyedOnEnvironmentIsolation(
           keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
           isolateHostEnvironment),
         argv),
-      governingLockIdentity),
+      governingLockIdentity), relocatable, cwd),
     actionCachePolicy: actionCachePolicy,
+    relocatable: relocatable,
+    relocationAnchors: @relocationAnchors,
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
@@ -8935,165 +8998,6 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
     except CatchableError:
       discard
 
-proc declaredWriteRootPrefixes(action: BuildAction): seq[string] =
-  ## The self-written prefix set, DERIVED from the action's own write-root
-  ## declaration rather than listed a second time beside it.
-  ##
-  ## Spec: `Filesystem-Policy-And-Observed-Inputs.md` §"The self-written set
-  ## is derived, never listed". An action's own writes are not its inputs,
-  ## and the set of directories it writes is ALREADY declared — it is
-  ## `declaredOutputs`, the M9.R.75 write roots. An author who states that
-  ## fact and then re-states it as an `ignoredInputPrefixes` entry has said
-  ## the same thing twice, and the second statement is the one that gets
-  ## forgotten. Counted at this revision: NINE prefix entries across the
-  ## tree name a path their own action also declares as a write root —
-  ## `runtime_contract`'s library edge (five lines apart),
-  ## `cmake_package`'s configure, build and install edges,
-  ## `meson_package`'s setup and compile edges, `cargo_package`'s compile
-  ## edge, `go_package`'s build edge, and `autotools_package`'s configure
-  ## edge on the branch where it adds one at all — while interface
-  ## extraction lists its scratch root and omits the directory it
-  ## publishes into.
-  ##
-  ## MATERIALIZED against `action.cwd`, unlike the explicit prefixes in
-  ## `ignoredInputRoots`, which compare raw. The asymmetry is deliberate and
-  ## it is the same argument `honouredDerivedPrefixes` makes for its side: an
-  ## explicit prefix is an author's spelling, and changing how it is read
-  ## would move keys that exist today, whereas a DERIVED root comes from a
-  ## declaration the engine already materializes everywhere else
-  ## (`portablePhysicalOutputsOf`, `isOwnOutput`, the R7 pass), so reading it
-  ## the same way here is the only consistent choice. A relative write root
-  ## therefore works, where a relative explicit prefix is inert.
-  ##
-  ## The symlinked spelling is added for the same reason, and with the same
-  ## measurement behind it, as in `ignoredInputRoots`: on macOS every path
-  ## the monitor reports comes back resolved (`/private/tmp/...`), so a root
-  ## derived from a `/tmp/...` declaration would never fire.
-  for root in action.declaredOutputs:
-    let expanded = normalizeWriteRoot(
-      materialPath(action.cwd, action.expandPolicyPath(root)))
-    if expanded.len == 0:
-      continue
-    result.add(expanded)
-    if not expanded.isAbsolute:
-      continue
-    try:
-      let resolved = normalizeWriteRoot(expandFilename(expanded))
-      if resolved.len > 0 and resolved != expanded:
-        result.add(resolved)
-    except CatchableError:
-      discard
-
-proc enumerationIgnoredRoots*(action: BuildAction): seq[string] =
-  ## The ignored-prefix set the ENUMERATION channel is filtered against: the
-  ## author's explicit `ignoredInputPrefixes` UNION the roots derived from the
-  ## action's own write-root declaration.
-  ##
-  ## Spec: `Filesystem-Policy-And-Observed-Inputs.md` §"Enumerations And
-  ## Probes Under Writable Areas" / §"The self-written set is derived, never
-  ## listed". Its testable consequence — "for any action, the set of ignored
-  ## input prefixes contains every declared output write-root" — is asserted
-  ## against THIS set, without running a build.
-  ##
-  ## WHY ENUMERATIONS AND NOT ALSO READS AND PROBES. The derivation is sound
-  ## for a directory's MEMBERSHIP and is not sound for its contents, and the
-  ## difference is not a matter of taste: it is a shipped recipe.
-  ## `autotools_package`'s configure edge declares the build tree as a write
-  ## root UNCONDITIONALLY, but adds it to `ignoredInputPrefixes` only when
-  ## there are no source patches and no bootstrap — because in those branches
-  ## the action runs BEFORE the cleanup and genuinely reads the previous
-  ## build tree (`test ! -f build/input || cp build/input src/settings`).
-  ## `tests/unit/t_configure_build_tree_cleanup.nim`'s "Autotools pre-cleanup
-  ## patches and bootstrap retain observed inputs" pins exactly that. Deriving
-  ## the ignore for the READ channel from the declaration would drop those
-  ## reads out of the key and hand that edge a hit on a build tree it had
-  ## consumed — a false hit, which is strictly worse than the miss being
-  ## fixed.
-  ##
-  ## Membership carries no such dependency. An entry LIST changes because
-  ## somebody added or removed a name, and when the action under consideration
-  ## is the one adding the name, the fact is derived from its own output. A
-  ## read or a probe can still witness prior content, so both keep the
-  ## explicit set — see `cacheInputPaths`. Dropping a directory from this
-  ## channel does NOT drop the directory from the key: it stays recorded as
-  ## `ffkDirectory` with `mtimeNs = 0`, which `membershipTrackedDirectory`
-  ## reads as "existence only", so "the directory was deleted" is still
-  ## detected. Only the self-inflicted part of the comparison goes away.
-  ##
-  ## And note which reading of `ignoredInputPrefixes` this is NOT.
-  ## `honouredDerivedPrefixes` — the S7 restore gate — keeps reading the
-  ## EXPLICIT `ignoredInputRoots`, so a declared write root does not become a
-  ## statement that the bytes under it are not product. Feeding the derived
-  ## set in there would be unsound by construction: the gate disqualifies a
-  ## prefix by comparing it against `declaredOutputs` in their declared
-  ## spelling, so the symlink-resolved derived spelling would slip past the
-  ## disqualification and exempt the product.
-  ##
-  ## AND WHY THE NINE DUPLICATE ENTRIES STAY. Because of the channel split,
-  ## none of them is merely redundant. Eight are genuinely read back —
-  ## `cmake --build` and `cmake --install` say so in their own comments, and
-  ## `cargo build`, `meson setup`/`compile`, `patchelf` and `configure` all
-  ## consume state a previous run left under the same root — so deleting the
-  ## entry would drop those reads from the key and hand the edge a hit on a
-  ## tree it had consumed. The ninth, `go_package`'s `effectiveDestdir`, is
-  ## write-only, and it is still not deletable: that recipe guards its
-  ## `setRegisteredActionDeclaredOutputs` on `projectRoot.len > 0` while the
-  ## prefix is unconditional, so with no project root the explicit entry is
-  ## the only ignore there is and the derivation has nothing to derive from.
-  ## The derivation therefore ADDS a floor; it does not license a sweep of
-  ## the recipes.
-  result = action.ignoredInputRoots()
-  for root in action.declaredWriteRootPrefixes():
-    if root notin result:
-      result.add(root)
-
-proc selfWrittenDirectoryKeys(action: BuildAction): HashSet[string] =
-  ## The directories this action writes INTO, derived from its own output
-  ## declaration: every declared write root, and the parent directory of
-  ## every declared output file.
-  ##
-  ## Same spec rule as `declaredWriteRootPrefixes`, applied to the one
-  ## channel a write-root prefix cannot reach: an action that declares
-  ## output FILES and no write root still writes a directory, and that
-  ## directory's MEMBERSHIP changes because of its own write. Interface
-  ## extraction is exactly that shape — it declares four files under
-  ## `build/repro/` and no write root — so the membership digest of a
-  ## directory it publishes into landed in its own key and the edge missed
-  ## its cache on every build of every project
-  ## (`issues/2026-10-08-interface-extraction-edge-is-keyed-on-directories-
-  ## it-writes-itself.md`).
-  ##
-  ## Deriving a PREFIX from an output file would be wrong: that would drop
-  ## every real input that merely lives next to an output, which is the
-  ## over-broad filter `selfWrittenOutputKeys` refuses for the same reason.
-  ## What is derived here is narrower and is the exact fact the declaration
-  ## supports — "I add an entry to this directory", so its entry LIST is
-  ## derived state — and it drops nothing else: file reads, probes and
-  ## enumerations of OTHER directories under the same parent are untouched,
-  ## and the files this action reads out of its own output directory stay in
-  ## the key by path.
-  ##
-  ## A directory the author DECLARED as an input is not filtered; the callers
-  ## consult `declaredInputs` first, as everywhere else in this family.
-  ##
-  ## The write-root loop below is SUBSUMED at the one caller that exists
-  ## today and is kept so the set is complete on its own terms. In
-  ## `cacheEnumeratedDirectories` a write root is already matched by
-  ## `isUnderAnyRoot(ignoredRoots)` — `enumerationIgnoredRoots` puts the
-  ## derived roots there and `isUnderAnyRoot` matches equality as well as
-  ## containment — and that test runs first, so deleting the loop changes
-  ## nothing a test can observe. Said here rather than left to be
-  ## rediscovered: "this restates something stated elsewhere" is the exact
-  ## defect this whole family is about, and an unremarked redundancy in the
-  ## fix for it is the same defect wearing the fix's clothes.
-  result = initHashSet[string]()
-  for output in action.outputs:
-    let dir = normalizeWriteRoot(parentDir(materialPath(action.cwd, output)))
-    if dir.len > 0:
-      result.incl(dir)
-  for root in action.declaredWriteRootPrefixes():
-    result.incl(root)
-
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
   for root in roots:
@@ -9232,10 +9136,6 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   declared-input carve-out that keeps the two filters from
   ##   colliding. Declared inputs are never dropped by either filter.
   let toolRoots = action.toolInputRoots()
-  # The EXPLICIT prefix set, deliberately not the derived one. The derived
-  # self-written set applies to the ENUMERATION channel only — see
-  # `enumerationIgnoredRoots` for the whole argument, and for the shipped
-  # recipe that makes the difference load-bearing.
   let ignoredRoots = action.ignoredInputRoots()
   let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
@@ -9577,8 +9477,8 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
       continue
     result.addUnique(seen, path)
 
-proc cacheEnumeratedDirectories*(action: BuildAction;
-                                 evidence: PathSetEvidence): seq[string] =
+proc cacheEnumeratedDirectories(action: BuildAction;
+                                evidence: PathSetEvidence): seq[string] =
   ## The subset of this action's recorded inputs that it ENUMERATED, in the
   ## same materialised form `cacheInputPaths` produces, so the record side
   ## can match them by path.
@@ -9588,8 +9488,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   ## one either, or the record would carry membership for something it does
   ## not record at all.
   let toolRoots = action.toolInputRoots()
-  let ignoredRoots = action.enumerationIgnoredRoots()
-  let selfWrittenDirs = action.selfWrittenDirectoryKeys()
+  let ignoredRoots = action.ignoredInputRoots()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     declaredMaterialized.incl(
@@ -9597,19 +9496,8 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   var seen = initHashSet[string]()
   for dir in evidence.monitorDirectoryEnumerations:
     let path = materialPath(action.cwd, dir)
-    if declaredMaterialized.contains(path.replace('\\', '/')):
-      result.addUnique(seen, path)
-      continue
-    if path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots):
-      continue
-    # The action's OWN output directory: its entry list changed because this
-    # action added an entry to it, so the membership digest is derived state
-    # and not an input. Derived from the output declaration — see
-    # `selfWrittenDirectoryKeys`. The directory is still dropped only from
-    # the MEMBERSHIP channel; reads and probes of paths inside it are
-    # unaffected, and the exact declared outputs stay excluded by
-    # `selfWrittenOutputKeys` as before.
-    if selfWrittenDirs.contains(normalizeWriteRoot(path)):
+    if not declaredMaterialized.contains(path.replace('\\', '/')) and
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -9772,7 +9660,7 @@ proc runConverter(action: BuildAction; converterSpec: PostBuildDependencyConvert
   # identically on a silent one. See `repro_core/process_streams`.
   var output = drainStream(child.outputStream)
   let exitCode = child.waitForExit()
-  child.close()
+  closeProcessOnce(child)
   if exitCode != 0:
     var diagnostic = "converter failed with exit " & $exitCode
     if output.len > 0:
@@ -14563,104 +14451,214 @@ proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
   "reprobuild-nix-daemon"
 
 when not defined(windows):
-  const NixDaemonExchangeAttempts* = 3
+  const NixDaemonExchangeAttempts* = 5
     ## How many times one request is offered to the evaluation daemon before
-    ## a dropped connection is reported as a failure.
+    ## a dropped connection is reported as a failure. Five, not three: under
+    ## a stress run that stops helpers every few hundred milliseconds (as a
+    ## suite does each time a case that started the helper finishes), three
+    ## drops in a row still failed 1-6 of 360 requests.
+  const NixDaemonStartFailures* = 3
+    ## How many helpers one connection attempt may see FAIL to start (exit
+    ## non-zero, or not exec at all) before it gives up: a helper that cannot
+    ## start must not be restarted forever.
+  const NixDaemonStartQuietExits* = 10
+    ## How many started helpers may exit 0 before one accepts. A helper that
+    ## exits 0 found a live helper at the socket and left it to serve; when
+    ## that one is stopped before this client reaches it, starting another
+    ## is the right move and is not a failure -- but it is bounded too, so a
+    ## "helper" that exits 0 without ever binding (a stub ``python3`` on
+    ## PATH) fails fast rather than spinning out the window.
+  const NixDaemonRespawnSpacingMs* = 250
+    ## A helper ended by a SIGNAL while it started was stopped by someone
+    ## else; that says nothing about whether one can start, so it counts
+    ## against neither budget above and is simply replaced -- no sooner than
+    ## this after the previous start, and only within the start window.
+  const NixDaemonStartTimeoutMs* = 60_000
+    ## How long a client waits for a helper it started to accept. The helper
+    ## is a Python script: on a host running a full suite (load average ~180
+    ## on 32 cores) its start-to-listen time was measured at 0.26-3.3 s,
+    ## and the former fixed 2 s window turned every slow start into "Failed
+    ## to connect or spawn". A helper that EXITS is noticed at once and does
+    ## not cost the whole window.
+  const NixDaemonBindTimeoutMs* = NixDaemonStartTimeoutMs
+    ## The name the spawn-wait tests use for the same ceiling: how long a
+    ## started helper may take to accept while it is still running.
+  const NixDaemonSocketDirEnv* = "REPROBUILD_NIX_DAEMON_SOCKET_DIR"
+    ## Directory of the helper's socket (default ``/tmp``). Exists so that a
+    ## test or an experiment can run its own helpers without touching -- or
+    ## being touched by -- the helper every other reprobuild process of the
+    ## user shares.
 
-  const NixDaemonBindTimeoutMs* = 30_000
-    ## How long a freshly spawned daemon may take to bind its socket while it
-    ## is still running. It was a fixed ~2 s (41 x 50 ms) whether or not the
-    ## daemon was alive: a Python process that needed longer on a loaded
-    ## runner was reported exactly like one that had crashed. A daemon that
-    ## EXITS stops the wait at once, so the long ceiling costs nothing in the
-    ## failure case it is not about.
-
-  proc nixDaemonSocketPath*(): string =
-    "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
-
-  proc describeUnboundNixDaemon(daemon: Process; waitedMs: int): string =
-    ## Why a spawned daemon never accepted a connection: it exited (with its
-    ## status and whatever it printed), or it is still running and never
-    ## bound. Reading the output is safe only once the process has exited --
-    ## a running daemon holds the pipe open and a read would block.
-    let code = peekExitCode(daemon)
-    if code == -1:
-      return "the daemon (pid " & $processID(daemon) & ") is still running " &
-        "but did not bind the socket within " & $waitedMs & " ms"
-    var output = ""
+  proc nixDaemonHelperKey*(daemonExe: string): string =
+    ## The identity of the helper this process would START: a digest of the
+    ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
+    ## lookup) is known.
+    ##
+    ## WHY THE SOCKET IS KEYED BY IT. The helper is shared by every
+    ## reprobuild process of the user, and those processes are not one build:
+    ## every worktree, installed package and CI checkout resolves its OWN
+    ## helper file. With one socket per user, whichever build happened to
+    ## start the helper served every other build -- an older helper answered
+    ## a newer client's requests with the older helper's semantics (a helper
+    ## from before e688e1690 returns a cached store path after it was garbage
+    ## collected), and a newer protocol field reached a helper that ignored
+    ## it. Keying by content keeps the sharing that matters (every process of
+    ## one build, and every build whose helper is byte-identical) and never
+    ## lets two different helpers answer for each other.
+    if daemonExe.len == 0 or not fileExists(daemonExe):
+      return ""
     try:
-      output = daemon.outputStream.readAll().strip()
+      toHex(weakFingerprintFromText(readFile(daemonExe)).bytes)[0 ..< 16]
+    except IOError, OSError:
+      ""
+
+  proc nixDaemonSocketPath*(helperKey = ""): string =
+    let dir = getEnv(NixDaemonSocketDirEnv, "/tmp")
+    let suffix = if helperKey.len > 0: "-" & helperKey else: ""
+    dir / ("reprobuild-nix-daemon-" & getEnv("USER", "default") & suffix &
+      ".sock")
+
+  proc nixDaemonLogTail(socketPath: string): string =
+    ## The last lines of the helper's own log (it writes ``<socket>.log``),
+    ## for a failure report. Empty when there is none.
+    let logPath = socketPath & ".log"
+    try:
+      if not fileExists(logPath):
+        return ""
+      let lines = readFile(logPath).strip().splitLines()
+      lines[max(0, lines.len - 6) .. ^1].join("\n    ")
+    except IOError, OSError:
+      ""
+
+  proc tryConnectNixDaemon(socketPath: string; sock: var Socket): bool =
+    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+      protocol = IPPROTO_IP)
+    try:
+      sock.connectUnix(socketPath)
+      result = true
     except CatchableError:
-      discard
-    if output.len > 2000:
-      output = "..." & output[^2000 .. ^1]
-    result = "the daemon exited with status " & $code &
-      " before binding the socket"
-    if output.len > 0:
-      result.add("; its output:\n" & output)
-    else:
-      result.add(" and printed nothing")
+      sock.close()
+      result = false
+
+  proc connectOrStartNixDaemon(socketPath: string;
+                               spawnDaemon: proc (): Process;
+                               sock: var Socket; diagnostic: var string):
+      bool =
+    ## Connect to the helper at ``socketPath``, starting one when nothing
+    ## accepts there. Waits for a started helper as long as it is running
+    ## (up to ``NixDaemonStartTimeoutMs``), and replaces one that exits
+    ## before anything accepts.
+    if tryConnectNixDaemon(socketPath, sock):
+      return true
+    let startedAt = epochTime()
+    var helper: Process = nil
+    var spawns = 0
+    var failures = 0
+    var quietExits = 0
+    var lastSpawnAt = 0.0
+    var lastExit = ""
+    var lastOutput = ""
+    var spawnError = ""
+    var pause = 10
+    try:
+      while (epochTime() - startedAt) * 1000.0 < NixDaemonStartTimeoutMs.float:
+        if helper != nil:
+          let code = helper.peekExitCode()
+          if code != -1:
+            # Exited. Exit 0 is a helper that found a live one at the
+            # socket; that one may since have gone. Either way, look once
+            # more before starting another.
+            lastExit = $code
+            # What the helper printed before exiting (stdout and stderr are
+            # merged) is the only first-hand account of why it did not bind.
+            try:
+              if helper.outputStream != nil:
+                let printed = helper.outputStream.readAll().strip()
+                if printed.len > 0:
+                  lastOutput = printed
+            except CatchableError:
+              discard
+            # 128+N is a helper ended by signal N -- stopped by someone else
+            # while it started, which says nothing about whether one can
+            # start. Only an exit the helper chose (or exec's 126/127)
+            # counts against it.
+            if code == 0:
+              inc quietExits
+            elif code <= 128:
+              inc failures
+            helper.close()
+            helper = nil
+            if tryConnectNixDaemon(socketPath, sock):
+              return true
+        if helper == nil and
+            (epochTime() - lastSpawnAt) * 1000.0 >= NixDaemonRespawnSpacingMs.float:
+          if quietExits >= NixDaemonStartQuietExits or
+              failures >= NixDaemonStartFailures:
+            break
+          inc spawns
+          lastSpawnAt = epochTime()
+          try:
+            helper = spawnDaemon()
+          except OSError as err:
+            # The resolved file can vanish between resolution and exec (a
+            # worktree rebuilt or deleted under us). Counted as an attempt.
+            spawnError = err.msg
+            inc failures
+            helper = nil
+        sleep(pause)
+        pause = min(pause * 2, 100)
+        if tryConnectNixDaemon(socketPath, sock):
+          return true
+    finally:
+      if helper != nil:
+        helper.close()
+    diagnostic = "started " & $spawns & " helper(s) over " &
+      $int((epochTime() - startedAt) * 1000.0) & " ms"
+    if lastExit.len > 0:
+      diagnostic.add("; the last exited with status " & lastExit &
+        " before accepting")
+    if lastOutput.len > 0:
+      let lines = lastOutput.splitLines()
+      diagnostic.add("; it printed:\n    " &
+        lines[max(0, lines.len - 6) .. ^1].join("\n    "))
+    if spawnError.len > 0:
+      diagnostic.add("; starting one failed: " & spawnError)
+    let tail = nixDaemonLogTail(socketPath)
+    if tail.len > 0:
+      diagnostic.add("; helper log " & socketPath & ".log:\n    " & tail)
+    false
 
   proc exchangeWithNixDaemon*(socketPath, request: string;
                               spawnDaemon: proc (): Process):
       tuple[connected: bool; response: string; attempts: int;
             diagnostic: string] =
     ## Send one request line to the shared ``reprobuild-nix-daemon`` and
-    ## return its one response line, spawning the daemon when nothing is
+    ## return its one response line, starting the daemon when nothing is
     ## listening.
     ##
     ## THE DAEMON IS SHARED AND IT CAN GO AWAY UNDER US. Every reprobuild
-    ## process of this user talks to the one socket, whichever process spawned
-    ## it. That process's lifetime is not the daemon's, but the daemon can
-    ## still end while it holds our request: it exits when idle (a connection
-    ## that lands between its accept timing out and its socket closing is
-    ## dropped unanswered), and whoever owns the spawning process's tree can
-    ## end it — the suite runner terminates every process carrying a finished
-    ## test's private token, and the daemon carries the token of the test that
-    ## happened to spawn it. A request in flight then reads end-of-stream: no
-    ## response at all, which is not an answer about the selector.
+    ## process of this user that resolves the same helper talks to the one
+    ## socket, whichever process spawned it. That process's lifetime is not
+    ## the daemon's, but the daemon can still end while it holds our request:
+    ## whoever owns the spawning process's tree can end it -- the suite runner
+    ## terminates every process carrying a finished test's private token, and
+    ## the daemon carries the token of the test that happened to spawn it --
+    ## and so can anyone who stops "their" helper by pid. A request in flight
+    ## then reads end-of-stream: no response at all, which is not an answer
+    ## about the selector.
     ##
     ## Resolve requests are idempotent, so a connection that ends without a
-    ## response line is offered again — to the same daemon if it is still
-    ## there, to a fresh one otherwise — up to ``NixDaemonExchangeAttempts``
+    ## response line is offered again -- to the same daemon if it is still
+    ## there, to a fresh one otherwise -- up to ``NixDaemonExchangeAttempts``
     ## times. ``response`` is empty only when every attempt was dropped.
     for attempt in 1 .. NixDaemonExchangeAttempts:
       result.attempts = attempt
-      var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
-        protocol = IPPROTO_IP)
-      var connected = false
-      try:
-        sock.connectUnix(socketPath)
-        connected = true
-      except CatchableError:
-        sock.close()
-        # ``spawnDaemon`` hands back the process it started (output captured,
-        # stderr merged into stdout) so the wait below can tell a daemon that
-        # is slow to bind from one that is already gone.
-        let daemon = spawnDaemon()
-        var waitedMs = 0
-        while true:
-          sleep(50)
-          waitedMs += 50
-          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
-            protocol = IPPROTO_IP)
-          try:
-            sock.connectUnix(socketPath)
-            connected = true
-            break
-          except CatchableError:
-            sock.close()
-          # A daemon that exited will never bind. Another process's daemon
-          # may still have bound meanwhile, so the connect above is tried
-          # once more before giving up; the ceiling bounds a daemon that runs
-          # but never binds.
-          if peekExitCode(daemon) != -1 or waitedMs >= NixDaemonBindTimeoutMs:
-            break
-        if not connected:
-          result.diagnostic = describeUnboundNixDaemon(daemon, waitedMs)
-        daemon.close()
-      if not connected:
+      var sock: Socket
+      var diagnostic = ""
+      if not connectOrStartNixDaemon(socketPath, spawnDaemon, sock,
+          diagnostic):
         result.connected = false
+        result.diagnostic = diagnostic
         return
       result.connected = true
       var line = ""
@@ -14676,6 +14674,40 @@ when not defined(windows):
       if line.len > 0:
         result.response = line
         return
+
+  proc requestNixDaemon*(request, cwd: string):
+      tuple[socketPath: string; connected: bool; response: string;
+            attempts: int; diagnostic: string] =
+    ## THE ONE WAY a reprobuild process asks the shared Nix helper anything:
+    ## resolve the helper this process would start, address the socket that
+    ## helper's identity names, and exchange one request with it.
+    ##
+    ## THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` -- so
+    ## that the resolution order is pinned by a test rather than by an `elif`
+    ## chain. It anchors on ``cwd`` (three historical candidates, for a build
+    ## run from the reprobuild tree itself), on `REPROBUILD_SOURCE_ROOT` when
+    ## set, and on BOTH the executable's grandparent (an install prefix) and
+    ## its great-grandparent (a dev tree's repository root, where `repro`
+    ## sits two levels down at `build/bin/repro`). M1's N24/N28.
+    ##
+    ## The helper is started DETACHED (its own process group), so a terminal
+    ## interrupt of one build does not take down the helper every other build
+    ## is using, and it is told its socket path explicitly, so the address a
+    ## client waits on and the address the helper binds cannot disagree.
+    let daemonExe = resolveNixDaemonExecutable(
+      cwd = cwd,
+      exePath = getAppFilename(),
+      envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
+      envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
+    let socketPath = nixDaemonSocketPath(nixDaemonHelperKey(daemonExe))
+    createDir(socketPath.parentDir)
+    proc spawnDaemon(): Process =
+      startProcess(daemonExe, args = ["--idle-exit-ms=300000",
+        "--socket-path=" & socketPath], options = {poDaemon, poUsePath})
+    let exchange = exchangeWithNixDaemon(socketPath, request, spawnDaemon)
+    (socketPath: socketPath, connected: exchange.connected,
+     response: exchange.response, attempts: exchange.attempts,
+     diagnostic: exchange.diagnostic)
 
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
@@ -14970,37 +15002,15 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if provisioner != "nix":
           raiseEngine("Unsupported provisioner: " & provisioner)
         
-        let socketPath = nixDaemonSocketPath()
         let req = %*{
           "action": "resolve",
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        proc spawnDaemon(): Process =
-          # Spawn daemon process detached.
-          #
-          # THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` --
-          # so that the resolution order is pinned by a test rather than by
-          # this `elif` chain. It anchors on `action.cwd` (three historical
-          # candidates, for a build run from the reprobuild tree itself), on
-          # `REPROBUILD_SOURCE_ROOT` when set, and on BOTH the executable's
-          # grandparent (an install prefix) and its great-grandparent (a dev
-          # tree's repository root, where `repro` sits two levels down at
-          # `build/bin/repro`). The single grandparent anchor this replaces
-          # resolved NEITHER layout's real location and fell through to a
-          # bare name on PATH -- M1's N24/N28.
-          let daemonExe = resolveNixDaemonExecutable(
-            cwd = action.cwd,
-            exePath = getAppFilename(),
-            envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
-            envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
-          startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
-            options = {poDaemon, poUsePath, poStdErrToStdOut})
-        let exchange = exchangeWithNixDaemon(socketPath, $req, spawnDaemon)
+        let exchange = requestNixDaemon($req, action.cwd)
         if not exchange.connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " &
-            socketPath & (if exchange.diagnostic.len > 0:
-              ": " & exchange.diagnostic else: ""))
+            exchange.socketPath & ": " & exchange.diagnostic)
         let respLine = exchange.response
         
         if respLine.len == 0:
@@ -16708,7 +16718,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if sessionInvalidatedPaths.len == 0:
       return ""
     for input in record.inputs:
-      let materialized = materialPath(action.cwd, input.path)
+      let materialized = recordedInputLocation(action.cwd, input.path)
       if sessionInvalidatedPaths.contains(materialized):
         return materialized
     ""
@@ -18189,7 +18199,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               let record = cache.recordActionResult(cas.inner,
                 action.weakFingerprint,
                 action.actionCachePolicy,
-                action.cacheInputPaths(evidence.evidence),
+                action.recordedInputNames(
+                  action.cacheInputPaths(evidence.evidence)),
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
@@ -18204,8 +18215,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # (Incremental-Invalidation.md:814-821). The evidence was
                 # already collected two lines up; only the hand-off was
                 # missing.
-                enumeratedDirectories =
-                  action.cacheEnumeratedDirectories(evidence.evidence),
+                enumeratedDirectories = action.recordedInputNames(
+                  action.cacheEnumeratedDirectories(evidence.evidence)),
                 determinism = entryDeterminismFor(config, action))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
@@ -18402,7 +18413,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 storeOutputBlobsFor(plan.action, evidence.evidence)
               let record = cache.recordActionResult(cas.inner,
                 plan.action.weakFingerprint,
-                plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
+                plan.action.actionCachePolicy,
+                plan.action.recordedInputNames(
+                  plan.action.cacheInputPaths(evidence.evidence)),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
@@ -18414,8 +18427,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # from a converter path set or from a monitor depfile a
                 # direct engine caller prewired — both of which
                 # `collectEvidence` has already folded by this point.
-                enumeratedDirectories =
-                  plan.action.cacheEnumeratedDirectories(evidence.evidence),
+                enumeratedDirectories = plan.action.recordedInputNames(
+                  plan.action.cacheEnumeratedDirectories(evidence.evidence)),
                 determinism = entryDeterminismFor(config, plan.action))
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
@@ -18886,7 +18899,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
       if runningItem.processKind == rpkHelperProcess:
-        runningItem.process.close()
+        closeProcessOnce(runningItem.process)
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
         if finishedUsed > runningItem.poolUnits:
@@ -19014,13 +19027,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # blob payloads back out of the local CAS.
           let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
           let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
-            action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
+            action.actionCachePolicy,
+            action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,
             metadataCache = addr fileMetadataCache,
             envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-            enumeratedDirectories =
-              action.cacheEnumeratedDirectories(evidence.evidence),
+            enumeratedDirectories = action.recordedInputNames(
+              action.cacheEnumeratedDirectories(evidence.evidence)),
             determinism = entryDeterminismFor(config, action))
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
@@ -19083,7 +19097,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           discard item.directProcess.cancelAndWait()
       of rpkHelperProcess:
         terminateRunningAction(item)
-        item.process.close()
+        closeProcessOnce(item.process)
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       inlineRunQuotaSession.close()

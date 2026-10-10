@@ -45,6 +45,11 @@ else:
 import repro_build_engine
 import repro_core/codec
 import repro_core/path_identity
+# ``execCmdExCloseOnce``: ``execCmdEx`` without ``osproc.close``'s double close
+# of the merged stdout/stderr descriptor. These helpers run inside the build
+# engine's workspace-VCS executor, on the scheduler thread, while the engine's
+# worker pool may be live; see ``repro_core/process_close``.
+from repro_core/process_exec import execCmdExCloseOnce
 import repro_hash
 
 import git_tool
@@ -603,7 +608,7 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir,
+  let res = execCmdExCloseOnce(cmd, workingDir = workingDir,
     env = scrubbedGitRepositoryEnv())
   (exitCode: res.exitCode, output: res.output)
 
@@ -679,7 +684,7 @@ proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
     let options =
       if errPath.len > 0: {poUsePath}
       else: {poUsePath, poStdErrToStdOut}
-    let res = execCmdEx(cmd, options = options, workingDir = workingDir,
+    let res = execCmdExCloseOnce(cmd, options = options, workingDir = workingDir,
       env = scrubbedGitRepositoryEnv())
     result.exitCode = res.exitCode
     result.stdoutText = res.output

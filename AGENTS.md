@@ -12,6 +12,7 @@
 - CMake Reprobuild vs Ninja benchmark: `just bench_cmake_reprobuild_vs_ninja`
 - CMake Reprobuild vs Ninja quick benchmark: `just bench_cmake_reprobuild_vs_ninja_quick`
 - CMake Reprobuild vs Ninja medium benchmark: `just bench_cmake_reprobuild_vs_ninja_medium`
+- CMake cross-project TryCompile reuse benchmark: `just bench_cmake_cross_project_trycompile_reuse`
 - Repository contract check: `just check-repo-requirements`
 - Regenerate the tree-derived suite artifacts: `just regen-suite-artifacts`
 

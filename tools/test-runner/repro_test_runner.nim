@@ -126,9 +126,11 @@ import ct_test_history
 # CodeTracer's write path.
 import repro_test_stats
 
-# ``closeMergedProcess``: the runner's only way to release a spawned child's
-# pipes. ``osproc.close`` double-closes on POSIX; see the module.
-import ./merged_process
+# ``closeProcessOnce``: the runner's only way to release a spawned child's
+# pipes. ``osproc.close`` double-closes a ``poStdErrToStdOut`` child's merged
+# descriptor on POSIX; see the module. Shared with the build engine, whose
+# scheduler thread has the same hazard while its worker pool is live.
+from repro_core/process_close import closeProcessOnce
 
 when defined(posix):
   import std/posix
@@ -1805,7 +1807,7 @@ proc qualifyName(binaryStem, suite, name: string): string =
 # been handed under the lock. That, not the fork hazard above, was the cause
 # of the sporadic ``Bad file descriptor``, ``Is a directory`` and "supervisor
 # did not become ready ... end of stream" spawn failures; it is fixed by
-# releasing every child through ``closeMergedProcess`` (merged_process.nim).
+# releasing every child through ``closeProcessOnce`` (repro_core/process_close).
 var spawnLock: Lock
 initLock(spawnLock)
 
@@ -2441,7 +2443,7 @@ when defined(posix):
       release(activeProcessGroupsLock)
     if result:
       finalDrainNonBlocking(testProcess.process, output)
-      closeMergedProcess(testProcess.process)
+      closeProcessOnce(testProcess.process)
       cleanupProcessGroupPaths(testProcess)
     else:
       output.add(
@@ -2471,7 +2473,7 @@ const
     ##
     ## Superseded diagnosis: the EBADF was at least largely another worker's
     ## ``osproc.close`` double-closing a descriptor number this spawn had just
-    ## been given (see ``closeMergedProcess``). That is fixed at the source;
+    ## been given (see ``closeProcessOnce``). That is fixed at the source;
     ## the retry remains only as a bound on genuinely transient faults.
     ##
     ## Retry covers ONLY the spawn. A supervisor that started and then
@@ -2575,7 +2577,7 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
           finalDrainNonBlocking(process, trailing)
         except CatchableError:
           discard
-        closeMergedProcess(process)
+        closeProcessOnce(process)
         let observed =
           if readError.len > 0:
             "a read error on the supervisor's stdout: " & readError
@@ -2635,7 +2637,7 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
           discard process.waitForExit()
         except CatchableError:
           discard
-        closeMergedProcess(process)
+        closeProcessOnce(process)
         raise newException(IOError,
           "test process-group supervisor did not own its expected group")
       result = TestProcess(
@@ -2887,7 +2889,7 @@ proc drainAndWait(testProcess: TestProcess):
       # A leaked process group is an observation about the case, so it is
       # raised as a REFUSAL and reported FAIL — never as a harness fault.
       raise newException(ProcessGroupRefusal, groupOutput)
-    closeMergedProcess(p)
+    closeProcessOnce(p)
     cleanupProcessGroupPaths(testProcess)
     return (groupOutput, groupExitCode)
 
@@ -2898,7 +2900,7 @@ proc drainAndWait(testProcess: TestProcess):
     output.add(line)
     output.add('\n')
   let exitCode = p.waitForExit()
-  closeMergedProcess(p)
+  closeProcessOnce(p)
   result = (output, exitCode)
 
 proc drainToEof(p: Process; output: var string) =
@@ -3245,11 +3247,11 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
             "\nrepro_test_runner: exact owner-token processes survived " &
             "bounded cleanup; refusing to unregister or report PASS.\n")
           raise newException(ProcessGroupRefusal, output)
-        closeMergedProcess(p)
+        closeProcessOnce(p)
         cleanupProcessGroupPaths(testProcess)
       else:
         finalDrainNonBlocking(p, output)
-        closeMergedProcess(p)
+        closeProcessOnce(p)
       return ChildRunOutcome(output: output, exitCode: code,
         peakRssBytes: peakRssBytes)
     # Drain whatever the live child has emitted since the last poll.
@@ -3383,7 +3385,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   # in ``timedOut`` — is what makes this a FAIL; the drain only gathers
   # diagnostics.
   finalDrainNonBlocking(p, output)
-  closeMergedProcess(p)
+  closeProcessOnce(p)
   when defined(posix):
     cleanupProcessGroupPaths(testProcess)
   result = ChildRunOutcome(output: output, exitCode: TimeoutExitCode,
