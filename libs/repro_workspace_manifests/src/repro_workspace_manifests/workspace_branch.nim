@@ -13,10 +13,10 @@
 ## Two operating modes:
 ##
 ##   1. **Composer mode** — ``.repro/workspace.toml`` already exists with
-##      one or more ``[[manifest]]`` entries. The writer reads the file
-##      via the M5 strict reader, updates ``workspace.branch``, and
-##      re-emits the canonical TOML preserving the declared manifest
-##      layers in source order.
+##      one or more ``[[manifest]]`` entries. The writer validates the file
+##      through the M5 strict reader, then edits ``workspace.branch`` in
+##      place through ``manifest_editor`` — the declared manifest layers,
+##      and any comment in the file, are left exactly as they are.
 ##
 ##   2. **Single-project mode** — no ``.repro/workspace.toml`` exists.
 ##      The writer creates a *metadata-only* workspace.toml carrying
@@ -27,45 +27,19 @@
 ##      bare ``fileExists`` so a metadata-only file still routes to the
 ##      M6/M7 single-project resolver.
 ##
-## The writer is idempotent: re-running with the same branch value
-## overwrites the file with byte-identical bytes (key order and
-## quoting are fixed by the serializer).
+## Every write goes through ``manifest_editor``: a new file is rendered from
+## the typed ``WorkspaceLocal`` (``workspaceStateText``), an existing one is
+## edited key by key (``applyWorkspaceState``). The writers are idempotent:
+## re-running with the same values leaves the file byte-identical.
 
 import std/[options, os, strutils]
 
 import types
 import diagnostics
 import reader
+import manifest_editor
 
 # ---- helpers --------------------------------------------------------------
-
-proc tomlEscape(value: string): string =
-  ## Minimal TOML basic-string escape. The workspace metadata only
-  ## carries identifier-shaped strings (project names, branch names,
-  ## URLs) — backslash / double-quote / control escapes are sufficient.
-  result = newStringOfCap(value.len + 2)
-  for ch in value:
-    case ch
-    of '\\': result.add("\\\\")
-    of '"': result.add("\\\"")
-    of '\n': result.add("\\n")
-    of '\r': result.add("\\r")
-    of '\t': result.add("\\t")
-    of '\b': result.add("\\b")
-    of '\f': result.add("\\f")
-    else: result.add(ch)
-
-template emitKv(buf: var string; key, value: string) =
-  buf.add(key)
-  buf.add(" = \"")
-  buf.add(tomlEscape(value))
-  buf.add("\"\n")
-
-template emitKvBool(buf: var string; key: string; value: bool) =
-  buf.add(key)
-  buf.add(" = ")
-  buf.add(if value: "true" else: "false")
-  buf.add("\n")
 
 proc workspaceTomlPath*(workspaceRoot: string): string =
   ## Canonical absolute path of the workspace metadata file
@@ -91,79 +65,6 @@ proc manifestsRoot*(workspaceRoot: string): string =
   if dirExists(reproManifests / "projects") or dirExists(reproManifests / "repos"):
     return reproManifests
   workspaceRoot
-
-# ---- serializer -----------------------------------------------------------
-
-proc serializeWorkspaceLocalToToml*(local: WorkspaceLocal): string =
-  ## Render a ``WorkspaceLocal`` to the canonical TOML form documented
-  ## in ``Workspace-Manifests.md`` §"Workspace Composition Layers". Key
-  ## order is fixed:
-  ##
-  ##   ``schema = "..."``
-  ##
-  ##   ``[workspace]``
-  ##   ``project = "..."``
-  ##   ``branch = "..."``     # optional
-  ##
-  ##   ``[[manifest]]``       # one block per declared layer
-  ##   ``url = "..."`` OR ``local_path = "..."``
-  ##   ``visibility = "..."``
-  ##   ``branch = "..."``     # optional
-  ##
-  ## The ``[extensions]`` table from the strict reader is NOT
-  ## re-emitted: M13's writer is the only structured writer for this
-  ## schema, and the workspace.toml does not carry extensions in any
-  ## production fixture today. If a future caller needs to round-trip
-  ## extensions, the writer can be extended without breaking existing
-  ## consumers (the strict reader already accepts the table).
-  if local.workspace.project.len == 0:
-    raiseManifestError("", "workspace.project",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
-      "serializeWorkspaceLocalToToml refuses to emit a workspace with empty project name")
-
-  result = newStringOfCap(192 + local.manifest.len * 128)
-  result.add("schema = \"")
-  result.add(schemaWorkspaceLocalV1)
-  result.add("\"\n\n")
-  result.add("[workspace]\n")
-  emitKv(result, "project", local.workspace.project)
-  # RA-6: emit the active project SET as a TOML array when it carries more
-  # than the single primary project. The array is omitted in the
-  # single-project steady state (empty or a one-element set equal to the
-  # primary) so existing fixtures stay byte-identical.
-  block emitProjects:
-    let ps = local.workspace.projects
-    if ps.len == 0:
-      break emitProjects
-    if ps.len == 1 and ps[0] == local.workspace.project:
-      break emitProjects
-    result.add("projects = [")
-    for i, p in ps:
-      if i > 0: result.add(", ")
-      result.add("\"")
-      result.add(tomlEscape(p))
-      result.add("\"")
-    result.add("]\n")
-  if local.workspace.branch.isSome and local.workspace.branch.get().len > 0:
-    emitKv(result, "branch", local.workspace.branch.get())
-  # M16: emit ``feature_started = true`` only when the flag is
-  # explicitly set. The ``none`` and ``some(false)`` cases both
-  # omit the key — the reader treats absent and ``false`` as
-  # equivalent, so omitting the key keeps the workspace.toml
-  # minimal in the steady state.
-  if local.workspace.feature_started.isSome and
-      local.workspace.feature_started.get() == true:
-    emitKvBool(result, "feature_started", true)
-
-  for entry in local.manifest:
-    result.add("\n[[manifest]]\n")
-    if entry.url.isSome and entry.url.get().len > 0:
-      emitKv(result, "url", entry.url.get())
-    elif entry.local_path.isSome and entry.local_path.get().len > 0:
-      emitKv(result, "local_path", entry.local_path.get())
-    emitKv(result, "visibility", entry.visibility)
-    if entry.branch.isSome and entry.branch.get().len > 0:
-      emitKv(result, "branch", entry.branch.get())
 
 # ---- reader ---------------------------------------------------------------
 
@@ -409,6 +310,18 @@ proc readWorkspaceBranch*(workspaceRoot: string): Option[string] =
     return some(local.workspace.branch.get())
   none(string)
 
+proc recordWorkspaceState(path: string; local: WorkspaceLocal) =
+  ## Write ``local`` to the state file at ``path`` through the manifest
+  ## editor: rendered from the typed value when the file is new, edited key
+  ## by key when it exists (so a hand-added comment or a manifest layer the
+  ## writer does not touch survives).
+  if fileExists(path):
+    var doc = loadManifestDoc(path)
+    discard doc.applyWorkspaceState(local.workspace)
+    doc.saveManifestDoc()
+  else:
+    writeWorkspaceManifestFile(path, workspaceStateText(local))
+
 proc readWorkspaceProjects*(workspaceRoot: string): seq[string] =
   ## RA-6 — return the active PROJECT SET recorded in
   ## ``.repo/workspace.toml``. The set is the ``[workspace] projects``
@@ -459,7 +372,7 @@ proc writeWorkspaceProjects*(workspaceRoot: string; projects: seq[string]) =
 
   local.workspace.project = deduped[0]
   local.workspace.projects = deduped
-  writeFile(path, serializeWorkspaceLocalToToml(local))
+  recordWorkspaceState(path, local)
 
 # ---- writer ---------------------------------------------------------------
 
@@ -506,7 +419,7 @@ proc writeWorkspaceBranch*(workspaceRoot, project, branch: string) =
     local.workspace.project = project
 
   local.workspace.branch = some(branch)
-  writeFile(path, serializeWorkspaceLocalToToml(local))
+  recordWorkspaceState(path, local)
 
 proc writeWorkspaceBranchWithStarted*(workspaceRoot, project, branch: string;
                                      featureStarted: bool) =
@@ -549,4 +462,4 @@ proc writeWorkspaceBranchWithStarted*(workspaceRoot, project, branch: string;
     # Clear the field. The serializer omits absent / false values, so
     # ``none`` keeps the workspace.toml minimal.
     local.workspace.feature_started = none(bool)
-  writeFile(path, serializeWorkspaceLocalToToml(local))
+  recordWorkspaceState(path, local)

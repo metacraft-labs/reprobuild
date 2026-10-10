@@ -51,8 +51,12 @@ def stage(package: Path) -> None:
     license_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(license_source, license_dir / "LICENSE.txt")
     helper.chmod(0o755)
+    # The helper runs inside build actions, whose PATH holds only declared
+    # tools and need not include dirname, so it locates itself with shell
+    # builtins alone.
     helper.write_text('''#!/bin/sh
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+here=$(CDPATH= cd -- "$here" && pwd)
 export PYTHONHOME="$here/.."
 export PYTHONPATH="$here/../lib"
 export PYTHONNOUSERSITE=1

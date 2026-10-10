@@ -685,6 +685,15 @@ bench_cmake_reprobuild_vs_ninja_medium *args:
         {{args}} \
         2> >(tee test-logs/bench_cmake_reprobuild_vs_ninja_medium.log >&2)
 
+bench_cmake_cross_project_trycompile_reuse *args:
+    mkdir -p bench-results test-logs
+    bash ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+        --cross-project-only \
+        --cross-project-pair zlib:libuv \
+        --output bench-results/cmake-cross-project-trycompile-reuse.json \
+        {{args}} \
+        2> >(tee test-logs/bench_cmake_cross_project_trycompile_reuse.log >&2)
+
 e2e_reprobuild_mvp_acceptance:
     mkdir -p test-logs
     bash ./scripts/run-m24-acceptance.sh 2>&1 | tee test-logs/e2e_reprobuild_mvp_acceptance.log

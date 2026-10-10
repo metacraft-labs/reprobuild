@@ -198,6 +198,15 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   # token below and the file is an input: an edit re-populates the cache.
   let overrideLock = npmBuildClosureLockPath(projectRoot)
   let hasOverrideLock = fileExists(overrideLock)
+  # Both files are read HERE, at emission, and their content is baked into
+  # the program below (the token and the archive count), so both are inputs
+  # of the graph evaluation, not only of the action. Unreported, an edit to
+  # either reused the cached graph: the action re-ran, but ran the program
+  # emitted for the OLD manifest, found its old token and count still
+  # matching, and declared the cache up to date. The lock is reported even
+  # when absent, so committing one later invalidates too.
+  providerFileInput(manifest)
+  providerFileInput(overrideLock)
   # npm writes a debug log into `<cache>/_logs` on every invocation and
   # deletes older ones to keep `logs_max`. The build runs npm against this
   # same cache with `logs_max=0`, so it DELETED the logs this step left there:

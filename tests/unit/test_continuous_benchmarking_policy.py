@@ -408,6 +408,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
             "just bench_cmake_reprobuild_vs_ninja",
             "just bench_cmake_reprobuild_vs_ninja_quick",
             "just bench_cmake_reprobuild_vs_ninja_medium",
+            "just bench_cmake_cross_project_trycompile_reuse",
         ]:
             self.assertIn(target, agents)
 

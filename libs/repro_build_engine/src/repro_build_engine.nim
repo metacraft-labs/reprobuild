@@ -14480,6 +14480,9 @@ when not defined(windows):
     ## and the former fixed 2 s window turned every slow start into "Failed
     ## to connect or spawn". A helper that EXITS is noticed at once and does
     ## not cost the whole window.
+  const NixDaemonBindTimeoutMs* = NixDaemonStartTimeoutMs
+    ## The name the spawn-wait tests use for the same ceiling: how long a
+    ## started helper may take to accept while it is still running.
   const NixDaemonSocketDirEnv* = "REPROBUILD_NIX_DAEMON_SOCKET_DIR"
     ## Directory of the helper's socket (default ``/tmp``). Exists so that a
     ## test or an experiment can run its own helpers without touching -- or
@@ -14554,6 +14557,7 @@ when not defined(windows):
     var quietExits = 0
     var lastSpawnAt = 0.0
     var lastExit = ""
+    var lastOutput = ""
     var spawnError = ""
     var pause = 10
     try:
@@ -14565,6 +14569,15 @@ when not defined(windows):
             # socket; that one may since have gone. Either way, look once
             # more before starting another.
             lastExit = $code
+            # What the helper printed before exiting (stdout and stderr are
+            # merged) is the only first-hand account of why it did not bind.
+            try:
+              if helper.outputStream != nil:
+                let printed = helper.outputStream.readAll().strip()
+                if printed.len > 0:
+                  lastOutput = printed
+            except CatchableError:
+              discard
             # 128+N is a helper ended by signal N -- stopped by someone else
             # while it started, which says nothing about whether one can
             # start. Only an exit the helper chose (or exec's 126/127)
@@ -14604,6 +14617,10 @@ when not defined(windows):
     if lastExit.len > 0:
       diagnostic.add("; the last exited with status " & lastExit &
         " before accepting")
+    if lastOutput.len > 0:
+      let lines = lastOutput.splitLines()
+      diagnostic.add("; it printed:\n    " &
+        lines[max(0, lines.len - 6) .. ^1].join("\n    "))
     if spawnError.len > 0:
       diagnostic.add("; starting one failed: " & spawnError)
     let tail = nixDaemonLogTail(socketPath)

@@ -7832,6 +7832,40 @@ type
                                terminal: bool; exitCode: int;
                                watchedPaths: seq[string]; lastResult: string)
 
+  ActionDecisionTally* = object
+    ## How one invocation's actions were settled, counted from the engine's
+    ## own per-action results. Written into the ``$REPRO_STATS_DIR`` record
+    ## so a caller that cannot see the action log -- CMake runs every
+    ## TryCompile build with ``--log=quiet`` -- can still tell a cache hit
+    ## from an executed command. The timing metrics in the same record are
+    ## not a substitute: their counts say how often a timer ran, and several
+    ## timers run for both outcomes.
+    total*: int
+    launched*: int
+    cacheHit*: int
+    failed*: int
+
+proc tallyActionDecisions*(results: openArray[ActionResult]):
+    ActionDecisionTally =
+  ## ``cacheHit`` counts both reuse decisions (``cdHit`` and
+  ## ``cdHybridCutoff``); ``launched`` counts actions whose command ran.
+  for item in results:
+    inc result.total
+    if item.launched:
+      inc result.launched
+    if item.cacheDecision in {cdHit, cdHybridCutoff}:
+      inc result.cacheHit
+    if item.status in {asFailed, asBlocked}:
+      inc result.failed
+
+proc actionTallyJson*(tally: ActionDecisionTally): JsonNode =
+  %*{
+    "total": tally.total,
+    "launched": tally.launched,
+    "cacheHit": tally.cacheHit,
+    "failed": tally.failed,
+  }
+
 proc writeBuildBenchmark(path: string; outcome: BuildCommandOutcome;
                          stats: BuildStats; modeName, fastPath: string;
                          executedActions: int;
@@ -9799,6 +9833,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     progressRenderer.finishProgress()
   var invocationFastPath = ""
   var benchmarkExecutedActions = 0
+  var invocationActionTally: ActionDecisionTally
   defer:
     if benchmarkPath.len > 0:
       try:
@@ -9862,6 +9897,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "exitCode": result.exitCode,
           "mode": $mode,
           "fastPath": invocationFastPath,
+          "actions": actionTallyJson(invocationActionTally),
         }
         var metrics = newJArray()
         for metric in buildStats.metrics:
@@ -10270,10 +10306,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
-    benchmarkExecutedActions = 0
-    for item in buildResult.results:
-      if item.launched:
-        inc benchmarkExecutedActions
+    invocationActionTally = tallyActionDecisions(buildResult.results)
+    benchmarkExecutedActions = invocationActionTally.launched
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
@@ -11884,10 +11918,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       raise
     finishStat(buildStats, statsEnabled, "repro engine runBuild", engineStart)
     buildStats.mergeStats(buildResult.stats)
-    benchmarkExecutedActions = 0
-    for item in buildResult.results:
-      if item.launched:
-        inc benchmarkExecutedActions
+    invocationActionTally = tallyActionDecisions(buildResult.results)
+    benchmarkExecutedActions = invocationActionTally.launched
     warnRunQuotaBypassIfUsed(buildResult,
       enabled = fallbackToRunQuotaBypass)
     logRunQuotaAuthority(buildResult)
@@ -17349,6 +17381,74 @@ proc buildServicesManagedHookContract*(contract: string): bool =
   ## Convenience form of the verdict above: does THIS build service
   ## ``contract``?
   managedHookContractServiceVerdict(contract).code == 0
+
+# ---- PG-16: the freshness question, asked per INSTALLED body ----------------
+#
+# `managedHookBodyIsCurrent` already answers "does this build generate the body
+# in front of me?", and until PG-16 its only caller was `effectivePrePushHook`.
+# It answers by RE-RENDERING the body, which is right for one hook on the push
+# path and wrong for a sweep. `repro health`'s population is the PARTICIPATING
+# repos: spec §1.6c measured 172 of them in one workspace, 153 carrying managed
+# hooks and 19 carrying none, so the sweep asks up to 5 × 172 = 860 yes/no
+# questions. Re-rendering a body per question turns a doctor into a compute
+# job, so it compares the one thing that identifies a body — its CONTRACT
+# TOKEN — against the five tokens this build generates, rendered once.
+#
+# (§1.6b's 770-bodies-across-154-repos is a DIFFERENT population and not this
+# one: it is a filesystem sweep, `find . -path '*/hooks/*.repro-managed'`, and
+# §1.6b says its 154 includes 14 nested checkouts such as
+# `reprobuild/references/*` — which the manifest does not make participating
+# repos. Neither figure bounds the other, so neither is quoted for the other's
+# purpose.)
+#
+# The two answers are not identical and the difference is stated rather than
+# hidden: the token digests `vcsManagedHookBody(hook, "", ManagedHookSite())`,
+# so a body whose token matches but whose machine-local site was hand-edited
+# compares EQUAL here and UNEQUAL in `managedHookBodyIsCurrent`. That residue
+# is deliberate. The site is the author path and the refusal-record directory,
+# neither of which changes what the hook does, and the push path still asks the
+# byte-exact question. What the sweep must not do is report `ok` for a body
+# whose CONTRACT this build does not service, which is the defect §1.6c
+# measured.
+
+type
+  ManagedHookFreshness* = enum
+    ## How an installed managed-hook body relates to the body THIS build
+    ## generates for the same hook. Three outcomes, because the middle one
+    ## earns a different diagnosis from the other two.
+    mhfCurrent
+      ## It demands exactly the token this build generates: the writer and this
+      ## build agree about the body.
+    mhfContractless
+      ## It carries NO ``--hook-contract=`` line at all. A positive finding,
+      ## not a parse failure (see ``managedHookBodyContractDemand``): the body
+      ## was written by a build predating the handshake, which is precisely the
+      ## state the hook's own remedy text warns ``hooks ensure`` can create.
+    mhfForeignContract
+      ## It demands a token this build does not generate. Some OTHER build
+      ## wrote it, and a dispatch from this one is a refusal — or, in the four
+      ## observational hooks, a silent fail-open.
+
+proc managedHookContractsOfThisBuild*(): Table[string, string] =
+  ## The contract token this build generates for each of ``VcsHookNames``,
+  ## rendered ONCE for the whole caller.
+  ##
+  ## Hoisting this out of a per-repo loop is not a micro-optimisation, it is
+  ## the deliverable: ``managedHookContract`` renders a full hook body and
+  ## digests it, and the sweep that needs it visits five hooks in every
+  ## participating repo (860 renders in the workspace §1.6c was measured on).
+  for hookName in VcsHookNames:
+    result[hookName] = managedHookContract(hookName)
+
+proc classifyManagedHookFreshness*(expectedContract, body: string):
+    ManagedHookFreshness =
+  ## Compare one installed body's demand against ``expectedContract`` (the
+  ## token this build generates for that hook, from
+  ## ``managedHookContractsOfThisBuild``).
+  let demanded = managedHookBodyContractDemand(body)
+  if demanded.len == 0: mhfContractless
+  elif demanded == expectedContract: mhfCurrent
+  else: mhfForeignContract
 
 type
   HookContractServicing* = enum
@@ -53612,6 +53712,288 @@ proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
       code = 1
   (code, lines, results)
 
+# ---- PG-16: OBSERVING the wiring, without writing any of it ----------------
+#
+# Spec §7.6.6 asks one question — "is this workspace governed?" — and names the
+# shape of the answer: per repo a state from §7.3's verdict table, and per
+# workspace the counts plus the ``gate_mode`` that WOULD apply to a push now,
+# "so `required` on an `unwired` repo is visible as the contradiction it is".
+#
+# §1.6c measured what shipped instead: ``push-gateway`` was an unconditional
+# ``hsOk`` carrying the constant string "no certificate-enforcing project;
+# pushes are direct", emitted with no enclosing block, no manifest read and no
+# probe. The string was true. It would also have been printed, unchanged, by a
+# workspace with a ``required`` project and not one repo wired — which is the
+# only state the check exists to find. A check that cannot report the state it
+# names is worse than no check, because CLI/health.md's stated purpose is to
+# localize the problem and a hardcoded ``ok`` removes the layer from
+# suspicion. (Prose, not a quotation: health.md reads *"`repro health`
+# localizes the problem"*, so quoting "localize the problem" would be a
+# paraphrase dressed as a quote — §1.6 applies to this file's citations too.)
+#
+# STRICTLY READ-ONLY, and that is a boundary rather than an implementation
+# detail. This is the ``health`` side of §7.6.1's split: ``sync`` performs
+# migration, ``hooks ensure --vcs`` and ``health`` only REPORT it. Nothing below
+# runs ``git config --set``, creates a gateway bare, or touches a pushurl.
+#
+# WHERE IT AGREES WITH THE WRITER, AND WHERE IT DOES NOT — stated, because the
+# first draft of this comment claimed the agreement was total and it is not.
+# ``wired`` is computed from the SAME expression ``ensureGatewayForRepo`` writes
+# with (``gatewayBarePathFor(root, lastPathPart(workspaceRoot), upstreamUrl)``),
+# so the report and the writer cannot disagree about what "wired" means. The
+# three OPT-OUTS below are a different matter: §7.4 defines all three, and
+# NOTHING on the writing side honours any of them yet — ``ensureGatewayForRepo``
+# consults neither ``REPRO_PUSH_GATEWAY``, nor the workspace's
+# ``push_gateway``, nor the per-repo marker, so ``gateway migrate`` would wire a
+# repo this reports as ``opted-out``. That asymmetry is deliberate in this
+# direction only: §7.4 is explicit that an opt-out suppresses WIRING and never
+# REPORTING, so the reporting side arriving first costs an operator a
+# diagnostic they can act on, while the reverse would have cost them a silent
+# gateway. PG-11 owns the writer half (and PG-9 ``unwire``, the marker's
+# writer); until it lands, a reader of this row should not infer that
+# ``migrate`` will respect what it says.
+
+type
+  GatewayObservedState* = enum
+    ## §7.3's verdict table, as an observation. ``stale-gateway`` and
+    ## ``foreign`` are deliberately distinct even though both are "a pushurl
+    ## that is not the expected one": the first is repairable by repointing and
+    ## the second must never be overwritten, so collapsing them would attach
+    ## the wrong remedy to a developer's own mirror.
+    gosWired = "wired"
+    gosStaleGateway = "stale-gateway"
+    gosForeign = "foreign"
+    gosOptedOut = "opted-out"
+    gosNotWired = "not-wired"
+
+  GatewayRepoObservation* = object
+    repo*: string
+    repoPath*: string
+    state*: GatewayObservedState
+    pushurl*: string           ## as observed, "" when absent
+    expectedGateway*: string   ## where this workspace's gateway would live
+    upstreamUrl*: string
+    reason*: string            ## why, for every state that has a why
+
+  WorkspaceGatewayObservation* = object
+    ## §7.6.6's summary, computed rather than asserted.
+    repos*: seq[GatewayRepoObservation]
+    wired*: int
+    staleGateway*: int
+    foreign*: int
+    optedOut*: int
+    notWired*: int
+    inspected*: int
+    notWiredReasons*: seq[string]  ## distinct, in order of first appearance
+    optOutScope*: string           ## "", "machine", "workspace"
+
+const
+  gatewayOptOutEnvVar = "REPRO_PUSH_GATEWAY"
+    ## §7.4's per-MACHINE opt-out. Intended for CI images and for bisecting a
+    ## gateway-related failure.
+  gatewayOptOutRepoConfigKey = "reprobuild.pushGateway.optOut"
+    ## §7.4's per-REPO opt-out marker. Its WRITER is ``unwire`` (§7.6.7), which
+    ## does not exist yet; the reader is implemented now because an opt-out
+    ## suppresses wiring and never reporting, so the reporting side must be able
+    ## to say ``opted-out`` the day the writer lands rather than a release
+    ## later.
+  gatewayProvenanceSetByKey = "reprobuild.pushGateway.setBy"
+  gatewayProvenanceValueKey = "reprobuild.pushGateway.value"
+  gatewayProvenanceWorkspaceKey = "reprobuild.pushGateway.workspace"
+    ## §7.6.3's provenance record. Also written by PG-9 rather than by anything
+    ## here, and read defensively for the same reason: its absence is the normal
+    ## state today and must not be reported as a defect.
+
+proc workspaceDeclaresGatewayOff(workspaceRoot: string): bool =
+  ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` in
+  ## ``.repro-workspace.toml``.
+  ##
+  ## Read by a line scan rather than through the typed bootstrap reader, and
+  ## the reason is stated so it is not mistaken for laziness: the key has NO
+  ## schema entry yet (PG-11 owns adding one), so a typed read would either
+  ## reject the file or silently drop the field. A scan that skips comments and
+  ## requires the key on the left of ``=`` is narrow enough not to match prose,
+  ## and the failure direction is the safe one — an unrecognised spelling reads
+  ## as "not opted out", which reports MORE than the operator asked for, and
+  ## §7.4 is explicit that an opt-out suppresses wiring and never reporting.
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0:
+    return false
+  var content = ""
+  try:
+    content = readFile(configPath)
+  except CatchableError:
+    return false
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    let eq = line.find('=')
+    if eq <= 0:
+      continue
+    if line[0 ..< eq].strip() != "push_gateway":
+      continue
+    let value = line[(eq + 1) .. ^1].strip().strip(chars = {'"', '\''})
+    return value.toLowerAscii() in ["off", "false", "no", "disabled"]
+  false
+
+proc observeWorkspaceGateways*(workspaceRoot: string; cacheRoot = "";
+                               remoteName = "origin"):
+    WorkspaceGatewayObservation =
+  ## Classify every participating repo's push path against §7.3's table.
+  ##
+  ## ``cacheRoot`` is injected so a hermetic test can confine the gateways tree
+  ## without reaching the operator's real cache; production passes "" and gets
+  ## ``defaultCacheRoot``, which honours ``XDG_CACHE_HOME`` and
+  ## ``REPRO_WORKSPACE_CLONES``.
+  let gitBin = findExe("git")
+  let machineOff = getEnv(gatewayOptOutEnvVar).strip().toLowerAscii() in
+    ["off", "false", "no", "0", "disabled"]
+  let workspaceOff = workspaceDeclaresGatewayOff(workspaceRoot)
+  result.optOutScope =
+    if machineOff: "machine"
+    elif workspaceOff: "workspace"
+    else: ""
+  let root =
+    if cacheRoot.len > 0: cacheRoot
+    else: defaultCacheRoot(workspaceRoot)
+  let gatewaysRoot = parentDir(root) / "gateways"
+  let enumerated = enumerateParticipatingRepos(workspaceRoot)
+
+  proc noteNotWired(obs: var WorkspaceGatewayObservation; reason: string) =
+    inc obs.notWired
+    if reason notin obs.notWiredReasons:
+      obs.notWiredReasons.add(reason)
+
+  for repo in enumerated.repos:
+    # Copied out of the loop variable BEFORE the closure below is declared.
+    # ``enumerated.repos`` is iterated by ``lent HookRepoTarget``, and a nested
+    # proc that captured ``repo`` directly does not compile ("cannot be
+    # captured as it would violate memory safety") — the borrow outlives the
+    # iteration step. Two plain strings are what ``cfg`` actually needs.
+    let repoPath = repo.repoPath
+    let repoName = repo.name
+    if gitTopLevel(repoPath).len == 0:
+      continue        # not materialized; the siblings check owns that.
+    inc result.inspected
+    var one = GatewayRepoObservation(repo: repoName, repoPath: repoPath)
+    if gitBin.len == 0:
+      # Degrade rather than guess (§8). "No git" is not "not wired": the push
+      # path may be perfectly configured and simply unreadable from here.
+      one.state = gosNotWired
+      one.reason = "no git tool on PATH, so the push path cannot be read"
+      result.noteNotWired(one.reason)
+      result.repos.add(one)
+      continue
+
+    proc cfg(key: string): string =
+      let res = gitNoteRun(gitBin, ["-C", repoPath, "config", "--get", key])
+      if res.code == 0: res.output.strip() else: ""
+
+    one.pushurl = cfg("remote." & remoteName & ".pushurl")
+    one.upstreamUrl = cfg("remote." & remoteName & ".url")
+    # Strict booleans only. ``optOut = off`` is NOT accepted as an opt-out even
+    # though an operator might mean "the gateway is off" by it: the key names
+    # the MARKER, so reading ``off`` as "opted out" would invert the one
+    # spelling that most plainly says the opposite.
+    let repoOptOut = cfg(gatewayOptOutRepoConfigKey).toLowerAscii() in
+      ["true", "yes", "1", "on"]
+
+    if result.optOutScope.len > 0 or repoOptOut:
+      # §7.4 — an opt-out suppresses WIRING, never REPORTING. The repo is still
+      # counted and still named, so a project at ``gate_mode = required`` that
+      # opted its repos out reads as the contradiction it is.
+      one.state = gosOptedOut
+      one.reason =
+        if repoOptOut: "per-repo opt-out marker (" &
+          gatewayOptOutRepoConfigKey & ")"
+        elif result.optOutScope == "machine": "per-machine opt-out (" &
+          gatewayOptOutEnvVar & ")"
+        else: "per-workspace opt-out (push_gateway in " &
+          bootstrapConfigFileName & ")"
+      inc result.optedOut
+      result.repos.add(one)
+      continue
+
+    if one.upstreamUrl.len == 0:
+      one.state = gosNotWired
+      one.reason = "no remote." & remoteName &
+        ".url, so there is no upstream to forward to"
+      result.noteNotWired(one.reason)
+      result.repos.add(one)
+      continue
+
+    # The SAME expression ``ensureGatewayForRepo`` wires with. Sharing it is
+    # what makes "wired" mean one thing in the report and in the writer.
+    one.expectedGateway = absolutePath(
+      gatewayBarePathFor(root, lastPathPart(workspaceRoot), one.upstreamUrl))
+
+    if one.pushurl.len == 0:
+      one.state = gosNotWired
+      one.reason = "remote." & remoteName & ".pushurl is unset"
+      result.noteNotWired(one.reason)
+      result.repos.add(one)
+      continue
+
+    let observed =
+      try: absolutePath(one.pushurl) except CatchableError: one.pushurl
+    if observed == one.expectedGateway:
+      one.state = gosWired
+      inc result.wired
+      result.repos.add(one)
+      continue
+
+    # Not the expected gateway. §7.3 splits the rest two ways, and §7.6.3 says
+    # PATH SHAPE IS NOT A SUFFICIENT TEST for the split — "a user who read this
+    # document and pointed their own mirror at a cache-root-shaped path would be
+    # clobbered by a rule whose entire purpose is not to clobber them". So the
+    # provenance record decides it when there is one, and without one the
+    # observation errs toward ``foreign``, the state that is never touched.
+    let setBy = cfg(gatewayProvenanceSetByKey)
+    let recordedValue = cfg(gatewayProvenanceValueKey)
+    let recordedWorkspace = cfg(gatewayProvenanceWorkspaceKey)
+    let ourRecord = setBy == "reprobuild" and recordedValue == one.pushurl and
+      (recordedWorkspace.len == 0 or
+       os.normalizedPath(recordedWorkspace) ==
+         os.normalizedPath(absolutePath(workspaceRoot)))
+    if ourRecord:
+      one.state = gosStaleGateway
+      one.reason = "reprobuild set this pushurl (provenance record) and it " &
+        "names a different gateway than this workspace's: '" & one.pushurl &
+        "' vs '" & one.expectedGateway & "'"
+      inc result.staleGateway
+    else:
+      one.state = gosForeign
+      one.reason = "pushurl '" & one.pushurl &
+        "' is not this workspace's gateway and no provenance record says " &
+        "reprobuild set it; it is reported and NEVER overwritten" &
+        (if observed.startsWith(gatewaysRoot):
+          " (it is under the gateways root, which by itself proves nothing — " &
+          "§7.6.3: path shape is not provenance)"
+        else: "")
+      inc result.foreign
+    result.repos.add(one)
+
+proc describeWorkspaceGatewayObservation*(
+    obs: WorkspaceGatewayObservation): string =
+  ## §7.6.6's summary line: the counts, with their population, every time.
+  result = "gateway " & $obs.wired & " wired, " & $obs.staleGateway &
+    " stale-gateway, " & $obs.foreign & " foreign, " & $obs.optedOut &
+    " opted-out, " & $obs.notWired & " not-wired across " & $obs.inspected &
+    " participating repo(s)"
+  if obs.notWiredReasons.len > 0:
+    result.add("; not-wired because: " & obs.notWiredReasons.join("; "))
+
+proc namesOfGatewayReposInState*(obs: WorkspaceGatewayObservation;
+                                 state: GatewayObservedState): seq[string] =
+  ## The repos in one state, each with its reason. Used by the ``health`` row,
+  ## which must NAME what it counted: §7.6.6 requires that an ``opted-out``
+  ## repo in a ``required`` project is "still named".
+  for one in obs.repos:
+    if one.state == state:
+      result.add(one.repo & (if one.reason.len > 0: " (" & one.reason & ")"
+                             else: ""))
+
 proc runGatewayMigrateCommand(args: openArray[string]): int =
   ## ``repro gateway migrate [--workspace-root=PATH] [--dry-run]``.
   ##
@@ -59358,21 +59740,52 @@ proc gatherHealthChecks(parsed: HealthArgs):
   #     pushes keep succeeding, and the absence surfaces only much later as a
   #     CI job that cannot resolve its siblings.
   #
-  #     Two distinct ways it stops, both seen in the fleet:
+  #     THREE distinct ways it stops, all seen in the fleet:
   #
   #       * missing — the repo never got hooks (``ensure`` never reached it);
   #       * shadowed — a foreign installer (pre-commit) overwrote the
   #         dispatcher at the canonical path while the managed body sits
-  #         beside it, unreferenced.
+  #         beside it, unreferenced;
+  #       * STALE (PG-16) — the dispatcher and the body are both there, both
+  #         carry every marker a generated body carries, and the body demands a
+  #         CONTRACT TOKEN this build does not generate. Every fire of such a
+  #         hook is a refusal (``pre-push``) or a silent fail-open (the four
+  #         observational hooks).
   #
-  #     Shadowed is the more dangerous of the two precisely because it LOOKS
-  #     installed: ``.git/hooks/pre-push`` exists and is executable.
+  #     Shadowed is more dangerous than missing precisely because it LOOKS
+  #     installed: ``.git/hooks/pre-push`` exists and is executable. STALE is
+  #     more dangerous still, and spec §1.6c measured this check scoring it
+  #     ``ok``: in the workspace it was measured on, ``reprobuild-specs``'s
+  #     ``post-commit`` was FIRED AND REFUSED and was nonetheless counted into
+  #     ``okCount``, because the wiring test was ``isReprobuildVcsHook`` — a
+  #     three-way substring sniff for markers EVERY generated body carries, old
+  #     and new — and nothing in the arm asked whether the installed body is one
+  #     this build can service.
+  #
+  #     WHY STALE DOES NOT SHARE ``missing``'s REMEDY, which is the other half
+  #     of the deliverable. ``missing`` is repaired by ``hooks ensure --vcs``
+  #     and is safely ``--fix``-able. Re-authoring a STALE body is the one
+  #     action the body's own refusal text warns against — *"Do NOT run `repro
+  #     hooks ensure` with it: that rewrites this file with its own older body,
+  #     the contract line disappears, and you silence this message instead of
+  #     fixing it"* — because this build being DIFFERENT from the writer does
+  #     not establish that it is NEWER. So the stale arm is deliberately NOT
+  #     ``--fix``-able and its remedy leads with reconciling what supplies
+  #     ``repro`` (the ``hook-interpreter`` row below is the machine-wide half
+  #     of the same question). An ambient ``hooks ensure`` runs on dev-shell
+  #     entry in this very repo, so a doctor that offered to re-author would be
+  #     racing it to delete its own evidence.
   block hooksCheck:
     var missing: seq[string]
     var shadowed: seq[string]
+    var stale: seq[string]
     var okCount = 0
     var reposInspected = 0
     let enumerated = enumerateParticipatingRepos(parsed.workspaceRoot)
+    # Rendered ONCE for the whole sweep (see
+    # ``managedHookContractsOfThisBuild``): five bodies, not five per repo.
+    let expectedContracts = managedHookContractsOfThisBuild()
+    var writers: seq[string]
     for repo in enumerated.repos:
       if gitTopLevel(repo.repoPath).len == 0:
         continue        # not materialized; the siblings check owns that.
@@ -59389,7 +59802,40 @@ proc gatherHealthChecks(parsed: HealthArgs):
         let displaced = isReprobuildVcsHook(
           hooksDir / (hookName & ".legacy"), hookName)
         if wired and fileExists(extendedPath(managed)):
-          inc okCount
+          # PRESENT. Now the question this arm did not use to ask: is the body
+          # one THIS build services?
+          var body = ""
+          var readFailed = false
+          try:
+            body = readFile(extendedPath(managed))
+          except CatchableError:
+            readFailed = true
+          if readFailed:
+            # Unreadable is not "fresh". It is also not evidence of staleness,
+            # so it is named as what it is rather than folded into either.
+            stale.add(repo.name & "/" & hookName &
+              " (managed body present but unreadable, so its contract cannot " &
+              "be compared)")
+            continue
+          let expected = expectedContracts.getOrDefault(hookName, "")
+          case classifyManagedHookFreshness(expected, body)
+          of mhfCurrent:
+            inc okCount
+          of mhfContractless:
+            stale.add(repo.name & "/" & hookName &
+              " (carries NO contract line: written by a build predating the " &
+              "handshake, so nothing verifies the writer and the runner are " &
+              "one build)")
+          of mhfForeignContract:
+            stale.add(repo.name & "/" & hookName & " (demands '" &
+              managedHookBodyContractDemand(body) &
+              "'; this build generates '" & expected & "')")
+          # The body names the build that WROTE it. Naming the writer is what
+          # turns "stale" from an accusation into a diagnosis: one build wrote
+          # these hooks, another is reading them, and the operator needs both.
+          let author = managedHookAuthorBin(body)
+          if author.len > 0 and author notin writers:
+            writers.add(author)
         elif fileExists(extendedPath(standard)) and not wired and
             (fileExists(extendedPath(managed)) or displaced):
           shadowed.add(repo.name & "/" & hookName &
@@ -59398,18 +59844,54 @@ proc gatherHealthChecks(parsed: HealthArgs):
         else:
           missing.add(repo.name & "/" & hookName)
     let remedy = self & " hooks ensure --vcs " & parsed.workspaceRoot
+    # Reported with every non-ok arm, so a count is never readable as the whole
+    # population: "4 wired" means nothing without "of 5 present in 1 repo".
+    let census = $okCount & " managed hook(s) wired across " &
+      $reposInspected & " participating repo(s)"
     if enumerated.mode != "workspace":
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsOk,
         detail: "single-repo target; workspace hook enumeration not applicable",
         remedy: "", fixKind: hfNone))
+    elif stale.len > 0:
+      # FIRST, ahead of ``shadowed`` and ``missing``, and that ordering is the
+      # safety property rather than a preference: the other two arms hand out
+      # an ``--fix``-able ``hooks ensure``, and running that while a contract
+      # mismatch is live is how the diagnostic gets deleted instead of the
+      # defect. Whatever else is wrong is NAMED here, in the same detail, so
+      # nothing is dropped by taking this arm.
+      checks.add(HealthCheck(
+        name: "vcs-hooks",
+        status: hsFail,
+        detail: $stale.len & " managed hook(s) STALE — present, carrying " &
+          "every marker a generated body carries, and demanding a contract " &
+          "THIS build does not generate, so each fire refuses (pre-push) or " &
+          "fails open in silence (the four observational hooks): " &
+          stale.join(", ") & ". " & census &
+          (if writers.len > 0:
+            ". The installed bodies name their writer(s): " &
+              writers.join(" | ") &
+              " — compare STORE PATHS, not versions"
+          else: "") &
+          (if shadowed.len > 0:
+            ". Also " & $shadowed.len & " SHADOWED: " & shadowed.join(", ")
+          else: "") &
+          (if missing.len > 0:
+            ". Also " & $missing.len & " missing: " & missing.join(", ")
+          else: "") &
+          ". See the hook-interpreter row for whether this host's shells " &
+          "even agree about which 'repro' runs them.",
+        # NOT ``hooks ensure``, and NOT auto-fixable. See the block comment.
+        remedy: "direnv reload   # then, only once hook-interpreter agrees: " &
+          remedy,
+        fixKind: hfNone))
     elif shadowed.len > 0:
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
         detail: $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
-          "installer and not running: " & shadowed.join(", "),
+          "installer and not running: " & shadowed.join(", ") & ". " & census,
         remedy: remedy,
         fixKind: hfEnsureVcsHooks))
     elif missing.len > 0:
@@ -59424,8 +59906,8 @@ proc gatherHealthChecks(parsed: HealthArgs):
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsOk,
-        detail: $okCount & " managed hook(s) wired across " &
-          $reposInspected & " participating repo(s)",
+        detail: census &
+          ", every body demanding the contract this build generates",
         remedy: "", fixKind: hfNone))
 
   # 8c. PG-14 — WHICH `repro` services those hooks, and whether the answer is
@@ -59441,15 +59923,143 @@ proc gatherHealthChecks(parsed: HealthArgs):
   #     disagreement between shells, which is PG-14's.)
   checks.add(hookInterpreterSkewCheck(parsed.workspaceRoot))
 
-  # 9. Push gateway. Structural/advisory: a certificate-enforcing project
-  #    routes pushes through the local gateway. Absent enforcement, the
-  #    gateway is not required; we report advisory so the user knows
-  #    pushes are direct.
-  checks.add(HealthCheck(
-    name: "push-gateway",
-    status: hsOk,
-    detail: "no certificate-enforcing project; pushes are direct",
-    remedy: "", fixKind: hfNone))
+  # 9. Push gateway — PG-16. OBSERVED state, per §7.6.6, replacing a constant.
+  #
+  #    What this used to be, verbatim, and why it had to go (spec §1.6c): an
+  #    unconditional ``hsOk`` carrying "no certificate-enforcing project; pushes
+  #    are direct", with no enclosing block, no manifest read and no probe. The
+  #    sentence was TRUE. It would also have been printed, byte for byte, by a
+  #    workspace whose project declares ``gate_mode = required`` and whose repos
+  #    are not wired at all — the one state this row exists to find. After PG-11,
+  #    "is this workspace governed?" is the question this row is read for, so a
+  #    constant here is not a harmless simplification: CLI/health.md's purpose is
+  #    to localize the problem, and a hardcoded ``ok`` removes this layer from
+  #    suspicion. (Prose rather than a quotation — see the note at
+  #    ``observeWorkspaceGateways``.)
+  #
+  #    The gate_mode is reported BESIDE the counts deliberately. §7.6.6: "so
+  #    `required` on an `unwired` repo is visible as the contradiction it is".
+  #    That contradiction is also the row's ``fail`` condition — the row must be
+  #    CAPABLE of failing, and this is the state it fails on.
+  block pushGatewayCheck:
+    let obs = observeWorkspaceGateways(parsed.workspaceRoot)
+    let gateMode =
+      if ctx.resolvedOk: ctx.resolved.certificatePolicy.gateMode
+      else: cgmOff
+    let modeNote =
+      if ctx.resolvedOk:
+        "gate_mode that would apply to a push now: " & $gateMode &
+          " (project '" & ctx.resolved.projectName & "')"
+      else:
+        "gate_mode UNKNOWN: the manifest did not resolve, so the policy a " &
+          "push would be judged against could not be read"
+    # Every repo that is not `wired` is one a push would leave ungated. Named,
+    # never only counted: §7.4 is explicit that an opt-out suppresses wiring and
+    # NEVER reporting, so an opted-out repo under `required` is listed too.
+    var ungoverned: seq[string]
+    for state in [gosStaleGateway, gosForeign, gosOptedOut, gosNotWired]:
+      for named in namesOfGatewayReposInState(obs, state):
+        ungoverned.add($state & ": " & named)
+    let summary = describeWorkspaceGatewayObservation(obs) & "; " & modeNote &
+      (if obs.optOutScope.len > 0:
+        "; a per-" & obs.optOutScope & " opt-out is in force (§7.4), which " &
+        "suppresses WIRING and not REPORTING"
+      else: "")
+    let remedy = self & " gateway migrate --workspace-root=" &
+      parsed.workspaceRoot
+    # §7.6.6's summary sentence, and the ONE number in this row that is not a
+    # raw observation: "policy would gate 0 of 172 (all advisory)". The spec's
+    # own example settles what "gate" means here — a repo is gated when its
+    # push would be REFUSED, so only ``required`` gates. An earlier revision of
+    # this block printed ``obs.wired`` unconditionally, which reported "policy
+    # would gate 1 of 1" for a workspace at ``gate_mode = off`` whose single
+    # repo was wired: a wired gateway with no policy behind it refuses nothing.
+    # That is the same defect this milestone exists to remove, one layer in —
+    # a number that is right in one state and printed in every state — so the
+    # qualifier travels with the count rather than being left to the reader.
+    let gatedCount = if gateMode == cgmRequired: obs.wired else: 0
+    let gatedNote = "policy would gate " & $gatedCount & " of " &
+      $obs.inspected & " participating repo(s)" &
+      (if not ctx.resolvedOk:
+        " (gate_mode UNKNOWN, so this is a LOWER BOUND, not a measurement)"
+      else:
+        case gateMode
+        of cgmRequired: ""
+        of cgmAdvisory:
+          " (all advisory: a wired repo's push is MEASURED and recorded, " &
+            "never refused — §7.7 step 4)"
+        of cgmOff: " (gate_mode is off: nothing is refused anywhere)")
+    if gateMode != cgmOff and ungoverned.len > 0:
+      # THE CONTRADICTION. A project that declares advisory or required while
+      # pushes bypass the gateway is not partially governed, it is ungoverned
+      # with a policy file. `advisory` counts: §7.7 step 4 makes advisory the
+      # MEASUREMENT instrument, and an instrument that is not attached measures
+      # nothing.
+      checks.add(HealthCheck(
+        name: "push-gateway",
+        status: hsFail,
+        detail: gatedNote & ": " & summary &
+          ". Pushes from the remaining repo(s) do NOT reach this workspace's " &
+          "gateway and are therefore judged by nothing: " &
+          ungoverned.join(", "),
+        remedy: remedy,
+        # Not auto-fixable. Wiring rewrites a remote on an operator's checkout;
+        # §7.6.1 keeps that on the attended `sync` path and off every
+        # unattended one, and `health --fix` is unattended by construction.
+        fixKind: hfNone))
+    elif obs.staleGateway > 0:
+      # Reprobuild's OWN provenance record names a gateway that is not this
+      # workspace's: repairable by repointing, and worth saying even at
+      # `gate_mode = off`, because it is drift in state this tool wrote.
+      checks.add(HealthCheck(
+        name: "push-gateway",
+        status: hsWarn,
+        detail: summary & ". " & gatedNote & ". " & $obs.staleGateway &
+          " repo(s) carry a reprobuild-set pushurl pointing at a DIFFERENT " &
+          "gateway than this workspace's: " &
+          namesOfGatewayReposInState(obs, gosStaleGateway).join(", "),
+        remedy: remedy,
+        fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "push-gateway",
+        status: hsOk,
+        detail: summary & ". " & gatedNote &
+          # The pre-rollout sentence is printed only where every clause of it
+          # is TRUE. ``obs.wired == 0`` alone does not establish it: a repo
+          # whose pushurl is ``foreign`` or ``stale-gateway`` is not wired to
+          # THIS workspace's gateway and its pushes are not direct either —
+          # they go to whatever that pushurl names. Claiming "pushes are
+          # direct" over a foreign mirror would be a second constant-shaped
+          # sentence, true in the common case and printed in every case, which
+          # is the defect §1.6c measured one row up.
+          (if gateMode == cgmOff and obs.wired == 0 and obs.foreign == 0 and
+              obs.staleGateway == 0:
+            ". No project enforces test certificates and no repo routes " &
+            "pushes through a gateway, so pushes are direct — which is the " &
+            "pre-rollout state (§7.7 step 4), not an absence of findings"
+          else: "") &
+          # ``foreign`` is NAMED here and not only counted, at every gate_mode.
+          # It is the one verdict in §7.3 that the retrofit must never repair,
+          # so it is the one a count alone cannot be acted on: an operator who
+          # reads "1 foreign" and nothing else has to go find which repo and
+          # why, and the reason string — including §7.6.3's note that the path's
+          # shape proved nothing — was computed and then discarded. §7.4's rule
+          # that an opt-out suppresses WIRING and never REPORTING applies with
+          # more force to a pushurl nobody opted out of.
+          (if obs.foreign > 0:
+            ". " & $obs.foreign & " repo(s) push somewhere this workspace's " &
+              "gateway is not, and are REPORTED and never overwritten (§7.3): " &
+              namesOfGatewayReposInState(obs, gosForeign).join(", ")
+          else: ""),
+        # No remedy, deliberately, even when ``foreign`` is non-zero. The one
+        # verb that exists — ``gateway migrate`` — leaves a foreign pushurl
+        # alone by design (``gwoForeignPushurl``), so offering it here would
+        # advertise a command that reports "foreign" again and changes nothing.
+        # §7.3's remedy is ``rewire --force``, which does not exist yet; a
+        # remedy naming a verb the binary does not have is worse than none.
+        remedy: "",
+        fixKind: hfNone))
 
   # 10. Toolchain provisioning for the active platform. Structural: the
   #     git toolchain probe above is the load-bearing one for workspace
@@ -59469,14 +60079,76 @@ proc gatherHealthChecks(parsed: HealthArgs):
       remedy: self & " hooks ensure --vcs",
       fixKind: hfNone))
 
-  # 11. Certificate policy. Advisory by default: when no project enforces
-  #     test certificates, report "advisory/off" so the user knows pushes
-  #     are not gated.
-  checks.add(HealthCheck(
-    name: "certificate-policy",
-    status: hsOk,
-    detail: "certificates: advisory/off (pushes not gated)",
-    remedy: "", fixKind: hfNone))
+  # 11. Certificate policy — PG-16. RESOLVED, not asserted.
+  #
+  #     What this used to be (spec §1.6c): an unconditional ``hsOk`` carrying
+  #     "certificates: advisory/off (pushes not gated)". True on the host it was
+  #     measured on, and unchanged on a host where it had stopped being true —
+  #     the string named the DEFAULT, and a default printed as an observation is
+  #     indistinguishable from an observation that the default holds.
+  #     CLI/health.md specifies this conditionally ("if a project enforces test
+  #     certificates, the policy resolves … otherwise report certificates:
+  #     advisory/off"), so the constant was a divergence from the spec rather
+  #     than an unspecified shortcut.
+  #
+  #     The policy is already resolved by the manifest ladder for every other
+  #     command that honours it (``resolveCertificatePolicy`` →
+  #     ``ResolvedProject.certificatePolicy``); this row reads THAT, so it cannot
+  #     report a policy the pre-push gate would not apply.
+  block certificatePolicyCheck:
+    if not ctx.resolvedOk:
+      # The policy is not "off" — it is UNKNOWN, and saying "off" here would be
+      # the original defect with extra steps: reporting a default as a finding.
+      checks.add(HealthCheck(
+        name: "certificate-policy",
+        status: hsWarn,
+        detail: "certificate policy UNKNOWN: the workspace manifest did not " &
+          "resolve, so the `[certificates]` table a push would be judged " &
+          "against could not be read (the manifest row above carries the " &
+          "reason)",
+        remedy: self & " sync --workspace-root=" & parsed.workspaceRoot,
+        fixKind: hfNone))
+    else:
+      let policy = ctx.resolved.certificatePolicy
+      let where =
+        if ctx.resolved.projectFile.len > 0: ctx.resolved.projectFile
+        else: "the resolved project set"
+      let found = "project '" & ctx.resolved.projectName &
+        "': gate_mode = " & $policy.gateMode & ", ci_trust = " &
+        $policy.ciTrust & ", required_targets = [" &
+        policy.requiredTargets.join(", ") & "], required_platforms = [" &
+        policy.requiredPlatforms.join(", ") & "] (resolved from " & where & ")"
+      if policy.gateMode != cgmOff and policy.requiredTargets.len == 0:
+        # A policy that demands coverage of NOTHING. Not a parse error — the
+        # resolver accepts it, and `certificateGate` then has no target to
+        # require — so it reads as enforcement and gates nothing. Precisely the
+        # shape of defect this milestone exists to stop printing as `ok`.
+        checks.add(HealthCheck(
+          name: "certificate-policy",
+          status: hsWarn,
+          detail: found & ". gate_mode is '" & $policy.gateMode &
+            "' with NO required_targets, so the gate runs and requires " &
+            "coverage of nothing: it reads as enforcement and enforces " &
+            "nothing",
+          remedy: "edit `[certificates] required_targets` in " & where,
+          fixKind: hfNone))
+      elif policy.gateMode == cgmOff:
+        checks.add(HealthCheck(
+          name: "certificate-policy",
+          status: hsOk,
+          detail: found &
+            ". No project in the resolved set enforces test certificates, so " &
+            "pushes are not cert-gated — the RA-32 default-off state, read " &
+            "from the manifest rather than assumed",
+          remedy: "", fixKind: hfNone))
+      else:
+        checks.add(HealthCheck(
+          name: "certificate-policy",
+          status: hsOk,
+          detail: found &
+            ". Whether a push actually REACHES the gate that applies this " &
+            "policy is the push-gateway row, not this one",
+          remedy: "", fixKind: hfNone))
 
   # 12. Workspace projects list and ignore/agents configuration (RA-30).
   block workspaceProjectsCheck:
@@ -63199,111 +63871,6 @@ proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
       return true
   false
 
-proc ensureRemoteEntry(projectFile, remoteName, fetchUrl: string) =
-  ## Append a ``[[remote]]`` entry naming ``fetchUrl`` if the project file
-  ## does not already declare a remote with that name. The new entry is
-  ## inserted right before the ``includes = [`` array so it sits with the
-  ## other remotes; when no includes array is present it is appended.
-  let content = readFile(projectFile)
-  if ("name = \"" & remoteName & "\"") in content:
-    return
-  let remoteBlock = "[[remote]]\nname = \"" & remoteName & "\"\nfetch = \"" &
-    fetchUrl & "\"\n\n"
-  let idx = content.find("includes")
-  if idx >= 0:
-    writeFile(projectFile, content[0 ..< idx] & remoteBlock & content[idx .. ^1])
-  else:
-    writeFile(projectFile, content & "\n" & remoteBlock)
-
-proc appendFragmentInclude(projectFile, includePath: string): bool =
-  ## Append ``"<includePath>",`` to the project's ``includes = [ … ]`` array.
-  ## Returns true when the include was added; false when it was already
-  ## present (idempotent). The append preserves the existing array entries.
-  let content = readFile(projectFile)
-  let quoted = "\"" & includePath & "\""
-  if quoted in content:
-    return false
-  var outLines: seq[string]
-  var inserted = false
-  for line in content.splitLines():
-    # Insert before the closing ``]`` of the includes array. The closing
-    # bracket sits alone on its own line in the canonical multi-line form.
-    if not inserted and line.strip() == "]":
-      outLines.add("  " & quoted & ",")
-      inserted = true
-    outLines.add(line)
-  if not inserted:
-    # No multi-line includes array to extend — append a fresh one.
-    outLines.add("")
-    outLines.add("includes = [")
-    outLines.add("  " & quoted & ",")
-    outLines.add("]")
-  writeFile(projectFile, outLines.join("\n"))
-  true
-
-proc addDependsEdge(fragmentPath, depName: string): bool =
-  ## Add ``depName`` to the ``depends`` array of the repo fragment at
-  ## ``fragmentPath`` (RA-21 develop-set edge). Returns true when the edge
-  ## was added; false when it was already present. Rewrites/creates the
-  ## ``depends = [ … ]`` inline array under ``[repo]``.
-  let content = readFile(fragmentPath)
-  var lines = content.splitLines()
-  var dependsIdx = -1
-  for idx, line in lines:
-    if line.strip().startsWith("depends"):
-      dependsIdx = idx
-      break
-  if dependsIdx >= 0:
-    let line = lines[dependsIdx]
-    if ("\"" & depName & "\"") in line:
-      return false
-    let open = line.find('[')
-    let close = line.rfind(']')
-    if open < 0 or close < 0 or close <= open:
-      raise newException(ValueError,
-        "malformed `depends` array in fragment: " & fragmentPath)
-    let inner = line[open + 1 ..< close].strip()
-    let newInner =
-      if inner.len == 0: "\"" & depName & "\""
-      else: inner & ", \"" & depName & "\""
-    lines[dependsIdx] = line[0 .. open] & newInner & line[close .. ^1]
-    writeFile(fragmentPath, lines.join("\n"))
-    return true
-  # No `depends` key yet — append one to the `[repo]` table. The fragment's
-  # `[repo]` table is the last table in the file, so a trailing append lands
-  # inside it.
-  var trimmed = content
-  while trimmed.len > 0 and trimmed[^1] in {'\n', '\r'}:
-    trimmed.setLen(trimmed.len - 1)
-  writeFile(fragmentPath,
-    trimmed & "\ndepends = [\"" & depName & "\"]\n")
-  true
-
-proc appendBinaryDependency(projectFile, name, remoteUrl, revision: string):
-    bool =
-  ## Record a BINARY-mode dependency in the project manifest as a
-  ## ``[[binary_dependency]]`` entry. A binary dependency is NEVER an
-  ## ``includes`` repo fragment, so it is never cloned, synced, or part of
-  ## the checkout GC graph. Returns true when the entry was added; false when
-  ## an entry of the same name already existed (idempotent).
-  let content = readFile(projectFile)
-  if ("name = \"" & name & "\"") in content and
-      "[[binary_dependency]]" in content:
-    # A binary_dependency or remote with this name may already exist; only
-    # skip when a binary_dependency block already names it.
-    for blk in content.split("[[binary_dependency]]"):
-      if ("name = \"" & name & "\"") in blk:
-        return false
-  var entry = "\n[[binary_dependency]]\nname = \"" & name & "\"\nremote = \"" &
-    remoteUrl & "\"\n"
-  if revision.len > 0:
-    entry.add("revision = \"" & revision & "\"\n")
-  var trimmed = content
-  while trimmed.len > 0 and trimmed[^1] in {'\n', '\r'}:
-    trimmed.setLen(trimmed.len - 1)
-  writeFile(projectFile, trimmed & "\n" & entry)
-  true
-
 proc cloneAddSibling(workspaceRoot, repoPath, fetchUrl, revision: string;
                      identity: GitToolIdentity):
     tuple[ok: bool; diagnostic: string] =
@@ -63380,9 +63947,18 @@ proc executeAdd(parsed: AddArgs): AddReport =
         "' as a BINARY dependency of project '" & resolved.projectName &
         "' (no checkout)")
       return
+    # A BINARY-mode dependency is a `[[binary_dependency]]` entry, never an
+    # `includes` fragment, so it is never cloned, synced, or part of the
+    # checkout GC graph. The editor adds it only when no entry of the same
+    # name exists (idempotent), in whichever spelling the file already uses.
+    var binaryFields = @[tomlField("name", tomlStr(parsed.target)),
+                         tomlField("remote", tomlStr(parsed.remoteUrl))]
+    if revision.len > 0:
+      binaryFields.add(tomlField("revision", tomlStr(revision)))
+    var projectDoc = loadManifestDoc(resolved.projectFile)
     result.declarationChanged =
-      appendBinaryDependency(resolved.projectFile, parsed.target,
-        parsed.remoteUrl, revision)
+      projectDoc.ensureArrayTableEntry("binary_dependency", binaryFields)
+    projectDoc.saveManifestDoc()
     result.exitCode = 0
   of amDevelop, amNoMembership:
     let isMembership = mode == amDevelop
@@ -63449,8 +64025,15 @@ proc executeAdd(parsed: AddArgs): AddReport =
     if remoteName.len == 0:
       remoteName = parsed.target & "-origin"
       remoteFetch = parsed.remoteUrl
+    # The project file is edited through the manifest editor: the `[[remote]]`
+    # entry is added only when no remote of that name exists, and lands after
+    # the last `[[remote]]` block (never above a top-level key, which would
+    # re-bind that key to the remote table).
+    var projectDoc = loadManifestDoc(resolved.projectFile)
     if remoteFetch.len > 0:
-      ensureRemoteEntry(resolved.projectFile, remoteName, remoteFetch)
+      discard projectDoc.ensureArrayTableEntry("remote",
+        @[tomlField("name", tomlStr(remoteName)),
+          tomlField("fetch", tomlStr(remoteFetch))])
     let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
@@ -63465,15 +64048,13 @@ proc executeAdd(parsed: AddArgs): AddReport =
     let pinRevision =
       parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
-      writeFile(fragmentAbs,
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-        "[repo]\n" &
-        "name = \"" & parsed.target & "\"\n" &
-        "path = \"" & repoPath & "\"\n" &
-        "remote = \"" & remoteName & "\"\n" &
-        (if pinRevision: "revision = \"" & revision & "\"\n" else: ""))
-    result.declarationChanged =
-      appendFragmentInclude(resolved.projectFile, fragmentRel)
+      writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
+        schema: schemaRepoFragmentV1,
+        repo: RepoBody(name: parsed.target, path: repoPath,
+          remote: some(remoteName),
+          revision: (if pinRevision: some(revision) else: none(string))))))
+    result.declarationChanged = projectDoc.appendInclude(fragmentRel)
+    projectDoc.saveManifestDoc()
     # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
     # that the named repo depends on the newly added one.
     if parsed.dependsOf.len > 0:
@@ -63487,7 +64068,10 @@ proc executeAdd(parsed: AddArgs): AddReport =
         result.diagnostic = "`--depends-of` names '" & parsed.dependsOf &
           "' which is not a repo in project '" & resolved.projectName & "'"
         return
-      if addDependsEdge(dependentFragment, parsed.target):
+      # The edge goes in `[repo] depends` — the array NAMED `depends` in the
+      # `[repo]` table, created inline when the fragment has none.
+      if addArrayMemberInFile(dependentFragment, "repo", "depends",
+          parsed.target, alInline):
         result.dependsEdgeOn = parsed.dependsOf
     result.exitCode = 0
 
@@ -63625,34 +64209,6 @@ proc resolveRemoveProject(parsed: RemoveArgs): ResolvedProject =
   ## raising — every manifest-present path is byte-unchanged.
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
     "`repro remove <repo>`").resolved
-
-proc dropFragmentInclude(projectFile, fragmentAbs: string): bool =
-  ## Remove the ``includes`` entry that resolves to ``fragmentAbs`` from
-  ## ``projectFile`` by rewriting the include list textually. Returns
-  ## true when a line was dropped. The match is on the resolved absolute
-  ## fragment path so a ``repos/<repo>.toml`` entry is identified even if
-  ## another repo shares a name prefix.
-  let content = readFile(projectFile)
-  var outLines: seq[string]
-  var dropped = false
-  for line in content.splitLines():
-    let trimmed = line.strip()
-    # An include line looks like ``"repos/<repo>.toml",`` (inside the
-    # ``includes = [ ... ]`` array). Extract the quoted path and compare
-    # its resolved form to the target fragment.
-    if trimmed.startsWith("\""):
-      let closeIdx = trimmed.find('"', 1)
-      if closeIdx > 1:
-        let raw = trimmed[1 ..< closeIdx]
-        let manifestRoot = parentDir(parentDir(absolutePath(projectFile)))
-        let resolvedInc = manifestRoot / raw.replace('/', DirSep)
-        if absolutePath(resolvedInc) == absolutePath(fragmentAbs):
-          dropped = true
-          continue
-    outLines.add(line)
-  if dropped:
-    writeFile(projectFile, outLines.join("\n"))
-  dropped
 
 proc reachableExcluding(repos: seq[ResolvedRepo];
                         rootNames: HashSet[string];
@@ -64014,7 +64570,20 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # tree). Only the target's include is dropped; transitive develop-set
   # siblings are GC'd as CHECKOUTS (their fragments are not the user's direct
   # dependency, so the declaration drop is scoped to the named target).
-  let changed = dropFragmentInclude(resolved.projectFile, target.fragmentPath)
+  #
+  # The `includes` entry is matched on its RESOLVED absolute fragment path,
+  # so a `repos/<repo>.toml` entry is identified even if another repo shares
+  # a name prefix, and only the `includes` array is edited.
+  var changed = false
+  block dropInclude:
+    var projectDoc = loadManifestDoc(resolved.projectFile)
+    let includeRoot = parentDir(parentDir(absolutePath(resolved.projectFile)))
+    for raw in projectDoc.arrayMembers("", "includes"):
+      let resolvedInc = includeRoot / raw.replace('/', DirSep)
+      if absolutePath(resolvedInc) == absolutePath(target.fragmentPath):
+        if projectDoc.removeArrayMember("", "includes", raw):
+          changed = true
+    projectDoc.saveManifestDoc()
   result.declarationChanged = changed
   for p in plan:
     if p.rejection.len > 0:
@@ -75679,80 +76248,6 @@ type
     memberSets: seq[string]
     memberRepos: seq[string]
 
-proc renderMemberArray(key: string; members: openArray[string]): string =
-  ## One membership array, one entry per line — the shape `editSetMember`
-  ## expects to find later, so a seeded set stays editable by the same CLI that
-  ## created it.
-  result = key & " = [\n"
-  for m in members:
-    result.add("  \"" & m & "\",\n")
-  result.add("]\n")
-
-proc projectManifestStub(project: string; seed: MembershipSeed): string =
-  ## A NEW project has no remotes yet, so the stub carries none.
-  ##
-  ## The membership arrays are written BEFORE the `[project]` table, and the
-  ## order is load-bearing rather than stylistic: a bare `member_sets = [ … ]`
-  ## written AFTER `[project]` is standard-TOML-bound to that table, the strict
-  ## decode then rejects `project.member_sets`, and the file stops parsing.
-  ## (The old `includes` array had the same problem and was simply omitted from
-  ## the stub; a template has content to place, so it is placed where it
-  ## parses. Verified against the pinned reader in both orders.)
-  ##
-  ## Both keys are written whenever a template applies, even when it seeds only
-  ## one, because which one an entry belongs in is the whole point:
-  ## `member_sets` and `member_repos` are two NAMESPACES, and a file carrying
-  ## only one would invite the next entry into whichever happened to be there.
-  ##
-  ## No `default_revision`. The model removes it: revision is lock territory,
-  ## and the value it carried was org branching policy restated once per
-  ## project. A stub that keeps emitting it re-seeds, into every project
-  ## authored from now on, exactly the field a manifest conversion has just
-  ## finished deleting — and the next conversion would have to delete it again.
-  ## The reader still ACCEPTS the key, so manifests that predate the conversion
-  ## keep parsing; what stops is this tool authoring new ones.
-  ##
-  ## `trunk` stays. It is not the same kind of field: it is live data with no
-  ## other declaration site, selecting the workspace branch for `repro branch`,
-  ## `repro switch` and `workspace init`.
-  let membership =
-    if seed.memberSets.len > 0 or seed.memberRepos.len > 0:
-      renderMemberArray("member_sets", seed.memberSets) & "\n" &
-      renderMemberArray("member_repos", seed.memberRepos) & "\n"
-    else:
-      ""
-  "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  membership &
-  "[project]\n" &
-  "name = \"" & project & "\"\n" &
-  "trunk = \"main\"\n"
-
-proc repoSetManifestStub(name: string; seed: MembershipSeed): string =
-  ## Workspace-Membership-Model.md — a NEW repo-set: a name and an empty
-  ## membership list, and nothing else. There is no `default_revision` and no
-  ## `default_remote` to stub, deliberately: a set that carried them would make
-  ## a member resolve differently depending on who referenced it, and a repo
-  ## fragment fully determining its own checkout is the invariant that makes it
-  ## portable between workspaces.
-  ##
-  ## Unlike `projectManifestStub`, the membership arrays ARE written out. A
-  ## repo-set manifest has no array-of-tables for a bare key to attach itself
-  ## to, so the "written after `[[remote]]` and read as a field of the last
-  ## remote" trap that forced the project stub to omit `includes` cannot arise
-  ## here — verified against the pinned reader in both key orders.
-  ##
-  ## Both keys are stubbed even though a new set has neither, because which one
-  ## an entry belongs in is the whole point: `member_sets` and `member_repos`
-  ## are two NAMESPACES, and a stub carrying only one would invite the next
-  ## entry into whichever happened to be there. A template seeds those same two
-  ## arrays; an empty seed leaves them empty, which is the pre-template stub
-  ## byte for byte.
-  "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
-  "[repo-set]\n" &
-  "name = \"" & name & "\"\n\n" &
-  renderMemberArray("member_sets", seed.memberSets) & "\n" &
-  renderMemberArray("member_repos", seed.memberRepos)
-
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
@@ -75805,26 +76300,6 @@ proc commitAndPushManifest(identity: GitToolIdentity;
   if push.code != 0:
     return (code: push.code, diagnostic: "git push failed: " & push.output)
   (code: 0, diagnostic: "committed and pushed to " & upstream)
-
-proc removeFragmentInclude(projectFile, includePath: string): bool =
-  ## Drop ``"<includePath>",`` from the project's ``includes = [ … ]`` array.
-  ## Returns true when an entry was removed; false when none was present
-  ## (idempotent, the mirror of ``appendFragmentInclude``).
-  let content = readFile(projectFile)
-  let quoted = "\"" & includePath & "\""
-  if quoted notin content:
-    return false
-  var outLines: seq[string]
-  var removed = false
-  for line in content.splitLines():
-    if line.strip().startsWith(quoted):
-      removed = true
-      continue
-    outLines.add(line)
-  if not removed:
-    return false
-  writeFile(projectFile, outLines.join("\n"))
-  true
 
 proc projectFilesUnder(manifestRoot: string): seq[string] =
   ## Absolute paths of every ``projects/*.toml`` under the manifest root,
@@ -75929,110 +76404,24 @@ type
     pesMembers   ## declares `member_sets` and/or `member_repos`
 
 proc projectEdgeStyle(projectFile: string): ProjectEdgeStyle =
-  ## The spelling in `projectFile`, decided the same way `editSetMember`
-  ## locates an array — by a line whose key opens a multi-line array — so the
-  ## style that is reported and the array that is then edited cannot disagree.
+  ## The spelling in `projectFile`, answered by the manifest editor — the same
+  ## module that then edits the array — so the style that is reported and the
+  ## array that is edited cannot disagree. A key counts whichever layout its
+  ## array has (inline or one element per line).
   ##
   ## `member_*` wins over `includes` in a half-converted manifest: the
   ## conversion direction is includes -> members, and a new edge belongs with
   ## the spelling the file is moving to.
-  result = pesNone
-  var content: string
+  var doc: ManifestDoc
   try:
-    content = readFile(projectFile)
-  except CatchableError:
-    return pesNone
-  for line in content.splitLines():
-    let stripped = line.strip()
-    if not stripped.endsWith("["):
-      continue
-    if stripped.startsWith(memberReposKey) or
-        stripped.startsWith(memberSetsKey):
+    doc = loadManifestDoc(projectFile)
+    if doc.hasKey("", memberReposKey) or doc.hasKey("", memberSetsKey):
       return pesMembers
-    if stripped.startsWith(includesKey):
-      result = pesIncludes
-
-proc editSetMember(setFile, key, member: string; add: bool): bool =
-  ## Add or drop ``"<member>",`` in the named membership array of a repo-set.
-  ## Returns true when the file changed, false when it already said what was
-  ## asked (idempotent) — the two-key mirror of ``appendFragmentInclude`` /
-  ## ``removeFragmentInclude``.
-  ##
-  ## The array is located by its KEY rather than by "the next line that is a
-  ## lone ``]``": a repo-set carries two arrays, so the positional rule the
-  ## include helpers can afford would put half the entries in the wrong
-  ## namespace.
-  let content = readFile(setFile)
-  let quoted = "\"" & member & "\""
-  var lines = content.splitLines()
-  var arrayStart = -1
-  for idx, line in lines:
-    let stripped = line.strip()
-    if stripped.startsWith(key) and stripped.endsWith("["):
-      arrayStart = idx
-      break
-  var arrayEnd = -1
-  if arrayStart >= 0:
-    for idx in arrayStart + 1 ..< lines.len:
-      if lines[idx].strip() == "]":
-        arrayEnd = idx
-        break
-
-  if add:
-    if arrayStart >= 0 and arrayEnd >= 0:
-      for idx in arrayStart + 1 ..< arrayEnd:
-        if lines[idx].strip().startsWith(quoted):
-          return false
-      lines.insert("  " & quoted & ",", arrayEnd)
-      writeFile(setFile, lines.join("\n"))
-      return true
-    # No such array yet — write a fresh one rather than guessing that the
-    # other key's array was meant.
-    #
-    # WHERE it goes is load-bearing rather than cosmetic. Appended at the END
-    # of the file, a bare `key = [ … ]` sits AFTER the last `[table]` header,
-    # and standard TOML binds a bare key to the table that precedes it: the
-    # strict decode then sees `project.member_repos`, rejects it, and the whole
-    # manifest stops parsing. This is the same trap `projectManifestStub`
-    # documents when it writes the membership arrays BEFORE `[project]`, and a
-    # freshly scaffolded project — which declares no array for this code to
-    # find — is exactly the file that reaches this branch.
-    #
-    # So the array is inserted ahead of the FIRST table header (where a bare
-    # key is top-level), and appended only when the file declares no table.
-    let fresh = @[key & " = [", "  " & quoted & ",", "]"]
-    var headerIdx = -1
-    for idx, line in lines:
-      if line.strip().startsWith("["):
-        headerIdx = idx
-        break
-    var outLines: seq[string]
-    if headerIdx < 0:
-      outLines = lines
-      outLines.add("")
-      for f in fresh: outLines.add(f)
-    else:
-      for idx in 0 ..< headerIdx: outLines.add(lines[idx])
-      for f in fresh: outLines.add(f)
-      outLines.add("")
-      for idx in headerIdx ..< lines.len: outLines.add(lines[idx])
-    writeFile(setFile, outLines.join("\n"))
-    return true
-
-  if arrayStart < 0 or arrayEnd < 0:
-    return false
-  var outLines: seq[string]
-  var removed = false
-  for idx, line in lines:
-    if idx > arrayStart and idx < arrayEnd and
-        line.strip().startsWith(quoted):
-      removed = true
-      continue
-    outLines.add(line)
-  if not removed:
-    return false
-  writeFile(setFile, outLines.join("\n"))
-  true
+    if doc.hasKey("", includesKey):
+      return pesIncludes
+  except CatchableError:
+    discard
+  pesNone
 
 proc projectsIncludingFragment(manifestRoot, fragmentRel: string): seq[string] =
   ## Which projects carry an ``includes`` edge to ``fragmentRel``. This is the
@@ -76310,9 +76699,28 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     createDir(manifestRoot / addDir)
     let fileRel = addDir & "/" & name & ".toml"
     let fileAbs = manifestRoot / addDir / (name & ".toml")
-    writeFile(fileAbs,
-      if addDir == "repo-sets": repoSetManifestStub(name, seed)
-      else: projectManifestStub(name, seed))
+    # Rendered from a typed value by the manifest editor, which places the
+    # membership arrays above the identity table (the key-order rule) and
+    # writes them as a pair whenever a template seeds either: `member_sets`
+    # and `member_repos` are two namespaces, and a file carrying only one
+    # would invite the next entry into whichever happened to be there.
+    #
+    # A new repo-set carries only a name and its membership — no
+    # `default_revision` / `default_remote`, which would make a member resolve
+    # differently depending on who referenced it. A new project carries no
+    # remotes and no `default_revision` either: revision is lock territory, and
+    # a stub that kept emitting it would re-seed the field every manifest
+    # conversion deletes. `trunk` stays: it is live data with no other
+    # declaration site (`repro branch`, `repro switch`, `workspace init`).
+    writeWorkspaceManifestFile(fileAbs,
+      if addDir == "repo-sets":
+        repoSetText(RepoSetManifest(schema: schemaRepoSetV1,
+          `repo-set`: RepoSetBody(name: name),
+          member_sets: seed.memberSets, member_repos: seed.memberRepos))
+      else:
+        projectManifestText(ProjectManifest(schema: schemaProjectManifestV1,
+          project: ProjectBody(name: name, trunk: some("main")),
+          member_sets: seed.memberSets, member_repos: seed.memberRepos)))
     var paths = @[fileRel]
     if desc.len > 0:
       let docRel = addDir & "/" & name & ".md"
@@ -76818,29 +77226,25 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if plan.mintedUrl.len > 0:
           createDir(manifestRoot / "url-prefixes")
           let prefixRel = "url-prefixes/" & plan.prefixName & ".toml"
-          writeFile(manifestRoot / prefixRel,
-            "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n" &
-            "[url-prefix]\n" &
-            "name = \"" & plan.prefixName & "\"\n" &
-            "url = \"" & plan.mintedUrl & "\"\n")
+          writeWorkspaceManifestFile(manifestRoot / prefixRel,
+            urlPrefixText(UrlPrefixManifest(schema: schemaUrlPrefixV1,
+              `url-prefix`: UrlPrefixBody(name: plan.prefixName,
+                url: plan.mintedUrl))))
           paths.add(prefixRel)
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
-          writeFile(fragmentAbs,
-            "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-            "[repo]\n" &
-            "name = \"" & repo & "\"\n" &
-            "path = \"" & effectivePath & "\"\n" &
-            (if branch.len > 0: "branch = \"" & branch & "\"\n"
-             elif revision.len > 0: "revision = \"" & revision & "\"\n"
-             else: "") &
-            "url_prefix = \"" & plan.prefixName & "\"\n" &
-            # `url_suffix` is written only when it differs from `name` — the
-            # point of the split is that identity stops carrying URL structure,
-            # so restating it would put the coupling straight back.
-            (if plan.urlSuffix != repo:
-               "url_suffix = \"" & plan.urlSuffix & "\"\n"
-             else: ""))
+          writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
+            schema: schemaRepoFragmentV1,
+            repo: RepoBody(name: repo, path: effectivePath,
+              branch: (if branch.len > 0: some(branch) else: none(string)),
+              revision: (if branch.len == 0 and revision.len > 0: some(revision)
+                         else: none(string)),
+              url_prefix: some(plan.prefixName),
+              # `url_suffix` is written only when it differs from `name` — the
+              # point of the split is that identity stops carrying URL
+              # structure, so restating it would put the coupling straight back.
+              url_suffix: (if plan.urlSuffix != repo: some(plan.urlSuffix)
+                           else: none(string))))))
           paths.add(fragmentRel)
           fragmentExisted = true
         # The fragment was just written, so the name resolves to a repo and the
@@ -76853,7 +77257,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
             (manifestRoot / "repos" / (repo & ".toml")) &
             "); refusing to guess which membership key it belongs under")
           return 2
-        discard editSetMember(target.abs, memberKey, repo, add = true)
+        discard addArrayMemberInFile(target.abs, "", memberKey, repo)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.prefixName &
           (if plan.mintedUrl.len > 0: " (new prefix, url " & plan.mintedUrl & ")"
@@ -76878,18 +77282,21 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           return 1
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
-          writeFile(fragmentAbs,
-            "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-            "[repo]\n" &
-            "name = \"" & plan.repoName & "\"\n" &
-            "path = \"" & effectivePath & "\"\n" &
-            "remote = \"" & plan.remoteName & "\"\n" &
-            (if branch.len > 0: "branch = \"" & branch & "\"\n" else: "") &
-            (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
+          writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
+            schema: schemaRepoFragmentV1,
+            repo: RepoBody(name: plan.repoName, path: effectivePath,
+              remote: some(plan.remoteName),
+              branch: (if branch.len > 0: some(branch) else: none(string)),
+              revision: (if revision.len > 0: some(revision)
+                         else: none(string))))))
           paths.add(fragmentRel)
           fragmentExisted = true
         if plan.mintedFetch.len > 0:
-          ensureRemoteEntry(target.abs, plan.remoteName, plan.mintedFetch)
+          var projectDoc = loadManifestDoc(target.abs)
+          discard projectDoc.ensureArrayTableEntry("remote",
+            @[tomlField("name", tomlStr(plan.remoteName)),
+              tomlField("fetch", tomlStr(plan.mintedFetch))])
+          projectDoc.saveManifestDoc()
         # THE EDGE. Declaring the fragment is only half of `repos add`: the
         # project has to say it participates, or the manifest is left
         # incoherent — a fragment nothing references (CLI/workspace.md
@@ -76920,7 +77327,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         #
         # Conversely, writing an `includes` path unconditionally is the
         # regression `t_repos_add_records_project_membership_by_key` pins: in
-        # a converted manifest the positional `appendFragmentInclude` put the
+        # a converted manifest a positional include-append put the
         # path inside `member_sets` and the project stopped resolving
         # entirely. Neither spelling is right for both shapes; the file's own
         # is.
@@ -76934,8 +77341,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           # new is authored into it (see `pesNone` below); a manifest that
           # still carries it is edited in place until someone converts it
           # deliberately.
-          discard editSetMember(target.abs, includesKey, fragmentRel,
-            add = true)
+          discard addArrayMemberInFile(target.abs, "", includesKey,
+            fragmentRel)
         of pesNone, pesMembers:
           # Same rule as the repo-set branch above: the membership key is read
           # off what the name resolves to, and the array is located BY ITS KEY.
@@ -76949,14 +77356,13 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           # would create, on every `projects add`, the one shape a conversion
           # exists to remove.
           #
-          # There is no array for `editSetMember` to find in a freshly
-          # scaffolded file, so it takes its new-array fallback — which
-          # inserts ahead of the FIRST table header, because a bare
-          # `member_repos = [ … ]` written after `[project]` is
+          # A freshly scaffolded file has no array to extend, so the manifest
+          # editor creates one — ahead of the FIRST table header, because a
+          # bare `member_repos = [ … ]` written after `[project]` is
           # TOML-bound to that table and the strict decode then rejects
-          # `project.member_repos`. That placement is the same one
-          # `projectManifestStub` documents, and a `pesNone` project is
-          # precisely the file that reaches it.
+          # `project.member_repos`. The editor enforces that placement for
+          # every top-level key, and a `pesNone` project is precisely the
+          # file that needs it.
           let memberKey = membershipKeyFor(manifestRoot, repo)
           if memberKey != memberReposKey:
             stderr.writeLine("repro workspace repos add: '" & repo &
@@ -76964,7 +77370,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
               (manifestRoot / "repos" / (repo & ".toml")) &
               "); refusing to guess which membership key it belongs under")
             return 2
-          discard editSetMember(target.abs, memberKey, repo, add = true)
+          discard addArrayMemberInFile(target.abs, "", memberKey, repo)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.remoteName &
           (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
@@ -77040,7 +77446,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
             "); refusing to guess which membership key to edit in " &
             target.rel)
           return 2
-        dropped = editSetMember(target.abs, memberKey, repo, add = false)
+        dropped = removeArrayMemberInFile(target.abs, "", memberKey, repo)
       of mkProject:
         # Mirrors the add path, and has to mirror BOTH of its spellings: a
         # project declares its repos either as fragment paths under `includes`
@@ -77053,7 +77459,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # dropping only the spelling that `projectEdgeStyle` prefers would
         # leave the other edge behind — the repo would still be declared after
         # a command that reported it removed.
-        if editSetMember(target.abs, includesKey, fragmentRel, add = false):
+        if removeArrayMemberInFile(target.abs, "", includesKey, fragmentRel):
           dropped = true
         let memberKey = membershipKeyFor(manifestRoot, repo)
         if memberKey.len == 0:
@@ -77065,7 +77471,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
               "); refusing to guess which membership key to edit in " &
               target.rel)
             return 2
-        elif editSetMember(target.abs, memberKey, repo, add = false):
+        elif removeArrayMemberInFile(target.abs, "", memberKey, repo):
           dropped = true
       if dropped:
         droppedFrom.add(project)
