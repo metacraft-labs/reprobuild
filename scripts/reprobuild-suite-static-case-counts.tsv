@@ -58,6 +58,7 @@ libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim	nim	2
 libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim	nim	9
 libs/repro_build_engine/tests/t_declared_depfile_absent_is_not_cacheable.nim	nim	3
 libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	14
+libs/repro_build_engine/tests/t_directory_listing_above_outputs_is_the_graph_view.nim	nim	7
 libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim	nim	6
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
 libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim	nim	1
@@ -85,6 +86,7 @@ libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	4
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	7
 libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	4
+libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
 libs/repro_build_engine/tests/t_whole_graph_prefix_refuses_free_before_statting.nim	nim	2
@@ -1208,7 +1210,9 @@ tests/integration/t_gateway_accepts_one_ref_push_certified_before_push.nim	nim	3
 tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
 tests/integration/t_health_fix_remediates_safe_issues_only.nim	nim	2
 tests/integration/t_health_names_the_binary_skew_and_does_not_propose_an_older_ensure.nim	nim	1
+tests/integration/t_health_push_gateway_check_reports_observed_state.nim	nim	5
 tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.nim	nim	1
+tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim	nim	3
 tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	5
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6
@@ -1833,9 +1837,13 @@ tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	8
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
-tests/unit/t_measurement_axes.nim	nim	15
+tests/unit/t_manifest_editor_edge_cases.nim	nim	21
+tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
+tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
+tests/unit/t_measurement_axes.nim	nim	17
 tests/unit/t_msi_archive_type.nim	nim	2
 tests/unit/t_nimcache_is_worktree_local.nim	nim	0
+tests/unit/t_nix_daemon_spawn_wait.nim	nim	3
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
 tests/unit/t_nonredistributable_publish_gate.nim	nim	3
 tests/unit/t_npm_vendor_action.nim	nim	2
@@ -1876,12 +1884,13 @@ tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	21
 tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	nim	6
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	16
+tests/unit/t_vendor_manifest_evaluation_inputs.nim	nim	4
 tests/unit/t_version.nim	nim	2
 tests/unit/t_voice_model_packages.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/test_build_report_attribution.py	python	12
-tests/unit/test_cmake_generator_competitiveness_bench.py	python	9
+tests/unit/test_cmake_generator_competitiveness_bench.py	python	18
 tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_dev_shell_hook_scope.py	python	6
