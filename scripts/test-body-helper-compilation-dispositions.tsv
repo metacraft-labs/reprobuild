@@ -84,7 +84,8 @@
 #   mutated-artifact 4 | optional-host-tool 2 | graph-owned 7
 #   migrate-pending 34
 # Since then: t_rp3_bind_deps_and_sharing product-api -> graph-owned
-# (product-api 17, graph-owned 8).
+# (product-api 17, graph-owned 8);
+# t_e2e_codetracer_in_place_project_file dynamic-source -> graph-owned.
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -205,7 +206,7 @@ libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim	graph-owned	Built 
 libs/repro_profile_compile/tests/t_smoke_module_imports.nim	product-api	compileProfileBinary is reprobuild's own profile compiler; the test asserts its sibling-module resolution and its CompileFailure diagnostics. The product compiles -- that is the subject.
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	product-api	compileProfileToRbpi is the product entry point; the assertions are on its cache fast path and its ProfileCompileError argument validation.
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	product-api	compileProfileBinary again; the subject is a Nim template-hygiene regression surfacing as a CompileFailure through the product's pipeline.
-tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim	dynamic-source	The cc compile is a gcc proxy whose source is GccProxySource.replace('@REAL_GCC_PATH@', realGcc) -- host-dependent text with no static file. The repro binary and monitor shim already come from requireBinary.
+tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim	graph-owned	The gcc proxy (also built as clang) and the stylus stand-in are built by edges reprobuild.test_fixtures.codetracer_tool_{gcc,clang,stylus} from checked-in sources under tests/fixtures/codetracer-tools into build/test-fixtures/codetracer-tools, typed inputs of the execute edge; the wrapper and stand-in scripts are used from the checked-in tree. The body used to compile both into a per-case <tempRoot>/codetracer-tool-bin with the host gcc path baked into the proxy source; the proxy now finds the real compiler on PATH after its own directory, so its bytes carry no host path. A stable tool directory on PATH is what lets interface extraction of the CodeTracer recipe be shared across cases.
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	product-api	compileFloorProvider is extractInterfaceFromModule + compileProviderBinary.
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	product-api	compileFixtureProvider is extractInterfaceFromModule + compileProviderBinary over a provider recipe written per test.
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	migrate-pending	MIGRATABLE IN PART: 'nim c --threads:on --out:build/test-bin/hcr_m28_target' on the git-tracked hcr_m28_target.nim is a plain fixture materialization. The OTHER compile in this file -- buildDebugObject's 'clang -c' of a .s written at run time -- must stay, and there is no cc/clang graph edge in repro.nim today.
