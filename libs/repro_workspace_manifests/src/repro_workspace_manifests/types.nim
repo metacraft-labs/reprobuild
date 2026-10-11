@@ -675,6 +675,17 @@ type
       ## A settings-file layer pin (§3): the layer is cloned AT this revision
       ## (`git clone --branch`, so a tag or a branch) and its HEAD is verified
       ## to resolve to it — the RA-17 pin check, applied per layer.
+    from_settings*: Option[bool]
+      ## Set (`some(true)`) on every layer BUILT from the settings files
+      ## (`composeSettingsLayers`) and on the implicit root base layer
+      ## `withSettingsLayers` adds; never decoded from a state file (the
+      ## state-file reader rejects it). It is the layer's ORIGIN, and the
+      ## composer reads it per layer: a settings-file layer composes
+      ## additively per project — without `projects/<p>.toml` it contributes
+      ## nothing to <p> (Workspace-Settings-Files.md §4 "Layers are additive
+      ## per project") — while a layer listed in the legacy state file keeps
+      ## the M8 rule that it must declare the project. Per layer rather than
+      ## per composition so a workspace mixing both kinds gets each rule.
 
   WorkspaceLocal* = object
     ## The per-checkout state file: `.repro/workspace-state.toml`

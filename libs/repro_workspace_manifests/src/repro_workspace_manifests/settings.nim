@@ -578,13 +578,14 @@ proc composeSettingsLayers*(s: WorkspaceSettings): SettingsLayerComposition =
           (if s.localPath.len > 0: s.localPath else: localSettingsFileName) &
           " supplies none; the layer is skipped"))
       continue
-    result.layers.add(ManifestLayer(url: url, local_path: shared.local_path,
+    result.layers.add(ManifestLayer(from_settings: some(true),
+      url: url, local_path: shared.local_path,
       visibility: shared.visibility.get(""), branch: branch,
       name: shared.name, revision: shared.revision))
   for local in s.localLayers:
     if local.name.isSome:
       continue
-    result.layers.add(ManifestLayer(url: local.url,
+    result.layers.add(ManifestLayer(from_settings: some(true), url: local.url,
       local_path: local.local_path, visibility: local.visibility.get(""),
       branch: local.branch, revision: local.revision))
 

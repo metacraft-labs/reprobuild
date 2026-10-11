@@ -33,7 +33,8 @@ import resolver
 import compose
 import workspace_branch
 
-proc resolveWorkspaceProjectByName*(workspaceRoot, name: string):
+proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
+                                    layersMayOmitProject = false):
     ResolvedProject =
   ## Resolve ONE project of the set by name, using the same ladder a
   ## single-project workspace uses: the composer when the workspace declares
@@ -44,15 +45,34 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string):
   ## An unresolvable name raises: a project recorded in the active set but
   ## absent from every manifest layer is a membership error the operator has
   ## to see, not a repo set to silently narrow.
-  if isCompositionalWorkspaceToml(workspaceRoot):
+  ##
+  ## The layer stack is the workspace's whole stack — the state file's and the
+  ## settings files' (`effectiveWorkspaceLocal`) — whether or not a state file
+  ## exists yet. A PROJECT is composed across it (Workspace-Settings-Files.md
+  ## §4). By default every DECLARED layer must declare it (the M8 contract);
+  ## `layersMayOmitProject` composes additively instead — the project is the
+  ## union of what the layers declaring it contribute — for callers that look
+  ## a name up rather than compose the workspace's own project (the sync
+  ## scope). A name no layer declares raises the composer's
+  ## `noLayerDeclaresProjectTag` diagnostic either way. A name the root layer
+  ## declares only as a VARIANT or a REPO-SET resolves from the root, as it
+  ## always did: the composer composes projects, and neither kind is defined
+  ## across layers.
+  let manifests = manifestsRoot(workspaceRoot)
+  let rootOnlyNonProject =
+    not fileExists(manifests / "projects" / (name & ".toml")) and
+    (fileExists(manifests / "variants" / (name & ".toml")) or
+     fileExists(manifests / repoSetsDirName / (name & ".toml")))
+  if not rootOnlyNonProject and
+      isCompositionalWorkspaceToml(workspaceRoot, name):
     let absToml = absolutePath(workspaceTomlPath(workspaceRoot))
-    var workspaceLocal = effectiveWorkspaceLocal(workspaceRoot)
+    var workspaceLocal = effectiveWorkspaceLocal(workspaceRoot, name)
     # Compose the NAMED project across the same layer stack. Only the selected
     # project name changes; the layer list, visibilities and branches are the
     # workspace's own.
     workspaceLocal.workspace.project = name
-    return composeManifestLayers(workspaceLocal, workspaceRoot, absToml)
-  let manifests = manifestsRoot(workspaceRoot)
+    return composeManifestLayersWithOptions(workspaceLocal, workspaceRoot,
+      absToml, ComposeOptions(layersMayOmitProject: layersMayOmitProject)).project
   let projectFile = manifests / "projects" / (name & ".toml")
   let variantFile = manifests / "variants" / (name & ".toml")
   # Workspace-Membership-Model.md — a repo-set that is ENABLED is what used to

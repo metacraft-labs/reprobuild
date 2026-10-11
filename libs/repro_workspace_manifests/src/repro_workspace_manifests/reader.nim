@@ -1001,7 +1001,8 @@ proc readWorkspaceLocal*(path: string): WorkspaceLocal =
         "manifest[" & $i & "].visibility", schema, schema,
         "required key `manifest[].visibility` is missing or empty")
     for (key, present) in [("name", m.name.isSome),
-                           ("revision", m.revision.isSome)]:
+                           ("revision", m.revision.isSome),
+                           ("from_settings", m.from_settings.isSome)]:
       if present:
         raiseManifestError(path, "manifest[" & $i & "]." & key, schema, schema,
           "`" & key & "` is a key of a `repro-workspace.toml` / " &

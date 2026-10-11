@@ -35926,10 +35926,37 @@ proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
   ## reinterpreted as a repo selector: several names are both a project and a
   ## repo, and a word whose meaning flips the day a manifest defines a project
   ## by that name would silently widen the sweep (CLI/sync.md, Summary).
+  ##
+  ## A workspace that composes manifest layers resolves the name ACROSS them
+  ## (``resolveWorkspaceProjectByName``), from the state file's layers or the
+  ## settings files' (Workspace-Settings-Files.md §4), with or without a state
+  ## file: a repo that a layer adds to the named project belongs to it, so the
+  ## scope must keep it. Reading the root layer's ``projects/<name>.toml``
+  ## alone dropped every such repo from ``sync <project>`` and from
+  ## ``ws enable <project>``, which syncs through here.
   let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
   let repoSetFile = manifestsRoot / repoSetsDirName / (name & ".toml")
+  #
+  # Only a PROJECT is composed: a name the root declares only as a variant or
+  # a repo-set resolves from the root below, exactly as before. The lookup
+  # composes additively (``layersMayOmitProject``): a layer that does not
+  # declare the project contributes nothing, so a project only the root
+  # declares, or only a later layer declares, scopes to what the declaring
+  # layers give it. A name NO layer
+  # declares (the composer's ``noLayerDeclaresProjectTag``) falls through to
+  # the diagnostics below; any other composition failure (an unreachable
+  # layer, a malformed fragment, conflicting declarations) is the answer.
+  let rootOnlyNonProject = not fileExists(projectFile) and
+    (fileExists(variantFile) or fileExists(repoSetFile))
+  if not rootOnlyNonProject and isCompositionalWorkspaceToml(workspaceRoot, name):
+    try:
+      return resolveWorkspaceProjectByName(workspaceRoot, name,
+        layersMayOmitProject = true)
+    except WorkspaceManifestParseError as err:
+      if noLayerDeclaresProjectTag notin err.innerMessage:
+        raise
   if fileExists(projectFile):
     return resolveProject(projectFile)
   if fileExists(variantFile):
@@ -70592,21 +70619,29 @@ proc runPromptCommand*(args: openArray[string]): int =
   ## per-render git fan-out). Silent + exit 0 outside a workspace so it is
   ## safe to drop into any prompt unconditionally. Read-only: no side
   ## effects, never blocks on the network.
+  ##
+  ## Workspace notices (state-file skew, skipped settings layers) are
+  ## suppressed for the whole render (``withoutWorkspaceNotices``): they are
+  ## stderr output the prompt did not ask for, printed on EVERY render, and
+  ## computing them reads and decodes the settings files — neither fits a
+  ## segment that must be silent when it has nothing to show and do only cheap
+  ## reads (CLI/prompt.md). The verbs the operator actually runs report them.
   let parsed = parsePromptArgs(args)
-  let root =
-    if parsed.explicitWorkspaceRoot:
-      if isInitializedWorkspace(parsed.workspaceRoot):
-        parsed.workspaceRoot
-      else: ""
-    else:
-      let found = ascendToWorkspaceRoot(parsed.workspaceRoot)
-      if found.len > 0 and isInitializedWorkspace(found): found else: ""
-  if root.len == 0:
-    # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
-    # requirement — safe to call unconditionally with no shell guards).
-    return 0
-  let state = readPromptState(root)
-  stdout.writeLine(renderPromptSegment(state, parsed))
+  withoutWorkspaceNotices:
+    let root =
+      if parsed.explicitWorkspaceRoot:
+        if isInitializedWorkspace(parsed.workspaceRoot):
+          parsed.workspaceRoot
+        else: ""
+      else:
+        let found = ascendToWorkspaceRoot(parsed.workspaceRoot)
+        if found.len > 0 and isInitializedWorkspace(found): found else: ""
+    if root.len == 0:
+      # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
+      # requirement — safe to call unconditionally with no shell guards).
+      return 0
+    let state = readPromptState(root)
+    stdout.writeLine(renderPromptSegment(state, parsed))
   0
 
 proc renderPromptInitSnippet(shell: string; reproBin: string): string =

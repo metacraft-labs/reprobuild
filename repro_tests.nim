@@ -12807,6 +12807,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_prompt_prints_no_workspace_notices.nim",
+    binary: "build/test-bin/t_prompt_prints_no_workspace_notices",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_protocol_document_survives_suite_body_echo.nim",
     binary: "build/test-bin/t_protocol_document_survives_suite_body_echo",
     defines: @[],

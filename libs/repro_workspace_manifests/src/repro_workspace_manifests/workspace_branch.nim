@@ -138,9 +138,28 @@ var printedNotices {.threadvar.}: seq[string]
 var noticedRoots {.threadvar.}: seq[string]
   ## Workspace roots whose notices (``reportWorkspaceNotices``) were computed.
 
+var noticesSuppressed {.threadvar.}: bool
+  ## Set by ``withoutWorkspaceNotices`` for the extent of a quiet path.
+
+template withoutWorkspaceNotices*(body: untyped) =
+  ## Run ``body`` with workspace notices (state-file skew, skipped settings
+  ## layers) neither computed nor printed. For read-only paths whose contract
+  ## forbids output they did not ask for and work beyond cheap reads — the
+  ## shell prompt above all (CLI/prompt.md: silent when there is nothing to
+  ## show, cheap reads only on every render). The notices are a property of the
+  ## checkout that every OTHER verb reports; a path that must stay quiet opts
+  ## out here, once, instead of every state read on its way having to know.
+  let previous = noticesSuppressed
+  noticesSuppressed = true
+  try:
+    body
+  finally:
+    noticesSuppressed = previous
+
 proc emitWorkspaceNotice(message: string) =
-  ## The one writer of workspace notices to stderr, de-duplicated per process.
-  if message.len == 0 or message in printedNotices:
+  ## The one writer of workspace notices to stderr, de-duplicated per process
+  ## and silent inside ``withoutWorkspaceNotices``.
+  if noticesSuppressed or message.len == 0 or message in printedNotices:
     return
   printedNotices.add(message)
   try:
@@ -169,6 +188,11 @@ proc reportWorkspaceNotices(workspaceRoot: string) =
   ##
   ## A settings file that does not parse is NOT reported here: the path that
   ## reads it for its own purpose raises the strict reader's diagnostic.
+  ##
+  ## Inside ``withoutWorkspaceNotices`` nothing is computed (the settings file
+  ## is not even read) and the root is not marked as reported.
+  if noticesSuppressed:
+    return
   let key = absolutePath(workspaceRoot)
   if key in noticedRoots:
     return
@@ -284,7 +308,8 @@ proc withSettingsLayers*(local: WorkspaceLocal;
     var rootRel = relativePath(manifestsRoot(workspaceRoot), workspaceRoot)
     if rootRel.len == 0:
       rootRel = "."
-    result.local.manifest.add(ManifestLayer(local_path: some(rootRel),
+    result.local.manifest.add(ManifestLayer(from_settings: some(true),
+      local_path: some(rootRel),
       visibility: "public", name: some(workspaceRootLayerName)))
   result.local.manifest.add(composed.layers)
 
