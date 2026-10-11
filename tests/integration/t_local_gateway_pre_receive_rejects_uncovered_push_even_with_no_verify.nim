@@ -118,9 +118,11 @@ type
     libAPath: string       ## the developer's clone
     seedSha: string
     daemonKey: string
+    certStore: string      ## the scratch local certificate store (user root)
 
 proc setupFixture(gitBin, certificatesTable: string): Fixture =
   result.scratch = createTempDir("repro-tc6-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"
@@ -230,17 +232,16 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, headSha, currentPlatformTag())
-  check fileExists(certFile)
-  result = readCertificateFile(certFile)
-  # TC-8b: the record names the tested CONTENT (HEAD's tree, the tree being
-  # clean) and, informationally, the commit it was issued on top of.
+  # TC-8c: the certificate is in the local store under the tested CONTENT
+  # (HEAD's tree, the tree being clean); the record names that content and,
+  # informationally, the commit it was issued on top of.
+  let content = treeContentId(gitBin, fx.libAPath, headSha)
+  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
   check result.vcs.base == headSha
-  check result.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
-    " -C " & q(fx.libAPath) & " rev-parse " & headSha & "^{tree}").strip()
+  check result.vcs.content == content
   check "t-unit" in result.targets
-  let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
+  # The note is keyed by that tree, on the shared notes ref.
+  let att = attachCertificate(gitBin, fx.libAPath, result)
   check att.ok
 
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =

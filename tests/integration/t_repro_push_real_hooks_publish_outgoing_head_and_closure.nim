@@ -888,7 +888,7 @@ suite "protocol v2 real-hook repro push closure":
         # mutates the later published member; source revalidation must catch it
         # before either that member or the backend is transported.
         discard require(q(gitBin) & " -C " & q(fx.core) &
-          " notes --ref=refs/notes/reprobuild/certificates add -m " &
+          " notes --ref=refs/notes/test-certificates/certificates add -m " &
           q("revalidation fixture " & drift) & " HEAD")
         let alternate = fx.scratch / "alternate-lib.git"
         if drift == "remote":
@@ -965,7 +965,7 @@ suite "protocol v2 real-hook repro push closure":
         " remote set-url --add --push origin " & q(fileUrl(libMirror)))
 
       discard require(q(gitBin) & " -C " & q(fx.core) &
-        " notes --ref=refs/notes/reprobuild/certificates add -m " &
+        " notes --ref=refs/notes/test-certificates/certificates add -m " &
         q("delete later advertised branch") & " HEAD")
       executable(fx.core / ".git" / "hooks" / "pre-push",
         "#!/usr/bin/env sh\nset -eu\n" &

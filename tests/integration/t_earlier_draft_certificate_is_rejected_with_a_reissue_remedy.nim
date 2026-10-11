@@ -128,16 +128,21 @@ suite "TC-8b — the earlier-draft boundary":
         "clean = true", "clean = maybe"))
       check damaged.status == crsMalformed
       check "re-issue" notin damaged.detail
-      # The note carrier does not hand it to a gate as evidence either.
-      writeFile(scratch / "note.txt", "# --- reprobuild-certificate ---\n" &
+      # The note carrier does not hand it to a gate as evidence either. (Noted
+      # on the commit's TREE, where a reader evaluating the commit looks,
+      # TC-8c; it is handed on as the earlier-draft record it is, so the
+      # verifier reports it with the re-issue remedy.)
+      writeFile(scratch / "note.txt", "# --- test-certificate ---\n" &
         record)
       discard execCmdEx(quoteShellCommand(@[findExe("git"), "-C", repo,
         "notes", "--ref", certificateNotesRef, "add", "-F",
-        scratch / "note.txt", commit]))
+        scratch / "note.txt", commit & "^{tree}"]))
       let noted = readAttachedCertificatesFrom(findExe("git"), repo, commit,
         certificateNotesRef)
       check noted.status == gorPresent
       check noted.certs.len == 0
+      check noted.found.len == 1 and
+        noted.found[0].read.status == crsEarlierDraft
 
       # --- 3. REJECTED at the commit it names — not unverifiable ----------
       let atCommit = commitUnderEvaluation(repo, commit, "lib-a")

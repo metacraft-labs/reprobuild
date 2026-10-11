@@ -109,9 +109,11 @@ type
     libASeed: string
     libASha: string
     daemonKey: string   ## ed25519 private key the daemon signs issuance with
+    certStore: string   ## the scratch local certificate store (user root)
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASeed = result.scratch / "seed-lib-a"
@@ -184,8 +186,10 @@ proc runReproTest(fx: Fixture; fixtureJson: string;
   runShell(shellCommand(args, daemonKeyEnv(fx.daemonKey, tc1KeyId)),
     fx.workspaceRoot)
 
-proc certPath(fx: Fixture): string =
-  defaultCertificatePath(fx.workspaceRoot, fx.libASha, currentPlatformTag())
+proc storedCerts(fx: Fixture; gitBin, sha: string): seq[string] =
+  ## TC-8c: the certificates the local store holds for ``sha``'s content.
+  storedCertificateFiles(fx.certStore,
+    treeContentId(gitBin, fx.workspaceRoot / "lib-a", sha))
 
 suite "TC-1 — repro test issues a certificate by default in a clean state":
 
@@ -207,9 +211,9 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
         checkpoint("repro test output: " & res.output)
       check res.code == 0
 
-      let cp = certPath(fx)
-      check fileExists(cp)
-      let cert = readCertificateFile(cp)
+      let issuedFiles = storedCerts(fx, gitBin, fx.libASha)
+      check issuedFiles.len == 1
+      let cert = readCertificateFile(issuedFiles[0])
       check cert.schema == testCertificateSchemaV1
       # TC-8b: [certificate.vcs] names the tested CONTENT — the content id
       # of the tracked files, which under the (still enforced) clean
@@ -276,19 +280,19 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
       check covIgnore.matchingCerts == 0
 
       # --- sub-case 2: --no-certify suppresses issuance --------------------
-      removeFile(cp)
+      removeDir(fx.certStore)
       let resNo = runReproTest(fx, fixtureJson, @["--no-certify"])
       check resNo.code == 0
-      check (not fileExists(cp))   # no certificate written
+      check (not dirExists(fx.certStore / "v1"))   # no certificate written
 
       # --- sub-case 3: a FAILING target → no certificate -------------------
       let fixtureFail = fx.scratch / "fixture-fail.json"
       writeTestFixtureJson(fixtureFail, "t-unit", "exit 1")
-      check (not fileExists(cp))
+      check (not dirExists(fx.certStore / "v1"))
       let resFail = runReproTest(fx, fixtureFail, @["--certify"])
       # The run itself fails (a failing target), and NO certificate is issued.
       check resFail.code != 0
-      check (not fileExists(cp))
+      check (not dirExists(fx.certStore / "v1"))
       check resFail.output.contains("no certificate")
 
   test "an unpushed clean current HEAD is certified before push":
@@ -296,7 +300,7 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
     # push that carries no covering certificate, so the certificate has to
     # exist BEFORE the push. Issuance therefore must not require the current
     # repository's own HEAD to be published; that publication is the very push
-    # being gated. Restoring the old requirement fails ``fileExists(cp)``.
+    # being gated. Restoring the old requirement leaves the store empty.
     let gitBin = findExe("git")
     if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
       skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
@@ -319,14 +323,13 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
       if res.code != 0:
         checkpoint("repro test output: " & res.output)
       check res.code == 0
-      let cp = defaultCertificatePath(fx.workspaceRoot, newSha,
-        currentPlatformTag())
-      if not fileExists(cp):
+      let issuedFiles = storedCerts(fx, gitBin, newSha)
+      if issuedFiles.len != 1:
         checkpoint("no certificate for the clean unpushed HEAD:\n" &
           res.output)
-      check fileExists(cp)
-      if fileExists(cp):
-        let cert = readCertificateFile(cp)
+      check issuedFiles.len == 1
+      if issuedFiles.len == 1:
+        let cert = readCertificateFile(issuedFiles[0])
         check cert.vcs.base == newSha
         check cert.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
           " -C " & q(libA) & " rev-parse " & newSha & "^{tree}").strip()
@@ -339,8 +342,8 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
 
       # Still REFUSED when the tree is dirty: the exemption is about
       # publication only, never cleanliness.
-      removeFile(cp)
+      removeDir(fx.certStore)
       writeFile(libA / "scratch.txt", "uncommitted\n")
       let resDirty = runReproTest(fx, fixtureJson, @["--certify"])
-      check (not fileExists(cp))
+      check (not dirExists(fx.certStore / "v1"))
       check resDirty.output.contains("no certificate")

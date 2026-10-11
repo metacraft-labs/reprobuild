@@ -119,9 +119,11 @@ type
     libASeed: string
     libASha: string
     daemonKey: string   ## ed25519 private key issuance signs the cert with
+    certStore: string   ## the scratch local certificate store (user root)
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1n-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   # TC-5: issuance signs the certificate with the daemon key; provide a
   # real ed25519 key (and register it via the env overlay below) so the
@@ -208,16 +210,19 @@ suite "TC-1 — re-certify is a no-op when no executed function changed":
       let fixtureJson = fx.scratch / "fixture.json"
       writeCountingFixture(fixtureJson, "t-unit", counterFile)
 
-      let certOut = defaultCertificatePath(
-        fx.workspaceRoot, fx.libASha, currentPlatformTag())
+      # TC-8c: the certificate lives in the local store, under the content.
+      let libA = fx.workspaceRoot / "lib-a"
+      let content1 = treeContentId(gitBin, libA, fx.libASha)
 
       # --- 1. initial certify: runs the target, issues the cert -----------
       let r1 = runCertify(fx, fixtureJson)
       if r1.code != 0:
         checkpoint("certify #1 output: " & r1.output)
       check r1.code == 0
-      check fileExists(certOut)
+      let files1 = storedCertificateFiles(fx.certStore, content1)
+      check files1.len == 1
       check runCount(counterFile) == 1
+      let certOut = files1[0]
       let certBytes1 = readFile(certOut)
 
       # --- 2. re-certify with NO relevant change: NO-OP -------------------
@@ -228,6 +233,7 @@ suite "TC-1 — re-certify is a no-op when no executed function changed":
       check r2.output.contains("no-op")
       # The existing certificate still stands, byte-identical.
       check readFile(certOut) == certBytes1
+      check storedCertificateFiles(fx.certStore, content1) == files1
 
       # --- 3. a RELEVANT change → re-run + re-issue ------------------------
       # A new commit changes the tracked CONTENT, so the content binding
@@ -252,10 +258,10 @@ suite "TC-1 — re-certify is a no-op when no executed function changed":
       # The target DID run again (the change forced a re-run).
       check runCount(counterFile) == 2
       # A fresh certificate bound to the NEW commit was issued.
-      let newCertOut = defaultCertificatePath(
-        fx.workspaceRoot, newSha, currentPlatformTag())
-      check fileExists(newCertOut)
-      let newCert = readCertificateFile(newCertOut)
+      let newFiles = storedCertificateFiles(fx.certStore,
+        treeContentId(gitBin, libA, newSha))
+      check newFiles.len == 1
+      let newCert = readCertificateFile(newFiles[0])
       check newCert.vcs.base == newSha
       check newCert.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
         " -C " & q(fx.workspaceRoot / "lib-a") & " rev-parse " & newSha &

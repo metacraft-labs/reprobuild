@@ -120,6 +120,7 @@ proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
 
 proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
   result.scratch = createTempDir("repro-ra32-" & slug & "-", "")
+  discard isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -220,12 +221,11 @@ proc issueAndAttachCert(fx: Fixture; gitBin: string) =
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, fx.libASha, currentPlatformTag())
-  check fileExists(certFile)
-  let cert = readCertificateFile(certFile)
-  let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
-  check att.ok
+  # TC-8c: issuance delivered it to the local store, which is where the
+  # client gate looks; no note is needed.
+  let content = treeContentId(gitBin, fx.libAPath, fx.libASha)
+  check storedCertificateFiles(getEnv("TEST_CERTIFICATES_DIR"),
+    content).len == 1
 
 suite "RA-32 — certificate gate defaults off; advisory never blocks":
 

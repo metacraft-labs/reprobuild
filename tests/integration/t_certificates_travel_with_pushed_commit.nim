@@ -1,10 +1,11 @@
 ## TC-2 — certificates TRAVEL with the pushed commit.
 ##
 ## A certificate issued by the TC-1 path (``repro test`` in a clean state) is
-## attached to its commit C as a git note under
-## ``refs/notes/reprobuild/certificates`` and carried to the upstream bare by
-## ``repro push`` so reviewers / the gate / CI can read exactly what was
-## attested. The transport must:
+## delivered to the local certificate store and attached as a git note on the
+## TREE its content names (TC-8c), under the shared
+## ``refs/notes/test-certificates/certificates``, and carried to the upstream
+## bare by ``repro push`` so reviewers / the gate / CI can read exactly what
+## was attested. The transport must:
 ##
 ##   1. Carry the attached certificate to the upstream: after ``repro push``,
 ##      the cert is READABLE from the upstream bare (fetch the notes ref) and
@@ -12,9 +13,9 @@
 ##   2. Carry MULTIPLE certificates (e.g. two platforms) on the same commit —
 ##      BOTH travel and are BOTH readable on the upstream (accumulate, no
 ##      overwrite).
-##   3. The reader ``readAttachedCertificates(…, C)`` IGNORES a record whose
-##      ``content`` is not the content id of C's tree (defense against a
-##      stale/misfiled note). TC-8b: the filter matches by CONTENT — a record
+##   3. The reader ``readAttachedCertificates(…, C)`` looks the note up on
+##      ``C^{tree}`` and IGNORES a record in it whose ``content`` does not name
+##      that tree, REPORTING it as a carrier fault (misattached note). A record
 ##      whose ``base`` names another commit but whose content IS C's tree is
 ##      kept, because ``base`` is never compared.
 ##
@@ -118,9 +119,11 @@ type
     libAPath: string
     libASha: string
     daemonKey: string
+    certStore: string
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc2-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -215,8 +218,7 @@ proc clonedUpstreamCerts(gitBin, originPath, commit, scratch, slug: string):
   discard requireGit(q(gitBin) & " clone " &
     q(fileUrl(originPath)) & " " & q(verifyClone))
   discard requireGit(q(gitBin) & " -C " & q(verifyClone) &
-    " fetch origin refs/notes/reprobuild/certificates:" &
-    "refs/notes/reprobuild/certificates")
+    " fetch origin " & certificateNotesRef & ":" & certificateNotesRef)
   readAttachedCertificates(gitBin, verifyClone, commit)
 
 suite "TC-2 — certificates travel with the pushed commit":
@@ -238,18 +240,15 @@ suite "TC-2 — certificates travel with the pushed commit":
         checkpoint("repro test output: " & issued.output)
       check issued.code == 0
 
-      let certFile = defaultCertificatePath(
-        fx.workspaceRoot, fx.libASha, currentPlatformTag())
-      check fileExists(certFile)
-      let cert = readCertificateFile(certFile)
-      let libATree = "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
-        q(fx.libAPath) & " rev-parse " & fx.libASha & "^{tree}").strip()
+      let libATree = treeContentId(gitBin, fx.libAPath, fx.libASha)
+      let cert = issuedCertificate(fx.certStore, libATree,
+        currentPlatformTag()).cert
       check cert.vcs.content == libATree
       check cert.vcs.base == fx.libASha
       check "t-unit" in cert.targets
 
-      # --- attach it to commit C (the TC-2 carrier) -----------------------
-      let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
+      # --- attach it on C's tree (the TC-2 carrier, keyed by content) -----
+      let att = attachCertificate(gitBin, fx.libAPath, cert)
       check att.ok
 
       # A SECOND platform's certificate for the SAME commit. We can only run
@@ -261,7 +260,7 @@ suite "TC-2 — certificates travel with the pushed commit":
         if cert.platform == "linux/other": "linux/second"
         else: "linux/other"
       cert2.targets = @["t-integration"]
-      let att2 = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert2)
+      let att2 = attachCertificate(gitBin, fx.libAPath, cert2)
       check att2.ok
 
       # Locally, BOTH certs are now attached to C (accumulated, not clobbered).
@@ -305,15 +304,17 @@ suite "TC-2 — certificates travel with the pushed commit":
           check "t-unit" in c.targets
 
       # ASSERT 3: a cert whose CONTENT is not C's tree is IGNORED by the
-      # reader. Attach a misfiled cert (its body names DIFFERENT content, on
-      # top of C) under C's note, then confirm the reader for C does NOT return
-      # it. Falsifiable: drop the mismatch filter and this cert is returned
-      # (count climbs, and the misfiled platform appears).
+      # reader and REPORTED as misattached. Attach a misfiled cert (its body
+      # names DIFFERENT content) to the note on C's tree, then confirm the
+      # reader for C does NOT return it. Falsifiable: drop the misattachment
+      # filter and this cert is returned (count climbs, and the misfiled
+      # platform appears).
       var mismatch = cert
       mismatch.vcs.content =
         "git-tree-sha1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
       mismatch.platform = "linux/mismatch"
-      let attM = attachCertificate(gitBin, fx.libAPath, fx.libASha, mismatch)
+      let cTree = libATree["git-tree-sha1:".len .. ^1]
+      let attM = attachCertificateRecord(gitBin, fx.libAPath, cTree, mismatch)
       check attM.ok
       # …and a cert issued on top of ANOTHER commit whose content IS C's tree
       # is KEPT: the filter never compares ``base``. Falsifiable: filter on
@@ -321,10 +322,13 @@ suite "TC-2 — certificates travel with the pushed commit":
       var otherBase = cert
       otherBase.vcs.base = "0123456789abcdef0123456789abcdef01234567"
       otherBase.platform = "linux/other-base"
-      let attB = attachCertificate(gitBin, fx.libAPath, fx.libASha, otherBase)
+      let attB = attachCertificate(gitBin, fx.libAPath, otherBase)
       check attB.ok
-      let afterMismatch =
-        readAttachedCertificates(gitBin, fx.libAPath, fx.libASha)
+      let read = readAttachedCertificatesFrom(gitBin, fx.libAPath, fx.libASha,
+        certificateNotesRef)
+      check read.misattached.len == 1
+      check "deadbeef" in read.misattached.join("\n")
+      let afterMismatch = read.certs
       # The two genuine certs for C plus the other-base one; the misfiled one
       # is dropped.
       check afterMismatch.len == 3

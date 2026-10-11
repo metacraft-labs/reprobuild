@@ -3,18 +3,18 @@
 ##
 ## When a project's `[certificates]` policy sets ``gate_mode = "required"``
 ## with ``required_targets`` / ``required_platforms``, the RA-21 pre-push gate
-## refuses the push unless the certificates ATTACHED to the pushed commit
-## (the TC-2 git-notes carrier) COVER (the TC-1 ``verifyCoverage`` verifier)
-## the pushed commit, against the current clean lock, for every required
-## target on EACH required platform. Coverage UNIONS multiple certificates:
+## refuses the push unless the certificates the LOCAL CERTIFICATE STORE holds
+## for the pushed commit's content (TC-8c: both roots, under the content id of
+## its tree — never notes) COVER the pushed commit, with reprobuild's lock
+## step passing, for every required target on EACH required platform. Coverage UNIONS multiple certificates:
 ## a {linux, macos} × {t-unit} requirement is satisfied by a linux cert + a
 ## macos cert TOGETHER.
 ##
 ##   (a) NO covering cert attached → the gate REFUSES (exit 2) with a
 ##       ``certificate-coverage`` failure naming the missing coverage and the
 ##       ``repro certify`` remedy.
-##   (b) A covering cert (issued via the TC-1 path, attached via TC-2) →
-##       the gate PASSES (exit 0).
+##   (b) A covering cert (issued via the TC-1 path, which delivers it to the
+##       local store) → the gate PASSES (exit 0).
 ##   (c) A multi-platform requirement satisfied by the UNION of two certs
 ##       (one per platform) → passes; dropping one platform's cert → refuses
 ##       and names exactly that platform.
@@ -118,6 +118,7 @@ type
     libAPath: string
     libASha: string
     daemonKey: string   ## ed25519 private key the daemon signs issuance with
+    certStore: string   ## the scratch local certificate store (user root)
 
 proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
   let manifestsRoot = fx.workspaceRoot
@@ -126,6 +127,7 @@ proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
 
 proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
   result.scratch = createTempDir("repro-tc3-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -221,14 +223,11 @@ proc issueAndReadCert(fx: Fixture): TestCertificate =
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, fx.libASha, currentPlatformTag())
-  check fileExists(certFile)
-  result = readCertificateFile(certFile)
+  let content = treeContentId("git", fx.libAPath, fx.libASha)
+  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
   # TC-8b: the record names the tested CONTENT and, informationally, HEAD.
   check result.vcs.base == fx.libASha
-  check result.vcs.content == "git-tree-sha1:" & requireGit("git -C " &
-    q(fx.libAPath) & " rev-parse " & fx.libASha & "^{tree}").strip()
+  check result.vcs.content == content
   check "t-unit" in result.targets
 
 const otherPlatform = "linux/tc3-second"
@@ -269,11 +268,10 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       check sawCertFailure
       check remedyNamesCertify
 
-      # ---- (b) required + a covering cert attached → PASS ----------------
-      # Issue a genuine cert (TC-1) and attach it to the pushed commit (TC-2).
+      # ---- (b) required + a covering cert in the local store → PASS -----
+      # Issue a genuine cert (TC-1); issuance delivers it to the local store,
+      # where the client gate looks (TC-8c). No note is attached.
       let cert = issueAndReadCert(fx)
-      let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
-      check att.ok
 
       let passed = invokeCheckPrePush(fx, refsFile)
       checkpoint("(b) output: " & passed.output)
@@ -324,8 +322,9 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       cert2.targets = @["t-unit"]
       cert2.signature = TestCertificateSignature()  # clear cert 1's signature
       signCertificateOnIssuance(cert2, tc3KeyId, fx.daemonKey)
-      let att2 = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert2)
-      check att2.ok
+      let delivered = publishCertificateToLocalStore(cert2, fx.libAPath)
+      check delivered.error == ""
+      check delivered.written
 
       let unionPass = invokeCheckPrePush(fx, refsFile)
       checkpoint("(c) union output: " & unionPass.output)

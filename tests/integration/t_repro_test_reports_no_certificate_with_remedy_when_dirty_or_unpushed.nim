@@ -107,6 +107,9 @@ type
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1d-" & slug & "-", "")
+  # TC-8c: issuance writes the local certificate store; keep it in scratch.
+  putEnv("TEST_CERTIFICATES_DIR", result.scratch / "certificate-store")
+  putEnv("TEST_CERTIFICATES_SYSTEM_DIR", result.scratch / "certificate-system")
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASeed = result.scratch / "seed-lib-a"
@@ -164,7 +167,9 @@ proc runReproTest(fx: Fixture; fixtureJson: string): CmdResult =
     fx.workspaceRoot)
 
 proc certPath(fx: Fixture): string =
-  defaultCertificatePath(fx.workspaceRoot, fx.libASha, currentPlatformTag())
+  ## TC-8c: where an issued certificate would land — the content directory of
+  ## the local store this fixture isolated. Nothing at all may appear there.
+  getEnv("TEST_CERTIFICATES_DIR") / "v1"
 
 suite "TC-1 — repro test withholds the certificate on a non-publishable state":
 
@@ -188,7 +193,7 @@ suite "TC-1 — repro test withholds the certificate on a non-publishable state"
         # The trivial target still PASSES (the run executed), so the shard
         # exit code is 0 — the only effect of the dirty state is no cert.
         check res.code == 0
-        check (not fileExists(certPath(fx)))
+        check (not dirExists(certPath(fx)))
         check res.output.contains("no certificate")
         check res.output.contains("dirty")
         # RA-28 remedy: name a concrete next step (commit / stash).
