@@ -216,7 +216,7 @@ suite "HL-7 — mixed public-clean + team-unpublished refuses":
         var unpub: JsonNode = nil
         for f in report["failures"]:
           if f["property"].getStr() == "unpublished": unpub = f
-        check unpub != nil
+        check not unpub.isNil
         check unpub["repo"].getStr() == "core"
         check unpub["remediation"].getStr().contains("git push")
         check unpub["remediation"].getStr().contains("core")

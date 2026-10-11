@@ -170,10 +170,13 @@ proc baseCert(fx: Fixture; keyId: string): TestCertificate =
   ## acceptance. ``keyId`` is set so the cert can claim a (possibly wrong) id.
   ##
   ## TC-7: there is no lock DIGEST to match any more. The gate resolves the
-  ## lock at ``vcs.commit`` itself, and the fixture's committed lock record is
-  ## keyed by exactly this commit, so a hand-built cert naming it passes the
+  ## lock at the pushed commit itself, and the fixture's committed lock record
+  ## is keyed by exactly this commit, so a hand-built cert passes the
   ## framework-specific step for free — leaving the signature as the only
   ## thing under test here, which is the point.
+  ##
+  ## TC-8b: the cert names the pushed commit's CONTENT (its tree), which is
+  ## what makes it describe the pushed commit; ``base`` is informational.
   TestCertificate(
     schema: testCertificateSchemaV1,
     framework: reprobuildFrameworkId,
@@ -182,8 +185,10 @@ proc baseCert(fx: Fixture; keyId: string): TestCertificate =
     targets: @["t-unit"], result: tcrPassed,
     issuedAt: "2026-06-25T00:00:00Z",
     issuer: "tc5-test", keyId: keyId,
-    vcs: TestCertificateVcs(repo: "lib-a", commit: fx.libASha,
-      clean: true, untracked: false),
+    vcs: TestCertificateVcs(repo: "lib-a",
+      content: "git-tree-sha1:" & requireGit("git -C " & q(fx.libAPath) &
+        " rev-parse " & fx.libASha & "^{tree}").strip(),
+      untracked: false, base: fx.libASha),
     commands: @[TestCertificateCommand(argv: @["repro", "test"])])
 
 proc gateRefuses(fx: Fixture; cert: TestCertificate; gitBin: string): bool =

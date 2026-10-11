@@ -231,7 +231,11 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
     fx.workspaceRoot, headSha, currentPlatformTag())
   check fileExists(certFile)
   result = readCertificateFile(certFile)
-  check result.vcs.commit == headSha
+  # TC-8b: the record names the tested CONTENT (HEAD's tree, the tree being
+  # clean) and, informationally, the commit it was issued on top of.
+  check result.vcs.base == headSha
+  check result.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
+    " -C " & q(fx.libAPath) & " rev-parse " & headSha & "^{tree}").strip()
   check "t-unit" in result.targets
   let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
   check att.ok
@@ -333,14 +337,17 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
     check ok.requiredPlatforms == @["*"]
 
   test "\"*\" is per-platform coverage, never a cross-platform union":
+    const content = "git-tree-sha1:c0ffee0000000000000000000000000000c0ffee"
     proc mk(platform: string; targets: seq[string]): TestCertificate =
       TestCertificate(schema: testCertificateSchemaV1,
         framework: reprobuildFrameworkId, platform: platform,
         targets: targets, result: tcrPassed,
-        vcs: TestCertificateVcs(repo: "r", commit: "c0ffee", clean: true))
+        vcs: TestCertificateVcs(repo: "r", content: content))
+    let state = stateWithKnownContent(
+      [KnownContentId(algorithm: "git-tree-sha1", id: content)])
     let split = @[mk("linux/amd64", @["a"]), mk("macos/arm64", @["b"])]
-    check uncoveredPlatforms(split, @["*"], @["a", "b"], "c0ffee").len == 1
+    check uncoveredPlatforms(split, @["*"], @["a", "b"], state).len == 1
     check uncoveredPlatforms(@[mk("macos/arm64", @["a", "b"])], @["*"],
-      @["a", "b"], "c0ffee").len == 0
-    check uncoveredPlatforms(@[], @["*"], @["a"], "c0ffee") ==
+      @["a", "b"], state).len == 0
+    check uncoveredPlatforms(@[], @["*"], @["a"], state) ==
       @["any platform (missing: <no certificate>)"]

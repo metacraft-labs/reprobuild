@@ -227,7 +227,10 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
     fx.workspaceRoot, headSha, currentPlatformTag())
   check fileExists(certFile)
   result = readCertificateFile(certFile)
-  check result.vcs.commit == headSha
+  # TC-8b: the record names the tested CONTENT and, informationally, HEAD.
+  check result.vcs.base == headSha
+  check result.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
+    " -C " & q(fx.libAPath) & " rev-parse " & headSha & "^{tree}").strip()
   check "t-unit" in result.targets
   let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
   check att.ok
@@ -286,7 +289,9 @@ suite "P6.e — repro certify --check-set":
       check fileExists(certFile)
       if fileExists(certFile):
         let cert = readCertificateFile(certFile)
-        check cert.vcs.commit == head
+        check cert.vcs.base == head
+        check cert.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
+          " -C " & q(fx.libAPath) & " rev-parse " & head & "^{tree}").strip()
         check cert.targets == @["pre-commit"]
         check cert.isSigned
         check cert.commands.len == 1

@@ -191,7 +191,9 @@
         # 31b05a5 (io-mon#41: endpoint + peer-uid IPC records, isolated launch).
         # Bumped to b464ce1 (2026-10-03), io-mon's `agents` tip; e750199 is an
         # ancestor.
-      url = "github:metacraft-labs/io-mon/1053102d159a0791e1d797bec5963315d0cfd74e";
+        # Bumped to 0b0476a (2026-10-11), io-mon's `agents` tip; 1053102 is an
+        # ancestor and `git diff 1053102 0b0476a -- src/` is empty.
+      url = "github:metacraft-labs/io-mon/0b0476ad55e97f1f96a77367f205fae5fac47a16";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -334,8 +336,11 @@
       # Bumped to 3b99d26 (2026-10-03), the published `agents`/`dev` tip; 72f5782
       # is an ancestor.
       #
+      # Bumped to 4aa8892 (2026-10-11), the published `agents`/`dev` tip;
+      # 2a7c5f7 is an ancestor and only `flake.lock` differs.
+      #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/2a7c5f7b0ed0351ac6136fcc99fc1b33a087ed77";
+      url = "github:metacraft-labs/nim-stackable-hooks/4aa8892844a43ac59d4be74a4f992161b09491fe";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -416,7 +421,11 @@
       # that a developer editing the seam in a workspace checkout sees the edit
       # immediately and an unset variable still means unset. Exporting the pin
       # as ``CODETRACER_SRC`` would put it permanently ahead of both.
-      url = "github:metacraft-labs/codetracer/847c4630edfdd861306da7e35556f074caa18471";
+      #
+      # At f8781d4b5 (CTC-3i, `ct-test` ships beside `ct`) CodeTracer's
+      # ``repro.lock`` builds against trace-format 7b8b587c, so
+      # ``ct-trace-format-src`` moves to that revision in the same step.
+      url = "github:metacraft-labs/codetracer/f8781d4b5514ee9bbcdee0de701dc4bd8090a061";
       flake = false;
     };
 
@@ -498,7 +507,10 @@
       # CodeTracer 632fdceed imports codetracer_trace_writer/span_stream. Keep
       # this past the span-stream writer, cumulative-index, and encoder fixes;
       # the older c2f3dfc3 pin does not contain that module at all.
-      url = "github:metacraft-labs/codetracer-trace-format-nim/051efd22b00ec3b88676fb07755a65c5a4ca8fde";
+      # Moved with ``codetracer-src`` to 7b8b587c, the revision CodeTracer
+      # f8781d4b5's ``repro.lock`` names (051efd22 is an ancestor; adds the
+      # --mm:none/refc build and the GC-safe reader entry points).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/7b8b587c72ec31f6825ae124ab89ad7954f6dca7";
       flake = false;
     };
     nim-stew-src = {
