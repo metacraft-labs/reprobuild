@@ -72,13 +72,23 @@ import diagnostics
 import reader
 import manifest_editor
 import settings
+import repro_core/workspace_root
+
+# The marker predicates live with the one workspace-root discovery walk in
+# ``repro_core/workspace_root`` (so the dependency-free flake activation can use
+# the same walk); re-exported so this module's callers see them unchanged.
+export workspace_root.firstMembershipManifestPath,
+  workspace_root.hasResolvedManifestCheckout,
+  workspace_root.hasCommittedLockWorkspaceMarker,
+  workspace_root.discoverWorkspaceRoot, workspace_root.findWorkspaceRoot,
+  workspace_root.WorkspaceRootDiscovery, workspace_root.WorkspaceRootMarker
 
 # ---- helpers --------------------------------------------------------------
 
 const
-  workspaceStateFileName* = "workspace-state.toml"
+  workspaceStateFileName* = workspace_root.StateFileName
     ## The state file's name under ``.repro/`` (Workspace-Settings-Files.md §5).
-  legacyWorkspaceStateFileName* = "workspace.toml"
+  legacyWorkspaceStateFileName* = workspace_root.LegacyStateFileName
     ## The state file's OLD name under ``.repro/``. Read, never written.
 
 proc workspaceStatePath*(workspaceRoot: string): string =
@@ -172,6 +182,17 @@ proc reportWorkspaceNotices(workspaceRoot: string) =
   except CatchableError:
     discard
 
+proc isSettingsMarkedRoot(dir: string): bool =
+  ## Whether ``dir`` is a workspace root by a settings file (§6): it holds one,
+  ## or ``REPRO_WORKSPACE_CONFIG`` names one in it.
+  if dir.len == 0:
+    return false
+  let configured = configuredSettingsFile()
+  if configured.set:
+    return configured.path.len > 0 and
+      cmpPaths(parentDir(configured.path), absolutePath(dir)) == 0
+  settingsFileIn(dir).len > 0
+
 proc workspaceTomlPath*(workspaceRoot: string): string =
   ## The state file to READ: ``.repro/workspace-state.toml`` when it exists,
   ## else the old ``.repro/workspace.toml`` when THAT exists, else the new name
@@ -180,11 +201,15 @@ proc workspaceTomlPath*(workspaceRoot: string): string =
   ## it under the new name). Native layout only — the legacy Google-``repo``
   ## ``.repo/`` location is not consulted.
   ##
-  ## Every state read resolves its file here, so when the checkout records
-  ## state this is also where the workspace notices are reported
-  ## (``reportWorkspaceNotices``: state-file skew, skipped settings layers).
-  ## Probing a directory with no state file reports nothing — ancestor walks
-  ## call this on directories that are not workspaces.
+  ## Every state read resolves its file here, so this is also where the
+  ## workspace notices are reported (``reportWorkspaceNotices``: state-file
+  ## skew, skipped settings layers) — when the checkout records state, AND
+  ## when it records none but is a workspace root by its settings file
+  ## (Workspace-Settings-Files.md §6: the file in the directory itself, or the
+  ## file ``REPRO_WORKSPACE_CONFIG`` names in it). The settings layers of §4
+  ## exist before ``repro workspace init`` / ``enable`` has written any state,
+  ## so a skipped one is reported then too. Probing any other directory
+  ## reports nothing.
   let current = workspaceStatePath(workspaceRoot)
   if fileExists(current):
     reportWorkspaceNotices(workspaceRoot)
@@ -193,6 +218,8 @@ proc workspaceTomlPath*(workspaceRoot: string): string =
   if fileExists(legacy):
     reportWorkspaceNotices(workspaceRoot)
     return legacy
+  if isSettingsMarkedRoot(workspaceRoot):
+    reportWorkspaceNotices(workspaceRoot)
   current
 
 proc hasWorkspaceStateFile*(workspaceRoot: string): bool =
@@ -261,30 +288,70 @@ proc withSettingsLayers*(local: WorkspaceLocal;
       visibility: "public", name: some(workspaceRootLayerName)))
   result.local.manifest.add(composed.layers)
 
-proc effectiveWorkspaceLocalWithNotes*(workspaceRoot: string):
-    EffectiveWorkspaceLocal =
-  ## The workspace's state file (``workspaceTomlPath``) with the layer list it
-  ## composes (``withSettingsLayers``). Raises the strict reader's diagnostic
-  ## when the state file is missing or malformed, or a settings file is.
-  withSettingsLayers(readWorkspaceLocal(absolutePath(
-    workspaceTomlPath(workspaceRoot))), workspaceRoot)
+proc readWorkspaceStateOrEmpty*(workspaceRoot: string): WorkspaceLocal =
+  ## The state file's content (``workspaceTomlPath``), or an empty ``state.v1``
+  ## record when the checkout records no state yet — a workspace root before
+  ## ``repro workspace init`` / ``enable`` ran, whose settings files may
+  ## already declare layers (Workspace-Settings-Files.md §4 composes them
+  ## "the root repository, then the shared file's ``[[manifest]]`` entries",
+  ## with no state file in that sentence). A malformed state file still raises
+  ## the strict reader's diagnostic.
+  let path = workspaceTomlPath(workspaceRoot)
+  if fileExists(path):
+    return readWorkspaceLocal(absolutePath(path))
+  WorkspaceLocal(schema: schemaWorkspaceStateV1)
 
-proc effectiveWorkspaceLocal*(workspaceRoot: string): WorkspaceLocal =
+proc effectiveWorkspaceLocalWithNotes*(workspaceRoot: string;
+                                       projectName = ""):
+    EffectiveWorkspaceLocal =
+  ## The workspace's state (``readWorkspaceStateOrEmpty``) with the layer list
+  ## it composes (``withSettingsLayers``) — THE one place the two layer
+  ## sources meet, whether or not a state file exists. ``projectName`` selects
+  ## the project to compose when the state records none (no state file yet,
+  ## or a state file without ``[workspace] project``); a project the state
+  ## records is never overridden here, so a checkout with state composes
+  ## exactly what it did before. Raises the strict reader's diagnostic when
+  ## the state file or a settings file is malformed.
+  result = withSettingsLayers(readWorkspaceStateOrEmpty(workspaceRoot),
+    workspaceRoot)
+  if result.local.workspace.project.len == 0 and projectName.len > 0:
+    result.local.workspace.project = projectName
+
+proc effectiveWorkspaceLocal*(workspaceRoot: string;
+                              projectName = ""): WorkspaceLocal =
   ## ``effectiveWorkspaceLocalWithNotes``, reporting skipped layers on stderr.
-  let eff = effectiveWorkspaceLocalWithNotes(workspaceRoot)
+  let eff = effectiveWorkspaceLocalWithNotes(workspaceRoot, projectName)
   reportSkippedSettingsLayers(eff.skipped)
   eff.local
 
-proc isCompositionalWorkspaceToml*(workspaceRoot: string): bool =
-  ## True iff the workspace records state (either state-file name) AND
-  ## composes at least one ``[[manifest]]`` layer — from the state file or
-  ## from the settings files (``withSettingsLayers``). CLI dispatch helpers
-  ## use this to decide between the M8 composer path and the M6/M7
-  ## single-project path: a metadata-only state file with no layers anywhere
-  ## routes to single-project mode because the composer requires layers.
+proc isCompositionalWorkspaceToml*(workspaceRoot: string;
+                                   projectName = ""): bool =
+  ## True iff the workspace composes at least one ``[[manifest]]`` layer —
+  ## from the state file or from the settings files (``withSettingsLayers``)
+  ## — and the composer has a project to select. CLI dispatch helpers use this
+  ## to decide between the M8 composer path and the M6/M7 single-project path:
+  ## a workspace with no layers anywhere routes to single-project mode because
+  ## the composer requires layers.
+  ##
+  ##   * The checkout records state (either state-file name): any layer
+  ##     decides, exactly as before — the project is the state's own.
+  ##   * It records none (a workspace root before ``init`` / ``enable``): the
+  ##     settings layers still compose (Workspace-Settings-Files.md §4), when
+  ##     the caller names the project (``projectName``, a ``<project>``
+  ##     argument). With no project named there is nothing to compose, and the
+  ##     caller's single-project ladder reports that as it always did.
+  ##
+  ## Callers that answer ``true`` compose through ``effectiveWorkspaceLocal``
+  ## / ``composeWorkspaceLayers`` with the same ``projectName``.
   let path = workspaceTomlPath(workspaceRoot)
   if not fileExists(path):
-    return false
+    if projectName.len == 0:
+      return false
+    try:
+      return withSettingsLayers(WorkspaceLocal(schema: schemaWorkspaceStateV1),
+        workspaceRoot).local.manifest.len > 0
+    except WorkspaceManifestParseError:
+      return false
   try:
     let local = readWorkspaceLocal(path)
     if local.manifest.len > 0:
@@ -297,102 +364,6 @@ proc isCompositionalWorkspaceToml*(workspaceRoot: string): bool =
     # unusable" — return false so the caller falls back to single-project
     # mode (which will then either succeed or emit its own diagnostic).
     return false
-
-proc firstMembershipManifestPath*(root: string): string =
-  ## The first resolved membership manifest ``root`` itself holds -- a
-  ## ``projects/*.toml`` or a ``variants/*.toml`` -- or "" when it holds none.
-  ## An empty ``projects/``/``variants/`` is NOT a resolved checkout.
-  ## Layout-agnostic: the caller decides WHICH directory to ask about.
-  ##
-  ## It answers with the PATH rather than a yes/no because a diagnostic that
-  ## says "manifest data was found here" has to be able to show WHICH file
-  ## said so (Interactive-UX-And-Progress.md Principle 2 -- name the specific
-  ## thing at fault). ``carriesResolvedMembershipManifest`` below is this same
-  ## question asked for its emptiness, so the two cannot drift into two rules.
-  ##
-  ## The scan is ORDERED rather than first-hit, so the file a message names is
-  ## the same on every host: ``walkDir`` yields in directory order, which is
-  ## the filesystem's business and not a fact a diagnostic should depend on.
-  if root.len == 0:
-    return ""
-  for sub in ["projects", "variants"]:
-    let dir = root / sub
-    if dirExists(dir):
-      var earliest = ""
-      for kind, path in walkDir(dir):
-        if kind == pcFile and path.endsWith(".toml") and
-            (earliest.len == 0 or path < earliest):
-          earliest = path
-      if earliest.len > 0:
-        return earliest
-  ""
-
-proc carriesResolvedMembershipManifest(root: string): bool =
-  ## True iff ``root`` itself holds at least one resolved membership manifest
-  ## (a ``projects/*.toml`` or a ``variants/*.toml``). An empty
-  ## ``projects/``/``variants/`` is NOT a resolved checkout. Layout-agnostic:
-  ## the caller decides WHICH directory to ask about.
-  firstMembershipManifestPath(root).len > 0
-
-proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
-  ## True iff ``workspaceRoot``'s ``.repro/`` SHELL carries at least one
-  ## resolved membership manifest (a ``projects/*.toml`` or a
-  ## ``variants/*.toml``) — either flat at the root beside that shell, or in
-  ## the materialized checkout under ``.repro/manifests``. An empty
-  ## ``projects/``/``variants/`` is NOT a resolved checkout.
-  ##
-  ## THE ``.repro/`` REQUIREMENT ON THE FLAT LAYOUT IS THE POINT, and it is
-  ## the invariant ``isInitializedWorkspace`` below has always DOCUMENTED —
-  ## "a directory counts as an initialized workspace only when its
-  ## ``.repro/`` shell carries a resolved manifest checkout". The
-  ## implementation lost it for the flat layout by asking ``manifestsRoot``,
-  ## whose first clause is a bare ``dirExists(<root>/projects)``.
-  ##
-  ## What that admitted is the LOCK RECORD STORE — the manifests repo
-  ## itself. It carries ``projects/``, ``repos/`` and ``locks/`` at its top
-  ## level, so it answered this predicate with ``true``, and with it
-  ## ``isInitializedWorkspace``. It is not a workspace: it holds the
-  ## membership and lock records FOR one. Classified as a workspace it fell
-  ## into a gap nothing covers — every "not a workspace" guard skipped, the
-  ## MO-2 committed-lock fallback skipped too (it is gated on the negation of
-  ## this predicate), no project nameable, and the resolver raising. The
-  ## pre-push gate then exited 1 in a repo with nothing to gate, and since
-  ## store publication is a STAGE of that gate, that blocked pushes across
-  ## the whole workspace. A bare clone of the manifests repo is the same
-  ## shape and the same non-workspace.
-  ##
-  ## ``.repro/`` is the marker that separates the two, and it is the one
-  ## every workspace has: it is where ``workspace.toml``, the durable
-  ## workspace state and the build tree live. ``hooks ensure``'s repo
-  ## enumerator already draws exactly this line, and says so in its own note
-  ## — "this, and NOT 'the directory happens to hold ``projects/`` and
-  ## ``repos/``', is what separates a workspace root from the manifest lock
-  ## backend". It draws the line at ``.repro/workspace.toml``; this predicate
-  ## draws it one notch weaker, at the ``.repro/`` shell, because it must
-  ## still say ``true`` for a workspace that resolves from its
-  ## ``projects/*.toml`` before a metadata-only ``workspace.toml`` has been
-  ## written (the case the RA-10 hook guards call out by name). Every
-  ## directory that satisfies the stricter rule satisfies this one.
-  ##
-  ## ``manifestsRoot`` is deliberately NOT changed to match. It answers
-  ## "given a root that IS a workspace, where does its membership live?" —
-  ## a question whose answer for the flat native-root layout must stay the
-  ## root itself, and whose callers have already decided they are looking at
-  ## a workspace. The two can therefore disagree about a bare manifests
-  ## clone, and that disagreement is harmless: a verb that reaches
-  ## ``manifestsRoot`` there still refuses for the reason it always did (no
-  ## project can be named), it just no longer does so from inside a hook
-  ## that had already promised not to block.
-  if workspaceRoot.len == 0:
-    return false
-  # The flat layout: ``projects/``/``repos/`` beside a ``.repro/`` shell.
-  if dirExists(workspaceRoot / ".repro") and
-      carriesResolvedMembershipManifest(workspaceRoot):
-    return true
-  # The materialized sub-layout: an ``init --manifest-url`` shared-cache
-  # symlink, or the git-checkout store backend. Unconditional — the path
-  # spells the ``.repro/`` shell itself, so there is nothing to require.
-  carriesResolvedMembershipManifest(workspaceRoot / ".repro" / "manifests")
 
 proc standaloneMembershipManifestCheckout*(workspaceRoot: string): string =
   ## "" unless ``workspaceRoot`` IS a membership-manifest checkout rather than
@@ -428,27 +399,6 @@ proc standaloneMembershipManifestCheckout*(workspaceRoot: string): string =
   if dirExists(workspaceRoot / ".repro"):
     return ""
   firstMembershipManifestPath(workspaceRoot)
-
-const committedLockFileName = "repro.lock"
-  ## Workspace-Manifest-Optional MO-2 — the committed solved-graph lock
-  ## filename. Mirrors ``repro_lock.CommittedLockFileName`` /
-  ## ``repro_cli_support.CommittedLockFileName``; duplicated here as a
-  ## stable filename convention so ``repro_workspace_manifests`` does not
-  ## acquire an upward dependency on the CLI / lock modules.
-
-proc hasCommittedLockWorkspaceMarker*(workspaceRoot: string): bool =
-  ## MO-2 — true iff ``workspaceRoot`` carries a committed ``repro.lock``
-  ## (the MO-1 solved-graph lock) at its root. This is the manifest-OPTIONAL
-  ## workspace marker: an all-public, single-repo workspace whose
-  ## reproducibility boundary is the committed lock needs no manifest repo,
-  ## yet must still count as an initialized workspace so the managed hooks
-  ## and the pre-push gate enforce there too. A project file alone (no
-  ## committed lock) is intentionally NOT a marker — the committed lock is
-  ## the reproducibility boundary the manifest-optional model leans on, so
-  ## ``repro lock refresh`` establishes it first.
-  if workspaceRoot.len == 0:
-    return false
-  fileExists(workspaceRoot / committedLockFileName)
 
 proc isInitializedWorkspace*(workspaceRoot: string): bool =
   ## RA-10 canonical "initialized workspace" marker. A directory counts

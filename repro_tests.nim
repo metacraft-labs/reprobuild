@@ -13590,6 +13590,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_settings_layers_apply_without_state_file.nim",
+    binary: "build/test-bin/t_settings_layers_apply_without_state_file",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_sevenzip_extractor_falls_back_to_standalone_decoder.nim",
     binary: "build/test-bin/t_sevenzip_extractor_falls_back_to_standalone_decoder",
     defines: @[],
@@ -15077,6 +15086,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_resolution_names_the_manifest_data_it_found.nim",
     binary: "build/test-bin/t_workspace_resolution_names_the_manifest_data_it_found",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_workspace_root_discovered_from_settings_file.nim",
+    binary: "build/test-bin/t_workspace_root_discovered_from_settings_file",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

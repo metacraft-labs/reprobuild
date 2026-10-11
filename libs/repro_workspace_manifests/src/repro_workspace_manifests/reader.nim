@@ -23,6 +23,7 @@ import toml_serialization/types as toml_types
 import types
 import diagnostics
 import manifest_editor
+from repro_core/workspace_root import nil
 
 # ---- helpers --------------------------------------------------------------
 
@@ -1035,7 +1036,7 @@ proc readDevelopOverrides*(path: string): DevelopOverrides =
 # ---- <host-repo>/.repro-workspace.toml (RA-8 host bootstrap config) ---------
 
 const
-  bootstrapConfigFileName* = ".repro-workspace.toml"
+  bootstrapConfigFileName* = workspace_root.LegacySettingsFileName
     ## The OLD name of the workspace settings file (`bootstrap.v1`). Still read
     ## — through `settings.nim`, which prefers `repro-workspace.toml` — until
     ## the old names are retired (Workspace-Settings-Files.md §8 step 4).

@@ -18461,12 +18461,15 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
   # non-existent ``<manifest>/<repo.path>`` children, install zero hooks, and
   # make the printed remediation ineffective. It just has to be asked SECOND.
   let declaresWorkspace = fileExists(workspaceTomlPath(workspaceRoot))
-  if isCompositionalWorkspaceToml(workspaceRoot):
-    let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
+  # A root with no state yet still composes its settings layers
+  # (Workspace-Settings-Files.md §4) for the project the root names on its own.
+  let unrecordedProject =
+    if declaresWorkspace: "" else: detectWorkspaceProjectName(workspaceRoot)
+  if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
     # PS-2: hooks are installed in EVERY participating repo, so the hook
     # target set is the whole active project set — not just the primary.
     let resolved = extendWithActiveProjectSet(workspaceRoot,
-      composeManifestLayersFromFile(workspaceToml))
+      composeWorkspaceLayers(workspaceRoot, unrecordedProject))
     result.mode = "workspace"
     result.projectName = resolved.projectName
     for repo in resolved.repos:
@@ -29102,26 +29105,19 @@ proc workspaceShellFirstRoot(explicit: string): string =
   ## (``CLI/develop.md`` §"The Develop Set Is The Repo's Own Dependencies"); this
   ## only decides which workspace's lock sources are readable when resolving
   ## them, which that section calls out as the separate question.
+  ##
+  ## The walk itself is the shared ``discoverWorkspaceRoot``
+  ## (``repro_core/workspace_root``): a settings file, a state file or a
+  ## resolved manifest checkout marks a root and the nearest wins; the MO-2
+  ## committed lock decides only when no ancestor carries one of those. That
+  ## is the "shell first, generic marker second" order this proc always had,
+  ## with the settings file (Workspace-Settings-Files.md §6) among the shell
+  ## markers.
   if explicit.len > 0:
     return absolutePath(explicit)
   let here = absolutePath(getCurrentDir())
-  var dir = here
-  while true:
-    if fileExists(workspaceTomlPath(dir)):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  dir = here
-  while true:
-    if isInitializedWorkspace(dir):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  here
+  let found = findWorkspaceRoot(here)
+  if found.len > 0: found else: here
 
 proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
@@ -29174,8 +29170,11 @@ proc resolveDevelopWorkspacePrimary(
   ## exactly one exists. A workspace with no resolvable project surfaces
   ## as a ``ValueError`` so the dispatcher exits 1 with a clear message.
   let workspaceToml = workspaceTomlPath(workspaceRoot)
-  if isCompositionalWorkspaceToml(workspaceRoot):
-    return composeManifestLayersFromFile(workspaceToml)
+  let unrecordedProject =
+    if fileExists(workspaceToml): ""
+    else: detectWorkspaceProjectName(workspaceRoot)
+  if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
+    return composeWorkspaceLayers(workspaceRoot, unrecordedProject)
   let manifestsRoot = manifestsRoot(workspaceRoot)
   if fileExists(workspaceToml):
     try:
@@ -33370,12 +33369,11 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
         extra.add(name)
     if extra.len == 0: primary
     else: unionProjectSet(parsed.workspaceRoot, primary, extra)
-  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let options = ComposeOptions(
       skipInaccessibleLayers: parsed.allowMissingLayers)
-    let composed = composeManifestLayersFromFileWithOptions(
-      workspaceToml, options)
+    let composed = composeWorkspaceLayersWithOptions(
+      parsed.workspaceRoot, parsed.projectName, options)
     # PS-2 — init restores the WHOLE workspace, so a recorded project set is
     # materialized in full rather than just its primary project.
     result.project = withAdditional(extendWithActiveProjectSet(
@@ -34558,7 +34556,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # change AFTER M25) must not fire for it, or compositional init aborts
   # before the composer ever runs.
   if not dirExists(manifestsDir) and args.manifestUrl.len == 0 and
-      not isCompositionalWorkspaceToml(args.workspaceRoot):
+      not isCompositionalWorkspaceToml(args.workspaceRoot, args.projectName):
     raise newException(ValueError,
       "no manifest configured for `repro workspace init`: pass " &
         "`--manifest-url=…`, commit a `" & settingsFileName &
@@ -35790,9 +35788,9 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   ## gate / check can reuse it (active-branch derivation, manifest-layer root);
   ## the non-compositional branches return ``none`` exactly as before.
   let workspaceToml = workspaceTomlPath(workspaceRoot)
-  if isCompositionalWorkspaceToml(workspaceRoot):
+  if isCompositionalWorkspaceToml(workspaceRoot, projectName):
     let absToml = absolutePath(workspaceToml)
-    let wl = effectiveWorkspaceLocal(workspaceRoot)
+    let wl = effectiveWorkspaceLocal(workspaceRoot, projectName)
     # PS-2 — layers compose WITHIN the project; the active project set unions
     # ACROSS projects. Both axes apply, layers first.
     return (extendWithActiveProjectSet(workspaceRoot,
@@ -38615,7 +38613,7 @@ proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
   ##     this one object regardless of which source filled any given repo.
   let root = absolutePath(workspaceRoot)
   if not hasResolvedManifestCheckout(root) and
-      not isCompositionalWorkspaceToml(root) and
+      not isCompositionalWorkspaceToml(root, projectName) and
       hasCommittedLockWorkspaceMarker(root):
     return populateLockedDeps(
       LockSource(kind: lskCommittedLock, workspaceRoot: root))
@@ -43965,9 +43963,10 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   ## ``WorkspaceLocal`` (when composer mode applies) so the caller can
   ## pick the anchor manifest layer for the lock destination.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot,
+      parsed.projectName)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -47066,29 +47065,12 @@ proc enclosingWorkspaceRoot*(startPath: string): string =
   ## layer checks (the public-lock visibility stage) that exist for exactly
   ## that push. Such a candidate is skipped, so the walk reaches the
   ## workspace that owns the ``.repro/`` it sits in.
-  let ancestors = selfAndAncestors(startPath)
-  proc insideAncestorReproState(candidate: string): bool =
-    ## True when ``candidate`` lies under ``<A>/.repro/`` for an ancestor
-    ## ``A`` that is itself a workspace.
-    for owner in ancestors:
-      if owner.len >= candidate.len:
-        continue
-      let state = owner / ".repro"
-      if candidate.startsWith(state & DirSep) and
-          (fileExists(workspaceTomlPath(owner)) or
-           hasResolvedManifestCheckout(owner)):
-        return true
-    false
-  for candidate in ancestors:
-    if fileExists(workspaceTomlPath(candidate)) or
-        hasResolvedManifestCheckout(candidate):
-      if insideAncestorReproState(candidate):
-        continue
-      return candidate
-  for candidate in ancestors:
-    if hasCommittedLockWorkspaceMarker(candidate):
-      return candidate
-  ""
+  ##
+  ## All of this is the shared ``discoverWorkspaceRoot``
+  ## (``repro_core/workspace_root``) — the one walk every workspace-root
+  ## lookup uses, whose marker set also includes the settings file
+  ## (Workspace-Settings-Files.md §6) and honours ``REPRO_WORKSPACE_CONFIG``.
+  findWorkspaceRoot(startPath)
 
 proc enclosingReproShell*(startPath: string): string =
   ## The nearest ancestor of ``startPath`` (inclusive) holding a ``.repro/``
@@ -47436,9 +47418,11 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
   ## the pre-push gate; returns ``@[]`` on any resolution failure so the caller
   ## (always best-effort) can silently no-op.
   try:
-    if isCompositionalWorkspaceToml(workspaceRoot):
-      let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
-      return composeManifestLayersFromFile(workspaceToml).repos
+    let unrecordedProject =
+      if hasWorkspaceStateFile(workspaceRoot): ""
+      else: detectWorkspaceProjectName(workspaceRoot)
+    if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
+      return composeWorkspaceLayers(workspaceRoot, unrecordedProject).repos
     else:
       let projectName = detectWorkspaceProjectName(workspaceRoot)
       if projectName.len == 0:
@@ -59002,9 +58986,9 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
   ## named project / variant. A metadata-only workspace.toml (M13)
   ## routes to single-project mode.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     return extendWithActiveProjectSet(parsed.workspaceRoot,
-      composeManifestLayersFromFile(workspaceToml))
+      composeWorkspaceLayers(parsed.workspaceRoot, parsed.projectName))
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name. Only the
     # read of workspace.toml is guarded here: if resolving the *named* project
@@ -60738,15 +60722,13 @@ proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
   report.workspaceRoot = args.workspaceRoot
   let workspaceToml = workspaceTomlPath(args.workspaceRoot)
   report.workspaceTomlPath = workspaceToml
-  if not fileExists(workspaceToml):
-    report.hasLayeredWorkspace = false
-    report.exitCode = 0
-    return report
-  # M13: a metadata-only workspace.toml (zero ``[[manifest]]`` entries —
-  # written by M9 init in single-project mode to record the active
-  # branch) is NOT a layered workspace. Mirror the dispatch sites in
-  # init / sync / lock / status / list and treat such a file the same
-  # way we treat a missing workspace.toml.
+  # M13: a metadata-only state file (zero ``[[manifest]]`` entries — written
+  # by M9 init in single-project mode to record the active branch) is NOT a
+  # layered workspace, and neither is a checkout with no state file — unless
+  # its settings files declare layers, which exist (and are enumerated here)
+  # whether or not ``init`` / ``enable`` has written state yet
+  # (Workspace-Settings-Files.md §4). With neither, the report is exactly the
+  # "no layered workspace" one it always was.
   let absToml = absolutePath(workspaceToml)
   let workspaceLocal = effectiveWorkspaceLocal(args.workspaceRoot)
   if workspaceLocal.manifest.len == 0:
@@ -61810,25 +61792,24 @@ type
     report: ReportSpec      ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc ascendToWorkspaceRoot(startDir: string): string =
-  ## Walk up from ``startDir`` to the nearest directory carrying the RA-10
-  ## ``isInitializedWorkspace`` marker, so the prompt works from any
-  ## subdirectory of a workspace (like ``__git_ps1``). Returns "" when no
-  ## ancestor is an initialized workspace. Pure filesystem stat walk — no
-  ## git, bounded by the path depth.
-  var dir = absolutePath(startDir)
-  while true:
-    if isInitializedWorkspace(dir):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      return ""
-    dir = parent
+  ## Walk up from ``startDir`` to the workspace root that owns it, so the
+  ## prompt and the workspace-wide verbs work from any subdirectory of a
+  ## workspace (like ``__git_ps1``). Returns "" when there is none. Pure
+  ## filesystem stat walk — no git, bounded by the path depth.
+  ##
+  ## The shared ``discoverWorkspaceRoot`` (``repro_core/workspace_root``), so
+  ## a member repo's own committed ``repro.lock`` no longer makes the member
+  ## its own workspace when a workspace root sits above it. FINDING a root is
+  ## not the root being initialized: a caller that needs state asks
+  ## ``isInitializedWorkspace`` of the answer (the prompt does).
+  findWorkspaceRoot(startDir)
 
 proc resolveInvokedWorkspaceRoot(explicit: string): string =
   ## The workspace root a workspace-wide verb should act on.
   ##
   ## An explicit ``--workspace-root`` wins. Otherwise walk UP from the current
-  ## directory to the nearest initialized workspace, so `repro branch` and
+  ## directory to the workspace root that owns it (``ascendToWorkspaceRoot``,
+  ## the shared discovery walk), so `repro branch` and
   ## `repro switch` work from inside a member repo — which is where a developer
   ## actually stands. Taking the cwd verbatim made them the only workspace-wide
   ## verbs that had to be run from the root, and the failure was obscure: the
@@ -62013,9 +61994,10 @@ proc resolveBranchProject(parsed: BranchArgs):
   ## ``[workspace].project`` field rather than asking the user to
   ## repeat it (M13's contract).
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot,
+      parsed.projectName)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -62856,9 +62838,10 @@ proc resolveSwitchProject(parsed: SwitchArgs):
   ## the project name from a metadata-only workspace.toml's
   ## ``[workspace].project`` field (the M13 schema).
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot,
+      parsed.projectName)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -63847,7 +63830,7 @@ proc resolveAddProject(parsed: AddArgs): ResolvedProject =
   ## project / variant (or the project recorded in a metadata-only
   ## workspace.toml) identically to the old projects-only copy for every
   ## manifest-present workspace.
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     raise newException(ValueError,
       "`repro add` is not supported in a compositional (multi-layer) " &
         "workspace; add the repo to the owning manifest layer directly")
@@ -70586,7 +70569,8 @@ proc runPromptCommand*(args: openArray[string]): int =
         parsed.workspaceRoot
       else: ""
     else:
-      ascendToWorkspaceRoot(parsed.workspaceRoot)
+      let found = ascendToWorkspaceRoot(parsed.workspaceRoot)
+      if found.len > 0 and isInitializedWorkspace(found): found else: ""
   if root.len == 0:
     # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
     # requirement — safe to call unconditionally with no shell guards).

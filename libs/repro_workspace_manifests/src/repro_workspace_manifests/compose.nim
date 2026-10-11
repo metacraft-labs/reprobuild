@@ -574,6 +574,33 @@ proc composeManifestLayers*(
     workspaceLocal, workspaceRoot, workspaceTomlPath,
     ComposeOptions()).project
 
+proc composeWorkspaceLayersWithOptions*(
+    workspaceRoot: string; projectName = "";
+    options: ComposeOptions = ComposeOptions()): ComposeResult =
+  ## Compose the WORKSPACE at `workspaceRoot`: its state (or none yet) and its
+  ## settings files' layers, through the one seam that joins them
+  ## (`effectiveWorkspaceLocalWithNotes`). `projectName` selects the project
+  ## when the state records none — the case of a workspace root whose settings
+  ## declare layers before `repro workspace init` / `enable` wrote any state
+  ## (Workspace-Settings-Files.md §4). Settings layers skipped for want of a
+  ## url are carried in `skippedLayers` (index -1: they never reached a layer
+  ## position) and reported on stderr, once per process.
+  let absRoot = absolutePath(workspaceRoot)
+  let absToml = absolutePath(workspaceTomlPath(absRoot))
+  let eff = effectiveWorkspaceLocalWithNotes(absRoot, projectName)
+  reportSkippedSettingsLayers(eff.skipped)
+  result = composeManifestLayersWithOptions(eff.local, absRoot, absToml,
+    options)
+  for note in eff.skipped:
+    result.skippedLayers.add(SkippedLayer(index: -1, provenance: note.name,
+      visibility: visibilityFromString(absToml, note.visibility),
+      diagnostic: note.message))
+
+proc composeWorkspaceLayers*(workspaceRoot: string;
+                             projectName = ""): ResolvedProject =
+  ## Strict-default `composeWorkspaceLayersWithOptions`.
+  composeWorkspaceLayersWithOptions(workspaceRoot, projectName).project
+
 proc composeManifestLayersFromFile*(
     workspaceTomlPath: string): ResolvedProject =
   ## Convenience wrapper that reads the state file at `workspaceTomlPath`
