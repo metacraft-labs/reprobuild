@@ -453,6 +453,144 @@ class WindowsDirectPatchGate(unittest.TestCase):
         finally:
             stop_process(pid, stop)
 
+    def test_trigger_wait_ends_at_the_requested_trigger_timeout(self) -> None:
+        """The driver gives up --trigger-timeout seconds after it is ready.
+
+        The previous wait was a fixed 30 s, so a 2 s request that ends within
+        a few seconds proves the flag sets it. The target keeps its original
+        behaviour: nothing is published without the trigger.
+        """
+        observed = self.work / "trigger-timeout-observations.csv"
+        stop = self.work / "trigger-timeout.stop"
+        report = self.work / "trigger-timeout-driver.json"
+        ready = self.work / "trigger-timeout.ready"
+        trigger = self.work / "trigger-timeout.trigger"
+        for path in (observed, stop, report, ready, trigger):
+            path.unlink(missing_ok=True)
+        launcher_log = self.work / "trigger-timeout-launcher.txt"
+        with launcher_log.open("w+", encoding="utf-8") as output:
+            launched = subprocess.run(
+                [
+                    str(self.artifacts["launcher"]),
+                    "--agent",
+                    str(self.artifacts["agent"]),
+                    "--",
+                    str(self.target),
+                    str(observed),
+                    str(stop),
+                ],
+                cwd=REPO,
+                env=self.env,
+                text=True,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                timeout=20,
+                check=False,
+            )
+            output.seek(0)
+            launcher_output = output.read()
+        self.assertEqual(launched.returncode, 0, launcher_output)
+        pid = int(json.loads(launcher_output.splitlines()[-1])["pid"])
+        try:
+            before = wait_for_count(
+                observed, 3, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
+            self.assertEqual(set(before), {18})
+            driver = subprocess.Popen(
+                self.driver_command(pid, self.target, self.pdb, report)
+                + [
+                    "--ready-file",
+                    str(ready),
+                    "--trigger-file",
+                    str(trigger),
+                    "--trigger-timeout",
+                    "2",
+                ],
+                cwd=REPO,
+                env=self.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                deadline = time.monotonic() + 20.0
+                while not ready.is_file():
+                    if driver.poll() is not None:
+                        self.fail(
+                            "driver exited before signalling ready:\n"
+                            + driver.communicate()[0]
+                        )
+                    if time.monotonic() >= deadline:
+                        self.fail("driver did not signal ready within 20 s")
+                    time.sleep(0.01)
+                ready_at = time.monotonic()
+                driver_output, _ = driver.communicate(timeout=30)
+                waited = time.monotonic() - ready_at
+            finally:
+                if driver.poll() is None:
+                    driver.kill()
+                    driver.wait(timeout=10)
+            self.assertEqual(driver.returncode, 1, driver_output)
+            self.assertIn(
+                "timed out after 2.0 s waiting for trigger file", driver_output
+            )
+            self.assertGreaterEqual(waited, 1.5, driver_output)
+            self.assertLess(waited, 10.0, driver_output)
+            self.assertFalse(report.exists())
+            after = wait_for_count(
+                observed,
+                len(observations(observed)) + 3,
+                pid=pid,
+                context=f"\nlauncher:\n{launcher_output}",
+            )
+            self.assertEqual(set(after), {18})
+        finally:
+            stop_process(pid, stop)
+
+    def test_trigger_timeout_values_are_validated(self) -> None:
+        report = self.work / "trigger-timeout-refused.json"
+        report.unlink(missing_ok=True)
+        base = self.driver_command(1, self.target, self.pdb, report)
+        trigger_files = [
+            "--ready-file",
+            str(self.work / "refused.ready"),
+            "--trigger-file",
+            str(self.work / "refused.trigger"),
+        ]
+        cases = [
+            (
+                base + trigger_files + ["--trigger-timeout", "0"],
+                "--trigger-timeout must be a positive number of seconds",
+            ),
+            (
+                base + trigger_files + ["--trigger-timeout", "nan"],
+                "--trigger-timeout must be a positive number of seconds",
+            ),
+            (
+                base + trigger_files + ["--trigger-timeout", "soon"],
+                "--trigger-timeout takes a number of seconds",
+            ),
+            (
+                base + ["--trigger-timeout", "5"],
+                "--trigger-timeout requires --ready-file and --trigger-file",
+            ),
+        ]
+        for command, message in cases:
+            with self.subTest(arguments=command[len(base) :]):
+                refused = subprocess.run(
+                    command,
+                    cwd=REPO,
+                    env=self.env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn(message, refused.stdout)
+                self.assertFalse(report.exists())
+
     def test_missing_function_padding_is_a_named_prepublication_refusal(self) -> None:
         report = self.work / "no-padding-driver.json"
         report.unlink(missing_ok=True)

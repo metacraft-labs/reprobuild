@@ -22,7 +22,7 @@ when defined(windows) and defined(amd64):
     --patch-object FILE --patch-symbol NAME --first-instruction-length N
   or: hcr_patch_driver_windows --pid PID --target-symbol NAME
     --patch-bundle FILE [--patch-symbol NAME]
-    [--ready-file FILE --trigger-file FILE]
+    [--ready-file FILE --trigger-file FILE [--trigger-timeout SECONDS]]
     [--patch-id ID] [--json-out FILE]
   or, to serve MANY patches on one named-pipe connection:
       hcr_patch_driver_windows --pid PID
@@ -77,6 +77,8 @@ when defined(windows) and defined(amd64):
       patchBundle = ""
       readyFile = ""
       triggerFile = ""
+      triggerTimeoutSeconds = 30.0
+      triggerTimeoutGiven = false
       firstInstructionLength = 0
       patchId = "windows-hcr-patch-1"
       jsonOut = ""
@@ -101,6 +103,17 @@ when defined(windows) and defined(amd64):
       of "--patch-bundle": patchBundle = nextValue()
       of "--ready-file": readyFile = nextValue()
       of "--trigger-file": triggerFile = nextValue()
+      of "--trigger-timeout":
+        let value = nextValue()
+        try:
+          triggerTimeoutSeconds = parseFloat(value)
+        except ValueError:
+          die("--trigger-timeout takes a number of seconds, got: " & value)
+        if not (triggerTimeoutSeconds > 0.0 and
+            triggerTimeoutSeconds < Inf):
+          die("--trigger-timeout must be a positive number of seconds, got: " &
+            value)
+        triggerTimeoutGiven = true
       of "--first-instruction-length":
         firstInstructionLength = parseInt(nextValue())
       of "--patch-id": patchId = nextValue()
@@ -116,6 +129,8 @@ when defined(windows) and defined(amd64):
       usage()
     if (readyFile.len == 0) != (triggerFile.len == 0):
       die("--ready-file and --trigger-file must be supplied together")
+    if triggerTimeoutGiven and triggerFile.len == 0:
+      die("--trigger-timeout requires --ready-file and --trigger-file")
     if sessionMode:
       if sessionDir.len == 0 or targetImage.len == 0 or targetPdb.len == 0 or
           firstInstructionLength <= 0:
@@ -346,10 +361,14 @@ when defined(windows) and defined(amd64):
       if parent.len > 0:
         createDir(parent)
       writeFile(readyFile, "ready\n")
-      let deadline = epochTime() + 30.0
+      # The caller decides when to publish, so it also decides how long the
+      # wait may last: a target that reaches its patch frame slowly needs
+      # longer than the default.
+      let deadline = epochTime() + triggerTimeoutSeconds
       while not fileExists(triggerFile):
         if epochTime() >= deadline:
-          die("timed out waiting for trigger file: " & triggerFile)
+          die("timed out after " & $triggerTimeoutSeconds &
+            " s waiting for trigger file: " & triggerFile)
         sleep(1)
     let request = directPatchRequest(
       patchId,
