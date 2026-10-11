@@ -1067,6 +1067,14 @@ proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
     projectRoot)
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
+  # The contracted ``config.nims`` ``include``s
+  # ``src/frontend/test_support/force_import_isolation.nims`` unconditionally
+  # (and force-imports ``state_isolation.nim`` beside it into test-shaped
+  # programs), so every subset needs that directory whether or not it copies
+  # the rest of ``src/frontend`` -- the native subset does not, and without
+  # it every compile stops while evaluating ``config.nims``.
+  copyTree(codeTracerRoot / "src" / "frontend" / "test_support",
+    projectRoot / "src" / "frontend" / "test_support")
   addCodeTracerFixtureTransitivePaths(projectRoot)
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
