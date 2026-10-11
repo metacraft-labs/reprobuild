@@ -98,6 +98,13 @@ import repro_local_store
 import repro_cas_store
 import repro_store_daemon
 import repro_daemon_core
+# Shared-Development-Services L8: `serviceInstanceStoreRoot` is the ONE
+# derivation of the registry's store root -- `leaseStoreRootForScope`,
+# called rather than re-derived (see its own note). The CLI reconciles
+# the registrations after the daemon has answered, so it needs that same
+# root; re-deriving it here is how a reconcile ends up writing into a
+# store the reaper does not sweep.
+from repro_daemon_core/instance_registry import serviceInstanceStoreRoot
 import repro_resources/service_registry
   # Shared-Development-Services L7 (§4.5): the instance registry's key
   # codec and outcome vocabulary. It re-exports `service_attach` and
@@ -15235,17 +15242,65 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         parsed.selection.outDir.sharedInstanceLedgerPath))
     except OSError, IOError:
       discard
+    # Shared-Development-Services L8: and the MINTED record, for exactly
+    # the reason above one level over. A stale registration record from
+    # a previous `repro up` of a recipe that has since dropped its
+    # `converge` (or its whole `instance` block) would let the
+    # supervisor concretize a `@minted:` token the recipe no longer
+    # declares -- a value from a run nobody can see, which is worse than
+    # the refusal the author would otherwise get. The write at the foot
+    # of this proc already says "written unconditionally, including
+    # empty" for the same reason; this is the path that never reaches
+    # it.
+    try:
+      removeFile(extendedPath(
+        parsed.selection.outDir.sharedInstanceMintedPath))
+    except OSError, IOError:
+      discard
     return 0
   if parsed.replace and declarations.len == 0:
     return 0
   let projectRoot = parsed.selection.projectRoot
   let holderId = serviceLeaseHolderId(projectRoot)
   var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
+  var minted: seq[tuple[serviceName, member, mintedId: string]] = @[]
   var refused = 0
   for item in declarations:
     let lifted = liftedServiceDeclaration(edge.interfacePath,
       item.declaration.serviceName)
     let snapshot = lifted.snapshot
+    # Shared-Development-Services L8 -- ONE FACT, AND A REFUSAL IF THE
+    # TWO CHANNELS DISAGREE.
+    #
+    # The identity and the scope now reach `DevEnvServiceSummary`
+    # directly (L7's review assigned that plumbing to L8). The interface
+    # artifact still carries them too, because that is where the
+    # FINGERPRINT comes from and §4.3 decides attach-or-refuse on the
+    # fingerprint. So there are two readings of one fact, and the thing
+    # to do with two readings is not to pick one: it is to compare them
+    # and refuse a disagreement. A disagreement means the artifact and
+    # the interface were produced from different evaluations of the
+    # recipe, and continuing would attach this project to an instance
+    # key neither declaration names.
+    let summaryDeclared = summaryDeclaredIdentityAndScope(item.service)
+    if summaryDeclared.declared:
+      if summaryDeclared.identity != lifted.identity or
+         summaryDeclared.scope != lifted.scope:
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: the dev-env artifact and " &
+          "the interface artifact disagree about this service's " &
+          "declared identity/scope (artifact: " &
+          $summaryDeclared.identity.kind & " `" &
+          summaryDeclared.identity.stableId & "` / " &
+          $summaryDeclared.scope & "; interface: " &
+          $lifted.identity.kind & " `" & lifted.identity.stableId &
+          "` / " & $lifted.scope & "). They are produced from one " &
+          "`service` block, so a disagreement means the two artifacts " &
+          "came from different evaluations. Re-run `repro dev-env` to " &
+          "rebuild both; attaching on either reading would pick an " &
+          "instance key the recipe does not declare.")
+        inc refused
+        continue
     let key = sharedServiceInstanceKey(item.declaration, projectRoot,
       lifted.identity, lifted.scope)
     if key.degradationReport().len > 0:
@@ -15290,11 +15345,79 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
       (if response.holders.len == 1: "" else: "s"))
     ledger.add((serviceName: item.declaration.serviceName,
       keyJson: encodeServiceInstanceKey(key), address: response.address))
+    # Shared-Development-Services L8 -- RECONCILE THE REGISTRATIONS, now
+    # that the instance is LIVE.
+    #
+    # §7's ordering requirement, and it is the whole of what §7 says is
+    # left to build: "The registration resource's provider needs the
+    # issuer *running* before it can reconcile, so the resource depends
+    # on the service's readiness, and consuming edges depend on the
+    # resource." This is that point in the program: the daemon has
+    # answered that the instance is materialised or attached, and the
+    # supervisor has NOT been launched yet, so every consuming edge is
+    # downstream of here.
+    #
+    # D-SS10 IS NOT RESOLVED BY THIS, and the difference is worth
+    # stating. The decision asks whether the ordering edge is "an
+    # ordinary `dependsOn` onto the service node, a leased
+    # `stateGroup`, or a distinct readiness edge". This is none of the
+    # three: it is a sequential step in the CLI, ordered by program
+    # order rather than by a graph edge. It satisfies the REQUIREMENT
+    # (nothing reads an attribute before it is computed) without taking
+    # the decision.
+    #
+    # THE MINTER IS A PLACEHOLDER AND IT SAYS SO. There is no OIDC
+    # client in this repository: the real minter registers an
+    # application against a running Zitadel, which L9 owns. What runs
+    # here derives a deterministic identifier from the instance address
+    # and the member -- which is enough to prove the lane (mint once,
+    # persist, reuse byte-identically, reach argv) and is NOT enough to
+    # be an OIDC client id. A consumer handed one of these will fail at
+    # the issuer, loudly, which is the right failure for a placeholder.
+    if item.service.registrationMembers.len > 0:
+      let storeRoot = serviceInstanceStoreRoot(dlsUser)
+      let reconciled =
+        try:
+          reconcileServiceRegistrations(storeRoot, key,
+            item.service.registrationMembers,
+            item.service.registrationContributors,
+            proc (member, contributor: string): string {.closure.} =
+              digestHex(blake3DomainDigest(
+                ("repro-dev-registration.v1\x00" & response.address &
+                 "\x00" & member).bytesOf(),
+                hdMetadataEnvelope))[0 ..< 24])
+        except CatchableError as err:
+          stderr.writeLine("repro " & commandName & ": service `" &
+            item.declaration.serviceName &
+            "`: registering its contributed members failed: " & err.msg)
+          refused.inc
+          continue
+      for reg in reconciled.set.registrations:
+        minted.add((serviceName: item.declaration.serviceName,
+          member: reg.member, mintedId: reg.mintedId))
+      var mintedCount = 0
+      var reusedCount = 0
+      var withdrawnCount = 0
+      for outcome in reconciled.outcomes:
+        case outcome.outcome
+        of sroMinted: inc mintedCount
+        of sroReused: inc reusedCount
+        of sroWithdrawn: inc withdrawnCount
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & $mintedCount &
+        " registration" & (if mintedCount == 1: "" else: "s") &
+        " minted, " & $reusedCount & " reused, " & $withdrawnCount &
+        " withdrawn")
   # The ledger records what was CONVERGED, including on a run where
   # another declaration refused: this project really does hold those
   # instances, and a `repro down` that did not release them would leave
   # them held forever.
   writeSharedInstanceLedger(parsed.selection.outDir, holderId, ledger)
+  # And what was MINTED, for the supervisor child to concretize argv
+  # from. Written unconditionally, including empty: a stale file from a
+  # previous run would otherwise resolve a token the recipe no longer
+  # declares.
+  writeSharedInstanceMinted(parsed.selection.outDir, minted)
   if refused > 0: 1 else: 0
 
 proc releaseSharedServiceInstances(outDir: string): int =

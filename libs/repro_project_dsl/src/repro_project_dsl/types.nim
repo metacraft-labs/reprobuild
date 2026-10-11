@@ -479,6 +479,41 @@ type
     epOverride  ## = ``prOverride`` -- where an environment binds (D-SS6)
     epForce     ## = ``prForce``
 
+  ContributionOperation* = enum
+    ## Shared-Development-Services L8 (§5), implementing
+    ## `Configurable-System.md` §"Operation is a SECOND axis, independent
+    ## of priority": "each contribution carries an **operation** as well
+    ## as a priority".
+    ##
+    ## THE TWO AXES ARE INDEPENDENT, and that independence is the whole
+    ## reason this enum exists. Priority alone makes every authoritative
+    ## contribution DESTRUCTIVE -- there is no way to say "add this, and
+    ## I have the standing to insist on it" without also saying "and
+    ## discard everything contributed below me". With the operation at
+    ## the call site there is: an ``coAppend`` at ``epOverride`` or
+    ## ``epForce`` is authoritative and leaves every lower contribution
+    ## present, while a ``coReplace`` is destructive downward at any
+    ## priority.
+    ##
+    ## ``coReplace`` IS ORDINAL 0 ON PURPOSE. Every contribution the
+    ## port recorded before this axis existed was a replace -- an
+    ## ``environment`` binding, a ``setConfigurable``, a construction
+    ## default -- so a record that carries no operation decodes to the
+    ## behaviour it already had rather than to a new one. That is the
+    ## same additive-decode argument ``compatibilityMajor`` makes for
+    ## ``0`` meaning UNDECLARED.
+    coReplace = 0
+      ## *The value is exactly this.* The only operation a scalar has,
+      ## which is why a scalar key needs no new spelling: ``:=`` /
+      ## ``setConfigurable`` / an ``environment`` binding are all
+      ## ``coReplace`` and always were.
+    coAppend = 1
+      ## *Add these to the collection.* Available only on a
+      ## CONTRIBUTION POINT -- a configurable whose type is an ordered
+      ## collection. Appending to a scalar is refused by name rather
+      ## than silently treated as a replace, because "add 4 to the
+      ## worker count" is not a thing the author can have meant.
+
   EnvironmentBindingDef* = object
     ## Shared-Development-Services L5 (§6): ONE binding of ONE
     ## configurable by ONE environment. "An environment is a named set of

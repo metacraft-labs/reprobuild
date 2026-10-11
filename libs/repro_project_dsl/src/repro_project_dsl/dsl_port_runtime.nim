@@ -102,6 +102,7 @@ type
     dskFloat
     dskEnum
     dskSeqEnum
+    dskSeqString
 
   DslScalarValue* = object
     ## Discriminated record holding one configurable's payload. Stored
@@ -128,6 +129,26 @@ type
       seqEnumTypeName*: string
       seqEnumOrds*: seq[int]
       seqEnumValueNames*: seq[string]
+    of dskSeqString:
+      ## Shared-Development-Services L8 — the ORDERED COLLECTION arm,
+      ## and the only kind a CONTRIBUTION POINT may have today.
+      ##
+      ## The enum's own doc comment above predicted this one: "Future
+      ## kinds (e.g. ``seq[string]``) widen this enum WITHOUT a schema
+      ## bump". It is appended LAST so no existing ordinal moves.
+      ##
+      ## WHY ``seq[string]`` HAD NO SLOT BEFORE, which is a gap and not
+      ## a design: ``recordConfigDefault`` carried ``seq[Enum]`` and
+      ## fell through to a static error for every other element type,
+      ## and ``m2TypeReprIsSupportedScalar`` rejected ``seq[string]`` by
+      ## name. So an activity that declared ``relyingParties:
+      ## seq[string]`` got NO configurable cell -- the key was simply
+      ## not registered, and the environment walker then refused a
+      ## binding to it with a diagnostic about a type "the configurable
+      ## lane does not carry". L8 needs exactly that type, because §5's
+      ## contribution point is "a configurable whose type is a
+      ## collection".
+      seqStrVals*: seq[string]
 
   DslVersionInfo* = object
     ## One entry inside a ``versions:`` block. Matches the four named
@@ -248,6 +269,15 @@ proc dslScalarSeqEnum*(typeName: string;
     names.add(n)
   DslScalarValue(kind: dskSeqEnum, seqEnumTypeName: typeName,
                  seqEnumOrds: ords, seqEnumValueNames: names)
+
+proc dslScalarSeqString*(values: seq[string]): DslScalarValue =
+  ## Shared-Development-Services L8 constructor for the ordered-collection
+  ## arm. The members are stored VERBATIM and in order; nothing sorts,
+  ## dedupes or normalises them here, because §5's merge rule for an
+  ## ordered collection is "append in contribution order" and a
+  ## constructor that reordered would make the fold's own ordering
+  ## unobservable.
+  DslScalarValue(kind: dskSeqString, seqStrVals: values)
 
 # ---------------------------------------------------------------------------
 # Public API — config: surface
@@ -432,9 +462,477 @@ proc registeredConfigKeys*(): seq[string] =
 proc isConfigKeyRegistered*(key: string): bool =
   key in dslPortDefaults
 
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L8 — CONTRIBUTION POINTS.
+#
+# `Shared-Development-Services.md` §5 is the authority, and its third
+# paragraph is the whole of why there is no new primitive here:
+#
+#   "This needs no new mechanism. A collection is a configurable."
+#
+# So a contribution point IS a row in the same `dslPortDefaults` /
+# `dslPortKeyOrder` registries every other `config:` key lives in. What
+# is new is (a) a collection-typed arm for it to hold (`dskSeqString`)
+# and (b) the SECOND AXIS the L5 section above said it was deferring:
+#
+#   "the CONTRIBUTION operation axis (`append` / `replace`, §5.1) is L8.
+#    An environment binding is a `replace` at `epOverride` in the terms
+#    L8 will introduce, and this code does not pre-empt the spelling."
+#
+# That prediction is honoured literally below: `setConfigurableRaw` --
+# which is the route an `environment` binding takes -- lands as a
+# `coReplace` at `epOverride`, and nothing about the environment lane
+# changed to make that true.
+#
+# WHAT THE PORT COULD NOT DO BEFORE, stated as a limitation at
+# `bindEnvironmentConfigurable`: "`epOverride` IS A RECORDED LABEL HERE,
+# NOT AN ORDERING THIS PORT CAN ENFORCE ... A later `epForce` does not
+# outrank an `epOverride` and an earlier one is not protected from it."
+# For a CONTRIBUTION POINT that is no longer true -- the fold below is
+# `Configurable-System.md` §Resolution's four steps, so the ladder is
+# enforced. It is still true for a SCALAR key, deliberately: changing
+# scalar resolution would change the resolved value of every existing
+# `config:` key in the repository, which is not L8's gate and would be a
+# silent behaviour change across 11 production NDE packages.
+# ---------------------------------------------------------------------------
+
+type
+  ConfigContribution* = object
+    ## ONE contribution to ONE configurable: the (priority, value,
+    ## provenance) triple `Configurable-System.md` specifies, plus the
+    ## OPERATION that makes the two axes independent.
+    key*: string
+      ## The configurable's full key, `<package>.<name>` or
+      ## `<package>.<activity>.<name>` -- byte-identical to the key
+      ## `recordConfigDefault` registers, which is what makes a
+      ## contribution a contributor into the EXISTING table rather than
+      ## a second one.
+    package*: string
+      ## The CONTRIBUTING package. This is the attribution §5 requires
+      ## ("every converged member can already name the package that
+      ## contributed it, and a withdrawn dependency's members can be
+      ## identified for removal").
+      ##
+      ## IT IS A FIELD AND NOT DERIVED FROM `sourceFile`, and the
+      ## distinction is load-bearing for `withdrawPackageContributions`:
+      ## a file path does not name a package (one file may lower several
+      ## packages, and a generated recipe's path names no package at
+      ## all), so a withdrawal keyed on the path would remove the wrong
+      ## rows. The empty string means "the port itself" -- a
+      ## construction default or a `setConfigurable` from code that is
+      ## not a package body.
+    precedence*: EnvironmentPrecedence
+      ## The priority axis. `EnvironmentPrecedence` is REUSED rather
+      ## than mirrored a second time: it is already declared as this
+      ## library's mirror of `Configurable-System.md`'s
+      ## `ContributionPriority`, the drift assertion that keeps the two
+      ## aligned already exists
+      ## (`tests/dsl_port/t_dsl_environment_binds_configurables.nim`,
+      ## "EnvironmentPrecedence mirrors ContributionPriority, ordinal
+      ## for ordinal"), and a third spelling of one ladder inside one
+      ## library is the drift this campaign has already paid for once.
+      ## Its NAME is environment-flavoured; its ROLE from L8 on is the
+      ## port's contribution ladder.
+    operation*: ContributionOperation
+      ## The operation axis, independent of `precedence`.
+    value*: DslScalarValue
+      ## For `coReplace`, the entire value. For `coAppend`, the members
+      ## to add -- so an append carries a `dskSeqString` holding just
+      ## its own members, never the running total.
+    sourceFile*: string
+    sourceLine*: int
+      ## The call site, for the step-4 diagnostic. An empty file is a
+      ## contribution made from code that captured no site; the
+      ## diagnostic says `<unknown site>` rather than rendering `:0`.
+
+  DiscardedContribution* = object
+    ## `Configurable-System.md` §Resolution step 4: "Every `append`
+    ## whose priority is BELOW R's is **discarded**, and each discard
+    ## MUST emit a structured diagnostic naming both sites -- the
+    ## discarded contribution and the `replace` that superseded it."
+    ##
+    ## STRUCTURED, not a string. A caller that wants the message calls
+    ## `renderDiscardedContribution`; a caller that wants to assert on
+    ## which site lost reads the fields. A pre-rendered string would
+    ## make the second impossible, and step 4's whole purpose is that
+    ## the engine "can say which contribution was dropped and which one
+    ## dropped it".
+    key*: string
+    discarded*: ConfigContribution
+    supersededBy*: ConfigContribution
+
+  ContributionFold* = object
+    ## The result of folding one contribution point: the resolved
+    ## members, who contributed each one, and what was discarded.
+    members*: seq[string]
+    memberPackages*: seq[string]
+      ## Parallel to `members`: the contributing package of each. Two
+      ## parallel seqs rather than a seq of tuples so `members` can be
+      ## handed to `dslScalarSeqString` without a rebuild.
+    discarded*: seq[DiscardedContribution]
+
+  EDslPortNotAContributionPoint* = object of CatchableError
+    ## Raised when `coAppend` is aimed at a key that is not a
+    ## contribution point. "Append 4 to the worker count" is not a thing
+    ## an author can have meant, so it is refused BY NAME rather than
+    ## silently treated as a replace -- which is the shape of defect
+    ## this campaign has found twenty-plus times.
+
+  EDslPortDuplicateForceReplace* = object of CatchableError
+    ## `Configurable-System.md` §"`prForce` is limited per operation,
+    ## not per configurable": "at most one `prForce` `replace` per
+    ## configurable, and a second is an error". SEVERAL `prForce`
+    ## APPENDS ARE NOT AN ERROR and must not raise this -- that is the
+    ## distinction the one-axis rule got wrong.
+
+  EDslPortContradictoryReplace* = object of CatchableError
+    ## §Resolution step 1: "Several `replace` contributions tied at that
+    ## priority resolve by the equal-priority rules above -- which for a
+    ## collection is an **error**, because two different 'the value is
+    ## exactly this' claims at equal authority are a genuine
+    ## contradiction rather than something to merge."
+    ##
+    ## Two claims with the SAME value are not a contradiction and do not
+    ## raise: that is a replay, not a disagreement.
+
+var dslPortContributionPoints: Table[string, bool]
+  ## Every key declared as a contribution point. A separate registry
+  ## from `dslPortDefaults` for the reason `dslPortRequired` is separate:
+  ## "which kind" and "is this a contribution point" are two facts, and
+  ## a key's kind alone cannot decide the second -- a plain
+  ## `seq[string]` scalar key would be indistinguishable from a
+  ## contribution point if the discriminant were the only evidence.
+
+var dslPortContributions: Table[string, seq[ConfigContribution]]
+  ## Every contribution to every contribution point, in contribution
+  ## order. `Configurable-System.md`'s `c.contributions` for this port.
+
+var dslPortContributionPointOrder: seq[string]
+  ## Insertion-order list of contribution-point keys, for stable
+  ## enumeration (same reason `dslPortKeyOrder` exists).
+
+proc isContributionPoint*(key: string): bool =
+  ## Whether `key` was declared as an ordered-collection contribution
+  ## point.
+  key in dslPortContributionPoints
+
+proc registeredContributionPoints*(): seq[string] =
+  ## Every contribution-point key in declaration order.
+  result = dslPortContributionPointOrder
+
+proc recordContributionPointRaw*(key: string; default: DslScalarValue;
+                                 sourceFile = ""; sourceLine = 0) =
+  ## Declare `key` as an ordered-collection contribution point whose
+  ## construction default is `default`.
+  ##
+  ## The default is recorded as a `coReplace` contribution at
+  ## `epDefault`, which is what makes §Resolution's steps 1 and 2
+  ## collapse correctly rather than needing a special case: "the base
+  ## value is R's value, or the construction default when there is no
+  ## `replace`" -- with the default itself a replace at the bottom rung,
+  ## R always exists and step 2 is just "R's value".
+  ##
+  ## IDEMPOTENT ON REPLAY. A module-init replay re-runs this; the second
+  ## call leaves the existing rows alone, exactly as
+  ## `recordConfigDefault` does. Without that, `rerunServiceDeclarators`
+  ## would double every default.
+  if default.kind != dskSeqString:
+    raise newException(EDslPortTypeMismatch,
+      "recordContributionPoint('" & key & "'): a contribution point " &
+      "must be an ordered collection (dskSeqString), not " &
+      $default.kind)
+  if key in dslPortContributionPoints:
+    return
+  if key notin dslPortDefaults:
+    dslPortKeyOrder.add(key)
+  dslPortDefaults[key] = default
+  dslPortContributionPoints[key] = true
+  dslPortContributionPointOrder.add(key)
+  dslPortContributions[key] = @[ConfigContribution(
+    key: key, package: "", precedence: epDefault, operation: coReplace,
+    value: default, sourceFile: sourceFile, sourceLine: sourceLine)]
+
+proc recordContributionPoint*[T](packageName, name: string; default: T;
+                                 sourceFile = ""; sourceLine = 0) =
+  ## Generic facade. `T` is `seq[string]` today and the static error
+  ## names the restriction rather than falling through to a scalar arm.
+  ##
+  ## A CONTRIBUTION POINT DECLARED WITHOUT A DEFAULT IS *NOT* REQUIRED,
+  ## and the `config:` lowering passes `@[]` for it. L5's rule -- "a key
+  ## with no default is REQUIRED" -- is right for a scalar and wrong
+  ## for a collection: "no relying parties have been contributed yet" is
+  ## a VALUE, not an absence, and raising `EDslPortUnsatisfiedRequired`
+  ## for it would make a contribution point unreadable until somebody
+  ## contributed, i.e. would make the owner's own `renderConfig` fail on
+  ## a workspace where no consumer is enabled.
+  when T is seq[string]:
+    recordContributionPointRaw(packageName & "." & name,
+      dslScalarSeqString(default), sourceFile, sourceLine)
+  else:
+    {.error: "recordContributionPoint: unsupported contribution-point " &
+       "type " & $T & "; L8 carries seq[string]".}
+
+proc contributionRowsEqual(a, b: ConfigContribution): bool =
+  a.key == b.key and a.package == b.package and
+    a.precedence == b.precedence and a.operation == b.operation and
+    a.sourceFile == b.sourceFile and a.sourceLine == b.sourceLine and
+    a.value.kind == b.value.kind and
+    a.value.seqStrVals == b.value.seqStrVals
+
+proc renderContributionSite*(c: ConfigContribution): string =
+  ## One contribution's site, for a diagnostic. Names the package as
+  ## well as the file, because "which package" is the fact an author
+  ## acts on and a path may not reveal it.
+  let where =
+    if c.sourceFile.len == 0: "<unknown site>"
+    else: c.sourceFile & ":" & $c.sourceLine
+  let who = if c.package.len == 0: "<the port>" else: c.package
+  who & " at " & where & " (" & $c.operation & ", " & $c.precedence & ")"
+
+proc renderDiscardedContribution*(d: DiscardedContribution): string =
+  ## §Resolution step 4's diagnostic, naming BOTH sites.
+  "contribution to `" & d.key & "` was DISCARDED: the " &
+    $d.discarded.operation & " contributed by " &
+    renderContributionSite(d.discarded) &
+    " is below the winning replace contributed by " &
+    renderContributionSite(d.supersededBy) &
+    ", so its members are not present. Raise the append to " &
+    $d.supersededBy.precedence &
+    " or stop replacing the collection."
+
+proc foldContributionPoint*(key: string): ContributionFold =
+  ## `Configurable-System.md` §Resolution, the four steps, in order.
+  if key notin dslPortContributionPoints:
+    raise newException(EDslPortNotAContributionPoint,
+      "foldContributionPoint('" & key & "'): not a contribution point")
+  let rows = dslPortContributions.getOrDefault(key)
+
+  # Step 1: R is the highest-priority `replace`.
+  var rIdx = -1
+  for i in 0 ..< rows.len:
+    if rows[i].operation == coReplace:
+      if rIdx < 0 or ord(rows[i].precedence) > ord(rows[rIdx].precedence):
+        rIdx = i
+  if rIdx < 0:
+    # Unreachable while `recordContributionPointRaw` seeds a default
+    # replace, and asserted rather than assumed: a contribution point
+    # with no replace at all would mean the seed row was removed, which
+    # `withdrawPackageContributions` is explicitly forbidden to do.
+    raise newException(EDslPortNotAContributionPoint,
+      "foldContributionPoint('" & key & "'): no `replace` contribution " &
+      "remains, not even the construction default -- the seed row was " &
+      "removed, which nothing is allowed to do")
+
+  # Step 1b: two DIFFERENT replaces tied at R's priority contradict.
+  for i in 0 ..< rows.len:
+    if i == rIdx: continue
+    if rows[i].operation != coReplace: continue
+    if rows[i].precedence != rows[rIdx].precedence: continue
+    if rows[i].value.seqStrVals == rows[rIdx].value.seqStrVals: continue
+    raise newException(EDslPortContradictoryReplace,
+      "two different `replace` contributions to `" & key &
+      "` at equal authority: " & renderContributionSite(rows[rIdx]) &
+      " claims " & $rows[rIdx].value.seqStrVals & " and " &
+      renderContributionSite(rows[i]) & " claims " &
+      $rows[i].value.seqStrVals & ". Two 'the value is exactly this' " &
+      "claims at one priority are a contradiction, not something to " &
+      "merge.")
+
+  # Step 2: the base value is R's.
+  result.members = rows[rIdx].value.seqStrVals
+  for _ in result.members:
+    result.memberPackages.add(rows[rIdx].package)
+
+  # Steps 3 and 4: every append at or above R's priority applies, in
+  # priority order and then contribution order; every append below R's
+  # is discarded WITH a diagnostic naming both sites.
+  for rung in ord(rows[rIdx].precedence) .. ord(high(EnvironmentPrecedence)):
+    for i in 0 ..< rows.len:
+      if rows[i].operation != coAppend: continue
+      if ord(rows[i].precedence) != rung: continue
+      for m in rows[i].value.seqStrVals:
+        result.members.add(m)
+        result.memberPackages.add(rows[i].package)
+  for i in 0 ..< rows.len:
+    if rows[i].operation != coAppend: continue
+    if ord(rows[i].precedence) >= ord(rows[rIdx].precedence): continue
+    result.discarded.add(DiscardedContribution(
+      key: key, discarded: rows[i], supersededBy: rows[rIdx]))
+
+proc configurableContributions*(key: string): seq[ConfigContribution] =
+  ## `Configurable-System.md`'s `c.contributions`: every contribution to
+  ## `key`, in contribution order, with its priority, operation, value
+  ## and provenance. A copy, so a caller cannot mutate the registry.
+  dslPortContributions.getOrDefault(key)
+
+proc contributionMemberAttribution*(key: string):
+                                    seq[tuple[member, package: string]] =
+  ## Every converged member paired with the package that contributed it.
+  ## §5's "Attribution" property, read off the fold.
+  let folded = foldContributionPoint(key)
+  for i in 0 ..< folded.members.len:
+    result.add((member: folded.members[i],
+                package: folded.memberPackages[i]))
+
+proc discardedContributions*(key: string): seq[DiscardedContribution] =
+  ## Every step-4 discard for `key`, recomputed from the current
+  ## contribution set. Recomputed rather than accumulated: a cached list
+  ## would still name a discard after the `replace` that caused it was
+  ## withdrawn.
+  foldContributionPoint(key).discarded
+
+proc allDiscardedContributions*(): seq[DiscardedContribution] =
+  ## Every step-4 discard across every contribution point, in
+  ## declaration order.
+  for key in dslPortContributionPointOrder:
+    for d in foldContributionPoint(key).discarded:
+      result.add(d)
+
+proc contributeConfigurableRaw*(key, package: string;
+                                precedence: EnvironmentPrecedence;
+                                operation: ContributionOperation;
+                                value: DslScalarValue;
+                                sourceFile = ""; sourceLine = 0) =
+  ## The ONE funnel every contribution goes through.
+  ##
+  ## IDEMPOTENT ON AN IDENTICAL ROW. A byte-identical contribution --
+  ## same key, package, priority, operation, value and site -- is a
+  ## replay and is dropped. This is what makes convergence idempotent
+  ## structurally rather than by a caller remembering to check:
+  ## `rerunServiceDeclarators` re-executes every service and activity
+  ## body during provider-graph emission, so every contribution in the
+  ## repository is made at least twice.
+  if key notin dslPortDefaults:
+    raise newException(EDslPortMissingKey,
+      "contributeConfigurable: no configurable registered for key '" &
+      key & "' -- declare it in a `config:` block first")
+  if operation == coAppend and key notin dslPortContributionPoints:
+    raise newException(EDslPortNotAContributionPoint,
+      "contributeConfigurable('" & key & "'): `append` is only " &
+      "available on an ordered-collection contribution point; `" & key &
+      "` is a " & $dslPortDefaults[key].kind & " scalar. A scalar's " &
+      "only operation is `replace` (Configurable-System.md " &
+      "§\"Operation is a SECOND axis\").")
+  let registered = dslPortDefaults[key]
+  if registered.kind != value.kind:
+    raise newException(EDslPortTypeMismatch,
+      "contributeConfigurable('" & key & "'): contribution kind " &
+      $value.kind & " does not match registered kind " &
+      $registered.kind)
+  let row = ConfigContribution(key: key, package: package,
+    precedence: precedence, operation: operation, value: value,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+  var rows = dslPortContributions.getOrDefault(key)
+  if precedence == epForce and operation == coReplace:
+    for existing in rows:
+      if existing.precedence == epForce and existing.operation == coReplace:
+        if contributionRowsEqual(existing, row):
+          return
+        raise newException(EDslPortDuplicateForceReplace,
+          "`" & key & "` already has a `force` `replace` contributed " &
+          "by " & renderContributionSite(existing) & "; " &
+          renderContributionSite(row) & " is a second one. At most one " &
+          "`force` `replace` per configurable (Configurable-System.md " &
+          "§\"`prForce` is limited per operation\"). Several `force` " &
+          "`append` contributions are NOT a contradiction and are " &
+          "permitted.")
+  for existing in rows:
+    if contributionRowsEqual(existing, row):
+      return
+  rows.add(row)
+  dslPortContributions[key] = rows
+
+proc contributeConfigurable*[T](key, package: string;
+                                precedence: EnvironmentPrecedence;
+                                operation: ContributionOperation;
+                                value: T;
+                                sourceFile = ""; sourceLine = 0) =
+  ## Generic facade over `contributeConfigurableRaw`.
+  when T is seq[string]:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarSeqString(value), sourceFile, sourceLine)
+  elif T is string:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarString(value), sourceFile, sourceLine)
+  elif T is bool:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarBool(value), sourceFile, sourceLine)
+  elif T is SomeInteger:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarInt(int(value)), sourceFile, sourceLine)
+  else:
+    {.error: "contributeConfigurable: unsupported type " & $T.}
+
+proc withdrawPackageContributions*(package: string): int {.discardable.} =
+  ## Remove every contribution `package` made, and NOTHING else.
+  ##
+  ## §5's second attribution property: "a withdrawn dependency's members
+  ## can be identified for removal". A withdrawal that also dropped the
+  ## construction default would leave the point unresolvable, so the
+  ## seed row -- `package == ""` at `epDefault` -- is explicitly held:
+  ## `withdrawPackageContributions("")` removes no seed, and the fold's
+  ## "no replace remains" refusal is the control that says so.
+  ##
+  ## Returns the number of rows removed, so a caller can tell "withdrew
+  ## nothing" from "withdrew everything" rather than guessing.
+  for key in dslPortContributionPointOrder:
+    var kept: seq[ConfigContribution] = @[]
+    for row in dslPortContributions.getOrDefault(key):
+      if row.package == package and
+         not (row.package.len == 0 and row.precedence == epDefault and
+              row.operation == coReplace):
+        inc result
+      else:
+        kept.add(row)
+    dslPortContributions[key] = kept
+
+proc l8ContributionMembers*(v: string): seq[string] =
+  ## One member, written as a bare string at the contribution site.
+  ## Shared-Development-Services L8: both `x = "a"` and `x = @["a","b"]`
+  ## are authorable, and the two overloads are what makes the single
+  ## emitted call shape carry either without the macro having to decide
+  ## the author's type.
+  @[v]
+
+proc l8ContributionMembers*(v: seq[string]): seq[string] =
+  ## Several members, written as a seq literal at the contribution site.
+  v
+
+proc contributeMembers*(key, package: string;
+                        precedence: EnvironmentPrecedence;
+                        operation: ContributionOperation;
+                        members: seq[string];
+                        sourceFile = ""; sourceLine = 0) =
+  ## The call the `contribute:` lowering emits, one per contribution.
+  contributeConfigurableRaw(key, package, precedence, operation,
+    dslScalarSeqString(members), sourceFile, sourceLine)
+
+proc contributionSnapshot*(): Table[string, seq[ConfigContribution]] =
+  ## A copy of the contribution registry, for a caller that must apply a
+  ## GROUP of contributions all-or-nothing -- the same contract
+  ## `configurableOverrideSnapshot` has, and needed for the same reason:
+  ## `applyEnvironment` binds several configurables in sequence and one
+  ## of them may be a contribution point, so a partial apply has to be
+  ## undoable on both registries or neither.
+  dslPortContributions
+
+proc restoreContributions*(snapshot: Table[string, seq[ConfigContribution]]) =
+  ## Replace the contribution registry with `snapshot`.
+  dslPortContributions = snapshot
+
 proc dslPortLookup(key: string): DslScalarValue =
   ## Internal: consult overrides first, then defaults. Raises
   ## ``EDslPortMissingKey`` when neither table knows the key.
+  ##
+  ## A CONTRIBUTION POINT IS RESOLVED BY THE FOLD AND NOTHING ELSE
+  ## (Shared-Development-Services L8). It is checked FIRST, before the
+  ## override table, because a `setConfigurable` against such a key is
+  ## routed into the contribution registry as a `coReplace` at
+  ## `epOverride` -- so if the override row were consulted first it
+  ## would shadow the ladder the fold exists to enforce, and an
+  ## `epForce` append would silently lose to an `epOverride` replace.
+  if key in dslPortContributionPoints:
+    return dslScalarSeqString(foldContributionPoint(key).members)
   if key in dslPortOverrides:
     return dslPortOverrides[key]
   if key in dslPortRequired:
@@ -509,9 +1007,20 @@ proc readConfigurable*[T](key: string): T =
         "'): stored enum type " & stored.enumTypeName &
         " does not match requested " & $T)
     return T(stored.enumOrd)
+  elif T is seq[string]:
+    # Shared-Development-Services L8: the ordered-collection arm. For a
+    # CONTRIBUTION POINT the value `dslPortLookup` returned is already
+    # the fold's result, so this reader never sees an unresolved
+    # collection and never has to know about the ladder.
+    if stored.kind != dskSeqString:
+      raise newException(EDslPortTypeMismatch,
+        "readConfigurable[seq[string]]('" & key & "'): stored kind is " &
+        $stored.kind & ", not dskSeqString")
+    return stored.seqStrVals
   else:
     {.error: "readConfigurable: unsupported type " & $T &
-       "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+       "; M2/M9.D supports bool / int / string / float / enum / " &
+       "seq[enum]; L8 adds seq[string]".}
 
 proc readConfigurable*[E: enum](key: string; fallback: seq[E]): seq[E] =
   ## M9.D ``seq[Enum]`` reader with graceful fallback. Returns the
@@ -591,9 +1100,13 @@ proc readConfigurable*[T](key: string; fallback: T): T =
       if stored.kind != dskEnum: return fallback
       if stored.enumTypeName != $T: return fallback
       return T(stored.enumOrd)
+    elif T is seq[string]:
+      if stored.kind != dskSeqString: return fallback
+      return stored.seqStrVals
     else:
       {.error: "readConfigurable: unsupported type " & $T &
-         "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+         "; M2/M9.D supports bool / int / string / float / enum / " &
+         "seq[enum]; L8 adds seq[string]".}
   except EDslPortMissingKey:
     return fallback
 
@@ -622,6 +1135,36 @@ proc setConfigurableRaw*(key: string; value: DslScalarValue) =
     raise newException(EDslPortTypeMismatch,
       "setConfigurable('" & key & "'): override kind " & $value.kind &
       " does not match registered kind " & $registered.kind)
+  if key in dslPortContributionPoints:
+    # Shared-Development-Services L8. The L5 section below predicted
+    # exactly this: "An environment binding is a `replace` at
+    # `epOverride` in the terms L8 will introduce". `setConfigurable` is
+    # the route an `environment` binding takes, so it lands as one --
+    # and nothing in the environment lane had to change to make that
+    # true.
+    #
+    # IT OVERWRITES RATHER THAN APPENDING A ROW, which is what keeps it
+    # equivalent to the `dslPortOverrides[key] = value` it replaces:
+    # applying environment `dev` and then environment `production` to
+    # the same key must leave the second's value in force, not two
+    # contradictory `replace` claims at one priority (which the fold
+    # would correctly refuse). One row per (key, `""` package,
+    # `epOverride`, `coReplace`), overwritten in place.
+    var rows = dslPortContributions.getOrDefault(key)
+    let row = ConfigContribution(key: key, package: "",
+      precedence: epOverride, operation: coReplace, value: value,
+      sourceFile: "", sourceLine: 0)
+    var replaced = false
+    for i in 0 ..< rows.len:
+      if rows[i].package.len == 0 and rows[i].precedence == epOverride and
+         rows[i].operation == coReplace:
+        rows[i] = row
+        replaced = true
+        break
+    if not replaced:
+      rows.add(row)
+    dslPortContributions[key] = rows
+    return
   dslPortOverrides[key] = value
 
 proc setConfigurable*[T](key: string; value: T) =
@@ -645,6 +1188,11 @@ proc setConfigurable*[T](key: string; value: T) =
       for e in value:
         pairs.add((e.ord, $e))
       setConfigurableRaw(key, dslScalarSeqEnum($Elem, pairs))
+    elif Elem is string:
+      # Shared-Development-Services L8: a `replace` of an
+      # ordered-collection contribution point. This is the route an
+      # `environment` binding to such a point takes.
+      setConfigurableRaw(key, dslScalarSeqString(value))
     else:
       {.error: "setConfigurable: unsupported type " & $T &
          "; M9.D seq support is restricted to seq[Enum]".}
@@ -671,6 +1219,19 @@ proc resetConfigurable*(key: string) =
     raise newException(EDslPortMissingKey,
       "resetConfigurable: no configurable registered for key '" & key &
       "'")
+  if key in dslPortContributionPoints:
+    # Shared-Development-Services L8: drop the row `setConfigurable`
+    # owns, and ONLY that row. A reset is the inverse of a `set`, so it
+    # must not take a consumer's `coAppend` contributions with it -- that
+    # is `withdrawPackageContributions`'s job and it is keyed by package.
+    var kept: seq[ConfigContribution] = @[]
+    for row in dslPortContributions.getOrDefault(key):
+      if row.package.len == 0 and row.precedence == epOverride and
+         row.operation == coReplace:
+        continue
+      kept.add(row)
+    dslPortContributions[key] = kept
+    return
   if key in dslPortOverrides:
     dslPortOverrides.del(key)
 
@@ -1553,6 +2114,20 @@ type
     scope*: ServiceScope
       ## ``scope project`` (the default) | ``workspace`` | ``user`` |
       ## ``system``.
+    convergePoints*: seq[string]
+      ## Shared-Development-Services L8: the BARE names of the
+      ## contribution points this service converges when its instance
+      ## answers -- `converge relyingParties, fixtureUsers`.
+      ##
+      ## BARE, not fully qualified, and resolved later. The service
+      ## emitter is shared by the package-level walker and the dev-env
+      ## `activity` walker (L2 extracted it precisely so the two cannot
+      ## drift), and only the second knows an activity name -- so
+      ## qualifying here would mean either threading the activity name
+      ## through the shared emitter or writing a second emitter. The
+      ## resolution is `resolveServiceConvergePoint`, which searches the
+      ## package's registered contribution points and REFUSES an
+      ## ambiguous or unknown name by name.
     # ---------------------------------------------------------------
     # M9.C — systemd-unit metadata extensions.
     #
@@ -1640,6 +2215,9 @@ type
     # Shared-Development-Services L4 — see DslServiceDef.
     identity: ServiceIdentityDef
     scope: ServiceScope
+    convergePoints: seq[string]
+      ## Shared-Development-Services L8: the bare `converge <point>`
+      ## names collected by `addActiveServiceConvergePoint`.
     identityDeclared: bool
       ## Whether this body already ran an ``identity`` setter. The macro
       ## refuses a second one at expansion time, so this is the runtime
@@ -2190,6 +2768,75 @@ proc addActiveServiceArg*(value: BuildOutput) =
   ## ``<buildOutput>.path``.
   addActiveServiceArg(value.path)
 
+proc addActiveServiceConvergePoint*(name: string) =
+  ## Body-setter: record one `converge <point>` of the active frame.
+  ##
+  ## IDEMPOTENT ON A REPEATED NAME. `converge relyingParties` written
+  ## twice in one body, or a body re-run by `rerunServiceDeclarators`,
+  ## records one point -- otherwise the registration pass would be asked
+  ## to reconcile the same member set twice and the second pass would be
+  ## indistinguishable from a second consumer.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  for existing in dslPortActiveServiceContext[^1].convergePoints:
+    if existing == name:
+      return
+  dslPortActiveServiceContext[^1].convergePoints.add(name)
+
+proc resolveServiceConvergePoint*(packageName, bareName: string): string =
+  ## Resolve a `converge <bareName>` to the full contribution-point key.
+  ##
+  ## Searches the package's registered contribution points for one whose
+  ## last dotted segment is `bareName`. An UNKNOWN name and an AMBIGUOUS
+  ## one are both refused, by name, naming the candidates -- the two
+  ## failure modes a suffix search has, and both silent if unchecked:
+  ## unknown would register nothing, ambiguous would register whichever
+  ## came first in a hash-ordered walk.
+  var matches: seq[string] = @[]
+  let suffix = "." & bareName
+  for key in dslPortContributionPointOrder:
+    if not key.startsWith(packageName & "."):
+      continue
+    if key.endsWith(suffix):
+      matches.add(key)
+  if matches.len == 1:
+    return matches[0]
+  var declared: seq[string] = @[]
+  for key in dslPortContributionPointOrder:
+    if key.startsWith(packageName & "."):
+      declared.add(key)
+  if matches.len == 0:
+    raise newException(EDslPortMissingKey,
+      "`converge " & bareName & "` in package `" & packageName &
+      "` names no contribution point. The ordered-collection `config:` " &
+      "keys of this package are: " &
+      (if declared.len == 0: "(none)" else: declared.join(", ")) &
+      ". A contribution point is a `config:` key whose type is " &
+      "`seq[string]`.")
+  raise newException(EDslPortMissingKey,
+    "`converge " & bareName & "` in package `" & packageName &
+    "` is AMBIGUOUS: " & matches.join(", ") & " all end in `." &
+    bareName & "`. Two activities declaring a point of the same bare " &
+    "name is legal; converging one of them by that name is not.")
+
+proc addActiveServiceArg*(values: seq[string]) =
+  ## Shared-Development-Services L8: `args <contributionPoint>` puts
+  ## EVERY folded member on argv as its own token, in fold order.
+  ##
+  ## ONE TOKEN PER MEMBER, not a joined string, and the distinction is
+  ## the gate's: §5's contribution point is a collection, and a service
+  ## that received `"a b c"` where it expected three arguments would
+  ## have been handed a different command line than the one the
+  ## contributions describe. `$seq` would also render Nim's `@["a"]`
+  ## syntax into argv, which no program parses.
+  ##
+  ## An EMPTY collection contributes NO tokens -- not an empty-string
+  ## argument. A workspace where nothing has contributed therefore runs
+  ## the owner's service with the flag and no values, which is the same
+  ## command line it ran before any consumer existed.
+  for value in values:
+    addActiveServiceArg(value)
+
 proc addActiveServiceRuntimeFile*(value: BuildOutput) =
   ## Body-setter for ``runtimeFile <buildOutput>`` — "declares a build
   ## output that the service must have alongside it at runtime even
@@ -2637,7 +3284,8 @@ proc finishServiceContext*() =
     runtimeFiles: frame.runtimeFiles,
     triggers: frame.triggers,
     identity: frame.identity,
-    scope: frame.scope))
+    scope: frame.scope,
+    convergePoints: frame.convergePoints))
 
 # ---------------------------------------------------------------------------
 # DSL-port M7 — user-facing service-context accessors. Symmetric with the
@@ -6089,11 +6737,23 @@ proc applyEnvironment*(packageName, environmentName: string) =
   # apply pass with the write suppressed -- two code paths that can
   # disagree about what is bindable, which is the defect family this
   # milestone keeps finding. Snapshot-and-restore needs one path.
+  #
+  # SHARED-DEVELOPMENT-SERVICES L8 ADDED A SECOND REGISTRY, SO THE
+  # SNAPSHOT HAD TO GROW WITH IT. A binding to a CONTRIBUTION POINT no
+  # longer writes `dslPortOverrides`; it writes a `coReplace` row into
+  # `dslPortContributions` (see `setConfigurableRaw`). Snapshotting only
+  # the override table would therefore have restored the scalar half of
+  # a half-applied environment and LEFT the collection half in force --
+  # exactly the partial apply the paragraph above exists to prevent,
+  # re-introduced one registry over. Both are snapshotted and both are
+  # restored, in one `try`.
   let snapshot = configurableOverrideSnapshot()
+  let contributions = contributionSnapshot()
   try:
     applier()
   except CatchableError:
     restoreConfigurableOverrides(snapshot)
+    restoreContributions(contributions)
     raise
 
 proc applySelectedEnvironment*(packageName: string): string =

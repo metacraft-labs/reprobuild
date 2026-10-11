@@ -397,9 +397,38 @@ package l5posvarargs:
 """
 
 const UnsupportedTypeBound = """
+import std/tables
 import repro_project_dsl
 
 package l5unsup:
+  defaultToolProvisioning "path"
+  config:
+    tags: Table[string, int] = initTable[string, int]()
+  environment dev:
+    tags = initTable[string, int]()
+"""
+  ## THE TYPE HERE CHANGED AT L8, AND THE CASE DID NOT WEAKEN.
+  ##
+  ## It was `seq[string]`, which was genuinely slot-less until
+  ## Shared-Development-Services L8 made an ordered collection the type
+  ## of a CONTRIBUTION POINT (§5: "a collection is a configurable"). So
+  ## the old fixture stopped exercising the refusal and started
+  ## exercising the opposite -- a binding that now compiles. Keeping it
+  ## would have turned a refusal test green for the wrong reason, which
+  ## is worse than deleting it.
+  ##
+  ## `Table[string, int]` is a type the configurable lane still does not
+  ## carry (`m2TypeReprIsSupportedScalar` admits a primitive scalar, a
+  ## bare identifier, `seq[<BareIdent>]` and `seq[string]`, and nothing
+  ## else), so the refusal under test is unchanged and still has a real
+  ## instance. The `seq[string]` case did not vanish: it is asserted
+  ## POSITIVELY below, as a contribution point, which is the invariant
+  ## L8 replaced this one with.
+
+const OrderedCollectionBound = """
+import repro_project_dsl
+
+package l5contrib:
   defaultToolProvisioning "path"
   config:
     tags: seq[string] = @["a"]
@@ -684,18 +713,31 @@ suite "L5 — a REQUIRED `config:` key: both routes compile, and nothing else do
     let probe = checkRecipeSource(UnsupportedTypeBound, "l5-noslot-type")
     checkpoint(probe.output)
     check not probe.ok
-    check probe.mentions("whose type `seq[string]` the configurable " &
-      "lane does not carry")
+    check probe.mentions("whose type `Table[string, int]` the " &
+      "configurable lane does not carry")
     check probe.mentions("could never be in force")
     # The old failure's text, asserted ABSENT: the refusal has to
     # replace it, not arrive beside it.
     check not probe.mentions("M9.D seq support is restricted to seq[Enum]")
+    check not probe.mentions("L8 adds seq[string]")
     # AND NOT the required-key refusal. "No default" and "unsupported
     # type" are two refusals and were deliberately not merged when the
     # first of them was narrowed: this key HAS a default and is still
     # slot-less.
     check not probe.mentions("which makes it REQUIRED")
     check not probe.mentions("NOTHING CAN EVER SATISFY IT")
+
+  test "L8: a `seq[string]` key IS carried now, and binding it compiles":
+    # The invariant that replaced the one above. Until
+    # Shared-Development-Services L8 this very spelling was the
+    # refusal's own fixture; §5 makes an ordered collection the type of
+    # a CONTRIBUTION POINT, so the key has a slot and an `environment`
+    # binding to it is the `replace` at `epOverride` that L5's own
+    # deferral note predicted L8 would introduce.
+    let probe = checkRecipeSource(OrderedCollectionBound,
+      "l8-ordered-collection-bound")
+    checkpoint(probe.output)
+    check probe.ok
 
   test "THE CONTROL: a `seq[<enum>]` key IS carried, and binding it compiles":
     let probe = checkRecipeSource(SupportedSeqEnumBound,

@@ -504,6 +504,15 @@ proc isProviderModePath(path: string): bool =
     # ``devEnv<Pkg>Package`` exist only under this define.
     "libs/repro_project_dsl/tests/" &
       "t_l5_environment_reaches_the_service_argv.nim",
+    # Shared-Development-Services L8: both drive ``buildPackageDevEnv``
+    # over a fixture whose ``devEnv:`` activity declares contribution
+    # points, and read the services the provider lowered --
+    # ``buildPackageDevEnv``, ``ProviderGraphRequest`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_contribution_operation_is_a_second_axis.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
   ]:
     if p == exact:
       return true

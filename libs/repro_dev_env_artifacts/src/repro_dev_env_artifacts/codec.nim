@@ -12,7 +12,12 @@ const
   DevEnvMagic = [byte(ord('R')), byte(ord('B')), byte(ord('D')), byte(ord('E'))]
   EnvelopeHeaderLen = 4 + 2 + 2 + 4 + 4
   EnvelopeTrailerLen = 32
-  EnvelopeVersion = 1'u16
+  EnvelopeVersion = 2'u16
+    ## Shared-Development-Services L8: bumped with
+    ## `DevEnvArtifactSchemaVersion`, because the service record grew
+    ## eight positional SSZ fields. The decoder's check is an EQUALITY
+    ## (`if version != EnvelopeVersion: fail`), so an older payload is
+    ## refused by name.
   EnvelopeTypeDevEnv = 1'u16
 
   MaxTextBytes = 16 * 1024
@@ -63,6 +68,18 @@ type
     supervisorPlanRef: Digest32
     hasSupervisorPlanRef: bool
     metadata: SszBytes
+    # Shared-Development-Services L8. Appended last; the envelope
+    # version AND the artifact schema version both move, so a payload
+    # written before these existed is refused by name rather than read
+    # with shifted offsets.
+    identityKind: SszText
+    identityStableId: SszText
+    scope: SszText
+    compatibilityMajor: uint32
+    typedCommand: SszStringList
+    registrationPoints: SszStringList
+    registrationMembers: SszStringList
+    registrationContributors: SszStringList
 
   DevEnvDiagnosticSsz = object
     severity: uint8
@@ -282,7 +299,16 @@ proc toSsz(value: DevEnvServiceSummary): DevEnvServiceSummarySsz =
     activityRequirements: toSszStringList(value.activityRequirements),
     supervisorPlanRef: value.supervisorPlanRef,
     hasSupervisorPlanRef: value.hasSupervisorPlanRef,
-    metadata: encodeMetadata(value.metadata))
+    metadata: encodeMetadata(value.metadata),
+    identityKind: toSszText(value.identityKind),
+    identityStableId: toSszText(value.identityStableId),
+    scope: toSszText(value.scope),
+    compatibilityMajor: value.compatibilityMajor,
+    typedCommand: toSszStringList(value.typedCommand),
+    registrationPoints: toSszStringList(value.registrationPoints),
+    registrationMembers: toSszStringList(value.registrationMembers),
+    registrationContributors:
+      toSszStringList(value.registrationContributors))
 
 proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
   DevEnvServiceSummary(
@@ -290,7 +316,16 @@ proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
     activityRequirements: fromSszStringList(value.activityRequirements),
     supervisorPlanRef: value.supervisorPlanRef,
     hasSupervisorPlanRef: value.hasSupervisorPlanRef,
-    metadata: decodeMetadata(value.metadata))
+    metadata: decodeMetadata(value.metadata),
+    identityKind: fromSszText(value.identityKind),
+    identityStableId: fromSszText(value.identityStableId),
+    scope: fromSszText(value.scope),
+    compatibilityMajor: value.compatibilityMajor,
+    typedCommand: fromSszStringList(value.typedCommand),
+    registrationPoints: fromSszStringList(value.registrationPoints),
+    registrationMembers: fromSszStringList(value.registrationMembers),
+    registrationContributors:
+      fromSszStringList(value.registrationContributors))
 
 proc toSsz(value: DevEnvDiagnostic): DevEnvDiagnosticSsz =
   DevEnvDiagnosticSsz(
@@ -600,7 +635,15 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
     result.services.add(DevEnvServiceSummary(
       name: service.name,
       activityRequirements: service.activityRequirements,
-      metadata: cborText(service.metadata)))
+      metadata: cborText(service.metadata),
+      identityKind: service.identityKind,
+      identityStableId: service.identityStableId,
+      scope: service.scope,
+      compatibilityMajor: service.compatibilityMajor,
+      typedCommand: service.typedCommand,
+      registrationPoints: service.registrationPoints,
+      registrationMembers: service.registrationMembers,
+      registrationContributors: service.registrationContributors))
   result.diagnostics = devEnv.diagnostics
   result.evaluationInputs = devEnv.evaluationInputs
   result.sourceFingerprints = devEnv.sourceFingerprints

@@ -1249,3 +1249,269 @@ proc installDecliningServiceInstanceReapHandler*() =
 # module can WRITE an instance record, so from that moment a sweep in that
 # process must have something honest to say about one.
 installDecliningServiceInstanceReapHandler()
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L8 — REGISTRATIONS, and the values the
+# instance MINTS for them.
+#
+# §7 settles the data path and this section is that settlement, built:
+#
+#   "A per-consumer OIDC client identifier does not exist until the
+#    instance has registered the application against a running issuer.
+#    That is not late-bound configuration -- nobody *contributes* it --
+#    but it is not a new category either: it is a **resource
+#    attribute**."
+#
+# So: one REGISTRATION per contributed member, each carrying the
+# identifier the instance minted for it. The member set is configuration
+# and is already folded by the time this runs (§5's contribution point);
+# the identifier is computed when the registration reconciles.
+#
+# WHAT IS IMPLEMENTED HERE AND WHAT IS NOT, said plainly. The MINTER is
+# injected. This repository contains no Zitadel provider and no OIDC
+# client, so the thing that really calls an issuer's management API does
+# not exist and is not L8's to write -- L9 owns the shared identity
+# provider. What is implemented is the LANE and its hard property:
+# mint-once, persist, and hand back byte-identical identifiers when a
+# second consumer arrives. That property is the one the gate names, and
+# it is the one that cannot be bolted on afterwards: "re-registering an
+# OIDC client mints a new client id and silently invalidates whatever a
+# developer configured last week".
+#
+# A SEPARATE STORE RECORD, not a field on the instance record, and the
+# reason is who writes what. The instance record is the DAEMON's: it
+# carries the pid and the process identity and is rewritten on every
+# converge. The registrations are the CONSUMER's reconcile, run from the
+# CLI after the daemon has answered that the instance is live. Two
+# writers on one record is a race; two records keyed by the same
+# instance address is not.
+#
+# KEYED BY THE INSTANCE, SO THE IDENTIFIERS SURVIVE A RESTART. A
+# `stable` identity exists so that durable state survives (§4.2), and a
+# minted client id IS that state as far as a consumer is concerned. So
+# the record outlives any one process and a new instance under the same
+# key reuses it. That is deliberate and it is the whole point; a record
+# keyed by pid would re-mint on every `repro up`.
+# ---------------------------------------------------------------------------
+
+const
+  ServiceRegistrationsTypeId* = "reprobuild.service-registrations"
+  ServiceRegistrationsAttrsTypeId* = "reprobuild.service-registrations.v1"
+  ServiceRegistrationsAddressSuffix* = "/registrations"
+
+type
+  ServiceRegistration* = object
+    ## One contributed member, registered, with what the instance minted.
+    member*: string
+      ## The member as the contribution point folded it. The IDENTITY of
+      ## a registration: a re-reconcile matches on this and nothing else,
+      ## which is what makes mint-once observable.
+    contributor*: string
+      ## The package that contributed the member (§5's attribution).
+    mintedId*: string
+      ## The value the instance minted. Never regenerated for a member
+      ## that already has one.
+    mintedAtUnix*: int64
+
+  ServiceRegistrationSet* = object
+    address*: string
+      ## `<instance address>/registrations`.
+    registrations*: seq[ServiceRegistration]
+
+  ServiceRegistrationMinter* =
+    proc (member, contributor: string): string {.closure.}
+      ## What the instance does to register a member. Returns the minted
+      ## identifier. INJECTED rather than imported for the reason the
+      ## liveness probe is: the real implementation talks to a running
+      ## service, which this library must not know how to do.
+
+  ServiceRegistrationOutcome* = enum
+    sroMinted      ## this reconcile minted a new identifier
+    sroReused      ## a registration already existed; nothing was minted
+    sroWithdrawn   ## the member's contributor withdrew; removed
+
+proc serviceRegistrationsAddress*(key: ServiceInstanceKey): string =
+  ## The store address of one instance's registration set.
+  serviceInstanceAddress(key) & ServiceRegistrationsAddressSuffix
+
+proc encodeServiceRegistrations*(value: ServiceRegistrationSet): string =
+  ## Deterministic in field and element order, so two writes of one set
+  ## produce identical bytes.
+  var rows = newJArray()
+  for reg in value.registrations:
+    rows.add(%*{
+      "member": reg.member,
+      "contributor": reg.contributor,
+      "mintedId": reg.mintedId,
+      "mintedAtUnix": reg.mintedAtUnix})
+  let node = %*{"attrsTypeId": ServiceRegistrationsAttrsTypeId}
+  node["registrations"] = rows
+  $node
+
+proc decodeServiceRegistrations*(address, attrsTypeId, attrsJson: string):
+    ServiceRegistrationSet =
+  ## The inverse. Raises `ValueError` on anything it cannot decode
+  ## EXACTLY -- a set written by a future version is reported by name
+  ## rather than read as "no registrations here", which would re-mint
+  ## every identifier.
+  if attrsTypeId != ServiceRegistrationsAttrsTypeId:
+    raise newException(ValueError,
+      "service registration set at `" & address & "` carries attrs " &
+      "type `" & attrsTypeId & "`; this build reads `" &
+      ServiceRegistrationsAttrsTypeId & "` only. Reading it anyway " &
+      "would re-mint every identifier in it, which is the one failure " &
+      "this record exists to prevent.")
+  let node =
+    try:
+      parseJson(attrsJson)
+    except CatchableError as err:
+      raise newException(ValueError,
+        "service registration set at `" & address &
+        "` has unparsable attrs: " & err.msg)
+  if node.kind != JObject:
+    raise newException(ValueError,
+      "service registration set at `" & address &
+      "` has non-object attrs")
+  result.address = address
+  let rows = node{"registrations"}
+  if rows.isNil or rows.kind != JArray:
+    return
+  for row in rows:
+    if row.kind != JObject:
+      raise newException(ValueError,
+        "service registration set at `" & address &
+        "` has a non-object registration row")
+    let member = row{"member"}.getStr("")
+    if member.len == 0:
+      raise newException(ValueError,
+        "service registration set at `" & address &
+        "` has a registration with no `member`; a registration with " &
+        "no identity cannot be matched on a re-reconcile, so it would " &
+        "be re-minted every time")
+    result.registrations.add(ServiceRegistration(
+      member: member,
+      contributor: row{"contributor"}.getStr(""),
+      mintedId: row{"mintedId"}.getStr(""),
+      mintedAtUnix: row{"mintedAtUnix"}.getBiggestInt(0)))
+
+proc readServiceRegistrations*(storeRoot: string;
+                               key: ServiceInstanceKey):
+                               ServiceRegistrationSet =
+  ## Read the persisted set, or an empty one when none exists.
+  let address = serviceRegistrationsAddress(key)
+  result.address = address
+  let store = openStateStore(storeRoot)
+  if not store.hasStateRecord(address):
+    return
+  let rec = store.readStateRecord(address)
+  decodeServiceRegistrations(address, rec.attrsTypeId, rec.attrsJson)
+
+proc writeServiceRegistrations*(storeRoot: string;
+                                key: ServiceInstanceKey;
+                                value: ServiceRegistrationSet;
+                                now: Time = getTime()) =
+  let store = openStateStore(storeRoot)
+  store.writeStateRecord(ResourceStateRecord(
+    address: serviceRegistrationsAddress(key),
+    typeId: ServiceRegistrationsTypeId,
+    determinism: rdVolatile,
+    attrsTypeId: ServiceRegistrationsAttrsTypeId,
+    attrsJson: encodeServiceRegistrations(value),
+    dependsOn: @[serviceInstanceAddress(key)],
+    identity: key.identity,
+    present: true,
+    holders: initTable[string, Time](),
+    effectiveDeadline: none(Time),
+    lastRenewed: now))
+
+proc reconcileServiceRegistrations*(
+    storeRoot: string;
+    key: ServiceInstanceKey;
+    members: openArray[string];
+    contributors: openArray[string];
+    mint: ServiceRegistrationMinter;
+    now: Time = getTime()):
+    tuple[set: ServiceRegistrationSet;
+          outcomes: seq[tuple[member: string;
+                              outcome: ServiceRegistrationOutcome]]] =
+  ## Reconcile the instance's registrations against the folded member
+  ## set, and return what each member's reconcile did.
+  ##
+  ## THE PROPERTY THIS PROC EXISTS FOR: a member that already has a
+  ## registration keeps its `mintedId` and its `mintedAtUnix`
+  ## BYTE-IDENTICAL. `mint` is not called for it. A second consumer
+  ## arriving adds its own members and touches nothing else.
+  ##
+  ## A MEMBER NO LONGER CONTRIBUTED IS REMOVED, and nothing else is --
+  ## §5's withdrawal property, at this layer. It is removed rather than
+  ## kept because a registration nobody asks for is a live OIDC client
+  ## with no owner.
+  ##
+  ## `mint` RETURNING AN EMPTY STRING IS A REFUSAL, not an identifier.
+  ## D-SS10: "A nil or an empty string is the one answer that must not
+  ## be chosen." An empty minted id would travel to a consumer's argv
+  ## as `--client-id ''`, which fails at the issuer with a message about
+  ## credentials rather than about registration.
+  if mint.isNil:
+    raise newException(ServiceRegistryError,
+      "reconcileServiceRegistrations needs a minter: the thing that " &
+      "registers a member against the running instance and reports " &
+      "the identifier it minted. A nil minter cannot be defaulted -- " &
+      "defaulting it would invent identifiers no instance knows.")
+  if members.len != contributors.len:
+    raise newException(ServiceRegistryError,
+      "reconcileServiceRegistrations: " & $members.len & " members " &
+      "and " & $contributors.len & " contributors. The two lists are " &
+      "parallel by construction (`contributionMemberAttribution` " &
+      "builds them together), so a length mismatch means they came " &
+      "from different folds and the attribution would be wrong.")
+  let existing = readServiceRegistrations(storeRoot, key)
+  var kept: seq[ServiceRegistration] = @[]
+  var outcomes: seq[tuple[member: string;
+                          outcome: ServiceRegistrationOutcome]] = @[]
+  for i in 0 ..< members.len:
+    var found = false
+    for reg in existing.registrations:
+      if reg.member != members[i]:
+        continue
+      kept.add(reg)
+      outcomes.add((member: members[i], outcome: sroReused))
+      found = true
+      break
+    if found:
+      continue
+    let minted = mint(members[i], contributors[i])
+    if minted.len == 0:
+      raise newException(ServiceRegistryError,
+        "registering `" & members[i] & "` in instance `" &
+        serviceInstanceAddress(key) & "` produced an EMPTY identifier. " &
+        "An empty minted id is not an identifier; it is a missing one " &
+        "wearing the shape of one, and it would reach a consuming " &
+        "service's argv as an empty argument.")
+    kept.add(ServiceRegistration(
+      member: members[i],
+      contributor: contributors[i],
+      mintedId: minted,
+      mintedAtUnix: now.toUnix()))
+    outcomes.add((member: members[i], outcome: sroMinted))
+  for reg in existing.registrations:
+    var stillAsked = false
+    for i in 0 ..< members.len:
+      if members[i] == reg.member:
+        stillAsked = true
+        break
+    if not stillAsked:
+      outcomes.add((member: reg.member, outcome: sroWithdrawn))
+  result.set = ServiceRegistrationSet(
+    address: serviceRegistrationsAddress(key), registrations: kept)
+  result.outcomes = outcomes
+  writeServiceRegistrations(storeRoot, key, result.set, now)
+
+proc mintedIdFor*(value: ServiceRegistrationSet; member: string): string =
+  ## The identifier minted for `member`, or the empty string when the
+  ## set holds no registration for it. The caller decides what an
+  ## absence means; this proc does not guess.
+  for reg in value.registrations:
+    if reg.member == member:
+      return reg.mintedId
+  return ""

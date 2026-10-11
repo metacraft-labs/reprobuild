@@ -1006,7 +1006,33 @@ proc m2TypeReprIsSupportedScalar(typeRepr: string): bool =
   if inner.len > 0 and m2IsBareIdentRepr(inner) and
       not m2TypeReprIsPrimitiveScalar(inner):
     return true
+  # Shared-Development-Services L8: `seq[string]` IS carried now. The
+  # doc comment above used to say it "stays rejected here so the
+  # runtime's static-error branch never fires", and that branch no
+  # longer exists -- `dskSeqString` is a real arm and a `seq[string]`
+  # `config:` key is §5's CONTRIBUTION POINT ("a collection is a
+  # configurable"). Until L8 such a key got NO cell at all: the one in
+  # the repository, `fontPackages` in
+  # `recipes/packages/de-foundation/graphics-stack/repro.nim`, carries a
+  # comment saying exactly that and predicting this change ("When M3+
+  # widens the runtime to cover `seq[string]`, the helper migrates to
+  # `readConfigurable`").
+  if inner.len > 0 and inner.strip() == "string":
+    return true
   return false
+
+proc m2TypeReprIsOrderedCollection*(typeRepr: string): bool =
+  ## True iff `T` from a `config:` entry names the ORDERED COLLECTION
+  ## the configurable lane carries, i.e. `seq[string]`.
+  ##
+  ## Shared-Development-Services L8: a `config:` key of this type is
+  ## §5's CONTRIBUTION POINT. The predicate is separate from
+  ## `m2TypeReprIsSupportedScalar` rather than folded into it because
+  ## the two answer different questions -- "does this key get a slot"
+  ## and "is that slot resolved by the contribution fold" -- and L7's
+  ## review found the cost of one predicate answering two questions.
+  let inner = m2SeqElementRepr(typeRepr.strip())
+  inner.len > 0 and inner.strip() == "string"
 
 proc emitM2ConfigDefaults(packageName: string;
                           sectionStmts: NimNode): NimNode =
@@ -1045,6 +1071,21 @@ proc emitM2ConfigDefaults(packageName: string;
       # parameter so Nim picks the bool/int/string/float branch
       # without having to infer from the literal — a literal like ``5``
       # would otherwise lose its desired ``int8`` / ``int32`` flavour.
+      if m2TypeReprIsOrderedCollection(typeRepr):
+        # Shared-Development-Services L8: an ordered-collection
+        # `config:` key is a CONTRIBUTION POINT, resolved by §Resolution's
+        # four-step fold rather than by the override table. A key with
+        # no default seeds `@[]` -- see `recordContributionPoint`'s
+        # comment on why an empty collection is a VALUE and not an
+        # absence, i.e. why L5's "no default means REQUIRED" rule is
+        # deliberately not applied to a collection.
+        let seed = if entry.defaultNode == nil or
+                      entry.defaultNode.kind == nnkEmpty: "@[]"
+                   else: defaultRepr
+        result.add(parseStmt(
+          "recordContributionPoint[" & typeRepr & "](" &
+          pkgLit & ", " & nameLit & ", " & seed & ")\n"))
+        continue
       result.add(parseStmt(
         "recordConfigDefault[" & typeRepr & "](" &
         pkgLit & ", " & nameLit & ", " & defaultRepr & ")\n"))
@@ -2652,6 +2693,7 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     afterLits: seq[NimNode];
     envPairs: seq[tuple[keyLit: NimNode; valueLit: NimNode]];
     restartLit: NimNode; userLit: NimNode; groupLit: NimNode;
+    convergePointNames: seq[string];
     identityScope: L4ServiceIdentityScope] =
   ## Walk a ``service:`` body and extract its setters.
   ##
@@ -2709,6 +2751,7 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   result.beforeLits = @[]
   result.afterLits = @[]
   result.envPairs = @[]
+  result.convergePointNames = @[]
   result.identityScope = l4NewIdentityScope()
   if body.kind != nnkStmtList:
     return
@@ -2771,6 +2814,44 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     of "runtimefile":
       for i in 1 ..< stmt.len:
         result.runtimeFileExprs.add(stmt[i].copyNimTree())
+    of "converge":
+      # Shared-Development-Services L8 -- `converge <point>, <point>`.
+      #
+      # §9.1's worked example writes this verb, in `on ready:`:
+      # "Converge the contributions once the instance answers.
+      #  Idempotent and attributed: a second consumer registers only its
+      #  own members and never re-mints an existing client id."
+      #
+      # It is a TOP-LEVEL setter here rather than an `on ready:` action
+      # and the reason is which lane runs it: the trigger actions
+      # (`sendSignal`, `restart`) are things the SUPERVISOR does to a
+      # running process, while a registration is a RESOURCE the resource
+      # lane reconciles after the instance answers. Putting it in the
+      # trigger list would have made the supervisor its owner, which is
+      # D-SS10's "an ordinary `dependsOn` onto the service node" read
+      # backwards.
+      #
+      # EVERY ARGUMENT MUST BE A BARE IDENTIFIER naming a contribution
+      # point of the declaring activity. A string literal, a dotted
+      # path, a call -- anything else -- is REFUSED rather than dropped,
+      # because a `converge "relyingParties"` that compiled and
+      # registered nothing is the exact defect shape this campaign keeps
+      # finding.
+      if stmt.len < 2:
+        error("`converge` takes at least one contribution point, e.g. " &
+          "`converge relyingParties`. On its own it registers nothing.",
+          m5ServiceStmtAnchor(stmt))
+      for i in 1 ..< stmt.len:
+        if stmt[i].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("`converge` takes BARE IDENTIFIERS naming contribution " &
+            "points of the declaring activity; `" &
+            stmt[i].repr.strip() & "` is a " & $stmt[i].kind & ". A " &
+            "quoted name or a dotted path is refused rather than " &
+            "dropped: a `converge` that compiles and registers nothing " &
+            "is indistinguishable from one that works.",
+            m5ServiceStmtAnchor(stmt[i]))
+          continue
+        result.convergePointNames.add(identText(stmt[i]))
     of "description":
       let lit = m5ServiceStringLitArg(stmt)
       if lit != nil:
@@ -2897,6 +2978,10 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
   elif parsedBody.executableRef.len > 0:
     tryBody.add(quote do:
       setActiveServiceExecutable(`exeRefLit`))
+  for pointName in parsedBody.convergePointNames:
+    let pointLit = newLit(pointName)
+    tryBody.add(quote do:
+      addActiveServiceConvergePoint(`pointLit`))
   for argExpr in parsedBody.argExprs:
     tryBody.add(quote do:
       addActiveServiceArg(`argExpr`))
@@ -3722,8 +3807,24 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
     # there is genuinely no slot for it -- the separate refusal
     # `m2TypeReprIsSupportedScalar` governs, and the two are not
     # merged.
+    #
+    # Shared-Development-Services L8: AN ORDERED COLLECTION WITH NO
+    # DEFAULT IS NOT REQUIRED, so it does not take the
+    # `requiredConfigurableValue` route. Its slot is seeded `@[]` by
+    # `recordContributionPoint` and its parameter default reads the
+    # FOLD through `environmentBoundValue` -- which is what makes a
+    # consumer's contribution reach the service's argv at the enable
+    # site. Taking the required route instead would raise
+    # `EDslPortUnsatisfiedRequired` on every workspace where no
+    # consumer has contributed, i.e. would make an owner unable to
+    # start its own service alone.
     let default =
-      if c.defaultNode == nil:
+      if c.defaultNode == nil and
+         m2TypeReprIsOrderedCollection(c.typeNode.repr):
+        newCall(bindSym"environmentBoundValue",
+          newLit(packageName & "." & parsed.activityName & "." & c.name),
+          parseExpr("newSeq[string]()"))
+      elif c.defaultNode == nil:
         if m2TypeReprIsSupportedScalar(c.typeNode.repr):
           parseExpr("requiredConfigurableValue[" & c.typeNode.repr & "](" &
             escForCode(packageName) & ", " &
@@ -4919,6 +5020,13 @@ proc l5RefuseUnsatisfiableRequiredKeys(packageName: string;
       continue
     if decl.defaultNode != nil:
       continue
+    if m2TypeReprIsOrderedCollection(decl.typeNode.repr):
+      # Shared-Development-Services L8: an ordered collection with no
+      # default is NOT required, so it is not unsatisfiable either. Its
+      # slot is seeded `@[]` and a consumer's `contribute:` -- a THIRD
+      # route §6 does not enumerate, because §6 is about bindings and
+      # this is a contribution -- is how members reach it.
+      continue
     let key = packageName & "." & decl.qualifier & "." & decl.name
     if l5ContainsNormalized(boundKeys, key):
       continue
@@ -5037,6 +5145,17 @@ proc emitL5ActivityConfigDefaults(packageName: string;
         let pkgLit = newLit(packageName)
         let nameLit = newLit(parsed.activityName & "." & key.name)
         let typeNode = key.typeNode.copyNimTree()
+        if m2TypeReprIsOrderedCollection(key.typeNode.repr):
+          # Shared-Development-Services L8, same statement as the
+          # package-level emitter: an ordered collection is a
+          # CONTRIBUTION POINT and is never REQUIRED.
+          let seedNode =
+            if key.defaultNode == nil: parseExpr("@[]")
+            else: key.defaultNode.copyNimTree()
+          result.add(quote do:
+            recordContributionPoint[`typeNode`](`pkgLit`, `nameLit`,
+              `seedNode`))
+          continue
         if key.defaultNode == nil:
           # A REQUIRED configurable: the slot exists, with NO seed
           # (§6). Two things may satisfy it -- an `environment`
@@ -5085,7 +5204,11 @@ proc l5RefuseDottedHeads(body: NimNode) =
     var parts: seq[string] = @[]
     if not l5DottedPath(stmt[0], parts) or parts.len < 2:
       continue
-    for headWord in ["environment", "instanceOverrides"]:
+    # Shared-Development-Services L8 adds `contribute` to this list for
+    # the identical reason: `contribute.append:` is a dotted head whose
+    # callee is an `nnkDotExpr`, so it lands in the preserved-Nim bucket
+    # and fails as an undeclared identifier pointing at generated code.
+    for headWord in ["environment", "instanceOverrides", "contribute"]:
       if parts[0].normalize == headWord.normalize:
         error("`" & headWord & "` is a declaration head, not a member: `" &
           stmt[0].repr.strip() & "` writes the name with a DOT. Write `" &
@@ -5125,6 +5248,232 @@ proc emitL5Environments(packageName: string;
     let pkgLit = newLit(packageName)
     result.add(quote do:
       discard applySelectedEnvironment(`pkgLit`))
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L8 — the `contribute:` section.
+#
+# §5's authoring surface: a consumer adds its own members to a shared
+# service's contribution point. The operation is spelled AT THE CALL
+# SITE, which is `Configurable-System.md` §Resolution's requirement
+# rather than a stylistic choice -- "with the operation declared at the
+# call site the engine can say which contribution was dropped and which
+# one dropped it", and step 4's diagnostic names the site it reads here.
+#
+# SHAPE, and why this one. The operation is the OUTER block and the
+# bindings are L5's `key = value` assignments, verbatim:
+#
+#   contribute:
+#     append:
+#       infra.sso.relyingParties = "isonim-site"
+#       infra.sso.fixtureUsers   = @["dev@isonim.test"]
+#     appendForce:
+#       infra.sso.relyingParties = "must-be-registered"
+#     replaceOverride:
+#       infra.edge.sites = @["only-this"]
+#
+# Six heads, one per (operation, priority) pair this port carries, and a
+# seventh spelling is a compile error naming the six. The alternative --
+# `append override infra.sso.x = "y"` -- parses as a command whose
+# argument is an assignment, which is exactly the ambiguous shape the L5
+# walker refuses for its own bindings.
+#
+# WHY THE KEY IS FULLY QUALIFIED AND MAY NAME A FOREIGN PACKAGE, where
+# an `environment` binding may not. §6.6 is the reason the environment
+# walker refuses a foreign key: bindings are the ENVIRONMENT's and a
+# consumer that could bind one "would fork the instance it is trying to
+# join". A contribution is the opposite case -- §5 exists so a consumer
+# can add to a collection another package declared -- so the first
+# segment is the OWNING package and two- or three-segment keys are both
+# accepted (`<pkg>.<name>` and `<pkg>.<activity>.<name>`, byte-identical
+# to the keys `recordConfigDefault` and `emitL5ActivityConfigDefaults`
+# register).
+#
+# WHAT IS NOT CHECKED AT COMPILE TIME, said plainly: whether the key
+# exists. It cannot be -- the owning package is a different module and
+# its registrations run at ITS module init. The check is at the consumer's
+# module init instead, where `contributeConfigurableRaw` raises
+# `EDslPortMissingKey` naming the key, and `append` at a key that is a
+# SCALAR raises `EDslPortNotAContributionPoint` naming the kind. Both are
+# loud; neither is a drop.
+# ---------------------------------------------------------------------------
+
+const
+  L8ContributeOperationHeads* = [
+    "append", "appendoverride", "appendforce",
+    "replace", "replaceoverride", "replaceforce"]
+    ## The closed set of operation-block heads. Asserted as a constant
+    ## rather than restated in each diagnostic so the refusal and the
+    ## dispatch cannot disagree about which spellings exist.
+
+type
+  L8Contribution = object
+    key: string
+    operation: string      ## "coAppend" / "coReplace", as emitted code
+    precedence: string     ## "epSet" / "epOverride" / "epForce"
+    valueNode: NimNode
+    anchor: NimNode
+
+proc l8OperationHeadIsKnown(head: string): bool =
+  for h in L8ContributeOperationHeads:
+    if h == head: return true
+  return false
+
+proc l8HeadsList(): string =
+  var parts: seq[string] = @[]
+  for h in L8ContributeOperationHeads:
+    parts.add("`" & h & "`")
+  parts.join(", ")
+
+proc l8OperationFor(head: string): tuple[op, prec: string] =
+  case head
+  of "append": ("coAppend", "epSet")
+  of "appendoverride": ("coAppend", "epOverride")
+  of "appendforce": ("coAppend", "epForce")
+  of "replace": ("coReplace", "epSet")
+  of "replaceoverride": ("coReplace", "epOverride")
+  of "replaceforce": ("coReplace", "epForce")
+  else: ("", "")
+
+proc l8DottedKeyPath(n: NimNode): seq[string] =
+  ## Flatten `a.b.c` into @["a", "b", "c"]. Returns an empty seq for
+  ## anything that is not a chain of bare identifiers -- a call, an
+  ## index, a string literal -- so the caller refuses it by shape.
+  var cursor = n
+  var reversed: seq[string] = @[]
+  while cursor.kind == nnkDotExpr:
+    if cursor.len != 2: return @[]
+    if cursor[1].kind notin {nnkIdent, nnkSym}: return @[]
+    reversed.add($cursor[1])
+    cursor = cursor[0]
+  if cursor.kind notin {nnkIdent, nnkSym}: return @[]
+  reversed.add($cursor)
+  for i in countdown(reversed.high, 0):
+    result.add(reversed[i])
+
+proc l8ParseContributeBody(body: NimNode): seq[L8Contribution] =
+  ## Walk one `contribute:` body. Every refusal names the author's own
+  ## line and says what to write instead.
+  if body.kind != nnkStmtList:
+    error("`contribute:` needs an indented body of operation blocks " &
+      "(" & l8HeadsList() & "), each holding `<package>.<key> = " &
+      "<member or @[members]>` assignments.", body)
+    return
+  if body.len == 0:
+    error("`contribute:` is empty. An empty contribution section is " &
+      "indistinguishable from a forgotten one, so it is refused rather " &
+      "than compiled into nothing. Write at least one operation block " &
+      "(" & l8HeadsList() & ") or delete the section.", body)
+    return
+  for stmt in body:
+    if stmt.kind == nnkCommentStmt:
+      continue
+    if stmt.kind == nnkDotExpr or
+       (stmt.kind in {nnkCall, nnkCommand} and stmt.len > 0 and
+        stmt[0].kind == nnkDotExpr):
+      error("`contribute:` operation heads are not dotted. Write " &
+        "`append:` on its own line with the assignments indented " &
+        "under it, not `append.something:`. Known heads: " &
+        l8HeadsList() & ".", stmt)
+      continue
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      error("`contribute:` accepts only operation blocks (" &
+        l8HeadsList() & "), each with an indented body. Got a " &
+        $stmt.kind & ". A bare assignment directly under " &
+        "`contribute:` has no operation, and the operation is half of " &
+        "what a contribution is (Configurable-System.md §\"Operation " &
+        "is a SECOND axis, independent of priority\").", stmt)
+      continue
+    if stmt[0].kind notin {nnkIdent, nnkSym}:
+      error("`contribute:` operation head must be a bare identifier; " &
+        "known heads: " & l8HeadsList() & ".", stmt)
+      continue
+    let head = ($stmt[0]).normalize
+    if not l8OperationHeadIsKnown(head):
+      error("`" & $stmt[0] & "` is not a `contribute:` operation. The " &
+        "operations are " & l8HeadsList() & " -- `append*` adds and is " &
+        "NEVER destructive at any priority, `replace*` says \"the " &
+        "value is exactly this\" and IS destructive downward " &
+        "(Configurable-System.md §\"Operation is a SECOND axis\"). " &
+        "There is no `add`, no `set`, no `incl` and no `remove`: " &
+        "`remove` is open as D-SS9's second half and is deliberately " &
+        "not spelled here.", stmt)
+      continue
+    if stmt.len != 2 or stmt[^1].kind != nnkStmtList:
+      error("`" & head & ":` takes an indented body of `" &
+        "<package>.<key> = <member or @[members]>` assignments and " &
+        "NOTHING on its own line. A head argument here would be read " &
+        "by nothing.", stmt)
+      continue
+    let opBody = stmt[^1]
+    let resolved = l8OperationFor(head)
+    var seen = 0
+    for inner in opBody:
+      if inner.kind == nnkCommentStmt:
+        continue
+      if inner.kind notin {nnkAsgn, nnkExprEqExpr}:
+        error("inside `" & head & ":` every statement is an assignment " &
+          "`<package>.<key> = <member or @[members]>`. Got a " &
+          $inner.kind & ", which would contribute nothing.", inner)
+        continue
+      let path = l8DottedKeyPath(inner[0])
+      if path.len == 0:
+        error("the left-hand side of a contribution must be a dotted " &
+          "configurable key made of bare identifiers, e.g. " &
+          "`infra.sso.relyingParties`.", inner)
+        continue
+      if path.len < 2 or path.len > 3:
+        error("`" & path.join(".") & "` is not a contribution key. A " &
+          "key is `<package>.<name>` or " &
+          "`<package>.<activity>.<name>` -- the FIRST segment names " &
+          "the package that DECLARED the contribution point, which is " &
+          "normally another package than this one. A one-segment key " &
+          "names no owner and a four-segment key names no slot the " &
+          "configurable lane registers.", inner)
+        continue
+      inc seen
+      result.add(L8Contribution(key: path.join("."),
+        operation: resolved.op, precedence: resolved.prec,
+        valueNode: inner[1].copyNimTree(), anchor: inner))
+    if seen == 0:
+      error("`" & head & ":` contributed nothing. A declared operation " &
+        "block that resolves to no contribution is the defect shape " &
+        "this campaign keeps finding; write at least one assignment or " &
+        "delete the block.", stmt)
+
+proc emitL8Contributions(packageName: string;
+                         sectionStmts: NimNode;
+                         body: NimNode): NimNode =
+  ## Emit one `contributeMembers(...)` call per contribution, over EVERY
+  ## `contribute:` section in the package body.
+  ##
+  ## EVERY section, not the first: a second `contribute:` block is a
+  ## plausible authoring shape (one per service being consumed) and
+  ## honouring only the first would silently drop the rest. Asserted by
+  ## a test rather than left to this comment.
+  result = newStmtList()
+  l5RefuseDottedHeads(body)
+  if sectionStmts.kind != nnkStmtList:
+    return
+  for stmt in sectionStmts:
+    if calleeName(stmt).normalize != "contribute":
+      continue
+    if stmt.len != 2 or stmt[^1].kind != nnkStmtList:
+      error("`contribute:` takes an indented body and no head " &
+        "argument. A name here would be read by nothing -- unlike " &
+        "`environment <name>:`, a contribution section is not named.",
+        stmt)
+      continue
+    for c in l8ParseContributeBody(stmt[^1]):
+      let keyLit = newLit(c.key)
+      let pkgLit = newLit(packageName)
+      let precIdent = ident(c.precedence)
+      let opIdent = ident(c.operation)
+      let valueNode = c.valueNode.copyNimTree()
+      let fileLit = newLit(c.anchor.lineInfoObj().filename)
+      let lineLit = newLit(c.anchor.lineInfoObj().line)
+      result.add(quote do:
+        contributeMembers(`keyLit`, `pkgLit`, `precIdent`, `opIdent`,
+          l8ContributionMembers(`valueNode`), `fileLit`, `lineLit`))
 
 # ---------------------------------------------------------------------------
 # Shared-Development-Services L3 — services and activities travel through
@@ -8188,6 +8537,15 @@ macro packageImpl*(name: untyped;
   let l5EnvironmentEmissionNode = emitL5Environments(packageName,
                                                      sectionStmts, body)
   result.add(l5EnvironmentEmissionNode)
+  # ── Shared-Development-Services L8: `contribute:` sections. Emitted
+  # AFTER the environment pass for the ordering reason that pass states
+  # for itself -- every contribution-point slot has to exist before a
+  # contribution can reach it, and `applySelectedEnvironment` is where a
+  # `replace` from an environment lands. Within the fold the order of
+  # these calls only decides ties at one priority, which §Resolution
+  # settles as "contribution order"; so emission order here IS the
+  # authored order and nothing re-sorts it.
+  result.add(emitL8Contributions(packageName, sectionStmts, body))
   # M9.R.13b.3 — emit ``buildCode`` LAST so its
   # ``when defined(reproProviderMode) and isMainModule: quit
   # runPackageProvider(...)`` exit point runs AFTER every other

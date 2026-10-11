@@ -341,6 +341,172 @@ when defined(reproProviderMode):
             consumed.path)))
     result.fragmentDigest = computeGraphFragmentDigest(result)
 
+
+  proc typedServiceScopeWord(scope: ServiceScope): string =
+    ## The scope's recipe spelling.
+    ##
+    ## DERIVED FROM THE ENUM NAME, by the same formula
+    ## `repro_resources/service_identity.nim`'s `scopeWord` uses, and
+    ## NOT by a `case` listing the four words. A `case` here would be a
+    ## second spelling of one fact and would read as correct while
+    ## disagreeing; the derivation cannot. `repro_resources` DEPENDS ON
+    ## this library so its proc cannot be imported, which is why the
+    ## formula is repeated rather than the call -- and
+    ## `t_l8_typed_service_facts_reach_the_dev_env_artifact.nim` asserts
+    ## the two agree for every value of the enum, which a test can do
+    ## because a test may import both.
+    ($scope)[3 .. ^1].normalize
+
+  proc typedServiceIdentityKindWord(kind: ServiceIdentityKind): string =
+    ## `derived` / `stable`. Same derivation, same reason.
+    ($kind)[3 .. ^1].normalize
+
+  proc typedServiceCommand(service: DslServiceDef): seq[string] =
+    ## The typed `service` block's own command line: its `executable`
+    ## followed by its `args`, one token per element.
+    ##
+    ## Empty when the service declared no executable. An executable with
+    ## an empty path contributes NO token rather than an empty one: a
+    ## supervisor handed `["", "--flag"]` would try to exec the empty
+    ## string, which is a worse failure than "this service declares no
+    ## command".
+    if service.executableTyped.path.len > 0:
+      result.add(service.executableTyped.path)
+    elif service.executableTyped.executableName.len > 0:
+      result.add(service.executableTyped.executableName)
+    else:
+      return @[]
+    for arg in service.typedArgs:
+      result.add(arg.value)
+
+  proc mergeTypedServiceFacts(packageName: string;
+                              selected: openArray[string];
+                              services: seq[DevEnvServiceMetadata]):
+                              seq[DevEnvServiceMetadata] =
+    ## Shared-Development-Services L8 — CLOSE THE PLUMBING GAP L7's
+    ## review assigned here.
+    ##
+    ## Before this, the typed `service` block and the `devEnv:`
+    ## `servicePlaceholder` were two disjoint channels joined by nothing
+    ## but a NAME, and only the second reached `DevEnvArtifact.services`
+    ## -- the one channel the dev-session supervisor reads. So a recipe
+    ## that wanted a shared instance declared its service twice.
+    ##
+    ## This proc is the join, and it joins ON THE NAME because the name
+    ## is what both channels already agree on: `servicePlaceholder
+    ## "zitadel"` and `service zitadel:` are the same service by the
+    ## author's reckoning, and nothing else in either record could
+    ## identify the other.
+    ##
+    ## TYPED FACTS WIN, AND A PLACEHOLDER CANNOT RESTATE THEM. The typed
+    ## block is the declaration; a placeholder carries command and
+    ## readiness. `dev_session.nim` already REFUSES `identity` and
+    ## `scope` keys inside the placeholder's JSON by name, so there is
+    ## no second source for either to disagree with.
+    ##
+    ## A TYPED SERVICE WITH NO PLACEHOLDER IS APPENDED rather than
+    ## dropped, which is the half that makes "declared once" true: the
+    ## summary then carries the typed command and the supervisor can
+    ## launch it. Appended AFTER the placeholders, in declaration order,
+    ## so an existing recipe's service list keeps its order.
+    result = services
+    for typed in registeredServices(packageName):
+      if typed.serviceName.len == 0:
+        continue
+      var compatibility = 0'u32
+      var declaringActivity = ""
+      for iface in registeredServiceInterfaces():
+        if iface.packageName == packageName and iface.name == typed.serviceName:
+          compatibility = iface.compatibilityMajor
+          declaringActivity = iface.activityName
+      # THE ACTIVITY GATE, and it is not optional: a typed `service`
+      # declared inside an activity reaches this record only when that
+      # activity is SELECTED.
+      #
+      # `DslServiceDef` carries no activity name -- L2 extracted the
+      # service emitter precisely so the package-level and the dev-env
+      # walkers share it, and only the second knows one -- so the
+      # activity is read from the LIFTED row, which has carried
+      # `activityName` since L3. One reading, not a second copy.
+      #
+      # WHY IT CANNOT BE LEFT TO `registeredServices` BEING EMPTY. It is
+      # not empty: `rerunServiceDeclarators` re-runs every declarator
+      # registered in this process, so a process that resolved activity
+      # `api` and then resolved activity `worker` has BOTH services in
+      # the registry on the second resolve. Measured as a real regression
+      # against `da3916089`: without this gate,
+      # `t_activity_params_reach_the_services_they_declare`'s "an
+      # unselected activity still gates its placeholder out" saw 3
+      # services where it declares 0, because three typed services from
+      # earlier resolutions were appended. A placeholder's gate is its
+      # `activityRequirements`; this is the typed lane's equivalent.
+      if declaringActivity.len == 0:
+        # A PACKAGE-LEVEL `service` is not a dev-env session service and
+        # does not belong on this channel at all.
+        #
+        # `devEnv:` is where a session's services are declared; a
+        # package-level `service` block is the deployment lane (its
+        # `execStart` / `wantedBy` / `restart` setters are systemd's) and
+        # the supervisor must not be handed one to run. Measured as a
+        # real regression against `da3916089`: appending them made
+        # `t_service_lowers_typed_edges_into_the_graph_fragment`'s "a
+        # placeholder is activity-gated exactly as before" see 1 service
+        # where it declares 0 -- a package-level `sso` with no activity
+        # requirement, i.e. ungated, which the supervisor would have
+        # started on every `repro up`.
+        #
+        # So the facts this proc routes are an ACTIVITY's typed
+        # services, and that is also exactly the set §4 keys an instance
+        # over. The L1 claim that "the typed service lane and the
+        # placeholder lane are disjoint" therefore still holds at
+        # package level and no longer holds inside an activity, which is
+        # what L8 set out to change.
+        continue
+      if not activityRecordIsActive(@[declaringActivity], selected):
+        continue
+      # Shared-Development-Services L8: resolve and FOLD every
+      # `converge <point>` now, so the members this service must
+      # register travel on the record that reaches the CLI. Folding here
+      # rather than at `repro up` time is the point of §7's split: the
+      # member SET is configuration, resolved at evaluation; only the
+      # minted identifier is a resource attribute computed later.
+      var points: seq[string] = @[]
+      var registrationMembers: seq[string] = @[]
+      var registrationContributors: seq[string] = @[]
+      for bareName in typed.convergePoints:
+        let key = resolveServiceConvergePoint(packageName, bareName)
+        points.add(key)
+        for pair in contributionMemberAttribution(key):
+          registrationMembers.add(pair.member)
+          registrationContributors.add(pair.package)
+      var landed = false
+      for existing in result.mitems:
+        if existing.name != typed.serviceName:
+          continue
+        existing.identityKind = typedServiceIdentityKindWord(typed.identity.kind)
+        existing.identityStableId = typed.identity.stableId
+        existing.scope = typedServiceScopeWord(typed.scope)
+        existing.compatibilityMajor = compatibility
+        existing.typedCommand = typedServiceCommand(typed)
+        existing.registrationPoints = points
+        existing.registrationMembers = registrationMembers
+        existing.registrationContributors = registrationContributors
+        landed = true
+      if landed:
+        continue
+      result.add(DevEnvServiceMetadata(
+        name: typed.serviceName,
+        activityRequirements: @[],
+        metadata: "",
+        identityKind: typedServiceIdentityKindWord(typed.identity.kind),
+        identityStableId: typed.identity.stableId,
+        scope: typedServiceScopeWord(typed.scope),
+        compatibilityMajor: compatibility,
+        typedCommand: typedServiceCommand(typed),
+        registrationPoints: points,
+        registrationMembers: registrationMembers,
+        registrationContributors: registrationContributors))
+
   proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;
                            devEnvProc: proc ()): DevEnvResult {.dynOrStatic.} =
     # Windows-dev-env M1: a ``uses:``-only recipe exposes dev-env
@@ -373,7 +539,8 @@ when defined(reproProviderMode):
       shellOps: activeShellOps(selectedActivities),
       toolRequirements: activeToolRequirements(selectedActivities),
       tasks: activeTasks(selectedActivities),
-      services: activeServices(selectedActivities),
+      services: mergeTypedServiceFacts(pkg.packageName,
+        selectedActivities, activeServices(selectedActivities)),
       diagnostics: devEnvDiagnosticRegistry)
     if fileExists(extendedPath(pkg.sourceFile)):
       let input = fileReadInput(pkg.sourceFile)

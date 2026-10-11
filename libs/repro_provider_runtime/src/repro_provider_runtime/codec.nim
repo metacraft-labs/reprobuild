@@ -292,12 +292,33 @@ proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
   outp.writeString(value.name)
   outp.writeStringSeq(value.activityRequirements)
   outp.writeString(value.metadata)
+  # Shared-Development-Services L8: appended at the END so the three
+  # fields above keep their offsets. Both halves of this codec are
+  # compiled from this tree, so there is no mixed-version pairing to
+  # carry -- what the ordering buys is that a diff of this proc reads as
+  # an addition rather than a reshuffle.
+  outp.writeString(value.identityKind)
+  outp.writeString(value.identityStableId)
+  outp.writeString(value.scope)
+  outp.writeU32Le(value.compatibilityMajor)
+  outp.writeStringSeq(value.typedCommand)
+  outp.writeStringSeq(value.registrationPoints)
+  outp.writeStringSeq(value.registrationMembers)
+  outp.writeStringSeq(value.registrationContributors)
 
 proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetadata =
-  DevEnvServiceMetadata(
+  result = DevEnvServiceMetadata(
     name: readString(bytes, pos),
     activityRequirements: readStringSeq(bytes, pos),
     metadata: readString(bytes, pos))
+  result.identityKind = readString(bytes, pos)
+  result.identityStableId = readString(bytes, pos)
+  result.scope = readString(bytes, pos)
+  result.compatibilityMajor = readU32Le(bytes, pos)
+  result.typedCommand = readStringSeq(bytes, pos)
+  result.registrationPoints = readStringSeq(bytes, pos)
+  result.registrationMembers = readStringSeq(bytes, pos)
+  result.registrationContributors = readStringSeq(bytes, pos)
 
 proc writeDevEnvDiagnostic(outp: var seq[byte]; value: DevEnvDiagnostic) =
   outp.writeByte(byte(ord(value.severity)))

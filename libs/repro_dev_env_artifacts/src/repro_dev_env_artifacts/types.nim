@@ -24,6 +24,23 @@ type
     supervisorPlanRef*: Digest32
     hasSupervisorPlanRef*: bool
     metadata*: DynamicValue
+    # Shared-Development-Services L8: the typed `service` block's facts.
+    # L7's review measured that this record "carries only `name`,
+    # `activityRequirements`, `supervisorPlanRef`,
+    # `hasSupervisorPlanRef` and `metadata`. There is no field an
+    # identity or a scope could travel in, so no amount of routing on
+    # the PRODUCING side closes it -- the typed interface has to reach
+    # the CONSUMING path first." These fields are that channel.
+    # `DevEnvServiceMetadata`'s own comment carries why they are strings
+    # and why the empty string means UNDECLARED.
+    identityKind*: string
+    identityStableId*: string
+    scope*: string
+    compatibilityMajor*: uint32
+    typedCommand*: seq[string]
+    registrationPoints*: seq[string]
+    registrationMembers*: seq[string]
+    registrationContributors*: seq[string]
 
   DevEnvArtifact* = object
     schemaVersion*: uint32
@@ -67,5 +84,11 @@ type
     servicesSectionStart*: int
 
 const
-  DevEnvArtifactSchemaVersion* = 1'u32
+  DevEnvArtifactSchemaVersion* = 2'u32
+    ## Shared-Development-Services L8 bumped this from 1 to 2 because
+    ## `DevEnvServiceSummary` grew eight fields and the SSZ container is
+    ## positional, so a v1 payload decoded as v2 would not be refused by
+    ## the format -- it would be refused by the schema check, which is
+    ## what this constant is for. A cached v1 artifact is re-evaluated
+    ## rather than mis-read.
   DevEnvArtifactRequiredFeatures* = 0'u32

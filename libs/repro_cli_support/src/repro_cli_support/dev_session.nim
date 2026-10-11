@@ -1,4 +1,5 @@
-import std/[json, net, options, os, osproc, sequtils, strtabs, strutils, times]
+import std/[algorithm, json, net, options, os, osproc, sequtils, strtabs,
+            strutils, tables, times]
 
 import cbor
 import repro_core
@@ -661,8 +662,159 @@ proc sharedServiceInstanceKey*(
     discoverServiceScopeContext(projectRoot),
     environment = declaration.environment)
 
+const
+  MintedAttributeTokenPrefix* = "@minted:"
+  MintedAttributeTokenSuffix* = "@"
+    ## Shared-Development-Services L8: the argv token a consuming
+    ## service writes for a value the shared instance MINTS.
+    ##
+    ## §9.3's worked example writes the value as a staged member
+    ## expression -- `sso.relyingParty("isonim-site").clientId`. That
+    ## spelling needs a typed handle member on the lifted interface,
+    ## which does not exist (L3 lifted the service's SIGNATURE, not a
+    ## member accessor). So the token is the shape the lane carries
+    ## today, and it is a TOKEN rather than an environment variable for
+    ## the reason §7 gives: "argv is concretized late, and a resource
+    ## attribute computed during reconciliation is available before an
+    ## edge that depends on that resource runs" -- which is the whole
+    ## argument for deleting a wrapper that sources a file at process
+    ## start.
+    ##
+    ## AN UNRESOLVED TOKEN IS A REFUSAL. Left verbatim it would reach
+    ## the service as the literal text `@minted:isonim-site@`; emptied
+    ## it would reach it as `""`, which D-SS10 names as "the one answer
+    ## that must not be chosen". Both are silent; the refusal is not.
+  SharedInstanceMintedFile* = "shared-instance-registrations.json"
+  SharedInstanceMintedSchemaId* =
+    "reprobuild.dev-session.shared-instance-registrations.v1"
+
+proc sharedInstanceMintedPath*(outDir: string): string =
+  ## Where `repro up` records what the instance minted, for the
+  ## supervisor child to read.
+  ##
+  ## A FILE OF ITS OWN rather than two more keys in the shared-instance
+  ## LEDGER. The ledger exists so `repro down` can release exactly the
+  ## holders this session took, and its schema id is checked on read; a
+  ## session that crashed between the two writes must still be
+  ## releasable, so the release record does not get a second
+  ## responsibility.
+  outDir.sessionDir / SharedInstanceMintedFile
+
+proc writeSharedInstanceMinted*(outDir: string;
+    entries: openArray[tuple[serviceName, member, mintedId: string]]) =
+  createDir(extendedPath(outDir.sessionDir))
+  var rows = newJArray()
+  for entry in entries:
+    rows.add(%*{"serviceName": entry.serviceName, "member": entry.member,
+      "mintedId": entry.mintedId})
+  let doc = %*{"schemaId": SharedInstanceMintedSchemaId}
+  doc["registrations"] = rows
+  writeFile(extendedPath(outDir.sharedInstanceMintedPath), $doc & "\n")
+
+proc readSharedInstanceMinted*(outDir: string): Table[string, string] =
+  ## The minted table, keyed `<serviceName>:<member>` and also by the
+  ## bare `<member>`.
+  ##
+  ## BOTH KEYS, because a consuming service names the MEMBER it needs
+  ## (`@minted:isonim-site@`) and does not generally know which shared
+  ## service registered it; the qualified key exists so two shared
+  ## services registering a member of the same name can still be
+  ## addressed apart. A bare member registered by two services is
+  ## recorded under the qualified keys only, so the bare form then
+  ## resolves to nothing and the substitution REFUSES rather than
+  ## picking one.
+  result = initTable[string, string]()
+  let path = outDir.sharedInstanceMintedPath
+  if not fileExists(extendedPath(path)):
+    return
+  let doc = parseJson(readFile(extendedPath(path)))
+  if doc.kind != JObject:
+    raise newException(ValueError,
+      "the shared-instance registration record at " & path &
+      " is not a JSON object")
+  if doc{"schemaId"}.getStr("") != SharedInstanceMintedSchemaId:
+    raise newException(ValueError,
+      "the shared-instance registration record at " & path &
+      " carries schemaId `" & doc{"schemaId"}.getStr("") &
+      "`; this build reads `" & SharedInstanceMintedSchemaId & "` only")
+  let rows = doc{"registrations"}
+  if rows.isNil or rows.kind != JArray:
+    return
+  var ambiguous: seq[string] = @[]
+  for row in rows:
+    if row.kind != JObject:
+      continue
+    let serviceName = row{"serviceName"}.getStr("")
+    let member = row{"member"}.getStr("")
+    let mintedId = row{"mintedId"}.getStr("")
+    if member.len == 0 or mintedId.len == 0:
+      continue
+    result[serviceName & ":" & member] = mintedId
+    if member in result and result[member] != mintedId:
+      ambiguous.add(member)
+    else:
+      result[member] = mintedId
+  for member in ambiguous:
+    result.del(member)
+
+proc substituteMintedAttributes*(serviceName: string;
+                                 command: seq[string];
+                                 minted: Table[string, string]):
+                                 seq[string] =
+  ## Replace every `@minted:<member>@` token in `command` with what the
+  ## instance minted for that member.
+  ##
+  ## WHOLE-TOKEN ONLY, not a substring rewrite, and that is deliberate:
+  ## a flag written `--client-id=@minted:x@` is a shape this does NOT
+  ## resolve, and it is better to refuse it than to rewrite inside an
+  ## argument where the author may have meant the text. The refusal
+  ## names the token, so the author learns the shape rather than
+  ## debugging an issuer error.
+  for token in command:
+    if not (token.startsWith(MintedAttributeTokenPrefix) and
+            token.endsWith(MintedAttributeTokenSuffix) and
+            token.len > MintedAttributeTokenPrefix.len +
+              MintedAttributeTokenSuffix.len - 1):
+      if token.contains(MintedAttributeTokenPrefix):
+        raise newException(ValueError,
+          "service `" & serviceName & "`: the argument `" & token &
+          "` embeds a minted-attribute token inside a larger " &
+          "argument. The token is resolved as a WHOLE argument only, " &
+          "so write it as its own `args` element (`\"--client-id\", " &
+          "\"" & MintedAttributeTokenPrefix & "<member>" &
+          MintedAttributeTokenSuffix & "\"`). Rewriting inside an " &
+          "argument would guess at text the author may have meant.")
+      result.add(token)
+      continue
+    let member = token[MintedAttributeTokenPrefix.len ..
+      token.len - MintedAttributeTokenSuffix.len - 1]
+    let qualified = serviceName & ":" & member
+    if minted.hasKey(qualified):
+      result.add(minted[qualified])
+    elif minted.hasKey(member):
+      result.add(minted[member])
+    else:
+      var known: seq[string] = @[]
+      for key in minted.keys:
+        if ':' notin key:
+          known.add(key)
+      known.sort()
+      raise newException(ValueError,
+        "service `" & serviceName & "`: nothing minted an identifier " &
+        "for `" & member & "`, so the argument `" & token &
+        "` cannot be concretized. A shared service registers a member " &
+        "only if its `service` block `converge`s the contribution " &
+        "point that member was contributed to, and only once `repro " &
+        "up` has converged that instance. Registered members: " &
+        (if known.len == 0: "(none)" else: known.join(", ")) &
+        ". Leaving the token verbatim or substituting an empty string " &
+        "would reach the service as a credential it cannot use " &
+        "(Shared-Development-Services.md D-SS10).")
+
 proc serviceSpecFromSummary(projectRoot: string;
-                            service: DevEnvServiceSummary): ServiceSpec =
+                            service: DevEnvServiceSummary;
+                            minted = initTable[string, string]()):
+                            ServiceSpec =
   result.name = service.name
   result.readinessKind = "none"
   result.readinessTimeoutMs = DefaultServiceReadinessTimeoutMs
@@ -673,8 +825,29 @@ proc serviceSpecFromSummary(projectRoot: string;
   let metadata = parseJson(text)
   result.command = metadata{"command"}.stringArray()
   if result.command.len == 0:
+    # Shared-Development-Services L8: fall back to the TYPED `service`
+    # block's own command, which now reaches this record.
+    #
+    # THE FALLBACK IS ONE-WAY AND THE DIRECTION MATTERS. A placeholder
+    # that states a command keeps stating it, because a recipe carrying
+    # both is a recipe mid-migration and silently preferring the typed
+    # one would change what it runs. A placeholder that states NONE now
+    # has somewhere to get one, which is what makes a service declarable
+    # once.
+    result.command = service.typedCommand
+  if result.command.len == 0:
     raise newException(ValueError,
-      "service " & service.name & " metadata must contain command")
+      "service " & service.name & " declares no command: its " &
+      "supervisor metadata has no `command` and its typed `service` " &
+      "block declares no `executable` either. One of the two has to " &
+      "say what to run.")
+  # Shared-Development-Services L8: argv is concretized LATE, and this
+  # is where late is. Every `@minted:<member>@` token becomes the
+  # identifier the shared instance minted when the registration
+  # reconciled -- which happened in `repro up` before the supervisor was
+  # launched, i.e. before this runs.
+  result.command = substituteMintedAttributes(service.name,
+    result.command, minted)
   result.cwd = metadata{"cwd"}.getStr(projectRoot)
   if result.cwd.len == 0:
     result.cwd = projectRoot
@@ -699,6 +872,58 @@ proc serviceSpecFromSummary(projectRoot: string;
         path = projectRoot / path
       result.resources.add((kind: item{"kind"}.getStr("directory"),
         path: path))
+
+proc summaryDeclaredIdentityAndScope*(
+    service: DevEnvServiceSummary):
+    tuple[declared: bool; identity: ServiceIdentityDef;
+          scope: ServiceScope] =
+  ## Shared-Development-Services L8: the typed `service` block's
+  ## identity and scope, read from the record they NOW reach.
+  ##
+  ## This is the channel L7's review said did not exist -- "there is no
+  ## field an identity or a scope could travel in, so no amount of
+  ## routing on the PRODUCING side closes it; the typed interface has to
+  ## reach the CONSUMING path first". It reaches it here.
+  ##
+  ## `declared == false` means the record carries the empty string,
+  ## which is what a provider built before the field existed reports.
+  ## The caller then falls back to the interface lift, so nothing that
+  ## worked at L7 stops working.
+  ##
+  ## AN UNKNOWN WORD IS A REFUSAL, NOT A DEFAULT. `scope: "workspce"`
+  ## must not read as `project` -- that is a narrower sharing boundary
+  ## than the author asked for, silently, which is the exact failure
+  ## §4.4 and L4's degradation report exist to prevent.
+  if service.identityKind.len == 0 and service.scope.len == 0:
+    return (declared: false, identity: ServiceIdentityDef(kind: sikDerived,
+      stableId: ""), scope: sscProject)
+  var identity = ServiceIdentityDef(kind: sikDerived, stableId: "")
+  case service.identityKind
+  of "", "derived": identity.kind = sikDerived
+  of "stable":
+    identity.kind = sikStable
+    identity.stableId = service.identityStableId
+  else:
+    raise newException(ValueError,
+      "service `" & service.name & "`: the dev-env artifact records " &
+      "the identity kind `" & service.identityKind & "`, which is not " &
+      "a kind this build knows (`derived` or `stable`). Reading it as " &
+      "a default would silently pick an instance key the recipe did " &
+      "not declare.")
+  var scope = sscProject
+  case service.scope
+  of "", "project": scope = sscProject
+  of "workspace": scope = sscWorkspace
+  of "user": scope = sscUser
+  of "system": scope = sscSystem
+  else:
+    raise newException(ValueError,
+      "service `" & service.name & "`: the dev-env artifact records " &
+      "the scope `" & service.scope & "`, which is not a scope this " &
+      "build knows (`project`, `workspace`, `user`, `system`). " &
+      "Reading it as `project` would narrow the sharing boundary the " &
+      "recipe declared, silently.")
+  (declared: true, identity: identity, scope: scope)
 
 proc sharedServiceInstanceLaunch*(projectRoot: string;
     service: DevEnvServiceSummary):
@@ -747,7 +972,9 @@ proc serviceStartOrder(services: openArray[ServiceSpec]): seq[ServiceSpec] =
   for i in 0 ..< services.len:
     visitService(i, services, temporary, permanent, result)
 
-proc serviceSpecsFromArtifact(artifact: DevEnvArtifact): seq[ServiceSpec] =
+proc serviceSpecsFromArtifact(artifact: DevEnvArtifact;
+                              minted = initTable[string, string]()):
+                              seq[ServiceSpec] =
   ## Shared-Development-Services L7 (§4.5): a service that declares an
   ## `instance` block is NOT started by this session. It is materialised
   ## once, by the daemon, under its `(identity, scope, environment)` key,
@@ -765,7 +992,8 @@ proc serviceSpecsFromArtifact(artifact: DevEnvArtifact): seq[ServiceSpec] =
   for service in artifact.services:
     if sharedServiceInstanceOf(service).declared:
       continue
-    specs.add(serviceSpecFromSummary(artifact.projectRoot, service))
+    specs.add(serviceSpecFromSummary(artifact.projectRoot, service,
+      minted))
   serviceStartOrder(specs)
 
 proc reconcileResources(state: var SessionState; specs: openArray[ServiceSpec]) =
@@ -1654,7 +1882,8 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   # services that did start -- that pre-existing leak is untouched here.
   var specs: seq[ServiceSpec]
   try:
-    specs = serviceSpecsFromArtifact(artifact)
+    specs = serviceSpecsFromArtifact(artifact,
+      readSharedInstanceMinted(config.outDir))
     state.reconcileResources(specs)
   except CatchableError as err:
     state.recordStartFailure("", err.msg)

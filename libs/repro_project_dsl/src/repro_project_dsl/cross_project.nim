@@ -463,7 +463,14 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # generated code rather than at the declaration. Listed,
                  # the L5 walker owns them and every refusal names the
                  # author's own line.
-                 "environment", "instanceoverrides"]
+                 "environment", "instanceoverrides",
+                 # Shared-Development-Services L8: `contribute:` is a
+                 # section for the same reason `environment` is -- absent
+                 # from this list it lands in the preserved-Nim bucket
+                 # and fails as `undeclared identifier: contribute`,
+                 # pointing at generated code rather than at the
+                 # author's line.
+                 "contribute"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.

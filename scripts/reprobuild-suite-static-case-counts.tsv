@@ -129,6 +129,7 @@ libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	3
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	13
 libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim	nim	19
+libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim	nim	11
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	7
@@ -426,7 +427,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim	nim	3
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_binds_configurables.nim	nim	28
-libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_surface_is_typed.nim	nim	53
+libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_surface_is_typed.nim	nim	54
 libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_ident_form.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_action_emission.nim	nim	2
@@ -473,6 +474,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim	nim	7
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_l6_service_compatibility_surface.nim	nim	19
+libs/repro_project_dsl/tests/dsl_port/t_l8_contribute_surface_refuses_near_misses.nim	nim	3
 libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim	nim	17
 libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim	nim	7
@@ -504,6 +506,8 @@ libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	
 libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	3
 libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim	nim	2
 libs/repro_project_dsl/tests/t_l5_environment_reaches_the_service_argv.nim	nim	21
+libs/repro_project_dsl/tests/t_l8_contribution_operation_is_a_second_axis.nim	nim	35
+libs/repro_project_dsl/tests/t_l8_typed_service_facts_reach_the_dev_env_artifact.nim	nim	7
 libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
@@ -526,6 +530,7 @@ libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	46
 libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	17
 libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	40
 libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim	nim	31
+libs/repro_resources/tests/t_l8_registrations_mint_once_and_reach_argv.nim	nim	10
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4
@@ -1657,7 +1662,7 @@ tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
-tests/unit/t_dev_env_large_values.nim	nim	3
+tests/unit/t_dev_env_large_values.nim	nim	4
 tests/unit/t_dev_env_path_ops.nim	nim	9
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6

@@ -58,7 +58,22 @@ proc serviceJson(service: DevEnvServiceSummary): string =
     ",\"activityRequirements\":" & stringsJson(service.activityRequirements) &
     ",\"hasSupervisorPlanRef\":" & (if service.hasSupervisorPlanRef: "true" else: "false") &
     ",\"supervisorPlanRef\":" & digestJson(service.supervisorPlanRef) &
-    ",\"metadata\":" & toJson(service.metadata) & "}"
+    ",\"metadata\":" & toJson(service.metadata) &
+    # Shared-Development-Services L8: the typed `service` block's facts.
+    # In the JSON view as well as in the record, because `repro dev-env
+    # --json` is how an operator sees what a recipe declared, and a
+    # field that reaches the artifact but not this view is invisible at
+    # exactly the moment someone is debugging why an instance was not
+    # shared.
+    ",\"identityKind\":" & q(service.identityKind) &
+    ",\"identityStableId\":" & q(service.identityStableId) &
+    ",\"scope\":" & q(service.scope) &
+    ",\"compatibilityMajor\":" & $service.compatibilityMajor &
+    ",\"typedCommand\":" & stringsJson(service.typedCommand) &
+    ",\"registrationPoints\":" & stringsJson(service.registrationPoints) &
+    ",\"registrationMembers\":" & stringsJson(service.registrationMembers) &
+    ",\"registrationContributors\":" &
+      stringsJson(service.registrationContributors) & "}"
 
 proc diagnosticJson(diagnostic: DevEnvDiagnostic): string =
   "{\"severity\":" & q($diagnostic.severity) &
