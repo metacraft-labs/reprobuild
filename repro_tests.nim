@@ -12816,6 +12816,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_provider_compile_follows_the_recipe.nim",
+    binary: "build/test-bin/t_provider_compile_follows_the_recipe",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_provider_compile_reporting_distinguishes_compile_from_reuse.nim",
     binary: "build/test-bin/t_provider_compile_reporting_distinguishes_compile_from_reuse",
     defines: @[],
