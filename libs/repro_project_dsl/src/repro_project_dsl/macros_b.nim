@@ -3531,7 +3531,7 @@ proc emitM9R3LibraryApis*(packageName: string;
                 valueNode)
         let policyLit = nlfM8MultiVersionLit(parsed.text, valueNode)
         let info = fieldStmt.lineInfoObj
-        let fileLit = newLit(info.filename)
+        let fileLit = newLit(recipeSourceName(info.filename))
         let lineLit = newLit(info.line)
         setters.add(quote do:
           `apiSym`.multiVersion = `policyLit`
@@ -3712,7 +3712,7 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
   ## extraction can carry it without executing a provider at resolution time.
   var contribution = ProvisioningContributionDef(
     targetPackage: stringLiteral(target),
-    sourceFile: target.lineInfoObj().filename,
+    sourceFile: recipeSourceName(target.lineInfoObj().filename),
     sourceLine: target.lineInfoObj().line)
   let statements = if body.kind == nnkStmtList: body else: newStmtList(body)
   for stmt in statements:

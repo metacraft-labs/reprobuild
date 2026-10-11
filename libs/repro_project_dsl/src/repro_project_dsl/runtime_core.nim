@@ -1178,7 +1178,11 @@ proc packageProjectRoot*(packageName: string): string {.dynOrStatic.} =
     return ""
   for pkg in registry:
     if pkg.packageName == packageName and pkg.sourceFile.len > 0:
-      return parentDir(pkg.sourceFile).replace("\\", "/")
+      # A recipe-relative provider (`recipeSourceName`) names its recipes
+      # relative to the recipe it was compiled from, which is the provider's
+      # working directory: resolve against it, so the root is the copy this
+      # provider runs beside.
+      return parentDir(absolutePath(pkg.sourceFile)).replace("\\", "/")
   ""
 
 proc currentPackageInstallMirrorRoot*(): string {.dynOrStatic.} =
