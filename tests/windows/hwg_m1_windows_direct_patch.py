@@ -107,11 +107,32 @@ def target_status(pid: int | None) -> str:
         kernel32.CloseHandle(handle)
 
 
+def read_observations_text(path: Path, timeout: float = 2.0) -> str:
+    """Read the target's observations file around its own writes.
+
+    The target appends through ``_wfopen_s``, which holds the file
+    exclusively for each write, about 100 times a second. A read that lands
+    inside one of those writes fails with a sharing violation, a transient
+    the target itself retries on its side. Python's ``open`` reports it as a
+    bare ``PermissionError`` (errno 13, no ``winerror``), so retry that error,
+    and only for ``timeout`` seconds: a file that stays locked or denied is a
+    real failure and is raised.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return path.read_text(encoding="ascii")
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+        time.sleep(0.005)
+
+
 def observations(path: Path) -> list[int]:
     if not path.is_file():
         return []
     result: list[int] = []
-    for line in path.read_text(encoding="ascii").splitlines():
+    for line in read_observations_text(path).splitlines():
         fields = line.split(",")
         if len(fields) == 2:
             result.append(int(fields[1]))
