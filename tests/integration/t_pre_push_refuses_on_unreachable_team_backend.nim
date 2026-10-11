@@ -228,7 +228,7 @@ suite "HL-3 — pre-push refuses on an unreachable team backend":
 
       # ---- the lock-backend-unreachable failure, tier + backend named ---
       let bf = backendUnreachableFailure(report)
-      check bf != nil
+      check not bf.isNil
       let remedy = bf["remediation"].getStr()
       check remedy.contains("team")
       check remedy.contains("git-checkout")

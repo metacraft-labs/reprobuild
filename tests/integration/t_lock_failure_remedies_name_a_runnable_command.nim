@@ -286,7 +286,7 @@ suite "a refusal names a command that runs where the operator is standing":
       checkpoint("gate output: " & refusal.output)
       check refusal.code == 2
       let failure = integrityFailure(readReport(ws))
-      check failure != nil
+      check not failure.isNil
       let remediation = failure["remediation"].getStr()
       let evidence = failure["evidence"].getStr()
       checkpoint("remediation: " & remediation)
@@ -469,7 +469,7 @@ suite "a refusal names a command that runs where the operator is standing":
         if f["property"].getStr() == "lock-failure":
           lockFailure = f
           break
-      require lockFailure != nil
+      require not lockFailure.isNil
       let evidence3 = lockFailure["evidence"].getStr()
       let remediation3 = lockFailure["remediation"].getStr()
       checkpoint("case C evidence: " & evidence3)

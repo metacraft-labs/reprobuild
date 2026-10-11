@@ -134,7 +134,7 @@ suite "HL-1 — repro locking explain reports tier + backend + layer":
       for r in parsed["repos"]:
         if r["path"].getStr() == ".":
           found = r
-      check found != nil
+      check not found.isNil
       if found != nil:
         # (2) tier + backend from the declaring layer, not the per-repo field.
         check found["tier"].getStr() == "team"

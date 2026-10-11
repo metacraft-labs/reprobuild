@@ -193,8 +193,8 @@ suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
           elif id == ExecuteActionId:
             executeAction = action
 
-        check reproAppAction != nil
-        check executeAction != nil
+        check not reproAppAction.isNil
+        check not executeAction.isNil
 
         if reproAppAction != nil:
           checkpoint("reprobuild.apps.repro status=" &

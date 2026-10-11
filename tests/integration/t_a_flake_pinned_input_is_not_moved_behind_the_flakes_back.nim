@@ -204,7 +204,7 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
         check betaLocked.hasKey(field)
       # Non-empty as well as present: an integrity field that survived as `""`
       # would satisfy `hasKey` and protect nothing.
-      check betaLocked{"narHash"} != nil
+      check not betaLocked{"narHash"}.isNil
       if betaLocked{"narHash"} != nil:
         check betaLocked["narHash"].getStr().len > 0
 
