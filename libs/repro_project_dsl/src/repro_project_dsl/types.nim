@@ -1806,6 +1806,72 @@ type
     producerPackage*: string
     producerActionId*: string
 
+  ServiceReadinessKind* = enum
+    ## Shared-Development-Services L9 — the ``readiness`` setter
+    ## §9.1 writes (``readiness httpGet("/debug/ready", port = port)``).
+    ##
+    ## THE THREE ARMS ARE THE THREE THE SUPERVISOR IMPLEMENTS, and that
+    ## is deliberate rather than conservative: ``readinessOk`` in
+    ## ``repro_cli_support/dev_session.nim`` switches on exactly
+    ## ``none`` / ``fileexists`` / ``httpget`` and treats anything else
+    ## as never-ready. A fourth arm here would be a word a recipe could
+    ## write, that reached the artifact, and that made the service hang
+    ## until its timeout with nothing said -- the silent-drop shape this
+    ## campaign exists to find, in its worst form (a hang, not a miss).
+    ##
+    ## ``srkUnset`` is ordinal 0 so a record that never saw the setter
+    ## -- every pre-L9 recipe -- is distinguishable from one that wrote
+    ## ``readiness none``. The distinction is load-bearing: UNSET means
+    ## "ask the ``servicePlaceholder``", and ``none`` means "this author
+    ## says there is nothing to wait for". Collapsing them would make a
+    ## typed ``readiness none`` beside a placeholder's ``fileExists``
+    ## silently discard the placeholder's probe.
+    srkUnset = 0
+    srkNone
+    srkFileExists
+    srkHttpGet
+
+  ServiceReadinessDef* = object
+    ## One ``readiness`` declaration on a ``service`` body.
+    kind*: ServiceReadinessKind
+    path*: string
+      ## ``readiness fileExists("<path>")``. Relative paths are resolved
+      ## against the project root by the supervisor, exactly as the
+      ## placeholder's ``readiness.path`` is -- one resolution, not two.
+    url*: string
+      ## ``readiness httpGet(url = "<base>")``, or the ``http://
+      ## 127.0.0.1:<port>`` base derived from ``port = <n>``.
+    timeoutMs*: int
+      ## ``timeoutMs = <n>``. Zero means UNDECLARED, so the supervisor's
+      ## own default applies; there is no second copy of that default
+      ## here to drift from it.
+
+  ServiceInstanceDef* = object
+    ## Shared-Development-Services L9 — the typed form of the
+    ## ``instance`` block that until now existed only inside a
+    ## ``servicePlaceholder``'s JSON metadata.
+    ##
+    ## WHAT IS NOT HERE: ``environment``. The JSON block accepts one,
+    ## and this block REFUSES it by name, because §6.4 makes the
+    ## selected environment a per-invocation tracked input
+    ## (``REPRO_ENVIRONMENT`` -> ``canonicalEnvironmentSelection``) and
+    ## §6.5 makes it part of the instance key. A recipe that also wrote
+    ## the name would be a second answer to "which environment is this
+    ## instance keyed under", and the two could disagree with nothing
+    ## said. The typed lane DERIVES it from the selection instead.
+    declared*: bool
+      ## Whether the body carried an ``instance:`` block at all. A
+      ## service with no block is session-owned, which is every service
+      ## that existed before L7.
+    leaseTtlSeconds*: int64
+      ## ``lease keep`` (-1, the default -- D-SS5) | ``immediate`` (0) |
+      ## ``delayed(<n>)`` (n > 0).
+    environment*: string
+      ## The environment this instance is keyed under, DERIVED from the
+      ## selection at evaluation time rather than declared. Empty when
+      ## no environment is selected, which is its own key component
+      ## (L5, D-SS8: "``repro up`` implies nothing").
+
   ServiceTriggerKind* = enum
     ## The ``on <trigger>:`` taxonomy of ``Package-Model.md``
     ## §"Service Lifecycle And Reactive Triggers".
@@ -1869,6 +1935,20 @@ type
     members*: seq[string]
     sourceFile*: string
     sourceLine*: int
+
+const
+  SharedServiceInstanceKeepTtlSeconds* = -1'i64
+    ## Shared-Development-Services D-SS5's decision, as ONE number.
+    ##
+    ## `repro_cli_support`'s `SharedServiceInstanceDefaultTtlSeconds`
+    ## IS this constant rather than a second copy of it: L7 decided
+    ## `keep` is the default for a `stable`, state-owning service, and
+    ## two spellings of `-1` in two libraries is the drift the campaign
+    ## has already paid for once (`EnvironmentPrecedence` needed a
+    ## standing assertion to keep it aligned with
+    ## `ContributionPriority`). The typed `instance:` block lowers here
+    ## and the JSON `instance` block reads the alias, so there is one
+    ## wire spelling of `keep`.
 
 proc allToolUses*(pkg: PackageDef): seq[PackageUseDef] =
   ## Every dependency entry a TOOL-PATH consumer needs, in one seq:

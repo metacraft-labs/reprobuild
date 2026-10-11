@@ -238,6 +238,46 @@ type
       ## `servicePlaceholder` to carry a command. Empty when the service
       ## declared no executable, which is the case a `servicePlaceholder`
       ## still answers.
+    # ---------------------------------------------------------------
+    # Shared-Development-Services L9 — THE SUPERVISION FACTS.
+    #
+    # L8 gave identity, scope, compatibility and the command a typed
+    # channel; its review recorded what was left: "the `instance` block
+    # and `readiness` still require a `servicePlaceholder`, so
+    # 'declared once' is only PARTLY unblocked." These fields are the
+    # rest, and with them `infra/repro.nim`'s `servicePlaceholder` is
+    # DELETED rather than kept beside the typed block for the two facts
+    # it alone could carry.
+    #
+    # STRINGS AND SCALARS, for `identityKind`'s reason above: the enums
+    # live in `repro_project_dsl`, which is ABOVE this library, so
+    # importing them here would be a cycle.
+    # ---------------------------------------------------------------
+    readinessKind*: string
+      ## `""` (undeclared) | `"none"` | `"fileExists"` | `"httpGet"`.
+      ## The empty string sends the supervisor to the placeholder's
+      ## probe, which is what keeps every pre-L9 recipe unchanged.
+    readinessPath*: string
+    readinessUrl*: string
+    readinessTimeoutMs*: int64
+      ## `0` is UNDECLARED, so the supervisor's own default applies.
+      ## There is no second copy of that default here to drift from it.
+    workingDirectory*: string
+      ## The typed `workingDirectory` — the placeholder's `cwd`.
+    stateDirectories*: seq[string]
+      ## The typed `stateDirectory` setters — the placeholder's
+      ## `resources` directories, in declaration order.
+    instanceDeclared*: bool
+      ## Whether the typed `service` block carried an `instance:` block,
+      ## i.e. whether this service is a SHARED instance the daemon owns.
+    instanceLeaseTtlSeconds*: int64
+      ## D-SS5's lease as the wire number: -1 `keep`, 0 `immediate`,
+      ## n > 0 `delayed`.
+    instanceEnvironment*: string
+      ## The environment component of the instance key, DERIVED from the
+      ## per-invocation selection (§6.4) rather than declared. The typed
+      ## `instance:` block refuses an `environment` setting by name for
+      ## exactly that reason.
 
   DevEnvDiagnostic* = object
     severity*: DevEnvDiagnosticSeverity

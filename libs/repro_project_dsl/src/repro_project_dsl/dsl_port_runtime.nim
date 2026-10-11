@@ -2129,6 +2129,34 @@ type
       ## package's registered contribution points and REFUSES an
       ## ambiguous or unknown name by name.
     # ---------------------------------------------------------------
+    # Shared-Development-Services L9 — THE SUPERVISION FACTS, which
+    # until now existed only inside a `servicePlaceholder`'s opaque
+    # JSON metadata.
+    #
+    # L8's review recorded the remainder and L9's gate carries it: "the
+    # `instance` block and `readiness` still require a
+    # `servicePlaceholder`, so `declared once` is only PARTLY
+    # unblocked." These four fields are the rest of that channel. With
+    # them a shared service is declarable in ONE place -- the typed
+    # `service` block -- and `infra/repro.nim`'s `servicePlaceholder`
+    # goes away rather than being kept beside the typed block for the
+    # two facts it alone could carry.
+    # ---------------------------------------------------------------
+    readiness*: ServiceReadinessDef
+      ## `readiness none` | `fileExists(...)` | `httpGet(...)`.
+      ## `srkUnset` when the body declared none.
+    workingDirectory*: string
+      ## `workingDirectory "<dir>"` -- the placeholder's `cwd`. Empty
+      ## when undeclared, which the supervisor reads as the project
+      ## root.
+    stateDirectories*: seq[string]
+      ## `stateDirectory "<dir>"`, repeating -- the placeholder's
+      ## `resources: [{"kind": "directory", ...}]`. In declaration
+      ## order.
+    instance*: ServiceInstanceDef
+      ## `instance:` block. `declared == false` for a session-owned
+      ## service.
+    # ---------------------------------------------------------------
     # M9.C — systemd-unit metadata extensions.
     #
     # The M9 NDE-package discovery survey flagged that systemd-unit
@@ -2225,6 +2253,17 @@ type
       ## some other route must not have the first declaration silently
       ## replaced.
     scopeDeclared: bool
+    # Shared-Development-Services L9 — see DslServiceDef.
+    readiness: ServiceReadinessDef
+    workingDirectory: string
+    stateDirectories: seq[string]
+    instance: ServiceInstanceDef
+    readinessDeclared: bool
+      ## First-wins, for ``identityDeclared``'s reason: a second
+      ## ``readiness`` would decide, by statement order, whether a
+      ## consumer that ``dependsOn`` this service starts against a
+      ## seeded instance or a merely listening one.
+    workingDirectoryDeclared: bool
 
 var dslPortServiceRegistry: Table[string, seq[DslServiceDef]]
   ## Per-package service registry. Keyed by package name.
@@ -2615,7 +2654,18 @@ proc beginServiceContext*(packageName, serviceName, bodyRepr: string) =
     identity: ServiceIdentityDef(kind: sikDerived, stableId: ""),
     scope: sscProject,
     identityDeclared: false,
-    scopeDeclared: false))
+    scopeDeclared: false,
+    # Shared-Development-Services L9. `srkUnset` / "" / @[] /
+    # `declared: false` are the ground states that mean "this body said
+    # nothing", which is what keeps a pre-L9 recipe's record
+    # byte-identical to what it was.
+    readiness: ServiceReadinessDef(kind: srkUnset),
+    workingDirectory: "",
+    stateDirectories: @[],
+    instance: ServiceInstanceDef(declared: false,
+      leaseTtlSeconds: SharedServiceInstanceKeepTtlSeconds),
+    readinessDeclared: false,
+    workingDirectoryDeclared: false))
 
 proc setActiveServiceIdentity*(kind: ServiceIdentityKind;
                                stableId = "") =
@@ -2652,6 +2702,100 @@ proc setActiveServiceScope*(scope: ServiceScope) =
     return
   dslPortActiveServiceContext[^1].scope = scope
   dslPortActiveServiceContext[^1].scopeDeclared = true
+
+proc selectedEnvironmentName*(): string
+  ## FORWARD DECLARATION. The definition is in this file's L5 section,
+  ## several thousand lines below; `setActiveServiceInstance` needs it
+  ## HERE because the environment component of an instance key is
+  ## derived from the selection rather than declared, and this file is
+  ## `include`d into one module compiled top to bottom.
+  ##
+  ## Forward-declared rather than moved: the L5 section is where a
+  ## reader looks for environment selection, and relocating the proc to
+  ## satisfy an ordering constraint would put it where nobody looks.
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L9 — the SUPERVISION body-setters.
+#
+# These are what makes "declared once" true for the last two facts L8's
+# review left behind: `readiness`, and the `instance` block. Before them
+# a recipe that wanted a SHARED instance wrote a typed `service` block
+# for the identity and a `servicePlaceholder` for the probe, joined by
+# the service name, and `infra/repro.nim` is the production instance of
+# exactly that.
+#
+# Every one of them is FIRST-WINS with the macro refusing the second
+# occurrence at expansion time, for `setActiveServiceIdentity`'s reason:
+# last-wins would make the decision depend on statement order, and these
+# particular fields decide whether a dependent starts against a seeded
+# instance and whether a developer's identity database is reaped.
+# ---------------------------------------------------------------------------
+
+proc setActiveServiceReadiness*(readiness: ServiceReadinessDef) =
+  ## Body-setter for ``readiness none`` / ``fileExists(...)`` /
+  ## ``httpGet(...)``.
+  ##
+  ## ``srkUnset`` is REFUSED rather than recorded: it is the ground
+  ## state meaning "this body declared no readiness", so writing it
+  ## through the setter would make a declaration indistinguishable from
+  ## its absence, and the absence is what sends the supervisor to the
+  ## placeholder's probe.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if readiness.kind == srkUnset:
+    return
+  if dslPortActiveServiceContext[^1].readinessDeclared:
+    return
+  dslPortActiveServiceContext[^1].readiness = readiness
+  dslPortActiveServiceContext[^1].readinessDeclared = true
+
+proc setActiveServiceWorkingDirectory*(dir: string) =
+  ## Body-setter for ``workingDirectory "<dir>"`` — the placeholder's
+  ## ``cwd``.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].workingDirectoryDeclared:
+    return
+  dslPortActiveServiceContext[^1].workingDirectory = dir
+  dslPortActiveServiceContext[^1].workingDirectoryDeclared = true
+
+proc addActiveServiceStateDirectory*(dir: string) =
+  ## Body-setter for ``stateDirectory "<dir>"`` — one of the
+  ## placeholder's ``resources`` entries, which the supervisor creates
+  ## before the service starts.
+  ##
+  ## REPEATING, like ``runtimeFile``: a service may own several state
+  ## directories, and the placeholder's ``resources`` is a list. An
+  ## EMPTY path is dropped rather than recorded, because
+  ## ``createDir("")`` is a silent no-op in the supervisor and a
+  ## recorded empty entry would read as a declared directory that
+  ## nothing creates.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dir.len == 0:
+    return
+  dslPortActiveServiceContext[^1].stateDirectories.add(dir)
+
+proc setActiveServiceInstance*(leaseTtlSeconds: int64) =
+  ## Body-setter for the ``instance:`` block — "this service is a SHARED
+  ## instance the daemon owns", with D-SS5's lease.
+  ##
+  ## The block's mere PRESENCE is the declaration; the lease is its one
+  ## setting. `environment` is not a setting of it — see
+  ## ``ServiceInstanceDef``'s note — and the macro refuses the word by
+  ## name rather than leaving an author to discover that it parsed and
+  ## did nothing.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].instance.declared:
+    return
+  dslPortActiveServiceContext[^1].instance = ServiceInstanceDef(
+    declared: true,
+    leaseTtlSeconds: leaseTtlSeconds,
+    # DERIVED, not declared. The selection is a tracked input (§6.4) and
+    # part of the instance key (§6.5); reading it here is the one
+    # reading, so a recipe cannot hold a second, disagreeing answer.
+    environment: selectedEnvironmentName())
 
 proc setActiveServiceExecutable*(executableRef: string) =
   ## Body-setter: select the referenced executable artifact. Mirrors
@@ -3285,7 +3429,11 @@ proc finishServiceContext*() =
     triggers: frame.triggers,
     identity: frame.identity,
     scope: frame.scope,
-    convergePoints: frame.convergePoints))
+    convergePoints: frame.convergePoints,
+    readiness: frame.readiness,
+    workingDirectory: frame.workingDirectory,
+    stateDirectories: frame.stateDirectories,
+    instance: frame.instance))
 
 # ---------------------------------------------------------------------------
 # DSL-port M7 — user-facing service-context accessors. Symmetric with the

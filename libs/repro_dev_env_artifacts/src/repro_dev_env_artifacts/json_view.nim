@@ -73,7 +73,22 @@ proc serviceJson(service: DevEnvServiceSummary): string =
     ",\"registrationPoints\":" & stringsJson(service.registrationPoints) &
     ",\"registrationMembers\":" & stringsJson(service.registrationMembers) &
     ",\"registrationContributors\":" &
-      stringsJson(service.registrationContributors) & "}"
+      stringsJson(service.registrationContributors) &
+    # Shared-Development-Services L9: in the JSON view for L8's reason
+    # -- `repro dev-env --json` is how an operator sees what a recipe
+    # declared, and a readiness probe that reaches the artifact but not
+    # this view is invisible at exactly the moment someone is debugging
+    # why a session hung waiting for one.
+    ",\"readinessKind\":" & q(service.readinessKind) &
+    ",\"readinessPath\":" & q(service.readinessPath) &
+    ",\"readinessUrl\":" & q(service.readinessUrl) &
+    ",\"readinessTimeoutMs\":" & $service.readinessTimeoutMs &
+    ",\"workingDirectory\":" & q(service.workingDirectory) &
+    ",\"stateDirectories\":" & stringsJson(service.stateDirectories) &
+    ",\"instanceDeclared\":" &
+      (if service.instanceDeclared: "true" else: "false") &
+    ",\"instanceLeaseTtlSeconds\":" & $service.instanceLeaseTtlSeconds &
+    ",\"instanceEnvironment\":" & q(service.instanceEnvironment) & "}"
 
 proc diagnosticJson(diagnostic: DevEnvDiagnostic): string =
   "{\"severity\":" & q($diagnostic.severity) &

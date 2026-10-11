@@ -1831,6 +1831,8 @@ const
     "with no diagnostic."
   m5ServiceSetterSurface = "`executable <ident>`, `args \"...\", ...`, " &
     "`runtimeFile <buildOutput>`, `identity <mode>`, `scope <value>`, " &
+    "`readiness <probe>`, `workingDirectory \"<dir>\"`, " &
+    "`stateDirectory \"<dir>\"`, `instance:`, `converge <point>`, " &
     "the systemd-unit setters and `on <trigger>:` blocks"
   m5ServiceHeadDropRule = "An extra argument here is REFUSED rather than " &
     "dropped: it is never semchecked, so an identifier that does not " &
@@ -2683,6 +2685,510 @@ proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
     of "compatibility": l6ParseCompatibilitySetter(stmt, result)
     else: discard
 
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L9 — the SUPERVISION setters of a `service`
+# body: `readiness`, `workingDirectory`, `stateDirectory` and the
+# `instance:` block.
+#
+# WHY THEY EXIST AND WHAT THEY REPLACE. L8's review measured the
+# remainder it left: "the `instance` block and `readiness` still require
+# a `servicePlaceholder`, so `declared once` is only PARTLY unblocked."
+# A recipe that wanted a SHARED instance therefore wrote the service
+# TWICE -- a typed `service` block for the identity, the scope and the
+# command, and a `servicePlaceholder` whose opaque JSON carried the
+# probe, the working directory, the state directories and the `instance`
+# block -- joined by nothing but the service NAME.
+# `infra/repro.nim` is the production instance of exactly that shape, and
+# it is what L9's first gate clause ("declared ONCE") is measured on.
+#
+# EVERY NEAR MISS IS REFUSED BY NAME. The setter walk below ends in
+# `else: discard`, so an unrecognised head is dropped in silence: a
+# recipe would compile, the service would carry no readiness, and a
+# consumer that `dependsOn` it would start against an instance that is
+# listening but not seeded. That is the campaign's dominant finding in
+# its worst form -- not a missing value but a race -- so the walker
+# refuses:
+#
+#   * a bare `readiness` / `instance` / `workingDirectory` /
+#     `stateDirectory` ident, which the Call/Command filter drops;
+#   * a DOTTED head (`cfg.readiness fileExists(...)`), which the
+#     ident-kind filter drops;
+#   * a readiness kind that is not one of the three the SUPERVISOR
+#     implements;
+#   * `environment`, `identity`, `scope` and `ttlSeconds` inside the
+#     `instance:` block, each naming where it does belong;
+#   * a second occurrence of any of them.
+# ---------------------------------------------------------------------------
+
+const
+  l9RecognisedReadiness = "`readiness none`, " &
+    "`readiness fileExists(\"<path>\")`, " &
+    "`readiness httpGet(port = <n>)` and " &
+    "`readiness httpGet(url = \"<base>\")`"
+  l9RecognisedLease = "`lease keep` (the default -- D-SS5), " &
+    "`lease immediate` and `lease delayed(<seconds>)`"
+  l9ReadinessKinds = ["none", "fileexists", "httpget"]
+  l9SupervisionHeads = ["readiness", "workingdirectory", "statedirectory",
+    "instance"]
+  l9SupervisionSurface = "`readiness <probe>`, " &
+    "`workingDirectory \"<dir>\"`, `stateDirectory \"<dir>\"` and " &
+    "`instance:`"
+  l9NoSilentDropRule = "Refused rather than dropped: this walker's " &
+    "closing `else: discard` would leave the service with no readiness " &
+    "probe at all, and a service with no probe is reported READY as " &
+    "soon as it is spawned -- so a consumer that `dependsOn` it would " &
+    "start against an instance that is listening and not yet seeded. " &
+    "That failure is a race rather than a missing value, which makes " &
+    "it the worst of the shapes this campaign hunts."
+
+type
+  L9ServiceSupervision = object
+    ## What a `service` body declared about its SUPERVISION, in a shape
+    ## the emitter can splice. Expressions are kept as nodes and never
+    ## evaluated here, exactly as `m5ServiceStringLitArg` does: the
+    ## macro relocates, the compiler type-checks.
+    readinessDeclared: bool
+    readinessKind: string
+      ## "none" | "fileExists" | "httpGet". The AUTHOR'S spelling of the
+      ## recognised kind, not the normalised one, because it appears in
+      ## the lowered record and in `repro dev-env --json`.
+    readinessPathExpr: NimNode
+    readinessUrlExpr: NimNode
+    readinessPortExpr: NimNode
+    readinessTimeoutExpr: NimNode
+    workingDirectoryExpr: NimNode
+    stateDirectoryExprs: seq[NimNode]
+    instanceDeclared: bool
+    instanceLeaseExpr: NimNode
+      ## An `int64` expression. Nil when the block declared no `lease`,
+      ## which is `keep`.
+
+proc l9NewSupervision(): L9ServiceSupervision =
+  L9ServiceSupervision(stateDirectoryExprs: @[])
+
+proc l9DottedSetterHead(stmt: NimNode): string =
+  ## The supervision setter name a DOTTED head spells, or "".
+  ##
+  ## `cfg.readiness fileExists(...)` parses as
+  ## `Command(DotExpr(cfg, readiness), Call(...))`, and the setter
+  ## walk's `if stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+  ## continue` drops it with no diagnostic. The shape is plausible
+  ## enough to be written -- the `args cfg.path` setter beside it takes
+  ## exactly that kind of expression -- and the consequence is the
+  ## silent no-probe race above.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return ""
+  if stmt.len < 1 or stmt[0].kind != nnkDotExpr:
+    return ""
+  var node = stmt[0]
+  while node.kind == nnkDotExpr and node.len == 2:
+    node = node[1]
+  if node.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return ""
+  let word = identText(node).normalize
+  if word in l9SupervisionHeads:
+    return word
+  ""
+
+proc l9BareSetterHead(stmt: NimNode): string =
+  ## The supervision setter name a BARE IDENT spells, or "".
+  ##
+  ## `readiness` on its own, or `instance` with no body, reaches the
+  ## setter walk as an `nnkIdent`, is not one of the short-form reactive
+  ## atoms, and is then dropped by `if stmt.kind notin {nnkCall,
+  ## nnkCommand}: continue`.
+  if stmt.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return ""
+  let word = identText(stmt).normalize
+  if word in l9SupervisionHeads:
+    return word
+  ""
+
+proc l9EmptyCallSetterHead(stmt: NimNode): string =
+  ## The supervision setter name an ARGUMENT-LESS CALL spells, or "".
+  ##
+  ## `readiness()` / `instance()` / `workingDirectory()` /
+  ## `stateDirectory()` reach the setter walk as an `nnkCall` of length
+  ## ONE, so they survive the statement-kind filter and are then dropped
+  ## by `if stmt.len < 2: continue` -- the ARITY filter, which is the
+  ## third of this walker's three `continue`s and was the one left
+  ## uncovered when the other two were closed.
+  ##
+  ## This matches ONLY the four supervision names, deliberately. A
+  ## one-child `nnkCall` is a legal spelling elsewhere in this DSL --
+  ## `m5ServiceShortFormEmission` records that `restartOnCrash()` parses
+  ## exactly this way -- so refusing the SHAPE would reject working
+  ## recipes. It is the shape plus one of these four names that can only
+  ## be a mistake, because none of the four has a zero-argument meaning.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return ""
+  if stmt.len != 1:
+    return ""
+  if stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return ""
+  let word = identText(stmt[0]).normalize
+  if word in l9SupervisionHeads:
+    return word
+  ""
+
+proc l9RefuseSupervisionNearMisses(stmt: NimNode) =
+  ## The three drop shapes, refused before the setter walk reads a head:
+  ## a bare ident, a dotted head, and an argument-less call. One per
+  ## `continue` in the walk.
+  let empty = l9EmptyCallSetterHead(stmt)
+  if empty.len > 0:
+    error("`" & stmt.repr.strip() & "` calls the setter `" & empty &
+      "` with NO ARGUMENTS, and the setter walk drops a statement with " &
+      "fewer than two children before it ever reads the head -- so " &
+      "this would be skipped entirely. None of the supervision " &
+      "setters has a zero-argument meaning: " & l9SupervisionSurface &
+      ". (An EMPTY `instance:` block is spelled `instance:` with a " &
+      "`discard` body, not `instance()`.) " & l9NoSilentDropRule,
+      m5ServiceStmtAnchor(stmt))
+  let bare = l9BareSetterHead(stmt)
+  if bare.len > 0:
+    error("`" & stmt.repr.strip() & "` is a bare identifier, and `" &
+      bare & "` is a SETTER that takes an argument. The setter walk " &
+      "would skip it entirely. The supervision setters are " &
+      l9SupervisionSurface & "; the readiness probes are " &
+      l9RecognisedReadiness & ". " & l9NoSilentDropRule,
+      m5ServiceStmtAnchor(stmt))
+  let dotted = l9DottedSetterHead(stmt)
+  if dotted.len > 0:
+    error("`" & stmt.repr.strip() & "` writes the setter `" & dotted &
+      "` behind a dotted head, and the setter walk accepts only a bare " &
+      "setter name -- so it would be skipped entirely. Write `" &
+      dotted & " ...` at the top level of the `service` body. " &
+      l9NoSilentDropRule,
+      m5ServiceStmtAnchor(stmt))
+
+proc l9ParseReadinessSetter(stmt: NimNode;
+                            result: var L9ServiceSupervision) =
+  ## `readiness none` | `readiness fileExists(...)` |
+  ## `readiness httpGet(...)`.
+  if result.readinessDeclared:
+    error("`readiness` is declared twice in one `service` body. The " &
+      "first declaration WINS at runtime (the body-setter is " &
+      "first-wins, like `identity`), so a second one is dead text -- " &
+      "and which probe a dependent waits on must not depend on " &
+      "statement order.", m5ServiceStmtAnchor(stmt))
+  if stmt.len != 2:
+    error("`readiness` takes exactly one probe. " &
+      l9RecognisedReadiness & ", each optionally with " &
+      "`timeoutMs = <n>` inside the parentheses.",
+      m5ServiceStmtAnchor(stmt))
+  let probe = stmt[1]
+  if probe.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    let word = identText(probe).normalize
+    if word == "none":
+      result.readinessDeclared = true
+      result.readinessKind = "none"
+      return
+    if word in l9ReadinessKinds:
+      error("`readiness " & identText(probe) & "` names a probe KIND " &
+        "and gives it nothing to probe. Write it as a call: " &
+        l9RecognisedReadiness & ".", m5ServiceStmtAnchor(stmt))
+    error("`readiness " & identText(probe) & "` is not a probe this " &
+      "build knows. The supervisor implements exactly three kinds (" &
+      "`readinessOk` in `repro_cli_support/dev_session.nim` switches " &
+      "on `none`, `fileExists` and `httpGet`), and anything else is " &
+      "NEVER READY -- so a fourth word would reach the artifact and " &
+      "hang the session until its timeout with nothing said. " &
+      l9RecognisedReadiness & ".", m5ServiceStmtAnchor(stmt))
+  if probe.kind notin {nnkCall, nnkCommand}:
+    error("`readiness` takes a probe written as `none` or as a call; `" &
+      probe.repr.strip() & "` is a " & $probe.kind & ". " &
+      l9RecognisedReadiness & ".", m5ServiceStmtAnchor(stmt))
+  if probe[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("`readiness " & probe.repr.strip() & "`: the probe's kind " &
+      "must be a bare name. " & l9RecognisedReadiness & ".",
+      m5ServiceStmtAnchor(stmt))
+  let kindWord = identText(probe[0]).normalize
+  if kindWord notin l9ReadinessKinds:
+    error("`readiness " & identText(probe[0]) & "(...)` is not a probe " &
+      "this build knows; the supervisor implements `none`, " &
+      "`fileExists` and `httpGet` and reports anything else as never " &
+      "ready. " & l9RecognisedReadiness & ".",
+      m5ServiceStmtAnchor(stmt))
+  if kindWord == "none":
+    error("`readiness none(...)` takes no arguments -- it says there " &
+      "is nothing to wait for. Write `readiness none`.",
+      m5ServiceStmtAnchor(stmt))
+  var positional: seq[NimNode] = @[]
+  for i in 1 ..< probe.len:
+    let arg = probe[i]
+    if arg.kind in {nnkExprEqExpr, nnkAsgn}:
+      if arg.len != 2 or arg[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+        error("`readiness " & identText(probe[0]) & "`: `" &
+          arg.repr.strip() & "` is not a named argument this probe " &
+          "accepts.", m5ServiceStmtAnchor(arg))
+      case identText(arg[0]).normalize
+      of "timeoutms":
+        if result.readinessTimeoutExpr != nil:
+          error("`readiness " & identText(probe[0]) &
+            "`: `timeoutMs` is given twice.", m5ServiceStmtAnchor(arg))
+        result.readinessTimeoutExpr = arg[1].copyNimTree()
+      of "port":
+        if kindWord != "httpget":
+          error("`readiness fileExists`: `port` belongs to " &
+            "`httpGet`, not to a file probe. A file probe waits for a " &
+            "PATH to exist, which is `readiness " &
+            "fileExists(\"<path>\")`.", m5ServiceStmtAnchor(arg))
+        if result.readinessPortExpr != nil:
+          error("`readiness httpGet`: `port` is given twice.",
+            m5ServiceStmtAnchor(arg))
+        result.readinessPortExpr = arg[1].copyNimTree()
+      of "url":
+        if kindWord != "httpget":
+          error("`readiness fileExists`: `url` belongs to `httpGet`, " &
+            "not to a file probe.", m5ServiceStmtAnchor(arg))
+        if result.readinessUrlExpr != nil:
+          error("`readiness httpGet`: `url` is given twice.",
+            m5ServiceStmtAnchor(arg))
+        result.readinessUrlExpr = arg[1].copyNimTree()
+      of "path":
+        if kindWord == "httpget":
+          error("`readiness httpGet`: `path` is NOT accepted, and that " &
+            "is a limit of the supervisor rather than of this macro. " &
+            "`readinessOk` probes `httpRequest(spec.readinessUrl, " &
+            "\"/\")` -- the request path is always `/` -- so a `path` " &
+            "here would be recorded, carried to the artifact and then " &
+            "read by nothing. Front the service with an endpoint at " &
+            "`/`, or wait on a file the service writes last " &
+            "(`readiness fileExists(\"<path>\")`), which is what " &
+            "\"seeded\" rather than \"listening\" usually means anyway.",
+            m5ServiceStmtAnchor(arg))
+        if result.readinessPathExpr != nil:
+          error("`readiness fileExists`: the path is given twice.",
+            m5ServiceStmtAnchor(arg))
+        result.readinessPathExpr = arg[1].copyNimTree()
+      else:
+        error("`readiness " & identText(probe[0]) & "`: `" &
+          identText(arg[0]) & "` is not an argument this probe " &
+          "accepts. `fileExists` takes a path and `timeoutMs`; " &
+          "`httpGet` takes `port` or `url` and `timeoutMs`. An " &
+          "unrecognised name is refused rather than ignored: an " &
+          "argument that parses and is read by nothing is " &
+          "indistinguishable from support for it.",
+          m5ServiceStmtAnchor(arg))
+    else:
+      positional.add(arg.copyNimTree())
+  case kindWord
+  of "fileexists":
+    if positional.len > 1:
+      error("`readiness fileExists` takes ONE path. The timeout is a " &
+        "NAMED argument -- `readiness fileExists(\"<path>\", " &
+        "timeoutMs = <n>)` -- so a second positional argument would " &
+        "be read by nothing.", m5ServiceStmtAnchor(stmt))
+    if positional.len == 1:
+      if result.readinessPathExpr != nil:
+        error("`readiness fileExists`: the path is given both " &
+          "positionally and as `path =`.", m5ServiceStmtAnchor(stmt))
+      result.readinessPathExpr = positional[0]
+    if result.readinessPathExpr == nil:
+      error("`readiness fileExists()` declares no path, so there is " &
+        "nothing to wait for and the probe can never go ready. Write " &
+        "`readiness fileExists(\"<path>\")`.",
+        m5ServiceStmtAnchor(stmt))
+  of "httpget":
+    if positional.len > 0:
+      error("`readiness httpGet` takes NAMED arguments only -- " &
+        "`port = <n>` or `url = \"<base>\"`, plus `timeoutMs = <n>`. " &
+        "A positional argument reads as the request path, which the " &
+        "supervisor does not honour (it probes `/`), so it would be " &
+        "accepted and then not there.", m5ServiceStmtAnchor(stmt))
+    if result.readinessPortExpr != nil and result.readinessUrlExpr != nil:
+      error("`readiness httpGet` is given both `port` and `url`, which " &
+        "are two answers to the same question. `port = <n>` IS " &
+        "`url = \"http://127.0.0.1:<n>\"`; write one of them.",
+        m5ServiceStmtAnchor(stmt))
+    if result.readinessPortExpr == nil and result.readinessUrlExpr == nil:
+      error("`readiness httpGet()` names nothing to probe. Write " &
+        "`readiness httpGet(port = <n>)` for a loopback listener, or " &
+        "`readiness httpGet(url = \"<base>\")` for anything else.",
+        m5ServiceStmtAnchor(stmt))
+  else: discard
+  result.readinessDeclared = true
+  result.readinessKind = (if kindWord == "fileexists": "fileExists"
+                          else: "httpGet")
+
+proc l9ParseInstanceBlock(stmt: NimNode;
+                          result: var L9ServiceSupervision) =
+  ## `instance:` -- "this service is a SHARED instance the daemon owns".
+  if result.instanceDeclared:
+    error("`instance:` is declared twice in one `service` body. The " &
+      "first declaration wins at runtime, so the second is dead text " &
+      "-- and D-SS5's lease is what decides whether a developer's " &
+      "identity database is reaped.", m5ServiceStmtAnchor(stmt))
+  if stmt.len != 2 or stmt[^1].kind != nnkStmtList:
+    error("`instance` is a BLOCK, not a value: write `instance:` with " &
+      "its settings indented beneath it. The settings are " &
+      l9RecognisedLease & "; an empty block is legal and means " &
+      "\"shared, with the default `keep` lease\". A non-block " &
+      "`instance` is refused rather than ignored, because ignoring it " &
+      "would leave the service SESSION-OWNED while its author " &
+      "believed it was shared -- the same refusal " &
+      "`parseSharedServiceInstance` raises for a non-object `instance` " &
+      "key in a placeholder's JSON.", m5ServiceStmtAnchor(stmt))
+  result.instanceDeclared = true
+  for entry in stmt[^1]:
+    let bareWord =
+      if entry.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+        identText(entry).normalize
+      else:
+        ""
+    if bareWord.len > 0:
+      error("`instance:` does not recognise the bare word `" &
+        identText(entry) & "`. Its settings are " & l9RecognisedLease &
+        ".", m5ServiceStmtAnchor(entry))
+    # A BARE `discard` is the empty block, and it is accepted for a
+    # language reason rather than a taste one: Nim has no syntax for an
+    # empty indented body, so `instance:` + `discard` is the ONLY way an
+    # author can write "shared, with the default `keep` lease". Refusing
+    # it would make the legal declaration unspellable. `discard <expr>`
+    # is NOT accepted -- it carries something, and what it carries would
+    # be read by nothing.
+    if entry.kind == nnkDiscardStmt and
+        (entry.len == 0 or entry[0].kind == nnkEmpty):
+      continue
+    if entry.kind notin {nnkCall, nnkCommand, nnkAsgn, nnkExprEqExpr}:
+      error("`instance:` does not recognise `" & entry.repr.strip() &
+        "` (a " & $entry.kind & "). Its settings are " &
+        l9RecognisedLease & ". A bare `discard` is accepted, as the " &
+        "only way Nim lets an author write an empty block.",
+        m5ServiceStmtAnchor(entry))
+    let head = (if entry.kind in {nnkAsgn, nnkExprEqExpr}: entry[0]
+                else: entry[0])
+    if head.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      error("`instance:` setting names must be bare words; `" &
+        entry.repr.strip() & "` is not. Its settings are " &
+        l9RecognisedLease & ".", m5ServiceStmtAnchor(entry))
+    case identText(head).normalize
+    of "environment":
+      error("`instance:` does not take an `environment`, and the " &
+        "omission is deliberate. The selected environment is a " &
+        "PER-INVOCATION tracked input (`REPRO_ENVIRONMENT` -> " &
+        "`canonicalEnvironmentSelection`, " &
+        "Shared-Development-Services.md §6.4) and it is already part " &
+        "of the instance key (§6.5), so this lane DERIVES it from the " &
+        "selection. A name written here would be a second answer to " &
+        "\"which environment is this instance keyed under\", and the " &
+        "two could disagree with nothing said -- a developer running " &
+        "`REPRO_ENVIRONMENT=production` would attach to the instance " &
+        "the recipe called `dev`.", m5ServiceStmtAnchor(entry))
+    of "identity":
+      error("`instance:` does not take an `identity`. An instance's " &
+        "identity is a setter of the `service` block itself -- " &
+        "`identity stable \"<id>\"` (§4.2) -- one level out from here. " &
+        "Declaring it in both places would give one service two " &
+        "answers to \"are these the same instance?\".",
+        m5ServiceStmtAnchor(entry))
+    of "scope":
+      error("`instance:` does not take a `scope`. Like the identity, " &
+        "the scope is a setter of the `service` block itself (`scope " &
+        "project|workspace|user|system`, §4.1), one level out from " &
+        "here.", m5ServiceStmtAnchor(entry))
+    of "ttlseconds":
+      error("`instance:` does not take a bare `ttlSeconds`; the ttl " &
+        "belongs to the lease that reads it -- `lease " &
+        "delayed(<seconds>)`. Beside `lease keep` or `lease " &
+        "immediate` a ttl is read by nothing, which is the same " &
+        "refusal `parseSharedServiceInstance` raises for the JSON " &
+        "spelling.", m5ServiceStmtAnchor(entry))
+    of "lease":
+      if result.instanceLeaseExpr != nil:
+        error("`instance:` declares `lease` twice. " &
+          l9RecognisedLease & ".", m5ServiceStmtAnchor(entry))
+      if entry.kind in {nnkAsgn, nnkExprEqExpr}:
+        error("`lease` is written as a command, not an assignment: " &
+          l9RecognisedLease & ".", m5ServiceStmtAnchor(entry))
+      if entry.len != 2:
+        error("`lease` takes exactly one word. " & l9RecognisedLease &
+          ".", m5ServiceStmtAnchor(entry))
+      let value = entry[1]
+      if value.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+        case identText(value).normalize
+        of "keep":
+          # THE CONSTANT, not a literal `-1`. The implicit default
+          # twenty lines down already lowers through
+          # `SharedServiceInstanceKeepTtlSeconds`, so writing the
+          # literal here meant one newly-written block reached the same
+          # number by two routes -- which is exactly the drift the
+          # constant was introduced to end.
+          result.instanceLeaseExpr = newLit(SharedServiceInstanceKeepTtlSeconds)
+        of "immediate":
+          result.instanceLeaseExpr = newLit(0'i64)
+        of "delayed":
+          error("`lease delayed` needs its ttl: `lease " &
+            "delayed(<seconds>)`. A delayed lease with no ttl is an " &
+            "immediate one wearing the wrong name -- the same refusal " &
+            "`parseSharedServiceInstance` raises for the JSON " &
+            "spelling.", m5ServiceStmtAnchor(entry))
+        else:
+          error("`lease " & identText(value) & "` is not a lease this " &
+            "build knows. " & l9RecognisedLease & ".",
+            m5ServiceStmtAnchor(entry))
+      elif value.kind in {nnkCall, nnkCommand} and value.len >= 1 and
+          value[0].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+        let word = identText(value[0]).normalize
+        if word != "delayed":
+          error("`lease " & identText(value[0]) & "(...)` is not a " &
+            "lease this build knows; only `delayed` takes an " &
+            "argument. " & l9RecognisedLease & ".",
+            m5ServiceStmtAnchor(entry))
+        if value.len != 2:
+          error("`lease delayed(<seconds>)` takes exactly one ttl.",
+            m5ServiceStmtAnchor(entry))
+        let ttl = value[1]
+        if ttl.kind != nnkIntLit:
+          error("`lease delayed(<seconds>)` takes an integer LITERAL, " &
+            "so the macro can refuse a non-positive one here rather " &
+            "than at run time: `" & ttl.repr.strip() & "` is a " &
+            $ttl.kind & ".", m5ServiceStmtAnchor(entry))
+        if ttl.intVal <= 0:
+          error("`lease delayed(" & $ttl.intVal & ")` is not a delay. " &
+            "A ttl of zero is `lease immediate` and a negative one is " &
+            "`lease keep`; write the lease you mean.",
+            m5ServiceStmtAnchor(entry))
+        result.instanceLeaseExpr = newLit(int64(ttl.intVal))
+      else:
+        error("`lease` takes one of " & l9RecognisedLease & "; `" &
+          value.repr.strip() & "` is a " & $value.kind & ".",
+          m5ServiceStmtAnchor(entry))
+    else:
+      error("`instance:` does not recognise the setting `" &
+        identText(head) & "`. Its settings are " & l9RecognisedLease &
+        ". An unrecognised setting is refused rather than ignored: a " &
+        "lease that parses and is read by nothing leaves the instance " &
+        "on the default, which decides whether a state-owning service " &
+        "is reaped.", m5ServiceStmtAnchor(entry))
+
+proc l9ParseWorkingDirectory(stmt: NimNode;
+                             result: var L9ServiceSupervision) =
+  if result.workingDirectoryExpr != nil:
+    error("`workingDirectory` is declared twice in one `service` " &
+      "body; the first wins at runtime, so the second is dead text.",
+      m5ServiceStmtAnchor(stmt))
+  if stmt.len != 2:
+    error("`workingDirectory` takes exactly one directory: " &
+      "`workingDirectory \"<dir>\"`. A relative path is resolved " &
+      "against the project root by the supervisor -- the same " &
+      "resolution a placeholder's `cwd` gets, not a second one.",
+      m5ServiceStmtAnchor(stmt))
+  result.workingDirectoryExpr = stmt[1].copyNimTree()
+
+proc l9ParseStateDirectory(stmt: NimNode;
+                           result: var L9ServiceSupervision) =
+  if stmt.len < 2:
+    error("`stateDirectory` takes at least one directory: " &
+      "`stateDirectory \"<dir>\"`. It is the typed form of a " &
+      "placeholder's `resources: [{\"kind\": \"directory\", \"path\": " &
+      "...}]` -- a directory the supervisor creates before the service " &
+      "starts -- and it REPEATS, because a service may own several.",
+      m5ServiceStmtAnchor(stmt))
+  for i in 1 ..< stmt.len:
+    result.stateDirectoryExprs.add(stmt[i].copyNimTree())
+
 proc m5ParseServiceBody(body: NimNode): tuple[
     executableRef: string; executableExpr: NimNode;
     argExprs: seq[NimNode]; runtimeFileExprs: seq[NimNode];
@@ -2694,7 +3200,8 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     envPairs: seq[tuple[keyLit: NimNode; valueLit: NimNode]];
     restartLit: NimNode; userLit: NimNode; groupLit: NimNode;
     convergePointNames: seq[string];
-    identityScope: L4ServiceIdentityScope] =
+    identityScope: L4ServiceIdentityScope;
+    supervision: L9ServiceSupervision] =
   ## Walk a ``service:`` body and extract its setters.
   ##
   ## ``Package-Model.md`` §Collections is the authority for the four
@@ -2753,6 +3260,7 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   result.envPairs = @[]
   result.convergePointNames = @[]
   result.identityScope = l4NewIdentityScope()
+  result.supervision = l9NewSupervision()
   if body.kind != nnkStmtList:
     return
   # L4: `identity` / `scope` are read by the shared walker, which also
@@ -2768,6 +3276,11 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     if shortForm != nil:
       result.reactiveEmissions.add(shortForm)
       continue
+    # Shared-Development-Services L9: the two shapes the three filters
+    # below drop in silence -- a bare supervision setter name and a
+    # dotted head. Refused HERE, before any filter, because each filter
+    # is a `continue` with no diagnostic.
+    l9RefuseSupervisionNearMisses(stmt)
     if stmt.kind notin {nnkCall, nnkCommand}:
       continue
     if stmt.len < 2:
@@ -2814,6 +3327,18 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     of "runtimefile":
       for i in 1 ..< stmt.len:
         result.runtimeFileExprs.add(stmt[i].copyNimTree())
+    of "readiness":
+      # Shared-Development-Services L9. §9.1's worked example writes
+      # `readiness httpGet("/debug/ready", port = port)` as a setter of
+      # the `service` block, and until now there was none: the probe
+      # could only be declared in a `servicePlaceholder`'s JSON.
+      l9ParseReadinessSetter(stmt, result.supervision)
+    of "workingdirectory":
+      l9ParseWorkingDirectory(stmt, result.supervision)
+    of "statedirectory":
+      l9ParseStateDirectory(stmt, result.supervision)
+    of "instance":
+      l9ParseInstanceBlock(stmt, result.supervision)
     of "converge":
       # Shared-Development-Services L8 -- `converge <point>, <point>`.
       #
@@ -3057,6 +3582,63 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
     let scopeLit = ident($parsedBody.identityScope.scope)
     tryBody.add(quote do:
       setActiveServiceScope(`scopeLit`))
+  # L9: the supervision setters. Emitted only when the body DECLARED
+  # them, for the reason L4's identity emission gives: the runtime frame
+  # is already on the ground state, so an unconditional call would make
+  # a recipe that said nothing indistinguishable from one that wrote the
+  # default — and for `readiness` the ground state (`srkUnset`) is what
+  # sends the supervisor to the placeholder's probe.
+  if parsedBody.supervision.readinessDeclared:
+    let kindIdent =
+      case parsedBody.supervision.readinessKind
+      of "none": ident("srkNone")
+      of "fileExists": ident("srkFileExists")
+      else: ident("srkHttpGet")
+    let pathExpr =
+      if parsedBody.supervision.readinessPathExpr != nil:
+        parsedBody.supervision.readinessPathExpr
+      else:
+        newLit("")
+    let timeoutExpr =
+      if parsedBody.supervision.readinessTimeoutExpr != nil:
+        parsedBody.supervision.readinessTimeoutExpr
+      else:
+        newLit(0)
+    # `port = <n>` IS `url = "http://127.0.0.1:<n>"`, derived here so
+    # the supervisor has one url field to read rather than two shapes
+    # to reconcile. 127.0.0.1 and not `localhost`, because a dev
+    # service binds loopback and `localhost` can resolve to `::1` on a
+    # host whose service listens on IPv4 only.
+    let urlExpr =
+      if parsedBody.supervision.readinessUrlExpr != nil:
+        parsedBody.supervision.readinessUrlExpr
+      elif parsedBody.supervision.readinessPortExpr != nil:
+        let portExpr = parsedBody.supervision.readinessPortExpr
+        quote do:
+          "http://127.0.0.1:" & $(`portExpr`)
+      else:
+        newLit("")
+    tryBody.add(quote do:
+      setActiveServiceReadiness(ServiceReadinessDef(
+        kind: `kindIdent`,
+        path: `pathExpr`,
+        url: `urlExpr`,
+        timeoutMs: int(`timeoutExpr`))))
+  if parsedBody.supervision.workingDirectoryExpr != nil:
+    let dirExpr = parsedBody.supervision.workingDirectoryExpr
+    tryBody.add(quote do:
+      setActiveServiceWorkingDirectory(`dirExpr`))
+  for dirExpr in parsedBody.supervision.stateDirectoryExprs:
+    tryBody.add(quote do:
+      addActiveServiceStateDirectory(`dirExpr`))
+  if parsedBody.supervision.instanceDeclared:
+    let leaseExpr =
+      if parsedBody.supervision.instanceLeaseExpr != nil:
+        parsedBody.supervision.instanceLeaseExpr
+      else:
+        newLit(SharedServiceInstanceKeepTtlSeconds)
+    tryBody.add(quote do:
+      setActiveServiceInstance(int64(`leaseExpr`)))
   # L1: the reactive surface, after the declarative setters so an
   # ``on change cfg:`` block sees the same handle the args did.
   for emission in parsedBody.reactiveEmissions:

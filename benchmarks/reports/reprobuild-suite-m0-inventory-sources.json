@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1807,
-    "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 603,
+    "nimTestBinaries": 1810,
+    "pureUnitConsolidationGroups": 50,
+    "pureUnitTests": 604,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1821
+    "testEntries": 1824
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -66,6 +66,22 @@
         "libs/repro_cas_store/tests/t_cas_materialize_link.nim",
         "libs/repro_cas_store/tests/t_link_capability_probe.nim",
         "libs/repro_cas_store/tests/t_repro_cas_store_basic.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_cli_support",
+        "repro_dev_env_artifacts",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_cli_support",
+      "sources": [
+        "libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim",
+        "libs/repro_cli_support/tests/t_l9_a_typed_service_is_supervised_without_a_placeholder.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1102,8 +1118,8 @@
       "graph-fixture": 12,
       "integration": 915,
       "platform/destructive": 117,
-      "pure unit": 603,
-      "unclassified": 174
+      "pure unit": 604,
+      "unclassified": 176
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1251,9 +1267,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1807,
+    "nimTestBinaryCount": 1810,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1821
+    "testEntryCount": 1824
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8564,6 +8580,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l9_a_typed_service_is_supervised_without_a_placeholder",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dev_env_artifacts",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_l9_a_typed_service_is_supervised_without_a_placeholder.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 17,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_binding_governs_per_name",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -14785,6 +14821,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l9_supervision_surface_refuses_near_misses",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_l9_supervision_surface_refuses_near_misses.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_activity_params_reach_the_services_they_declare",
       "class": "unclassified",
       "classificationReason": "imports `activity_params_fixtures`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
@@ -15375,6 +15428,27 @@
       "source": "libs/repro_project_dsl/tests/t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_l9_supervision_facts_reach_the_dev_env_artifact",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

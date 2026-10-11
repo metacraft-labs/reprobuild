@@ -513,6 +513,8 @@ proc isProviderModePath(path: string): bool =
       "t_l8_contribution_operation_is_a_second_axis.nim",
     "libs/repro_project_dsl/tests/" &
       "t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
   ]:
     if p == exact:
       return true

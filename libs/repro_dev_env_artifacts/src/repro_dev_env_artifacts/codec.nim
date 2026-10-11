@@ -12,7 +12,7 @@ const
   DevEnvMagic = [byte(ord('R')), byte(ord('B')), byte(ord('D')), byte(ord('E'))]
   EnvelopeHeaderLen = 4 + 2 + 2 + 4 + 4
   EnvelopeTrailerLen = 32
-  EnvelopeVersion = 2'u16
+  EnvelopeVersion = 3'u16
     ## Shared-Development-Services L8: bumped with
     ## `DevEnvArtifactSchemaVersion`, because the service record grew
     ## eight positional SSZ fields. The decoder's check is an EQUALITY
@@ -80,6 +80,19 @@ type
     registrationPoints: SszStringList
     registrationMembers: SszStringList
     registrationContributors: SszStringList
+    # Shared-Development-Services L9. Appended last again, and the
+    # envelope version AND the artifact schema version move again, so a
+    # payload written at L8 is refused by name rather than read with
+    # shifted offsets.
+    readinessKind: SszText
+    readinessPath: SszText
+    readinessUrl: SszText
+    readinessTimeoutMs: uint64
+    workingDirectory: SszText
+    stateDirectories: SszStringList
+    instanceDeclared: bool
+    instanceLeaseTtlSeconds: uint64
+    instanceEnvironment: SszText
 
   DevEnvDiagnosticSsz = object
     severity: uint8
@@ -308,7 +321,18 @@ proc toSsz(value: DevEnvServiceSummary): DevEnvServiceSummarySsz =
     registrationPoints: toSszStringList(value.registrationPoints),
     registrationMembers: toSszStringList(value.registrationMembers),
     registrationContributors:
-      toSszStringList(value.registrationContributors))
+      toSszStringList(value.registrationContributors),
+    readinessKind: toSszText(value.readinessKind),
+    readinessPath: toSszText(value.readinessPath),
+    readinessUrl: toSszText(value.readinessUrl),
+    # `cast`, not a conversion: `keep` is -1 and SSZ has no signed
+    # scalar here, so the bit pattern is what round-trips.
+    readinessTimeoutMs: cast[uint64](value.readinessTimeoutMs),
+    workingDirectory: toSszText(value.workingDirectory),
+    stateDirectories: toSszStringList(value.stateDirectories),
+    instanceDeclared: value.instanceDeclared,
+    instanceLeaseTtlSeconds: cast[uint64](value.instanceLeaseTtlSeconds),
+    instanceEnvironment: toSszText(value.instanceEnvironment))
 
 proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
   DevEnvServiceSummary(
@@ -325,7 +349,16 @@ proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
     registrationPoints: fromSszStringList(value.registrationPoints),
     registrationMembers: fromSszStringList(value.registrationMembers),
     registrationContributors:
-      fromSszStringList(value.registrationContributors))
+      fromSszStringList(value.registrationContributors),
+    readinessKind: fromSszText(value.readinessKind),
+    readinessPath: fromSszText(value.readinessPath),
+    readinessUrl: fromSszText(value.readinessUrl),
+    readinessTimeoutMs: cast[int64](value.readinessTimeoutMs),
+    workingDirectory: fromSszText(value.workingDirectory),
+    stateDirectories: fromSszStringList(value.stateDirectories),
+    instanceDeclared: value.instanceDeclared,
+    instanceLeaseTtlSeconds: cast[int64](value.instanceLeaseTtlSeconds),
+    instanceEnvironment: fromSszText(value.instanceEnvironment))
 
 proc toSsz(value: DevEnvDiagnostic): DevEnvDiagnosticSsz =
   DevEnvDiagnosticSsz(
@@ -643,7 +676,16 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
       typedCommand: service.typedCommand,
       registrationPoints: service.registrationPoints,
       registrationMembers: service.registrationMembers,
-      registrationContributors: service.registrationContributors))
+      registrationContributors: service.registrationContributors,
+      readinessKind: service.readinessKind,
+      readinessPath: service.readinessPath,
+      readinessUrl: service.readinessUrl,
+      readinessTimeoutMs: service.readinessTimeoutMs,
+      workingDirectory: service.workingDirectory,
+      stateDirectories: service.stateDirectories,
+      instanceDeclared: service.instanceDeclared,
+      instanceLeaseTtlSeconds: service.instanceLeaseTtlSeconds,
+      instanceEnvironment: service.instanceEnvironment))
   result.diagnostics = devEnv.diagnostics
   result.evaluationInputs = devEnv.evaluationInputs
   result.sourceFingerprints = devEnv.sourceFingerprints

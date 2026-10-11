@@ -64,16 +64,26 @@ type
     host*: string
     port*: int
 
-  ServiceSpec = object
-    name: string
-    command: seq[string]
-    cwd: string
-    dependsOn: seq[string]
-    readinessKind: string
-    readinessPath: string
-    readinessUrl: string
-    readinessTimeoutMs: int
-    resources: seq[tuple[kind, path: string]]
+  ServiceSpec* = object
+    ## Shared-Development-Services L9 exported this type and its fields.
+    ## It is read-only widening — no field changed and no behaviour moved
+    ## — and it is earned: the claim L9 has to prove is that the typed
+    ## `service` block's supervision facts reach the SPEC the supervisor
+    ## starts from, and until now the only way to see any of that from
+    ## outside was `sharedServiceInstanceLaunch`, which reports the
+    ## command and the working directory and nothing else. Asserting the
+    ## readiness probe and the state directories through a running
+    ## supervisor instead would have been a test of process timing
+    ## rather than of the plumbing under test.
+    name*: string
+    command*: seq[string]
+    cwd*: string
+    dependsOn*: seq[string]
+    readinessKind*: string
+    readinessPath*: string
+    readinessUrl*: string
+    readinessTimeoutMs*: int
+    resources*: seq[tuple[kind, path: string]]
 
   SharedServiceInstanceDeclaration* = object
     ## Shared-Development-Services L7 (§4.5): the dev-session service
@@ -463,7 +473,7 @@ proc stringArray(node: JsonNode): seq[string] =
     return @[]
 
 const
-  SharedServiceInstanceDefaultTtlSeconds* = -1'i64
+  SharedServiceInstanceDefaultTtlSeconds* = SharedServiceInstanceKeepTtlSeconds
     ## D-SS5, DECIDED HERE: a shared development service instance's
     ## holder takes a `keep` lease by default (`-1` is the wire spelling
     ## of `keep`).
@@ -482,6 +492,11 @@ const
     ##
     ## A recipe that wants the other trade declares `"lease": "delayed",
     ## "ttlSeconds": <n>` and gets a holder the rebuild can name.
+    ##
+    ## Shared-Development-Services L9: the number itself now lives at
+    ## `repro_project_dsl`'s `SharedServiceInstanceKeepTtlSeconds`, so
+    ## the typed `instance:` block's `lease keep` and this JSON block's
+    ## default are one value rather than two that agree today.
 
   SharedServiceInstanceKeys = ["environment", "lease", "ttlSeconds"]
     ## The complete set of keys `instance` accepts. Enumerated so an
@@ -575,7 +590,10 @@ proc parseSharedServiceInstance*(serviceName, metadataText: string):
         "declares `lease` as a " & $leaseNode.kind &
         "; it must be one of the words keep, immediate, delayed.")
     case leaseNode.getStr("").strip()
-    of "keep": result.leaseTtlSeconds = -1'i64
+    # The CONSTANT here too: the default at the top of this proc already
+    # uses it, so the explicit spelling of the same lease must not reach
+    # the number by a different route.
+    of "keep": result.leaseTtlSeconds = SharedServiceInstanceKeepTtlSeconds
     of "immediate": result.leaseTtlSeconds = 0'i64
     of "delayed":
       let ttl = node{"ttlSeconds"}
@@ -609,7 +627,44 @@ proc sharedServiceInstanceOf*(service: DevEnvServiceSummary):
   ## The declaration of one dev-env service. The single entry point every
   ## caller uses, so `repro up`, `repro down` and the supervisor cannot
   ## read the blob differently.
-  parseSharedServiceInstance(service.name, service.metadataText)
+  ##
+  ## Shared-Development-Services L9: it now reads TWO lanes, and the
+  ## JSON one is the only one read when the typed block is SILENT --
+  ## which is not the same as winning where both speak, because where
+  ## both speak this proc REFUSES (see the paragraph below; an earlier
+  ## version of this sentence said "wins", which is true of the
+  ## `command` and false of `instance`). The typed `instance:` block is
+  ## what lets `infra/repro.nim` delete its `servicePlaceholder`; the
+  ## JSON block is what every recipe written before L9 has, and
+  ## preferring the typed side would change which services the daemon
+  ## owns in a recipe nobody edited.
+  ##
+  ## BOTH DECLARING IT IS A REFUSAL rather than a precedence decision,
+  ## for `serviceSpecFromSummary`'s readiness reason: the loser decides
+  ## whether a state-owning service is reaped, and "the one the author
+  ## wrote in the other file" is not an answer anybody can read off the
+  ## recipe.
+  result = parseSharedServiceInstance(service.name, service.metadataText)
+  if not service.instanceDeclared:
+    return
+  if result.declared:
+    refuseInstanceDeclaration(service.name,
+      "is declared TWICE -- once as the `instance` key of the " &
+      "`servicePlaceholder`'s metadata and once as the typed `service` " &
+      "block's `instance:` block. One service cannot have two leases " &
+      "and two environments; whichever lost would be the one deciding " &
+      "whether this instance's state is reaped. Delete the " &
+      "placeholder's `instance` key -- the typed block is the surface " &
+      "that makes a shared service declarable once.")
+  result.declared = true
+  result.leaseTtlSeconds = service.instanceLeaseTtlSeconds
+  # DERIVED at evaluation, carried here. The typed `instance:` block
+  # refuses an `environment` setting by name, so this is the only
+  # answer, which is the point: §6.4 makes the selection a tracked
+  # input and §6.5 makes it part of the instance key, and a recipe that
+  # could also write the name would be a second answer able to disagree
+  # with the selection under which the artifact was evaluated.
+  result.environment = service.instanceEnvironment
 
 proc sharedServiceInstancesOf*(artifact: DevEnvArtifact):
     seq[SharedServiceInstanceDeclaration] =
@@ -811,18 +866,39 @@ proc substituteMintedAttributes*(serviceName: string;
         "would reach the service as a credential it cannot use " &
         "(Shared-Development-Services.md D-SS10).")
 
-proc serviceSpecFromSummary(projectRoot: string;
-                            service: DevEnvServiceSummary;
-                            minted = initTable[string, string]()):
-                            ServiceSpec =
+proc serviceSpecFromSummary*(projectRoot: string;
+                             service: DevEnvServiceSummary;
+                             minted = initTable[string, string]()):
+                             ServiceSpec =
   result.name = service.name
   result.readinessKind = "none"
   result.readinessTimeoutMs = DefaultServiceReadinessTimeoutMs
   let text = service.metadataText.strip()
-  if text.len == 0:
+  # Shared-Development-Services L9: EMPTY METADATA IS NO LONGER A
+  # REFUSAL, and that one line is what makes the gate's "declared once"
+  # reachable rather than only describable.
+  #
+  # Before this, a service declared ONLY as a typed `service` block
+  # raised here -- `mergeTypedServiceFacts` appends such a service with
+  # `metadata: ""` -- so every recipe that wanted a supervised service
+  # still had to write a `servicePlaceholder`, whatever the typed block
+  # carried. L8 gave the record its fields; this gives the reader a
+  # route that does not need the JSON at all.
+  #
+  # A SERVICE THAT DECLARED NEITHER IS STILL REFUSED, by the command
+  # check below, and the message names both halves.
+  let metadata =
+    if text.len == 0:
+      newJObject()
+    else:
+      parseJson(text)
+  if text.len > 0 and metadata.kind != JObject:
     raise newException(ValueError,
-      "service " & service.name & " has empty supervisor metadata")
-  let metadata = parseJson(text)
+      "service " & service.name & ": its supervisor metadata is a " &
+      $metadata.kind & " rather than a JSON object. Refused rather " &
+      "than treated as absent, because treating it as absent would " &
+      "silently fall through to the typed `service` block's facts and " &
+      "supervise something the author did not write.")
   result.command = metadata{"command"}.stringArray()
   if result.command.len == 0:
     # Shared-Development-Services L8: fall back to the TYPED `service`
@@ -840,7 +916,11 @@ proc serviceSpecFromSummary(projectRoot: string;
       "service " & service.name & " declares no command: its " &
       "supervisor metadata has no `command` and its typed `service` " &
       "block declares no `executable` either. One of the two has to " &
-      "say what to run.")
+      "say what to run." &
+      (if text.len == 0:
+         " This service has no `servicePlaceholder` at all, so the " &
+         "typed block is the only source: give it an `executable`."
+       else: ""))
   # Shared-Development-Services L8: argv is concretized LATE, and this
   # is where late is. Every `@minted:<member>@` token becomes the
   # identifier the shared instance minted when the registration
@@ -848,13 +928,44 @@ proc serviceSpecFromSummary(projectRoot: string;
   # launched, i.e. before this runs.
   result.command = substituteMintedAttributes(service.name,
     result.command, minted)
-  result.cwd = metadata{"cwd"}.getStr(projectRoot)
+  # Shared-Development-Services L9: `cwd` falls back to the typed
+  # `workingDirectory`, through ONE relative-path resolution against the
+  # project root rather than two. `sharedServiceInstanceLaunch` reuses
+  # this proc precisely so the daemon and the supervisor resolve the
+  # same bytes; a second resolution here would reintroduce the split it
+  # was written to close.
+  result.cwd = metadata{"cwd"}.getStr("")
+  if result.cwd.len == 0:
+    result.cwd = service.workingDirectory
   if result.cwd.len == 0:
     result.cwd = projectRoot
   elif not result.cwd.isAbsolute:
     result.cwd = projectRoot / result.cwd
   result.dependsOn = metadata{"dependsOn"}.stringArray()
-  if metadata.hasKey("readiness") and metadata["readiness"].kind == JObject:
+  let placeholderReadiness =
+    metadata.hasKey("readiness") and metadata["readiness"].kind == JObject
+  # BOTH SIDES DECLARING A PROBE IS A REFUSAL, not a precedence
+  # decision, and it is the one place L9 does NOT copy L8's one-way
+  # fallback. L8's reasoning for preferring the placeholder's COMMAND
+  # was that a recipe carrying both is mid-migration and a silent switch
+  # would change what it runs. For readiness the same silence has a
+  # worse outcome: the losing probe is the one the author wrote LAST,
+  # and a dependent then starts against an instance that is listening
+  # and not seeded. There is no reading of two probes that is safe, so
+  # the author is asked which one they meant.
+  if placeholderReadiness and service.readinessKind.len > 0:
+    raise newException(ValueError,
+      "service `" & service.name & "`: a readiness probe is declared " &
+      "TWICE -- once in the `servicePlaceholder`'s metadata (`" &
+      metadata["readiness"]{"kind"}.getStr("") & "`) and once on the " &
+      "typed `service` block (`readiness " & service.readinessKind &
+      "`). One service cannot have two answers to \"when is this " &
+      "ready\": whichever lost would be the probe a dependent does " &
+      "NOT wait on, and a dependent that starts against a listening " &
+      "but unseeded instance fails intermittently rather than loudly. " &
+      "Delete the placeholder's `readiness` block -- the typed setter " &
+      "is the surface Shared-Development-Services.md §9.1 writes.")
+  if placeholderReadiness:
     let readiness = metadata["readiness"]
     result.readinessKind = readiness{"kind"}.getStr("none")
     result.readinessPath = readiness{"path"}.getStr("")
@@ -863,6 +974,32 @@ proc serviceSpecFromSummary(projectRoot: string;
     result.readinessUrl = readiness{"url"}.getStr("")
     result.readinessTimeoutMs = readiness{"timeoutMs"}.getInt(
       DefaultServiceReadinessTimeoutMs)
+  elif service.readinessKind.len > 0:
+    # The typed probe. The WORD is checked here rather than trusted,
+    # for `summaryDeclaredIdentityAndScope`'s reason: `readinessOk`
+    # reports an unrecognised kind as NEVER READY, so a kind this build
+    # does not know would hang the session until its timeout with
+    # nothing said.
+    case service.readinessKind.normalize()
+    of "none", "fileexists", "httpget":
+      result.readinessKind = service.readinessKind
+    else:
+      raise newException(ValueError,
+        "service `" & service.name & "`: the dev-env artifact records " &
+        "the readiness kind `" & service.readinessKind & "`, which is " &
+        "not a kind this build knows (`none`, `fileExists`, " &
+        "`httpGet`). Reading it as `none` would report the service " &
+        "ready as soon as it is spawned; reading it as anything else " &
+        "would hang the session until its timeout. Both are silent.")
+    result.readinessPath = service.readinessPath
+    if result.readinessPath.len > 0 and not result.readinessPath.isAbsolute:
+      result.readinessPath = projectRoot / result.readinessPath
+    result.readinessUrl = service.readinessUrl
+    result.readinessTimeoutMs =
+      if service.readinessTimeoutMs > 0:
+        int(service.readinessTimeoutMs)
+      else:
+        DefaultServiceReadinessTimeoutMs
   if metadata.hasKey("resources") and metadata["resources"].kind == JArray:
     for item in metadata["resources"]:
       if item.kind != JObject:
@@ -872,6 +1009,23 @@ proc serviceSpecFromSummary(projectRoot: string;
         path = projectRoot / path
       result.resources.add((kind: item{"kind"}.getStr("directory"),
         path: path))
+  # L9: the typed `stateDirectory` setters are APPENDED to whatever the
+  # placeholder declared rather than replacing it. `resources` is a
+  # LIST, and both lanes name directories to create: a service
+  # mid-migration that declared one of each must get both, and creating
+  # a directory twice is idempotent where failing to create one is not.
+  for dir in service.stateDirectories:
+    if dir.len == 0:
+      continue
+    var path = dir
+    if not path.isAbsolute:
+      path = projectRoot / path
+    var seen = false
+    for existing in result.resources:
+      if existing.path == path:
+        seen = true
+    if not seen:
+      result.resources.add((kind: "directory", path: path))
 
 proc summaryDeclaredIdentityAndScope*(
     service: DevEnvServiceSummary):
@@ -1104,6 +1258,22 @@ proc declaredReadinessTimeoutMs*(service: DevEnvServiceSummary): int =
   ## real ``ValueError`` for malformed metadata a moment later, and it names
   ## the service.
   result = DefaultServiceReadinessTimeoutMs
+  # Shared-Development-Services L9: THE TYPED TIMEOUT IS READ HERE TOO,
+  # and leaving it out was a real silent drop found by going looking
+  # rather than by a failure.
+  #
+  # This proc sizes the PARENT's wait (`derivedReadyTimeoutMs`), while
+  # `serviceSpecFromSummary` sizes the SUPERVISOR's. A typed service
+  # declaring `timeoutMs = 600000` would have been supervised for ten
+  # minutes and waited on by its parent for ninety seconds plus the
+  # margin — so `repro up` would have abandoned a healthy first boot and
+  # reported failure, which is the defect
+  # `issues/2026-10-04-repro-up-abandons-any-service-slower-than-ten-
+  # seconds.md` describes, reintroduced through the new channel. Two
+  # readers of one declaration is how they stop agreeing; this is the
+  # second reader, reading the same two lanes in the same order.
+  if service.readinessKind.len > 0 and service.readinessTimeoutMs > 0:
+    result = int(service.readinessTimeoutMs)
   let text = service.metadataText.strip()
   if text.len == 0:
     return

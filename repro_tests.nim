@@ -1116,6 +1116,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_l9_a_typed_service_is_supervised_without_a_placeholder.nim",
+    binary: "build/test-bin/t_l9_a_typed_service_is_supervised_without_a_placeholder",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim",
     binary: "build/test-bin/t_lock_binding_governs_per_name",
     defines: @[],
@@ -4221,6 +4230,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_l9_supervision_surface_refuses_near_misses.nim",
+    binary: "build/test-bin/t_l9_supervision_surface_refuses_near_misses",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim",
     binary: "build/test-bin/t_activity_params_reach_the_services_they_declare",
     defines: @["reproProviderMode"],
@@ -4511,6 +4529,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
     binary: "build/test-bin/t_l8_typed_service_facts_reach_the_dev_env_artifact",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
+    binary: "build/test-bin/t_l9_supervision_facts_reach_the_dev_env_artifact",
     defines: @["reproProviderMode"],
     requiresReproBinary: false,
     extraPassC: @[],

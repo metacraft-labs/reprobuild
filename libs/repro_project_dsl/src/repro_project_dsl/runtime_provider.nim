@@ -379,6 +379,23 @@ when defined(reproProviderMode):
     for arg in service.typedArgs:
       result.add(arg.value)
 
+  proc typedServiceReadinessWord(kind: ServiceReadinessKind): string =
+    ## Shared-Development-Services L9: the wire word for a typed
+    ## `readiness` probe, or `""` when the body declared none.
+    ##
+    ## The words are the ones `readinessOk` in
+    ## `repro_cli_support/dev_session.nim` switches on, normalized by
+    ## that proc, which is why `fileExists` can be written here in the
+    ## author's camelCase and still match. There is deliberately no
+    ## `else` arm that invents a word: a kind this proc did not expect
+    ## reports UNDECLARED, which sends the supervisor to the
+    ## placeholder's probe rather than to a probe that can never pass.
+    case kind
+    of srkUnset: ""
+    of srkNone: "none"
+    of srkFileExists: "fileExists"
+    of srkHttpGet: "httpGet"
+
   proc mergeTypedServiceFacts(packageName: string;
                               selected: openArray[string];
                               services: seq[DevEnvServiceMetadata]):
@@ -491,6 +508,22 @@ when defined(reproProviderMode):
         existing.registrationPoints = points
         existing.registrationMembers = registrationMembers
         existing.registrationContributors = registrationContributors
+        # Shared-Development-Services L9. The same ONE-WAY shape L8
+        # gave the command: the typed facts are written onto the
+        # record, and `serviceSpecFromSummary` prefers whatever the
+        # PLACEHOLDER stated and falls back to these. A recipe carrying
+        # both is mid-migration, and silently preferring the typed side
+        # would change what an existing recipe supervises.
+        existing.readinessKind =
+          typedServiceReadinessWord(typed.readiness.kind)
+        existing.readinessPath = typed.readiness.path
+        existing.readinessUrl = typed.readiness.url
+        existing.readinessTimeoutMs = int64(typed.readiness.timeoutMs)
+        existing.workingDirectory = typed.workingDirectory
+        existing.stateDirectories = typed.stateDirectories
+        existing.instanceDeclared = typed.instance.declared
+        existing.instanceLeaseTtlSeconds = typed.instance.leaseTtlSeconds
+        existing.instanceEnvironment = typed.instance.environment
         landed = true
       if landed:
         continue
@@ -505,7 +538,16 @@ when defined(reproProviderMode):
         typedCommand: typedServiceCommand(typed),
         registrationPoints: points,
         registrationMembers: registrationMembers,
-        registrationContributors: registrationContributors))
+        registrationContributors: registrationContributors,
+        readinessKind: typedServiceReadinessWord(typed.readiness.kind),
+        readinessPath: typed.readiness.path,
+        readinessUrl: typed.readiness.url,
+        readinessTimeoutMs: int64(typed.readiness.timeoutMs),
+        workingDirectory: typed.workingDirectory,
+        stateDirectories: typed.stateDirectories,
+        instanceDeclared: typed.instance.declared,
+        instanceLeaseTtlSeconds: typed.instance.leaseTtlSeconds,
+        instanceEnvironment: typed.instance.environment))
 
   proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;
                            devEnvProc: proc ()): DevEnvResult {.dynOrStatic.} =

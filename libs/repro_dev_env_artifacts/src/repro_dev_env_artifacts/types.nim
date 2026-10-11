@@ -41,6 +41,22 @@ type
     registrationPoints*: seq[string]
     registrationMembers*: seq[string]
     registrationContributors*: seq[string]
+    # Shared-Development-Services L9: the SUPERVISION facts. L8's
+    # review named what it left -- "the `instance` block and
+    # `readiness` still require a `servicePlaceholder`" -- and these
+    # are the rest of the channel it opened.
+    # `DevEnvServiceMetadata`'s own comment carries the semantics of
+    # each, including that the empty string / 0 / false mean
+    # UNDECLARED and send the supervisor to the placeholder.
+    readinessKind*: string
+    readinessPath*: string
+    readinessUrl*: string
+    readinessTimeoutMs*: int64
+    workingDirectory*: string
+    stateDirectories*: seq[string]
+    instanceDeclared*: bool
+    instanceLeaseTtlSeconds*: int64
+    instanceEnvironment*: string
 
   DevEnvArtifact* = object
     schemaVersion*: uint32
@@ -84,7 +100,7 @@ type
     servicesSectionStart*: int
 
 const
-  DevEnvArtifactSchemaVersion* = 2'u32
+  DevEnvArtifactSchemaVersion* = 3'u32
     ## Shared-Development-Services L8 bumped this from 1 to 2 because
     ## `DevEnvServiceSummary` grew eight fields and the SSZ container is
     ## positional, so a v1 payload decoded as v2 would not be refused by

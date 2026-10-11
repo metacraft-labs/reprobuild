@@ -305,6 +305,21 @@ proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
   outp.writeStringSeq(value.registrationPoints)
   outp.writeStringSeq(value.registrationMembers)
   outp.writeStringSeq(value.registrationContributors)
+  # Shared-Development-Services L9: appended at the END, for the same
+  # reason L8's block was. The two int64s cross as `uint64` because
+  # `repro_core/codec.nim` has an unsigned pair and no signed one, and
+  # `keep` is -1: a cast round-trips the bit pattern exactly, where a
+  # decimal string would be a third encoding of a number this record
+  # already carries twice.
+  outp.writeString(value.readinessKind)
+  outp.writeString(value.readinessPath)
+  outp.writeString(value.readinessUrl)
+  outp.writeU64Le(cast[uint64](value.readinessTimeoutMs))
+  outp.writeString(value.workingDirectory)
+  outp.writeStringSeq(value.stateDirectories)
+  outp.writeByte(if value.instanceDeclared: 1'u8 else: 0'u8)
+  outp.writeU64Le(cast[uint64](value.instanceLeaseTtlSeconds))
+  outp.writeString(value.instanceEnvironment)
 
 proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetadata =
   result = DevEnvServiceMetadata(
@@ -319,6 +334,24 @@ proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetad
   result.registrationPoints = readStringSeq(bytes, pos)
   result.registrationMembers = readStringSeq(bytes, pos)
   result.registrationContributors = readStringSeq(bytes, pos)
+  result.readinessKind = readString(bytes, pos)
+  result.readinessPath = readString(bytes, pos)
+  result.readinessUrl = readString(bytes, pos)
+  result.readinessTimeoutMs = cast[int64](readU64Le(bytes, pos))
+  result.workingDirectory = readString(bytes, pos)
+  result.stateDirectories = readStringSeq(bytes, pos)
+  # A byte rather than a bool, because `readByte` is what this codec
+  # has; anything other than 0 or 1 is REFUSED rather than coerced to
+  # `true`, so a shifted offset surfaces here instead of turning a
+  # session-owned service into a shared one.
+  let instanceFlag = readByte(bytes, pos)
+  if instanceFlag > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "dev-env service `instanceDeclared` flag is " & $instanceFlag &
+      ", which is neither 0 nor 1")
+  result.instanceDeclared = instanceFlag == 1'u8
+  result.instanceLeaseTtlSeconds = cast[int64](readU64Le(bytes, pos))
+  result.instanceEnvironment = readString(bytes, pos)
 
 proc writeDevEnvDiagnostic(outp: var seq[byte]; value: DevEnvDiagnostic) =
   outp.writeByte(byte(ord(value.severity)))
