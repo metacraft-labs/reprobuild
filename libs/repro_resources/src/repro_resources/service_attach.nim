@@ -383,6 +383,41 @@ type
       ## they are NOT a reason to refuse and a reader who sees only
       ## "three holders" would think they were.
 
+static:
+  ## THE WIRE ORDINALS OF `ServiceMemberKind`, ASSERTED RATHER THAN
+  ## DESCRIBED. `serviceInterfaceDigest` writes `ord(member.kind)` into
+  ## the per-service digest, so these five numbers are part of a
+  ## persisted comparison: inserting a value mid-enum silently renumbers
+  ## every later one and re-keys every existing fingerprint for a reason
+  ## unrelated to any interface changing.
+  ##
+  ## `smkContributionPoint`'s own doc comment says it was "appended as
+  ## the last enum value, so no existing ordinal moves" -- but a comment
+  ## is not a guarantee, and before this block nothing in the tree would
+  ## have failed if a later value were inserted above it. This block is
+  ## the guarantee: a mid-enum insertion is now a COMPILE error in this
+  ## file naming the member whose ordinal moved, which is a structural
+  ## check rather than a test that has to be remembered and run.
+  ##
+  ## The cardinality assertion is what makes it complete. Without it,
+  ## APPENDING a sixth value -- which is the safe operation -- would also
+  ## be invisible here, and a reviewer would have no prompt to confirm
+  ## the new value went at the end rather than merely compiling. Adding
+  ## one is meant to require editing this block.
+  doAssert ord(smkSignature) == 0, "ServiceMemberKind: smkSignature moved"
+  doAssert ord(smkActivityParam) == 1,
+    "ServiceMemberKind: smkActivityParam moved"
+  doAssert ord(smkConfigKey) == 2, "ServiceMemberKind: smkConfigKey moved"
+  doAssert ord(smkSiblingService) == 3,
+    "ServiceMemberKind: smkSiblingService moved"
+  doAssert ord(smkContributionPoint) == 4,
+    "ServiceMemberKind: smkContributionPoint moved -- D-SS11 appended it " &
+    "as ordinal 4 and the per-service digest writes ord(kind), so this " &
+    "renumbering re-keys every persisted service fingerprint"
+  doAssert ord(high(ServiceMemberKind)) == 4,
+    "ServiceMemberKind grew or shrank: confirm the new value was APPENDED " &
+    "(the digest writes ord(kind)) and then update this assertion"
+
 # ---------------------------------------------------------------------------
 # The interface projection.
 # ---------------------------------------------------------------------------

@@ -306,7 +306,20 @@ suite "D-SS11 §4.6 — a contribution to an undeclared point is REFUSED":
               precedence = prec, operation = op)], "service:probe")
         except ServiceRegistryError as err:
           raised = true
-          check "may only `append`" in err.msg
+          # ASSERTED AGAINST THE HELPER'S OWN OUTPUT, not against a
+          # hand-typed fragment of it. §5.1's judgement is refused at
+          # three stages and used to be typed out three times in three
+          # phrasings; it now has one source
+          # (`sharedServiceReplaceRefusal`), and a test that re-typed a
+          # substring of it would be a fourth copy free to drift from
+          # the other three. This assertion cannot drift: if the shared
+          # wording changes, it follows, and if this site stops using
+          # the shared wording, it fails.
+          check sharedServiceReplaceRefusal() in err.msg
+          # …and the part that is genuinely THIS stage's, which the
+          # shared text deliberately does not contain. Without this the
+          # case would pass for a converge site that printed the shared
+          # judgement and dropped the reason the owner refuses too.
           check "discard every other consumer's appends" in err.msg
         check raised
 

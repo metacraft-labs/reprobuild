@@ -1791,14 +1791,18 @@ proc validateServiceContributions*(declaredPoints: openArray[string];
   ## FIRST offender, naming it, the contributor and the declared set.
   ##
   ## Two refusals, both §4.6's or §5.1's and neither a drop:
-  ##   * a point the instance does not declare (the version-skew case);
-  ##   * a `replace` operation, which §5.1 forbids a consumer -- "a
-  ##     consumer that could replace them would fork the instance it is
-  ##     trying to join". The resolver refuses it at the consumer's
-  ##     compile time as well; this is the check for a row that reached
-  ##     the store some other way, and it has to exist because a stored
-  ##     `replace` would become the fold's base value and DISCARD every
-  ##     other consumer's appends.
+  ##   * a point the instance does not declare (the version-skew case),
+  ##     refused through `refuseUndeclaredContribution`;
+  ##   * a `replace` operation, refused with
+  ##     `sharedServiceReplaceRefusal()` -- the ONE wording of §5.1's
+  ##     judgement, shared with the resolver macro's compile-time
+  ##     refusal and the evaluation-time one. That helper's own doc
+  ##     comment carries the reason and names all three stages; it is
+  ##     deliberately not restated here, because a fourth copy of one
+  ##     sentence is the drift this factoring exists to stop. What is
+  ##     specific to THIS stage is that it sees a row out of the
+  ##     cross-process store, where a stored `replace` would become the
+  ##     fold's base value and DISCARD every other consumer's appends.
   for c in contributions:
     var found = false
     for p in declaredPoints:
@@ -1809,15 +1813,19 @@ proc validateServiceContributions*(declaredPoints: openArray[string];
       refuseUndeclaredContribution(c.point, c.contributor, c.site,
         declaredPoints, address)
     if c.operation != $coAppend:
+      # STAGE 3 of §5.1's three refusals, and the only one that sees a
+      # row out of the cross-process store. The judgement is the shared
+      # `sharedServiceReplaceRefusal()`; what is local is the subject
+      # (contributor, point, site) and the consequence only this stage
+      # can state -- a stored `replace` becomes the FOLD's base value.
       raise newException(ServiceRegistryError,
         "package `" & c.contributor & "` contributes to `" & c.point &
         "` at " & (if c.site.len == 0: "<unknown site>" else: c.site) &
-        " with operation `" & c.operation & "`. A consumer of a shared " &
-        "service may only `append` (Shared-Development-Services.md " &
-        "§5.1; who may use the destructive operation is D-SS9, open). " &
-        "A stored `replace` would become the fold's base value and " &
-        "discard every other consumer's appends, so it is refused here " &
-        "as well as at the consumer's compile time.")
+        " with operation `" & c.operation & "`. " &
+        sharedServiceReplaceRefusal() &
+        " Refused at the OWNER's converge as well, because a stored " &
+        "`replace` would become the fold's base value and discard " &
+        "every other consumer's appends.")
     if c.members.len == 0:
       raise newException(ServiceRegistryError,
         "package `" & c.contributor & "` contributes NO members to `" &

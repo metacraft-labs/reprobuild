@@ -7006,18 +7006,16 @@ macro sharedServiceResolve*(points: static seq[string];
       continue
     let resolved = l11OperationFor(head)
     if resolved.op == "coReplace":
+      # STAGE 1 of §5.1's three refusals. The judgement is
+      # `sharedServiceReplaceRefusal()`, shared with the evaluation and
+      # converge sites so the three cannot drift; what is local here is
+      # the SUBJECT (the author's own call as written) and the note that
+      # this stage is the consumer's compile time.
       error("`" & reference & ".shared(" & point & " = " &
-        identText(valueNode[0]) & "(...))`: a CONSUMER of a shared " &
-        "service may not `replace` what the owner declared. " &
-        "Shared-Development-Services.md §5.1: a consumer \"must be " &
-        "able to `append` a relying party freely, and must NOT be able " &
-        "to `replace` the relying-party collection or the issuer's " &
-        "hostname ... a consumer that could replace them would fork " &
-        "the instance it is trying to join\". Who may use the " &
-        "destructive operation is D-SS9 and it is still open, so the " &
-        "resolver refuses it rather than deciding it. Write `append`, " &
-        "`appendOverride` or `appendForce` -- an append at a high " &
-        "priority is authoritative and still not destructive.",
+        identText(valueNode[0]) & "(...))`: " &
+        sharedServiceReplaceRefusal() &
+        " Refused at the CONSUMER's compile time, which is the earliest " &
+        "of the three stages that refuse it.",
         valueNode)
       continue
     if valueNode.len < 2:

@@ -206,23 +206,43 @@ suite "L6 — a v22 artifact still decodes, to the undeclared major":
     check serviceNamed(decoded, "zitadel").compatibilityMajor == 0'u32
     check serviceNamed(decoded, "hostAgent").compatibilityMajor == 0'u32
 
-  test "a v25 envelope is still refused rather than misread":
-    # The version gate widened by one. The property the envelope exists
-    # for has to survive that.
+  test "the FIRST UNKNOWN envelope version is refused rather than misread":
+    # The property: a version this build does not know is refused rather
+    # than read with shifted offsets. So the probe has to be the FIRST
+    # UNKNOWN version -- one past the current one.
     #
-    # THE PROBE FOLLOWS THE CURRENT VERSION, and it moved 24 -> 25 at
-    # D-SS11, which appended `InterfaceService.contributionPoints` at
-    # envelope v24. The point of the case is "a version this build does
-    # not know is refused rather than read with shifted offsets", so the
-    # probe has to be the FIRST UNKNOWN one; pinned to 24 it was
-    # measuring the current version, which decodes correctly and must.
-    # Found by D-SS11's regression sweep rather than by reading, which
-    # is the argument for running it: 14 OK at the base, 13 OK / 1
-    # FAILED at the tree.
+    # IT IS NO LONGER A LITERAL, AND THAT IS THE POINT OF THIS EDIT.
+    # This probe hard-coded a byte and the pin had to be hand-moved on
+    # every envelope bump: v22 -> v23, -> v24, and again at D-SS11. Each
+    # time it was silently wrong first -- pinned AT the current version
+    # it measured the opposite property, that the current version
+    # decodes correctly (which it does, and must) -- and each time a
+    # regression sweep found it rather than a compiler. The cause was
+    # that `EnvelopeVersion` is private, so the probe had no constant to
+    # be relative to; `firstUnknownInterfaceEnvelopeVersion()` is that
+    # name, and the next bump needs no edit here.
+    #
+    # THE TWO ASSERTIONS BELOW ARE NOT THE SAME ASSERTION. The first is
+    # the positive control that makes the second discriminate: without
+    # it, a `firstUnknownInterfaceEnvelopeVersion()` that returned some
+    # absurd number (or that this file poked into the wrong offset)
+    # would still produce a refusal, and the case would pass while
+    # measuring nothing about the version gate.
+    let probe = firstUnknownInterfaceEnvelopeVersion()
+    check probe == interfaceEnvelopeVersion() + 1
+    var current = encodeProjectInterfaceArtifact(
+      artifactFor(liftedInterface("l6LiftProducer")))
+    # The control: the CURRENT version, at the same offsets this case
+    # pokes, decodes. If this fails the offsets below are wrong and the
+    # refusal they produce would say nothing about the version.
+    current[4] = byte(interfaceEnvelopeVersion() and 0xff'u16)
+    current[5] = byte((interfaceEnvelopeVersion() shr 8) and 0xff'u16)
+    check decodeProjectInterfaceArtifact(current)
+      .projectInterface.publicServices.len > 0
     var bytes = encodeProjectInterfaceArtifact(
       artifactFor(liftedInterface("l6LiftProducer")))
-    bytes[4] = 25'u8
-    bytes[5] = 0'u8
+    bytes[4] = byte(probe and 0xff'u16)
+    bytes[5] = byte((probe shr 8) and 0xff'u16)
     expect EnvelopeError:
       discard decodeProjectInterfaceArtifact(bytes)
 

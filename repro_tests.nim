@@ -4698,6 +4698,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_resources/tests/t_dss11_converge_response_carries_the_instances_points.nim",
+    binary: "build/test-bin/t_dss11_converge_response_carries_the_instances_points",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim",
     binary: "build/test-bin/t_dss11_cross_process_contribution_store",
     defines: @[],

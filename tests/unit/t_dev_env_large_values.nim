@@ -79,7 +79,7 @@ suite "dev-env large environment values":
     # would fail the two cases below rather than this one.
     check hex == "2758a09be9e22f307c4dd3d267947f15520e530d00e5027bf00066998421631c"
 
-  test "the artifact declares schema version 4, and 1, 2 and 3 are refused":
+  test "the declared schema version is pinned, and every superseded envelope version is refused":
     # The assertions that keep the re-pin above from being a blessing.
     check decodeDevEnvArtifact(
       encodeDevEnvArtifact(fixture("small"))).schemaVersion == 4'u32
@@ -90,8 +90,24 @@ suite "dev-env large environment values":
     # "whatever byte matched" instead of about the VERSION.
     const VersionOffset = 4
     var bytes = encodeDevEnvArtifact(fixture("small"))
-    check bytes[VersionOffset] == 4'u8
-    check bytes[VersionOffset + 1] == 0'u8
+    # THE ONE DELIBERATE PIN, and it is deliberate: this number is meant
+    # to need a hand edit when the envelope moves, so that a bump is a
+    # conscious act with a reviewer attached. It is the ONLY numeric
+    # envelope version left in this file; every PROBE below is relative
+    # to `devEnvEnvelopeVersion()` instead. That split is the fix for a
+    # defect generator -- a probe pinned to a literal goes on passing
+    # while measuring the wrong property, whereas this pin fails loudly
+    # and names itself. The schema gate below already worked this way
+    # (`DevEnvArtifactSchemaVersion - 1`); the envelope gate now does.
+    check devEnvEnvelopeVersion() == 4'u16
+    # The ENCODER writes the current version at that offset. Relative,
+    # and it is the control for the pokes below: if the offset were
+    # wrong, every refusal below would be a checksum failure that said
+    # nothing about the version.
+    check bytes[VersionOffset] ==
+      byte(devEnvEnvelopeVersion() and 0xff'u16)
+    check bytes[VersionOffset + 1] ==
+      byte((devEnvEnvelopeVersion() shr 8) and 0xff'u16)
     #
     # AND THE REFUSAL IS ASSERTED ON ITS MESSAGE, NOT ON THE EXCEPTION
     # TYPE. The envelope trailer checksums the header, so EVERY
@@ -108,8 +124,19 @@ suite "dev-env large environment values":
     # carries, so it is the stale input that actually occurs. Version 1 is
     # kept because a guard that only knew about its immediate predecessor
     # would read the one before that with shifted offsets.
-    for superseded in [1'u8, 2'u8, 3'u8]:
-      bytes[VersionOffset] = superseded
+    #
+    # DERIVED FROM THE CURRENT VERSION rather than listed. The list used
+    # to be `[1, 2, 3]`, which meant "every version below 4" and had to
+    # be extended by hand on each bump -- and a bump that forgot would
+    # leave the newly superseded version unprobed WITHOUT failing
+    # anything, which is the silent half of this file's own subject.
+    # `1 ..< devEnvEnvelopeVersion()` is the same set, stated as what it
+    # is. The loop also asserts it is non-empty, because an empty range
+    # would make this whole block vacuous.
+    var supersededProbed = 0
+    for superseded in 1'u16 ..< devEnvEnvelopeVersion():
+      bytes[VersionOffset] = byte(superseded and 0xff'u16)
+      bytes[VersionOffset + 1] = byte((superseded shr 8) and 0xff'u16)
       var refusal = ""
       try:
         discard decodeDevEnvArtifact(bytes)
@@ -118,16 +145,26 @@ suite "dev-env large environment values":
       checkpoint("envelope version " & $superseded &
         " was not refused BY NAME; the refusal said: " & refusal)
       check ("envelope version " & $superseded) in refusal
+      inc supersededProbed
+    check supersededProbed == int(devEnvEnvelopeVersion()) - 1
+    check supersededProbed > 0
     # ...and a version this build does not know YET is refused the same
-    # way, by name, rather than read with shifted offsets.
+    # way, by name, rather than read with shifted offsets. The FIRST
+    # unknown one, named rather than hard-coded: pinned to a literal
+    # this probe would land ON the current version after a bump and
+    # would then be measuring that the current version decodes, which it
+    # does and must.
+    let unknown = firstUnknownDevEnvEnvelopeVersion()
+    check unknown == devEnvEnvelopeVersion() + 1
     var future = encodeDevEnvArtifact(fixture("small"))
-    future[VersionOffset] = 5'u8
+    future[VersionOffset] = byte(unknown and 0xff'u16)
+    future[VersionOffset + 1] = byte((unknown shr 8) and 0xff'u16)
     var futureRefusal = ""
     try:
       discard decodeDevEnvArtifact(future)
     except DevEnvArtifactCodecError as err:
       futureRefusal = err.msg
-    check "envelope version 5" in futureRefusal
+    check ("envelope version " & $unknown) in futureRefusal
 
   test "the SCHEMA gate is independent of the envelope gate, and it fires":
     # WHAT THIS CASE ADDS, and it is the gain that makes the re-pin above

@@ -2137,3 +2137,83 @@ proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
   ##   implicit case reuses the exact same derivation with an empty
   ##   "extra" dev-env body.
   pkg.hasDevEnv or pkg.allToolUses().len > 0
+
+proc sharedServiceReplaceRefusal*(): string =
+  ## §5.1's `replace` refusal, WRITTEN ONCE.
+  ##
+  ## Shared-Development-Services forbids a CONSUMER of a shared service
+  ## the destructive operation, and that one judgement is enforced at
+  ## THREE different stages, each of which has to refuse independently:
+  ##
+  ##   1. the consumer's COMPILE time, in the resolver macro
+  ##      (`macros_b.nim`), where a `replace*(...)` head at a
+  ##      `.shared(...)` argument is a compile error;
+  ##   2. EVALUATION, in `resolveSharedService`
+  ##      (`dsl_port_runtime.nim`), which is what catches a resolution
+  ##      built by a path the macro did not write;
+  ##   3. the owner's CONVERGE, in `validateServiceContributions`
+  ##      (`repro_resources/service_registry.nim`), which is what catches
+  ##      a row that reached the cross-process store some other way.
+  ##
+  ## ALL THREE STILL FIRE, and none of them is unreachable -- that was
+  ## measured, and merging the CHECKS would be wrong because they run at
+  ## three different times against three different inputs. What was
+  ## duplicated was the JUDGEMENT: the citation, the reason and the
+  ## remedy were typed out three times, in three different phrasings
+  ## ("may not `replace` what the owner declared", "may `append` freely
+  ## and may NOT `replace`", "may only `append`"), which is three copies
+  ## of one sentence free to drift apart. The sibling undeclared-point
+  ## refusal was already factored into a single helper
+  ## (`refuseUndeclaredContribution`); this is the same move for its
+  ## twin.
+  ##
+  ## NOT "ALREADY DRIFTED", AND THE DISTINCTION IS WORTH KEEPING
+  ## STRAIGHT. `git log -S` on each of the three fragments, scoped to
+  ## its own file, returns exactly ONE commit each -- the commit that
+  ## introduced all three. They were born different rather than having
+  ## diverged from a common sentence. The hazard is the same (three
+  ## copies, three futures) but the history is not a drift and should
+  ## not be cited as one.
+  ##
+  ## ONE COPY IS STILL OUTSIDE THIS HELPER, said here because a reader
+  ## otherwise concludes the set is closed.
+  ## `tests/dsl_port/t_dss11_resolver_surface_refuses_near_misses.nim`
+  ## carries the hand-typed fragment "may not `replace` what the owner
+  ## declared" as a `ResolverProbe.phrase`, and a one-word edit to the
+  ## text below reddens it while the two in-process tests stay green
+  ## (measured: 4 OK / 1 FAILED there, 26 OK / 0 and 21 OK / 0 for the
+  ## other two). It cannot simply import this proc: it matches a
+  ## substring of a COMPILER DIAGNOSTIC captured from a subprocess, not
+  ## an exception message in this process. Closing that one needs the
+  ## probe table to carry a phrase derived from here, which is a change
+  ## to that file and was not made.
+  ##
+  ## IT IS THE SHARED PART ONLY. Each site prefixes its own SUBJECT (the
+  ## key, the point, the contributing package, the call-site spelling)
+  ## and appends its own STAGE-SPECIFIC consequence, because those
+  ## genuinely differ: the macro can quote the author's own source line,
+  ## and only the converge site can say that a stored `replace` would
+  ## become the fold's base value.
+  ##
+  ## A `proc` rather than a `const`, and that is a STYLE choice, not a
+  ## necessity -- do not read the earlier claim that a `const` would not
+  ## work in the resolver macro's compile-time `error()`, because it was
+  ## measured and it is false. A `const` whose value is a `&` chain of
+  ## string literals is an ordinary compile-time value and reads
+  ## identically from a macro body executed in the VM: converted to one,
+  ## all three sites compile and all three covering tests stay green
+  ## (26 OK / 0, 21 OK / 0, and 5 OK / 0 for the out-of-process macro
+  ## probe that actually exercises `error()`). The `proc` is kept only
+  ## because the file's other derived strings are procs. Either form is
+  ## correct, and site 1 and sites 2-3 read the same bytes under both.
+  "A CONSUMER of a shared service may `append` freely and " &
+    "may not `replace` what the owner declared. " &
+    "Shared-Development-Services.md §5.1: a consumer \"must be able to " &
+    "`append` a relying party freely, and must NOT be able to " &
+    "`replace` the relying-party collection or the issuer's hostname " &
+    "... a consumer that could replace them would fork the instance it " &
+    "is trying to join\". Who may use the destructive operation is " &
+    "D-SS9 and it is still open, so this is refused rather than " &
+    "decided. Write `append`, `appendOverride` or `appendForce` -- an " &
+    "append at a high priority is authoritative and still not " &
+    "destructive."

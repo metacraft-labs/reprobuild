@@ -1075,15 +1075,18 @@ proc resolveSharedService*[T](declaration: SharedServiceDeclarationDef;
         "point, so it is refused rather than carried to an instance " &
         "that would ignore it.")
     if c.operation != coAppend:
+      # STAGE 2 of §5.1's three refusals, and it is NOT redundant with
+      # the macro's: this runs on a `SharedServiceResolution` VALUE, so
+      # it is what refuses a resolution the resolver macro did not write.
+      # The judgement is the shared one; the subject and the stage note
+      # are local.
       raise newException(EDslPortSharedServiceRefusal,
         "shared(" & declaration.ownerPackage & "." &
         declaration.serviceName & "): `" & c.point & "` is contributed " &
-        "with `" & $c.operation & "`. A consumer of a shared service " &
-        "may `append` freely and may NOT `replace`: " &
-        "Shared-Development-Services.md §5.1 -- \"a consumer that could " &
-        "replace them would fork the instance it is trying to join\" -- " &
-        "and who may use the destructive operation is D-SS9, still " &
-        "open. Write `append` (or `appendOverride` / `appendForce`).")
+        "with `" & $c.operation & "`. " & sharedServiceReplaceRefusal() &
+        " Refused at EVALUATION, where the resolution record is read " &
+        "rather than written, so a resolution the resolver macro did " &
+        "not produce is refused too.")
     if not declaration.contributionPoints.contains(c.point):
       raise newException(EDslPortSharedServiceRefusal,
         "shared(" & declaration.ownerPackage & "." &

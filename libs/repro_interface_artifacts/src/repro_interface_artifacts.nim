@@ -1034,6 +1034,57 @@ const
   ProviderFreshnessCacheRecordMagic =
     "reprobuild.providerFreshnessCache.v2"
 
+proc interfaceEnvelopeVersion*(): uint16 =
+  ## The envelope version THIS BUILD writes and is the newest it reads.
+  ##
+  ## Exists so that a test which needs to be relative to the current
+  ## version has a name to be relative to. Before it, every such probe
+  ## hard-coded a byte, and the pin had to be hand-edited on every bump
+  ## -- v22 -> v23 -> v24 in one campaign, each time silently wrong
+  ## first and found by a sweep afterwards rather than by a compiler.
+  EnvelopeVersion
+
+proc firstUnknownInterfaceEnvelopeVersion*(): uint16 =
+  ## One past `interfaceEnvelopeVersion()`: the LOWEST version number
+  ## this build does not know how to read.
+  ##
+  ## This is the value a "an unknown version is refused rather than
+  ## misread" probe wants, and it is given a name of its own rather than
+  ## left as `interfaceEnvelopeVersion() + 1` at each call site so that
+  ## the probe's INTENT is in the source. A probe written against the
+  ## current version measures the opposite property -- the current
+  ## version decodes correctly, and must -- which is precisely the way
+  ## the L6 probe failed silently when the envelope moved to 24 while
+  ## the probe still poked 24.
+  ##
+  ## AN ACCESSOR RATHER THAN AN EXPORTED CONSTANT, and the hazard it
+  ## avoids is LATENT rather than present-day -- stated precisely,
+  ## because an earlier wording of this comment overstated it.
+  ## `repro_dev_env_artifacts/codec.nim` has a private const named
+  ## EXACTLY `EnvelopeVersion` too, and four modules in this tree import
+  ## both libraries (`repro_cli_support.nim`,
+  ## `t_w2_dev_env_producer_pin_binding.nim`,
+  ## `t_dss11_resolutions_reach_the_dev_env_artifact.nim` and
+  ## `tests/integration/t_dev_env_artifact.nim`). Exporting the constant
+  ## from both would make the bare name ambiguous in all four AT ANY USE
+  ## SITE -- but it breaks no build today, and that was measured:
+  ## adding `*` to both consts compiles all four modules clean, because
+  ## Nim diagnoses ambiguity at the USE site and none of the four
+  ## references the bare name. Force a use site into each and all four
+  ## fail identically with `Error: ambiguous identifier:
+  ## 'EnvelopeVersion'`. So the accessor buys a trap that is not yet
+  ## sprung, not four compile errors avoided. It is also the shape
+  ## `repro_domain_types/codec.nim` already uses for the same job
+  ## (`envelopeVersion()` / `fixedSchemaMagic()`) over its own private
+  ## envelope constants, which is the stronger reason of the two.
+  ##
+  ## `InterfaceFormatVersion` is NOT a substitute for the first half of
+  ## this pair: it is a different CONCEPT that happens to be defined as
+  ## the same number (the lift's format identity, so a bump re-keys
+  ## every lift). A probe about envelope framing should not be the thing
+  ## that breaks if those two ever stop coinciding.
+  EnvelopeVersion + 1
+
 var cachedNimCompilerPath = ""
 var processWarmInterfaceMetadata =
   initTable[string, WarmInterfaceExtractionCacheRecord]()

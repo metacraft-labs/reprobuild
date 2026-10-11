@@ -38,6 +38,29 @@ const
     ## a project cannot resolve more shared services than a workspace can
     ## declare.
 
+proc devEnvEnvelopeVersion*(): uint16 =
+  ## The dev-env envelope version THIS BUILD writes, and -- the check
+  ## being an EQUALITY rather than a ceiling -- the only one it reads.
+  ##
+  ## Exported as an accessor over the private const for the reason
+  ## `repro_interface_artifacts.firstUnknownInterfaceEnvelopeVersion`
+  ## records at length: that library's private envelope const has the
+  ## same NAME as this one, and four modules in this tree import both,
+  ## so exporting the constants would make the bare name ambiguous in
+  ## all four AT ANY USE SITE. Read the hazard as latent, not current --
+  ## exporting both was measured and compiles clean today, because none
+  ## of the four references the bare name. `repro_domain_types/codec.nim`
+  ## already exposes its own envelope version this way, which is the
+  ## stronger reason for the shape.
+  EnvelopeVersion
+
+proc firstUnknownDevEnvEnvelopeVersion*(): uint16 =
+  ## One past `devEnvEnvelopeVersion()`: the lowest version this build
+  ## does not know. What a "an unknown version is refused by name rather
+  ## than read with shifted offsets" probe wants, so that the probe does
+  ## not have to hard-code a byte and be hand-edited on every bump.
+  EnvelopeVersion + 1
+
 type
   DevEnvArtifactCodecError* = object of CatchableError
 

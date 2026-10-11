@@ -387,7 +387,17 @@ suite "D-SS11 §4.6 — `resolveSharedService` refuses rather than records":
           operation = coReplace)], "probe.nim", 50)
     except EDslPortSharedServiceRefusal as err:
       raised = true
-      check "may `append` freely and may NOT `replace`" in err.msg
+      # Keyed on the shared helper rather than on a re-typed substring,
+      # for the reason its doc comment gives: §5.1's judgement is
+      # refused at three stages and had three independent phrasings, so
+      # a hand-typed fragment here would be a fourth copy. See the
+      # matching assertion in
+      # `repro_resources/tests/t_dss11_cross_process_contribution_store.nim`.
+      check sharedServiceReplaceRefusal() in err.msg
+      # The part local to THIS stage, which the shared text does not
+      # carry -- so the case still distinguishes the evaluation-time
+      # refusal from the other two.
+      check "Refused at EVALUATION" in err.msg
     check raised
 
   test "a resolver with NO consuming package in scope is refused":
