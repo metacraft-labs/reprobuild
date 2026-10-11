@@ -2239,10 +2239,14 @@ when defined(macosx) or defined(linux):
       # product ships — the binary plus the startup assets `ct` reads out
       # of `<prefix>/config/` — and a set name does not rename its member.
       #
-      # This case's subset copies `src/ct` but not `src/config`, so
-      # `ctStartupAssets` is empty here and the aggregate degenerates to
-      # one member; that is why the closure is a single action. It does
-      # NOT make the aggregate a second name for that action.
+      # This case's subset copies `src/ct` but not `src/config` wholesale.
+      # The compile-closure walker (`completeCodeTracerCompileClosure`)
+      # still stages `src/config/default_config.yaml`, because the staged
+      # `src/common/config_test.nim` `staticRead`s it, so `ctStartupAssets`
+      # holds exactly that one copy (`default_layout.json` is referenced by
+      # nothing staged) and the closure is two actions: the compile and
+      # `config-default-config-yaml`. Neither makes the aggregate a second
+      # name for the compile.
       #
       # That is a MEASURED claim, not a reading of the code. Drive the
       # same pair through the UNPATCHED engine with the aggregate carrying
@@ -2252,7 +2256,7 @@ when defined(macosx) or defined(linux):
       # `target()` name. The id an edge is keyed and reported under must
       # not flip because two data files happened to be present.
       check first.contains("selectedTarget: ct")
-      check first.contains("scheduler: actions=1")
+      check first.contains("scheduler: actions=2")
       check first.contains(
         "action: ct-binary status=asSucceeded launched=true")
       check not first.contains("action: ct status=")
@@ -2278,8 +2282,10 @@ when defined(macosx) or defined(linux):
       check fileOutput.contains("executable")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 1
+      check firstReport{"actions"}.len == 2
       assertAction(firstReport, "ct-binary", "asSucceeded", true)
+      assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
+        true)
       # The aggregate's name is not an action id.
       check reportAction(firstReport, "ct").kind == JNull
       let nativeAction = reportAction(firstReport, "ct-binary")
@@ -2362,8 +2368,13 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check first.contains("defaultTarget: codetracer")
       check first.contains("selectedTarget: codetracer")
-      check first.contains("scheduler: actions=24")
-      check first.contains("action: ct status=asSucceeded launched=true")
+      # 25 = the 23 non-ct actions, ``ct-binary`` (the compile that the ``ct``
+      # aggregate names; ``ct`` itself is a selector, not an action id) and,
+      # since CodeTracer f8781d4b (CTC-3i), ``ct-test``, which now ships in
+      # ``codetracerActions`` beside ``ct``.
+      check first.contains("scheduler: actions=25")
+      check first.contains("action: ct-binary status=asSucceeded launched=true")
+      check first.contains("action: ct-test status=asSucceeded launched=true")
       check first.contains(
         "action: db-backend-record status=asSucceeded launched=true")
       check first.contains(
@@ -2381,7 +2392,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "bin/db-backend-record"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 24
+      check firstReport{"actions"}.len == 25
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -2409,18 +2420,19 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
         true)
       assertAction(firstReport, "db-backend-record", "asSucceeded", true)
-      assertAction(firstReport, "ct", "asSucceeded", true)
+      assertAction(firstReport, "ct-binary", "asSucceeded", true)
+      assertAction(firstReport, "ct-test", "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
       check reportAction(firstReport,
         "c-sudoku-object-with-generated-header").kind == JNull
-      check reportAction(firstReport, "ct"){"dependencyPolicyKind"}.getStr() ==
+      check reportAction(firstReport, "ct-binary"){"dependencyPolicyKind"}.getStr() ==
         "dgAutomaticMonitor"
-      check hasMonitorEvidence(reportAction(firstReport, "ct"))
-      check monitorEvidenceContains(reportAction(firstReport, "ct"),
+      check hasMonitorEvidence(reportAction(firstReport, "ct-binary"))
+      check monitorEvidenceContains(reportAction(firstReport, "ct-binary"),
         "src/ct/codetracerconf.nim")
-      check declaredEvidenceContains(reportAction(firstReport, "ct"),
+      check declaredEvidenceContains(reportAction(firstReport, "ct-binary"),
         "src/ct/codetracer.nim")
 
       let aggregateIdentity =
@@ -2435,7 +2447,7 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check secondReport{"actions"}.len == 24
+      check secondReport{"actions"}.len == 25
       assertActionCacheEffective(secondReport, "frontend-ui-js")
       assertActionCacheEffective(secondReport, "frontend-public-ui-js")
       assertActionCacheEffective(secondReport, "frontend-index-js")
@@ -2459,7 +2471,8 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "config-default-layout-json")
       assertActionCacheEffective(secondReport, "config-default-config-yaml")
       assertActionCacheEffective(secondReport, "db-backend-record")
-      assertActionCacheEffective(secondReport, "ct")
+      assertActionCacheEffective(secondReport, "ct-binary")
+      assertActionCacheEffective(secondReport, "ct-test")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -2497,7 +2510,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(changedReport, "config-default-layout-json")
       assertActionCacheEffective(changedReport, "config-default-config-yaml")
       assertActionCacheEffective(changedReport, "db-backend-record")
-      assertAction(changedReport, "ct", "asSucceeded", true)
+      assertAction(changedReport, "ct-binary", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
       check reportAction(changedReport, "generate-config-header").kind == JNull
