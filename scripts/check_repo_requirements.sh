@@ -115,7 +115,7 @@ require_contains flake.nix "+ pre-commit-check.shellHook"
 # pin and every Nix execution surface must therefore agree on one immutable
 # source root. Exact counts make removal of any one surface fail this quick
 # repository check instead of surfacing after a minute-long CodeTracer compile.
-trace_format_rev="051efd22b00ec3b88676fb07755a65c5a4ca8fde"
+trace_format_rev="7b8b587c72ec31f6825ae124ab89ad7954f6dca7"
 require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${trace_format_rev}"
 # The bootstrap modules follow this Repro flake, so its former nested Repro
 # release (and duplicate trace-format node) is absent. The remaining node
