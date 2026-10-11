@@ -454,9 +454,9 @@ class WindowsDirectPatchGate(unittest.TestCase):
             stop_process(pid, stop)
 
     def test_trigger_wait_ends_at_the_requested_trigger_timeout(self) -> None:
-        """The driver gives up --trigger-timeout seconds after it is ready.
+        """The driver gives up --trigger-timeout-ms after it is ready.
 
-        The previous wait was a fixed 30 s, so a 2 s request that ends within
+        The default wait is 30 s, so a 2000 ms request that ends within
         a few seconds proves the flag sets it. The target keeps its original
         behaviour: nothing is published without the trigger.
         """
@@ -503,8 +503,8 @@ class WindowsDirectPatchGate(unittest.TestCase):
                     str(ready),
                     "--trigger-file",
                     str(trigger),
-                    "--trigger-timeout",
-                    "2",
+                    "--trigger-timeout-ms",
+                    "2000",
                 ],
                 cwd=REPO,
                 env=self.env,
@@ -532,7 +532,7 @@ class WindowsDirectPatchGate(unittest.TestCase):
                     driver.wait(timeout=10)
             self.assertEqual(driver.returncode, 1, driver_output)
             self.assertIn(
-                "timed out after 2.0 s waiting for trigger file", driver_output
+                "timed out after 2000 ms waiting for trigger file", driver_output
             )
             self.assertGreaterEqual(waited, 1.5, driver_output)
             self.assertLess(waited, 10.0, driver_output)
@@ -559,20 +559,24 @@ class WindowsDirectPatchGate(unittest.TestCase):
         ]
         cases = [
             (
-                base + trigger_files + ["--trigger-timeout", "0"],
-                "--trigger-timeout must be a positive number of seconds",
+                base + trigger_files + ["--trigger-timeout-ms", "0"],
+                "--trigger-timeout-ms must be a positive number of milliseconds",
             ),
             (
-                base + trigger_files + ["--trigger-timeout", "nan"],
-                "--trigger-timeout must be a positive number of seconds",
+                base + trigger_files + ["--trigger-timeout-ms", "-5"],
+                "--trigger-timeout-ms must be a positive number of milliseconds",
             ),
             (
-                base + trigger_files + ["--trigger-timeout", "soon"],
-                "--trigger-timeout takes a number of seconds",
+                base + trigger_files + ["--trigger-timeout-ms", "1.5"],
+                "--trigger-timeout-ms takes a whole number of milliseconds",
             ),
             (
-                base + ["--trigger-timeout", "5"],
-                "--trigger-timeout requires --ready-file and --trigger-file",
+                base + trigger_files + ["--trigger-timeout-ms", "soon"],
+                "--trigger-timeout-ms takes a whole number of milliseconds",
+            ),
+            (
+                base + ["--trigger-timeout-ms", "5000"],
+                "--trigger-timeout-ms requires --ready-file and --trigger-file",
             ),
         ]
         for command, message in cases:
