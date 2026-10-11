@@ -89,6 +89,7 @@ jobs:
             reprobuild-packages
             reprobuild-test-adapters
             runquota
+            test-certificates-spec
             tree-sitter-aiken
             tree-sitter-cadence
             tree-sitter-cairo
@@ -372,6 +373,7 @@ jobs:
             reprobuild-packages
             reprobuild-test-adapters
             runquota
+            test-certificates-spec
             tree-sitter-aiken
             tree-sitter-cadence
             tree-sitter-cairo
@@ -904,6 +906,7 @@ jobs:
             reprobuild-packages
             reprobuild-test-adapters
             runquota
+            test-certificates-spec
             tree-sitter-aiken
             tree-sitter-cadence
             tree-sitter-cairo

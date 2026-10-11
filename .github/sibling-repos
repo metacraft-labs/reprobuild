@@ -220,5 +220,18 @@ repo-workspaces=dev
 # as data rather than as one workflow's inline step.
 metacraft-github-actions=dev
 
-
-
+# The Test Certificates specification (private; mainline `latest`). Its
+# `vectors/content/` suite is the oracle for
+# tests/integration/t_content_id_vectors_match_the_conformance_suite.nim, which
+# reads the vectors with `git archive` at the revision recorded in
+# tests/integration/content_id/test-certificates-spec-content-vectors.pin --
+# from the object store, not the working tree -- and fails (never skips) when
+# the sibling or that revision is missing.
+#
+# Pinned to THAT SAME 40-hex revision rather than to `latest`, because
+# clone-siblings clones every entry shallow (`--depth 1` at the resolved
+# revision): a `=latest` entry would fetch only the branch tip, and the pinned
+# vectors would be absent the moment `latest` moved past them. A SHA entry
+# fetches exactly the pinned commit. scripts/check_workflows.sh refuses a
+# sibling pin that differs from the .pin file, so move both together.
+test-certificates-spec=b463664607264c2449a34eb66c2777756438d5bd

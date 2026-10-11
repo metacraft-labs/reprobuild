@@ -121,6 +121,11 @@ import repro_cli_support/dev_session
 import repro_cli_support/push_hook_protocol
 import repro_cli_support/cmake_direct
 import repro_cli_support/daemon_working_directory
+# TC-8b: the certificate verifier matches by CONTENT (Verification §4.1.1), so
+# it computes the content id of the state under evaluation with the TC-8a
+# library. Other imports also export a ``sha256Hex`` and a ``ProbeResult``;
+# this module names the content-id ones qualified.
+import repro_cli_support/content_id
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -18627,12 +18632,15 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
   # non-existent ``<manifest>/<repo.path>`` children, install zero hooks, and
   # make the printed remediation ineffective. It just has to be asked SECOND.
   let declaresWorkspace = fileExists(workspaceTomlPath(workspaceRoot))
-  if isCompositionalWorkspaceToml(workspaceRoot):
-    let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
+  # A root with no state yet still composes its settings layers
+  # (Workspace-Settings-Files.md §4) for the project the root names on its own.
+  let unrecordedProject =
+    if declaresWorkspace: "" else: detectWorkspaceProjectName(workspaceRoot)
+  if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
     # PS-2: hooks are installed in EVERY participating repo, so the hook
     # target set is the whole active project set — not just the primary.
     let resolved = extendWithActiveProjectSet(workspaceRoot,
-      composeManifestLayersFromFile(workspaceToml))
+      composeWorkspaceLayers(workspaceRoot, unrecordedProject))
     result.mode = "workspace"
     result.projectName = resolved.projectName
     for repo in resolved.repos:
@@ -29269,26 +29277,19 @@ proc workspaceShellFirstRoot(explicit: string): string =
   ## (``CLI/develop.md`` §"The Develop Set Is The Repo's Own Dependencies"); this
   ## only decides which workspace's lock sources are readable when resolving
   ## them, which that section calls out as the separate question.
+  ##
+  ## The walk itself is the shared ``discoverWorkspaceRoot``
+  ## (``repro_core/workspace_root``): a settings file, a state file or a
+  ## resolved manifest checkout marks a root and the nearest wins; the MO-2
+  ## committed lock decides only when no ancestor carries one of those. That
+  ## is the "shell first, generic marker second" order this proc always had,
+  ## with the settings file (Workspace-Settings-Files.md §6) among the shell
+  ## markers.
   if explicit.len > 0:
     return absolutePath(explicit)
   let here = absolutePath(getCurrentDir())
-  var dir = here
-  while true:
-    if fileExists(workspaceTomlPath(dir)):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  dir = here
-  while true:
-    if isInitializedWorkspace(dir):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  here
+  let found = findWorkspaceRoot(here)
+  if found.len > 0: found else: here
 
 proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
@@ -29341,8 +29342,11 @@ proc resolveDevelopWorkspacePrimary(
   ## exactly one exists. A workspace with no resolvable project surfaces
   ## as a ``ValueError`` so the dispatcher exits 1 with a clear message.
   let workspaceToml = workspaceTomlPath(workspaceRoot)
-  if isCompositionalWorkspaceToml(workspaceRoot):
-    return composeManifestLayersFromFile(workspaceToml)
+  let unrecordedProject =
+    if fileExists(workspaceToml): ""
+    else: detectWorkspaceProjectName(workspaceRoot)
+  if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
+    return composeWorkspaceLayers(workspaceRoot, unrecordedProject)
   let manifestsRoot = manifestsRoot(workspaceRoot)
   if fileExists(workspaceToml):
     try:
@@ -33537,12 +33541,11 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
         extra.add(name)
     if extra.len == 0: primary
     else: unionProjectSet(parsed.workspaceRoot, primary, extra)
-  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let options = ComposeOptions(
       skipInaccessibleLayers: parsed.allowMissingLayers)
-    let composed = composeManifestLayersFromFileWithOptions(
-      workspaceToml, options)
+    let composed = composeWorkspaceLayersWithOptions(
+      parsed.workspaceRoot, parsed.projectName, options)
     # PS-2 — init restores the WHOLE workspace, so a recorded project set is
     # materialized in full rather than just its primary project.
     result.project = withAdditional(extendWithActiveProjectSet(
@@ -34725,7 +34728,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # change AFTER M25) must not fire for it, or compositional init aborts
   # before the composer ever runs.
   if not dirExists(manifestsDir) and args.manifestUrl.len == 0 and
-      not isCompositionalWorkspaceToml(args.workspaceRoot):
+      not isCompositionalWorkspaceToml(args.workspaceRoot, args.projectName):
     raise newException(ValueError,
       "no manifest configured for `repro workspace init`: pass " &
         "`--manifest-url=…`, commit a `" & settingsFileName &
@@ -35957,9 +35960,9 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   ## gate / check can reuse it (active-branch derivation, manifest-layer root);
   ## the non-compositional branches return ``none`` exactly as before.
   let workspaceToml = workspaceTomlPath(workspaceRoot)
-  if isCompositionalWorkspaceToml(workspaceRoot):
+  if isCompositionalWorkspaceToml(workspaceRoot, projectName):
     let absToml = absolutePath(workspaceToml)
-    let wl = effectiveWorkspaceLocal(workspaceRoot)
+    let wl = effectiveWorkspaceLocal(workspaceRoot, projectName)
     # PS-2 — layers compose WITHIN the project; the active project set unions
     # ACROSS projects. Both axes apply, layers first.
     return (extendWithActiveProjectSet(workspaceRoot,
@@ -36082,10 +36085,37 @@ proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
   ## reinterpreted as a repo selector: several names are both a project and a
   ## repo, and a word whose meaning flips the day a manifest defines a project
   ## by that name would silently widen the sweep (CLI/sync.md, Summary).
+  ##
+  ## A workspace that composes manifest layers resolves the name ACROSS them
+  ## (``resolveWorkspaceProjectByName``), from the state file's layers or the
+  ## settings files' (Workspace-Settings-Files.md §4), with or without a state
+  ## file: a repo that a layer adds to the named project belongs to it, so the
+  ## scope must keep it. Reading the root layer's ``projects/<name>.toml``
+  ## alone dropped every such repo from ``sync <project>`` and from
+  ## ``ws enable <project>``, which syncs through here.
   let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
   let repoSetFile = manifestsRoot / repoSetsDirName / (name & ".toml")
+  #
+  # Only a PROJECT is composed: a name the root declares only as a variant or
+  # a repo-set resolves from the root below, exactly as before. The lookup
+  # composes additively (``layersMayOmitProject``): a layer that does not
+  # declare the project contributes nothing, so a project only the root
+  # declares, or only a later layer declares, scopes to what the declaring
+  # layers give it. A name NO layer
+  # declares (the composer's ``noLayerDeclaresProjectTag``) falls through to
+  # the diagnostics below; any other composition failure (an unreachable
+  # layer, a malformed fragment, conflicting declarations) is the answer.
+  let rootOnlyNonProject = not fileExists(projectFile) and
+    (fileExists(variantFile) or fileExists(repoSetFile))
+  if not rootOnlyNonProject and isCompositionalWorkspaceToml(workspaceRoot, name):
+    try:
+      return resolveWorkspaceProjectByName(workspaceRoot, name,
+        layersMayOmitProject = true)
+    except WorkspaceManifestParseError as err:
+      if noLayerDeclaresProjectTag notin err.innerMessage:
+        raise
   if fileExists(projectFile):
     return resolveProject(projectFile)
   if fileExists(variantFile):
@@ -38782,7 +38812,7 @@ proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
   ##     this one object regardless of which source filled any given repo.
   let root = absolutePath(workspaceRoot)
   if not hasResolvedManifestCheckout(root) and
-      not isCompositionalWorkspaceToml(root) and
+      not isCompositionalWorkspaceToml(root, projectName) and
       hasCommittedLockWorkspaceMarker(root):
     return populateLockedDeps(
       LockSource(kind: lskCommittedLock, workspaceRoot: root))
@@ -44132,9 +44162,10 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   ## ``WorkspaceLocal`` (when composer mode applies) so the caller can
   ## pick the anchor manifest layer for the lock destination.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot,
+      parsed.projectName)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -47233,29 +47264,12 @@ proc enclosingWorkspaceRoot*(startPath: string): string =
   ## layer checks (the public-lock visibility stage) that exist for exactly
   ## that push. Such a candidate is skipped, so the walk reaches the
   ## workspace that owns the ``.repro/`` it sits in.
-  let ancestors = selfAndAncestors(startPath)
-  proc insideAncestorReproState(candidate: string): bool =
-    ## True when ``candidate`` lies under ``<A>/.repro/`` for an ancestor
-    ## ``A`` that is itself a workspace.
-    for owner in ancestors:
-      if owner.len >= candidate.len:
-        continue
-      let state = owner / ".repro"
-      if candidate.startsWith(state & DirSep) and
-          (fileExists(workspaceTomlPath(owner)) or
-           hasResolvedManifestCheckout(owner)):
-        return true
-    false
-  for candidate in ancestors:
-    if fileExists(workspaceTomlPath(candidate)) or
-        hasResolvedManifestCheckout(candidate):
-      if insideAncestorReproState(candidate):
-        continue
-      return candidate
-  for candidate in ancestors:
-    if hasCommittedLockWorkspaceMarker(candidate):
-      return candidate
-  ""
+  ##
+  ## All of this is the shared ``discoverWorkspaceRoot``
+  ## (``repro_core/workspace_root``) — the one walk every workspace-root
+  ## lookup uses, whose marker set also includes the settings file
+  ## (Workspace-Settings-Files.md §6) and honours ``REPRO_WORKSPACE_CONFIG``.
+  findWorkspaceRoot(startPath)
 
 proc enclosingReproShell*(startPath: string): string =
   ## The nearest ancestor of ``startPath`` (inclusive) holding a ``.repro/``
@@ -47603,9 +47617,11 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
   ## the pre-push gate; returns ``@[]`` on any resolution failure so the caller
   ## (always best-effort) can silently no-op.
   try:
-    if isCompositionalWorkspaceToml(workspaceRoot):
-      let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
-      return composeManifestLayersFromFile(workspaceToml).repos
+    let unrecordedProject =
+      if hasWorkspaceStateFile(workspaceRoot): ""
+      else: detectWorkspaceProjectName(workspaceRoot)
+    if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
+      return composeWorkspaceLayers(workspaceRoot, unrecordedProject).repos
     else:
       let projectName = detectWorkspaceProjectName(workspaceRoot)
       if projectName.len == 0:
@@ -50566,13 +50582,22 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
 #   | targets       | observed/run order              | sorted + deduplicated |
 #   | namespace     | reprobuild-test-certificate-v1  | test-certificate-v1  |
 #
-# THE LOCK DIGEST IS GONE, NOT MOVED (Canonical-Payload §7). reprobuild's lock
-# RECORD is committed and keyed by the trigger commit, so ``vcs.commit``
-# already binds it: a verifier that wants the lock resolves it AT THAT COMMIT
-# itself (``resolveLockAtCommit`` below — the standard's framework-specific
+# THE LOCK DIGEST IS GONE, NOT MOVED (Canonical-Payload §7). reprobuild's
+# ``repro.lock`` is tracked, so ``vcs.content`` already binds it: a verifier
+# that wants the lock reads it OUT OF THE CONTENT under evaluation itself
+# (``reprobuildLockValidity`` below — the standard's framework-specific
 # validity step, Verification §4.2) instead of trusting a digest the record
-# carried. That digest was information the commit already implied, at the cost
-# of making the format ecosystem-specific.
+# carried.
+#
+# TC-8b — THE CONTENT BINDING (the standard's 2026-10-09 revision,
+# Canonical-Payload §7.1). ``[certificate.vcs]`` names the tested CONTENT
+# (``content``, a self-describing content id) and, informationally, the commit
+# checked out at issuance (``base``). It no longer names a commit to match:
+# a certificate covers every state whose content id equals ``content``, and
+# ``base`` is never compared with anything. A record in the earlier shape
+# (``commit`` + ``clean``, no ``content``) is decidably invalid and is REJECTED
+# with a re-issue remedy, never translated — deriving ``content`` from its
+# commit while keeping its signature would attest a payload no run produced.
 #
 # The signature (TC-5, further down) is what makes a record unforgeable
 # without the key; the verifier here answers the other two of Verification
@@ -50608,30 +50633,23 @@ type
     algorithm*: string   ## ``ed25519``
     value*: string       ## base64 (RFC 4648 §4, padded, single line)
 
-  TestCertificateWorktree* = object
-    ## ``[certificate.vcs.worktree]`` — the modified state a ``clean = false``
-    ## certificate was tested against (Standard §3.2.2). reprobuild does not
-    ## ISSUE this form (see ``issueCertificate``), but the format layer
-    ## round-trips and canonicalises it because a verifier must be able to
-    ## reconstruct any conforming producer's signed bytes.
-    present*: bool         ## whether the table is present at all
-    tree*: string          ## VCS canonical content id of the tested state
-    format*: string        ## opaque id pinning the exact diff semantics
-    patchDigest*: string   ## ``<algo>:<hex>`` over the exact patch bytes
-
   TestCertificateVcs* = object
-    ## ``[certificate.vcs]`` — the repository state the tests ran against
-    ## (Standard §3.2). ``clean`` and ``untracked`` are SEPARATE fields
-    ## because they mean different things: a modified tracked file means the
-    ## tests ran against something other than ``commit``, while untracked
-    ## files usually mean scratch work but can mean a file the build picked
-    ## up. Both are reported honestly or no certificate is issued at all.
+    ## ``[certificate.vcs]`` — the repository CONTENT the tests ran against
+    ## (Standard §3.2). Canonical key order: ``repo``, ``paths``, ``content``,
+    ## ``untracked``, ``base``.
+    ##
+    ## ``content`` identifies exactly what was tested: every tracked file within
+    ## scope with its working-tree content. There is no "clean" or "dirty"
+    ## certificate any more, because a certificate never claims to be about a
+    ## commit. ``untracked`` is reported because untracked files are NOT part
+    ## of ``content``. ``base`` names the commit checked out at issuance; it is
+    ## informational, signed like everything else, and never matched
+    ## (Standard §3.2.3).
     repo*: string
-    commit*: string
     paths*: seq[string]    ## scope; empty means the WHOLE repository
-    clean*: bool
+    content*: string       ## ``<algorithm>:<digest>`` (Content-Id §1), verbatim
     untracked*: bool
-    worktree*: TestCertificateWorktree
+    base*: string          ## OPTIONAL; omitted when empty, never emitted empty
 
   TestCertificateCommand* = object
     ## One ``[[certificate.command]]`` entry — the argument vector as
@@ -50759,11 +50777,14 @@ proc canonicalCertificatePayload*(cert: TestCertificate): string =
   ## itself.
   ##
   ## Key order is FIXED as below and is not alphabetical; tables are separated
-  ## by exactly one blank line; ``key_id`` and ``paths`` are OMITTED ENTIRELY
-  ## rather than emitted empty (an omitted key and an empty one are different
-  ## payloads); ``clean``/``untracked`` are bare TOML booleans; every other
+  ## by exactly one blank line; ``key_id``, ``paths`` and ``base`` are OMITTED
+  ## ENTIRELY rather than emitted empty (an omitted key and an empty one are
+  ## different payloads); ``untracked`` is a bare TOML boolean; every other
   ## value is a quoted basic string — including ``issued_at``, which is copied
-  ## VERBATIM and never re-formatted.
+  ## VERBATIM and never re-formatted, and ``content``, which is emitted
+  ## verbatim and never validated here (Canonical-Payload §2 rule 9: a
+  ## malformed content id is the VERIFIER's finding, and rewriting it here
+  ## would sign a value the producer never computed).
   ##
   ## A verifier MUST reconstruct these bytes FROM THE PARSED FIELDS, never by
   ## slicing the received file: a cosmetically reformatted certificate parses
@@ -50789,19 +50810,16 @@ proc canonicalCertificatePayload*(cert: TestCertificate): string =
     kv("key_id", cert.keyId)
   result.add("\n[certificate.vcs]\n")
   kv("repo", cert.vcs.repo)
-  kv("commit", cert.vcs.commit)
   let scope = canonicalStringList(cert.vcs.paths)
   if scope.len > 0:
     appendInlineArray(result, "paths", scope)
-  result.add("clean = " & (if cert.vcs.clean: "true" else: "false") & "\n")
+  kv("content", cert.vcs.content)
   result.add("untracked = " &
     (if cert.vcs.untracked: "true" else: "false") & "\n")
-  if cert.vcs.worktree.present:
-    result.add("\n[certificate.vcs.worktree]\n")
-    if cert.vcs.worktree.tree.len > 0: kv("tree", cert.vcs.worktree.tree)
-    if cert.vcs.worktree.format.len > 0: kv("format", cert.vcs.worktree.format)
-    if cert.vcs.worktree.patchDigest.len > 0:
-      kv("patch_digest", cert.vcs.worktree.patchDigest)
+  # ``base`` is the LAST key of the table and is omitted when absent — never
+  # emitted empty (Canonical-Payload §2 rule 10).
+  if cert.vcs.base.len > 0:
+    kv("base", cert.vcs.base)
   # Command entries stay in EXECUTION ORDER — that order is part of the claim
   # and MUST NOT be sorted — and each is preceded by exactly one blank line.
   # ``argv`` is serialized like ``targets`` but is NEVER sorted or
@@ -50888,12 +50906,54 @@ proc parseTomlStringArray(rhs: string): seq[string] =
 # ---- reader ---------------------------------------------------------------
 #
 # A received certificate may differ from canonical form in whitespace, key
-# order, table order and escaping while parsing to identical values
-# (Canonical-Payload §5), so the reader is a real (small) TOML scanner rather
-# than a line matcher: it accepts CRLF, aligned ``=``, tables in any order,
-# literal ``'...'`` strings, ``\uXXXX`` escapes, and arrays spread over
-# several lines. What it will NOT do is repair: a value it cannot represent
-# canonically is malformed, not something to normalise.
+# order, table order, key quoting and string form while parsing to identical
+# values (Canonical-Payload §5), so the reader is a real (small) TOML parser
+# rather than a line matcher. It builds a tree first and maps the tree onto a
+# record second, so every way of spelling the same table — ``[certificate.vcs]``
+# or ``vcs = { … }`` inside ``[certificate]``; ``[[certificate.command]]`` or
+# ``command = [ { argv = … } ]``; a sub-table before its parent; quoted keys;
+# literal, multi-line and ``\uXXXX``-escaped strings; CRLF — reads alike.
+#
+# What it will NOT do is repair. A value it cannot represent canonically, a
+# key defined twice, a table header repeated, a known field of the wrong TOML
+# type: each makes the record malformed rather than something to normalise.
+#
+# Why not ``toml_serialization`` (vendored, and reachable here through
+# ``repro_workspace_manifests``): measured 2026-10-11, its ``TomlValueRef``
+# decoder refuses valid TOML the conformance suite requires a reader to accept
+# — ``store/signed-non-canonical`` and ``payload/escapes/received.toml`` define
+# ``[certificate]`` AFTER ``[certificate.signature]`` / ``[[certificate.command]]``
+# and are rejected as "duplicate table key not allowed: 'certificate'". A
+# verifier that cannot read a cosmetically reordered certificate fails it
+# against its own valid signature (Canonical-Payload §5). Re-test and switch if
+# the library is fixed; the record mapping below is independent of the parser.
+
+type
+  CertTomlKind = enum
+    ctkString, ctkBool, ctkArray, ctkTable, ctkOther
+
+  CertTomlNode = ref object
+    case kind: CertTomlKind
+    of ctkString:
+      str: string
+    of ctkBool:
+      flag: bool
+    of ctkArray:
+      items: seq[CertTomlNode]
+      ofTables: bool       ## created by ``[[header]]``; extendable by one
+    of ctkTable:
+      fields: Table[string, CertTomlNode]
+      defined: bool        ## an explicit ``[header]`` or a key/value made it
+      sealed: bool         ## an inline table: closed to every later addition
+    of ctkOther:
+      raw: string          ## a number, date or time — no certificate field
+                           ## is one, so it is kept only to be ignored
+
+proc newCertTomlTable(): CertTomlNode =
+  CertTomlNode(kind: ctkTable, fields: initTable[string, CertTomlNode]())
+
+proc certTomlFail(msg: string) {.noreturn.} =
+  raise newException(TestCertificateParseError, msg)
 
 proc appendUtf8(dest: var string; codePoint: int) =
   ## Encode one code point as UTF-8. Hand-rolled rather than pulled from
@@ -50924,10 +50984,10 @@ proc hexDigitValue(ch: char): int =
 proc skipCertTomlBlanks(s: string; i: var int) =
   ## Spaces and tabs only — never a newline, so a key with no value on its
   ## own line cannot silently borrow the next line's.
-  while i < s.len and s[i] in {' ', '\t', '\r'}: inc i
+  while i < s.len and s[i] in {' ', '\t'}: inc i
 
 proc skipCertTomlTrivia(s: string; i: var int) =
-  ## Whitespace (including newlines) and whole-line comments.
+  ## Whitespace (including newlines) and comments.
   while i < s.len:
     case s[i]
     of ' ', '\t', '\r', '\n': inc i
@@ -50935,84 +50995,150 @@ proc skipCertTomlTrivia(s: string; i: var int) =
       while i < s.len and s[i] != '\n': inc i
     else: return
 
+proc expectCertTomlLineEnd(s: string; i: var int; what: string) =
+  ## After a header or a key/value pair only blanks and a comment may follow
+  ## on the same line. ``a = "x" b = "y"`` is not two assignments.
+  skipCertTomlBlanks(s, i)
+  if i < s.len and s[i] == '#':
+    while i < s.len and s[i] != '\n': inc i
+  if i < s.len and s[i] == '\r' and i + 1 < s.len and s[i + 1] == '\n':
+    inc i
+  if i < s.len and s[i] != '\n':
+    certTomlFail("unexpected '" & $s[i] & "' after " & what)
+
+proc isRawControl(ch: char): bool =
+  ## TOML strings cannot carry a raw control character other than TAB.
+  (ord(ch) < 0x20 and ch != '\t') or ord(ch) == 0x7F
+
+proc parseCertTomlEscape(s: string; i: var int; dest: var string) =
+  ## One escape sequence; ``s[i]`` is the character after the backslash.
+  ## ``\uXXXX`` / ``\UXXXXXXXX`` are accepted on INPUT for interoperability
+  ## and never produced when re-serializing (Canonical-Payload §4).
+  if i >= s.len: certTomlFail("trailing backslash")
+  case s[i]
+  of '\\': dest.add('\\'); inc i
+  of '"': dest.add('"'); inc i
+  of 'n': dest.add('\n'); inc i
+  of 'r': dest.add('\r'); inc i
+  of 't': dest.add('\t'); inc i
+  of 'b': dest.add('\b'); inc i
+  of 'f': dest.add('\f'); inc i
+  of 'u', 'U':
+    let width = if s[i] == 'u': 4 else: 8
+    inc i
+    if i + width > s.len: certTomlFail("truncated unicode escape")
+    var codePoint = 0
+    for k in 0 ..< width:
+      let digit = hexDigitValue(s[i + k])
+      if digit < 0: certTomlFail("invalid unicode escape")
+      codePoint = codePoint * 16 + digit
+    if codePoint > 0x10FFFF or (codePoint >= 0xD800 and codePoint <= 0xDFFF):
+      certTomlFail("unicode escape names no Unicode scalar value")
+    i += width
+    appendUtf8(dest, codePoint)
+  else:
+    certTomlFail("unknown escape '\\" & $s[i] & "'")
+
 proc parseCertTomlString(s: string; i: var int): string =
-  ## One TOML string: basic ``"..."`` (escapes processed) or literal
-  ## ``'...'`` (escapes are ordinary characters). ``\uXXXX`` / ``\UXXXXXXXX``
-  ## are accepted on INPUT for interoperability, and are never produced when
-  ## re-serializing (Canonical-Payload §4).
-  if i >= s.len:
-    raise newException(TestCertificateParseError, "expected a string value")
-  if s[i] == '\'':
-    inc i
-    let start = i
-    while i < s.len and s[i] != '\'': inc i
-    if i >= s.len:
-      raise newException(TestCertificateParseError,
-        "unterminated literal string")
-    result = s[start ..< i]
-    inc i
-    return
-  if s[i] != '"':
-    raise newException(TestCertificateParseError,
-      "expected a quoted string, found '" & $s[i] & "'")
+  ## One TOML string in any of its four forms. Escapes are processed in the
+  ## two basic forms only; a literal string keeps every character as written.
+  if i >= s.len: certTomlFail("expected a string")
+  let quote = s[i]
+  if quote notin {'"', '\''}:
+    certTomlFail("expected a quoted string, found '" & $s[i] & "'")
+  let multiLine = i + 2 < s.len and s[i + 1] == quote and s[i + 2] == quote
+  if multiLine:
+    i += 3
+    # A newline immediately after the opening delimiter is trimmed.
+    if i < s.len and s[i] == '\n': inc i
+    elif i + 1 < s.len and s[i] == '\r' and s[i + 1] == '\n': i += 2
+    result = newStringOfCap(32)
+    while true:
+      if i >= s.len: certTomlFail("unterminated multi-line string")
+      if s[i] == quote and i + 2 < s.len and s[i + 1] == quote and
+          s[i + 2] == quote:
+        # Up to two quotes may sit directly before the closing delimiter.
+        var run = 3
+        while i + run < s.len and s[i + run] == quote and run < 5: inc run
+        for _ in 0 ..< run - 3: result.add(quote)
+        i += run
+        return
+      let ch = s[i]
+      if quote == '"' and ch == '\\':
+        inc i
+        # A line-ending backslash trims the newline and the whitespace that
+        # follows it.
+        var j = i
+        while j < s.len and s[j] in {' ', '\t'}: inc j
+        if j < s.len and (s[j] == '\n' or
+            (s[j] == '\r' and j + 1 < s.len and s[j + 1] == '\n')):
+          i = j
+          while i < s.len and s[i] in {' ', '\t', '\r', '\n'}: inc i
+        else:
+          parseCertTomlEscape(s, i, result)
+        continue
+      if ch == '\r' and i + 1 < s.len and s[i + 1] == '\n':
+        result.add('\n')
+        i += 2
+        continue
+      if ch != '\n' and isRawControl(ch):
+        certTomlFail("raw control character in a string")
+      result.add(ch)
+      inc i
   inc i
   result = newStringOfCap(32)
-  while i < s.len and s[i] != '"':
-    if s[i] != '\\':
-      result.add(s[i])
+  while true:
+    if i >= s.len or s[i] == '\n':
+      certTomlFail("unterminated string")
+    let ch = s[i]
+    if ch == quote:
+      inc i
+      return
+    if quote == '"' and ch == '\\':
+      inc i
+      parseCertTomlEscape(s, i, result)
+      continue
+    if isRawControl(ch):
+      certTomlFail("raw control character in a string")
+    result.add(ch)
+    inc i
+
+proc parseCertTomlKey(s: string; i: var int): seq[string] =
+  ## A possibly dotted key: bare segments (``A-Za-z0-9_-``) or quoted ones,
+  ## with blanks allowed around each ``.``.
+  while true:
+    skipCertTomlBlanks(s, i)
+    if i >= s.len: certTomlFail("expected a key")
+    if s[i] in {'"', '\''}:
+      if i + 2 < s.len and s[i + 1] == s[i] and s[i + 2] == s[i]:
+        certTomlFail("a multi-line string cannot be a key")
+      result.add(parseCertTomlString(s, i))
+    else:
+      let start = i
+      while i < s.len and s[i] in {'A'..'Z', 'a'..'z', '0'..'9', '_', '-'}:
+        inc i
+      if i == start:
+        certTomlFail("expected a key, found '" & $s[i] & "'")
+      result.add(s[start ..< i])
+    skipCertTomlBlanks(s, i)
+    if i < s.len and s[i] == '.':
       inc i
       continue
-    inc i
-    if i >= s.len:
-      raise newException(TestCertificateParseError, "trailing backslash")
-    case s[i]
-    of '\\': result.add('\\'); inc i
-    of '"': result.add('"'); inc i
-    of 'n': result.add('\n'); inc i
-    of 'r': result.add('\r'); inc i
-    of 't': result.add('\t'); inc i
-    of 'b': result.add('\b'); inc i
-    of 'f': result.add('\f'); inc i
-    of '/':
-      # Not one of ours, and never produced — but a JSON-shaped producer may
-      # have written it, and accepting it on input costs nothing because the
-      # re-serialization emits a bare '/'.
-      result.add('/'); inc i
-    of 'u', 'U':
-      let width = if s[i] == 'u': 4 else: 8
-      inc i
-      if i + width > s.len:
-        raise newException(TestCertificateParseError,
-          "truncated unicode escape")
-      var codePoint = 0
-      for k in 0 ..< width:
-        let digit = hexDigitValue(s[i + k])
-        if digit < 0:
-          raise newException(TestCertificateParseError,
-            "invalid unicode escape")
-        codePoint = codePoint * 16 + digit
-      i += width
-      appendUtf8(result, codePoint)
-    else:
-      raise newException(TestCertificateParseError,
-        "unknown escape '\\" & $s[i] & "'")
-  if i >= s.len:
-    raise newException(TestCertificateParseError, "unterminated basic string")
-  inc i
+    return
 
-proc parseCertTomlStringArray(s: string; i: var int): seq[string] =
-  ## ``[ "a", "b" ]`` — tolerant of newlines and of a trailing comma.
-  if i >= s.len or s[i] != '[':
-    raise newException(TestCertificateParseError, "expected an array")
-  inc i
+proc parseCertTomlValue(s: string; i: var int): CertTomlNode
+
+proc parseCertTomlArray(s: string; i: var int): CertTomlNode =
+  ## ``[ v, v, ]`` — newlines, comments and a trailing comma allowed.
+  inc i  # '['
+  result = CertTomlNode(kind: ctkArray)
   while true:
     skipCertTomlTrivia(s, i)
-    if i >= s.len:
-      raise newException(TestCertificateParseError, "unterminated array")
+    if i >= s.len: certTomlFail("unterminated array")
     if s[i] == ']':
       inc i
       return
-    result.add(parseCertTomlString(s, i))
+    result.items.add(parseCertTomlValue(s, i))
     skipCertTomlTrivia(s, i)
     if i < s.len and s[i] == ',':
       inc i
@@ -51020,15 +51146,173 @@ proc parseCertTomlStringArray(s: string; i: var int): seq[string] =
       inc i
       return
     else:
-      raise newException(TestCertificateParseError,
-        "expected ',' or ']' in array")
+      certTomlFail("expected ',' or ']' in an array")
+
+proc certTomlDescend(table: CertTomlNode; key: string;
+                     what: string): CertTomlNode =
+  ## The table ``key`` names inside ``table``, created implicitly when absent.
+  ## An array of tables yields its LAST element, as TOML specifies.
+  if table.sealed:
+    certTomlFail("'" & what & "' extends an inline table")
+  if key notin table.fields:
+    let created = newCertTomlTable()
+    table.fields[key] = created
+    return created
+  let node = table.fields[key]
+  case node.kind
+  of ctkTable:
+    if node.sealed:
+      certTomlFail("'" & what & "' extends an inline table")
+    node
+  of ctkArray:
+    if not node.ofTables or node.items.len == 0:
+      certTomlFail("'" & what & "' is not a table")
+    node.items[^1]
+  else:
+    certTomlFail("'" & what & "' is not a table")
+
+proc certTomlAssign(table: CertTomlNode; key: seq[string];
+                    value: CertTomlNode) =
+  var at = table
+  for k in 0 ..< key.high:
+    at = certTomlDescend(at, key[k], key[0 .. k].join("."))
+    at.defined = true
+  if at.sealed:
+    certTomlFail("'" & key.join(".") & "' extends an inline table")
+  if key[^1] in at.fields:
+    certTomlFail("key '" & key.join(".") & "' is defined twice")
+  at.fields[key[^1]] = value
+
+proc parseCertTomlInlineTable(s: string; i: var int): CertTomlNode =
+  ## ``{ k = v, k = v }`` — on one line, as TOML 1.0 requires; sealed once
+  ## parsed.
+  inc i  # '{'
+  result = newCertTomlTable()
+  result.defined = true
+  skipCertTomlBlanks(s, i)
+  if i < s.len and s[i] == '}':
+    inc i
+    result.sealed = true
+    return
+  while true:
+    let key = parseCertTomlKey(s, i)
+    if i >= s.len or s[i] != '=':
+      certTomlFail("expected '=' after key '" & key.join(".") & "'")
+    inc i
+    skipCertTomlBlanks(s, i)
+    certTomlAssign(result, key, parseCertTomlValue(s, i))
+    skipCertTomlBlanks(s, i)
+    if i < s.len and s[i] == ',':
+      inc i
+      continue
+    if i < s.len and s[i] == '}':
+      inc i
+      result.sealed = true
+      return
+    certTomlFail("expected ',' or '}' in an inline table")
+
+proc parseCertTomlValue(s: string; i: var int): CertTomlNode =
+  if i >= s.len: certTomlFail("missing value")
+  case s[i]
+  of '"', '\'':
+    CertTomlNode(kind: ctkString, str: parseCertTomlString(s, i))
+  of '[':
+    parseCertTomlArray(s, i)
+  of '{':
+    parseCertTomlInlineTable(s, i)
+  else:
+    let start = i
+    while i < s.len and s[i] notin {' ', '\t', '\r', '\n', ',', ']', '}', '#'}:
+      inc i
+    let word = s[start ..< i]
+    if word.len == 0:
+      certTomlFail("missing value")
+    case word
+    of "true": CertTomlNode(kind: ctkBool, flag: true)
+    of "false": CertTomlNode(kind: ctkBool, flag: false)
+    else:
+      # A number, date or time. TOML has them; no certificate field is one.
+      # Kept so an unknown key carrying one is ignored, and a KNOWN key
+      # carrying one is a type error below — never coerced to a string.
+      # Only the characters TOML numbers, dates and times are spelled with,
+      # starting as one of them does; ``inf`` / ``nan`` are the only words.
+      # Anything else is not TOML and is refused, not kept as a value.
+      let special = word in ["inf", "+inf", "-inf", "nan", "+nan", "-nan"]
+      if not special and (word[0] notin {'0'..'9', '+', '-'} or
+          not word.allCharsInSet({'0'..'9', 'A'..'Z', 'a'..'z', '+', '-',
+            '.', ':', '_'})):
+        certTomlFail("unexpected bare value '" & word & "'")
+      CertTomlNode(kind: ctkOther, raw: word)
+
+proc parseCertTomlDocument(content: string): CertTomlNode =
+  ## The whole document as a tree. Raises ``TestCertificateParseError``.
+  result = newCertTomlTable()
+  result.defined = true
+  var current = result
+  var i = 0
+  while true:
+    skipCertTomlTrivia(content, i)
+    if i >= content.len: break
+    if content[i] == '[':
+      let arrayOfTables = i + 1 < content.len and content[i + 1] == '['
+      i += (if arrayOfTables: 2 else: 1)
+      let key = parseCertTomlKey(content, i)
+      let closing = if arrayOfTables: "]]" else: "]"
+      if not content.continuesWith(closing, i):
+        certTomlFail("unterminated table header '" & key.join(".") & "'")
+      i += closing.len
+      expectCertTomlLineEnd(content, i, "table header")
+      var parent = result
+      for k in 0 ..< key.high:
+        parent = certTomlDescend(parent, key[k], key[0 .. k].join("."))
+      let name = key.join(".")
+      let last = key[^1]
+      if arrayOfTables:
+        if parent.sealed:
+          certTomlFail("'" & name & "' extends an inline table")
+        if last notin parent.fields:
+          parent.fields[last] = CertTomlNode(kind: ctkArray, ofTables: true)
+        let arr = parent.fields[last]
+        if arr.kind != ctkArray or not arr.ofTables:
+          certTomlFail("'" & name & "' is not an array of tables")
+        let element = newCertTomlTable()
+        element.defined = true
+        arr.items.add(element)
+        current = element
+      else:
+        if last in parent.fields:
+          let existing = parent.fields[last]
+          if existing.kind != ctkTable or existing.defined or existing.sealed:
+            certTomlFail("table '" & name & "' is defined twice")
+          existing.defined = true
+          current = existing
+        else:
+          if parent.sealed:
+            certTomlFail("'" & name & "' extends an inline table")
+          let created = newCertTomlTable()
+          created.defined = true
+          parent.fields[last] = created
+          current = created
+      continue
+    let key = parseCertTomlKey(content, i)
+    if i >= content.len or content[i] != '=':
+      certTomlFail("expected '=' after key '" & key.join(".") & "'")
+    inc i
+    skipCertTomlBlanks(content, i)
+    if i >= content.len or content[i] in {'\r', '\n', '#'}:
+      certTomlFail("missing value for key '" & key.join(".") & "'")
+    certTomlAssign(current, key, parseCertTomlValue(content, i))
+    expectCertTomlLineEnd(content, i, "the value of '" & key.join(".") & "'")
 
 type
   CertificateReadStatus* = enum
-    ## Why a found record is or is not evidence, kept apart because the three
-    ## failures call for three different operator responses (Verification §7).
+    ## Why a found record is or is not evidence, kept apart because the
+    ## failures call for different operator responses (Verification §7).
     crsOk                ## a well-formed ``test-certificate.v1`` record
     crsRetiredSchema     ## the PRE-MIGRATION reprobuild id — must be RE-ISSUED
+    crsEarlierDraft      ## ``test-certificate.v1`` in the EARLIER-DRAFT shape
+                         ## (bound to a commit, no ``content``): decidably
+                         ## invalid — must be RE-ISSUED, never translated
     crsUnknownSchema     ## a schema version this build does not implement
     crsMalformed         ## decidably invalid: unparseable, or a missing field
 
@@ -51039,11 +51323,13 @@ type
     detail*: string       ## human-facing reason, including the remedy
 
 proc certificateStructuralDefect*(cert: TestCertificate): string =
-  ## "" when every REQUIRED v1 field is present (Standard §3.1/§3.2/§3.3),
-  ## otherwise the name of the first missing one. A record missing a required
-  ## field is DECIDABLY INVALID and contributes nothing — which is a different
-  ## failure from a schema version this verifier cannot read, and the two must
-  ## not be reported as one.
+  ## "" when every REQUIRED v1 field that a ``TestCertificate`` can be missing
+  ## is present (Standard §3.1/§3.2/§3.3), otherwise the name of the first
+  ## missing one. A record missing a required field is DECIDABLY INVALID and
+  ## contributes nothing — which is a different failure from a schema version
+  ## this verifier cannot read, and the two must not be reported as one.
+  ## (The reader additionally requires ``result`` and ``vcs.untracked`` to be
+  ## PRESENT, which a parsed value cannot tell apart from its default.)
   if cert.framework.len == 0: return "framework"
   if cert.project.len == 0: return "project"
   if cert.platform.len == 0: return "platform"
@@ -51051,139 +51337,114 @@ proc certificateStructuralDefect*(cert: TestCertificate): string =
   if cert.issuedAt.len == 0: return "issued_at"
   if cert.issuer.len == 0: return "issuer"
   if cert.vcs.repo.len == 0: return "vcs.repo"
-  if cert.vcs.commit.len == 0: return "vcs.commit"
+  if cert.vcs.content.len == 0: return "vcs.content"
   if cert.commands.len == 0:
     return "certificate.command (at least one is required)"
   for cmd in cert.commands:
     if cmd.argv.len == 0:
       return "certificate.command.argv (describes no command)"
-  # Standard §3.2.2: ``worktree`` is REQUIRED when ``clean = false`` and MUST
-  # be absent when ``clean = true``. A dirty certificate without it identifies
-  # no state at all.
-  if not cert.vcs.clean and not cert.vcs.worktree.present:
-    return "certificate.vcs.worktree (required when clean = false)"
-  if cert.vcs.clean and cert.vcs.worktree.present:
-    return "certificate.vcs.worktree (must be absent when clean = true)"
-  if cert.vcs.worktree.present and cert.vcs.worktree.tree.len == 0 and
-      cert.vcs.worktree.patchDigest.len == 0:
-    return "certificate.vcs.worktree (needs tree or patch_digest)"
   ""
 
-proc parseCertificateBody(content: string): TestCertificate =
-  ## The scanner proper. Raises ``TestCertificateParseError``; the schema is
-  ## read but NOT judged here, because the caller has to tell an unknown
-  ## schema apart from a malformed record.
-  var i = 0
-  var table = ""
-  while true:
-    skipCertTomlTrivia(content, i)
-    if i >= content.len: break
-    if content[i] == '[':
-      var doubled = false
-      inc i
-      if i < content.len and content[i] == '[':
-        doubled = true
-        inc i
-      let start = i
-      while i < content.len and content[i] != ']': inc i
-      if i >= content.len:
-        raise newException(TestCertificateParseError,
-          "unterminated table header")
-      table = content[start ..< i].strip()
-      inc i
-      if doubled:
-        if i < content.len and content[i] == ']': inc i
-        if table == "certificate.command":
-          result.commands.add(TestCertificateCommand())
-      if table == "certificate.vcs.worktree":
-        result.vcs.worktree.present = true
-      continue
-    let keyStart = i
-    while i < content.len and content[i] notin {'=', ' ', '\t', '\r', '\n'}:
-      inc i
-    let key = content[keyStart ..< i]
-    if key.len == 0:
-      raise newException(TestCertificateParseError,
-        "expected a key at offset " & $keyStart)
-    skipCertTomlBlanks(content, i)
-    if i >= content.len or content[i] != '=':
-      raise newException(TestCertificateParseError,
-        "expected '=' after key '" & key & "'")
-    inc i
-    skipCertTomlBlanks(content, i)
-    if i >= content.len:
-      raise newException(TestCertificateParseError,
-        "missing value for key '" & key & "'")
-    # The value. Booleans are bare; everything else is a string or an array of
-    # strings, so the first character decides.
-    if content[i] == '[':
-      let values = parseCertTomlStringArray(content, i)
-      case table
-      of "certificate":
-        if key == "targets": result.targets = values
-      of "certificate.vcs":
-        if key == "paths": result.vcs.paths = values
-      of "certificate.command":
-        if key == "argv" and result.commands.len > 0:
-          result.commands[^1].argv = values
-      else: discard
-      continue
-    if content[i] in {'t', 'f'}:
-      let boolStart = i
-      while i < content.len and content[i] in {'a'..'z'}: inc i
-      let word = content[boolStart ..< i]
-      if word notin ["true", "false"]:
-        raise newException(TestCertificateParseError,
-          "unexpected bare value '" & word & "' for key '" & key & "'")
-      let flag = word == "true"
-      if table == "certificate.vcs":
-        case key
-        of "clean": result.vcs.clean = flag
-        of "untracked": result.vcs.untracked = flag
-        else: discard
-      continue
-    let value = parseCertTomlString(content, i)
-    case table
-    of "":
-      if key == "schema": result.schema = value
-    of "certificate":
-      case key
-      of "framework": result.framework = value
-      of "project": result.project = value
-      of "platform": result.platform = value
-      of "result":
-        case value
-        of "passed": result.result = tcrPassed
-        of "failed": result.result = tcrFailed
-        else:
-          raise newException(TestCertificateParseError,
-            "invalid certificate result: '" & value & "'")
-      of "issued_at": result.issuedAt = value
-      of "issuer": result.issuer = value
-      of "key_id": result.keyId = value
-      else: discard
-    of "certificate.vcs":
-      case key
-      of "repo": result.vcs.repo = value
-      of "commit": result.vcs.commit = value
-      else: discard
-    of "certificate.vcs.worktree":
-      case key
-      of "tree": result.vcs.worktree.tree = value
-      of "format": result.vcs.worktree.format = value
-      of "patch_digest": result.vcs.worktree.patchDigest = value
-      else: discard
-    of "certificate.signature":
-      case key
-      of "algorithm": result.signature.algorithm = value
-      of "value": result.signature.value = value
-      else: discard
-    else: discard
+type
+  CertificateFieldPresence = object
+    ## What the tree carried that a ``TestCertificate`` cannot remember.
+    result, untracked, content: bool
+    earlierDraftKeys: seq[string]   ## ``commit`` / ``clean`` / ``worktree``
+
+proc certTomlString(table: CertTomlNode; key, path: string;
+                    present: var bool): string =
+  if table == nil or key notin table.fields: return ""
+  let node = table.fields[key]
+  if node.kind != ctkString:
+    certTomlFail("'" & path & "' must be a string")
+  present = true
+  node.str
+
+proc certTomlString(table: CertTomlNode; key, path: string): string =
+  var ignored = false
+  certTomlString(table, key, path, ignored)
+
+proc certTomlStrings(table: CertTomlNode; key, path: string): seq[string] =
+  if table == nil or key notin table.fields: return @[]
+  let node = table.fields[key]
+  if node.kind != ctkArray or node.ofTables:
+    certTomlFail("'" & path & "' must be an array of strings")
+  for item in node.items:
+    if item.kind != ctkString:
+      certTomlFail("'" & path & "' must be an array of strings")
+    result.add(item.str)
+
+proc certTomlTable(table: CertTomlNode; key, path: string): CertTomlNode =
+  if table == nil or key notin table.fields: return nil
+  let node = table.fields[key]
+  if node.kind != ctkTable:
+    certTomlFail("'" & path & "' must be a table")
+  node
+
+proc certificateFromTomlTree(root: CertTomlNode;
+    presence: var CertificateFieldPresence): TestCertificate =
+  ## Map the tree onto the record. Unknown keys are ignored (a later revision
+  ## may add optional fields); a KNOWN key of the wrong type is malformed.
+  result.schema = certTomlString(root, "schema", "schema")
+  let c = certTomlTable(root, "certificate", "certificate")
+  if c == nil:
+    return
+  result.framework = certTomlString(c, "framework", "certificate.framework")
+  result.project = certTomlString(c, "project", "certificate.project")
+  result.platform = certTomlString(c, "platform", "certificate.platform")
+  result.targets = certTomlStrings(c, "targets", "certificate.targets")
+  let resultValue = certTomlString(c, "result", "certificate.result",
+    presence.result)
+  if presence.result:
+    case resultValue
+    of "passed": result.result = tcrPassed
+    of "failed": result.result = tcrFailed
+    else: certTomlFail("invalid certificate result: '" & resultValue & "'")
+  result.issuedAt = certTomlString(c, "issued_at", "certificate.issued_at")
+  result.issuer = certTomlString(c, "issuer", "certificate.issuer")
+  result.keyId = certTomlString(c, "key_id", "certificate.key_id")
+  let v = certTomlTable(c, "vcs", "certificate.vcs")
+  if v != nil:
+    result.vcs.repo = certTomlString(v, "repo", "certificate.vcs.repo")
+    result.vcs.paths = certTomlStrings(v, "paths", "certificate.vcs.paths")
+    result.vcs.content = certTomlString(v, "content",
+      "certificate.vcs.content", presence.content)
+    if "untracked" in v.fields:
+      let node = v.fields["untracked"]
+      if node.kind != ctkBool:
+        certTomlFail("'certificate.vcs.untracked' must be a boolean")
+      presence.untracked = true
+      result.vcs.untracked = node.flag
+    var basePresent = false
+    result.vcs.base = certTomlString(v, "base", "certificate.vcs.base",
+      basePresent)
+    if basePresent and result.vcs.base.len == 0:
+      # Standard §3.2.3: a producer MUST omit ``base`` rather than emit an
+      # empty value. Reading it as absent would be a repair.
+      certTomlFail("'certificate.vcs.base' is present but empty")
+    for key in ["commit", "clean", "worktree"]:
+      if key in v.fields:
+        presence.earlierDraftKeys.add(key)
+  if "command" in c.fields:
+    let commands = c.fields["command"]
+    if commands.kind != ctkArray:
+      certTomlFail("'certificate.command' must be an array of tables")
+    for entry in commands.items:
+      if entry.kind != ctkTable:
+        certTomlFail("'certificate.command' must be an array of tables")
+      result.commands.add(TestCertificateCommand(
+        argv: certTomlStrings(entry, "argv", "certificate.command.argv")))
+  let s = certTomlTable(c, "signature", "certificate.signature")
+  if s != nil:
+    result.signature.algorithm = certTomlString(s, "algorithm",
+      "certificate.signature.algorithm")
+    result.signature.value = certTomlString(s, "value",
+      "certificate.signature.value")
 
 proc readCertificateRecord*(content: string): CertificateReadResult =
   ## Read a found record and CLASSIFY it. This is the entry point a verifier
-  ## uses, because the three ways a record can fail to be evidence lead to
-  ## three different reports (Verification §7):
+  ## uses, because the ways a record can fail to be evidence lead to
+  ## different reports (Verification §7):
   ##
   ##   * ``crsRetiredSchema`` — a certificate issued before the TC-7
   ##     migration. Its signature was made over a payload that is no longer
@@ -51191,13 +51452,24 @@ proc readCertificateRecord*(content: string): CertificateReadResult =
   ##     translated: translating would mean re-signing bytes the original
   ##     signer never saw. The operator is told to RE-ISSUE, which is a
   ##     different instruction from "this file is damaged".
+  ##   * ``crsEarlierDraft`` — a ``test-certificate.v1`` record in the shape
+  ##     the standard had before its 2026-10-09 revision: bound to a
+  ##     ``commit`` with ``clean``, and no ``content``. It lacks a required
+  ##     field, so it is DECIDABLY INVALID (not covered, never unverifiable),
+  ##     and for the same reason as above it is never translated: deriving
+  ##     ``content`` from its commit and keeping its signature would attest a
+  ##     payload no run produced (Canonical-Payload §7.1). Reported apart from
+  ##     ``crsMalformed`` so the message says "re-issue", not "damaged".
   ##   * ``crsUnknownSchema`` — a schema version this build does not
   ##     implement. It may be a perfectly good certificate this consumer
   ##     simply cannot read, so it is reported UNVERIFIABLE, not invalid.
-  ##   * ``crsMalformed`` — unparseable, or missing a required v1 field. The
-  ##     consumer asked the question and got an answer: not evidence.
+  ##   * ``crsMalformed`` — unparseable, missing a required v1 field, or
+  ##     carrying a value with no canonical form. The consumer asked the
+  ##     question and got an answer: not evidence.
+  var presence: CertificateFieldPresence
   try:
-    result.cert = parseCertificateBody(content)
+    result.cert = certificateFromTomlTree(parseCertTomlDocument(content),
+      presence)
   except TestCertificateParseError as err:
     result.status = crsMalformed
     result.detail = err.msg
@@ -51217,10 +51489,31 @@ proc readCertificateRecord*(content: string): CertificateReadResult =
       "' is not implemented by this build (expected '" &
       testCertificateSchemaV1 & "')"
     return
-  let defect = certificateStructuralDefect(result.cert)
+  if not presence.content and presence.earlierDraftKeys.len > 0:
+    result.status = crsEarlierDraft
+    result.detail = "earlier-draft record bound to a commit (it carries " &
+      presence.earlierDraftKeys.mapIt("vcs." & it).join(", ") &
+      " and no vcs.content, which the standard now requires); it is " &
+      "invalid and is not translated, because a content id derived from " &
+      "its commit would sign a payload no run produced — run 'repro test' " &
+      "/ 'repro certify' to re-issue it"
+    return
+  var defect = certificateStructuralDefect(result.cert)
+  if defect.len == 0 and not presence.result: defect = "result"
+  if defect.len == 0 and not presence.untracked: defect = "vcs.untracked"
   if defect.len > 0:
     result.status = crsMalformed
     result.detail = "certificate is missing a required field: " & defect
+    return
+  # A value with NO canonical form — a control character the escape table
+  # does not cover, arriving through a ``\u`` escape — cannot be signed or
+  # verified by anyone. Malformed, not something to invent an escape for
+  # (Canonical-Payload §4).
+  try:
+    discard canonicalCertificatePayload(result.cert)
+  except CertificateSerializationError as err:
+    result.status = crsMalformed
+    result.detail = err.msg
     return
   result.status = crsOk
 
@@ -51262,17 +51555,125 @@ proc readCertificateFile*(path: string): TestCertificate =
 # another, and conflating them is the most common way to get this wrong.
 
 type
+  KnownContentId* = object
+    ## A content id the consumer was HANDED for the state under evaluation
+    ## rather than computing it — what a conformance vector's ``state.json``
+    ## lists. ``paths`` is the scope, empty for the whole repository.
+    algorithm*: string
+    paths*: seq[string]
+    id*: string
+
+  CertificateState* = ref object
+    ## THE STATE UNDER EVALUATION (Verification §4.1.1): a commit's tree, the
+    ## index a pre-commit gate is about to commit, or a working tree. A
+    ## certificate matches it when the content id computed WITH THE
+    ## CERTIFICATE'S ALGORITHM, OVER THE CERTIFICATE'S SCOPE, for this state
+    ## equals the certificate's ``vcs.content``. Nothing here names a commit to
+    ## compare with ``vcs.base``, because nothing may (Standard §3.2.3).
+    ##
+    ## Ids are computed with the TC-8a library and memoised per
+    ## (algorithm, scope), so several certificates over the same state cost
+    ## one computation.
+    repo*: string
+      ## The consumer's name for the repository. "" = not checked: matching
+      ## ``vcs.repo`` is the consumer's choice, and the content binding does
+      ## not depend on it (Verification §4.1).
+    repository*: string
+      ## Path of the git repository holding the state. "" means the consumer
+      ## computes nothing and knows only ``known``: an algorithm or scope
+      ## absent from it is one this consumer CANNOT COMPUTE.
+    content*: ContentState
+    known*: seq[KnownContentId]
+    git*: ContentIdGit
+    computed: Table[string, ContentIdResult]
+
+proc newCertificateState(repository: string; content: ContentState;
+                         repo: string): CertificateState =
+  CertificateState(repo: repo, repository: repository, content: content,
+    git: defaultContentIdGit(),
+    computed: initTable[string, ContentIdResult]())
+
+proc commitUnderEvaluation*(repository, commit: string;
+                            repo = ""): CertificateState =
+  ## ``commit``'s tree in ``repository`` (bare or not). What a pre-push gate,
+  ## a receiving gateway and a CI plan evaluate.
+  newCertificateState(repository, commitState(commit), repo)
+
+proc indexUnderEvaluation*(repository: string; repo = ""): CertificateState =
+  ## The index being committed. What a pre-commit gate evaluates.
+  newCertificateState(repository, indexState(), repo)
+
+proc workingTreeUnderEvaluation*(repository: string;
+                                 repo = ""): CertificateState =
+  ## The tracked files as they are in the working tree.
+  newCertificateState(repository, workingTreeState(), repo)
+
+proc stateWithKnownContent*(known: openArray[KnownContentId];
+                            repo = ""): CertificateState =
+  ## A state described only by the content ids it was handed.
+  result = newCertificateState("", workingTreeState(), repo)
+  result.known = @known
+
+proc evaluatedCommit*(state: CertificateState): string =
+  ## The commit under evaluation, when the state IS a commit; "" otherwise.
+  ## For framework-specific steps that are keyed by commit (a lock record
+  ## store) — never for matching a certificate.
+  if state != nil and state.repository.len > 0 and
+      state.content.kind == cskCommit:
+    state.content.revision
+  else: ""
+
+proc describeState*(state: CertificateState): string =
+  if state == nil or state.repository.len == 0:
+    return "the state under evaluation"
+  case state.content.kind
+  of cskCommit:
+    "commit " & state.content.revision[0 ..< min(12,
+      state.content.revision.len)]
+  of cskIndex: "the index being committed"
+  of cskWorkingTree: "the working tree"
+
+proc stateContentId*(state: CertificateState; algorithmName: string;
+                     paths: openArray[string]): ContentIdResult =
+  ## The content id of ``state`` in ``algorithmName`` over ``paths`` (sorted
+  ## and deduplicated here: absent, empty and the same paths in another order
+  ## are one scope). ``cioCannotCompute`` when the consumer cannot compute it.
+  let scope = canonicalStringList(paths)
+  let key = algorithmName & "\0" & scope.join("\0")
+  if key in state.computed:
+    return state.computed[key]
+  var found = false
+  for k in state.known:
+    if k.algorithm == algorithmName and canonicalStringList(k.paths) == scope:
+      let colon = k.id.find(':')
+      result = ContentIdResult(outcome: cioComputed, id: k.id,
+        algorithmName: algorithmName,
+        digest: (if colon >= 0: k.id[colon + 1 .. ^1] else: ""))
+      found = true
+      break
+  if not found:
+    if state.repository.len == 0:
+      result = ContentIdResult(outcome: cioCannotCompute,
+        algorithmName: algorithmName,
+        reason: "no " & algorithmName & " content id" &
+          (if scope.len > 0: " over [" & scope.join(", ") & "]" else: "") &
+          " can be computed for " & describeState(state))
+    else:
+      result = computeContentId(state.repository, state.content,
+        algorithmName, scope, state.git)
+  state.computed[key] = result
+
+type
   CoverageRequirement* = object
     ## The state, scope and platform ONE certificate is checked against.
     ##
-    ## The pre-TC-7 ``lock`` digest is deliberately absent: ``commit`` already
-    ## binds every committed input, and a framework that wants its lock
-    ## resolves it AT that commit itself (``resolveLockAtCommit``,
-    ## Verification §4.2) rather than trusting a digest the record carried.
+    ## There is no commit here to compare a certificate with: a certificate
+    ## names CONTENT, and the state supplies the content to compare it to
+    ## (Verification §4.1.1). The pre-TC-7 ``lock`` digest is likewise absent:
+    ## ``repro.lock`` is part of the content, and the framework-specific step
+    ## reads it from the state itself (``reprobuildLockValidity``).
     framework*: string           ## only this framework's certificates count
-    repo*: string                ## repository under evaluation ("" = unchecked)
-    commit*: string              ## the commit under evaluation
-    tree*: string                ## content id of that state ("" = unknown)
+    state*: CertificateState     ## the state under evaluation
     platform*: string
     requiredTargets*: seq[string]
     requiredPaths*: seq[string]  ## scope that must be covered; empty = whole repo
@@ -51287,31 +51688,56 @@ type
 
   StateBinding* = enum
     ## Whether a certificate describes the state under evaluation.
-    sbBound            ## yes — it attests exactly this state
-    sbOtherState       ## no  — it attests a different one (not evidence here)
-    sbUnreproducible   ## cannot tell: this consumer cannot reproduce the claim
+    sbBound            ## yes — its content is exactly this state's
+    sbOtherState       ## no  — it describes other content, another
+                       ##       repository, or too narrow a scope (not
+                       ##       evidence here, and not evidence against)
+    sbInvalid          ## decidably invalid — a malformed content id
+    sbUnreproducible   ## cannot tell: this consumer cannot compute the
+                       ## certificate's content id for this state
 
-
-proc readStoredCertificates*(storeDir, commit: string): seq[TestCertificate] =
-  ## Every certificate in a workspace certificate store that binds
-  ## ``commit``. Files are named ``<sha12>-<os>-<cpu>.toml``
-  ## (``defaultCertificatePath``); the prefix only narrows the scan, and the
-  ## record's own ``vcs.commit`` is what decides. An unreadable file
-  ## contributes nothing: an absent certificate is already a refusal under
-  ## ``required``, so skipping a corrupt one can only make the gate stricter.
-  if storeDir.len == 0 or commit.len < 12 or not dirExists(storeDir):
-    return
-  let prefix = commit[0 ..< 12] & "-"
-  for kind, path in walkDir(storeDir):
-    if kind notin {pcFile, pcLinkToFile}: continue
-    let name = extractFilename(path)
-    if not (name.startsWith(prefix) and name.endsWith(".toml")): continue
-    try:
-      let cert = readCertificateFile(path)
-      if cert.vcs.commit == commit:
-        result.add(cert)
-    except CatchableError:
-      discard
+proc certificateContentBinding*(cert: TestCertificate;
+                                state: CertificateState):
+    tuple[binding: StateBinding; why: string] =
+  ## THE CONTENT MATCH (Verification §4.1.1), and nothing else: take the
+  ## algorithm from ``vcs.content``, compute it over ``vcs.paths`` for the
+  ## state, compare the strings. ``vcs.base`` is never read — a certificate
+  ## issued on top of one commit routinely covers the next, and comparing
+  ## ``base`` rejects exactly the certificates the design exists to make
+  ## valid.
+  let parsed = parseContentId(cert.vcs.content)
+  case parsed.form
+  of cifMalformed:
+    # Decidably invalid, and never repaired into the id it was probably
+    # meant to be.
+    return (sbInvalid, "malformed content id '" & cert.vcs.content & "': " &
+      parsed.problem)
+  of cifUnknownAlgorithm, cifWellFormed: discard
+  if state == nil:
+    return (sbUnreproducible, "no state under evaluation to compute " &
+      parsed.algorithmName & " for")
+  let ours = stateContentId(state, parsed.algorithmName, cert.vcs.paths)
+  case ours.outcome
+  of cioComputed:
+    if ours.id == cert.vcs.content:
+      (sbBound, "")
+    else:
+      (sbOtherState, "vcs.content " & cert.vcs.content &
+        " is not the content of " & describeState(state) & " (" & ours.id &
+        ")")
+  of cioCannotCompute:
+    # Not a mismatch: the consumer has not established one. A well-formed id
+    # in an algorithm it cannot compute may match perfectly.
+    (sbUnreproducible, "content id algorithm '" & parsed.algorithmName &
+      "' cannot be computed by this consumer: " & ours.reason)
+  of cioNoContentId:
+    # The state itself has no honest content id (Content-Id §3), so no
+    # certificate can describe it. The consumer could tell: not evidence.
+    (sbOtherState, describeState(state) & " has no content id (" &
+      describe(ours.findings) & "), so no certificate describes it")
+  of cioFailed:
+    (sbUnreproducible, "the content id of " & describeState(state) &
+      " could not be computed: " & ours.reason)
 
 proc scopeCoversPath*(scope: openArray[string]; required: string): bool =
   ## Standard §3.2.1: a path naming a DIRECTORY scopes the subtree beneath it,
@@ -51343,36 +51769,20 @@ proc certificateScopeSatisfies*(cert: TestCertificate;
 proc certificateBindsState*(cert: TestCertificate; req: CoverageRequirement):
     tuple[binding: StateBinding; why: string] =
   ## The generic VCS check (Verification §4.1), independent of platform.
-  if req.repo.len > 0 and cert.vcs.repo != req.repo:
+  ##
+  ## Order matters for the REPORT, not for coverage. The repository name and
+  ## the scope are checked BEFORE the content id is computed: both are
+  ## decidable from the record alone, so a too-narrow certificate in an
+  ## algorithm this consumer cannot compute is REJECTED for its scope rather
+  ## than reported as unverifiable for its algorithm — the consumer could
+  ## tell that it does not satisfy the requirement whatever its content.
+  if req.state != nil and req.state.repo.len > 0 and
+      cert.vcs.repo != req.state.repo:
     return (sbOtherState, "attests repository '" & cert.vcs.repo & "'")
-  if cert.vcs.clean:
-    if req.commit.len == 0 or cert.vcs.commit != req.commit:
-      return (sbOtherState, "attests commit " & cert.vcs.commit)
-  else:
-    # A ``clean = false`` certificate does not describe ``commit``; it
-    # describes ``commit`` PLUS the modification in ``worktree``, and is
-    # matched by CONTENT rather than by commit identity (§4.1.1). That is what
-    # lets a certificate issued against a dirty tree still cover the commit
-    # that tree was later committed as.
-    if not cert.vcs.worktree.present:
-      return (sbOtherState, "clean = false with no worktree identifies no state")
-    if cert.vcs.worktree.tree.len > 0:
-      if req.tree.len == 0:
-        return (sbUnreproducible,
-          "no content id is available for the state under evaluation")
-      if cert.vcs.worktree.tree != req.tree:
-        return (sbOtherState, "worktree.tree " & cert.vcs.worktree.tree &
-          " is not the tree under evaluation")
-    else:
-      # ``patch_digest`` only. Reproducing the patch requires the exact
-      # semantics named in ``format``, which this consumer does not implement,
-      # so the record is UNVERIFIABLE rather than invalid (§4.1.1).
-      return (sbUnreproducible, "patch_digest in format '" &
-        cert.vcs.worktree.format & "' cannot be reproduced by this consumer")
   if not certificateScopeSatisfies(cert, req.requiredPaths):
     return (sbOtherState, "scoped to [" & cert.vcs.paths.join(", ") &
       "], which is narrower than the requirement")
-  (sbBound, "")
+  certificateContentBinding(cert, req.state)
 
 proc certificateMatches*(cert: TestCertificate;
                          req: CoverageRequirement): bool =
@@ -51411,6 +51821,56 @@ proc verifyCoverage*(certs: openArray[TestCertificate];
       result.missingTargets.add(t)
   result.covered = result.missingTargets.len == 0
 
+proc certificateStoreRelativePath*(cert: TestCertificate): string =
+  ## Where the standard local certificate store keeps ``cert``, relative to a
+  ## store root (Transport §2.2): ``v1/<algorithm>/<digest>/<payload-hash>.toml``.
+  ## ``<algorithm>`` and ``<digest>`` are ``vcs.content`` split at its FIRST
+  ## ``:`` (Content-Id §1); ``<payload-hash>`` is the lowercase hex SHA-256 of
+  ## the CANONICAL PAYLOAD — never of a file, so neither the rendering nor the
+  ## signature block moves the name. Components are joined with ``/`` on
+  ## every platform. "" when ``vcs.content`` has no ``:`` to split at.
+  let colon = cert.vcs.content.find(':')
+  if colon <= 0 or colon == cert.vcs.content.high:
+    return ""
+  "v1/" & cert.vcs.content[0 ..< colon] & "/" &
+    cert.vcs.content[colon + 1 .. ^1] & "/" &
+    content_id.sha256Hex(canonicalCertificatePayload(cert)) & ".toml"
+
+proc certificateMayDescribe*(cert: TestCertificate;
+                             state: CertificateState): bool =
+  ## The carrier filters' question: is this record possibly about ``state``?
+  ## FALSE only when the consumer DECIDED it is not — its content id was
+  ## computed and differs. A record whose id cannot be computed here, or is
+  ## malformed, is kept, so the verifier reports it as what it is instead of
+  ## a carrier dropping it as though it were about something else.
+  certificateContentBinding(cert, state).binding != sbOtherState
+
+proc readStoredCertificates*(storeDir: string;
+                             state: CertificateState): seq[TestCertificate] =
+  ## Every certificate in a workspace certificate store that may describe
+  ## ``state``. The whole store is read and each record's CONTENT decides
+  ## (``certificateMayDescribe``); file names, which still carry the commit
+  ## checked out at issuance (``defaultCertificatePath``), are not consulted,
+  ## because that commit is ``base`` and a certificate is never found by its
+  ## base. An unreadable file contributes nothing: an absent certificate is
+  ## already a refusal under ``required``, so skipping a corrupt one can only
+  ## make the gate stricter.
+  if storeDir.len == 0 or not dirExists(storeDir):
+    return
+  var paths: seq[string]
+  for kind, path in walkDir(storeDir):
+    if kind notin {pcFile, pcLinkToFile}: continue
+    if not path.endsWith(".toml"): continue
+    paths.add(path)
+  sort(paths)
+  for path in paths:
+    try:
+      let cert = readCertificateFile(path)
+      if certificateMayDescribe(cert, state):
+        result.add(cert)
+    except CatchableError:
+      discard
+
 const anyCertificatePlatform* = "*"
   ## Agents-Push-Gate.md §4.2 — the reserved ``required_platforms`` entry for
   ## a PLATFORM-NEUTRAL requirement (the pre-commit check set): one trusted
@@ -51419,7 +51879,7 @@ const anyCertificatePlatform* = "*"
 
 proc uncoveredPlatforms*(trusted: openArray[TestCertificate];
                          requiredPlatforms, requiredTargets: seq[string];
-                         commit: string): seq[string] =
+                         state: CertificateState): seq[string] =
   ## The per-platform shortfall of ``trusted`` against a policy, as
   ## ``"<platform> (missing: …)"`` descriptors; EMPTY means covered. Shared by
   ## the client gate (TC-3) and the receiving-side gateway (TC-6) so the two
@@ -51438,7 +51898,7 @@ proc uncoveredPlatforms*(trusted: openArray[TestCertificate];
     var haveBest = false
     for platform in candidates:
       let cov = verifyCoverage(trusted, CoverageRequirement(
-        framework: reprobuildFrameworkId, commit: commit,
+        framework: reprobuildFrameworkId, state: state,
         platform: platform, requiredTargets: requiredTargets))
       if cov.covered:
         return @[]
@@ -51450,7 +51910,7 @@ proc uncoveredPlatforms*(trusted: openArray[TestCertificate];
        else: "<no certificate>") & ")"]
   for platform in requiredPlatforms:
     let cov = verifyCoverage(trusted, CoverageRequirement(
-      framework: reprobuildFrameworkId, commit: commit,
+      framework: reprobuildFrameworkId, state: state,
       platform: platform, requiredTargets: requiredTargets))
     if not cov.covered:
       result.add(platform & " (missing: " &
@@ -52066,25 +52526,24 @@ type
     fvInvalid        ## decidably inconsistent for this framework → rejected
     fvUnverifiable   ## the check could not run → unevaluated
 
-  FrameworkValidityCheck* = proc(cert: TestCertificate):
+  FrameworkValidityCheck* = proc(cert: TestCertificate;
+                                  state: CertificateState):
     tuple[verdict: FrameworkValidity; detail: string] {.closure, gcsafe.}
     ## Supplied by the framework whose certificates are being evaluated; ``nil``
     ## means "no framework-specific step", which is the right value for a
     ## consumer evaluating ANOTHER framework's certificates — applying one
     ## framework's validity logic to another's record is always wrong.
+    ##
+    ## It is handed the STATE under evaluation, because the pattern the
+    ## standard is built around (Verification §4.2) is a framework reading its
+    ## own version-controlled inputs out of the content in front of it — which,
+    ## once ``vcs.content`` has matched, is exactly the content tested.
 
   FoundCertificate* = object
     ## A certificate as FOUND, which may not have parsed. ``name`` is whatever
     ## identifies it to a human (a file name, a note index).
     name*: string
     read*: CertificateReadResult
-
-  VerificationState* = object
-    ## The world being evaluated. ``tree`` is the canonical content id of that
-    ## state, used to match modified-worktree claims (§4.1.1).
-    repo*: string
-    commit*: string
-    tree*: string
 
   VerificationRequirement* = object
     ## What the CONSUMER demands. Separate from the state on purpose: a commit
@@ -52130,7 +52589,7 @@ proc certificateCouldSatisfy(cert: TestCertificate;
   false
 
 proc evaluateCertificates*(found: openArray[FoundCertificate];
-                           state: VerificationState;
+                           state: CertificateState;
                            req: VerificationRequirement;
                            store: RegisteredKeyStore;
                            storeAvailability = ksaReadable;
@@ -52144,12 +52603,13 @@ proc evaluateCertificates*(found: openArray[FoundCertificate];
   ##   * IGNORED — another framework's certificate. Not evidence FOR this
   ##     consumer, and not evidence AGAINST anything either.
   ##   * REJECTED — the consumer asked and got an answer: revoked key, unsigned
-  ##     under a signatures-required policy, a state this record does not
-  ##     describe, a scope narrower than the requirement, a missing field, or
-  ##     the retired pre-TC-7 schema.
+  ##     under a signatures-required policy, content this record does not
+  ##     describe, a malformed content id, a scope narrower than the
+  ##     requirement, a missing field, an earlier-draft record bound to a
+  ##     commit, or the retired pre-TC-7 schema.
   ##   * UNEVALUATED — the consumer could not ask: an unreadable key store, a
-  ##     schema version it does not implement, a ``patch_digest`` in a format
-  ##     it cannot reproduce.
+  ##     schema version it does not implement, a content id in an algorithm it
+  ##     cannot compute.
   ##   * contributed — counted into its platform's union.
   var perPlatform = initTable[string, HashSet[string]]()
   for p in req.platforms:
@@ -52181,7 +52641,7 @@ proc evaluateCertificates*(found: openArray[FoundCertificate];
         why: f.read.detail))
       uninterpretableSeen = true
       continue
-    of crsRetiredSchema, crsMalformed:
+    of crsRetiredSchema, crsEarlierDraft, crsMalformed:
       result.rejected.add(CertificateNote(certificate: f.name,
         why: f.read.detail))
       continue
@@ -52222,12 +52682,11 @@ proc evaluateCertificates*(found: openArray[FoundCertificate];
         why: "result is '" & $cert.result & "', not 'passed'"))
       continue
     let platformReq = CoverageRequirement(
-      framework: req.framework, repo: state.repo, commit: state.commit,
-      tree: state.tree, platform: cert.platform,
+      framework: req.framework, state: state, platform: cert.platform,
       requiredTargets: req.targets, requiredPaths: req.paths)
     let bound = certificateBindsState(cert, platformReq)
     case bound.binding
-    of sbOtherState:
+    of sbOtherState, sbInvalid:
       result.rejected.add(CertificateNote(certificate: f.name,
         why: bound.why))
       continue
@@ -52239,10 +52698,10 @@ proc evaluateCertificates*(found: openArray[FoundCertificate];
       continue
     of sbBound: discard
     # 4. FRAMEWORK-SPECIFIC VALIDITY (§4.2) — whatever the issuing framework
-    #    says about its OWN inputs at ``vcs.commit``. There is no portable
-    #    substitute for this step and the standard defines none.
+    #    says about its OWN inputs in the content under evaluation. There is
+    #    no portable substitute for this step and the standard defines none.
     if frameworkValidity != nil:
-      let fw = frameworkValidity(cert)
+      let fw = frameworkValidity(cert, state)
       case fw.verdict
       of fvInvalid:
         result.rejected.add(CertificateNote(certificate: f.name, why: fw.detail))
@@ -52292,23 +52751,32 @@ proc evaluateCertificates*(found: openArray[FoundCertificate];
     result.outcome = voNotCovered
     result.missing = gaps
 
-# ---- reprobuild's framework-specific validity: the lock at vcs.commit ------
+# ---- reprobuild's framework-specific validity: the lock in the content ----
 #
 # THIS IS WHY THE RECORD CARRIES NO LOCK DIGEST.
 #
-# reprobuild's lock record is COMMITTED and keyed by the trigger commit —
-# ``<manifest-layer>/locks/<project>/<repo>/<sha>.toml`` (RA-1) — so
-# ``vcs.commit`` already binds it, transitively and without the standard
-# needing to know what a reprobuild lock is. A digest carried IN the record
-# was information the commit already implied, at the cost of making the format
-# ecosystem-specific.
+# By default a repository's ``repro.lock`` is COMMITTED (Unified-Locking-And-
+# Hooks §14), so it is one of the tracked files ``vcs.content`` binds. Once a
+# certificate's content has matched the state under evaluation, the lock the
+# tests ran with is exactly the ``repro.lock`` in that state, and the verifier
+# reads it from there itself — the same blob read the gateway's public-tier
+# lock gate makes of ``<pushed commit>:repro.lock``. Nothing is looked up by
+# the certificate's ``base``.
 #
-# The difference is not cosmetic. A digest in the record is A CLAIM BY THE
-# ISSUER, checkable only against another copy of the same claim. The record on
-# disk at the named commit is A FACT THE VERIFIER ESTABLISHED for itself. So a
-# certificate whose commit has no committed lock is refused HERE even though
-# the certificate itself is impeccable — which is impossible for an
-# implementation that reads a digest out of the record.
+# The difference from a digest is not cosmetic. A digest in the record is A
+# CLAIM BY THE ISSUER, checkable only against another copy of the same claim.
+# The lock read out of the content is A FACT THE VERIFIER ESTABLISHED. So the
+# same certificate is covered at a tree whose ``repro.lock`` parses and
+# rejected at a tree whose ``repro.lock`` is absent or unparseable.
+#
+# A project that OPTED INTO a lock record store keeps its lock out of the
+# tree, in records keyed by commit (``<store>/locks/<project>/<repo>/<sha>.toml``,
+# RA-1). For it, ``resolveLockAtCommit`` still applies — but only when the
+# state under evaluation IS a commit, and keyed by THAT commit. At any other
+# state (the index a pre-commit gate is about to commit, a working tree) the
+# lock is not part of the content and is not evaluated: the certificate alone
+# decides (operator decision D8, 2026-10-09). That is neither "could not ask"
+# nor unverifiable.
 
 type
   LockAtCommitStatus* = enum
@@ -52331,8 +52799,8 @@ proc lockRecordsDirFor*(recordStoreRoot, project, repo: string): string =
     lockRepoSubtreeRelativePath(project, repo).replace('/', DirSep)
 
 proc resolveLockAtCommit*(lockRecordsDir, commit: string): LockAtCommit =
-  ## Resolve reprobuild's lock AT ``commit`` — the framework-specific validity
-  ## step (Verification §4.2), which the standard deliberately defines none of.
+  ## Resolve a RECORD-STORE project's lock AT ``commit`` — the commit under
+  ## evaluation, never a certificate's ``base``.
   ##
   ## Three outcomes, not two, because "there is no lock for that commit" and
   ## "I could not look" lead to different reports: the first is decidably not
@@ -52369,19 +52837,103 @@ proc resolveLockAtCommit*(lockRecordsDir, commit: string): LockAtCommit =
     return
   result.status = lacPresent
 
-proc reprobuildLockValidity*(lockRecordsDir: string): FrameworkValidityCheck =
-  ## reprobuild's validity check, as the closure ``evaluateCertificates``
-  ## takes. Bound to a lock subtree rather than to a workspace so the client
-  ## gate, the CI plan and the receiving-side gateway can all supply the one
-  ## they have — the gateway bare repo has no checkout to re-resolve from.
-  let dir = lockRecordsDir
-  result = proc(cert: TestCertificate):
-      tuple[verdict: FrameworkValidity; detail: string] {.closure, gcsafe.} =
-    let resolved = resolveLockAtCommit(dir, cert.vcs.commit)
+type
+  LockInContentStatus* = enum
+    licPresent      ## ``repro.lock`` is in the content and parses
+    licAbsent       ## the content was read and tracks no ``repro.lock``
+    licUnparseable  ## it is tracked, but is not a lock a consumer may act on
+    licUnreadable   ## the content could not be read — we could not ask
+
+  LockInContent* = object
+    status*: LockInContentStatus
+    detail*: string
+
+proc readLockFromContent*(state: CertificateState): LockInContent =
+  ## ``repro.lock`` read OUT OF THE CONTENT under evaluation and parsed by the
+  ## lock-plane boundary (``parseWorkspaceLockedDeps``) every committed-lock
+  ## consumer uses.
+  if state == nil or state.repository.len == 0:
+    return LockInContent(status: licUnreadable,
+      detail: "no repository holds " & describeState(state) &
+        ", so its " & CommittedLockFileName & " cannot be read")
+  let read = readContentFile(state.repository, CommittedLockFileName,
+    state.content, state.git)
+  case read.status
+  of cfsFailed:
+    LockInContent(status: licUnreadable,
+      detail: CommittedLockFileName & " could not be read from " &
+        describeState(state) & ": " & read.reason)
+  of cfsAbsent:
+    LockInContent(status: licAbsent,
+      detail: describeState(state) & " tracks no " & CommittedLockFileName &
+        ", so the lock the tests ran with is not part of the content; " &
+        "commit the " & CommittedLockFileName & " ('repro lock refresh') " &
+        "and re-certify that content with 'repro test'")
+  of cfsPresent:
+    try:
+      discard parseWorkspaceLockedDeps(read.bytes,
+        CommittedLockFileName & " in " & describeState(state))
+      LockInContent(status: licPresent)
+    except CatchableError as err:
+      LockInContent(status: licUnparseable,
+        detail: "the " & CommittedLockFileName & " in " &
+          describeState(state) & " is not a usable lock: " & err.msg &
+          "; commit a valid one ('repro lock refresh') and re-certify " &
+          "that content with 'repro test'")
+
+type
+  ReprobuildLockSourceKind* = enum
+    rlsCommittedLock  ## the default: ``repro.lock`` is tracked in the content
+    rlsRecordStore    ## opted in: lock records keyed by commit, out of tree
+
+  ReprobuildLockSource* = object
+    ## Where a project's lock lives, which decides where the framework-specific
+    ## step looks for it. The opt-in is the project's, never inferred from a
+    ## certificate.
+    kind*: ReprobuildLockSourceKind
+    lockRecordsDir*: string   ## ``rlsRecordStore``: the per-repo lock subtree
+
+proc committedLockSource*(): ReprobuildLockSource =
+  ReprobuildLockSource(kind: rlsCommittedLock)
+
+proc recordStoreLockSource*(lockRecordsDir: string): ReprobuildLockSource =
+  ReprobuildLockSource(kind: rlsRecordStore, lockRecordsDir: lockRecordsDir)
+
+proc reprobuildLockVerdict*(source: ReprobuildLockSource;
+                            state: CertificateState):
+    tuple[verdict: FrameworkValidity; detail: string] =
+  ## reprobuild's framework-specific validity step for the state under
+  ## evaluation (Verification §4.2). Independent of the certificate: once its
+  ## content matched, the state's lock IS the lock it was tested with.
+  case source.kind
+  of rlsCommittedLock:
+    let lock = readLockFromContent(state)
+    case lock.status
+    of licPresent: (fvValid, "")
+    of licAbsent, licUnparseable: (fvInvalid, lock.detail)
+    of licUnreadable: (fvUnverifiable, lock.detail)
+  of rlsRecordStore:
+    let commit = evaluatedCommit(state)
+    if commit.len == 0:
+      # D8: the record-store lock is not part of the content of an index or a
+      # working tree, so it is not evaluated there. The certificate decides.
+      return (fvValid, "")
+    let resolved = resolveLockAtCommit(source.lockRecordsDir, commit)
     case resolved.status
     of lacPresent: (fvValid, "")
     of lacAbsent: (fvInvalid, resolved.detail)
     of lacUnknown: (fvUnverifiable, resolved.detail)
+
+proc reprobuildLockValidity*(source: ReprobuildLockSource):
+    FrameworkValidityCheck =
+  ## reprobuild's validity check, as the closure ``evaluateCertificates``
+  ## takes. Bound to a lock SOURCE rather than to a workspace so the client
+  ## gate, the CI plan and the receiving-side gateway can each supply the one
+  ## they have — the gateway bare repo has no checkout to re-resolve from.
+  let bound = source
+  result = proc(cert: TestCertificate; state: CertificateState):
+      tuple[verdict: FrameworkValidity; detail: string] {.closure, gcsafe.} =
+    reprobuildLockVerdict(bound, state)
 # ============================================================================
 # TC-2: certificate TRANSPORT — attach/read certificates bound to a commit and
 # carry them on the push.
@@ -52406,10 +52958,11 @@ proc reprobuildLockValidity*(lockRecordsDir: string): FrameworkValidityCheck =
 # second platform's cert accumulates next to the first instead of replacing it.
 # The reader splits on the sentinel and parses each record independently.
 #
-# Mismatch defense (Test-Certificates.md: "Verifiers ignore … notes whose
-# ``commit`` field doesn't match the target commit"): when reading the certs
-# attached to commit C, a record whose INTERNAL ``commit`` field is not C is
-# dropped — a stale/misfiled note never masquerades as an attestation of C.
+# Mismatch defense: when reading the certs attached to commit C, a record
+# whose ``content`` is not the content id of C's tree is dropped — a
+# stale/misfiled note never masquerades as an attestation of C. (Before TC-8b
+# the record named a commit and the filter compared it with C; a record now
+# names content, and its informational ``base`` is never compared.)
 
 const
   certificateNotesRef* = "refs/notes/reprobuild/certificates"
@@ -52666,17 +53219,21 @@ proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
   result.diagnostic = read.diagnostic
   if read.status != gorPresent or read.body.len == 0:
     return
+  # Mismatch filter: only records that may describe THIS commit's content. The
+  # note is still FOUND by the commit it is attached to (TC-8c moves lookup to
+  # content), but what it says is judged by CONTENT: a record whose content id
+  # differs from the commit's tree is dropped, so a stale or misfiled note
+  # never masquerades as an attestation of this commit. Its ``base`` is never
+  # compared — a record issued on top of another commit, for the same
+  # content, describes this one (Verification §4.1.1).
+  let evaluated = commitUnderEvaluation(repoPath, commit)
   for body in splitCertificateRecords(read.body):
     var cert: TestCertificate
     try:
       cert = parseCertificateFromToml(body)
     except TestCertificateParseError:
       continue
-    # Mismatch filter: only certs that genuinely attest THIS commit. A
-    # ``clean = false`` record names its BASE commit here and is matched by
-    # content later (Verification §4.1.1), so the note-level filter is on the
-    # base either way.
-    if cert.vcs.commit == commit:
+    if certificateMayDescribe(cert, evaluated):
       result.certs.add(cert)
 
 proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
@@ -52689,8 +53246,9 @@ proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
   ## brand-new value for ``refs/notes/reprobuild/certificates`` that has NOT
   ## yet been moved into place (the ref update is still pending), so the
   ## gateway resolves the certs straight from the INCOMING notes-commit SHA it
-  ## reads off the pre-receive stdin. Records whose internal ``commit`` field
-  ## does not equal ``commit`` are DROPPED; unparseable records are skipped.
+  ## reads off the pre-receive stdin. Records whose ``content`` differs from
+  ## the content id of ``commit``'s tree are DROPPED; unparseable records are
+  ## skipped.
   ##
   ## This is the seq-shaped convenience wrapper for callers that hold a
   ## settled repository and have nothing to do with a read failure; anything
@@ -52702,8 +53260,9 @@ proc readAttachedCertificates*(gitBin, repoPath, commit: string):
     seq[TestCertificate] =
   ## Read the certificates attached to ``commit`` (the note under
   ## ``refs/notes/reprobuild/certificates``) in ``repoPath``. Records whose
-  ## INTERNAL ``commit`` field does not equal ``commit`` are DROPPED (defense
-  ## against a stale/misfiled note); unparseable records are skipped. Returns
+  ## ``content`` differs from the content id of ``commit``'s tree are DROPPED
+  ## (defense against a stale/misfiled note); unparseable records are
+  ## skipped. Returns
   ## an empty seq when no note is attached.
   readAttachedCertificatesFromRef(gitBin, repoPath, commit, certificateNotesRef)
 
@@ -52748,17 +53307,18 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
   ## the pushed commit for the required targets on EACH required platform.
   if policy.gateMode == cgmOff:
     return
-  # TC-7: the certificate no longer CARRIES a lock digest, so there is nothing
-  # to compare a record against. What binds the lock is ``vcs.commit``, and
-  # the gate RESOLVES the lock at that commit itself — the standard's
-  # framework-specific validity step. The stage-4 lock pass filled
-  # ``report.lockUpdate.lockFilePath`` in every arm (already-current / created
-  # / refreshed), and that file lives in the per-repo lock subtree whose other
-  # entries are the same repo's other commits.
-  let lockRecordsDir =
+  # TC-7 / TC-8b: the certificate carries no lock digest. The gate establishes
+  # the lock itself — the standard's framework-specific validity step — from
+  # the state it evaluates. By default (Unified-Locking-And-Hooks §14) that is
+  # the ``repro.lock`` in the pushed commit's tree. A workspace that DECLARED a
+  # manifest-backed lock route (the record-store opt-in; nothing else makes
+  # the stage-4 lock pass write a record) keeps its lock in records keyed by
+  # commit, and the record for the pushed commit is resolved in the per-repo
+  # subtree that pass reported.
+  let lockSource =
     if report.lockUpdate.lockFilePath.len > 0:
-      parentDir(report.lockUpdate.lockFilePath)
-    else: ""
+      recordStoreLockSource(parentDir(report.lockUpdate.lockFilePath))
+    else: committedLockSource()
   # A policy that opts in but lists no required platforms means certificates
   # are advisory-only (the spec: required_platforms may be none). There is
   # nothing to enforce, so ``required`` degrades to a no-op rather than
@@ -52768,10 +53328,8 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
       report.notices.add("certificate advisory: policy sets no " &
         "required_platforms — nothing to attest (pushes not gated)")
     return
-  if pushedCommit.len == 0 or lockRecordsDir.len == 0:
-    let why =
-      if pushedCommit.len == 0: "no HEAD commit to attest"
-      else: "no resolvable workspace lock to check at the attested commit"
+  if pushedCommit.len == 0:
+    let why = "no HEAD commit to attest"
     if policy.gateMode == cgmAdvisory:
       report.notices.add("certificate advisory: coverage NOT verified (" &
         why & ")")
@@ -52789,13 +53347,18 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
   # per-platform covered set is the UNION of every matching cert's targets
   # (multi-cert union: a linux cert + a macos cert together satisfy a
   # {linux, macos} requirement).
+  #
+  # TC-8b: a certificate covers the pushed commit when its CONTENT is the
+  # content id of the pushed commit's tree (Verification §4.1.1); the commit
+  # it was issued on top of (``base``) is never compared.
+  let evaluated = commitUnderEvaluation(certRepoPath, pushedCommit)
   var attached = readAttachedCertificates(gitBin, certRepoPath, pushedCommit)
   # Agents-Push-Gate.md §4.3: the workspace certificate store is a second
   # carrier, read on BOTH sides so the client gate and the gateway agree on a
   # one-ref push of a certified commit. Same trust checks below.
   if report.workspaceRoot.len > 0:
     for cert in readStoredCertificates(report.workspaceRoot / ".repro" /
-        "workspace" / "certificates", pushedCommit):
+        "workspace" / "certificates", evaluated):
       attached.add(cert)
   # TC-5: coverage now requires a VALID REGISTERED SIGNATURE. A certificate
   # counts toward coverage ONLY when its ``key_id`` resolves to a registered,
@@ -52820,15 +53383,19 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
       signatureNotes.add(cert.platform & ": " &
         signatureVerdictReason(verdict, cert.keyId))
       continue
-    # TC-7 §4.2: reprobuild's own framework-specific validity — the lock
-    # resolved AT ``vcs.commit``, not a digest the record carried.
-    let lockAt = resolveLockAtCommit(lockRecordsDir, cert.vcs.commit)
-    if lockAt.status != lacPresent:
-      signatureNotes.add(cert.platform & ": " & lockAt.detail)
-      continue
     trusted.add(cert)
+  # §4.2: reprobuild's own framework-specific validity — the lock established
+  # from the state under evaluation, not a digest a record carried. It is a
+  # property of the STATE, so it is decided once; when it fails, no
+  # certificate for this state is evidence.
+  if trusted.len > 0:
+    let lockVerdict = reprobuildLockVerdict(lockSource, evaluated)
+    if lockVerdict.verdict != fvValid:
+      for cert in trusted:
+        signatureNotes.add(cert.platform & ": " & lockVerdict.detail)
+      trusted.setLen(0)
   let perPlatformMissing = uncoveredPlatforms(trusted,
-    policy.requiredPlatforms, policy.requiredTargets, pushedCommit)
+    policy.requiredPlatforms, policy.requiredTargets, evaluated)
   if perPlatformMissing.len == 0:
     if policy.gateMode == cgmAdvisory:
       report.notices.add("certificate advisory: coverage OK for " &
@@ -52924,15 +53491,15 @@ type
     requiredTargets*: seq[string]
     requiredPlatforms*: seq[string]
     lockRecordsDir*: string
-      ## TC-7: the per-repo lock subtree
+      ## The record-store opt-in: the per-repo lock subtree
       ## (``<manifest-layer>/locks/<project>/<repo>``) the gateway resolves the
       ## lock AT THE PUSHED COMMIT in — reprobuild's framework-specific
-      ## validity step. It replaces the pre-TC-7 ``lock`` digest, which the
-      ## record no longer carries: a digest was the ISSUER's claim, while the
-      ## record in this subtree at the attested commit is a fact the gateway
-      ## establishes. Empty when the receiving side has no lock subtree to
-      ## resolve against, in which case the framework-specific step is skipped
-      ## and only the generic checks apply.
+      ## validity step for a project whose lock lives in a record store.
+      ## EMPTY (the default) means the lock is the committed ``repro.lock``,
+      ## which the gateway reads out of the pushed commit's tree (TC-8b). In
+      ## both cases it replaces the pre-TC-7 ``lock`` digest: a digest was the
+      ## ISSUER's claim, while the lock the gateway reads is a fact it
+      ## establishes.
     registeredKeysPath*: string
       ## Absolute path to the allowed-signers store (TC-5 registered keys). The
       ## ``pre-receive`` reads it to verify each cert's signature.
@@ -53504,6 +54071,11 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
     # scrubbed read finds no certificate for any commit and a ``required``
     # gate then refuses every push — including the covered ones it is meant to
     # let through.
+    #
+    # TC-8b: the certificates are judged against the pushed commit's CONTENT
+    # (Verification §4.1.1); the commit each was issued on top of is never
+    # compared.
+    let evaluated = commitUnderEvaluation(gatewayBareDir, pushedCommit)
     var attached: seq[TestCertificate]
     var noteUnreadable = ""
     if notesSha.len > 0 and notesSha != zeroSha:
@@ -53521,7 +54093,7 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
     # Agents-Push-Gate.md §4.3: a LOCAL gateway also reads the workspace
     # certificate store, so a one-ref push of a certified commit is covered.
     # The certificates are judged by exactly the same checks below.
-    for cert in readStoredCertificates(cfg.certificateStoreDir, pushedCommit):
+    for cert in readStoredCertificates(cfg.certificateStoreDir, evaluated):
       attached.add(cert)
     # Drop every cert that is not this framework's, or is not a
     # registered-signed, unrevoked, valid-sig attestation, BEFORE coverage.
@@ -53537,18 +54109,24 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         sigNotes.add(cert.platform & ": " &
           signatureVerdictReason(verdict, cert.keyId))
         continue
-      # TC-7: the lock resolved AT the attested commit, when the receiving
-      # side has a lock subtree to resolve it in. An unconfigured subtree
-      # means the gateway cannot run the framework-specific step, so it
-      # applies only the generic checks rather than pretending to.
-      if cfg.lockRecordsDir.len > 0:
-        let lockAt = resolveLockAtCommit(cfg.lockRecordsDir, cert.vcs.commit)
-        if lockAt.status != lacPresent:
-          sigNotes.add(cert.platform & ": " & lockAt.detail)
-          continue
       trusted.add(cert)
+    # The framework-specific step (Verification §4.2), decided once for the
+    # pushed STATE: by default the ``repro.lock`` in the pushed commit's tree
+    # — read out of the received objects, as the public-tier lock gate reads
+    # it; for a project that opted into a lock record store (a configured
+    # ``lock_records_dir``), the record for the pushed commit.
+    if trusted.len > 0:
+      let lockSource =
+        if cfg.lockRecordsDir.len > 0:
+          recordStoreLockSource(cfg.lockRecordsDir)
+        else: committedLockSource()
+      let lockVerdict = reprobuildLockVerdict(lockSource, evaluated)
+      if lockVerdict.verdict != fvValid:
+        for cert in trusted:
+          sigNotes.add(cert.platform & ": " & lockVerdict.detail)
+        trusted.setLen(0)
     let missing = uncoveredPlatforms(trusted, cfg.requiredPlatforms,
-      cfg.requiredTargets, pushedCommit)
+      cfg.requiredTargets, evaluated)
     if missing.len > 0:
       let sigDetail =
         if sigNotes.len > 0: " (untrusted certs ignored: " &
@@ -59169,9 +59747,9 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
   ## named project / variant. A metadata-only workspace.toml (M13)
   ## routes to single-project mode.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     return extendWithActiveProjectSet(parsed.workspaceRoot,
-      composeManifestLayersFromFile(workspaceToml))
+      composeWorkspaceLayers(parsed.workspaceRoot, parsed.projectName))
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name. Only the
     # read of workspace.toml is guarded here: if resolving the *named* project
@@ -60905,15 +61483,13 @@ proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
   report.workspaceRoot = args.workspaceRoot
   let workspaceToml = workspaceTomlPath(args.workspaceRoot)
   report.workspaceTomlPath = workspaceToml
-  if not fileExists(workspaceToml):
-    report.hasLayeredWorkspace = false
-    report.exitCode = 0
-    return report
-  # M13: a metadata-only workspace.toml (zero ``[[manifest]]`` entries —
-  # written by M9 init in single-project mode to record the active
-  # branch) is NOT a layered workspace. Mirror the dispatch sites in
-  # init / sync / lock / status / list and treat such a file the same
-  # way we treat a missing workspace.toml.
+  # M13: a metadata-only state file (zero ``[[manifest]]`` entries — written
+  # by M9 init in single-project mode to record the active branch) is NOT a
+  # layered workspace, and neither is a checkout with no state file — unless
+  # its settings files declare layers, which exist (and are enumerated here)
+  # whether or not ``init`` / ``enable`` has written state yet
+  # (Workspace-Settings-Files.md §4). With neither, the report is exactly the
+  # "no layered workspace" one it always was.
   let absToml = absolutePath(workspaceToml)
   let workspaceLocal = effectiveWorkspaceLocal(args.workspaceRoot)
   if workspaceLocal.manifest.len == 0:
@@ -61977,25 +62553,24 @@ type
     report: ReportSpec      ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc ascendToWorkspaceRoot(startDir: string): string =
-  ## Walk up from ``startDir`` to the nearest directory carrying the RA-10
-  ## ``isInitializedWorkspace`` marker, so the prompt works from any
-  ## subdirectory of a workspace (like ``__git_ps1``). Returns "" when no
-  ## ancestor is an initialized workspace. Pure filesystem stat walk — no
-  ## git, bounded by the path depth.
-  var dir = absolutePath(startDir)
-  while true:
-    if isInitializedWorkspace(dir):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      return ""
-    dir = parent
+  ## Walk up from ``startDir`` to the workspace root that owns it, so the
+  ## prompt and the workspace-wide verbs work from any subdirectory of a
+  ## workspace (like ``__git_ps1``). Returns "" when there is none. Pure
+  ## filesystem stat walk — no git, bounded by the path depth.
+  ##
+  ## The shared ``discoverWorkspaceRoot`` (``repro_core/workspace_root``), so
+  ## a member repo's own committed ``repro.lock`` no longer makes the member
+  ## its own workspace when a workspace root sits above it. FINDING a root is
+  ## not the root being initialized: a caller that needs state asks
+  ## ``isInitializedWorkspace`` of the answer (the prompt does).
+  findWorkspaceRoot(startDir)
 
 proc resolveInvokedWorkspaceRoot(explicit: string): string =
   ## The workspace root a workspace-wide verb should act on.
   ##
   ## An explicit ``--workspace-root`` wins. Otherwise walk UP from the current
-  ## directory to the nearest initialized workspace, so `repro branch` and
+  ## directory to the workspace root that owns it (``ascendToWorkspaceRoot``,
+  ## the shared discovery walk), so `repro branch` and
   ## `repro switch` work from inside a member repo — which is where a developer
   ## actually stands. Taking the cwd verbatim made them the only workspace-wide
   ## verbs that had to be run from the root, and the failure was obscure: the
@@ -62180,9 +62755,10 @@ proc resolveBranchProject(parsed: BranchArgs):
   ## ``[workspace].project`` field rather than asking the user to
   ## repeat it (M13's contract).
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot,
+      parsed.projectName)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -63023,9 +63599,10 @@ proc resolveSwitchProject(parsed: SwitchArgs):
   ## the project name from a metadata-only workspace.toml's
   ## ``[workspace].project`` field (the M13 schema).
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot)
+    let workspaceLocal = effectiveWorkspaceLocal(parsed.workspaceRoot,
+      parsed.projectName)
     let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
@@ -64014,7 +64591,7 @@ proc resolveAddProject(parsed: AddArgs): ResolvedProject =
   ## project / variant (or the project recorded in a metadata-only
   ## workspace.toml) identically to the old projects-only copy for every
   ## manifest-present workspace.
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     raise newException(ValueError,
       "`repro add` is not supported in a compositional (multi-layer) " &
         "workspace; add the repo to the owning manifest layer directly")
@@ -66479,6 +67056,8 @@ type
     ipUnpublished       ## a repo in the closure has unpublished HEAD.
     ipOffLock           ## HEAD differs from the locked revision (lock stale).
     ipNoWorkspace       ## not a resolvable workspace → cannot bind to a lock.
+    ipNoContentId       ## the tested state has no honest content id
+                        ## (Content-Id §3) → nothing a certificate could name.
     ipGateError         ## the gate raised (IO / resolve / VCS error).
 
   IssuancePreconditions* = object
@@ -66503,8 +67082,19 @@ type
     platform*: string
     project*: string
     repo*: string
+    repository*: string
+      ## The checkout whose content the certificate names.
+    content*: string
+      ## TC-8b: the content id of the tracked files of ``repository`` as the
+      ## tests will run against them (Content-Id §5, a working tree, computed
+      ## in a temporary index). Under the clean precondition, which is still
+      ## enforced, it equals ``commit``'s tree. Becomes ``vcs.content``.
+    base*: string
+      ## ``commit`` again, as the record's informational ``vcs.base``.
     clean*: bool
       ## MEASURED: no tracked file differed from ``commit`` at this moment.
+      ## Issuance still REQUIRES it (relaxing that is TC-8d); the record no
+      ## longer carries it, because a certificate names content, not a commit.
     untracked*: bool
       ## MEASURED: untracked files were present. Separate from ``clean``
       ## because they mean different things — a modified tracked file means the
@@ -66518,10 +67108,10 @@ proc observeWorktreeState*(identity: GitToolIdentity; repoRoot: string):
     tuple[ok: bool; clean: bool; untracked: bool; diagnostic: string] =
   ## MEASURE ``clean`` and ``untracked`` for a repository, separately.
   ##
-  ## A producer MUST NOT issue ``clean = true`` when it did not check, and if
-  ## it cannot determine cleanliness it MUST NOT issue a certificate at all — a
-  ## guess here invalidates everything downstream (Standard §3.2). So a failed
-  ## status query is ``ok = false``, never a cheerful "clean".
+  ## A producer MUST NOT issue when it did not check for untracked files, and
+  ## issuance still requires a clean tree at HEAD (until TC-8d) — a guess here
+  ## invalidates everything downstream (Standard §3.2). So a failed status
+  ## query is ``ok = false``, never a cheerful "clean".
   ##
   ## ``--untracked-files=all`` rather than the default: a directory of
   ## untracked files reports as one entry under ``normal``, and "one entry"
@@ -66633,6 +67223,46 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     return
   result.clean = observed.clean
   result.untracked = observed.untracked
+  if not observed.clean:
+    # The clean-at-HEAD precondition is kept until TC-8d relaxes it. The gate
+    # passing does not by itself establish it, so it is checked here on the
+    # measurement rather than assumed.
+    result.kind = ipDirty
+    result.offender = repoForHead
+    result.remedy = "commit or stash the modified tracked files, then re-run"
+    return
+  # TC-8b: the record names the tested CONTENT. Computed by the TC-8a library
+  # over the working tree, in a temporary index, in the algorithm matching the
+  # repository's object format; ``base`` is HEAD, informational only.
+  let algorithm = repositoryContentAlgorithm(repoForHead)
+  if not algorithm.ok:
+    result.kind = ipGateError
+    result.offender = repoForHead
+    result.remedy = "could not determine the repository's object format (" &
+      algorithm.failure & "); no certificate is issued rather than guessing"
+    return
+  let content = computeContentId(repoForHead, workingTreeState(),
+    algorithm.algorithm)
+  case content.outcome
+  of cioComputed:
+    discard
+  of cioNoContentId:
+    result.kind = ipNoContentId
+    result.offender = repoForHead
+    var remedies: seq[string]
+    for finding in content.findings:
+      remedies.add(remedy(finding))
+    result.remedy = describe(content.findings) & " — " & remedies.join("; ")
+    return
+  of cioCannotCompute, cioFailed:
+    result.kind = ipGateError
+    result.offender = repoForHead
+    result.remedy = "could not compute the content id of the tested state (" &
+      content.reason & "); no certificate is issued rather than guessing"
+    return
+  result.repository = repoForHead
+  result.content = content.id
+  result.base = result.commit
   result.repo =
     if report.lockUpdate.triggerRepo.len > 0: report.lockUpdate.triggerRepo
     else: result.project
@@ -66646,12 +67276,11 @@ proc certificateNoOpDecision*(existingCertPath: string;
   ##
   ## The decision is driven by TWO honest signals (both must say "unchanged"):
   ##
-  ##   1. A CONTENT/COMMIT signal: an existing certificate at the output path
-  ##      already covers (commit, platform) and the requested targets. Because
-  ##      the issuance preconditions require a CLEAN tree at HEAD, the commit
-  ##      is a precise fingerprint of the tested state — and the lock, being
-  ##      committed and keyed by that commit, moves with it — so an unchanged
-  ##      commit plus a covering cert means nothing relevant changed.
+  ##   1. A CONTENT signal: an existing certificate at the output path
+  ##      already covers the content about to be tested (``pre.content``) on
+  ##      this platform for the requested targets. Content binds every tracked
+  ##      input — the committed lock included — so unchanged content plus a
+  ##      covering cert means nothing relevant changed.
   ##   2. The canonical ct-incremental change signal, WHEN a trace dir is
   ##      supplied: ``watchTestEdgeDecision`` (the codetracer-backed adapter)
   ##      returns ``weaSkip`` only when no executed function changed. This is
@@ -66666,9 +67295,14 @@ proc certificateNoOpDecision*(existingCertPath: string;
     existing = readCertificateFile(existingCertPath)
   except CatchableError:
     return false
+  # The content is already computed; the state is described by it rather than
+  # computed again.
+  let algorithmName = parseContentId(pre.content).algorithmName
   let req = CoverageRequirement(
-    framework: reprobuildFrameworkId, repo: pre.repo,
-    commit: pre.commit, platform: pre.platform,
+    framework: reprobuildFrameworkId,
+    state: stateWithKnownContent(
+      [KnownContentId(algorithm: algorithmName, id: pre.content)], pre.repo),
+    platform: pre.platform,
     requiredTargets: requestedTargets)
   let cov = verifyCoverage(@[existing], req)
   if not cov.covered:
@@ -66697,21 +67331,13 @@ proc issueCertificate*(pre: IssuancePreconditions;
   ## "tests passed" but "*these commands* ran and passed", so a reader can see
   ## what was attested without trusting a summary of it.
   ##
-  ## TWO OPTIONAL FEATURES OF THE STANDARD ARE DELIBERATELY DECLINED HERE, and
-  ## the decision is recorded rather than left to be inferred:
+  ## What the record binds, and the one optional feature of the standard that
+  ## is deliberately DECLINED here (recorded rather than left to be inferred):
   ##
-  ##   * THE MODIFIED-WORKTREE FORM (``[certificate.vcs.worktree]``) is not
-  ##     issued. Issuance already requires a clean tree at HEAD, and the
-  ##     standard's own guidance is that the clean-tree form is the normal
-  ##     output because it is the form every consumer can evaluate with a
-  ##     plain commit comparison and no reconstruction. reprobuild's
-  ##     incremental testing makes "run, commit, re-run" nearly free —
-  ##     committing changes no file content, so every per-test hash is
-  ##     unchanged and the second invocation is a hash comparison rather than
-  ##     a test run — so the workflow the clean form asks for costs almost
-  ##     nothing here. The FORMAT layer still round-trips and canonicalises
-  ##     the modified form, because a verifier must be able to reconstruct any
-  ##     conforming producer's signed bytes.
+  ##   * ``vcs.content`` is the content id ``evaluateIssuancePreconditions``
+  ##     computed (TC-8a, a temporary index over the working tree) and
+  ##     ``vcs.base`` is HEAD. Issuance still requires a clean tree at HEAD
+  ##     (relaxing that is TC-8d), so the content equals HEAD's tree.
   ##   * PATH SCOPING (``vcs.paths``) is not issued. The standard permits it
   ##     only for a producer that knows what its tests read, and FORBIDS it
   ##     otherwise: "a producer that cannot bound its tests' input set MUST
@@ -66734,9 +67360,9 @@ proc issueCertificate*(pre: IssuancePreconditions;
     keyId: "",
     vcs: TestCertificateVcs(
       repo: pre.repo,
-      commit: pre.commit,
-      clean: pre.clean,
-      untracked: pre.untracked),
+      content: pre.content,
+      untracked: pre.untracked,
+      base: pre.base),
     signature: TestCertificateSignature(algorithm: "", value: ""))
   for argv in commands:
     if argv.len > 0:
@@ -66823,24 +67449,27 @@ type
     platforms*: seq[CiPlatformPlan]
 
 proc computeCiPlatformPlan*(certs: openArray[TestCertificate];
-                            commit, lockRecordsDir, platform: string;
+                            state: CertificateState;
+                            lockSource: ReprobuildLockSource;
+                            platform: string;
                             requiredTargets: seq[string];
                             ciTrust: CertificateCiTrust;
                             keyStore: RegisteredKeyStore): CiPlatformPlan =
-  ## The CORE per-platform decision. Given the certs attached to ``commit`` and
-  ## the project's required targets, returns which targets CI can SKIP (covered
-  ## by a VALID cert for ``platform``) and which it must RUN.
+  ## The CORE per-platform decision. Given the certs found for the state under
+  ## evaluation (the commit CI is building) and the project's required
+  ## targets, returns which targets CI can SKIP (covered by a VALID cert for
+  ## ``platform``) and which it must RUN.
   ##
   ## SECURITY-CRITICAL: a cert counts ONLY when it is THIS framework's, when
   ## ``verifyCertificateSignature`` says ``svValid``, when reprobuild's lock
-  ## resolves at its ``vcs.commit``, and when it matches the binding
-  ## (``certificateMatches`` inside ``verifyCoverage``). A forged / unsigned /
-  ## wrong-key / revoked / wrong-commit / wrong-platform / foreign-framework
-  ## cert is dropped, so it CANNOT move a target into ``skip``. The filter is
-  ## the push gate's, not a second opinion about it.
+  ## is valid in the state's content (``lockSource``), and when its content
+  ## matches the state (``certificateMatches`` inside ``verifyCoverage``). A
+  ## forged / unsigned / wrong-key / revoked / other-content / wrong-platform
+  ## / foreign-framework cert is dropped, so it CANNOT move a target into
+  ## ``skip``. The filter is the push gate's, not a second opinion about it.
   result.platform = platform
   # 1. Filter to TRUSTED certs (this framework's, registered-signed, unrevoked,
-  #    signature verifies, lock present at the attested commit).
+  #    signature verifies), then apply the lock step for the state.
   var trusted: seq[TestCertificate]
   for cert in certs:
     if cert.framework != reprobuildFrameworkId:
@@ -66850,18 +67479,19 @@ proc computeCiPlatformPlan*(certs: openArray[TestCertificate];
       result.untrustedCerts.add(cert.platform & ": " &
         signatureVerdictReason(verdict, cert.keyId))
       continue
-    if lockRecordsDir.len > 0:
-      let lockAt = resolveLockAtCommit(lockRecordsDir, cert.vcs.commit)
-      if lockAt.status != lacPresent:
-        result.untrustedCerts.add(cert.platform & ": " & lockAt.detail)
-        continue
     trusted.add(cert)
+  if trusted.len > 0:
+    let lockVerdict = reprobuildLockVerdict(lockSource, state)
+    if lockVerdict.verdict != fvValid:
+      for cert in trusted:
+        result.untrustedCerts.add(cert.platform & ": " & lockVerdict.detail)
+      trusted.setLen(0)
   # 2. Coverage for THIS platform — the same ``verifyCoverage`` union the gate
-  #    runs (it also enforces the framework/commit/platform binding via
+  #    runs (it also enforces the framework/content/platform binding via
   #    ``certificateMatches``).
   let req = CoverageRequirement(
     framework: reprobuildFrameworkId,
-    commit: commit, platform: platform,
+    state: state, platform: platform,
     requiredTargets: requiredTargets)
   let cov = verifyCoverage(trusted, req)
   result.matchingCerts = cov.matchingCerts
@@ -68126,6 +68756,7 @@ proc runReproTestCommand*(args: openArray[string];
         of ipUnpublished: "dependency has unpushed commits"
         of ipOffLock: "repo not at the locked revision"
         of ipNoWorkspace: "not a workspace"
+        of ipNoContentId: "the tested state has no content id"
         of ipGateError: "workspace gate error"
         of ipOk: ""
       stderr.writeLine("repro test: no certificate — " & label &
@@ -68163,7 +68794,8 @@ proc runReproTestCommand*(args: openArray[string];
       writeCertificateFile(cert, certOut)
       stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
         " covering [" & outcome.passedTargets.join(", ") & "] for " &
-        cert.platform & " at " & cert.vcs.commit & " → " & certOut &
+        cert.platform & " for content " & cert.vcs.content & " (base " &
+        cert.vcs.base & ") → " & certOut &
         " (signed " & certificateSignatureAlgorithm & ", key_id=" &
         cert.keyId & ")")
     return code
@@ -68407,10 +69039,17 @@ proc runCiPlanCommand(args: openArray[string]): int =
   # Read the certs attached to HEAD (TC-2). With no binding we have nothing to
   # match against, so the trusted-cert set is empty and every target runs.
   var attached: seq[TestCertificate]
+  let certRepoPath =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: parsed.workspaceRoot
+  # TC-8b: certificates are matched against the CONTENT of the commit CI is
+  # building; the lock step reads the committed ``repro.lock`` from that
+  # content unless the project opted into a lock record store.
+  let evaluated = commitUnderEvaluation(certRepoPath, commit)
+  let lockSource =
+    if lockRecordsDir.len > 0: recordStoreLockSource(lockRecordsDir)
+    else: committedLockSource()
   if commit.len > 0:
-    let certRepoPath =
-      if parsed.currentRepo.len > 0: parsed.currentRepo
-      else: parsed.workspaceRoot
     let identity = ensureGitToolResolvable(
       if parsed.toolProvisioning == tpmUnspecified: tpmPathOnly
       else: parsed.toolProvisioning, getEnv("PATH"))
@@ -68423,11 +69062,11 @@ proc runCiPlanCommand(args: openArray[string]): int =
     ciTrust: policy.ciTrust)
   for platform in planPlatforms:
     var pp =
-      if commit.len == 0 or lockRecordsDir.len == 0:
+      if commit.len == 0:
         # No binding ⇒ run the full required set on this platform.
         CiPlatformPlan(platform: platform, run: policy.requiredTargets)
       else:
-        computeCiPlatformPlan(attached, commit, lockRecordsDir, platform,
+        computeCiPlatformPlan(attached, evaluated, lockSource, platform,
           policy.requiredTargets, policy.ciTrust, keyStore)
     if bindingNote.len > 0 and pp.advisoryNote.len == 0:
       pp.advisoryNote = bindingNote
@@ -70776,20 +71415,29 @@ proc runPromptCommand*(args: openArray[string]): int =
   ## per-render git fan-out). Silent + exit 0 outside a workspace so it is
   ## safe to drop into any prompt unconditionally. Read-only: no side
   ## effects, never blocks on the network.
+  ##
+  ## Workspace notices (state-file skew, skipped settings layers) are
+  ## suppressed for the whole render (``withoutWorkspaceNotices``): they are
+  ## stderr output the prompt did not ask for, printed on EVERY render, and
+  ## computing them reads and decodes the settings files — neither fits a
+  ## segment that must be silent when it has nothing to show and do only cheap
+  ## reads (CLI/prompt.md). The verbs the operator actually runs report them.
   let parsed = parsePromptArgs(args)
-  let root =
-    if parsed.explicitWorkspaceRoot:
-      if isInitializedWorkspace(parsed.workspaceRoot):
-        parsed.workspaceRoot
-      else: ""
-    else:
-      ascendToWorkspaceRoot(parsed.workspaceRoot)
-  if root.len == 0:
-    # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
-    # requirement — safe to call unconditionally with no shell guards).
-    return 0
-  let state = readPromptState(root)
-  stdout.writeLine(renderPromptSegment(state, parsed))
+  withoutWorkspaceNotices:
+    let root =
+      if parsed.explicitWorkspaceRoot:
+        if isInitializedWorkspace(parsed.workspaceRoot):
+          parsed.workspaceRoot
+        else: ""
+      else:
+        let found = ascendToWorkspaceRoot(parsed.workspaceRoot)
+        if found.len > 0 and isInitializedWorkspace(found): found else: ""
+    if root.len == 0:
+      # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
+      # requirement — safe to call unconditionally with no shell guards).
+      return 0
+    let state = readPromptState(root)
+    stdout.writeLine(renderPromptSegment(state, parsed))
   0
 
 proc renderPromptInitSnippet(shell: string; reproBin: string): string =

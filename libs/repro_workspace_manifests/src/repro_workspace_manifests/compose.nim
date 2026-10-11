@@ -116,6 +116,21 @@ type
     ## fatal — those are operator-controlled and a missing local path is
     ## almost certainly a typo, not an access-control event.
     skipInaccessibleLayers*: bool
+    layersMayOmitProject*: bool
+      ## When ``true``, a layer that does not declare the requested project
+      ## (no ``projects/<p>.toml``) contributes nothing instead of failing
+      ## the composition — the additive reading of "manifests compose
+      ## additively" (Workspace-And-Develop-Mode.md §"Layering Rules") that a
+      ## caller LOOKING A NAME UP needs: the RA-27 sync scope asks "which
+      ## repos does project <p> have across this workspace's layers", and a
+      ## layer that does not know <p> simply has none. Off by default, and
+      ## then the rule is per layer (``ManifestLayer.from_settings``):
+      ## settings-file layers are additive per project
+      ## (Workspace-Settings-Files.md §4), layers listed in the legacy state
+      ## file keep the M8 contract (Workspace-Management.milestones.org M8,
+      ## ``test_m8_layer_missing_project_raises``) that a layer lacking the
+      ## project fails the composition, naming the layer. Either way a name NO
+      ## layer declares raises with ``noLayerDeclaresProjectTag``.
 
   SkippedLayer* = object
     ## One per layer dropped because of an unreachable remote when
@@ -138,6 +153,11 @@ type
     skippedLayers*: seq[SkippedLayer]
 
 const
+  noLayerDeclaresProjectTag* = "no-manifest-layer-declares-project:"
+    ## Stable marker prepended to the ``innerMessage`` of the diagnostic the
+    ## composer raises when NO layer declares the requested project. Callers
+    ## that look a name up (the sync scope filter) tell "unknown name" from a
+    ## genuine composition failure by it, rather than by message wording.
   manifestLayerUnreachableTag* = "manifest-layer-unreachable:"
     ## Stable marker prepended to the ``innerMessage`` of every
     ## structured diagnostic raised when a URL-backed manifest layer
@@ -428,6 +448,7 @@ proc composeManifestLayersWithOptions*(
   var lastSkipDiagnostic = ""
   var firstLayerSeen = false
   var mergedAnyLayer = false
+  var lookedFor: seq[string]
 
   for layerIdx, entry in workspaceLocal.manifest:
     let hasUrl = entry.url.isSome and entry.url.get().len > 0
@@ -476,8 +497,23 @@ proc composeManifestLayersWithOptions*(
       layerRoot = acquireLocalPathLayer(workspaceRoot, workspaceTomlPath,
         layerIdx, entry)
 
+    # A layer lacking the project, decided PER LAYER by its origin:
+    #   * a settings-file layer (``from_settings``: built from
+    #     ``repro-workspace.toml`` / ``repro-workspace.local.toml``, and the
+    #     implicit root base layer ``withSettingsLayers`` adds) contributes
+    #     nothing to the project — Workspace-Settings-Files.md §4 "Layers are
+    #     additive per project": such a layer applies to the whole workspace
+    #     and typically extends only some projects;
+    #   * a layer listed in the legacy state file must declare it (M8,
+    #     ``test_m8_layer_missing_project_raises``) until those are retired —
+    #     unless the caller composes additively throughout
+    #     (``layersMayOmitProject``, the sync scope's name lookup).
+    # A name NO layer declares is an error either way (below, after the loop).
     let projectFile = layerRoot / "projects" / (projectName & ".toml")
     if not fileExists(projectFile):
+      if options.layersMayOmitProject or entry.from_settings.get(false):
+        lookedFor.add(projectFile)
+        continue
       raiseManifestError(workspaceTomlPath,
         "manifest[" & $layerIdx & "]",
         schemaWorkspaceStateV1, schemaWorkspaceStateV1,
@@ -515,6 +551,15 @@ proc composeManifestLayersWithOptions*(
       layerResolved, composed, seen)
     mergedAnyLayer = true
 
+  if not mergedAnyLayer and lookedFor.len > 0:
+    # Every layer that could be read lacks the project: the name is unknown
+    # to this workspace (whether or not other layers were unreachable — a
+    # skipped layer is reported in its own entry, and no reachable layer
+    # declared the name either).
+    raiseManifestError(workspaceTomlPath, "manifest",
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
+      noLayerDeclaresProjectTag & " no manifest layer declares project '" &
+        projectName & "' (looked for " & lookedFor.join(", ") & ")")
   if not mergedAnyLayer:
     # Every layer was skipped — that means access-control denied the
     # entire workspace, not "the public subset still resolves". Raise
@@ -573,6 +618,33 @@ proc composeManifestLayers*(
   composeManifestLayersWithOptions(
     workspaceLocal, workspaceRoot, workspaceTomlPath,
     ComposeOptions()).project
+
+proc composeWorkspaceLayersWithOptions*(
+    workspaceRoot: string; projectName = "";
+    options: ComposeOptions = ComposeOptions()): ComposeResult =
+  ## Compose the WORKSPACE at `workspaceRoot`: its state (or none yet) and its
+  ## settings files' layers, through the one seam that joins them
+  ## (`effectiveWorkspaceLocalWithNotes`). `projectName` selects the project
+  ## when the state records none — the case of a workspace root whose settings
+  ## declare layers before `repro workspace init` / `enable` wrote any state
+  ## (Workspace-Settings-Files.md §4). Settings layers skipped for want of a
+  ## url are carried in `skippedLayers` (index -1: they never reached a layer
+  ## position) and reported on stderr, once per process.
+  let absRoot = absolutePath(workspaceRoot)
+  let absToml = absolutePath(workspaceTomlPath(absRoot))
+  let eff = effectiveWorkspaceLocalWithNotes(absRoot, projectName)
+  reportSkippedSettingsLayers(eff.skipped)
+  result = composeManifestLayersWithOptions(eff.local, absRoot, absToml,
+    options)
+  for note in eff.skipped:
+    result.skippedLayers.add(SkippedLayer(index: -1, provenance: note.name,
+      visibility: visibilityFromString(absToml, note.visibility),
+      diagnostic: note.message))
+
+proc composeWorkspaceLayers*(workspaceRoot: string;
+                             projectName = ""): ResolvedProject =
+  ## Strict-default `composeWorkspaceLayersWithOptions`.
+  composeWorkspaceLayersWithOptions(workspaceRoot, projectName).project
 
 proc composeManifestLayersFromFile*(
     workspaceTomlPath: string): ResolvedProject =

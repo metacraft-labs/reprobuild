@@ -543,7 +543,7 @@ suite "repro_test_runner catalog fidelity and hash-difference selection":
     check written{"projectRoot"}.getStr() == getCurrentDir()
     check written{"binDir"}.getStr() == binDir
     let writtenTests = written{"binaries"}{Stem}{"tests"}
-    check writtenTests != nil
+    check not writtenTests.isNil
     check writtenTests.len == 3
     let baselineBeta =
       writtenTests{"catalog_fixture::beta"}.getStr()
@@ -832,7 +832,7 @@ suite "nohash_fixture":
     # The catalog records the cases with empty hashes — recording what
     # the producer said, including that it said nothing.
     let recorded = parseJson(readFile(catalogPath)){"binaries"}{Stem}{"tests"}
-    check recorded != nil
+    check not recorded.isNil
     check recorded.len == 2
     for _, hashNode in recorded.pairs:
       check hashNode.getStr() == ""

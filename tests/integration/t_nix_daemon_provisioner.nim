@@ -101,6 +101,9 @@ when defined(linux):
 
   const StressChildEnv = "REPRO_NIXD_STRESS_CHILD"
   const StressRequests = 12
+  const StressMaxRequests = 2_000   ## backstop if ``release`` never appears
+  const StressSignalsWanted = 3     ## TERM, INT and KILL, once each
+  const StressDeadlineSec = 240.0   ## then release anyway; ``signals`` judges
 
   proc foreignProvisionAction(selector, receipt, cwd: string): BuildAction =
     BuildAction(
@@ -114,19 +117,33 @@ when defined(linux):
 
   if existsEnv(StressChildEnv):
     # One of several client PROCESSES (the helper is shared between
-    # processes, not threads). Prints one line per request. Every request
+    # processes, not threads). Records one line per request. Every request
     # names its own selector, so each one is a resolution the helper must
     # run rather than a cache hit.
+    #
+    # A client does not decide when it is done: it keeps resolving until the
+    # stopper creates ``release`` (and at least ``StressRequests`` times).
+    # Left to a fixed count, the clients could -- and under a loaded suite
+    # did -- finish before the stopper had stopped a single helper, and the
+    # case exercised nothing (run 29: "helpers signalled 0 times").
     let workDir = getEnv(StressChildEnv)
     let tag = $getCurrentProcessId()
-    for i in 0 ..< StressRequests:
+    # Results go to a file, not a pipe: a client that runs until released
+    # could fill a pipe nobody reads until it exits, and then never exit.
+    var results = open(workDir / ("client-" & tag & ".out"), fmWrite)
+    var i = 0
+    while i < StressRequests or (not fileExists(workDir / "release") and
+        i < StressMaxRequests):
       let receipt = workDir / ("receipt-" & tag & "-" & $i)
       let res = executeBuiltinAction(foreignProvisionAction(
         "fake#tool-" & tag & "-" & $i, receipt, workDir))
       if res.status == asSucceeded and dirExists(readFile(receipt).strip()):
-        echo "OK"
+        results.writeLine("OK")
       else:
-        echo "FAIL ", res.stderr.strip().replace("\n", " | ")
+        results.writeLine("FAIL " & res.stderr.strip().replace("\n", " | "))
+      results.flushFile()
+      inc i
+    results.close()
     quit(0)
 
   type SharedHelperFixture = object
@@ -503,20 +520,33 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
           env[key] = value
         env[StressChildEnv] = f.root
         children.add(startProcess(getAppFilename(), env = env,
-          options = {poStdErrToStdOut}))
+          options = {poParentStreams}))
       # Each helper is stopped once it has been up for 1.5-3.9 s -- the
       # lifetime of the case that happened to start it. A stopper that ends
       # every helper before it can finish a request leaves nothing that could
       # serve, which is not the situation being modelled.
+      #
+      # The STOPPER ends the case, not the clients: they keep requesting until
+      # it has sent TERM, INT and KILL to a helper, so every signal lands
+      # while all four clients are still mid-flight, on every run, however
+      # loaded the host. ``signalledWhileServing`` counts only signals sent
+      # while every client was still running, and is what the guard reads.
       var signals = 0
+      var signalledWhileServing = 0
       var firstSeen = initTable[int, float]()
+      let deadline = epochTime() + StressDeadlineSec
+      var released = false
       while true:
-        var anyRunning = false
+        var running = 0
         for child in children:
           if child.running:
-            anyRunning = true
-        if not anyRunning:
+            inc running
+        if running == 0:
           break
+        if not released and (signalledWhileServing >= StressSignalsWanted or
+            epochTime() > deadline):
+          writeFile(f.root / "release", "")
+          released = true
         sleep(100)
         let now = epochTime()
         for pid in f.ownHelperPids():
@@ -526,18 +556,28 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
             let sig = [posix.SIGTERM, posix.SIGINT, posix.SIGKILL][signals mod 3]
             if posix.kill(posix.Pid(pid), sig) == 0:
               inc signals
+              if not released and running == children.len:
+                inc signalledWhileServing
       var ok = 0
       var failures: seq[string] = @[]
       for child in children:
-        for line in child.outputStream.readAll().splitLines():
+        let exitCode = child.waitForExit()
+        if exitCode != 0:
+          failures.add("client " & $child.processID & " exited " & $exitCode)
+        let outFile = f.root / ("client-" & $child.processID & ".out")
+        let lines = try: readFile(outFile).splitLines()
+                    except IOError: @["no results from client " & $child.processID]
+        child.close()
+        for line in lines:
           if line == "OK":
             inc ok
           elif line.len > 0:
             failures.add(line)
-        discard child.waitForExit()
-        child.close()
-      checkpoint("helpers signalled " & $signals & " times; failures: " &
-        failures.join("\n"))
+      checkpoint("helpers signalled " & $signals & " times (" &
+        $signalledWhileServing & " while every client was mid-flight); " &
+        $ok & " requests served; failures: " & failures.join("\n"))
+      # Anti-vacuity: the stopper must have stopped helpers UNDER the clients.
       check signals > 0
+      check signalledWhileServing >= StressSignalsWanted
       check failures.len == 0
-      check ok == 4 * StressRequests
+      check ok >= 4 * StressRequests

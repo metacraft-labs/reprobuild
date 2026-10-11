@@ -118,7 +118,7 @@ suite "regression — shared cache keys the bare by the full repo URL":
       for r in report["repos"]:
         if r["path"].getStr() == "proj":
           entry = r
-      check entry != nil
+      check not entry.isNil
       check entry["barePresent"].getBool()
       check entry["wired"].getBool()
       # The alternates file physically points the checkout at the shared bare.

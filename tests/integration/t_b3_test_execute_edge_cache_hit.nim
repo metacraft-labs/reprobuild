@@ -260,8 +260,8 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
                 if outPath.getStr() == "build/test-bin/" & TargetTest:
                   buildAction = action
 
-        check buildAction != nil
-        check executeAction != nil
+        check not buildAction.isNil
+        check not executeAction.isNil
 
         if buildAction != nil:
           checkpoint(buildAction{"id"}.getStr() & " status=" &

@@ -32,9 +32,12 @@ import std/[algorithm, options, os, strutils]
 import types
 import diagnostics
 import reader
+import repro_core/workspace_root
+
+export workspace_root.settingsFileIn
 
 const
-  settingsFileName* = "repro-workspace.toml"
+  settingsFileName* = workspace_root.SettingsFileName
     ## The shared settings file (§3). No leading dot: it is policy people read
     ## and review, and the file that makes a directory a workspace root.
   localSettingsFileName* = "repro-workspace.local.toml"
@@ -50,17 +53,6 @@ const
 
 # ---- discovery -------------------------------------------------------------
 
-proc settingsFileIn*(dir: string): string =
-  ## The settings file `dir` itself holds — `repro-workspace.toml`, else the
-  ## old `.repro-workspace.toml` — or "" when it holds neither.
-  let current = dir / settingsFileName
-  if fileExists(current):
-    return current
-  let legacy = dir / legacySettingsFileName
-  if fileExists(legacy):
-    return legacy
-  ""
-
 proc findWorkspaceSettingsPath*(workspaceRoot: string): string =
   ## Locate the workspace settings file (§6):
   ##
@@ -73,9 +65,19 @@ proc findWorkspaceSettingsPath*(workspaceRoot: string): string =
   ##      of the directory a command runs in.
   ##
   ## Returns "" when there is none.
-  let override = getEnv("REPRO_WORKSPACE_CONFIG")
-  if override.len > 0:
-    return (if fileExists(override): absolutePath(override) else: "")
+  ##
+  ## This answers "which settings file governs `workspaceRoot`", not "where is
+  ## the workspace root" — that is `repro_core/workspace_root`'s
+  ## `discoverWorkspaceRoot`, which marks a root by the same file names
+  ## (`settingsFileIn`) and the same `REPRO_WORKSPACE_CONFIG` reading
+  ## (`configuredSettingsFile`). For a root that discovery found by its
+  ## settings file the two agree trivially: the walk below stops at once. The
+  ## walk continues past the root only for a root marked by something else (a
+  ## state file, a manifest checkout) that sits below a directory holding a
+  ## settings file, which inherits that file exactly as it did before.
+  let configured = configuredSettingsFile()
+  if configured.set:
+    return configured.path
   if workspaceRoot.len == 0:
     return ""
   var dir = absolutePath(workspaceRoot)
@@ -576,13 +578,14 @@ proc composeSettingsLayers*(s: WorkspaceSettings): SettingsLayerComposition =
           (if s.localPath.len > 0: s.localPath else: localSettingsFileName) &
           " supplies none; the layer is skipped"))
       continue
-    result.layers.add(ManifestLayer(url: url, local_path: shared.local_path,
+    result.layers.add(ManifestLayer(from_settings: some(true),
+      url: url, local_path: shared.local_path,
       visibility: shared.visibility.get(""), branch: branch,
       name: shared.name, revision: shared.revision))
   for local in s.localLayers:
     if local.name.isSome:
       continue
-    result.layers.add(ManifestLayer(url: local.url,
+    result.layers.add(ManifestLayer(from_settings: some(true), url: local.url,
       local_path: local.local_path, visibility: local.visibility.get(""),
       branch: local.branch, revision: local.revision))
 

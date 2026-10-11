@@ -38,6 +38,7 @@ import std/[json, os, osproc, streams, strutils]
 
 import repro_core/ambient_execution
 import repro_core/paths
+import repro_core/workspace_root
 import repro_project_dsl
 
 import ./apply
@@ -280,24 +281,15 @@ proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
 proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
     seq[(string, string)] =
   ## Ask NF-1 for the actual develop bindings instead of duplicating its resolver.
-  var root = absolutePath(projectRoot)
-  # A workspace root is marked by its settings file or its state file, each
-  # under its current name or the old one still read during the rename
-  # (Workspace-Settings-Files.md §6, §8). The literals are repeated here
-  # rather than imported because this stdlib module does not depend on the
-  # workspace-manifest library.
-  proc marksWorkspaceRoot(dir: string): bool =
-    for marker in [dir / "repro-workspace.toml", dir / ".repro-workspace.toml",
-                   dir / ".repro" / "workspace-state.toml",
-                   dir / ".repro" / "workspace.toml"]:
-      if fileExists(extendedPath(marker)):
-        return true
-    false
-  while not marksWorkspaceRoot(root):
-    let parent = parentDir(root)
-    if parent == root or parent.len == 0:
-      return
-    root = parent
+  # The workspace root is found by the one walk every workspace-root lookup
+  # uses (`repro_core/workspace_root`, Workspace-Settings-Files.md §6). A
+  # root found only by the MO-2 committed lock is a single-repo workspace with
+  # no siblings to develop against, so there are no overrides to ask for and
+  # no `repro` to start.
+  let found = discoverWorkspaceRoot(projectRoot)
+  if found.marker in {wrmNone, wrmCommittedLock}:
+    return
+  let root = found.root
   var localRef = flakeRef.split('#')[0].split('?')[0]
   if localRef.startsWith("path:"):
     localRef = localRef[5 .. ^1]

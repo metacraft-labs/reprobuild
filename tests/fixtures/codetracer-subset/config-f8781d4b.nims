@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# 847c4630edfdd861306da7e35556f074caa18471, config.nims.
-# Source: https://github.com/metacraft-labs/codetracer/blob/847c4630edfdd861306da7e35556f074caa18471/config.nims
+# f8781d4b5514ee9bbcdee0de701dc4bd8090a061, config.nims.
+# Source: https://github.com/metacraft-labs/codetracer/blob/f8781d4b5514ee9bbcdee0de701dc4bd8090a061/config.nims
 #
 # Keep every byte after this provenance header identical to the public source.
 import std/[os, strutils]
@@ -216,3 +216,22 @@ block worktreeLocalNimcache:
   if rel.len > 0:
     cacheDir.add("/" & rel)
   switch("nimcache", cacheDir & "/" & project & suffix)
+
+# EVERY TEST PROGRAM GETS A PRIVATE `CODETRACER_HOME`.
+#
+# `src/frontend/test_support/state_isolation.nim` points `CODETRACER_HOME` (the
+# one variable every CodeTracer path resolver honours, `src/common/ct_home.nim`)
+# at a fresh temporary directory before the program's own code runs, unless the
+# caller already chose a scratch one. Force-importing it, by the shape of the
+# program's name, covers every suite under `src/` — `src/common/*_test.nim`,
+# `src/ct/**/*_test.nim` and their helpers included — however it is compiled:
+# by a lane, by hand, or by a mutation harness.
+#
+# Only the LAST config file evaluated may add the switch (see the include's
+# header): when a deeper `config.nims` follows, it does it — the test trees'
+# own import it unconditionally, `src/ct_test/config.nims` calls
+# `ctForceImportStateIsolation` at its end.
+# `src/common/ct_home_isolation_test.nim` fails if this goes away.
+include "src/frontend/test_support/force_import_isolation.nims"
+if not ctDeeperConfigNims(repoRoot):
+  ctForceImportStateIsolation(repoRoot)

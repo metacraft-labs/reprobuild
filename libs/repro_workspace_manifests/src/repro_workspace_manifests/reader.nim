@@ -23,6 +23,7 @@ import toml_serialization/types as toml_types
 import types
 import diagnostics
 import manifest_editor
+from repro_core/workspace_root import nil
 
 # ---- helpers --------------------------------------------------------------
 
@@ -1000,7 +1001,8 @@ proc readWorkspaceLocal*(path: string): WorkspaceLocal =
         "manifest[" & $i & "].visibility", schema, schema,
         "required key `manifest[].visibility` is missing or empty")
     for (key, present) in [("name", m.name.isSome),
-                           ("revision", m.revision.isSome)]:
+                           ("revision", m.revision.isSome),
+                           ("from_settings", m.from_settings.isSome)]:
       if present:
         raiseManifestError(path, "manifest[" & $i & "]." & key, schema, schema,
           "`" & key & "` is a key of a `repro-workspace.toml` / " &
@@ -1035,7 +1037,7 @@ proc readDevelopOverrides*(path: string): DevelopOverrides =
 # ---- <host-repo>/.repro-workspace.toml (RA-8 host bootstrap config) ---------
 
 const
-  bootstrapConfigFileName* = ".repro-workspace.toml"
+  bootstrapConfigFileName* = workspace_root.LegacySettingsFileName
     ## The OLD name of the workspace settings file (`bootstrap.v1`). Still read
     ## — through `settings.nim`, which prefers `repro-workspace.toml` — until
     ## the old names are retired (Workspace-Settings-Files.md §8 step 4).

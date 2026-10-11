@@ -13,13 +13,18 @@
 ##      BOTH travel and are BOTH readable on the upstream (accumulate, no
 ##      overwrite).
 ##   3. The reader ``readAttachedCertificates(…, C)`` IGNORES a record whose
-##      internal ``commit`` field != C (defense against a stale/misfiled note).
+##      ``content`` is not the content id of C's tree (defense against a
+##      stale/misfiled note). TC-8b: the filter matches by CONTENT — a record
+##      whose ``base`` names another commit but whose content IS C's tree is
+##      kept, because ``base`` is never compared.
 ##
 ## Falsifiability (see the milestone note):
 ##   - no attach → the upstream has no cert note → assert 1 fails.
 ##   - overwrite-instead-of-accumulate → only one platform survives → the
 ##     multi-cert assert (2) fails.
-##   - no mismatch filter → the wrong-commit cert is returned → assert 3 fails.
+##   - no mismatch filter → the other-content cert is returned → assert 3 fails.
+##   - a filter on ``base`` → the same-content, other-base cert is dropped →
+##     assert 3 fails.
 ##
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos; no network.
 ## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
@@ -237,7 +242,10 @@ suite "TC-2 — certificates travel with the pushed commit":
         fx.workspaceRoot, fx.libASha, currentPlatformTag())
       check fileExists(certFile)
       let cert = readCertificateFile(certFile)
-      check cert.vcs.commit == fx.libASha
+      let libATree = "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
+        q(fx.libAPath) & " rev-parse " & fx.libASha & "^{tree}").strip()
+      check cert.vcs.content == libATree
+      check cert.vcs.base == fx.libASha
       check "t-unit" in cert.targets
 
       # --- attach it to commit C (the TC-2 carrier) -----------------------
@@ -287,7 +295,7 @@ suite "TC-2 — certificates travel with the pushed commit":
       for c in upstreamCerts:
         upstreamPlatforms.add(c.platform)
         # Each travelled cert genuinely attests C (round-trips the binding).
-        check c.vcs.commit == fx.libASha
+        check c.vcs.content == libATree
         check c.schema == testCertificateSchemaV1
       check cert.platform in upstreamPlatforms
       check cert2.platform in upstreamPlatforms
@@ -296,20 +304,33 @@ suite "TC-2 — certificates travel with the pushed commit":
         if c.platform == cert.platform:
           check "t-unit" in c.targets
 
-      # ASSERT 3: a cert whose INTERNAL commit != C is IGNORED by the reader.
-      # Attach a misfiled cert (its body claims a DIFFERENT commit) under C's
-      # note, then confirm the reader for C does NOT return it. Falsifiable:
-      # drop the mismatch filter and this cert is returned (count climbs to 3,
-      # and the wrong-commit platform appears).
+      # ASSERT 3: a cert whose CONTENT is not C's tree is IGNORED by the
+      # reader. Attach a misfiled cert (its body names DIFFERENT content, on
+      # top of C) under C's note, then confirm the reader for C does NOT return
+      # it. Falsifiable: drop the mismatch filter and this cert is returned
+      # (count climbs, and the misfiled platform appears).
       var mismatch = cert
-      mismatch.vcs.commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      mismatch.vcs.content =
+        "git-tree-sha1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
       mismatch.platform = "linux/mismatch"
       let attM = attachCertificate(gitBin, fx.libAPath, fx.libASha, mismatch)
       check attM.ok
+      # …and a cert issued on top of ANOTHER commit whose content IS C's tree
+      # is KEPT: the filter never compares ``base``. Falsifiable: filter on
+      # ``base`` and this one disappears.
+      var otherBase = cert
+      otherBase.vcs.base = "0123456789abcdef0123456789abcdef01234567"
+      otherBase.platform = "linux/other-base"
+      let attB = attachCertificate(gitBin, fx.libAPath, fx.libASha, otherBase)
+      check attB.ok
       let afterMismatch =
         readAttachedCertificates(gitBin, fx.libAPath, fx.libASha)
-      # Still exactly the two genuine certs for C; the misfiled one is dropped.
-      check afterMismatch.len == 2
+      # The two genuine certs for C plus the other-base one; the misfiled one
+      # is dropped.
+      check afterMismatch.len == 3
+      var afterPlatforms: seq[string]
       for c in afterMismatch:
-        check c.vcs.commit == fx.libASha
+        check c.vcs.content == libATree
         check c.platform != "linux/mismatch"
+        afterPlatforms.add(c.platform)
+      check "linux/other-base" in afterPlatforms

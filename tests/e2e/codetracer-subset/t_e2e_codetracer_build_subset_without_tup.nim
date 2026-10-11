@@ -27,9 +27,9 @@ const
   NimJsWithoutOldCaseObjectsHash = "600a5090da25c07b"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "847c4630edfdd861306da7e35556f074caa18471"
+    "f8781d4b5514ee9bbcdee0de701dc4bd8090a061"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-847c4630.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-f8781d4b.tup"
 
 type
   TupRules = object

@@ -179,8 +179,12 @@ proc attachUntrustedCert(gitBin: string; fx: ModeFixture; commit: string):
     issuedAt: "2026-08-27T00:00:00Z",
     issuer: "w9-modes-fixture",
     keyId: modesUnregisteredKeyId,
-    vcs: TestCertificateVcs(repo: "clone", commit: commit,
-      clean: true, untracked: false),
+    # TC-8b: the record names the commit's CONTENT (its tree), which is what
+    # makes it describe the pushed commit; ``base`` is informational.
+    vcs: TestCertificateVcs(repo: "clone",
+      content: "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
+        q(fx.clone) & " rev-parse " & commit & "^{tree}").strip(),
+      untracked: false, base: commit),
     commands: @[TestCertificateCommand(argv: @["repro", "test"])],
     signature: TestCertificateSignature(
       algorithm: "ed25519",
@@ -348,8 +352,10 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         issuedAt: "2026-08-27T00:00:00Z",
         issuer: "w11-fixture",
         keyId: "w11-note-read-key",
-        vcs: TestCertificateVcs(repo: "repo", commit: covered,
-          clean: true, untracked: false),
+        vcs: TestCertificateVcs(repo: "repo",
+          content: "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
+            q(repo) & " rev-parse " & covered & "^{tree}").strip(),
+          untracked: false, base: covered),
         commands: @[TestCertificateCommand(argv: @["repro", "test"])],
         signature: TestCertificateSignature(
           algorithm: "ed25519",
