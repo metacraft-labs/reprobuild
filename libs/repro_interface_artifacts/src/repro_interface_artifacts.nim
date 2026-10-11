@@ -5879,29 +5879,29 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # ``resourceType`` macro emits a module-init proc calling
   # ``registerResourceTypeInterface``; that side effect only executes if the
   # module is actually imported into the extraction runner's compilation unit.
-  # A recipe-relative extraction names the recipe relative to the runner,
-  # so the runner it compiles is the same text wherever the recipe lies.
-  let recipeImportPath =
-    if recipeRelative:
-      relativePath(absoluteModulePath, tempParent).replace('\\', '/')
-    else:
-      absoluteModulePath
   var resourceImport = ""
   if resourceModule.len > 0:
     let absoluteResourceModule =
       absolutePath(resourceModule).replace('\\', '/')
     resourceImport = "import \"" & absoluteResourceModule & "\"\n"
+  # The runner of a recipe-relative extraction (`extractInterfaceEdge`)
+  # lives OUTSIDE the recipe's tree, under the action-cache root; it imports
+  # the recipe by absolute path (scratch only — the edge's key and record
+  # name the recipe relative to its own directory). Nim reads the
+  # `config.nims` / `nim.cfg` chain of the MAIN module's directory — the
+  # runner's — not the recipe's; see
+  # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  # compiles" for what that means for a recipe's configuration.
   let runnerSource =
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
     "import repro_dsl_stdlib/constructors\n" &
     resourceImport &
-    "import \"" & recipeImportPath & "\"\n\n" &
+    "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
     (if recipeRelative:
-       # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
-       # compiles": source locations travel relative to the recipe.
+       # Source locations travel relative to the recipe.
        "var anchors: seq[string] = @[]\n" &
        "for i in 5 .. paramCount(): anchors.add(paramStr(i))\n" &
        "writeInterfaceArtifactRecipeRelative(paramStr(1), artifact, " &

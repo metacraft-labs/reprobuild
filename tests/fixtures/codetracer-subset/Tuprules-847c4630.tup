@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned command-semantics extract from CodeTracer commit
-# 3240f37f9c3e3ecf9e81a7906b65450b02578825, src/Tuprules.tup.
-# Source: https://github.com/metacraft-labs/codetracer/blob/3240f37f9c3e3ecf9e81a7906b65450b02578825/src/Tuprules.tup
+# 847c4630edfdd861306da7e35556f074caa18471, src/Tuprules.tup.
+# Source: https://github.com/metacraft-labs/codetracer/blob/847c4630edfdd861306da7e35556f074caa18471/src/Tuprules.tup
 #
 # This fixture contains every variable and macro definition that contributes
 # to the !nim_js and !trace_object_file command fingerprints exercised by the
@@ -116,4 +116,3 @@ NIM_SIDE_OUTPUTS_IGNORE = ^(([A-Za-z]:)?[/\\]tmp[/\\]ct-nim-cache[/\\].*|([A-Za-
 js %f |> %B.js | $(NIM_SIDE_OUTPUTS_IGNORE)
 
 !trace_object_file = |> ^ %f^ gcc -fPIC -g3 -c -o %o %f |> %o
-
