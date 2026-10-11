@@ -7,10 +7,10 @@ Reprobuild project and builds it through the public `repro build` command with
 The macOS gate does not invoke `tup`. Homebrew marks `tup` Linux-only and
 nixpkgs marks it broken on this host. Instead, the test parses and fingerprints
 the command-semantics fixture pinned from CodeTracer commit
-`f8781d4b5514ee9bbcdee0de701dc4bd8090a061`. Its fixture files are byte-identical to
-the `dev`-branch contract selected by Reprobuild's `.github/sibling-repos`; using a
-Reprobuild-owned fixture keeps the oracle independent of an adjacent
-CodeTracer checkout's branch or uncommitted state. The fixture covers the exact
+`f8781d4b5514ee9bbcdee0de701dc4bd8090a061`, the revision this repository's
+`flake.lock` pins for `codetracer-src`; using a Reprobuild-owned fixture keeps
+the oracle independent of an adjacent CodeTracer checkout's branch or
+uncommitted state. The fixture covers the exact
 Tup-equivalent actions:
 
 - `!nim_js` semantics for `src/frontend/tests/ipc_registry_test.nim`
@@ -57,9 +57,12 @@ The `f8781d4b` refresh followed the next `codetracer-src` pin. CodeTracer's
 `repro.nim` adds `ct-test` to `codetracerActions` (CTC-3i), `config.nims`
 force-imports the test-state isolation include, and `src/Tuprules.tup` gains an
 `!ct_test_orc` macro that neither extracted rule uses, so the Tup extract
-changes only in its provenance header. At this pin CodeTracer `dev` carries the
-same three files byte-for-byte, so the fail-closed CI comparison against the
-`codetracer=dev` sibling holds.
+changes only in its provenance header. CodeTracer `dev` (aabb0970b when this
+pin moved) does not yet contain f8781d4b: its `src/Tuprules.tup` lacks only the
+unused `!ct_test_orc` macro, so the extracted rules still match, but its
+`repro.nim` and `config.nims` predate CTC-3i and the isolation include. The
+fail-closed in-place comparison against CI's `codetracer=dev` sibling therefore
+holds only once CodeTracer merges f8781d4b into `dev`.
 
 The `847c4630` refresh followed the previous `codetracer-src` pin. CodeTracer's
 `repro.nim` gained the `isonim-tui` sibling dependency, `config.nims` gained a
