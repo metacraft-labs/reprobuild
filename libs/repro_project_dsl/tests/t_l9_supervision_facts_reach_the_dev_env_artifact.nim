@@ -318,17 +318,24 @@ suite "L9: every supervision fact survives the artifact codec":
     check "\"instanceLeaseTtlSeconds\":-1" in json
     check L9StateDir in json
 
-  test "the artifact schema version is 3, which is what makes a refusal possible":
+  test "the artifact schema version is 4, which is what makes a refusal possible":
     # The fields are appended to a positional codec, so a payload
     # written before they existed would decode with shifted offsets --
     # which is not an error, just wrong values. The version bump is what
     # turns that into a refusal by name.
     #
     # THIS CASE ASSERTS THE VERSION, NOT THE REFUSAL, and the name says
-    # so. The refusal itself -- that envelope versions 1 and 2 are
-    # rejected BY NAME and version 4 is rejected as unknown -- is
-    # asserted in `tests/unit/t_dev_env_large_values.nim`, which owns
+    # so. The refusal itself -- that every superseded envelope version
+    # is rejected BY NAME and the next one up is rejected as unknown --
+    # is asserted in `tests/unit/t_dev_env_large_values.nim`, which owns
     # the wire-bytes pin. Naming a refusal here that is measured
     # elsewhere is how a reader comes to believe this file proves
     # something it does not.
-    check DevEnvArtifactSchemaVersion == 3'u32
+    #
+    # MOVED 3 -> 4 BY D-SS11, which appended
+    # `DevEnvArtifact.sharedResolutions`. This case is a PIN ON THE
+    # NUMBER, so it has to move with the number, and it was found by
+    # D-SS11's regression sweep rather than by reading -- which is the
+    # argument for the sweep: L9's own version bump broke the same
+    # pin in `t_dev_env_large_values` and was found the same way.
+    check DevEnvArtifactSchemaVersion == 4'u32

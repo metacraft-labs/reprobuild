@@ -53,6 +53,30 @@ proc taskJson(task: DevEnvTaskSummary): string =
     ",\"commandRef\":" & digestJson(task.commandRef) &
     ",\"command\":" & q(task.command) & "}"
 
+proc sharedResolutionJson(resolution: DevEnvSharedResolutionSummary): string =
+  ## Shared-Development-Services D-SS11 (§4.6). `repro dev-env --json`
+  ## is the only view an operator has of what a recipe declared, and a
+  ## resolver whose contributions are invisible there is one nobody can
+  ## check before `repro up` acts on it.
+  "{\"ownerPackage\":" & q(resolution.ownerPackage) &
+    ",\"serviceName\":" & q(resolution.serviceName) &
+    ",\"activityName\":" & q(resolution.activityName) &
+    ",\"ownerRecipeDir\":" & q(resolution.ownerRecipeDir) &
+    ",\"consumerPackage\":" & q(resolution.consumerPackage) &
+    ",\"environment\":" & q(resolution.environment) &
+    ",\"sourceFile\":" & q(resolution.sourceFile) &
+    ",\"sourceLine\":" & $resolution.sourceLine &
+    ",\"contributionPoints\":" & stringsJson(resolution.contributionPoints) &
+    ",\"contributionOperations\":" &
+      stringsJson(resolution.contributionOperations) &
+    ",\"contributionPrecedences\":" &
+      stringsJson(resolution.contributionPrecedences) &
+    ",\"contributionSites\":" & stringsJson(resolution.contributionSites) &
+    ",\"contributionMemberPoints\":" &
+      stringsJson(resolution.contributionMemberPoints) &
+    ",\"contributionMembers\":" &
+      stringsJson(resolution.contributionMembers) & "}"
+
 proc serviceJson(service: DevEnvServiceSummary): string =
   "{\"name\":" & q(service.name) &
     ",\"activityRequirements\":" & stringsJson(service.activityRequirements) &
@@ -145,6 +169,8 @@ proc toJsonInspection*(artifact: DevEnvArtifact): string =
     ",\"toolProfiles\":" & listJson(artifact.toolProfiles, toolProfileJson) &
     ",\"tasks\":" & listJson(artifact.tasks, taskJson) &
     ",\"services\":" & listJson(artifact.services, serviceJson) &
+    ",\"sharedResolutions\":" &
+      listJson(artifact.sharedResolutions, sharedResolutionJson) &
     ",\"resourcePrerequisites\":" & digestsJson(artifact.resourcePrerequisites) &
     ",\"diagnostics\":" & listJson(artifact.diagnostics, diagnosticJson) &
     ",\"evaluationInputs\":" & listJson(artifact.evaluationInputs, inputJson) &

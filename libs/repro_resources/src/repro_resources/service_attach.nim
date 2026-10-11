@@ -185,6 +185,29 @@ type
     smkActivityParam   ## a constructor parameter of the declaring activity
     smkConfigKey       ## a `config:` key of the declaring activity
     smkSiblingService  ## another service the declaring activity declares
+    smkContributionPoint
+      ## Shared-Development-Services D-SS11 (§4.6): a CONTRIBUTION POINT
+      ## the service converges.
+      ##
+      ## It is a member a consumer compiles against, which is why it is
+      ## in this enum and therefore in the fingerprint: a consumer writes
+      ## `infra.sso.shared(relyingParties = append("x"))` against the
+      ## owner's declared point set, exactly as it writes
+      ## `sso.externalDomain` against a `config:` key. §4.6 requires the
+      ## lift to carry the points for that reason.
+      ##
+      ## APPENDED AS THE LAST ENUM VALUE, so no existing ordinal moves.
+      ## The per-service digest writes `ord(member.kind)`, so inserting
+      ## it anywhere earlier would re-key every existing fingerprint for
+      ## a reason that has nothing to do with any interface changing.
+      ##
+      ## IT IS DISTINCT FROM `smkConfigKey` even though a contribution
+      ## point IS a `config:` key. The two statements a consumer can make
+      ## about one key are different -- "bind this" (refused to a
+      ## consumer, §6.6) and "append to this" (the whole of §5) -- so an
+      ## instance that stopped converging a point while keeping the key
+      ## has changed what a contributing consumer compiled against, and a
+      ## member list that said only `config:` could not name it.
 
   ServiceInterfaceMember* = object
     kind*: ServiceMemberKind
@@ -380,6 +403,7 @@ proc memberKindWord*(kind: ServiceMemberKind): string =
   of smkActivityParam: "activity parameter"
   of smkConfigKey: "config key"
   of smkSiblingService: "sibling service"
+  of smkContributionPoint: "contribution point"
 
 proc identityModeWord*(mode: InterfaceServiceIdentityMode): string =
   case mode
@@ -440,33 +464,65 @@ proc serviceInterfaceMembers*(value: ProjectInterface;
       signature: scopeWord(svc.scope)),
     ServiceInterfaceMember(kind: smkSignature, name: "compatibility",
       signature: $svc.compatibilityMajor)]
-  if svc.activityName.len == 0:
-    return
-  for act in value.publicActivities:
-    if act.name != svc.activityName:
-      continue
-    for param in act.params:
-      result.add(ServiceInterfaceMember(kind: smkActivityParam,
-        name: param.name, signature: param.nimType))
-    for key in act.config:
-      # REQUIRED-NESS IS CARRIED AND IT NEEDED NO NEW FIELD. L5's review
-      # expected one `bool` on `InterfaceConfigKey` here; "required" is
-      # exactly "declared with no default" (L5's own words: "a `config:`
-      # key with no default is a REQUIRED configurable"), and
-      # `hasDefault` has carried that since L3 at v21. So the signature
-      # below spells it out of the two fields that already exist, and the
-      # envelope gained no field for it -- see this milestone's report.
-      result.add(ServiceInterfaceMember(kind: smkConfigKey,
-        name: key.name,
-        signature:
-          key.nimType &
-          (if key.hasDefault: " = " & key.defaultRepr else: " (required)")))
-    for sibling in act.services:
-      if sibling == svc.name:
+  # D-SS11: the contribution points are appended at the END, after the
+  # activity's members, so this block is skipped rather than returned
+  # from -- a PACKAGE-LEVEL service has no declaring activity and the
+  # loop below would find none, but it can still declare `converge`, and
+  # a point that reached the artifact and not the snapshot would be a
+  # point a consumer compiles against and the attach decision cannot see.
+  if svc.activityName.len > 0:
+    for act in value.publicActivities:
+      if act.name != svc.activityName:
         continue
-      result.add(ServiceInterfaceMember(kind: smkSiblingService,
-        name: sibling, signature: ""))
-    break
+      for param in act.params:
+        result.add(ServiceInterfaceMember(kind: smkActivityParam,
+          name: param.name, signature: param.nimType))
+      for key in act.config:
+        # REQUIRED-NESS IS CARRIED AND IT NEEDED NO NEW FIELD. L5's review
+        # expected one `bool` on `InterfaceConfigKey` here; "required" is
+        # exactly "declared with no default" (L5's own words: "a `config:`
+        # key with no default is a REQUIRED configurable"), and
+        # `hasDefault` has carried that since L3 at v21. So the signature
+        # below spells it out of the two fields that already exist, and the
+        # envelope gained no field for it -- see this milestone's report.
+        result.add(ServiceInterfaceMember(kind: smkConfigKey,
+          name: key.name,
+          signature:
+            key.nimType &
+            (if key.hasDefault: " = " & key.defaultRepr else: " (required)")))
+      for sibling in act.services:
+        if sibling == svc.name:
+          continue
+        result.add(ServiceInterfaceMember(kind: smkSiblingService,
+          name: sibling, signature: ""))
+      break
+  # D-SS11: the contribution points, LAST.
+  #
+  # The signature is the point's own name, not its type: the lift carries
+  # bare names (§4.6's reason -- the consumer's spelling and the owner's
+  # are the same string), and the TYPE of a contribution point is
+  # `seq[string]` for every point this port carries, so a type here would
+  # be a constant dressed as a comparand.
+  for point in svc.contributionPoints:
+    result.add(ServiceInterfaceMember(kind: smkContributionPoint,
+      name: point, signature: point))
+
+proc contributionPointsOf*(snapshot: ServiceInterfaceSnapshot):
+    seq[string] =
+  ## The CONTRIBUTION POINTS a snapshot declares, bare names, declaration
+  ## order.
+  ##
+  ## §4.6: "a contribution that reaches an instance which does not
+  ## declare that point must be **refused, never dropped** -- including
+  ## across a version skew, where the running instance was built from an
+  ## older definition that lacks the point." The snapshot is the one
+  ## record both sides of that comparison already carry: the RUNNING
+  ## instance's is persisted with its registry record, and the resolving
+  ## definition's comes out of the owner's lift. So this projection --
+  ## and not a second channel -- is what the refusal reads.
+  for member in snapshot.members:
+    if member.kind == smkContributionPoint:
+      result.add(member.name)
 
 proc serviceInterfaceFingerprint*(members: openArray[ServiceInterfaceMember]):
     string =

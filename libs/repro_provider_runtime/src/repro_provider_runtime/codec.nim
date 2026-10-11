@@ -288,6 +288,69 @@ proc readDevEnvTask(bytes: openArray[byte]; pos: var int): DevEnvTaskMetadata =
     command: readString(bytes, pos),
     activityRequirements: readStringSeq(bytes, pos))
 
+proc writeDevEnvSharedResolution(outp: var seq[byte];
+                                 value: DevEnvSharedResolution) =
+  ## Shared-Development-Services D-SS11: one resolver call on the
+  ## provider wire. Field order is the record's declaration order, and
+  ## the four parallel contribution seqs are written adjacently so a
+  ## reader that mis-frames one of them mis-frames the next and the
+  ## length check below catches it.
+  outp.writeString(value.ownerPackage)
+  outp.writeString(value.serviceName)
+  outp.writeString(value.activityName)
+  outp.writeString(value.ownerRecipeDir)
+  outp.writeString(value.consumerPackage)
+  outp.writeString(value.environment)
+  outp.writeString(value.sourceFile)
+  outp.writeU64Le(cast[uint64](value.sourceLine))
+  outp.writeStringSeq(value.contributionPoints)
+  outp.writeStringSeq(value.contributionOperations)
+  outp.writeStringSeq(value.contributionPrecedences)
+  outp.writeStringSeq(value.contributionSites)
+  outp.writeStringSeq(value.contributionMemberPoints)
+  outp.writeStringSeq(value.contributionMembers)
+
+proc readDevEnvSharedResolution(bytes: openArray[byte];
+                                pos: var int): DevEnvSharedResolution =
+  result.ownerPackage = readString(bytes, pos)
+  result.serviceName = readString(bytes, pos)
+  result.activityName = readString(bytes, pos)
+  result.ownerRecipeDir = readString(bytes, pos)
+  result.consumerPackage = readString(bytes, pos)
+  result.environment = readString(bytes, pos)
+  result.sourceFile = readString(bytes, pos)
+  result.sourceLine = cast[int64](readU64Le(bytes, pos))
+  result.contributionPoints = readStringSeq(bytes, pos)
+  result.contributionOperations = readStringSeq(bytes, pos)
+  result.contributionPrecedences = readStringSeq(bytes, pos)
+  result.contributionSites = readStringSeq(bytes, pos)
+  result.contributionMemberPoints = readStringSeq(bytes, pos)
+  result.contributionMembers = readStringSeq(bytes, pos)
+  # The four per-contribution seqs are parallel BY CONSTRUCTION (one
+  # loop builds them), so a disagreement here is a shifted offset or a
+  # record assembled from two reads. REFUSED rather than truncated to
+  # the shortest: truncating would drop a contribution, and a dropped
+  # contribution is the defect this whole lane exists to prevent.
+  if result.contributionOperations.len != result.contributionPoints.len or
+     result.contributionPrecedences.len != result.contributionPoints.len or
+     result.contributionSites.len != result.contributionPoints.len:
+    raiseEnvelopeError(eeMalformed,
+      "dev-env shared resolution for `" & result.ownerPackage & "." &
+      result.serviceName & "` carries " & $result.contributionPoints.len &
+      " contribution points but " & $result.contributionOperations.len &
+      " operations, " & $result.contributionPrecedences.len &
+      " precedences and " & $result.contributionSites.len &
+      " sites. The four lists are parallel by construction, so a " &
+      "mismatch means the record was not read as it was written.")
+  if result.contributionMemberPoints.len != result.contributionMembers.len:
+    raiseEnvelopeError(eeMalformed,
+      "dev-env shared resolution for `" & result.ownerPackage & "." &
+      result.serviceName & "` carries " &
+      $result.contributionMembers.len & " members but " &
+      $result.contributionMemberPoints.len &
+      " member points. Each member names the point it belongs to; a " &
+      "mismatch would attribute members to the wrong point silently.")
+
 proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
   outp.writeString(value.name)
   outp.writeStringSeq(value.activityRequirements)
@@ -408,6 +471,11 @@ proc writeDevEnvResult(outp: var seq[byte]; value: DevEnvResult) =
   outp.writeU32Le(uint32(value.sourceFingerprints.len))
   for item in value.sourceFingerprints:
     outp.writeDevEnvFingerprint(item)
+  # Shared-Development-Services D-SS11: appended at the END, for the
+  # reason L8's and L9's service blocks were.
+  outp.writeU32Le(uint32(value.sharedResolutions.len))
+  for item in value.sharedResolutions:
+    outp.writeDevEnvSharedResolution(item)
 
 proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
   result.schemaVersion = readU32Le(bytes, pos)
@@ -446,6 +514,10 @@ proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
   result.sourceFingerprints = newSeq[DevEnvSourceFingerprint](count)
   for i in 0 ..< count:
     result.sourceFingerprints[i] = readDevEnvFingerprint(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.sharedResolutions = newSeq[DevEnvSharedResolution](count)
+  for i in 0 ..< count:
+    result.sharedResolutions[i] = readDevEnvSharedResolution(bytes, pos)
 
 proc writeStoredFragment(outp: var seq[byte]; value: StoredGraphFragment) =
   outp.writeString(value.invocationKey)

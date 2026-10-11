@@ -975,6 +975,35 @@ type
       ## `holders.len`, because "no holders" and "no holders I can name"
       ## are the two states §4.5 insists must not be conflated.
     holders*: seq[string]
+    contributionPoints*: seq[string]
+      ## Shared-Development-Services D-SS11 (§4.6): the CONTRIBUTION
+      ## POINTS the instance this decision resolved to DECLARES, bare
+      ## names, declaration order.
+      ##
+      ## §4.6 requires a contribution to a point "the running instance
+      ## does not declare" to be refused, "including across a version
+      ## skew, where the running instance was built from an older
+      ## definition that lacks the point". That is a fact about the
+      ## RUNNING instance, and on an attach it comes from the registry
+      ## entry's own persisted snapshot -- not from the snapshot the
+      ## requesting consumer sent, which is by definition the newer
+      ## definition when there is skew.
+      ##
+      ## SENT ON THE RESPONSE RATHER THAN READ FROM THE STORE BY THE
+      ## CLIENT, and the reason is measured rather than stylistic: the
+      ## daemon's instance records live under its own `--state-root`,
+      ## while a client's `serviceInstanceStoreRoot(dlsUser)` with no
+      ## override is `$HOME/.cache/repro/state`. A client that read the
+      ## record itself would find nothing whenever the daemon was
+      ## started with an explicit root, and would then refuse every
+      ## contribution for a reason that has nothing to do with the
+      ## contribution.
+      ##
+      ## An EMPTY list is "this instance converges no points", which is
+      ## what every pre-D-SS11 instance really did and what a client
+      ## built against an older protocol decodes to. It is not "unknown":
+      ## a contribution against it is refused by name, which is the
+      ## correct answer for an instance that declares none.
 
   DaemonServiceReleaseRequest* = object
     ## L7 (§4.5) `repro down`'s release request.
@@ -1061,6 +1090,8 @@ proc serviceConvergeResponseBody*(response: DaemonServiceConvergeResponse):
   result.writeBool(response.hadInstance)
   result.writeBool(response.holderSetRecoverable)
   result.writeStringSeq(response.holders)
+  # D-SS11: appended at the END, so every field above keeps its offset.
+  result.writeStringSeq(response.contributionPoints)
 
 proc parseServiceConvergeResponseBody*(body: openArray[byte]):
     DaemonServiceConvergeResponse =
@@ -1073,6 +1104,13 @@ proc parseServiceConvergeResponseBody*(body: openArray[byte]):
   result.hadInstance = body.readBool(pos)
   result.holderSetRecoverable = body.readBool(pos)
   result.holders = body.readStringSeq(pos)
+  if pos < body.len:
+    # A body written before D-SS11 ends here. Read as an EMPTY point
+    # list rather than refused, for the reason the field's own comment
+    # gives: an instance that converges no points is a real state, and
+    # refusing the whole response over a trailing field would make a
+    # newer client unable to talk to an older daemon at all.
+    result.contributionPoints = body.readStringSeq(pos)
 
 proc serviceReleaseRequestBody*(request: DaemonServiceReleaseRequest):
     seq[byte] =

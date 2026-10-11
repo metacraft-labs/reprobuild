@@ -61,17 +61,28 @@ suite "dev-env large environment values":
     let digest = blake3.digest(encodeDevEnvArtifact(fixture("small")))
     var hex = ""
     for b in digest: hex.add(toHex(int(b), 2).toLowerAscii())
-    # Measured at Shared-Development-Services L9. The two superseded pins,
-    # kept so the history of this guard is readable from the guard:
+    # Measured at Shared-Development-Services D-SS11. The three
+    # superseded pins, kept so the history of this guard is readable
+    # from the guard:
     #   pre-L8: 5260be4bfb09c2ffe0536e5057001b866a0b478e5e5251660495d7c54be5521e
     #   L8:     04d3aa770b1e294eb716ae258fdd56830d9e8c5da310a888cb927ae7e4eb7e53
-    # The header says what moved it each time.
-    check hex == "1cdd6d320513d693cb051af7c48e9faf9c9d7a1ac427cafab5bdf42b404c7844"
+    #   L9:     1cdd6d320513d693cb051af7c48e9faf9c9d7a1ac427cafab5bdf42b404c7844
+    # The header says what moved it each time. D-SS11 moved it by adding
+    # `DevEnvArtifact.sharedResolutions` -- a new variable-size SSZ
+    # field, so the container's fixed portion grew by one 4-byte offset
+    # entry and every later offset shifted -- and by moving both version
+    # numbers 3 -> 4.
+    #
+    # THIS FIXTURE CARRIES NO RESOLUTION, which is what makes the pin
+    # worth having: the digest moved for the SCHEMA, not for content, so
+    # an implementation that added the field without moving the versions
+    # would fail the two cases below rather than this one.
+    check hex == "2758a09be9e22f307c4dd3d267947f15520e530d00e5027bf00066998421631c"
 
-  test "the artifact declares schema version 3, and 1 and 2 are refused":
+  test "the artifact declares schema version 4, and 1, 2 and 3 are refused":
     # The assertions that keep the re-pin above from being a blessing.
     check decodeDevEnvArtifact(
-      encodeDevEnvArtifact(fixture("small"))).schemaVersion == 3'u32
+      encodeDevEnvArtifact(fixture("small"))).schemaVersion == 4'u32
     # The envelope version is a little-endian u16 directly after the
     # 4-byte magic. PINNED rather than searched for: an earlier revision
     # of this case scanned for the first `02 00` pair, which does land on
@@ -79,7 +90,7 @@ suite "dev-env large environment values":
     # "whatever byte matched" instead of about the VERSION.
     const VersionOffset = 4
     var bytes = encodeDevEnvArtifact(fixture("small"))
-    check bytes[VersionOffset] == 3'u8
+    check bytes[VersionOffset] == 4'u8
     check bytes[VersionOffset + 1] == 0'u8
     #
     # AND THE REFUSAL IS ASSERTED ON ITS MESSAGE, NOT ON THE EXCEPTION
@@ -97,7 +108,7 @@ suite "dev-env large environment values":
     # carries, so it is the stale input that actually occurs. Version 1 is
     # kept because a guard that only knew about its immediate predecessor
     # would read the one before that with shifted offsets.
-    for superseded in [1'u8, 2'u8]:
+    for superseded in [1'u8, 2'u8, 3'u8]:
       bytes[VersionOffset] = superseded
       var refusal = ""
       try:
@@ -110,13 +121,48 @@ suite "dev-env large environment values":
     # ...and a version this build does not know YET is refused the same
     # way, by name, rather than read with shifted offsets.
     var future = encodeDevEnvArtifact(fixture("small"))
-    future[VersionOffset] = 4'u8
+    future[VersionOffset] = 5'u8
     var futureRefusal = ""
     try:
       discard decodeDevEnvArtifact(future)
     except DevEnvArtifactCodecError as err:
       futureRefusal = err.msg
-    check "envelope version 4" in futureRefusal
+    check "envelope version 5" in futureRefusal
+
+  test "the SCHEMA gate is independent of the envelope gate, and it fires":
+    # WHAT THIS CASE ADDS, and it is the gain that makes the re-pin above
+    # something other than a blessing.
+    #
+    # The codec has TWO equality gates on two different numbers:
+    # `parseEnvelope` refuses an unexpected `EnvelopeVersion` (the u16
+    # after the magic) and `decodeDevEnvArtifactSszPayload` refuses an
+    # unexpected `DevEnvArtifactSchemaVersion` (a u32 inside the
+    # payload). Every assertion in the case above flips the ENVELOPE
+    # byte, so the schema gate was asserted as a VALUE and never
+    # exercised as a REFUSAL -- deleting it would have left that case
+    # green, which is exactly the shape of unprotected guard this file's
+    # header exists to refuse.
+    #
+    # The payload is produced by the real encoder with the schema field
+    # set to the immediately preceding version, which is the stale input
+    # that actually occurs: a dev-env artifact cached by the previous
+    # build. `encodeDevEnvArtifact` only fills the field when it is 0
+    # and recomputes `artifactId` over the result, so the envelope is
+    # well-formed, the checksum matches and the identity matches -- the
+    # ONLY thing wrong with these bytes is the schema version, and the
+    # refusal has to name it.
+    var stale = fixture("small")
+    stale.schemaVersion = DevEnvArtifactSchemaVersion - 1
+    var refusal = ""
+    try:
+      discard decodeDevEnvArtifact(encodeDevEnvArtifact(stale))
+    except DevEnvArtifactCodecError as err:
+      refusal = err.msg
+    checkpoint("the schema gate did not refuse by name; it said: " & refusal)
+    check "schema version " & $(DevEnvArtifactSchemaVersion - 1) in refusal
+    # And the envelope was NOT the thing that refused: a reader that
+    # answered on the envelope here would be reporting the wrong number.
+    check "envelope version" notin refusal
 
   test "value capacity is bounded independently of metadata":
     let largest = repeat("x", 128 * 1024)

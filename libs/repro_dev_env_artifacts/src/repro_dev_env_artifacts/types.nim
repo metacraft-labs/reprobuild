@@ -58,6 +58,44 @@ type
     instanceLeaseTtlSeconds*: int64
     instanceEnvironment*: string
 
+  DevEnvSharedResolutionSummary* = object
+    ## Shared-Development-Services D-SS11 (§4.6): one resolver call, as
+    ## the ARTIFACT carries it.
+    ##
+    ## Field-for-field the provider record
+    ## (`repro_provider_runtime`'s `DevEnvSharedResolution`), mapped by
+    ## NAME in `artifactFromDevEnvResult`. Two records rather than one
+    ## for the reason `DevEnvServiceSummary` and
+    ## `DevEnvServiceMetadata` are two: the provider wire and the
+    ## artifact are versioned independently and this library must not
+    ## depend on that one's layout.
+    ##
+    ## WHY IT IS ON THE ARTIFACT AT ALL. The artifact is the DURABLE
+    ## answer to a dev-env edge; a cached edge is served from it without
+    ## re-running the provider. A resolution that lived only on the
+    ## provider wire would therefore reach `repro up` on a cold
+    ## evaluation and not on a cached one, so a consumer's contributions
+    ## would be deposited once and then silently stop being deposited --
+    ## the exact "declared, looks wired, does nothing" shape §4.6 exists
+    ## to close.
+    ownerPackage*: string
+    serviceName*: string
+    activityName*: string
+    ownerRecipeDir*: string
+    consumerPackage*: string
+    environment*: string
+      ## The environment selected for the evaluation that resolved this
+      ## service -- §6.5's third component of the instance key. Derived,
+      ## never authored; see the provider record's own note.
+    sourceFile*: string
+    sourceLine*: int64
+    contributionPoints*: seq[string]
+    contributionOperations*: seq[string]
+    contributionPrecedences*: seq[string]
+    contributionSites*: seq[string]
+    contributionMemberPoints*: seq[string]
+    contributionMembers*: seq[string]
+
   DevEnvArtifact* = object
     schemaVersion*: uint32
     artifactId*: Digest32
@@ -85,6 +123,15 @@ type
     sourceFingerprints*: seq[DevEnvSourceFingerprint]
     evaluationEvidenceRef*: Digest32
     providerMetadata*: DynamicValue
+    sharedResolutions*: seq[DevEnvSharedResolutionSummary]
+      ## Shared-Development-Services D-SS11 (§4.6): every
+      ## `<package>.<service>.shared(...)` call this project's recipe
+      ## made.
+      ##
+      ## APPENDED AT THE END, after `providerMetadata`, so every field
+      ## above keeps its SSZ offset and the navigator's relational
+      ## assertions about the `shellOps` / `tasks` / `services` sections
+      ## stay about what they claim.
 
   DevEnvNavigatorStats* = object
     envelopeBytesChecked*: int
@@ -100,7 +147,7 @@ type
     servicesSectionStart*: int
 
 const
-  DevEnvArtifactSchemaVersion* = 3'u32
+  DevEnvArtifactSchemaVersion* = 4'u32
     ## Shared-Development-Services L8 bumped this from 1 to 2 because
     ## `DevEnvServiceSummary` grew eight fields and the SSZ container is
     ## positional, so a v1 payload decoded as v2 would not be refused by

@@ -515,6 +515,14 @@ proc isProviderModePath(path: string): bool =
       "t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
     "libs/repro_project_dsl/tests/" &
       "t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services D-SS11: drives ``buildPackageDevEnv``
+    # over a fixture whose consumer packages resolve a shared service
+    # through ``<package>.<service>.shared(...)``, and reads the
+    # resolutions the provider lowered -- ``buildPackageDevEnv``,
+    # ``ProviderGraphRequest`` and the generated ``devEnv<Pkg>Package``
+    # exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss11_resolutions_reach_the_dev_env_artifact.nim",
   ]:
     if p == exact:
       return true

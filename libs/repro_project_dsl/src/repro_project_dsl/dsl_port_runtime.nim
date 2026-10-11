@@ -700,13 +700,21 @@ proc renderDiscardedContribution*(d: DiscardedContribution): string =
     $d.supersededBy.precedence &
     " or stop replacing the collection."
 
-proc foldContributionPoint*(key: string): ContributionFold =
-  ## `Configurable-System.md` §Resolution, the four steps, in order.
-  if key notin dslPortContributionPoints:
-    raise newException(EDslPortNotAContributionPoint,
-      "foldContributionPoint('" & key & "'): not a contribution point")
-  let rows = dslPortContributions.getOrDefault(key)
-
+proc foldContributionRows*(key: string;
+                           rows: seq[ConfigContribution]): ContributionFold =
+  ## `Configurable-System.md` §Resolution, the four steps, in order,
+  ## over an EXPLICIT row set.
+  ##
+  ## WHY THIS IS THE ONE WITH THE ALGEBRA IN IT. D-SS11's cross-process
+  ## lane folds rows that were written by ANOTHER PROCESS and read back
+  ## from a store, so they are not in `dslPortContributions` and cannot
+  ## be. Folding them with a second implementation would mean two
+  ## answers to "which append wins" -- the drift this campaign has paid
+  ## for repeatedly -- so the registry-backed `foldContributionPoint`
+  ## below is now a one-line caller of this proc and both lanes resolve
+  ## by the same four steps.
+  ##
+  ## `key` is used only in diagnostics; the rows are the whole input.
   # Step 1: R is the highest-priority `replace`.
   var rIdx = -1
   for i in 0 ..< rows.len:
@@ -758,6 +766,15 @@ proc foldContributionPoint*(key: string): ContributionFold =
     if ord(rows[i].precedence) >= ord(rows[rIdx].precedence): continue
     result.discarded.add(DiscardedContribution(
       key: key, discarded: rows[i], supersededBy: rows[rIdx]))
+
+proc foldContributionPoint*(key: string): ContributionFold =
+  ## `Configurable-System.md` §Resolution for a key this process's
+  ## registry holds. The four steps live in `foldContributionRows`; this
+  ## proc is the registry lookup and nothing else.
+  if key notin dslPortContributionPoints:
+    raise newException(EDslPortNotAContributionPoint,
+      "foldContributionPoint('" & key & "'): not a contribution point")
+  foldContributionRows(key, dslPortContributions.getOrDefault(key))
 
 proc configurableContributions*(key: string): seq[ConfigContribution] =
   ## `Configurable-System.md`'s `c.contributions`: every contribution to
@@ -906,6 +923,237 @@ proc contributeMembers*(key, package: string;
   ## The call the `contribute:` lowering emits, one per contribution.
   contributeConfigurableRaw(key, package, precedence, operation,
     dslScalarSeqString(members), sourceFile, sourceLine)
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services D-SS11 (§4.6) — the RESOLVER's runtime
+# record, and the CROSS-PROCESS contribution lane's consumer end.
+#
+# §4.6 decides three things together, and this is the third: "the
+# consumer's contributions are **arguments of the resolver call**,
+# carried on the interface the owner already lifts, and applied by the
+# owner's instance when it converges."
+#
+# WHY A REGISTRY HERE AND NOT A CONTRIBUTION. `contributeMembers` is the
+# INTRA-PROCESS lane: it writes into `dslPortContributions`, which is a
+# table of this process, folded by this process's `mergeTypedServiceFacts`
+# for services this process declares. A consumer does not declare the
+# owner's service, so there is no fold here for its members to land in,
+# and writing them into `dslPortContributions` would be precisely the
+# "declared, looks wired, does nothing" defect L9's F2 measured: in the
+# consumer's process the fold would show the member and the owner's
+# instance would never see it.
+#
+# So a resolver records a RESOLUTION instead. The resolution travels on
+# the consumer's dev-env artifact to the consumer's `repro up`, which
+# attaches to the instance and deposits the contributions in the
+# instance's own identity-keyed store, where the OWNER's converge reads
+# them. Every step of that is a different process reading a file the
+# previous one wrote, which is what makes the lane cross-process rather
+# than a second name for the intra-process one.
+# ---------------------------------------------------------------------------
+
+type
+  EDslPortSharedServiceRefusal* = object of CatchableError
+    ## Every refusal of this surface. A resolver that cannot be honoured
+    ## raises; none of them returns a handle that does nothing.
+
+var dslPortSharedResolutions: seq[SharedServiceResolution]
+  ## Every resolver call this evaluation made, in call order.
+
+var dslPortResolverPackages: seq[string]
+  ## The stack of packages whose dev-env bodies are being lowered. A
+  ## STACK and not a scalar because one process lowers several packages
+  ## (a sibling `include` shim expands two `package` blocks), and a
+  ## scalar would leave the second attributing its resolvers to the
+  ## first after the first's `finally` cleared it.
+
+proc beginResolverPackage*(packageName: string) =
+  ## Enter `packageName`'s dev-env lowering. Emitted by the `package`
+  ## macro around the generated `devEnv<Pkg>Package()` body.
+  dslPortResolverPackages.add(packageName)
+
+proc endResolverPackage*() =
+  ## Leave it. Emitted in a `finally`, so a body that raises does not
+  ## leak the ambient into whatever is lowered next.
+  if dslPortResolverPackages.len > 0:
+    dslPortResolverPackages.setLen(dslPortResolverPackages.len - 1)
+
+proc currentResolverPackage*(): string =
+  ## The package a resolver call is being evaluated for, or "" outside
+  ## any dev-env lowering. `resolveSharedService` REFUSES the empty
+  ## case rather than recording an unattributed contribution.
+  if dslPortResolverPackages.len == 0: ""
+  else: dslPortResolverPackages[^1]
+
+proc resetSharedServiceResolutions*() =
+  ## Drop every recorded resolution. Called by the port's own reset
+  ## between test cases, and by nothing in a recipe.
+  dslPortSharedResolutions.setLen(0)
+  dslPortResolverPackages.setLen(0)
+
+proc registeredSharedServiceResolutions*(): seq[SharedServiceResolution] =
+  ## The resolutions recorded so far, in call order.
+  dslPortSharedResolutions
+
+proc sharedResolutionsEqual(a, b: SharedServiceResolution): bool =
+  ## Whether two resolutions are the SAME call, site included. Used only
+  ## to drop a replay; a difference in anything is a real second
+  ## resolver and is refused rather than merged.
+  if a.declaration != b.declaration: return false
+  if a.consumerPackage != b.consumerPackage: return false
+  if a.sourceFile != b.sourceFile or a.sourceLine != b.sourceLine:
+    return false
+  if a.contributions.len != b.contributions.len: return false
+  for i in 0 ..< a.contributions.len:
+    if a.contributions[i] != b.contributions[i]: return false
+  return true
+
+proc renderSharedResolutionSite(r: SharedServiceResolution): string =
+  if r.sourceFile.len == 0: "<unknown site>"
+  else: r.sourceFile & ":" & $r.sourceLine
+
+proc resolveSharedService*[T](declaration: SharedServiceDeclarationDef;
+                              consumerPackage: string;
+                              contributions: seq[SharedContributionDef];
+                              sourceFile = ""; sourceLine = 0):
+    SharedServiceHandle[T] =
+  ## THE RESOLVER. `<package>.<service>.shared(...)` lowers to this.
+  ##
+  ## It records the resolution and returns a handle. It does NOT contact
+  ## the daemon, take a lease or compare a fingerprint: evaluation
+  ## happens while the dev-env artifact is being produced, before any
+  ## instance exists to decide against. §4.6's "the resolver is where
+  ## the machinery of §4 is triggered" is honoured by the resolution
+  ## travelling to `repro up`, which resolves `(identity, scope,
+  ## environment)`, takes the lease and runs §4.3's attach decision AT
+  ## THIS CALL SITE -- the site is carried in the record so the
+  ## diagnostic lands on the consumer's own line, which is the property
+  ## §4.6 asks for ("a fingerprint mismatch warns *here*, at a named
+  ## call site in the consumer's recipe").
+  ##
+  ## FOUR REFUSALS, NONE OF THEM A DROP:
+  ##   1. a declaration with no owner package or no service name -- a
+  ##      const that was not produced by the lift;
+  ##   2. a contribution naming a point the DECLARATION does not carry
+  ##      (the resolver macro refuses this at compile time; this is the
+  ##      same check for a direct caller, because a public proc that
+  ##      trusted its arguments would make the macro's check the only
+  ##      one and a library caller's mistake silent);
+  ##   3. a `replace` operation -- §5.1 / D-SS9;
+  ##   4. a SECOND resolver for one service in one consumer package.
+  ##      Two resolvers would take two leases and deposit two
+  ##      contribution sets for one key, and the second write would have
+  ##      to either lose or duplicate the first. A byte-identical replay
+  ##      is not a second resolver and is dropped silently, because
+  ##      module init replays (`rerunServiceDeclarators`).
+  if consumerPackage.len == 0:
+    raise newException(EDslPortSharedServiceRefusal,
+      "shared(" & declaration.ownerPackage & "." &
+      declaration.serviceName & "): no CONSUMING package is in scope, " &
+      "so this resolution could not be attributed to one. A resolver " &
+      "belongs at an `enable <activity>(...)` call inside a " &
+      "`devEnv:` block of a `package` body " &
+      "(Shared-Development-Services.md §4.6: \"In the consuming " &
+      "project's own recipe, at its `enable <activity>(...)` call\"), " &
+      "which is the scope that names the contributor. An " &
+      "unattributed contribution is refused rather than recorded: §5 " &
+      "requires every converged member to name the package that " &
+      "contributed it, and a blank contributor can never be withdrawn.")
+  if declaration.ownerPackage.len == 0 or declaration.serviceName.len == 0:
+    raise newException(EDslPortSharedServiceRefusal,
+      "shared(): the declaration record names no owner package or no " &
+      "service (" & declaration.ownerPackage & "." &
+      declaration.serviceName & "). A resolver is spelled against a " &
+      "declaration the OWNER's interface lift produced; a hand-built " &
+      "one is refused rather than resolved against a default key.")
+  for c in contributions:
+    if c.point.len == 0:
+      raise newException(EDslPortSharedServiceRefusal,
+        "shared(" & declaration.ownerPackage & "." &
+        declaration.serviceName & "): a contribution names no point. " &
+        "An unnamed contribution cannot be matched against a declared " &
+        "point, so it is refused rather than carried to an instance " &
+        "that would ignore it.")
+    if c.operation != coAppend:
+      raise newException(EDslPortSharedServiceRefusal,
+        "shared(" & declaration.ownerPackage & "." &
+        declaration.serviceName & "): `" & c.point & "` is contributed " &
+        "with `" & $c.operation & "`. A consumer of a shared service " &
+        "may `append` freely and may NOT `replace`: " &
+        "Shared-Development-Services.md §5.1 -- \"a consumer that could " &
+        "replace them would fork the instance it is trying to join\" -- " &
+        "and who may use the destructive operation is D-SS9, still " &
+        "open. Write `append` (or `appendOverride` / `appendForce`).")
+    if not declaration.contributionPoints.contains(c.point):
+      raise newException(EDslPortSharedServiceRefusal,
+        "shared(" & declaration.ownerPackage & "." &
+        declaration.serviceName & "): service `" &
+        declaration.serviceName & "` of package `" &
+        declaration.ownerPackage & "` declares no contribution point " &
+        "`" & c.point & "`. It converges " &
+        (if declaration.contributionPoints.len == 0: "no points at all"
+         else: "`" & declaration.contributionPoints.join("`, `") & "`") &
+        ". Shared-Development-Services.md §4.6: a contribution to a " &
+        "point the instance does not declare is REFUSED, never dropped.")
+  let row = SharedServiceResolution(
+    declaration: declaration, consumerPackage: consumerPackage,
+    contributions: contributions,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+  for existing in dslPortSharedResolutions:
+    if existing.declaration.ownerPackage != declaration.ownerPackage or
+       existing.declaration.serviceName != declaration.serviceName or
+       existing.consumerPackage != consumerPackage:
+      continue
+    if sharedResolutionsEqual(existing, row):
+      return SharedServiceHandle[T](
+        ownerPackage: declaration.ownerPackage,
+        serviceName: declaration.serviceName,
+        activityName: declaration.activityName,
+        consumerPackage: consumerPackage,
+        sourceFile: sourceFile, sourceLine: sourceLine)
+    raise newException(EDslPortSharedServiceRefusal,
+      "package `" & consumerPackage & "` resolves `" &
+      declaration.ownerPackage & "." & declaration.serviceName &
+      "` twice: " & renderSharedResolutionSite(existing) & " and " &
+      (if sourceFile.len == 0: "<unknown site>"
+       else: sourceFile & ":" & $sourceLine) &
+      ". One consumer takes ONE lease on one instance and deposits ONE " &
+      "contribution set for it, so a second resolver would have to " &
+      "either lose or duplicate the first's contributions. Resolve " &
+      "once and pass the handle to every activity that needs it.")
+  dslPortSharedResolutions.add(row)
+  SharedServiceHandle[T](
+    ownerPackage: declaration.ownerPackage,
+    serviceName: declaration.serviceName,
+    activityName: declaration.activityName,
+    consumerPackage: consumerPackage,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+
+proc sharedContribution*(point: string; members: seq[string];
+                         precedence = epSet;
+                         operation = coAppend;
+                         sourceFile = ""; sourceLine = 0):
+    SharedContributionDef =
+  ## One contribution, as the resolver macro builds it.
+  SharedContributionDef(point: point, operation: operation,
+    precedence: precedence, members: members,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+
+proc contributionRowsOfResolution*(r: SharedServiceResolution;
+                                   resolveKey: proc (point: string): string):
+    seq[ConfigContribution] =
+  ## Project one resolution's contributions onto the SAME row type the
+  ## intra-process lane folds (`ConfigContribution`), so the
+  ## cross-process fold is `foldContributionRows` and not a second
+  ## algebra. `resolveKey` maps a bare point name to the owner's
+  ## fully-qualified configurable key; the caller supplies it because
+  ## only the owner knows its own activity name.
+  for c in r.contributions:
+    result.add(ConfigContribution(
+      key: resolveKey(c.point), package: r.consumerPackage,
+      precedence: c.precedence, operation: c.operation,
+      value: dslScalarSeqString(c.members),
+      sourceFile: c.sourceFile, sourceLine: c.sourceLine))
 
 proc contributionSnapshot*(): Table[string, seq[ConfigContribution]] =
   ## A copy of the contribution registry, for a caller that must apply a

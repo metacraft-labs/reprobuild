@@ -290,6 +290,84 @@ type
     identity*: string
     digest*: string
 
+  DevEnvSharedResolution* = object
+    ## Shared-Development-Services D-SS11 (§4.6): one
+    ## `<package>.<service>.shared(...)` call in a CONSUMER's recipe, on
+    ## its way out of the evaluation that made it.
+    ##
+    ## This is the whole of what the cross-process contribution lane
+    ## carries. §4.6: "the consumer's contributions are **arguments of
+    ## the resolver call**, carried on the interface the owner already
+    ## lifts, and applied by the owner's instance when it converges." The
+    ## first half of that is the owner's lift (which now carries its
+    ## contribution points); this record is the second half's vehicle --
+    ## it takes the consumer's arguments to the consumer's `repro up`,
+    ## which deposits them in the instance's identity-keyed store where
+    ## the owner's converge reads them.
+    ##
+    ## WHY THE ARTIFACT AND NOT A DIRECT WRITE. The resolver is evaluated
+    ## inside the provider process, which may not run again: a cached
+    ## dev-env edge is answered from the artifact. A resolver that wrote
+    ## the store itself would therefore deposit its contributions on the
+    ## first `repro up` and on no later one, so a `repro down` plus
+    ## `repro up` would attach WITHOUT the contributions and nothing
+    ## would say so -- a construct that is declared, looks wired and
+    ## works once. Carrying the record makes the deposit a function of
+    ## the artifact rather than of whether the evaluation was cached.
+    ##
+    ## THE ENUMS CROSS AS STRINGS, as every other enum on this wire
+    ## does: `repro_project_dsl` imports this library, so naming
+    ## `ContributionOperation` or `EnvironmentPrecedence` here would be a
+    ## cycle. The empty string means UNDECLARED and is refused by name on
+    ## the reading side rather than mapped to an ordinal-0 default --
+    ## ordinal 0 is `coReplace`, which is the one operation a consumer
+    ## may not use, so a silent default would turn a dropped field into
+    ## a destructive contribution.
+    ownerPackage*: string
+    serviceName*: string
+    activityName*: string
+    ownerRecipeDir*: string
+    consumerPackage*: string
+    environment*: string
+      ## The environment SELECTED for the evaluation that made this
+      ## resolution, derived from `selectedEnvironmentName()` -- never
+      ## written by the author.
+      ##
+      ## §6.5 makes the environment part of the instance key, and §6.4
+      ## makes its selection a per-invocation tracked input. The owner's
+      ## `instance:` block derives it the same way and REFUSES an
+      ## authored `environment` word for the same reason: a second
+      ## answer could disagree with the selection the artifact was
+      ## evaluated under. A consumer that resolved under `development`
+      ## must attach to the `development` instance even if its `repro
+      ## up` is invoked with nothing selected, so the value is captured
+      ## at evaluation and carried rather than re-read later.
+    sourceFile*: string
+    sourceLine*: int64
+    contributionPoints*: seq[string]
+      ## One entry per CONTRIBUTION, in call order. The next three seqs
+      ## are parallel to this one and a length mismatch is refused: the
+      ## four were built together, so a disagreement means the record was
+      ## assembled from two different reads.
+    contributionOperations*: seq[string]
+    contributionPrecedences*: seq[string]
+    contributionSites*: seq[string]
+      ## `<file>:<line>` of each contribution's own argument, for the
+      ## step-4 diagnostic. Rendered rather than carried as a pair
+      ## because this wire has no `seq[int64]` and a second number
+      ## encoding for one fact is how the two sides drift.
+    contributionMemberPoints*: seq[string]
+      ## One entry per MEMBER: the point that member belongs to.
+      ## Parallel to `contributionMembers`.
+      ##
+      ## A POINT-PER-MEMBER RATHER THAN A COUNT-PER-POINT. A count seq
+      ## would need `seq[int64]`, which this codec does not have, and
+      ## more importantly a wrong count mis-slices SILENTLY -- members
+      ## would be attributed to the neighbouring point with nothing
+      ## malformed to detect. A point name per member is self-describing:
+      ## a member naming a point the record does not declare is a refusal.
+    contributionMembers*: seq[string]
+
   DevEnvResult* = object
     schemaVersion*: uint32
     providerArtifactId*: string
@@ -306,6 +384,11 @@ type
     diagnostics*: seq[DevEnvDiagnostic]
     evaluationInputs*: seq[GraphEvaluationInput]
     sourceFingerprints*: seq[DevEnvSourceFingerprint]
+    sharedResolutions*: seq[DevEnvSharedResolution]
+      ## Shared-Development-Services D-SS11 (§4.6): every resolver call
+      ## this evaluation made. Appended at the END for the reason the
+      ## L8 and L9 service fields were: a diff of the codec reads as an
+      ## addition rather than a reshuffle.
 
   ProviderGraphRequest* = object
     kind*: ProviderRequestKind

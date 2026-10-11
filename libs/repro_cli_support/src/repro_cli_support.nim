@@ -15205,6 +15205,261 @@ proc liftedServiceDeclaration(interfacePath, serviceName: string):
     serviceName & "` but no row for it, which cannot happen; refusing " &
     "rather than resolving a default identity")
 
+proc ownerInterfaceCandidates(ownerRecipeDir: string): seq[string] =
+  ## Every path the owner's lifted interface could be at, in a
+  ## deterministic order.
+  ##
+  ## There is NO single path, and that is a fact about this tree rather
+  ## than a choice here: `repro dev-env` writes
+  ## `<project>/.repro/dev-env/<activity-segment>/project-interface.rbsz`
+  ## (`defaultDevEnvOutDir`) and `repro build` writes
+  ## `<project>/.repro/build/<target>/project-interface.rbsz`
+  ## (`outputDirForTarget`), so the segment depends on which activity
+  ## the owner enabled and which target it built. A hard-coded path
+  ## would be right for exactly one owner layout and silently absent for
+  ## every other, which the caller would report as "run `repro dev-env`"
+  ## for a project that had already run it.
+  ##
+  ## So the candidates are enumerated and SORTED, and the caller picks
+  ## the first that actually carries the service it is resolving. Sorted
+  ## rather than directory order so two runs on one tree agree about
+  ## which artifact answered.
+  for parent in [".repro" / "dev-env", ".repro" / "build"]:
+    let base = ownerRecipeDir / parent
+    if not dirExists(extendedPath(base)):
+      continue
+    var segments: seq[string] = @[]
+    for kind, path in walkDir(base):
+      if kind == pcDir or kind == pcLinkToDir:
+        segments.add(lastPathPart(path))
+    segments.sort()
+    for segment in segments:
+      let candidate = base / segment / "project-interface.rbsz"
+      if fileExists(extendedPath(candidate)):
+        result.add(candidate)
+
+proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
+                                    edge: DevEnvEdgeResult;
+                                    commandName: string): int =
+  ## Shared-Development-Services D-SS11 (§4.6): run every
+  ## `<package>.<service>.shared(...)` this project's recipe wrote.
+  ##
+  ## THIS IS WHERE §4's MACHINERY TRIGGERS FOR A CONSUMER. §4.6: "The
+  ## resolver is where the machinery of §4 is triggered. It resolves
+  ## `(identity, scope, environment)`, takes a lease, and runs the attach
+  ## decision of §4.3 -- so a fingerprint mismatch warns *here*, at a
+  ## named call site in the consumer's recipe, rather than somewhere
+  ## inside a supervisor's log." Every diagnostic this proc prints names
+  ## the resolver's own file and line, which the resolution record
+  ## carries from the consumer's compilation.
+  ##
+  ## FOUR STEPS PER RESOLUTION, in this order and not interchangeable:
+  ##
+  ##   1. READ THE OWNER'S LIFTED INTERFACE, from the owner's own
+  ##      project-interface artifact. That is where the identity, the
+  ##      scope and the interface FINGERPRINT come from -- §4.3 decides
+  ##      attach-or-refuse on the fingerprint, and a consumer that
+  ##      invented one would be comparing the running instance against
+  ##      itself. Absent is a REFUSAL naming the path and the project to
+  ##      run `repro dev-env` in.
+  ##   2. RESOLVE THE KEY: `(identity, scope, environment)` through the
+  ##      same `sharedServiceInstanceKey` the owner's converge uses, with
+  ##      the environment the consumer's EVALUATION selected.
+  ##   3. CONVERGE, ATTACH-ONLY: the daemon runs L6's `attachDecision`
+  ##      and takes this project's lease. The request carries NO command,
+  ##      and that is the whole of "a resolver is not a constructor"
+  ##      (§4.6): a consumer cannot materialise a service it does not
+  ##      own, because it has no definition of one -- the lift carries
+  ##      the signature and deliberately not the `executable` or `args`.
+  ##      The daemon already refuses a command-less converge that finds
+  ##      no instance, by name.
+  ##   4. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
+  ##      instance declares. Refused, never dropped (§4.6), including
+  ##      under version skew.
+  ##
+  ## Returns 0 when every resolution attached and deposited, and 1 when
+  ## any refused. Called BEFORE the supervisor is launched, for
+  ## `convergeSharedServiceInstances`' reason: a refusal has to stop the
+  ## session rather than arrive after it published `session.up`.
+  let artifact =
+    try:
+      readDevEnvArtifact(edge.artifactPath)
+    except CatchableError as err:
+      raise newException(IOError,
+        "could not read the dev-env artifact at " & edge.artifactPath &
+        " to find resolved shared services: " & err.msg)
+  if artifact.sharedResolutions.len == 0:
+    return 0
+  let projectRoot = parsed.selection.projectRoot
+  let holderId = serviceLeaseHolderId(projectRoot)
+  let storeRoot = serviceInstanceStoreRoot(dlsUser)
+  var refused = 0
+  for resolution in artifact.sharedResolutions:
+    let site =
+      if resolution.sourceFile.len == 0: "<unknown site>"
+      else: resolution.sourceFile & ":" & $resolution.sourceLine
+    let reference = resolution.ownerPackage &
+      (if resolution.activityName.len > 0: "." & resolution.activityName
+       else: "") & "." & resolution.serviceName
+    proc refuse(detail: string) =
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & detail)
+    let candidates =
+      if resolution.ownerRecipeDir.len == 0: @[]
+      else: ownerInterfaceCandidates(resolution.ownerRecipeDir)
+    var lifted: tuple[snapshot: ServiceInterfaceSnapshot;
+                      identity: ServiceIdentityDef; scope: ServiceScope]
+    var liftedFrom = ""
+    var liftErrors: seq[string] = @[]
+    for candidate in candidates:
+      try:
+        lifted = liftedServiceDeclaration(candidate, resolution.serviceName)
+        liftedFrom = candidate
+        break
+      except CatchableError as err:
+        liftErrors.add(candidate & ": " & err.msg)
+    if liftedFrom.len == 0:
+      refuse("the owning project's lifted interface does not carry " &
+        "service `" & resolution.serviceName & "`, so this resolver " &
+        "has no identity, no scope and no interface fingerprint to " &
+        "resolve against. Shared-Development-Services.md §4.3 decides " &
+        "attach-or-refuse on that fingerprint, so there is nothing to " &
+        "decide with. " &
+        (if candidates.len == 0:
+           "No project-interface artifact was found under " &
+           (resolution.ownerRecipeDir / ".repro") &
+           " at all; run `repro dev-env` in the project that declares `" &
+           resolution.ownerPackage & "`."
+         else:
+           "Probed: " & liftErrors.join("; ") & ".") &
+        " (Refused rather than attached on a default identity: the " &
+        "default is `derived` with an empty id, which every service in " &
+        "the workspace would share.)")
+      inc refused
+      continue
+    let declaration = SharedServiceInstanceDeclaration(
+      declared: true,
+      serviceName: resolution.serviceName,
+      environment: resolution.environment,
+      leaseTtlSeconds: SharedServiceInstanceDefaultTtlSeconds)
+    let key =
+      try:
+        sharedServiceInstanceKey(declaration, projectRoot,
+          lifted.identity, lifted.scope)
+      except CatchableError as err:
+        refuse(err.msg)
+        inc refused
+        continue
+    if key.degradationReport().len > 0:
+      # Reported, never swallowed -- L4's rule, and the consumer side
+      # needs it as much as the owner's: a narrower-than-declared
+      # sharing boundary here means this consumer attaches to a
+      # DIFFERENT instance than the owner started, and the symptom
+      # would be contributions that never appear.
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & key.degradationReport())
+    let response = requestUserDaemonServiceConverge(
+      DaemonServiceConvergeRequest(
+        scope: dlsUser,
+        keyJson: encodeServiceInstanceKey(key),
+        snapshotJson: encodeServiceInterfaceSnapshot(lifted.snapshot),
+        holderId: holderId,
+        ttlSeconds: declaration.leaseTtlSeconds,
+        # NO COMMAND, and no `--replace` / `--force` either. A resolver
+        # attaches; it does not construct, and it does not take over. A
+        # takeover is `repro up --replace` in the project that DECLARES
+        # the service, which is the only place a definition to run
+        # exists.
+        command: @[],
+        workingDir: projectRoot,
+        replace: false,
+        force: false))
+    let outcome =
+      try:
+        parseConvergeOutcome(response.outcome)
+      except CatchableError as err:
+        raise newException(ValueError,
+          "the daemon answered `repro " & commandName &
+          "` with an outcome this build does not know: " & err.msg)
+    if not response.ok or convergeRefused(outcome):
+      refuse((if response.diagnostic.len > 0: response.diagnostic
+              else: "the daemon refused the attach (" &
+                response.outcome & ")") &
+        " A resolver ATTACHES to an instance and cannot materialise " &
+        "one: the lift carries the service's signature and " &
+        "deliberately not its command, so `repro up` in the project " &
+        "that DECLARES `" & resolution.serviceName & "` is what starts " &
+        "it (Shared-Development-Services.md §4.6).")
+      inc refused
+      continue
+    if response.diagnostic.len > 0:
+      # §4.3 row 2's warning, AT THE RESOLVER'S OWN CALL SITE, which is
+      # the property §4.6 asks for by name.
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & response.diagnostic)
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()` " & outcomeWord(outcome) & " at " &
+      response.address & " with " & $response.holders.len & " holder" &
+      (if response.holders.len == 1: "" else: "s"))
+    # The RUNNING instance's own declaration of its contribution points,
+    # as the DAEMON answered -- not as the owner's artifact on disk
+    # describes it.
+    #
+    # §4.6's refusal is about what the INSTANCE declares, and under
+    # version skew the instance was built from an older definition than
+    # the artifact now on disk. Reading the artifact a second time would
+    # make the skew case undetectable; the daemon reads the registry
+    # entry's own persisted snapshot, which is the running definition.
+    #
+    # And it is the daemon's answer rather than a store read for a
+    # measured reason: the daemon's records live under its own
+    # `--state-root`, while this process's
+    # `serviceInstanceStoreRoot(dlsUser)` with no override is the user
+    # cache. A client that read the record itself would find nothing
+    # whenever the daemon was started with an explicit root.
+    let runningPoints = response.contributionPoints
+    var rows: seq[ServiceContribution] = @[]
+    for i in 0 ..< resolution.contributionPoints.len:
+      var members: seq[string] = @[]
+      for j in 0 ..< resolution.contributionMembers.len:
+        if resolution.contributionMemberPoints[j] ==
+           resolution.contributionPoints[i]:
+          members.add(resolution.contributionMembers[j])
+      rows.add(ServiceContribution(
+        point: resolution.contributionPoints[i],
+        contributor: resolution.consumerPackage,
+        operation: resolution.contributionOperations[i],
+        precedence: resolution.contributionPrecedences[i],
+        members: members,
+        site: resolution.contributionSites[i]))
+    try:
+      validateServiceContributions(runningPoints, rows,
+        serviceInstanceAddress(key))
+    except CatchableError as err:
+      refuse(err.msg)
+      inc refused
+      continue
+    let deposited =
+      try:
+        depositServiceContributions(storeRoot, key,
+          resolution.consumerPackage, rows)
+      except CatchableError as err:
+        refuse("depositing this project's contributions failed: " & err.msg)
+        inc refused
+        continue
+    # Said out loud even when nothing changed, and even when the
+    # deposit is EMPTY. An empty deposit is a withdrawal, not a no-op,
+    # and a consumer that removed its last contribution should see that
+    # its removal was recorded rather than wonder whether the resolver
+    # ran at all.
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()`: deposited " & $deposited.added &
+      " contribution" & (if deposited.added == 1: "" else: "s") &
+      " for `" & resolution.consumerPackage & "`, replacing " &
+      $deposited.replaced & ", of " &
+      $deposited.set.contributions.len & " on the instance")
+  if refused > 0: 1 else: 0
+
 proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
                                     edge: DevEnvEdgeResult;
                                     commandName: string): int =
@@ -15374,13 +15629,70 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
     # persist, reuse byte-identically, reach argv) and is NOT enough to
     # be an OIDC client id. A consumer handed one of these will fail at
     # the issuer, loudly, which is the right failure for a placeholder.
-    if item.service.registrationMembers.len > 0:
+    # Shared-Development-Services D-SS11 (§4.6) -- APPLY THE
+    # CROSS-PROCESS CONTRIBUTIONS.
+    #
+    # §4.6: the consumer's contributions are "applied by the owner's
+    # instance when it converges". This is that point: the instance is
+    # live, and the members this instance must register are the owner's
+    # own fold PLUS every row a consumer's `repro up` deposited in the
+    # instance's identity-keyed contribution store.
+    #
+    # THE OWNER MUST READ THEM, and that is not an enhancement.
+    # `reconcileServiceRegistrations` removes a member no longer
+    # contributed -- §5's withdrawal property -- so an owner that passed
+    # only its own members would WITHDRAW every consumer's registration
+    # on its next `repro up`. A live OIDC client would be deleted
+    # because the project that asked for it was not the one converging.
+    #
+    # THE GATE IS `registrationPoints`, NOT `registrationMembers`, and
+    # this is a deliberate change from L8's gate. A service that
+    # declares `converge` points and currently folds no members of its
+    # own can still have a consumer's members to register, and -- the
+    # other direction -- a consumer that withdrew its last contribution
+    # must cause a withdrawal rather than leave last week's registration
+    # in place with nothing asking for it. The old gate made both of
+    # those no-ops.
+    var unionMembers = item.service.registrationMembers
+    var unionContributors = item.service.registrationContributors
+    let declaredPoints = contributionPointsOf(snapshot)
+    if item.service.registrationPoints.len > 0:
+      let contributionStoreRoot = serviceInstanceStoreRoot(dlsUser)
+      let stored =
+        try:
+          readServiceContributions(contributionStoreRoot, key)
+        except CatchableError as err:
+          stderr.writeLine("repro " & commandName & ": service `" &
+            item.declaration.serviceName &
+            "`: reading the cross-process contributions of this " &
+            "instance failed: " & err.msg)
+          refused.inc
+          continue
+      if stored.contributions.len > 0:
+        let folded =
+          try:
+            foldCrossProcessContributions(declaredPoints,
+              stored.contributions, serviceInstanceAddress(key))
+          except CatchableError as err:
+            stderr.writeLine("repro " & commandName & ": service `" &
+              item.declaration.serviceName & "`: " & err.msg)
+            refused.inc
+            continue
+        for i in 0 ..< folded.members.len:
+          unionMembers.add(folded.members[i])
+          unionContributors.add(folded.contributors[i])
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: applying " &
+          $folded.members.len & " contributed member" &
+          (if folded.members.len == 1: "" else: "s") & " from " &
+          $stored.contributions.len & " cross-process contribution" &
+          (if stored.contributions.len == 1: "" else: "s"))
+    if item.service.registrationPoints.len > 0:
       let storeRoot = serviceInstanceStoreRoot(dlsUser)
       let reconciled =
         try:
           reconcileServiceRegistrations(storeRoot, key,
-            item.service.registrationMembers,
-            item.service.registrationContributors,
+            unionMembers, unionContributors,
             proc (member, contributor: string): string {.closure.} =
               digestHex(blake3DomainDigest(
                 ("repro-dev-registration.v1\x00" & response.address &
@@ -15511,6 +15823,19 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
   let converged = convergeSharedServiceInstances(parsed, edge, commandName)
   if converged != 0:
     return converged
+  # Shared-Development-Services D-SS11 (§4.6): and run every resolver
+  # this project's recipe wrote, AFTER its own declarations converged and
+  # before anything is started.
+  #
+  # AFTER, for a reason that is not ordering taste: a project may both
+  # declare a shared service and resolve another one, and its own
+  # declaration's instance has to exist before a sibling consumer
+  # attaches to it in the same workspace. Before the supervisor, because
+  # a refused resolution must stop the session rather than arrive after
+  # `session.up`.
+  let resolved = resolveSharedServiceReferences(parsed, edge, commandName)
+  if resolved != 0:
+    return resolved
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
     # W2 — the SAME resolver the detached arm re-creates in

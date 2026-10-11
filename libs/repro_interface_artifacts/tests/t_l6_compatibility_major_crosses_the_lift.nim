@@ -206,12 +206,22 @@ suite "L6 — a v22 artifact still decodes, to the undeclared major":
     check serviceNamed(decoded, "zitadel").compatibilityMajor == 0'u32
     check serviceNamed(decoded, "hostAgent").compatibilityMajor == 0'u32
 
-  test "a v24 envelope is still refused rather than misread":
+  test "a v25 envelope is still refused rather than misread":
     # The version gate widened by one. The property the envelope exists
     # for has to survive that.
+    #
+    # THE PROBE FOLLOWS THE CURRENT VERSION, and it moved 24 -> 25 at
+    # D-SS11, which appended `InterfaceService.contributionPoints` at
+    # envelope v24. The point of the case is "a version this build does
+    # not know is refused rather than read with shifted offsets", so the
+    # probe has to be the FIRST UNKNOWN one; pinned to 24 it was
+    # measuring the current version, which decodes correctly and must.
+    # Found by D-SS11's regression sweep rather than by reading, which
+    # is the argument for running it: 14 OK at the base, 13 OK / 1
+    # FAILED at the tree.
     var bytes = encodeProjectInterfaceArtifact(
       artifactFor(liftedInterface("l6LiftProducer")))
-    bytes[4] = 24'u8
+    bytes[4] = 25'u8
     bytes[5] = 0'u8
     expect EnvelopeError:
       discard decodeProjectInterfaceArtifact(bytes)

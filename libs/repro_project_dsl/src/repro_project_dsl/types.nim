@@ -411,6 +411,34 @@ type
       ## keeping identity off ``ActivityInterfaceDef``. The lift reads it
       ## from the body AST through the shared ``identity``/``scope``
       ## walker, so there is exactly one reading.
+    contributionPoints*: seq[string]
+      ## Shared-Development-Services D-SS11 (§4.6): the CONTRIBUTION
+      ## POINTS this service converges, as the bare names the author
+      ## wrote in ``converge <point>, <point>``, in declaration order.
+      ##
+      ## §4.6 requires this of the lift and not of anything else: "The
+      ## owner's lifted interface must **carry its contribution points**,
+      ## so a consumer's contribution is type-checked against a declared
+      ## point and a misspelled one is refused by name at the consumer's
+      ## compile time." Before this field the points existed only in the
+      ## owner's own lowering (``DslServiceDef.convergePoints``) and in
+      ## the owner's own process, so a consumer had nothing to compile
+      ## against -- which is exactly L9's F2 measurement.
+      ##
+      ## THE BARE NAME, NOT THE RESOLVED KEY. The resolved key is
+      ## ``<package>.<activity>.<name>`` and is derived by
+      ## ``resolveServiceConvergePoint`` from facts the OWNER knows; the
+      ## bare name is what a consumer writes at the resolver
+      ## (``infra.sso.shared(relyingParties = append("x"))``). Carrying
+      ## the bare name keeps the consumer's spelling and the owner's
+      ## declaration the same string, so a refusal can name it back
+      ## verbatim.
+      ##
+      ## IT IS SIGNATURE, so it belongs in the fingerprint: a service
+      ## that drops a point a consumer contributes to has changed what
+      ## that consumer compiled against. ``serviceInterfaceMembers``
+      ## emits one ``smkContributionPoint`` member per entry for exactly
+      ## that reason.
     sourceFile*: string
     sourceLine*: int
 
@@ -610,6 +638,121 @@ type
     leaseKind*: ConsumerLeaseKind
     leaseTtlSeconds*: int
       ## Meaningful only for ``clkDelayed``; zero otherwise.
+    sourceFile*: string
+    sourceLine*: int
+
+  SharedServiceDeclarationDef* = object
+    ## Shared-Development-Services D-SS11 (§4.6): the DECLARATION a
+    ## resolver is spelled against, as the owner's lift carries it.
+    ##
+    ## `<package>.<service>.shared()` is "a resolver on the typed
+    ## declaration symbol", and this record is what the declaration
+    ## symbol knows about itself in a CONSUMER's compilation: who owns
+    ## it, what it is called, which activity declares it, where the
+    ## owner's recipe lives, and which contribution points it converges.
+    ## Every field comes from the owner's `service` block by way of the
+    ## interface lift; none of it is supplied by the consumer.
+    ##
+    ## IT IS NOT A HANDLE, and that is the distinction §4.6's closing
+    ## paragraph exists for: "The activity names the service; the
+    ## resolver yields a handle to an instance of it; the two are
+    ## different types and should not be spellable interchangeably."
+    ## `SharedServiceHandle` below is the other type.
+    ownerPackage*: string
+    serviceName*: string
+    activityName*: string
+      ## The activity whose body declares the service, or "" for a
+      ## package-level `service`.
+    ownerRecipeDir*: string
+      ## The directory of the recipe file that declared the service.
+      ##
+      ## This is the one field that is a PATH, and it is here because the
+      ## resolver's attach decision needs the owner's own project
+      ## interface artifact -- §4.3 compares the running instance's
+      ## interface fingerprint against the definition the consumer
+      ## resolved, and the consumer has no other way to reach it. It is
+      ## derived from the service declaration's `sourceFile`, which the
+      ## lift already carries for diagnostics, so no new fact crosses the
+      ## boundary.
+      ##
+      ## A path in a lifted record is normally wrong (§4.4: "State is
+      ## keyed by identity, never by path"), and this one is NOT part of
+      ## the instance key, is not digested into any identity, and is read
+      ## exactly once, to locate an artifact. When it is stale or absent
+      ## the resolver REFUSES by name and says which project to run
+      ## `repro dev-env` in; it never falls back to a default identity.
+    contributionPoints*: seq[string]
+      ## The points this service converges, bare names, declaration
+      ## order -- `ServiceInterfaceDef.contributionPoints` as it reaches
+      ## a consumer. The resolver macro checks the consumer's spelling
+      ## against this list AT THE CONSUMER'S COMPILE TIME, which is the
+      ## first of §4.6's two "must land together" requirements.
+
+  SharedServiceHandle*[T] = object
+    ## Shared-Development-Services D-SS11 (§4.6): what a RESOLVER
+    ## returns. "It returns a `SharedServiceHandle[T]`, a type
+    ## **distinct from the declaration's**, so the two are not spellable
+    ## interchangeably."
+    ##
+    ## `T` is the declaration's own lifted type (`LiftedServiceHandle`
+    ## for every service the lift emits today). It is a PHANTOM
+    ## parameter: nothing reads a `T`-typed field, and it is here so that
+    ## the handle's type names the declaration it came from. That is what
+    ## makes `enable stack(sso = infra.sso)` a type error while
+    ## `enable stack(sso = infra.sso.shared())` is not -- the mistake
+    ## §4.6 records an earlier revision of §9 making.
+    ##
+    ## WHAT IT DOES NOT CARRY: a value of the running service. §7's
+    ## staged configurables and computed resource attributes are read
+    ## from the instance after it converges; a handle minted at
+    ## evaluation time is an ADDRESS plus the resolution it belongs to.
+    ## Pre-filling it would make it read like an instance, which is
+    ## exactly what the lift already refuses to do for `config:`
+    ## defaults.
+    ownerPackage*: string
+    serviceName*: string
+    activityName*: string
+    consumerPackage*: string
+      ## The package whose recipe wrote the resolver. This is the
+      ## ATTRIBUTION §5 requires of every contribution, captured at the
+      ## one call site that knows it.
+    sourceFile*: string
+    sourceLine*: int
+
+  SharedContributionDef* = object
+    ## ONE contribution made AT a resolver call. §4.6: "the consumer's
+    ## contributions are **arguments of the resolver call**".
+    point*: string
+      ## The bare point name, as the consumer wrote it and as the owner
+      ## declared it. Checked against
+      ## `SharedServiceDeclarationDef.contributionPoints` at the
+      ## consumer's compile time.
+    operation*: ContributionOperation
+      ## `coAppend` only, today, and the restriction is REFUSED rather
+      ## than silently coerced: §5.1 and D-SS9 say a consumer of a shared
+      ## service "must be able to `append` a relying party freely, and
+      ## must **not** be able to `replace` the relying-party collection",
+      ## because "a consumer that could replace them would fork the
+      ## instance it is trying to join". The field is still typed as the
+      ## operation axis rather than dropped, so the record a store holds
+      ## says which operation produced it and D-SS9's resolution has
+      ## somewhere to widen into.
+    precedence*: EnvironmentPrecedence
+    members*: seq[string]
+    sourceFile*: string
+    sourceLine*: int
+
+  SharedServiceResolution* = object
+    ## One resolver call, recorded at the consumer's evaluation.
+    ##
+    ## This is the record that travels from the consumer's recipe to the
+    ## consumer's `repro up`, and it is the whole of what the
+    ## CROSS-PROCESS lane carries. Everything in it was decided by the
+    ## consumer's own compilation; nothing in it is read from a running
+    ## instance.
+    declaration*: SharedServiceDeclarationDef
+    consumerPackage*: string
+    contributions*: seq[SharedContributionDef]
     sourceFile*: string
     sourceLine*: int
 

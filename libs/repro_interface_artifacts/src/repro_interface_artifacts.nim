@@ -508,6 +508,28 @@ type
       ## ``repro_resources/service_attach`` is what compares it; this
       ## module only carries it, which is the split that keeps the
       ## comparison out of the artifact codec.
+    contributionPoints*: seq[string]
+      ## Shared-Development-Services D-SS11 (§4.6): the CONTRIBUTION
+      ## POINTS this service converges, bare names, declaration order.
+      ##
+      ## §4.6 requires exactly this of the lift: "The owner's lifted
+      ## interface must **carry its contribution points**, so a
+      ## consumer's contribution is type-checked against a declared
+      ## point and a misspelled one is refused by name at the consumer's
+      ## compile time." Before v24 the points existed only in the
+      ## owner's own lowering and the owner's own process, which is why
+      ## L9 measured the contribution lane as intra-process: a consumer
+      ## had nothing to compile against.
+      ##
+      ## IT IS IN THE FINGERPRINT, and that is deliberate rather than
+      ## incidental. §4.3 decides attach-or-warn on the interface
+      ## fingerprint, and a running instance that no longer converges a
+      ## point its consumer contributes to has changed what that consumer
+      ## compiled against -- the clearest possible case of "the members
+      ## that differ". An empty list is a service that converges none, so
+      ## every pre-v24 row and every freshly lifted service that
+      ## declares no `converge` AGREE rather than refusing each other
+      ## over a format boundary.
     location*: SourceLocation
 
   InterfaceActivity* = object
@@ -856,8 +878,19 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 23'u16
-    ## v23 (current): Shared-Development-Services L6 (§4.3) retains the
+  EnvelopeVersion = 24'u16
+    ## v24 (current): Shared-Development-Services D-SS11 (§4.6) retains
+    ##                the CONTRIBUTION POINTS each ``publicServices`` row
+    ##                converges -- ``contributionPoints``, a counted
+    ##                string list appended after ``compatibilityMajor``
+    ##                at the row's tail. §4.6 requires the owner's lifted
+    ##                interface to carry them, because that is what makes
+    ##                a consumer's misspelled contribution a compile
+    ##                error in the CONSUMER's recipe rather than a
+    ##                contribution that reaches an instance which ignores
+    ##                it. An empty list is a service that converges none,
+    ##                which is what every pre-v24 row decodes to.
+    ## v23:           Shared-Development-Services L6 (§4.3) retains the
     ##                DECLARED MAJOR COMPATIBILITY FIELD on each
     ##                ``publicServices`` row — ``compatibilityMajor``, a
     ##                u32 appended after ``scope`` at the row's tail. The
@@ -1312,6 +1345,13 @@ proc writeService(outp: var seq[byte]; svc: InterfaceService;
     outp.writeByte(byte(ord(svc.scope)))
   if version >= 23'u16:
     outp.writeU32Le(svc.compatibilityMajor)
+  ## v24 (D-SS11) appends the CONTRIBUTION POINTS after the major, at the
+  ## row's new tail -- the same append-not-insert rule, so a v23 row
+  ## keeps decoding byte for byte.
+  if version >= 24'u16:
+    outp.writeU32Le(uint32(svc.contributionPoints.len))
+    for point in svc.contributionPoints:
+      outp.writeString(point)
 
 proc readService(bytes: openArray[byte]; pos: var int;
                  version: uint16): InterfaceService =
@@ -1341,6 +1381,16 @@ proc readService(bytes: openArray[byte]; pos: var int;
   # "declared nothing" case a v22 artifact must still produce.
   if version >= 23'u16:
     result.compatibilityMajor = readU32Le(bytes, pos)
+  # v<24 rows carry no contribution points. The empty seq -- the zero
+  # value -- is "this service converges none", which is what a pre-D-SS11
+  # service really did, so such a row decodes to the behaviour it
+  # described. A consumer resolving it is then told, by name at compile
+  # time, that it converges no points at all, which is true.
+  if version >= 24'u16:
+    let pointCount = int(readU32Le(bytes, pos))
+    result.contributionPoints = newSeq[string](pointCount)
+    for i in 0 ..< pointCount:
+      result.contributionPoints[i] = readString(bytes, pos)
 
 proc writeActivity(outp: var seq[byte]; act: InterfaceActivity;
                    forFingerprint = false) =
@@ -2254,6 +2304,10 @@ proc toProjectInterface*(pkg: PackageDef;
       # it is a number the author declared, and 0 means undeclared on
       # both sides.
       compatibilityMajor: svc.compatibilityMajor,
+      # D-SS11: carried verbatim, like the major. Bare names, so the
+      # consumer's spelling at the resolver and the owner's spelling at
+      # `converge` are the same string and a refusal can name it back.
+      contributionPoints: svc.contributionPoints,
       location: SourceLocation(file: svc.sourceFile, line: svc.sourceLine)))
   for act in registeredActivityInterfaces():
     if act.packageName != pkg.packageName:
@@ -3057,6 +3111,47 @@ proc emitLiftedServiceSymbols(code: var string; packageName: string;
     if svc.activityName.len == 0 and validGeneratedIdent(svc.name):
       code.add("proc " & svc.name & "*(pkg: " & typeName &
         "): LiftedServiceHandle =\n  pkg.liftedExports." & svc.name & "\n")
+  code.add("\n")
+  # Shared-Development-Services D-SS11 (§4.6): the RESOLVER's two
+  # generated consts, the stub half of what `l3LiftedExportSurface`
+  # emits from the producer's own expansion. Two emitters, one surface:
+  # a consumer reaching `infra` through a stub and a consumer reaching it
+  # through a sibling import must get the SAME resolver, or
+  # `infra.sso.shared(...)` would compile in one and not the other and
+  # nothing would fail.
+  #
+  # EMITTED FOR A SERVICE THE LIFT SAYS IS SHARED. The artifact carries
+  # no `instance:` flag of its own -- that block is implementation, not
+  # signature -- so the discriminant here is the one signature fact
+  # D-SS11 added: a service that converges contribution points. A shared
+  # service that converges NONE therefore gets no resolver const through
+  # this route and is refused by name by `sharedServiceNotResolvable`,
+  # which is a STATED LIMIT of the stub route rather than a silent drop,
+  # and it is recorded in this milestone's report. The sibling-import
+  # route reads `instance:` directly and has no such limit.
+  for svc in services:
+    if svc.contributionPoints.len == 0:
+      continue
+    if not validGeneratedIdent(svc.name):
+      continue
+    if svc.activityName.len > 0 and not validGeneratedIdent(svc.activityName):
+      continue
+    # ONE derivation, called -- not a second copy. See
+    # `sharedServiceConstBase`'s own comment for why.
+    let base = sharedServiceConstBase(packageName, svc.activityName,
+      svc.name)
+    var points: seq[string] = @[]
+    for point in svc.contributionPoints:
+      points.add(escForCode(point))
+    let pointsList = points.join(", ")
+    code.add("const " & base & "SharedPoints* = @[" & pointsList & "]\n")
+    code.add("const " & base & "SharedService* = " &
+      "SharedServiceDeclarationDef(ownerPackage: " &
+      escForCode(packageName) & ", serviceName: " & escForCode(svc.name) &
+      ", activityName: " & escForCode(svc.activityName) &
+      ", ownerRecipeDir: " &
+      escForCode(parentDir(svc.location.file)) &
+      ", contributionPoints: @[" & pointsList & "])\n")
   code.add("\n")
 
 proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =

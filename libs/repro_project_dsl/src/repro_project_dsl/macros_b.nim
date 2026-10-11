@@ -322,10 +322,31 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let pkgNameLit = newLit(pkg.packageName)
   let devEnvProc =
     if devEnvBody.len > 0:
+      # Shared-Development-Services D-SS11 (§4.6): the dev-env body runs
+      # inside `beginResolverPackage` / `endResolverPackage`, so a
+      # `<package>.<service>.shared(...)` call in an `enable` argument
+      # can name the CONSUMING package without the author repeating it.
+      #
+      # The ambient is set HERE and nowhere else, which is also what
+      # makes a resolver OUTSIDE a dev-env body refused rather than
+      # misattributed: `resolveSharedService` raises when the ambient is
+      # empty instead of recording a contribution attributed to "". §5's
+      # attribution property -- "every converged member can already name
+      # the package that contributed it" -- is unusable if the name can
+      # be blank, and a blank contributor also makes
+      # `withdrawPackageContributions` unable to find the row again.
+      #
+      # `try`/`finally` rather than a plain pair: a recipe body that
+      # raises (a refused required configurable, say) must not leave the
+      # ambient set for whatever is lowered next in the same process.
       quote do:
         when defined(reproProviderMode):
           proc `devEnvProcName`*() =
-            `devEnvBody`
+            beginResolverPackage(`pkgNameLit`)
+            try:
+              `devEnvBody`
+            finally:
+              endResolverPackage()
     else:
       newStmtList()
   # Project-DSL-Composition M5 — Approach B: wrap the lowered build
@@ -2315,13 +2336,29 @@ type
     compatibilityMajor: uint32
     compatibilityDeclared: bool
     compatibilityAnchor: NimNode
+    # Shared-Development-Services D-SS11 (§4.6): the CONTRIBUTION POINTS
+    # the body declares with `converge <point>`. Read HERE, by the
+    # shared walker, for the same reason the major is: the lift and the
+    # lowering must not have two readings of one declaration. The
+    # lowering (`m5ParseServiceBody`) keeps its own `converge` arm
+    # because it is the one that REFUSES a bad shape with a line the
+    # author wrote; this arm only collects, and a shape that arm refuses
+    # never reaches a lift that would otherwise have carried nothing.
+    convergePoints: seq[string]
+    # Shared-Development-Services D-SS11: whether the body declared an
+    # `instance:` block, i.e. whether this service is a daemon-owned
+    # SHARED instance at all. Collected here so the LIFT can decide
+    # which services get a resolver declaration const; the lowering's
+    # own `instance` arm (`l9ParseInstanceBlock`) keeps every refusal.
+    instanceDeclared: bool
 
 proc l4NewIdentityScope(): L4ServiceIdentityScope =
   L4ServiceIdentityScope(
     identityKind: sikDerived, stableId: "", identityDeclared: false,
     identityAnchor: nil, scope: sscProject, scopeDeclared: false,
     scopeAnchor: nil, compatibilityMajor: 0'u32,
-    compatibilityDeclared: false, compatibilityAnchor: nil)
+    compatibilityDeclared: false, compatibilityAnchor: nil,
+    convergePoints: @[], instanceDeclared: false)
 
 proc l4ScopeFromName(name: string):
     tuple[found: bool; scope: ServiceScope] =
@@ -2683,6 +2720,22 @@ proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
     of "identity": l4ParseIdentitySetter(stmt, result)
     of "scope": l4ParseScopeSetter(stmt, result)
     of "compatibility": l6ParseCompatibilitySetter(stmt, result)
+    of "instance":
+      # COLLECT ONLY -- presence, nothing else. `l9ParseInstanceBlock`
+      # on the lowering path reads and refuses the block's contents.
+      result.instanceDeclared = true
+    of "converge":
+      # COLLECT ONLY -- no refusal here. `m5ParseServiceBody`'s own
+      # `converge` arm refuses every non-identifier argument by name, it
+      # runs on the SAME body in the same macro expansion, and a second
+      # `error` here would report one authoring mistake twice on two
+      # generated lines. A shape it refuses aborts the compilation, so
+      # this walker never lifts a point the lowering rejected.
+      for i in 1 ..< stmt.len:
+        if stmt[i].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+          let point = identText(stmt[i])
+          if not result.convergePoints.contains(point):
+            result.convergePoints.add(point)
     else: discard
 
 # ---------------------------------------------------------------------------
@@ -6367,6 +6420,46 @@ proc l3CheckExportNames(packageName: string;
           "distinct.", act.anchor)
       fields.add(svcName.normalize)
 
+proc l3ContributionPointLiterals(points: seq[string]): string =
+  ## The `converge` point names as a comma-separated list of Nim string
+  ## literals, for the generated `registerServiceInterface` call and the
+  ## generated consumer-side const. One renderer, two emissions, so the
+  ## artifact and the compile-time check cannot disagree about which
+  ## points a service declares.
+  var parts: seq[string] = @[]
+  for point in points:
+    parts.add(escForCode(point))
+  parts.join(", ")
+
+proc sharedServiceConstBase*(packageName, activityName,
+                             serviceName: string): string =
+  ## THE name prefix of the two consts a lifted shared service's
+  ## resolver is reached through -- `<packageValue><TitleActivity?>`
+  ## `<TitleService>`, so `infra` + "" + `sso` -> `infraSso` and
+  ## `infra` + `idp` + `sso` -> `infraIdpSso`.
+  ##
+  ## EXPORTED, AND CALLED BY BOTH EMITTERS. `l3LiftedExportSurface`
+  ## (the producer's own macro expansion, for a workspace-sibling
+  ## import) and `emitLiftedServiceSymbols` in
+  ## `repro_interface_artifacts` (the stub, for a consumer that reached
+  ## the producer through its artifact) both have to produce the SAME
+  ## const names, because the resolver macro reconstructs the name from
+  ## the author's expression and cannot know which route the author took.
+  ## Two hand-kept copies of this derivation is how a resolver would
+  ## compile against one route and not the other with nothing failing --
+  ## the divergence `emitLiftedServiceSymbols`' own header warns about.
+  ## So there is one copy and the stub calls it.
+  ##
+  ## The ACTIVITY is in the name because two activities of one package
+  ## may each declare a service of the same bare name, and L3's
+  ## module-scope clash check only claims PACKAGE-LEVEL export names. A
+  ## const named for the service alone would leave one of the two
+  ## silently unreachable.
+  result = packageValueIdent(packageName)
+  if activityName.len > 0:
+    result.add(titleCase(activityName))
+  result.add(titleCase(serviceName))
+
 proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
   ## The whole L3 emission for one package, or an empty statement list
   ## when the package exports no service and no constructor-shaped
@@ -6544,8 +6637,65 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       # `ServiceInterfaceDef.compatibilityMajor`.
       ", compatibilityMajor: " & $svc.identityScope.compatibilityMajor &
       "'u32" &
+      # D-SS11 (§4.6): the owner's contribution points travel WITH the
+      # signature. Emitted from the same `l4ServiceIdentityScope`
+      # reading the lowering uses, so the lift cannot carry a point the
+      # service does not converge.
+      ", contributionPoints: @[" &
+      l3ContributionPointLiterals(svc.identityScope.convergePoints) &
+      "]" &
       ", sourceFile: " & escForCode(info.filename) &
       ", sourceLine: " & $info.line & "))\n")
+  # Shared-Development-Services D-SS11 (§4.6): the RESOLVER's two
+  # generated consts, one pair per service that declares an `instance:`
+  # block.
+  #
+  # They are what makes `<package>.<service>.shared(...)` a compile-time
+  # checked surface in a CONSUMER's recipe: `...SharedPoints` is read by
+  # `sharedServiceResolve` as a `static seq[string]` so a misspelled
+  # point is refused by name with the list, and `...SharedService`
+  # carries the declaration record the resolution is built from.
+  #
+  # ONLY FOR A SERVICE WITH AN `instance:` BLOCK. A session-owned
+  # service has no registry entry to attach to (§4.5 keys the registry
+  # on instances), so a resolver for one could never do anything;
+  # `sharedServiceNotResolvable` says that by name instead, which is why
+  # the absence of the const is a usable diagnostic rather than a gap.
+  #
+  # THE OWNER'S RECIPE DIRECTORY travels in the record. The resolver's
+  # attach decision needs the owner's own project interface artifact --
+  # §4.3 compares fingerprints and the consumer has no other way to
+  # reach the owner's -- and the declaration's `sourceFile` is the one
+  # fact already lifted that locates it. See
+  # `SharedServiceDeclarationDef.ownerRecipeDir` for why a path here is
+  # not a §4.4 violation.
+  var resolverCode = ""
+  for svc in collected.services:
+    if not svc.identityScope.instanceDeclared:
+      continue
+    if not l3Exportable(svc.name):
+      continue
+    if svc.activityName.len > 0 and not l3Exportable(svc.activityName):
+      continue
+    let base = sharedServiceConstBase(pkg.packageName, svc.activityName,
+      svc.name)
+    let points = l3ContributionPointLiterals(svc.identityScope.convergePoints)
+    resolverCode.add("const " & base & "SharedPoints* = @[" & points &
+      "]\n")
+    resolverCode.add("const " & base & "SharedService* = " &
+      "SharedServiceDeclarationDef(ownerPackage: " &
+      escForCode(pkg.packageName) & ", serviceName: " &
+      escForCode(svc.name) & ", activityName: " &
+      escForCode(svc.activityName) & ", ownerRecipeDir: " &
+      # The DIRECTORY, computed here rather than emitted as a
+      # `parentDir(...)` call: the generated code lands in a recipe whose
+      # imports this emitter does not control, and a stub that needed
+      # `std/os` in scope would be a build break in the consumer rather
+      # than a diagnostic.
+      escForCode(parentDir(svc.anchor.lineInfoObj().filename)) &
+      ", contributionPoints: @[" & points & "])\n")
+  if resolverCode.len > 0:
+    code.add(resolverCode)
   result = parseStmt(code)
   result.copyLineInfo(pkgBody)
 
@@ -6619,6 +6769,358 @@ macro liftedMemberRefusal*(ty: typedesc; anchor: untyped;
     "each exported service is \"the type of its handle and that type's " &
     "members\", so a member written here that the lifted type does not " &
     "have is refused at the recipe's own line.", anchor)
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services D-SS11 (§4.6) — THE RESOLVER, and its
+# refusals.
+#
+#   enable stack(sso = infra.sso.shared(
+#                        relyingParties = append("codetracer-cli")))
+#
+# §4.6 decides the spelling: "`<package>.<service>.shared()` -- a
+# resolver on the typed declaration symbol, reached by dot syntax, never
+# by a string. It returns a `SharedServiceHandle[T]`, a type DISTINCT
+# from the declaration's". And it decides where the call lives: "In the
+# consuming project's own recipe, at its `enable <activity>(...)` call."
+#
+# WHY THREE MACROS AND NOT ONE. `shared` must see the author's
+# IDENTIFIERS (`infra`, `sso`) to know which service is meant, so its
+# first parameter is `untyped`. But the check that a contribution names a
+# DECLARED point needs the owner's point list as a compile-time VALUE,
+# and that value lives in a generated `const` the owner's lift emitted.
+# A macro cannot test whether an identifier it just built resolves, so
+# the emission is `when declared(<const>): <checked call> else:
+# <refusal>` -- and the checked call has to be a second macro, because
+# only a macro can read the const as `static` and `error` naming its
+# contents. The third macro is the refusal, which exists so the message
+# names the author's own expression rather than Nim's "undeclared
+# identifier".
+#
+# WHAT IS SYNTAX AND WHAT IS A VALUE. The OPERATION is syntax, exactly as
+# L8's `contribute:` heads are: `append(...)` / `appendOverride(...)` /
+# `appendForce(...)`, read from the call's head and never from a value.
+# `Configurable-System.md` §"Operation is a SECOND axis" requires the
+# operation "declared at the call site" so "the engine can say which
+# contribution was dropped and which one dropped it"; a value-carried
+# operation could be computed, and then the site would not say it. The
+# MEMBERS are a value, and both `append("a")` and `append(@["a", "b"])`
+# are authorable through the same `l8ContributionMembers` overloads L8
+# built.
+#
+# WHAT A RESOLVER DOES NOT DO HERE. It does not contact the daemon and
+# does not compare a fingerprint: at macro-expansion and at evaluation
+# there is no instance to decide against. It records a resolution that
+# travels to the consumer's `repro up`, where §4's machinery runs
+# against THIS call site -- see `resolveSharedService`'s own comment.
+# ---------------------------------------------------------------------------
+
+const
+  SharedResolverOperationHeads* = [
+    "append", "appendoverride", "appendforce",
+    "replace", "replaceoverride", "replaceforce"]
+    ## The closed set, normalized. The SAME six L8's `contribute:`
+    ## carries (`L8ContributeOperationHeads`), spelled as calls rather
+    ## than as blocks because a resolver argument is an expression. Not
+    ## shared with that constant by identity because the two surfaces are
+    ## allowed to diverge -- a resolver refuses the three `replace` heads
+    ## and `contribute:` does not -- and a shared constant would hide
+    ## that in a predicate.
+
+proc l11OperationHeadsList(): string =
+  var parts: seq[string] = @[]
+  for h in SharedResolverOperationHeads:
+    parts.add("`" & h & "`")
+  parts.join(", ")
+
+proc l11OperationFor(head: string): tuple[op, prec: string] =
+  ## Head -> (operation, precedence), identical to L8's mapping.
+  case head
+  of "append": ("coAppend", "epSet")
+  of "appendoverride": ("coAppend", "epOverride")
+  of "appendforce": ("coAppend", "epForce")
+  of "replace": ("coReplace", "epSet")
+  of "replaceoverride": ("coReplace", "epOverride")
+  of "replaceforce": ("coReplace", "epForce")
+  else: ("", "")
+
+proc l11DeclarationChain(decl: NimNode): seq[string] =
+  ## Flatten the author's declaration expression into the identifier
+  ## chain `<packageValue>[.<activity>].<service>`.
+  ##
+  ## `infra.sso.shared(...)` reaches a macro whose first parameter is
+  ## `untyped` as the CALL `sso(infra)` -- Nim has already rewritten the
+  ## dot into a call to find `shared` -- so both that shape and the plain
+  ## `nnkDotExpr` of `shared(infra.sso)` have to be read. Anything else
+  ## (a string literal, an index, a call with arguments) returns an empty
+  ## chain and the caller refuses it by shape rather than guessing.
+  var cursor = decl
+  var reversed: seq[string] = @[]
+  while true:
+    case cursor.kind
+    of nnkCall, nnkCommand:
+      if cursor.len != 2: return @[]
+      if cursor[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}: return @[]
+      reversed.add(identText(cursor[0]))
+      cursor = cursor[1]
+    of nnkDotExpr:
+      if cursor.len != 2: return @[]
+      if cursor[1].kind notin {nnkIdent, nnkSym, nnkAccQuoted}: return @[]
+      reversed.add(identText(cursor[1]))
+      cursor = cursor[0]
+    of nnkIdent, nnkSym:
+      reversed.add(identText(cursor))
+      break
+    else:
+      return @[]
+  if reversed.len < 2:
+    return @[]
+  for i in countdown(reversed.high, 0):
+    result.add(reversed[i])
+
+proc l11ConstBaseName(chain: seq[string]): string =
+  ## `<packageValue><TitleActivity?><TitleService>` -- the prefix both
+  ## generated consts share, derived from the AUTHOR's expression by the
+  ## same two helpers the emitters derive it from, so Nim's own
+  ## identifier folding is the only difference the two can have.
+  ##
+  ## The activity is in the name because two activities of one package
+  ## may each declare a service of the same bare name, and `l3`'s
+  ## module-scope clash check only claims PACKAGE-LEVEL export names. A
+  ## const named for the service alone would make one of the two
+  ## unreachable -- silently, which is the whole class of defect this
+  ## campaign keeps finding.
+  if chain.len == 2:
+    sharedServiceConstBase(chain[0], "", chain[1])
+  else:
+    var activity = chain[1]
+    for i in 2 ..< chain.high:
+      activity.add(titleCase(chain[i]))
+    sharedServiceConstBase(chain[0], activity, chain[^1])
+
+macro sharedServiceNotResolvable*(reference: static string;
+                                  constName: static string;
+                                  anchor: untyped): untyped =
+  ## The `else` arm of the emitted `when declared(...)`: the named
+  ## service has no generated resolver const.
+  ##
+  ## Reached only when the const is absent, so it always errors. Three
+  ## things can put it here and the message says all three, because the
+  ## author cannot see which from the call site: the service does not
+  ## declare an `instance:` block (so it is not a shared instance at
+  ## all -- §4.5 keys a registry on instances, and a session-owned
+  ## service has no entry to attach to); the reference names something
+  ## that is not a service; or the owner's package was reached in a way
+  ## that did not lift it.
+  error("`" & reference & ".shared()`: there is no shared-service " &
+    "declaration for `" & reference & "`. A resolver is spelled against " &
+    "a service whose `service` block declares an `instance:` block -- " &
+    "that block is what makes it a daemon-owned SHARED instance " &
+    "(Shared-Development-Services.md §4.5), and only such a service " &
+    "gets the generated declaration const `" & constName & "` the " &
+    "resolver reads. Either `" & reference & "` is not a service of " &
+    "that package, or its `service` block has no `instance:`. A " &
+    "session-owned service is reached as an ordinary dependency, not " &
+    "by a resolver: §4.6 -- \"a consumer cannot reach the constructor " &
+    "of a service it does not own\" -- cuts both ways, and there is " &
+    "nothing to attach to.", anchor)
+
+macro sharedServiceResolve*(points: static seq[string];
+                            declaration: untyped;
+                            reference: static string;
+                            sourceFile: static string;
+                            sourceLine: static int;
+                            pairs: varargs[untyped]): untyped =
+  ## The checked half of the resolver. `points` is the owner's declared
+  ## contribution-point list, read as a compile-time value out of the
+  ## generated const, which is what makes a misspelling a compile error
+  ## IN THE CONSUMER'S RECIPE naming what is available -- the first of
+  ## the two things §4.6 requires to land together.
+  ##
+  ## `pairs` arrives flattened: point-name node, value node, point-name
+  ## node, value node. Flattened rather than as `nnkExprEqExpr` pairs
+  ## because this macro's own parameters are typed and a named argument
+  ## here would bind one of them.
+  var emitted = newStmtList()
+  var seen: seq[string] = @[]
+  let available =
+    if points.len == 0: "it converges no contribution points at all"
+    else: "it converges `" & points.join("`, `") & "`"
+  var contributionCalls: seq[NimNode] = @[]
+  var i = 0
+  while i + 1 < pairs.len:
+    let nameNode = pairs[i]
+    let valueNode = pairs[i + 1]
+    i += 2
+    let point = identText(nameNode)
+    # 1. the point must be one the OWNER declared.
+    var found = false
+    for p in points:
+      if p.normalize == point.normalize:
+        found = true
+        break
+    if not found:
+      error("`" & reference & ".shared(" & point & " = ...)`: service `" &
+        reference & "` declares no contribution point `" & point &
+        "`; " & available & ". Shared-Development-Services.md §4.6: " &
+        "the owner's lifted interface carries its contribution points " &
+        "so that \"a misspelled one is refused by name at the " &
+        "consumer's compile time\" -- which is here.", nameNode)
+      continue
+    # 2. one contribution per point per resolver. Two would have to be
+    #    merged or one dropped, and this macro is not the place either
+    #    decision belongs: write one `append` with both members.
+    if seen.contains(point.normalize):
+      error("`" & reference & ".shared()` contributes to `" & point &
+        "` twice. One resolver call makes ONE contribution per point: " &
+        "two would need an order this call site does not state. Write " &
+        "one `append(...)` listing every member.", nameNode)
+      continue
+    seen.add(point.normalize)
+    # 3. the OPERATION is the head of the value expression, and the
+    #    closed set is refused by name.
+    if valueNode.kind notin {nnkCall, nnkCommand} or valueNode.len < 1 or
+       valueNode[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      error("`" & reference & ".shared(" & point & " = " &
+        valueNode.repr.strip() & ")`: a contribution states its " &
+        "OPERATION at the call site -- " & l11OperationHeadsList() &
+        ". `Configurable-System.md` §\"Operation is a SECOND axis, " &
+        "independent of priority\" puts the operation at the call site " &
+        "so the engine \"can say which contribution was dropped and " &
+        "which one dropped it\"; a bare value names no operation, and " &
+        "defaulting it would make an authoritative contribution " &
+        "destructive or a destructive one quiet. Write `" & point &
+        " = append(" & valueNode.repr.strip() & ")`.", valueNode)
+      continue
+    let head = identText(valueNode[0]).normalize
+    var known = false
+    for h in SharedResolverOperationHeads:
+      if h == head:
+        known = true
+        break
+    if not known:
+      error("`" & identText(valueNode[0]) & "` is not a contribution " &
+        "operation. The operations are " & l11OperationHeadsList() &
+        ". `append*` adds and is NEVER destructive at any priority; " &
+        "there is no `add`, no `set`, no `incl` and no `remove` " &
+        "(`remove` is D-SS9's open second half).", valueNode)
+      continue
+    let resolved = l11OperationFor(head)
+    if resolved.op == "coReplace":
+      error("`" & reference & ".shared(" & point & " = " &
+        identText(valueNode[0]) & "(...))`: a CONSUMER of a shared " &
+        "service may not `replace` what the owner declared. " &
+        "Shared-Development-Services.md §5.1: a consumer \"must be " &
+        "able to `append` a relying party freely, and must NOT be able " &
+        "to `replace` the relying-party collection or the issuer's " &
+        "hostname ... a consumer that could replace them would fork " &
+        "the instance it is trying to join\". Who may use the " &
+        "destructive operation is D-SS9 and it is still open, so the " &
+        "resolver refuses it rather than deciding it. Write `append`, " &
+        "`appendOverride` or `appendForce` -- an append at a high " &
+        "priority is authoritative and still not destructive.",
+        valueNode)
+      continue
+    if valueNode.len < 2:
+      error("`" & point & " = " & identText(valueNode[0]) &
+        "()`: an operation with no members contributes nothing. A " &
+        "declared contribution that resolves to no member is " &
+        "indistinguishable from a forgotten one, so it is refused " &
+        "rather than compiled into nothing. List the members, or " &
+        "delete the argument.", valueNode)
+      continue
+    # Members: every argument of the operation call, through L8's two
+    # `l8ContributionMembers` overloads, so `append("a")` and
+    # `append(@["a", "b"])` are both authorable with no type decision
+    # taken here.
+    var membersExpr = newCall(ident"l8ContributionMembers", valueNode[1])
+    for k in 2 ..< valueNode.len:
+      membersExpr = nnkInfix.newTree(ident"&", membersExpr,
+        newCall(ident"l8ContributionMembers", valueNode[k]))
+    let siteFile = newLit(nameNode.lineInfoObj().filename)
+    let siteLine = newLit(nameNode.lineInfoObj().line)
+    contributionCalls.add(newCall(ident"sharedContribution",
+      newLit(point), membersExpr, ident(resolved.prec),
+      ident(resolved.op), siteFile, siteLine))
+  if i < pairs.len:
+    error("`" & reference & ".shared()`: trailing argument `" &
+      pairs[pairs.len - 1].repr.strip() & "` is not a `<point> = " &
+      "<operation>(<members>)` contribution. Every argument of a " &
+      "resolver is a contribution; a positional one names no point and " &
+      "would be read by nothing.", pairs[pairs.len - 1])
+  var membersSeq = nnkPrefix.newTree(ident"@", nnkBracket.newTree())
+  for call in contributionCalls:
+    membersSeq[1].add(call)
+  let fileLit = newLit(sourceFile)
+  let lineLit = newLit(sourceLine)
+  # The CONSUMING package is the ambient one the dev-env lowering set,
+  # read at evaluation rather than baked in here: this macro expands
+  # wherever the author wrote the resolver and has no way to know which
+  # `package` block encloses it, while the generated dev-env proc does.
+  emitted.add(newCall(
+    nnkBracketExpr.newTree(ident"resolveSharedService",
+      ident"LiftedServiceHandle"),
+    declaration, newCall(ident"currentResolverPackage"), membersSeq,
+    fileLit, lineLit))
+  result = emitted
+  result.copyLineInfo(declaration)
+
+macro shared*(declaration: untyped;
+              contributions: varargs[untyped]): untyped =
+  ## THE RESOLVER, as §4.6 spells it: `<package>.<service>.shared(...)`.
+  ##
+  ## `.shared` WITHOUT PARENTHESES IS THE SAME CALL and is honoured, not
+  ## dropped: Nim's dot-call sugar makes `infra.sso.shared` and
+  ## `infra.sso.shared()` one AST, and a resolver with no contributions
+  ## is a legitimate thing to write -- §9.4's consumer "contributes
+  ## little" and a consumer may contribute nothing and only attach.
+  ## Asserted rather than asserted-by-comment, because L9's review found
+  ## four argument-less call forms that compiled and were silently
+  ## dropped; the difference here is that there is no second spelling
+  ## for this one to be confused with.
+  let chain = l11DeclarationChain(declaration)
+  if chain.len == 0:
+    error("`shared()` is a resolver on a SERVICE DECLARATION reached by " &
+      "dot access -- `<package>.<service>.shared(...)`, " &
+      "Shared-Development-Services.md §4.6: \"a resolver on the typed " &
+      "declaration symbol, reached by dot syntax, never by a string\". " &
+      "`" & declaration.repr.strip() & "` is a " & $declaration.kind &
+      ", not such a chain.", declaration)
+    return newStmtList()
+  let reference = chain.join(".")
+  let base = l11ConstBaseName(chain)
+  let pointsConst = ident(base & "SharedPoints")
+  let declConst = ident(base & "SharedService")
+  var pairs: seq[NimNode] = @[]
+  for c in contributions:
+    if c.kind != nnkExprEqExpr:
+      error("`" & reference & ".shared()` takes `<point> = " &
+        "<operation>(<members>)` arguments; `" & c.repr.strip() &
+        "` is a " & $c.kind & ". §4.6: \"the consumer's contributions " &
+        "are ARGUMENTS of the resolver call\", so an argument that " &
+        "names no point is not a contribution and would be read by " &
+        "nothing.", c)
+      continue
+    if c[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      error("`" & reference & ".shared()`: a contribution's point is a " &
+        "bare identifier naming a point the owner declared; `" &
+        c[0].repr.strip() & "` is a " & $c[0].kind & ".", c)
+      continue
+    pairs.add(c[0])
+    pairs.add(c[1])
+  let anchor = declaration.copyNimTree()
+  let checked = newCall(ident"sharedServiceResolve", pointsConst, declConst,
+    newLit(reference),
+    newLit(declaration.lineInfoObj().filename),
+    newLit(declaration.lineInfoObj().line))
+  for p in pairs:
+    checked.add(p)
+  let refusal = newCall(ident"sharedServiceNotResolvable",
+    newLit(reference), newLit(base & "SharedService"), anchor)
+  result = nnkWhenStmt.newTree(
+    nnkElifBranch.newTree(
+      newCall(ident"declared", declConst), newStmtList(checked)),
+    nnkElse.newTree(newStmtList(refusal)))
+  result.copyLineInfo(declaration)
 
 proc l3CollectDependencyReferences(node: NimNode; depValues: seq[string];
     acc: var seq[tuple[dep, member, member2: string; anchor: NimNode]]) =

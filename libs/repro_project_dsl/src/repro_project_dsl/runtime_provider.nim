@@ -396,6 +396,51 @@ when defined(reproProviderMode):
     of srkFileExists: "fileExists"
     of srkHttpGet: "httpGet"
 
+  proc providerSharedResolutions(packageName: string):
+      seq[DevEnvSharedResolution] =
+    ## Shared-Development-Services D-SS11 (§4.6): project this package's
+    ## resolver calls onto the provider wire.
+    ##
+    ## FILTERED ON THE CONSUMING PACKAGE, for the reason
+    ## `toProjectInterface`'s service fold is: one process may lower
+    ## several `package` blocks (a sibling shim `include`), and a
+    ## resolution recorded by one package must not travel on another's
+    ## result. The filter is the `consumerPackage` the dev-env lowering's
+    ## own ambient set, so it names the package whose `enable` site wrote
+    ## the resolver.
+    ##
+    ## THE ENUMS CROSS AS THEIR OWN NAMES (`$`), not as ordinals: a
+    ## reordered enum would silently re-map an ordinal, and the reading
+    ## side refuses an unknown name rather than defaulting it. `coReplace`
+    ## is ordinal 0 and is the one operation a consumer may not use, so a
+    ## dropped ordinal would decode to a destructive contribution.
+    for resolution in registeredSharedServiceResolutions():
+      if resolution.consumerPackage != packageName:
+        continue
+      var row = DevEnvSharedResolution(
+        ownerPackage: resolution.declaration.ownerPackage,
+        serviceName: resolution.declaration.serviceName,
+        activityName: resolution.declaration.activityName,
+        ownerRecipeDir: resolution.declaration.ownerRecipeDir,
+        consumerPackage: resolution.consumerPackage,
+        # Derived here from the SAME proc `setActiveServiceInstance`
+        # derives the owner's instance environment from, so the two
+        # sides of one instance key cannot be read differently.
+        environment: selectedEnvironmentName(),
+        sourceFile: resolution.sourceFile,
+        sourceLine: int64(resolution.sourceLine))
+      for c in resolution.contributions:
+        row.contributionPoints.add(c.point)
+        row.contributionOperations.add($c.operation)
+        row.contributionPrecedences.add($c.precedence)
+        row.contributionSites.add(
+          if c.sourceFile.len == 0: ""
+          else: c.sourceFile & ":" & $c.sourceLine)
+        for member in c.members:
+          row.contributionMemberPoints.add(c.point)
+          row.contributionMembers.add(member)
+      result.add(row)
+
   proc mergeTypedServiceFacts(packageName: string;
                               selected: openArray[string];
                               services: seq[DevEnvServiceMetadata]):
@@ -583,7 +628,8 @@ when defined(reproProviderMode):
       tasks: activeTasks(selectedActivities),
       services: mergeTypedServiceFacts(pkg.packageName,
         selectedActivities, activeServices(selectedActivities)),
-      diagnostics: devEnvDiagnosticRegistry)
+      diagnostics: devEnvDiagnosticRegistry,
+      sharedResolutions: providerSharedResolutions(pkg.packageName))
     if fileExists(extendedPath(pkg.sourceFile)):
       let input = fileReadInput(pkg.sourceFile)
       result.evaluationInputs.add(input)

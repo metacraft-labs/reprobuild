@@ -12,7 +12,7 @@ const
   DevEnvMagic = [byte(ord('R')), byte(ord('B')), byte(ord('D')), byte(ord('E'))]
   EnvelopeHeaderLen = 4 + 2 + 2 + 4 + 4
   EnvelopeTrailerLen = 32
-  EnvelopeVersion = 3'u16
+  EnvelopeVersion = 4'u16
     ## Shared-Development-Services L8: bumped with
     ## `DevEnvArtifactSchemaVersion`, because the service record grew
     ## eight positional SSZ fields. The decoder's check is an EQUALITY
@@ -32,6 +32,11 @@ const
   MaxDiagnostics = 4096
   MaxEvaluationInputs = 4096
   MaxSourceFingerprints = 4096
+  MaxSharedResolutions = 1024
+    ## Shared-Development-Services D-SS11: one entry per resolver call in
+    ## one project's recipe. The same bound `MaxServices` takes, because
+    ## a project cannot resolve more shared services than a workspace can
+    ## declare.
 
 type
   DevEnvArtifactCodecError* = object of CatchableError
@@ -115,6 +120,22 @@ type
     identity: SszText
     digest: SszText
 
+  DevEnvSharedResolutionSsz = object
+    ownerPackage: SszText
+    serviceName: SszText
+    activityName: SszText
+    ownerRecipeDir: SszText
+    consumerPackage: SszText
+    environment: SszText
+    sourceFile: SszText
+    sourceLine: uint64
+    contributionPoints: SszStringList
+    contributionOperations: SszStringList
+    contributionPrecedences: SszStringList
+    contributionSites: SszStringList
+    contributionMemberPoints: SszStringList
+    contributionMembers: SszStringList
+
   DevEnvArtifactSsz* = object
     schemaVersion*: uint32
     artifactId*: Digest32
@@ -142,6 +163,7 @@ type
     sourceFingerprints*: List[DevEnvSourceFingerprintSsz, MaxSourceFingerprints]
     evaluationEvidenceRef*: Digest32
     providerMetadata*: SszBytes
+    sharedResolutions*: List[DevEnvSharedResolutionSsz, MaxSharedResolutions]
 
   EnvelopePayloadBounds = object
     start: int
@@ -306,6 +328,70 @@ proc fromSsz(value: DevEnvTaskSummarySsz): DevEnvTaskSummary =
     commandRef: value.commandRef,
     command: fromSszText(value.command))
 
+proc toSsz(value: DevEnvSharedResolutionSummary):
+    DevEnvSharedResolutionSsz =
+  ## Shared-Development-Services D-SS11. `cast`, not a conversion, for
+  ## `sourceLine`: SSZ has no signed scalar here and the bit pattern is
+  ## what round-trips -- the same choice `readinessTimeoutMs` made.
+  DevEnvSharedResolutionSsz(
+    ownerPackage: toSszText(value.ownerPackage),
+    serviceName: toSszText(value.serviceName),
+    activityName: toSszText(value.activityName),
+    ownerRecipeDir: toSszText(value.ownerRecipeDir),
+    consumerPackage: toSszText(value.consumerPackage),
+    environment: toSszText(value.environment),
+    sourceFile: toSszText(value.sourceFile),
+    sourceLine: cast[uint64](value.sourceLine),
+    contributionPoints: toSszStringList(value.contributionPoints),
+    contributionOperations: toSszStringList(value.contributionOperations),
+    contributionPrecedences:
+      toSszStringList(value.contributionPrecedences),
+    contributionSites: toSszStringList(value.contributionSites),
+    contributionMemberPoints:
+      toSszStringList(value.contributionMemberPoints),
+    contributionMembers: toSszStringList(value.contributionMembers))
+
+proc fromSsz(value: DevEnvSharedResolutionSsz):
+    DevEnvSharedResolutionSummary =
+  result = DevEnvSharedResolutionSummary(
+    ownerPackage: fromSszText(value.ownerPackage),
+    serviceName: fromSszText(value.serviceName),
+    activityName: fromSszText(value.activityName),
+    ownerRecipeDir: fromSszText(value.ownerRecipeDir),
+    consumerPackage: fromSszText(value.consumerPackage),
+    environment: fromSszText(value.environment),
+    sourceFile: fromSszText(value.sourceFile),
+    sourceLine: cast[int64](value.sourceLine),
+    contributionPoints: fromSszStringList(value.contributionPoints),
+    contributionOperations:
+      fromSszStringList(value.contributionOperations),
+    contributionPrecedences:
+      fromSszStringList(value.contributionPrecedences),
+    contributionSites: fromSszStringList(value.contributionSites),
+    contributionMemberPoints:
+      fromSszStringList(value.contributionMemberPoints),
+    contributionMembers: fromSszStringList(value.contributionMembers))
+  # The parallel-list invariant, checked on the way IN rather than
+  # trusted. The provider wire checks it too; this is the second,
+  # independent reading, and it has to exist because an artifact can be
+  # read from a cache written by a build that is not this one. Truncating
+  # to the shortest list would DROP a contribution, which is the defect
+  # this lane exists to prevent, so a mismatch is refused by name.
+  if result.contributionOperations.len != result.contributionPoints.len or
+     result.contributionPrecedences.len != result.contributionPoints.len or
+     result.contributionSites.len != result.contributionPoints.len:
+    fail("dev-env artifact shared resolution for `" &
+      result.ownerPackage & "." & result.serviceName & "` carries " &
+      $result.contributionPoints.len & " contribution points but " &
+      $result.contributionOperations.len & " operations, " &
+      $result.contributionPrecedences.len & " precedences and " &
+      $result.contributionSites.len & " sites")
+  if result.contributionMemberPoints.len != result.contributionMembers.len:
+    fail("dev-env artifact shared resolution for `" &
+      result.ownerPackage & "." & result.serviceName & "` carries " &
+      $result.contributionMembers.len & " members but " &
+      $result.contributionMemberPoints.len & " member points")
+
 proc toSsz(value: DevEnvServiceSummary): DevEnvServiceSummarySsz =
   DevEnvServiceSummarySsz(
     name: toSszText(value.name),
@@ -437,6 +523,9 @@ proc toSsz(artifact: DevEnvArtifact; artifactIdOverride: Digest32): DevEnvArtifa
     artifact.tasks.mapIt(toSsz(it)))
   result.services = List[DevEnvServiceSummarySsz, MaxServices].init(
     artifact.services.mapIt(toSsz(it)))
+  result.sharedResolutions =
+    List[DevEnvSharedResolutionSsz, MaxSharedResolutions].init(
+      artifact.sharedResolutions.mapIt(toSsz(it)))
   result.resourcePrerequisites = List[Digest32, MaxDigests].init(
     artifact.resourcePrerequisites)
   result.diagnostics = List[DevEnvDiagnosticSsz, MaxDiagnostics].init(
@@ -469,6 +558,8 @@ proc fromSsz(wire: DevEnvArtifactSsz): DevEnvArtifact =
   result.toolProfiles = wire.toolProfiles.asSeq().mapIt(fromSsz(it))
   result.tasks = wire.tasks.asSeq().mapIt(fromSsz(it))
   result.services = wire.services.asSeq().mapIt(fromSsz(it))
+  result.sharedResolutions =
+    wire.sharedResolutions.asSeq().mapIt(fromSsz(it))
   result.resourcePrerequisites = wire.resourcePrerequisites.asSeq()
   result.diagnostics = wire.diagnostics.asSeq().mapIt(fromSsz(it))
   result.evaluationInputs = wire.evaluationInputs.asSeq().mapIt(fromSsz(it))
@@ -695,6 +786,24 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
     entry("providerEntryPointId", cborText(devEnv.providerEntryPointId)),
     entry("providerEntryPointBodyHash", cborText(devEnv.providerEntryPointBodyHash))
   ])
+  # Shared-Development-Services D-SS11 (§4.6): the resolver calls the
+  # consumer's recipe made, field for field.
+  for resolution in devEnv.sharedResolutions:
+    result.sharedResolutions.add(DevEnvSharedResolutionSummary(
+      ownerPackage: resolution.ownerPackage,
+      serviceName: resolution.serviceName,
+      activityName: resolution.activityName,
+      ownerRecipeDir: resolution.ownerRecipeDir,
+      consumerPackage: resolution.consumerPackage,
+      environment: resolution.environment,
+      sourceFile: resolution.sourceFile,
+      sourceLine: resolution.sourceLine,
+      contributionPoints: resolution.contributionPoints,
+      contributionOperations: resolution.contributionOperations,
+      contributionPrecedences: resolution.contributionPrecedences,
+      contributionSites: resolution.contributionSites,
+      contributionMemberPoints: resolution.contributionMemberPoints,
+      contributionMembers: resolution.contributionMembers))
   result.artifactId = computeArtifactId(result)
 
 proc produceDevEnvArtifact*(config: ProviderExecutionConfig;

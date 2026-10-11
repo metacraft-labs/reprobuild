@@ -1507,6 +1507,371 @@ proc reconcileServiceRegistrations*(
   result.outcomes = outcomes
   writeServiceRegistrations(storeRoot, key, result.set, now)
 
+# ---------------------------------------------------------------------------
+# Shared-Development-Services D-SS11 (§4.6) — THE CROSS-PROCESS
+# CONTRIBUTION STORE.
+#
+# §4.6, the part L9 measured as absent: "a consumer in a *different
+# process* has no way to reach them ... So the lane is intra-process, and
+# a cross-repo `contribute:` would compile, look wired, and do nothing."
+#
+# This record is the lane. It is IDENTITY-KEYED, beside the registration
+# set and under the same instance address, because §4.4 is explicit that
+# a shared instance's state "is addressed by its identity" -- a
+# contribution set under one consumer's `.repro/` would belong to
+# whichever project happened to run first, which is the defect §4.4
+# names.
+#
+# WHO WRITES AND WHO READS. A CONSUMER's `repro up` writes its own rows
+# (and only its own); the OWNER's converge reads every row and applies
+# them when it reconciles its registrations. That is "applied by the
+# owner's instance when it converges", and it is also why the owner MUST
+# read them: `reconcileServiceRegistrations` removes a member no longer
+# contributed, so an owner that folded only its own members would
+# WITHDRAW every consumer's registration on its next `repro up` -- a
+# live OIDC client deleted because the project that asked for it was not
+# the one converging.
+#
+# ONE CONTRIBUTOR, ONE SLOT. A deposit REPLACES exactly the rows of the
+# depositing package and leaves every other contributor's alone. That is
+# §5's withdrawal property at this layer: a consumer that drops a
+# contribution from its recipe has it disappear on its next `repro up`,
+# and a consumer that is not run does not lose what it registered.
+# ---------------------------------------------------------------------------
+
+const
+  ServiceContributionsTypeId* = "reprobuild.service-contributions"
+  ServiceContributionsAttrsTypeId* = "reprobuild.service-contributions.v1"
+  ServiceContributionsAddressSuffix* = "/contributions"
+
+type
+  ServiceContribution* = object
+    ## One cross-process contribution, as the store holds it.
+    ##
+    ## The two ENUM fields are strings here for the reason they are
+    ## strings on the provider wire: the record crosses a process
+    ## boundary and may be read by a build that is not the one that wrote
+    ## it, and an ordinal that shifted would silently re-map an
+    ## operation. `coReplace` is ordinal 0 and is the one operation a
+    ## consumer may not use, so a mis-mapped ordinal would turn a
+    ## contribution into a destructive one. The names are refused by
+    ## name on read.
+    point*: string
+      ## The bare point name, as the OWNER declared it in `converge` and
+      ## as the consumer wrote it at the resolver.
+    contributor*: string
+      ## The contributing package. §5's attribution, and the key a
+      ## deposit replaces on.
+    operation*: string
+    precedence*: string
+    members*: seq[string]
+    site*: string
+      ## `<file>:<line>` of the resolver argument, for a diagnostic that
+      ## can name the contributor's own line.
+
+  ServiceContributionSet* = object
+    address*: string
+    contributions*: seq[ServiceContribution]
+
+proc serviceContributionsAddress*(key: ServiceInstanceKey): string =
+  ## The store address of one instance's cross-process contribution set.
+  serviceInstanceAddress(key) & ServiceContributionsAddressSuffix
+
+proc encodeServiceContributions*(value: ServiceContributionSet): string =
+  ## Deterministic in field and element order, so two writes of one set
+  ## produce identical bytes.
+  var rows = newJArray()
+  for c in value.contributions:
+    var members = newJArray()
+    for member in c.members:
+      members.add(%member)
+    let row = %*{
+      "point": c.point,
+      "contributor": c.contributor,
+      "operation": c.operation,
+      "precedence": c.precedence,
+      "site": c.site}
+    row["members"] = members
+    rows.add(row)
+  let node = %*{"attrsTypeId": ServiceContributionsAttrsTypeId}
+  node["contributions"] = rows
+  $node
+
+proc decodeServiceContributions*(address, attrsTypeId,
+                                 attrsJson: string): ServiceContributionSet =
+  ## The inverse. Everything it cannot read EXACTLY is refused by name.
+  ##
+  ## A set written by a future version is NOT read as "no contributions
+  ## here". That reading is the dangerous one: the owner's converge would
+  ## then reconcile its own members only, and
+  ## `reconcileServiceRegistrations` would withdraw every consumer's
+  ## registration -- a silent deletion caused by a format boundary.
+  if attrsTypeId != ServiceContributionsAttrsTypeId:
+    raise newException(ValueError,
+      "service contribution set at `" & address & "` carries attrs " &
+      "type `" & attrsTypeId & "`; this build reads `" &
+      ServiceContributionsAttrsTypeId & "` only. Reading it anyway " &
+      "would make this instance's cross-process contributions look " &
+      "absent, and the next converge would WITHDRAW every registration " &
+      "they asked for.")
+  let node =
+    try:
+      parseJson(attrsJson)
+    except CatchableError as err:
+      raise newException(ValueError,
+        "service contribution set at `" & address &
+        "` has unparsable attrs: " & err.msg)
+  if node.kind != JObject:
+    raise newException(ValueError,
+      "service contribution set at `" & address &
+      "` has non-object attrs")
+  result.address = address
+  let rows = node{"contributions"}
+  if rows.isNil or rows.kind != JArray:
+    return
+  for row in rows:
+    if row.kind != JObject:
+      raise newException(ValueError,
+        "service contribution set at `" & address &
+        "` has a non-object contribution row")
+    var c = ServiceContribution(
+      point: row{"point"}.getStr(""),
+      contributor: row{"contributor"}.getStr(""),
+      operation: row{"operation"}.getStr(""),
+      precedence: row{"precedence"}.getStr(""),
+      site: row{"site"}.getStr(""))
+    if c.point.len == 0:
+      raise newException(ValueError,
+        "service contribution set at `" & address &
+        "` has a contribution naming no point; it could not be matched " &
+        "against a declared point, so it is refused rather than read " &
+        "as a contribution to nothing")
+    if c.contributor.len == 0:
+      raise newException(ValueError,
+        "service contribution set at `" & address &
+        "` has a contribution to `" & c.point &
+        "` naming no contributor; a row with no contributor can never " &
+        "be replaced or withdrawn by the package that made it")
+    let members = row{"members"}
+    if members.isNil or members.kind != JArray:
+      raise newException(ValueError,
+        "service contribution set at `" & address &
+        "` has a contribution to `" & c.point & "` with no member list")
+    for member in members:
+      if member.kind != JString or member.getStr("").len == 0:
+        raise newException(ValueError,
+          "service contribution set at `" & address &
+          "` has an empty or non-string member in the contribution to `" &
+          c.point & "`")
+      c.members.add(member.getStr(""))
+    result.contributions.add(c)
+
+proc readServiceContributions*(storeRoot: string;
+                              key: ServiceInstanceKey):
+                              ServiceContributionSet =
+  ## Read the persisted set, or an empty one when none exists.
+  let address = serviceContributionsAddress(key)
+  result.address = address
+  let store = openStateStore(storeRoot)
+  if not store.hasStateRecord(address):
+    return
+  let rec = store.readStateRecord(address)
+  decodeServiceContributions(address, rec.attrsTypeId, rec.attrsJson)
+
+proc writeServiceContributions*(storeRoot: string;
+                                key: ServiceInstanceKey;
+                                value: ServiceContributionSet;
+                                now: Time = getTime()) =
+  let store = openStateStore(storeRoot)
+  store.writeStateRecord(ResourceStateRecord(
+    address: serviceContributionsAddress(key),
+    typeId: ServiceContributionsTypeId,
+    determinism: rdVolatile,
+    attrsTypeId: ServiceContributionsAttrsTypeId,
+    attrsJson: encodeServiceContributions(value),
+    dependsOn: @[serviceInstanceAddress(key)],
+    identity: key.identity,
+    present: true,
+    holders: initTable[string, Time](),
+    effectiveDeadline: none(Time),
+    lastRenewed: now))
+
+proc depositServiceContributions*(storeRoot: string;
+                                  key: ServiceInstanceKey;
+                                  contributor: string;
+                                  contributions: openArray[ServiceContribution];
+                                  now: Time = getTime()):
+    tuple[set: ServiceContributionSet; replaced: int; added: int] =
+  ## Write `contributor`'s rows into the instance's contribution set,
+  ## REPLACING exactly its previous rows and touching nobody else's.
+  ##
+  ## `contributions` may be empty, and an empty deposit is a WITHDRAWAL
+  ## rather than a no-op: a consumer whose recipe no longer contributes
+  ## must stop contributing, and the only way its `repro up` can say so
+  ## is by depositing nothing. Skipping the write for an empty list would
+  ## leave last week's members registered forever with nothing asking
+  ## for them.
+  if contributor.len == 0:
+    raise newException(ServiceRegistryError,
+      "depositServiceContributions needs the contributing package: a " &
+      "row with no contributor can never be replaced or withdrawn, and " &
+      "§5 requires every converged member to name the package that " &
+      "contributed it.")
+  for c in contributions:
+    if c.contributor != contributor:
+      raise newException(ServiceRegistryError,
+        "depositServiceContributions for `" & contributor &
+        "` was handed a contribution attributed to `" & c.contributor &
+        "`. A deposit replaces exactly one contributor's rows, so a " &
+        "mixed batch would either write rows this deposit cannot " &
+        "replace later or silently re-attribute them.")
+  var kept: seq[ServiceContribution] = @[]
+  let existing = readServiceContributions(storeRoot, key)
+  for c in existing.contributions:
+    if c.contributor == contributor:
+      inc result.replaced
+    else:
+      kept.add(c)
+  for c in contributions:
+    kept.add(c)
+    inc result.added
+  result.set = ServiceContributionSet(
+    address: serviceContributionsAddress(key), contributions: kept)
+  writeServiceContributions(storeRoot, key, result.set, now)
+
+proc contributionPrecedenceFromWord(word: string;
+                                   c: ServiceContribution):
+    EnvironmentPrecedence =
+  ## The stored precedence word back to the ladder. Refused by name
+  ## rather than defaulted: `epDefault` is the LOWEST rung, so a
+  ## mis-read word would silently demote an `appendForce` to the rung a
+  ## `replace` discards, and the member would vanish with a step-4
+  ## diagnostic nobody asked for.
+  case word
+  of "epSet": epSet
+  of "epOverride": epOverride
+  of "epForce": epForce
+  of "epDefault": epDefault
+  else:
+    raise newException(ServiceRegistryError,
+      "package `" & c.contributor & "` contributes to `" & c.point &
+      "` with precedence `" & word & "`, which this build does not " &
+      "know. The rungs are `epDefault`, `epSet`, `epOverride` and " &
+      "`epForce`. Defaulting an unknown rung would demote the " &
+      "contribution to the bottom one, where a `replace` discards it.")
+
+proc refuseUndeclaredContribution(point, contributor, site: string;
+                                  declaredPoints: openArray[string];
+                                  address: string) =
+  ## §4.6's refusal, in one place so the consumer's check and the
+  ## owner's check cannot word it differently.
+  var declared: seq[string] = @[]
+  for p in declaredPoints:
+    declared.add("`" & p & "`")
+  raise newException(ServiceRegistryError,
+    "package `" & contributor & "` contributes to `" & point &
+    "` at " & (if site.len == 0: "<unknown site>" else: site) &
+    ", and the instance at `" & address & "` declares no such " &
+    "contribution point. It converges " &
+    (if declared.len == 0: "no contribution points at all"
+     else: declared.join(", ")) &
+    ". Shared-Development-Services.md §4.6: \"a contribution that " &
+    "reaches an instance which does not declare that point must be " &
+    "REFUSED, never dropped -- including across a version skew, where " &
+    "the running instance was built from an older definition that lacks " &
+    "the point. §4.3's three outcomes already decide the skew case; a " &
+    "contribution to an absent point is the refusing row, not the " &
+    "warning row, because the consumer asked for something the instance " &
+    "cannot do.\"")
+
+proc validateServiceContributions*(declaredPoints: openArray[string];
+                                   contributions: openArray[ServiceContribution];
+                                   address: string) =
+  ## Refuse every contribution the instance cannot honour. Raises on the
+  ## FIRST offender, naming it, the contributor and the declared set.
+  ##
+  ## Two refusals, both §4.6's or §5.1's and neither a drop:
+  ##   * a point the instance does not declare (the version-skew case);
+  ##   * a `replace` operation, which §5.1 forbids a consumer -- "a
+  ##     consumer that could replace them would fork the instance it is
+  ##     trying to join". The resolver refuses it at the consumer's
+  ##     compile time as well; this is the check for a row that reached
+  ##     the store some other way, and it has to exist because a stored
+  ##     `replace` would become the fold's base value and DISCARD every
+  ##     other consumer's appends.
+  for c in contributions:
+    var found = false
+    for p in declaredPoints:
+      if p == c.point:
+        found = true
+        break
+    if not found:
+      refuseUndeclaredContribution(c.point, c.contributor, c.site,
+        declaredPoints, address)
+    if c.operation != $coAppend:
+      raise newException(ServiceRegistryError,
+        "package `" & c.contributor & "` contributes to `" & c.point &
+        "` at " & (if c.site.len == 0: "<unknown site>" else: c.site) &
+        " with operation `" & c.operation & "`. A consumer of a shared " &
+        "service may only `append` (Shared-Development-Services.md " &
+        "§5.1; who may use the destructive operation is D-SS9, open). " &
+        "A stored `replace` would become the fold's base value and " &
+        "discard every other consumer's appends, so it is refused here " &
+        "as well as at the consumer's compile time.")
+    if c.members.len == 0:
+      raise newException(ServiceRegistryError,
+        "package `" & c.contributor & "` contributes NO members to `" &
+        c.point & "` at " &
+        (if c.site.len == 0: "<unknown site>" else: c.site) &
+        ". A contribution with no members is indistinguishable from a " &
+        "forgotten one; it is refused rather than folded into nothing.")
+
+proc foldCrossProcessContributions*(declaredPoints: openArray[string];
+                                    contributions: openArray[ServiceContribution];
+                                    address: string):
+    tuple[members: seq[string]; contributors: seq[string]] =
+  ## Fold the stored cross-process contributions into the member list the
+  ## instance must register, with each member attributed to the package
+  ## that contributed it.
+  ##
+  ## THE ALGEBRA IS NOT RE-DECIDED HERE. Every point is folded by
+  ## `foldContributionRows` -- the same four steps of
+  ## `Configurable-System.md` §Resolution that the intra-process lane
+  ## folds with, which L8 built and this proc calls. A second
+  ## implementation of "which append wins" is the drift this campaign has
+  ## already paid for.
+  ##
+  ## THE BASE IS EMPTY, deliberately. Step 1's `R` is the
+  ## highest-priority `replace`, and the owner's OWN members are already
+  ## resolved by the owner's process before this proc is reached -- they
+  ## are appended to this result by the caller, not folded again. So the
+  ## base row here is an empty `replace` at `epDefault` attributed to the
+  ## port, and what this fold decides is exactly the ordering and
+  ## priority of the cross-process appends among themselves.
+  ##
+  ## POINTS ARE FOLDED IN THE INSTANCE'S DECLARATION ORDER, not in store
+  ## order, so two deposits in different orders produce the same member
+  ## list. A store whose row order decided the result would make the
+  ## registration set depend on which consumer ran first.
+  validateServiceContributions(declaredPoints, contributions, address)
+  for point in declaredPoints:
+    var rows: seq[ConfigContribution] = @[ConfigContribution(
+      key: point, package: "", precedence: epDefault,
+      operation: coReplace, value: dslScalarSeqString(@[]))]
+    for c in contributions:
+      if c.point != point:
+        continue
+      rows.add(ConfigContribution(
+        key: point, package: c.contributor,
+        precedence: contributionPrecedenceFromWord(c.precedence, c),
+        operation: coAppend,
+        value: dslScalarSeqString(c.members),
+        sourceFile: c.site, sourceLine: 0))
+    let folded = foldContributionRows(point, rows)
+    for i in 0 ..< folded.members.len:
+      result.members.add(folded.members[i])
+      result.contributors.add(folded.memberPackages[i])
+
 proc mintedIdFor*(value: ServiceRegistrationSet; member: string): string =
   ## The identifier minted for `member`, or the empty string when the
   ## set holds no registration for it. The caller decides what an

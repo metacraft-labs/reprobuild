@@ -439,7 +439,23 @@ proc applyServiceConverge*(registry: var ServiceInstanceRegistry;
     address: decision.address,
     hadInstance: decision.hadInstance,
     holderSetRecoverable: decision.holderRecovery == hrTotal,
-    holders: decision.holdersKnown)
+    holders: decision.holdersKnown,
+    # Shared-Development-Services D-SS11 (§4.6): what the instance this
+    # decision resolved to DECLARES.
+    #
+    # From the REGISTRY ENTRY's own persisted snapshot when an instance
+    # was present, and from the REQUEST's snapshot otherwise. The
+    # distinction is the whole of the version-skew case: when the
+    # running instance was built from an older definition, the request's
+    # snapshot is the newer one and answering with it would make the
+    # skew undetectable -- a contribution to a point only the newer
+    # definition converges would be accepted and then ignored by the
+    # instance, which is the silent drop §4.6 exists to refuse.
+    contributionPoints:
+      (if decision.hadInstance:
+         contributionPointsOf(registry.entries[decision.address]
+           .record.snapshot)
+       else: contributionPointsOf(snapshot)))
   if decision.outcome == scoMaterialise:
     if request.command.len == 0:
       # Refused rather than registered without a process. An instance
