@@ -36,50 +36,22 @@
 ## ``src/db`` not taking in ``src/dbx``, and a scoped id that keeps full
 ## paths, so it is not the subtree ``T:src/db``.
 
-import std/[base64, json, os, osproc, sets, strutils, unittest]
+import std/[base64, json, os, sets, strutils, unittest]
 
 import repro_cli_support/content_id
 import content_id_fixture
-
-proc repoRoot(): string =
-  currentSourcePath().parentDir.parentDir.parentDir
-
-proc pinFile(): string =
-  currentSourcePath().parentDir / "content_id" /
-    "test-certificates-spec-content-vectors.pin"
-
-proc specSibling(): string =
-  let explicit = getEnv("TEST_CERTIFICATES_SPEC")
-  if explicit.len > 0: explicit
-  else: repoRoot().parentDir / "test-certificates-spec"
+import spec_vectors_pin
 
 proc extractVectors(scratch: string): tuple[root: string; error: string] =
-  ## ``vectors/`` at the pinned revision, unpacked into ``scratch``.
-  let sibling = specSibling()
-  let pin = readFile(pinFile()).strip()
-  if pin.len != 40 or not pin.allCharsInSet(HexDigits):
-    return ("", "the pin file " & pinFile() & " must hold one full commit id")
-  if not dirExists(sibling):
-    return ("", "the test-certificates-spec sibling is absent: expected a " &
-      "clone at " & sibling & " (or set TEST_CERTIFICATES_SPEC). This test " &
-      "needs revision " & pin & " of it")
-  let probe = runGitIn(sibling, ["cat-file", "-e", pin & "^{commit}"])
-  if probe.code != 0:
-    return ("", "revision " & pin & " is not in the object store of " &
-      sibling & "; run `git -C " & sibling & " fetch` (an unshallow fetch " &
-      "if the clone is shallow)")
-  let archive = scratch / "vectors.tar"
-  let archived = runGitIn(sibling, ["archive", "--format=tar", "-o", archive,
-                                    pin, "vectors"])
-  if archived.code != 0:
-    return ("", "`git archive " & pin & " vectors` failed: " & archived.stderr)
-  let unpacked = execCmdEx("tar -x -f " & quoteShell(archive) & " -C " &
-                           quoteShell(scratch))
-  if unpacked.exitCode != 0:
-    return ("", "could not unpack the vectors archive: " & unpacked.output)
-  removeFile(archive)
-  echo "  content vectors: test-certificates-spec ", pin, " (", sibling, ")"
-  (scratch / "vectors", "")
+  ## ``vectors/`` at the pinned revision, unpacked into ``scratch``; the pin
+  ## and the extraction are shared with the conformance walker
+  ## (``spec_vectors_pin``), so both read the suite at one revision.
+  let extracted = extractPinnedVectors(scratch)
+  if extracted.error.len > 0:
+    return ("", extracted.error)
+  echo "  content vectors: test-certificates-spec ", extracted.pin, " (",
+    extracted.sibling, ")"
+  (extracted.root, "")
 
 proc entriesOf(path: string): seq[ContentEntry] =
   for node in parseFile(path):

@@ -992,6 +992,65 @@ proc manifestOfTree(session: var Session; cwd, tree: string): ContentIdResult =
       at = eol + 1 + size + 1
   manifestV1Sha256(entries)
 
+type
+  StateTree = object
+    ok: bool
+    tree: string
+      ## The unscoped tree ``T`` of the state.
+    cwd: string
+      ## Where to run later steps over ``T``: the working tree's top level
+      ## for an index or working-tree state, the repository otherwise.
+    findings: seq[NoContentIdFinding]
+    failure: string
+
+proc stateTree(session: var Session; repository: string; state: ContentState;
+               format: ContentAlgorithm; scope: openArray[string]): StateTree =
+  ## The unscoped tree of ``state`` (see ``computeContentId``). §3 states are
+  ## looked for within ``scope`` only.
+  result.cwd = repository
+  case state.kind
+  of cskCommit:
+    let resolved = session.step(result.cwd,
+      ["rev-parse", "--verify", "--quiet", state.revision & "^{tree}"])
+    if not resolved.ok:
+      return StateTree(failure: "`" & state.revision & "` does not name a " &
+        "commit or tree in this repository")
+    result.tree = singleLine(resolved.stdout)
+  of cskWorkingTree, cskIndex:
+    let copied = session.copyUserIndex(repository)
+    if not copied.ok:
+      return StateTree(failure: copied.failure)
+    result.cwd = copied.toplevel
+    let probe =
+      if state.kind == cskWorkingTree:
+        session.probeWorkingTree(result.cwd, copied.path, scope)
+      else:
+        session.probeUnmerged(result.cwd, copied.path, scope)
+    if not probe.ok:
+      return StateTree(failure: probe.failure)
+    if probe.findings.len > 0:
+      return StateTree(findings: probe.findings)
+    if state.kind == cskWorkingTree:
+      try:
+        setLastModificationTime(copied.path, fromUnix(StatDistrustTime))
+      except OSError:
+        return StateTree(failure: "could not date the temporary index: " &
+          getCurrentExceptionMsg())
+      # No pathspec: since git 2.0 `add --update` without one covers the
+      # whole tree, which is what `-- :/` spells, and it stays so under an
+      # inherited GIT_LITERAL_PATHSPECS that would make `:/` a file name.
+      let update = session.step(result.cwd, ["add", "--update"], copied.path)
+      if not update.ok:
+        return StateTree(failure: update.failure)
+    let written = session.step(result.cwd, ["write-tree"], copied.path)
+    if not written.ok:
+      return StateTree(failure: written.failure)
+    result.tree = singleLine(written.stdout)
+  let treeProblem = treeIdProblem(result.tree, format)
+  if treeProblem.len > 0:
+    return StateTree(failure: treeProblem)
+  result.ok = true
+
 proc computeContentId*(repository: string; state: ContentState;
                        algorithm: ContentAlgorithm;
                        scope: openArray[string] = [];
@@ -1041,49 +1100,14 @@ proc computeContentId*(repository: string; state: ContentState;
         "repository: its object format makes its trees " & $format.algorithm &
         " ids")
 
-    var cwd = repository
-    var tree: string
-    case state.kind
-    of cskCommit:
-      let resolved = session.step(cwd,
-        ["rev-parse", "--verify", "--quiet", state.revision & "^{tree}"])
-      if not resolved.ok:
-        return failed(name, "`" & state.revision & "` does not name a " &
-          "commit or tree in this repository")
-      tree = singleLine(resolved.stdout)
-    of cskWorkingTree, cskIndex:
-      let copied = session.copyUserIndex(repository)
-      if not copied.ok:
-        return failed(name, copied.failure)
-      cwd = copied.toplevel
-      let probe =
-        if state.kind == cskWorkingTree:
-          session.probeWorkingTree(cwd, copied.path, scope)
-        else:
-          session.probeUnmerged(cwd, copied.path, scope)
-      if not probe.ok:
-        return failed(name, probe.failure)
-      if probe.findings.len > 0:
-        return noContentId(name, probe.findings)
-      if state.kind == cskWorkingTree:
-        try:
-          setLastModificationTime(copied.path, fromUnix(StatDistrustTime))
-        except OSError:
-          return failed(name, "could not date the temporary index: " &
-            getCurrentExceptionMsg())
-        # No pathspec: since git 2.0 `add --update` without one covers the
-        # whole tree, which is what `-- :/` spells, and it stays so under an
-        # inherited GIT_LITERAL_PATHSPECS that would make `:/` a file name.
-        let update = session.step(cwd, ["add", "--update"], copied.path)
-        if not update.ok:
-          return failed(name, update.failure)
-      let written = session.step(cwd, ["write-tree"], copied.path)
-      if not written.ok:
-        return failed(name, written.failure)
-      tree = singleLine(written.stdout)
-    let treeProblem = treeIdProblem(tree, format.algorithm)
-    if treeProblem.len > 0:
-      return failed(name, treeProblem)
+    let unscoped = session.stateTree(repository, state, format.algorithm,
+                                     scope)
+    if unscoped.findings.len > 0:
+      return noContentId(name, unscoped.findings)
+    if not unscoped.ok:
+      return failed(name, unscoped.failure)
+    let cwd = unscoped.cwd
+    var tree = unscoped.tree
 
     if scope.len > 0:
       let scoped = session.scratch / "scoped-index"
@@ -1124,6 +1148,77 @@ proc computeContentId*(repository: string; state: ContentState;
     return cannotCompute(algorithmName, "`" & algorithmName & "` is not a " &
       "content id algorithm this implementation computes")
   computeContentId(repository, state, algorithm, scope, git)
+
+# ---------------------------------------------------------------------------
+# Reading a file out of a state's content
+# ---------------------------------------------------------------------------
+
+type
+  ContentFileStatus* = enum
+    cfsPresent
+      ## The state's content tracks the path; ``bytes`` holds its content.
+    cfsAbsent
+      ## The state was read and its content does not track the path.
+    cfsFailed
+      ## The state could not be read; ``reason`` says why. Never an absence.
+
+  ContentFile* = object
+    status*: ContentFileStatus
+    bytes*: string
+    reason*: string
+
+proc readContentFile*(repository, path: string; state: ContentState;
+                      git = defaultContentIdGit()): ContentFile =
+  ## The bytes ``path`` has in the CONTENT of ``state`` — the same tree
+  ## ``computeContentId`` names for that state, so a working tree yields the
+  ## file's working-tree bytes when it is tracked and an untracked file is
+  ## absent, exactly as it is absent from the content id. This is how a
+  ## framework reads its own version-controlled inputs out of the content
+  ## under evaluation (the standard's Verification §4.2). Writes nothing in
+  ## the repository beyond the objects ``git add --update`` stores for a
+  ## working tree.
+  let problem = scopePathProblem(path)
+  if problem.len > 0:
+    return ContentFile(status: cfsFailed, reason: problem)
+  if state.kind == cskCommit and
+     (state.revision.len == 0 or state.revision.startsWith("-")):
+    return ContentFile(status: cfsFailed,
+      reason: "`" & state.revision & "` is not a revision")
+  var (opened, session, failure) = openSession(git)
+  if not opened:
+    return ContentFile(status: cfsFailed, reason: failure)
+  try:
+    let format = session.repositoryObjectFormat(repository)
+    if not format.ok:
+      return ContentFile(status: cfsFailed, reason: format.failure)
+    let unscoped = session.stateTree(repository, state, format.algorithm,
+                                     [path])
+    if unscoped.findings.len > 0:
+      return ContentFile(status: cfsFailed,
+        reason: "the state has no content id: " &
+          describe(unscoped.findings))
+    if not unscoped.ok:
+      return ContentFile(status: cfsFailed, reason: unscoped.failure)
+    let listed = session.step(unscoped.cwd,
+      ["--literal-pathspecs", "ls-tree", "-r", "-z", "--full-tree",
+       unscoped.tree, "--", path])
+    if not listed.ok:
+      return ContentFile(status: cfsFailed, reason: listed.failure)
+    for record in nulRecords(listed.stdout):
+      # `<mode> SP <type> SP <object> TAB <path>`
+      let tab = record.find('\t')
+      if tab < 0 or record[tab + 1 .. ^1] != path:
+        continue
+      let fields = record[0 ..< tab].split(' ')
+      if fields.len != 3 or fields[1] != "blob":
+        continue
+      let blob = session.step(unscoped.cwd, ["cat-file", "blob", fields[2]])
+      if not blob.ok:
+        return ContentFile(status: cfsFailed, reason: blob.failure)
+      return ContentFile(status: cfsPresent, bytes: blob.stdout)
+    ContentFile(status: cfsAbsent)
+  finally:
+    closeSession(session)
 
 # ---------------------------------------------------------------------------
 # Evaluating a claimed id

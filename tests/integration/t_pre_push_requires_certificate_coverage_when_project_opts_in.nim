@@ -225,7 +225,10 @@ proc issueAndReadCert(fx: Fixture): TestCertificate =
     fx.workspaceRoot, fx.libASha, currentPlatformTag())
   check fileExists(certFile)
   result = readCertificateFile(certFile)
-  check result.vcs.commit == fx.libASha
+  # TC-8b: the record names the tested CONTENT and, informationally, HEAD.
+  check result.vcs.base == fx.libASha
+  check result.vcs.content == "git-tree-sha1:" & requireGit("git -C " &
+    q(fx.libAPath) & " rev-parse " & fx.libASha & "^{tree}").strip()
   check "t-unit" in result.targets
 
 const otherPlatform = "linux/tc3-second"

@@ -9729,6 +9729,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_certificate_matches_by_content_never_by_base.nim",
+    binary: "build/test-bin/t_certificate_matches_by_content_never_by_base",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_certificate_policy_required_advisory_off_modes.nim",
     binary: "build/test-bin/t_certificate_policy_required_advisory_off_modes",
     defines: @[],
@@ -10577,6 +10586,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_e2e_variant_feature_flag_drops_tls.nim",
     binary: "build/test-bin/t_e2e_variant_feature_flag_drops_tls",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_earlier_draft_certificate_is_rejected_with_a_reissue_remedy.nim",
+    binary: "build/test-bin/t_earlier_draft_certificate_is_rejected_with_a_reissue_remedy",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -11745,8 +11763,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_lock_is_checked_at_vcs_commit_rather_than_from_a_digest.nim",
-    binary: "build/test-bin/t_lock_is_checked_at_vcs_commit_rather_than_from_a_digest",
+    source: "tests/integration/t_lock_is_read_from_the_content_under_evaluation.nim",
+    binary: "build/test-bin/t_lock_is_read_from_the_content_under_evaluation",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
