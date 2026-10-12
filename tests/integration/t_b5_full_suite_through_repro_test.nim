@@ -15,6 +15,7 @@
 ## ``REPRO_B5_FULL_SUITE_RUN=1``.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 const RepoMarker = "repro.nim"
 

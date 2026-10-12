@@ -8,6 +8,7 @@
 ## the local key, the portable record and the determinism probe alike.
 
 import std/[os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_hash

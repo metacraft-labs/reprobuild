@@ -155,10 +155,16 @@ proc sha512Hex*(data: string): string =
   ## helper is a construction checked against itself.
   toLowerAscii($sha512.digest(data))
 
-proc be32(n: int): string =
+proc be32Prefix*(n: int): string =
   ## Four-byte big-endian length. Big-endian because every wire format
   ## this evidence travels beside is, and a fixed width because a
   ## self-describing one would need framing of its own.
+  ##
+  ## Exported so every framed construction in this library — the report
+  ## data below, the inference commitment, the inference statement — uses
+  ## ONE length prefix. A second implementation of a four-byte integer is
+  ## a second answer to where a field ends, and the one that is wrong is
+  ## whichever the document did not travel through.
   result = newString(4)
   result[0] = char((n shr 24) and 0xFF)
   result[1] = char((n shr 16) and 0xFF)
@@ -179,11 +185,11 @@ proc bindingPreimage*(purpose: BindingPurpose;
   ## Use ``reportDataHexFor`` for anything a backend actually binds.
   result = ReportDataDomainTag
   let p = $purpose
-  result.add be32(p.len)
+  result.add be32Prefix(p.len)
   result.add p
-  result.add be32(challenge.len)
+  result.add be32Prefix(challenge.len)
   result.add challenge
-  result.add be32(ephemeralPub.len)
+  result.add be32Prefix(ephemeralPub.len)
   result.add ephemeralPub
 
 proc reportData*(purpose: BindingPurpose;

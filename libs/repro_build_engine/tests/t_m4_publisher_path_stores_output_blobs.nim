@@ -68,6 +68,7 @@ from repro_cas_store import openCasStore, casGet, close, CasStore,
   toContentHash
 
 from repro_core/paths import extendedPath
+from repro_test_support import testCaseScratchSlug
 
 # Every case gets its OWN root, under this run's pid-scoped directory in
 # the build tree, and every removal goes through ``extendedPath``.
@@ -81,8 +82,9 @@ from repro_core/paths import extendedPath
 # NEXT run then meets a warm cache. Every case in this file fails at once
 # in that state, with ``asUpToDate`` and no publisher invocation — a
 # stale-state failure that looks exactly like the feature being broken.
-# Pid scoping plus a sweep of earlier runs bounds the residue at one run's
-# trees, and puts them in ``build/`` rather than ``%TEMP%``.
+# A root private to the case, cleared by that case's own fresh process
+# before it builds (``newCaseRoot``), bounds the residue at one tree per
+# case and puts it in ``build/`` rather than ``%TEMP%``.
 #
 # *``extendedPath``.* Without it this file leaves a tree behind on every
 # run, and the reason is neither a handle nor a scanner: the action cache's
@@ -97,8 +99,14 @@ from repro_core/paths import extendedPath
 # file, rooted in ``%TEMP%``, leaked only the case with the LONGEST tag
 # name and cleaned up the other six.
 
-const TmpRoot = "build/test-tmp/m4pub"
-let RunRoot = absolutePath(TmpRoot / $getCurrentProcessId())
+# Keyed on the CASE, not the pid. Every case of this binary runs as its own
+# process, concurrently with its siblings, so "a directory that is not mine
+# belongs to a process that is gone" does not hold: the sweep that used to
+# remove every pid directory but this run's own deleted the RunRoot of a
+# sibling case still in flight. A per-case root needs no sweep -- the set is
+# bounded (one per case) and each case clears its own tags in
+# ``newCaseRoot`` -- and nothing outside it is ever touched.
+let RunRoot = absolutePath("build/test-tmp/m4pub" / testCaseScratchSlug())
 
 proc dropTree(path: string) =
   ## Best-effort removal, always through ``extendedPath``. Never fatal:
@@ -113,17 +121,6 @@ proc dropTree(path: string) =
     except CatchableError:
       sleep(100)
 
-proc sweepPreviousRuns() =
-  ## A sibling belongs to a process that is gone, so this is the removal
-  ## that can actually succeed. It cannot affect this run either way — the
-  ## pid scope is what isolates them.
-  if not dirExists(TmpRoot):
-    return
-  for kind, path in walkDir(absolutePath(TmpRoot)):
-    if kind == pcDir and path != RunRoot:
-      dropTree(path)
-
-sweepPreviousRuns()
 createDir(extendedPath(RunRoot))
 
 var caseRoots: seq[string] = @[]

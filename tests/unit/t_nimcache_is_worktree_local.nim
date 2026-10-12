@@ -172,7 +172,8 @@ for m in MainModules:
   checkLayout(m & " (-d:release)", nimcacheOf(root, m, @["-d:release"]),
               expectedFor(m, "_r"))
 
-let explicitDir = getTempDir() / "nimcache-locality-explicit"
+let explicitDir = getTempDir() / ("nimcache-locality-explicit-" &
+  $getCurrentProcessId())
 let explicitGot = nimcacheOf(root, selfRel, @["--nimcache:" & explicitDir])
 if explicitGot.len > 0:
   if sameDir(explicitGot, explicitDir):
@@ -186,7 +187,8 @@ echo "nimcache-locality: [3] negative control: repo-root config switched off"
 var controlEnv = newStringTable(modeCaseSensitive)
 for k, v in envPairs():
   controlEnv[k] = v
-let fakeXdg = getTempDir() / "nimcache-locality-control-xdg"
+let fakeXdg = getTempDir() / ("nimcache-locality-control-xdg-" &
+  $getCurrentProcessId())
 controlEnv["XDG_CACHE_HOME"] = fakeXdg
 let controlGot = nimcacheOf(root, selfRel, @["--skipParentCfg"], controlEnv)
 if controlGot.len > 0:

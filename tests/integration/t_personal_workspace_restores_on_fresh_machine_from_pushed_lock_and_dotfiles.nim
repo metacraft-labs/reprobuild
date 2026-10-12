@@ -226,7 +226,7 @@ suite "HL-7 — personal workspace restores on a fresh machine":
       var appEntry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "app": appEntry = e
-      check appEntry != nil
+      check not appEntry.isNil
       check appEntry["executionStatus"].getStr() == "cloned"
 
       # =================================================================

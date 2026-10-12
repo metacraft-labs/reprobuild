@@ -38,6 +38,7 @@ import std/[json, os, osproc, streams, strutils]
 
 import repro_core/ambient_execution
 import repro_core/paths
+import repro_core/workspace_root
 import repro_project_dsl
 
 import ./apply
@@ -207,6 +208,51 @@ proc resolveNixExe*(explicit = ""): string =
       "install nix, or drop the useFlakeDevShell() call from devEnv:")
   found
 
+const
+  NixShellScratchNames* = ["NIX_BUILD_TOP", "TMP", "TMPDIR", "TEMP", "TEMPDIR",
+    "terminfo"]
+    ## What `nix print-dev-env`'s script sets for the SHELL SESSION rather
+    ## than for the environment: `NIX_BUILD_TOP` and the four temp-directory
+    ## names all point at a `/tmp/nix-shell.XXXXXX` directory the script
+    ## creates with `mktemp -d` on every sourcing, and `terminfo` at the
+    ## builder's terminal database. nix-direnv's `_nix_import_env` restores
+    ## exactly this list to its pre-import values and deletes the directory
+    ## (nix-direnv 3.0.7, `direnvrc`); `direnv exec` therefore leaves `TMPDIR`
+    ## unset in this repository's shell.
+    ##
+    ## Absorbing them had two consequences, both measured on reprobuild's own
+    ## flake shell (2026-09-28):
+    ##
+    ##   * the contribution was different on EVERY activation — five
+    ##     variables naming a fresh random directory — so the dev-env artifact
+    ##     could never be byte-stable, whatever else is fixed around it; the
+    ##     entropy that put a random name into the OUTPUT is what the M6 gate
+    ##     exists to refuse;
+    ##   * the directory was never removed: 3,975 `/tmp/nix-shell.*`
+    ##     directories had accumulated on the host, one per entry.
+    ##
+    ## Every activated program then used a directory that had been created
+    ## for a subshell which no longer exists; with these dropped it uses the
+    ## caller's own `TMPDIR` (or the platform default), as under direnv.
+
+proc withoutNixShellScratch*(ops: openArray[ForeignEnvOp]):
+    tuple[kept: seq[ForeignEnvOp], scratchDir: string] =
+  ## Split a flake-shell contribution into what the environment keeps and the
+  ## per-sourcing scratch directory to delete. Pure, so the list and the
+  ## directory test are asserted without running `nix`.
+  ##
+  ## The directory is returned only when `NIX_BUILD_TOP` names a
+  ## `nix-shell.*` directory: that is the one shape `print-dev-env`'s
+  ## `mktemp -d` produces, and anything else is somebody else's path that a
+  ## cleanup must not touch (nix-direnv applies the same test).
+  for op in ops:
+    if op.name in NixShellScratchNames:
+      if op.name == "NIX_BUILD_TOP" and op.kind == feoSet and
+          op.value.extractFilename.startsWith("nix-shell."):
+        result.scratchDir = op.value
+      continue
+    result.kept.add(op)
+
 proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
                        overrideInputs: openArray[(string, string)] = [];
                        nixExe = ""; profile = "";
@@ -221,19 +267,29 @@ proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
     else: workDir / "flake-profile"
   let argv = flakePrintDevEnvArgv(resolveNixExe(nixExe), flakeRef, profilePath,
     overrideInputs, extraArgs)
-  captureForeignEnvOps(argv, projectRoot, workDir / "print-dev-env.bash",
-    separator = $PathSep)
+  let split = withoutNixShellScratch(captureForeignEnvOps(argv, projectRoot,
+    workDir / "print-dev-env.bash", separator = $PathSep))
+  if split.scratchDir.len > 0 and dirExists(extendedPath(split.scratchDir)):
+    # Best effort, like nix-direnv's `rm -rf`: a directory we could not remove
+    # is litter, not a reason to fail an activation that otherwise succeeded.
+    try:
+      removeDir(extendedPath(split.scratchDir))
+    except OSError:
+      discard
+  split.kept
 
 proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
     seq[(string, string)] =
   ## Ask NF-1 for the actual develop bindings instead of duplicating its resolver.
-  var root = absolutePath(projectRoot)
-  while not fileExists(extendedPath(root / ".repro-workspace.toml")) and
-      not fileExists(extendedPath(root / ".repro" / "workspace.toml")):
-    let parent = parentDir(root)
-    if parent == root or parent.len == 0:
-      return
-    root = parent
+  # The workspace root is found by the one walk every workspace-root lookup
+  # uses (`repro_core/workspace_root`, Workspace-Settings-Files.md §6). A
+  # root found only by the MO-2 committed lock is a single-repo workspace with
+  # no siblings to develop against, so there are no overrides to ask for and
+  # no `repro` to start.
+  let found = discoverWorkspaceRoot(projectRoot)
+  if found.marker in {wrmNone, wrmCommittedLock}:
+    return
+  let root = found.root
   var localRef = flakeRef.split('#')[0].split('?')[0]
   if localRef.startsWith("path:"):
     localRef = localRef[5 .. ^1]

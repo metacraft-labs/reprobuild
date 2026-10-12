@@ -34,8 +34,10 @@ import repro_cas_store
 import repro_hash
 import repro_local_store
 import repro_peer_cache
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_m5_peer_cache_build_wiring"
+let TmpDir = "build/test-tmp/t_m5_peer_cache_build_wiring" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

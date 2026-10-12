@@ -1,4 +1,4 @@
-import std/[os, sequtils, strutils, unittest]
+import std/[options, os, sequtils, strutils, unittest]
 
 import repro_cli_support
 import repro_daemon_core/protocol
@@ -32,9 +32,11 @@ suite "daemon carried environment":
         delEnv(Key)
 
     delEnv(Key)
-    check autoRunQuotaMemoryBytes() == DefaultAutoRunQuotaMemoryBytes
+    # Unset means NO budget from reprobuild: the daemon's own default
+    # (a share of physical memory) or the host file decides.
+    check autoRunQuotaMemoryBytes().isNone
     putEnv(Key, "68719476736")
-    check autoRunQuotaMemoryBytes() == 68719476736'u64
+    check autoRunQuotaMemoryBytes() == some(68719476736'u64)
     for invalid in ["0", "not-a-number"]:
       putEnv(Key, invalid)
       expect ValueError:

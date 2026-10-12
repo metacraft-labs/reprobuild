@@ -19,10 +19,18 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc runBuild(reproBin, repoRoot: string; progressMode: string; workRoot: string; extraArgs: seq[string] = @[]): tuple[output: string; exitCode: int] =
-  let tempCache = createTempDir("repro-progress-cache-", "")
-  defer: removeDir(tempCache)
-  
+proc runBuild(reproBin, repoRoot: string; progressMode: string; workRoot: string;
+              actionCacheRoot: string;
+              extraArgs: seq[string] = @[]): tuple[output: string; exitCode: int] =
+  ## ``actionCacheRoot`` is chosen by the caller. The real build (step 1) gets
+  ## a cache of its own, so it runs cold and actually executes actions. The
+  ## five ``--dry-run`` steps share ONE further cache that no real build ever
+  ## writes to: a dry run records no action results there, so every one of
+  ## them still lists the same would-run actions (measured: 10 ``Starting:`` /
+  ## 10 ``Finished:`` lines with a fresh cache and with a reused one), but only
+  ## the first pays for compiling reprobuild's own project provider into it.
+  ## A fresh cache per dry run made each of them recompile that provider
+  ## (measured alone: 178 s with a fresh cache vs 12 s reused, same work root).
   var args = @[
     reproBin,
     "build",
@@ -32,7 +40,7 @@ proc runBuild(reproBin, repoRoot: string; progressMode: string; workRoot: string
     args.add("--progress=" & progressMode)
   args.add("--no-runquota")
   args.add("--tool-provisioning=path")
-  args.add("--action-cache-root=" & tempCache)
+  args.add("--action-cache-root=" & actionCacheRoot)
   args.add("--work-root=" & workRoot)
   for arg in extraArgs:
     args.add(arg)
@@ -53,17 +61,21 @@ suite "t_build_progress_modes":
       defer: removeDir(tempRoot)
       let workRoot = tempRoot / "work"
       createDir(workRoot)
+      let buildCache = tempRoot / "build-cache"
+      createDir(buildCache)
+      let dryRunCache = tempRoot / "dry-run-cache"
+      createDir(dryRunCache)
 
       # 1. Test `simple-dots` with real execution (cold cache)
       # We want to see dots representing completion of launched actions.
-      let dotsRes = runBuild(reproBin, repoRoot, "simple-dots", workRoot)
+      let dotsRes = runBuild(reproBin, repoRoot, "simple-dots", workRoot, buildCache)
       check dotsRes.exitCode == 0
       # Verify that dots were output to stderr (captured in output)
       check dotsRes.output.contains(".")
 
       # 2. Test `simple-lines` with --dry-run
       # We want to see "Starting: " and "Finished: " lines with elapsed time.
-      let linesRes = runBuild(reproBin, repoRoot, "simple-lines", workRoot, @["--dry-run"])
+      let linesRes = runBuild(reproBin, repoRoot, "simple-lines", workRoot, dryRunCache, @["--dry-run"])
       check linesRes.exitCode == 0
       check linesRes.output.contains("Starting:")
       check linesRes.output.contains("Finished:")
@@ -71,25 +83,25 @@ suite "t_build_progress_modes":
 
       # 3. Test `live-lines` with --dry-run and --unicode
       # We want to see completed lines ending with unicode checkboxes like [✓]
-      let liveUnicodeRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, @["--dry-run", "--unicode"])
+      let liveUnicodeRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, dryRunCache, @["--dry-run", "--unicode"])
       check liveUnicodeRes.exitCode == 0
       check liveUnicodeRes.output.contains("[✓]") or liveUnicodeRes.output.contains("[✗]")
 
       # 4. Test `live-lines` with --dry-run and --no-unicode
       # We want to see completed lines ending with ASCII indicators like [OK]
-      let liveAsciiRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, @["--dry-run", "--no-unicode"])
+      let liveAsciiRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, dryRunCache, @["--dry-run", "--no-unicode"])
       check liveAsciiRes.exitCode == 0
       check liveAsciiRes.output.contains("[OK]") or liveAsciiRes.output.contains("[FAIL]")
 
       # 5. Test `dots` mode with --dry-run
       # We want to see dots representation (bright or pale dots)
-      let paleDotsRes = runBuild(reproBin, repoRoot, "dots", workRoot, @["--dry-run"])
+      let paleDotsRes = runBuild(reproBin, repoRoot, "dots", workRoot, dryRunCache, @["--dry-run"])
       check paleDotsRes.exitCode == 0
       check paleDotsRes.output.contains(".")
 
       # 6. Test `IN_AGENT_SHELL` override (defaults to quiet mode)
       putEnv("IN_AGENT_SHELL", "1")
-      let agentShellRes = runBuild(reproBin, repoRoot, "", workRoot, @["--dry-run"])
+      let agentShellRes = runBuild(reproBin, repoRoot, "", workRoot, dryRunCache, @["--dry-run"])
       delEnv("IN_AGENT_SHELL")
       check agentShellRes.exitCode == 0
       # In quiet mode, stdout/stderr progress updates are suppressed

@@ -36,6 +36,7 @@
 ## managed body's dispatch line.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import ./committed_lock_siblings_fixture
 
 proc installPreCommit(fx: SiblingFixture) =

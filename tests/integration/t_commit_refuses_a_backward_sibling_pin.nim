@@ -59,6 +59,7 @@
 ## managed body's dispatch line.
 
 import std/[os, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 import ./committed_lock_siblings_fixture
 
@@ -97,7 +98,7 @@ proc tryCommit(fx: SiblingFixture; label: string; allow = ""):
   runCmd(fx.gitCmd(fx.app, "commit -m " & q(label), allow))
 
 proc preCommitLog(fx: SiblingFixture): string =
-  let path = fx.ws / ".repro" / "workspace" / "pre-commit-lock.log"
+  let path = fx.ws / ".repro" / "build" / "reports" / "pre-commit-lock.log"
   if fileExists(path): readFile(path) else: ""
 
 proc pinOf(lockBody, path: string): string =

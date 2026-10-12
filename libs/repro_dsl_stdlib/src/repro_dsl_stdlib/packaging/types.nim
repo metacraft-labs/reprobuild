@@ -264,6 +264,53 @@ type
       ## Ordering hints (``network.target``, ``RPCSS``). Carried
       ## verbatim; each producer maps or drops them.
 
+  HostSeedFile* = object
+    ## A file the installer puts in a ``HostDirectory`` ONCE: when the
+    ## file is absent. Never overwritten by a repair or an upgrade and
+    ## never removed by an uninstall, because after the first install it
+    ## is the operator's file, not the package's.
+    name*: string
+      ## The file's name inside the directory.
+    buildPath*: string
+      ## Where its bytes are in the build tree, project-relative.
+
+  HostDirectory* = object
+    ## A machine-wide directory OUTSIDE the install prefix that the
+    ## installer creates with a fixed access-control list -- a system
+    ## service's state or configuration directory.
+    ##
+    ## WHY THE PACKAGE AND NOT THE SERVICE. A directory a service creates
+    ## on first start has the owner and ACL of whoever started it first,
+    ## and on Windows a directory created under ``C:\ProgramData``
+    ## inherits ``BUILTIN\Users`` write access, so another user can plant
+    ## files in it before the service does. The install step is the one
+    ## actor that runs elevated, once, before anything else touches the
+    ## path. RunQuota's host state directory is the case that needed it:
+    ## its daemon refuses a directory another user can write, and until
+    ## this type existed its MSI could not create one it would accept.
+    ##
+    ## MSI-ONLY TODAY, AND REFUSED ELSEWHERE rather than dropped. POSIX
+    ## packages express ``/etc/<name>`` as ``crConfigFile`` components,
+    ## which dpkg and rpm create with the FHS owner and mode, and a
+    ## service's own state directory belongs to its unit
+    ## (``StateDirectory=``); ``validate`` says so.
+    path*: string
+      ## Absolute, in the target's spelling. On Windows it must lie under
+      ## ``C:\ProgramData`` (the MSI's ``CommonAppDataFolder``), the one
+      ## machine-wide root an installer can name portably.
+    windowsSddl*: string
+      ## The directory's DACL as SDDL, applied through
+      ## ``MsiLockPermissionsEx`` (Windows Installer 5.0). A PROTECTED
+      ## DACL (``D:P...``) is what drops the ACEs ``C:\ProgramData`` would
+      ## otherwise hand down.
+    windowsComponentGuid*: string
+      ## The GUID of the Windows Installer component that creates the
+      ## directory. Generated once and pasted, for the reason
+      ## ``DistMetadata.upgradeCode`` is: a component with no file to key
+      ## on cannot have one derived, and one that changed between
+      ## releases would make every upgrade remove and re-create it.
+    seedFiles*: seq[HostSeedFile]
+
   RuntimeContract* = object
     ## §5 — "the hard constraint" — as data.
     ##
@@ -526,6 +573,9 @@ type
     components*: seq[DistComponent]
     runtime*: RuntimeContract
     services*: seq[ServiceDef]
+    hostDirectories*: seq[HostDirectory]
+      ## Machine-wide directories the installer provisions; see
+      ## ``HostDirectory``.
     metadata*: DistMetadata
     stagingRoot*: string
       ## Build-tree directory the install tree is staged into. Every
@@ -1102,6 +1152,18 @@ proc computesDependencyFloor*(dist: Distribution): bool =
   dist.targetOs == toLinux and dist.runtime.vendorRuntimeClosure and
     dist.runtime.computeDependencyFloor
 
+proc isGuidText*(value: string): bool =
+  ## ``{8-4-4-4-12}`` hex, braces required: the spelling WiX accepts for a
+  ## component GUID, and the one ``upgradeCode`` is written in.
+  if value.len != 38 or value[0] != '{' or value[^1] != '}':
+    return false
+  for i, ch in value[1 .. ^2]:
+    if i in [8, 13, 18, 23]:
+      if ch != '-': return false
+    elif ch notin HexDigits:
+      return false
+  true
+
 proc validate*(dist: Distribution) =
   ## Reject a distribution no producer could translate, at the point the
   ## recipe made the mistake rather than inside whichever producer was
@@ -1137,6 +1199,35 @@ proc validate*(dist: Distribution) =
         "distribution '" & dist.name & "': two components both install to '" &
         rel & "' (" & seen[rel] & " and " & c.buildPath & ")")
     seen[rel] = c.buildPath
+  for dir in dist.hostDirectories:
+    const root = r"c:\programdata\"
+    if dist.targetOs != toWindows:
+      raise newException(ValueError,
+        "distribution '" & dist.name & "': host directory '" & dir.path &
+        "' is only produced for Windows (the MSI); on this target ship " &
+        "/etc files as crConfigFile components and a service's state " &
+        "directory through its unit")
+    if not dir.path.toLowerAscii.startsWith(root) or dir.path.len <= root.len:
+      raise newException(ValueError,
+        "distribution '" & dist.name & "': host directory '" & dir.path &
+        "' must lie under C:\\ProgramData, the MSI's CommonAppDataFolder")
+    if not dir.windowsSddl.startsWith("D:"):
+      raise newException(ValueError,
+        "distribution '" & dist.name & "': host directory '" & dir.path &
+        "' needs windowsSddl, a DACL in SDDL starting with D: -- a " &
+        "directory under C:\\ProgramData left to inherit is writable by " &
+        "every local user")
+    if not isGuidText(dir.windowsComponentGuid):
+      raise newException(ValueError,
+        "distribution '" & dist.name & "': host directory '" & dir.path &
+        "' needs windowsComponentGuid, a {GUID} generated once and " &
+        "pasted into the recipe; the layer will not invent one")
+    for seed in dir.seedFiles:
+      if seed.name.len == 0 or seed.buildPath.len == 0 or
+          '/' in seed.name or '\\' in seed.name:
+        raise newException(ValueError,
+          "distribution '" & dist.name & "': a seed file of '" & dir.path &
+          "' needs a plain file name and a buildPath")
   for svc in dist.services:
     var found = false
     for c in dist.components:

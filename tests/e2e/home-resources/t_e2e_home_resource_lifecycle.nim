@@ -12,6 +12,7 @@
 ## path + the `repro home adopt` CLI skeleton.
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_home_generations
 import repro_home_resources

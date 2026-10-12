@@ -82,6 +82,20 @@ source scripts/test_parallelism.sh
 # requirement is scoped to the platforms where the flake provides one.
 # REPROBUILD_SKIP_DEV_SHELL_CHECK=1 is the documented escape for a deliberately
 # different toolchain; it is not a way to silence a mistake.
+#
+# The remedy it prints is the repository's own entry point, `repro exec`,
+# which activates exactly the dev environment `repro.nim`'s `devEnv:` declares
+# (its own develop set of sibling overrides, not every same-named sibling a
+# generic flake-override plugin would substitute). The language-convention
+# toolchains are the opt-in `test-toolchains` activity, which is why the hint
+# names it: without it those cases skip rather than fail.
+repro_dev_env_hint() {
+  printf '  Run it through the repository'"'"'s dev environment:\n' >&2
+  printf '      repro exec -- just test\n' >&2
+  printf '  or, with the language-convention toolchains (Go, Rust, .NET, ...):\n' >&2
+  printf '      repro exec --activity=test-toolchains -- just test\n' >&2
+  printf '  (`./build/bin/repro` after `just bootstrap` if the installed repro lags.)\n' >&2
+}
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
   *)
@@ -89,9 +103,9 @@ case "$(uname -s)" in
       resolved_nim="$(command -v nim 2>/dev/null || true)"
       if [[ -z "${resolved_nim}" ]]; then
         printf 'run_tests.sh: refusing: no `nim` on PATH.\n' >&2
-        printf '  This suite needs the CodeTracer Nim fork from the dev shell.\n' >&2
-        printf '  Run it as:  direnv exec . bash ./scripts/run_tests.sh\n' >&2
-        printf '  (or `nix develop` first). To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
+        printf '  This suite needs the CodeTracer Nim fork from the dev environment.\n' >&2
+        repro_dev_env_hint
+        printf '  To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
         exit 1
       fi
       resolved_nim_real="$(readlink -f "${resolved_nim}" 2>/dev/null || printf '%s' "${resolved_nim}")"
@@ -100,9 +114,9 @@ case "$(uname -s)" in
         printf '  resolved: %s\n' "${resolved_nim_real}" >&2
         printf '  version:  %s\n' "$("${resolved_nim}" --version 2>/dev/null | head -1)" >&2
         printf '  The suite is built and asserted against the fork; a stock Nim\n' >&2
-        printf '  compiles a different program. Run it as:\n' >&2
-        printf '      direnv exec . bash ./scripts/run_tests.sh\n' >&2
-        printf '  (or `nix develop` first). To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
+        printf '  compiles a different program.\n' >&2
+        repro_dev_env_hint
+        printf '  To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
         exit 1
       fi
     fi
@@ -113,6 +127,17 @@ esac
 # graph-owned app rebuilds must use optimized binaries by default. Developers
 # can still opt into debug apps explicitly with REPROBUILD_BUILD_MODE=debug.
 export REPROBUILD_BUILD_MODE="${REPROBUILD_BUILD_MODE:-release}"
+
+# The suite tests THIS checkout, so its engine must read this checkout's
+# libs/. The engine prefers an ambient REPROBUILD_SOURCE_ROOT over its own
+# location, and `repro exec` run from another checkout's build exports that
+# checkout's root — a whole suite run once compiled every provider against a
+# different worktree's libs/ that way. Pin it; say so when it overrides one.
+if [[ -n "${REPROBUILD_SOURCE_ROOT:-}" &&
+      "$(cd "${REPROBUILD_SOURCE_ROOT}" 2>/dev/null && pwd -P)" != "${repo_root}" ]]; then
+  echo "run_tests: REPROBUILD_SOURCE_ROOT named ${REPROBUILD_SOURCE_ROOT}; testing ${repo_root} instead" >&2
+fi
+export REPROBUILD_SOURCE_ROOT="${repo_root}"
 
 # Tests must not depend on the developer's persistent action cache. Large or
 # stale user-level metadata can dominate memory use in daemon-hosted cache-hit
@@ -482,7 +507,26 @@ repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
 # M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
-repro_build_collection ".#test-builds" || exit 1
+# A failed test COMPILE is a failed test, not a reason to run nothing. This
+# used to `exit 1` here, so one broken compile cancelled every other case: one
+# 22-hour run and one 7-hour run each produced no test results at all for a
+# single failed action out of ~1 800. Now the failed actions' binaries are
+# deleted (a copy an earlier warm run left would otherwise run as if this
+# revision had built it), the rest of the suite runs, and the failure is
+# re-raised at the end like the other phases'. When the script cannot tell
+# which binaries are stale -- a timeout, no report attributed to this build,
+# blocked actions -- it stops, as before.
+test_builds_status=0
+repro_build_collection ".#test-builds" || test_builds_status=$?
+if (( test_builds_status != 0 )); then
+  if (( test_builds_status == 124 )) || ! python3 scripts/drop_failed_test_binaries.py \
+      "test-logs/build-failure-report-$(repro_build_report_slug ".#test-builds").json" \
+      build/test-bin; then
+    exit 1
+  fi
+  printf '::error:: .#test-builds failed (exit %d); running every test that built, failure re-raised at the end\n' \
+    "${test_builds_status}" >&2
+fi
 
 REPROBUILD_BIN_ABS="$(cd build/bin && pwd)"
 export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
@@ -512,7 +556,17 @@ run_catalog="build/reprobuild-run-catalog.json"
 rm -f "${run_catalog}"
 
 # D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
-RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
+#
+# The backstop has to be longer than a healthy test phase, or it stops being a
+# backstop and becomes the thing that ends every run. At 4h it was: a full
+# local run on 2026-09-24 (10,432 cases, 8 threads, host load ~100) needed
+# 8h17m for its test phase, and an earlier run with the 4h default was
+# SIGTERM'd after 1,187 of 10,070 planned cases -- every later case reported
+# as never run, whatever it would have done. Per-case wedges are already
+# bounded by --test-timeout's hard ceiling below (4x, i.e. 2h), so this
+# outer limit only has to catch the runner itself wedging; 24h is ~3x the
+# measured phase, leaving room for a slower or busier host.
+RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-24h}"
 # ``--test-timeout`` is a *no-progress* deadline: the runner kills a case only
 # after it has produced no output AND its process group has consumed no
 # measurable CPU for N seconds. (Output alone was the old rule; it read CPU
@@ -610,6 +664,16 @@ printf 'Executing tests with %s worker(s); nested builds get REPROBUILD_MAX_PARA
 # it with their own lookup ($CT_TEST, then `ct-test`, then `ct`) precisely
 # because it must not be confused with this one. When `ct test run` gains a
 # Nim provider that can execute, this block is where that lands.
+# The runner executes every `t_*`/`test_*` executable in --bin-dir; it does
+# not read repro_tests.nim. A cold run wiped build/test-bin above, so the
+# directory holds exactly what `.#test-builds` declared. A warm run
+# (REPROBUILD_TEST_WARM_REUSE=1) kept it, and with it the binaries of tests an
+# earlier revision declared and this one no longer does -- which would
+# otherwise keep running, from stale bytes, and be counted. Reconcile the
+# directory with this revision's declaration before the runner walks it. Run on
+# both arms: on a cold run it is a no-op, and a no-op that is exercised is one
+# that is known to work.
+python3 scripts/prune_undeclared_test_binaries.py --root . --bin-dir build/test-bin >&2
 ct_test_runner="${CT_TEST_RUNNER:-}"
 if [[ -z "${ct_test_runner}" ]]; then
   ct_test_runner="$(command -v "ct-test-runner${exe_ext}" 2>/dev/null || true)"
@@ -665,7 +729,12 @@ fi
 # guarantee comes from `.#test-builds` having succeeded, not from the Python
 # phase's position relative to the Nim one. Nothing between the two deletes a
 # test binary.
-export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+# Only when the build really did succeed: after a failed compile the missing
+# binary is already reported (above, and re-raised below), and the inventory
+# must not turn that one failure into one refusal per inventory case.
+if (( test_builds_status == 0 )); then
+  export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+fi
 # Hand the inventory the catalog the runner just published. Absent, stale or
 # unreadable, this is a no-op and the inventory probes as before.
 export REPROBUILD_SUITE_INVENTORY_RUN_CATALOG="${run_catalog}"
@@ -701,5 +770,10 @@ fi
 if (( nim_phase_status != 0 )); then
   printf '\nNim test phase exited %d\n' "${nim_phase_status}" >&2
   suite_status="${nim_phase_status}"
+fi
+if (( test_builds_status != 0 )); then
+  printf '\n.#test-builds failed (exit %d); see the NOT BUILT lines above\n' \
+    "${test_builds_status}" >&2
+  (( suite_status != 0 )) || suite_status="${test_builds_status}"
 fi
 exit "${suite_status}"

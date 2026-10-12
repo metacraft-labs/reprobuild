@@ -260,6 +260,24 @@ if [ "${actual_parse}" != "${expected_parse}" ]; then
 fi
 echo "ok: sibling-repos parser handles bare, =ref, !=ref, SHA and comments"
 
+# The test-certificates-spec sibling is pinned to the exact revision the
+# content-id conformance test reads its vectors at. clone-siblings clones
+# shallow, so the sibling carries ONLY the revision its entry names; if the two
+# drift, CI's clone lacks the pinned commit and the test fails at `git archive`
+# with nothing pointing back here. Offline, so it runs before the network gate.
+tcs_pin_file="tests/integration/content_id/test-certificates-spec-content-vectors.pin"
+tcs_pin="$(tr -d '[:space:]' <"${tcs_pin_file}")"
+tcs_entry="$(sibling_repo_entries "${sibling_repos_file}" |
+  sed -nE 's/^test-certificates-spec!?=//p')"
+if [ -z "${tcs_entry}" ] || [ "${tcs_entry}" != "${tcs_pin}" ]; then
+  echo "FAIL: ${sibling_repos_file} pins test-certificates-spec to '${tcs_entry:-<no entry>}'," >&2
+  echo "      but ${tcs_pin_file} pins '${tcs_pin}'." >&2
+  echo "      CI clones that sibling shallow at its entry's revision, so the two" >&2
+  echo "      must name the same commit. Move them together." >&2
+  exit 1
+fi
+echo "ok: test-certificates-spec sibling pin matches the content-vector pin"
+
 if [ "${network_ok}" -eq 0 ]; then
   # Never silently pass in CI. Offline is a plausible state for the pre-commit
   # hook on a laptop; it is not a plausible state for a CI runner, where it

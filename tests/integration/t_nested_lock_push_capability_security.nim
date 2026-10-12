@@ -20,6 +20,7 @@
 
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
   times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_cli_support/push_hook_protocol
 import repro_test_support

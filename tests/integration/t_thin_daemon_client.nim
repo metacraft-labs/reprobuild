@@ -237,30 +237,37 @@ proc daemonBuildSessionProjectRoots(tempRoot, endpoint: string): seq[string] =
   ## The ``projectRoot`` column of ``repro daemon sessions``, one entry per
   ## recorded BUILD session, in the order the daemon recorded them.
   ##
-  ## This exists to keep the parity case from passing for the wrong reason.
-  ## Comparing two byte streams says nothing about WHERE the second one came
-  ## from, and the thin client's whole failure mode is silent: when anything
-  ## goes wrong it ``execv``s the full ``repro``, which then produces exactly
-  ## the bytes the comparison is looking for. A parity case that only compared
-  ## output would therefore stay green if the thin client never served a
-  ## single build — verified, not assumed: making ``shouldRouteToDaemon``
-  ## return ``false`` unconditionally leaves the byte comparisons passing and
-  ## reddens only the check below.
-  ##
-  ## ``projectRoot`` is the discriminator because it is the ONE request field
-  ## the two clients are documented to fill differently (see the module header
-  ## of ``apps/repro-client/repro_client.nim``): the full client derives it by
-  ## parsing the build target, and the thin client leaves it empty so the
-  ## daemon's ``workingDir`` fallback applies. Both runs below build the SAME
-  ## project path, so a thin run that had fallen back would record the same
-  ## ``projectRoot`` as the full run, and a thin run that was served records
-  ## the working directory instead.
+  ## Both clients now record the PROJECT here (the daemon derives the thin
+  ## client's root from its raw arguments), so this column no longer tells
+  ## the clients apart; ``daemonBuildRequestRootSources`` does. It still
+  ## counts the build sessions the daemon actually recorded.
   let res = runShell(shellCommand(@[fullCliBin(), "daemon", "sessions",
     "--endpoint", endpoint, "--state-dir", tempRoot / "state"]), repoRoot())
   for raw in res.output.splitLines():
     let fields = raw.split('\t')
     if fields.len >= 5 and fields[1] == "build":
       result.add(fields[4])
+
+proc daemonBuildRequestRootSources(tempRoot: string): seq[string] =
+  ## The ``projectRootSource`` of every accepted build request, in order, from
+  ## the daemon log. THIS is what tells the two clients apart now: the full
+  ## image fills ``projectRoot`` from its own target parse (``request``), the
+  ## thin client leaves it empty and the daemon derives it from the raw
+  ## arguments (``derived``). The recorded ROOT no longer discriminates -- both
+  ## clients now record the project, which is the point of deriving it -- so
+  ## a thin run that had quietly handed over to the full image would show up
+  ## here as a second ``request``.
+  let logPath = tempRoot / "state" / "logs" / "repro-daemon.log"
+  if not fileExists(logPath):
+    return
+  for line in readFile(logPath).splitLines():
+    if "build request accepted" notin line:
+      continue
+    let at = line.find("projectRootSource=")
+    if at < 0:
+      result.add("")
+      continue
+    result.add(line[at + "projectRootSource=".len .. ^1].splitWhitespace()[0])
 
 proc buildArgs(projectRoot, tempRoot: string): seq[string] =
   @[
@@ -364,10 +371,15 @@ suite "MAC-1 thin daemon client":
       checkpoint("daemon build sessions: " & roots.join(" | "))
       check roots.len == 2
       if roots.len == 2:
-        # Same project path built twice, two DIFFERENT recorded project roots:
-        # the full client's parsed target and the thin client's working-dir
-        # fallback. Equal roots means the same client composed both requests.
-        check roots[0] != roots[1]
+        # Same project path built twice, and both sessions now name it: the
+        # daemon derives the thin client's root from its raw arguments.
+        check roots[0] == roots[1]
+      # Which client composed each request: the full image's own parse, then
+      # the daemon's derivation for the thin client. Two ``request`` entries
+      # would mean the thin run handed over to the full image.
+      let sources = daemonBuildRequestRootSources(tempRoot)
+      checkpoint("build request root sources: " & sources.join(" | "))
+      check sources == @["request", "derived"]
 
     test "integration_thin_client_serves_an_install_layout_with_no_environment":
       # WHAT THIS IS FOR. MAC-1's saving is only real if something a user
@@ -430,17 +442,19 @@ suite "MAC-1 thin daemon client":
       check fileExists(project / "dist" / "copied.txt")
 
       # ...and it was SERVED, not quietly handed over. Same discriminator as
-      # the parity case: the thin client leaves `projectRoot` empty so the
-      # daemon's `workingDir` fallback applies, and the full client fills it
-      # from the parsed target. Exactly one build session, recorded against
-      # the WORKING DIRECTORY rather than the project path, is a session the
-      # thin client composed.
+      # the parity case: the thin client leaves `projectRoot` empty and the
+      # daemon derives it from the raw arguments (`derived`); the full client
+      # fills it from its own parse (`request`). Exactly one build session,
+      # recorded against the project, whose root the DAEMON derived, is a
+      # session the thin client composed.
       let roots = daemonBuildSessionProjectRoots(tempRoot, endpoint)
       checkpoint("daemon build sessions: " & roots.join(" | "))
       check roots.len == 1
       if roots.len == 1:
-        check roots[0] != project
-        check roots[0].endsWith(lastPathPart(tempRoot))
+        check roots[0] == project
+      let sources = daemonBuildRequestRootSources(tempRoot)
+      checkpoint("build request root sources: " & sources.join(" | "))
+      check sources == @["derived"]
 
     test "integration_thin_client_falls_back_to_a_working_build_when_the_daemon_cannot_be_reached":
       let tempRoot = createTempDir("repro-mac1-fallback", "")

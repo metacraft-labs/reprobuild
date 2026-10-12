@@ -12,7 +12,9 @@
 - CMake Reprobuild vs Ninja benchmark: `just bench_cmake_reprobuild_vs_ninja`
 - CMake Reprobuild vs Ninja quick benchmark: `just bench_cmake_reprobuild_vs_ninja_quick`
 - CMake Reprobuild vs Ninja medium benchmark: `just bench_cmake_reprobuild_vs_ninja_medium`
+- CMake cross-project TryCompile reuse benchmark: `just bench_cmake_cross_project_trycompile_reuse`
 - Repository contract check: `just check-repo-requirements`
+- Regenerate the tree-derived suite artifacts: `just regen-suite-artifacts`
 
 ## Structure
 
@@ -59,3 +61,14 @@
   sibling pin files.
 - JSON may be emitted for inspection and benchmark output, but it must not be
   used as an on-disk source of truth.
+- The four tree-derived suite artifacts — `repro_tests.nim`,
+  `scripts/reprobuild-test-shape-parity.tsv`,
+  `scripts/reprobuild-suite-static-case-counts.tsv` and
+  `benchmarks/reports/reprobuild-suite-m0-inventory-sources.json` — are
+  `-merge` in `.gitattributes`. When a merge, rebase or cherry-pick leaves one
+  of them unmerged, run `just regen-suite-artifacts` and `git add` the result.
+  Never pick a side, never hand-edit, and never reach for `-X ours`/`-X theirs`
+  or `--strategy=resolve` to get past it: their correct value is a function of
+  the merged tree, so any resolution that is not a regeneration is a fabricated
+  document that fails a gate later, on someone else's branch. See the block at
+  the top of `.gitattributes`.

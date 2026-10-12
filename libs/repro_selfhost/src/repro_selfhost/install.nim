@@ -60,21 +60,64 @@ type
       ## The prefix the root holds AFTER the pass; "" when dropped.
     reason*: string
 
-proc selfStoreReceiptHint(version, storeAddress: string): StoreReceiptHint =
-  ## The receipt an installed reprobuild image carries. ``lockIdentity`` is
+proc pinnedStoreReceiptHint(pkg: PinnedPackage;
+                            version, storeAddress: string): StoreReceiptHint =
+  ## The receipt an installed pinned image carries. ``lockIdentity`` is
   ## the lock's own self-describing store address, which is also what
   ## ``prefixIdFor`` folds into the realization hash — so the receipt on disk
   ## names the pin that may exec it.
   StoreReceiptHint(
-    adapter: SelfHostAdapter,
-    packageName: SelfPackageName,
+    adapter: pkg.adapter,
+    packageName: pkg.name,
     version: version,
-    declaredExecutablePath: selfDeclaredExecutablePath(),
-    exportedExecutables: @[selfExecutableName()],
+    declaredExecutablePath: pinnedDeclaredExecutablePath(pkg),
+    exportedExecutables: @[pinnedExecutableName(pkg)],
     lockIdentity: selfLockIdentity(storeAddress),
     provenanceUrl: "",
     provenanceChecksum: "",
     materializationMechanism: "")
+
+proc validateProviderNimTree(sourceDir: string) =
+  ## A pinned Nim is a Nim DISTRIBUTION, not a binary: ``bin/nim`` finds its
+  ## standard library at ``../lib`` relative to itself, and a prefix holding
+  ## the executable without it realizes cleanly and then fails every provider
+  ## compile with "cannot open file: system". Refused here, where the person
+  ## installing it can act, for the reason ``installSelfImage`` refuses a
+  ## tree without its engine.
+  let pkg = providerNimPin()
+  if not fileExists(pinnedExecutableIn(pkg, sourceDir)):
+    raise newException(ValueError,
+      "repro self install --package=" & pkg.name & ": the source tree at " &
+      sourceDir & " has no " & pinnedDeclaredExecutablePath(pkg) &
+      "; a Nim image is the distribution directory that CONTAINS bin/" &
+      pinnedExecutableName(pkg) & " and lib/, not the binary itself")
+  if not fileExists(sourceDir / "lib" / "system.nim"):
+    raise newException(ValueError,
+      "repro self install --package=" & pkg.name & ": the source tree at " &
+      sourceDir & " has " & pinnedDeclaredExecutablePath(pkg) &
+      " but no lib/system.nim. The compiler resolves its standard library " &
+      "relative to its own executable, so a prefix without lib/ cannot " &
+      "compile a provider; install the whole Nim distribution directory")
+
+proc realizePinnedTree(pkg: PinnedPackage;
+                       storeRoot, version, platform, sourceDir: string):
+    SelfInstallResult =
+  result.version = version
+  result.platform = platform
+  result.storeAddress = storeAddressFor(pkg, version, platform)
+  let hint = pinnedStoreReceiptHint(pkg, version, result.storeAddress)
+  let prefixId = prefixIdFor(pkg, version, result.storeAddress)
+
+  var store = openStore(storeRoot)
+  defer: store.close()
+  let realized = store.realizePrefix(prefixId, hint,
+    proc (stagingDir: string; mechanism: var string) =
+      materializeViaHardlinkOrCopy(sourceDir, stagingDir, mechanism))
+  result.prefixId = realized.prefixId
+  result.relativePath = realized.relativePath.replace("\\", "/")
+  result.absolutePath = realized.absolutePath
+  result.executablePath = pinnedExecutableIn(pkg, realized.absolutePath)
+  result.alreadyPresent = realized.outcome == roAlreadyPresent
 
 proc installSelfImage*(storeRoot, version, platform, sourceDir: string):
     SelfInstallResult =
@@ -128,26 +171,30 @@ proc installSelfImage*(storeRoot, version, platform, sourceDir: string):
       "(`just build` / `scripts/build_apps.sh` produce both) before " &
       "installing this tree")
 
-  result.version = version
-  result.platform = platform
-  result.storeAddress = storeAddressFor(version, platform)
-  let hint = selfStoreReceiptHint(version, result.storeAddress)
-  let prefixId = prefixIdFor(version, result.storeAddress)
+  realizePinnedTree(reprobuildPin(), storeRoot, version, platform, sourceDir)
 
-  var store = openStore(storeRoot)
-  defer: store.close()
-  let realized = store.realizePrefix(prefixId, hint,
-    proc (stagingDir: string; mechanism: var string) =
-      materializeViaHardlinkOrCopy(sourceDir, stagingDir, mechanism))
-  result.prefixId = realized.prefixId
-  result.relativePath = realized.relativePath.replace("\\", "/")
-  result.absolutePath = realized.absolutePath
-  result.executablePath = selfExecutableIn(realized.absolutePath)
-  result.alreadyPresent = realized.outcome == roAlreadyPresent
+proc installPinnedImage*(pkg: PinnedPackage;
+                         storeRoot, version, platform, sourceDir: string):
+    SelfInstallResult =
+  ## Realize the image tree at ``sourceDir`` into the store as ``pkg``
+  ## ``version`` for ``platform``, at the prefix a lock pinning exactly that
+  ## identity resolves to. Each package's tree is validated first.
+  if pkg.name == SelfPackageName:
+    return installSelfImage(storeRoot, version, platform, sourceDir)
+  if version.len == 0:
+    raise newException(ValueError, "repro self install: version is required")
+  if platform.len == 0:
+    raise newException(ValueError, "repro self install: platform is required")
+  if sourceDir.len == 0 or not dirExists(sourceDir):
+    raise newException(ValueError,
+      "repro self install: source tree does not exist: " & sourceDir)
+  if pkg.name == ProviderNimPackageName:
+    validateProviderNimTree(sourceDir)
+  realizePinnedTree(pkg, storeRoot, version, platform, sourceDir)
 
-proc attachPinRoot*(storeRoot, projectRoot: string;
+proc attachPinRoot*(pkg: PinnedPackage; storeRoot, projectRoot: string;
                     prefixId: PrefixIdBytes): bool =
-  ## Hold ``prefixId`` with the pin root belonging to ``projectRoot``.
+  ## Hold ``prefixId`` with ``projectRoot``'s pin root for ``pkg``.
   ## Returns false when the prefix is not indexed, which is the only way
   ## this can fail without the caller having done something wrong: a root
   ## may not hold a prefix the store does not have.
@@ -155,40 +202,53 @@ proc attachPinRoot*(storeRoot, projectRoot: string;
   defer: store.close()
   if not store.lookupPrefix(prefixId).found:
     return false
-  let rootId = pinRootIdFor(projectRoot)
+  let rootId = pinRootIdFor(pkg, projectRoot)
   store.deleteRoot(rootId)
   store.registerRoot(rootId, rkPin)
   store.attachPrefixToRoot(rootId, prefixId)
   true
 
-proc dropPinRoot*(storeRoot, projectRoot: string) =
+proc attachPinRoot*(storeRoot, projectRoot: string;
+                    prefixId: PrefixIdBytes): bool =
+  ## Hold ``prefixId`` with the reprobuild pin root belonging to
+  ## ``projectRoot``.
+  attachPinRoot(reprobuildPin(), storeRoot, projectRoot, prefixId)
+
+proc dropPinRoot*(pkg: PinnedPackage; storeRoot, projectRoot: string) =
   var store = openStore(storeRoot)
   defer: store.close()
-  store.deleteRoot(pinRootIdFor(projectRoot))
+  store.deleteRoot(pinRootIdFor(pkg, projectRoot))
+
+proc dropPinRoot*(storeRoot, projectRoot: string) =
+  dropPinRoot(reprobuildPin(), storeRoot, projectRoot)
 
 proc prunePinRoots*(storeRoot: string): seq[PinRootOutcome] =
-  ## Re-derive every ``pin:reprobuild:*`` root from the lock it names.
+  ## Re-derive every ``pin:reprobuild:*`` and ``pin:nim:*`` root from the
+  ## lock it names.
   ##
   ## Runs before ``repro store gc``'s dead-set query, so a pin removed from a
-  ## project's ``repro.lock`` makes that project's reprobuild version
+  ## project's ``repro.lock`` makes that project's pinned version
   ## unreachable in the same command that collects it. Roots belonging to
-  ## other kinds are untouched, and so are pin roots for other packages.
+  ## other kinds are untouched, and so are pin roots for packages nothing
+  ## here knows how to re-derive.
   var store = openStore(storeRoot)
   defer: store.close()
-  var pending: seq[tuple[rootId, projectRoot: string]] = @[]
+  var pending: seq[tuple[rootId, projectRoot: string; pkg: PinnedPackage]] =
+    @[]
   for row in store.listRoots():
     if row.kind != $rkPin:
       continue
-    let projectRoot = projectRootFromPinRootId(row.rootId)
-    if projectRoot.len == 0:
-      continue
-    pending.add((rootId: row.rootId, projectRoot: projectRoot))
+    for pkg in [reprobuildPin(), providerNimPin()]:
+      let projectRoot = projectRootFromPinRootId(pkg, row.rootId)
+      if projectRoot.len > 0:
+        pending.add((rootId: row.rootId, projectRoot: projectRoot, pkg: pkg))
+        break
 
   for entry in pending:
     var outcome = PinRootOutcome(rootId: entry.rootId,
       projectRoot: entry.projectRoot)
     let held = store.prefixesHeldByRoot(entry.rootId)
-    let pin = selfPinForProject(entry.projectRoot)
+    let pin = selfPinForProject(entry.projectRoot, entry.pkg)
     store.deleteRoot(entry.rootId)
     if pin.state != spsPinned:
       outcome.action = praDropped
@@ -198,7 +258,7 @@ proc prunePinRoots*(storeRoot: string): seq[PinRootOutcome] =
     let prefixId = selfPrefixId(pin)
     if not store.lookupPrefix(prefixId).found:
       outcome.action = praDropped
-      outcome.reason = "the project pins " & SelfPackageName & " " &
+      outcome.reason = "the project pins " & entry.pkg.name & " " &
         pin.version & " but no prefix for it is installed (" &
         prefixIdHex(prefixId) & ")"
       result.add(outcome)
@@ -209,16 +269,21 @@ proc prunePinRoots*(storeRoot: string): seq[PinRootOutcome] =
     outcome.action =
       if held.len == 1 and held[0] == prefixId: praKept
       else: praRepointed
-    outcome.reason = "pinned " & SelfPackageName & " " & pin.version
+    outcome.reason = "pinned " & entry.pkg.name & " " & pin.version
     result.add(outcome)
 
-proc listSelfPrefixes*(storeRoot: string): seq[PrefixRow] =
-  ## Every reprobuild image resident in the store, newest-path-order as the
-  ## index returns them. Filtered on the ADAPTER as well as the name so a
-  ## package that merely happens to be called ``reprobuild`` and was put
-  ## there by some other adapter is not offered to a pin.
+proc listPinnedPrefixes*(pkg: PinnedPackage;
+                         storeRoot: string): seq[PrefixRow] =
+  ## Every ``pkg`` image a pin may resolve to, resident in the store.
+  ## Filtered on the ADAPTER as well as the name so a package that merely
+  ## happens to share the name and was put there by some other adapter is
+  ## not offered to a pin.
   var store = openStore(storeRoot)
   defer: store.close()
   for row in store.listPrefixes():
-    if row.packageName == SelfPackageName and row.adapter == SelfHostAdapter:
+    if row.packageName == pkg.name and row.adapter == pkg.adapter:
       result.add(row)
+
+proc listSelfPrefixes*(storeRoot: string): seq[PrefixRow] =
+  ## Every reprobuild image resident in the store.
+  listPinnedPrefixes(reprobuildPin(), storeRoot)

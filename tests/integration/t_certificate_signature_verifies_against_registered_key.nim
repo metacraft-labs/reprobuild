@@ -126,6 +126,7 @@ proc requiredPolicy(): string =
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-tc5-verify-", "")
+  discard isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -174,9 +175,10 @@ proc writeTestFixtureJson(path, selector, scriptCmd: string) =
 proc issueRealCert(fx: Fixture; daemonKey, keyId: string): TestCertificate =
   ## Drive the TC-1/TC-5 issuance path: a REAL passing run in a clean state,
   ## signed by the daemon key. Returns the issued (signed) cert read from disk.
-  ## A per-key ``--certificate-out`` keeps each issuance distinct so the TC-1
-  ## incremental no-op (which consults the existing cert at the out path) does
-  ## not short-circuit a re-issue under a DIFFERENT key.
+  ## A per-key ``--certificate-out`` keeps a copy of each issuance. The TC-1
+  ## incremental no-op consults the LOCAL STORE (TC-8c), so a re-issue under a
+  ## different key for the same content needs that content's certificates out
+  ## of the store first (see step 2).
   let fixtureJson = fx.scratch / "fixture-pass.json"
   writeTestFixtureJson(fixtureJson, "t-unit", "exit 0")
   let certFile = fx.scratch / ("issued-" & keyId & ".toml")
@@ -242,9 +244,10 @@ suite "TC-5 — certificate signature verifies against a registered key":
       # Signature is VALID against the registered, unrevoked key.
       check verifyCertificateSignature(certA, storeA) == svValid
 
-      # Attach + gate ACCEPTS (the `required` gate now requires a valid sig).
-      let attA = attachCertificate(gitBin, fx.libAPath, fx.libASha, certA)
-      check attA.ok
+      # Issuance delivered it to the local store, where the gate looks (TC-8c);
+      # the gate ACCEPTS (the `required` gate requires a valid sig).
+      let storeRoot = getEnv("TEST_CERTIFICATES_DIR")
+      check storeRoot.startsWith(fx.scratch)
       let acceptA = invokeCheckPrePush(fx, refsFile)
       checkpoint("accept-A output: " & acceptA.output)
       check acceptA.code == 0
@@ -263,8 +266,14 @@ suite "TC-5 — certificate signature verifies against a registered key":
       check not resolveSigner(rotated, keyIdA).revoked
       check resolveSigner(rotated, keyIdB).found
 
+      # The content is unchanged, so with cert A in the store a re-issue would
+      # be the incremental no-op. Empty the store to issue B, then put A back
+      # as the ONLY certificate the gate can find (step 3 judges it alone).
+      removeDir(storeRoot)
       let certB = issueRealCert(fx, keyB.priv, keyIdB)
       check certB.keyId == keyIdB
+      removeDir(storeRoot)
+      check publishCertificateToLocalStore(certA, fx.libAPath).written
       let storeRot = readRegisteredKeyStore(
         registeredKeyStorePath(fx.workspaceRoot))
       # Cert signed with the rotated-in key B verifies.
@@ -283,7 +292,7 @@ suite "TC-5 — certificate signature verifies against a registered key":
       # Falsifiable: if the verifier ignored revocation, this would stay svValid.
       check verifyCertificateSignature(certA, storeRev) == svRevokedKey
 
-      # The gate now REJECTS the SAME push (cert A is the only attached cert
+      # The gate now REJECTS the SAME push (cert A is the only stored cert
       # and its key is revoked → no trusted cert covers the requirement).
       let rejected = invokeCheckPrePush(fx, refsFile)
       checkpoint("revoked output: " & rejected.output)

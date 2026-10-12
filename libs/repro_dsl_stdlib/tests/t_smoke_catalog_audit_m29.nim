@@ -32,6 +32,11 @@ import std/[os, strutils, unittest]
 import repro_dsl_stdlib/nixpkgs_pin
 
 from repro_test_support import nimSourceCodeOnly, nimSourceCommentsBlanked
+# A package that moved to reprobuild-packages may leave a one-release stub
+# module here whose only content is a compile error naming the new home. It
+# is not a catalog entry, so the audit skips exactly those names.
+from repro_project_dsl/reprobuild_packages_catalog import
+  MovedPackageImportStubs
 
 const
   PackagesRel = "libs" / "repro_dsl_stdlib" / "src" / "repro_dsl_stdlib" /
@@ -125,6 +130,7 @@ iterator catalogFiles(): tuple[name, path: string] =
     if kind == pcFile and path.endsWith(".nim"):
       let name = splitFile(path).name
       if name in AuditExemptions: continue
+      if name in MovedPackageImportStubs: continue
       yield (name: name, path: path)
 
 # NEITHER READER RETURNS RAW TEXT, AND THE TWO ARE NOT INTERCHANGEABLE.

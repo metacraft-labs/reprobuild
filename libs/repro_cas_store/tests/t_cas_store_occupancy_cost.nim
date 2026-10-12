@@ -65,6 +65,7 @@
 ## ``st_blocks`` are not exercised here and no claim is made about them.
 
 import std/[os, sequtils, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 
 from repro_core/paths import extendedPath
 

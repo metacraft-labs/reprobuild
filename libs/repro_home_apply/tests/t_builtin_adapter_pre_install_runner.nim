@@ -18,8 +18,10 @@ from repro_core/paths import extendedPath
 
 import repro_dsl_stdlib/packages_schema
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-pre-install"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-pre-install" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):

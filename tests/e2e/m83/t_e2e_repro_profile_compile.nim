@@ -12,13 +12,22 @@ import std/[json, os, osproc, sets, strutils, tables, unittest]
 import repro_elevation
 import repro_profile
 
+from repro_test_support import testCaseScratchSlug
+
 const
   fixturesDir = currentSourcePath.parentDir.parentDir.parentDir /
     "fixtures" / "m83"
+
+# Private to the process running ONE case. Several cases compile the same
+# fixture (``home_basic.nim`` three times over); with one shared output path
+# a case relinked ``home_basic.exe`` while a sibling case was executing it,
+# and the sibling failed with ``Text file busy``. The nimcache is per-case
+# for the same reason: two concurrent ``nim c`` runs must not share one.
+let
   buildBinDir = currentSourcePath.parentDir.parentDir.parentDir.parentDir /
-    "build" / "test-bin" / "m83"
+    "build" / "test-bin" / "m83" / testCaseScratchSlug()
   buildCacheDir = currentSourcePath.parentDir.parentDir.parentDir.parentDir /
-    "build" / "nimcache" / "m83"
+    "build" / "nimcache" / "m83" / testCaseScratchSlug()
 
 proc compileAndRun(fixtureName: string): string =
   ## Compile `<fixturesDir>/<fixtureName>` with `nim c -r`, return its

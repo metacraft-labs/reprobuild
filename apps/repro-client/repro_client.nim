@@ -86,11 +86,12 @@
 ## in build events that no client reads. The full client derives it by parsing
 ## the target; deriving it here would mean duplicating ``parseBuildTarget``,
 ## which is exactly the CLI knowledge this binary must not carry. It is left
-## empty and the daemon's own documented fallback (``workingDir``) applies.
-## For the common invocation shapes — ``repro build`` and ``repro build .``
-## run from the project root — the two agree. When they disagree, the
-## difference is confined to the daemon's session bookkeeping; no build
-## output, exit code, cache decision or diagnostic depends on it.
+## empty, and the DAEMON derives it from ``rawArgs`` resolved against
+## ``workingDir`` (``UserDaemonProjectRootResolver``, in the full image the
+## daemon runs), falling back to ``workingDir`` only when the target does not
+## resolve. The daemon log records which happened (``projectRootSource=
+## request|derived|workingDir``). No build output, exit code, cache decision
+## or diagnostic depends on it.
 ##
 ## WHEN IT HANDS OVER, AND WHY EACH ARM IS THERE.
 ##

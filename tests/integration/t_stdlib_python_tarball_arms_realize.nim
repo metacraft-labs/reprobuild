@@ -24,6 +24,12 @@
 ##     standard library, so the prefix is a working interpreter and not
 ##     merely a file with the right name.
 ##
+## On a NixOS host the last step needs one accommodation: NixOS cannot start
+## a generic-Linux dynamically linked executable directly (its FHS loader path
+## holds a stub that refuses, exit 127), so there -- and only on that exact
+## refusal -- the interpreter is run through the glibc loader this test binary
+## was linked against. The prefix is still what is being tested.
+##
 ## No mocks. This is a network test: it downloads the upstream archive the
 ## recipe pins (once — both packages share it, and the store's download cache
 ## is keyed by digest). On a host with no matching arm (e.g. Linux aarch64)
@@ -35,6 +41,7 @@
 ## executable python/bin/python3" on Linux x86_64 and macOS aarch64.
 
 import std/[os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_project_dsl
 import repro_interface_artifacts
@@ -60,6 +67,39 @@ proc pythonToolUse(packageName: string): InterfaceToolUse =
   doAssert iface.toolUses.len == 1,
     "expected one tool use for " & packageName
   iface.toolUses[0]
+
+const NixosStubLdSignature =
+  "NixOS cannot run dynamically linked executables intended for generic"
+
+proc selfElfInterpreter(): string =
+  ## The PT_INTERP of this test binary (little-endian ELF64 only, which is
+  ## every host with a pinned Linux arm), or "" when it cannot be read.
+  try:
+    let data = readFile("/proc/self/exe")
+    if data.len < 64 or data[0 .. 3] != "\x7FELF" or data[4] != '\x02' or
+        data[5] != '\x01':
+      return ""
+    proc u16(at: int): int = ord(data[at]) or (ord(data[at + 1]) shl 8)
+    proc u64(at: int): int =
+      for i in countdown(7, 0):
+        result = (result shl 8) or ord(data[at + i])
+    let phoff = u64(0x20)
+    let phentsize = u16(0x36)
+    let phnum = u16(0x38)
+    for i in 0 ..< phnum:
+      let ph = phoff + i * phentsize
+      if ph + 56 > data.len:
+        return ""
+      if u16(ph) == 3 and u16(ph + 2) == 0:  # p_type == PT_INTERP
+        let off = u64(ph + 8)
+        let size = u64(ph + 32)
+        if off + size > data.len or size == 0:
+          return ""
+        return data[off ..< off + size].strip(leading = false,
+          chars = {'\0'})
+  except CatchableError:
+    discard
+  ""
 
 proc isRegularFile(path: string): bool =
   getFileInfo(path, followSymlink = false).kind == pcFile
@@ -97,10 +137,26 @@ suite "stdlib python tarball arms realize":
           else: profile.pathSearchList[0] / "python3"
         check fileExists(invoked)
 
-        let run = runShell(shellCommand([invoked, "-c",
-          "import sys, json; " &
+        let probe = "import sys, json; " &
           "print('%d.%d' % sys.version_info[:2]); " &
-          "print(json.dumps({'ok': True}))"]))
+          "print(json.dumps({'ok': True}))"
+        var run = runShell(shellCommand([invoked, "-c", probe]))
+        when defined(linux):
+          if run.code == 127 and NixosStubLdSignature in run.output:
+            # This host cannot start ANY generic-Linux dynamically linked
+            # executable directly: NixOS installs a stub at the FHS loader
+            # path that prints the signature above and exits 127. That is a
+            # property of the host, not of the prefix under test, so the
+            # prefix is run through the glibc loader this test binary was
+            # itself linked against -- which still exercises everything this
+            # case is about (the interpreter starts, reports 3.12, imports
+            # from its own stdlib). Nothing else is excused: any other 127,
+            # or a loader that cannot be found, fails below.
+            let loader = selfElfInterpreter()
+            checkpoint("NixOS stub loader refused " & invoked &
+              "; re-running through " & loader)
+            require loader.len > 0 and fileExists(loader)
+            run = runShell(shellCommand([loader, invoked, "-c", probe]))
         check run.code == 0
         check run.output.contains("3.12")
         check run.output.contains("{\"ok\": true}")

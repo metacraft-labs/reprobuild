@@ -13,6 +13,9 @@
 #   * the provider / resource-accessor compiles (repro_cli_support,
 #     repro_resources, repro_dsl_stdlib/foreign_env)
 #
+# and then a recipe that uses a package which moved to reprobuild-packages,
+# which must resolve from the archive's own share/repro/reprobuild-packages.
+#
 # with a --path set built from the archive layout alone, from a scratch
 # directory with every parent/user/project nim config disabled. A missing tree
 # fails as `cannot open file: <module>`, naming exactly what to stage.
@@ -82,3 +85,39 @@ if ! (cd "$work" && nim check --skipParentCfg:on --skipUserCfg:on \
   fail "the archive's share/repro does not close the installed compile; stage the module(s) named above"
 fi
 echo "=== closure OK: every module resolved from the archive ==="
+
+# A recipe that uses a package which moved out of the stdlib compiles only when
+# a reprobuild-packages catalog defines it. An installed reprobuild has no
+# workspace sibling to find, so the archive carries the pinned catalog beside
+# its sources (stage_release_sources.sh), where the lookup's last place --
+# beside the source tree the DSL was compiled from -- finds it. Prove that from
+# a scratch directory with no catalog above it and $REPROBUILD_PACKAGES_ROOT
+# unset: the compile must succeed, and from THIS archive's catalog.
+catalog="$share/reprobuild-packages"
+[[ -f "$catalog/packages/interfaces/sqlite3/repro.nim" ]] ||
+  fail "$pkg has no share/repro/reprobuild-packages catalog -- stage_release_sources.sh stages the pinned one"
+grep -q '^revision=[0-9a-f]\{40\}' "$catalog/catalog-revision" 2>/dev/null ||
+  fail "$catalog/catalog-revision does not name the catalog commit it was staged from"
+cat > "$work/catalog_probe.nim" <<'EOF'
+import std/strutils
+import repro_project_dsl
+
+const found = reprobuildPackagesSearch("sqlite3", currentSourcePath()).module
+static:
+  doAssert found.replace('\\', '/').contains(
+    "/share/repro/reprobuild-packages/packages/interfaces/sqlite3/repro"),
+    "sqlite3 resolved from " & found & ", not from the archive's catalog"
+
+package releaseCatalogProbe:
+  uses:
+    "sqlite3"
+EOF
+echo "=== nim check of a recipe using a moved package, against the archive's catalog ==="
+if ! (cd "$work" && env -u REPROBUILD_PACKAGES_ROOT nim check --skipParentCfg:on \
+        --skipUserCfg:on --skipProjCfg:on --hints:off --warnings:off \
+        "${os_flag[@]}" --nimcache:"$work/nimcache-catalog" "${paths[@]}" \
+        catalog_probe.nim) > "$log" 2>&1; then
+  grep -E "Error:|catalog was looked for|  - " "$log" | head -20 >&2 || tail -30 "$log" >&2
+  fail "a recipe using a moved package does not compile against the archive alone; its share/repro/reprobuild-packages catalog is missing or not where the lookup looks"
+fi
+echo "=== catalog OK: the moved package resolved from the archive's own catalog ==="

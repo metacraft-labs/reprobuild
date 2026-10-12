@@ -39,6 +39,13 @@ when defined(posix):
   import std/[json, net, os, osproc, posix, sequtils, streams, strutils,
               tempfiles, times, unittest]
   import repro_core/cli_images
+  # For `systemdUnitName`: the teardown below stops the transient unit the
+  # daemon this case launches runs under, and the name has to come from the
+  # runtime that chose it. Only the three names it needs: the whole
+  # `repro_daemon_core` facade crashes the CodeTracer Nim fork's compiler
+  # (SIGSEGV, no position) when imported into this module.
+  from repro_daemon_core/runtime import UserDaemonConfig,
+    defaultUserDaemonConfig, systemdUnitName
 
   type
     ProcessRecord = object
@@ -291,13 +298,15 @@ elif params.len > 0 and params[0] == "--sentinel":
   let listener = listenOnLoopback()
   appendRecord("sentinel", label, listener.port)
   waitForever()
-elif params.len > 2 and params[0] == "--token-churner":
+elif params.len > 3 and params[0] == "--token-churner":
   # This controller is deliberately outside the runner-owned group and does
   # not carry the owner token in its environment. It keeps one token-bearing
-  # child alive at a time long enough to make the runner's first bounded
-  # post-KILL verification fail, then stops replenishing owners so the final
-  # reaper can succeed. This exercises a retry after the original supervisor
-  # has already been synchronously reaped.
+  # child alive at a time until the test controller creates the stop file,
+  # which it does only once the runner's FINAL reaper has begun its retry, so
+  # the first bounded post-KILL verification fails whatever the host load;
+  # it then stops replenishing owners so the final reaper can succeed. This
+  # exercises a retry after the original supervisor has already been
+  # synchronously reaped. The duration argument is only a safety cap.
   if setpgid(Pid(0), Pid(0)) != 0:
     quit(107)
   ignoreTermination()
@@ -305,9 +314,10 @@ elif params.len > 2 and params[0] == "--token-churner":
   let listener = listenOnLoopback()
   appendRecord("churner", label, listener.port)
   let ownerToken = params[1]
-  let churnUntil = epochTime() + parseFloat(params[2])
+  let stopPath = params[2]
+  let churnUntil = epochTime() + parseFloat(params[3])
   var owner: Process
-  while epochTime() < churnUntil:
+  while not fileExists(stopPath) and epochTime() < churnUntil:
     if owner.isNil or owner.peekExitCode() != -1:
       if not owner.isNil:
         discard owner.waitForExit()
@@ -484,11 +494,13 @@ elif params[0] == "--forged-owner":
   let listener = listenOnLoopback()
   appendRecord("forged-owner", label, listener.port)
   waitForever()
-elif params.len > 2 and params[0] == "--token-churner":
+elif params.len > 3 and params[0] == "--token-churner":
   # Identical mechanism to the post-reap-retry scenario: an unrelated
   # controller, outside the runner-owned group and without the token in its
   # own environment, keeps exactly one token-bearing child alive at a time
-  # for long enough to outlast the runner's bounded TERM/KILL/verify window.
+  # until the test controller creates the stop file (once the runner's final
+  # reaper has begun its retry), so it outlasts the runner's bounded
+  # TERM/KILL/verify window however slowly the host runs it.
   if setpgid(Pid(0), Pid(0)) != 0:
     quit(107)
   ignoreTermination()
@@ -496,9 +508,10 @@ elif params.len > 2 and params[0] == "--token-churner":
   let listener = listenOnLoopback()
   appendRecord("churner", label, listener.port)
   let ownerToken = params[1]
-  let churnUntil = epochTime() + parseFloat(params[2])
+  let stopPath = params[2]
+  let churnUntil = epochTime() + parseFloat(params[3])
   var owner: Process
-  while epochTime() < churnUntil:
+  while not fileExists(stopPath) and epochTime() < churnUntil:
     if owner.isNil or owner.peekExitCode() != -1:
       if not owner.isNil:
         discard owner.waitForExit()
@@ -685,20 +698,73 @@ else:
       else:
         delEnv("REPRO_TREE_RECORD")
 
-  proc startTokenChurner(binary, recordPath, ownerToken: string;
-                         durationSec: float): Process =
+  const ChurnerSafetyCapSec = 120.0
+    ## Upper bound on a churner whose controller never releases it. The
+    ## release itself is event-driven (``awaitRunnerReleasingChurner``).
+
+  proc startTokenChurner(binary, recordPath, ownerToken,
+                         stopPath: string): Process =
     let priorRecord = getEnv("REPRO_TREE_RECORD")
     let hadRecord = existsEnv("REPRO_TREE_RECORD")
     putEnv("REPRO_TREE_RECORD", recordPath)
     try:
       result = startProcess(binary,
-        args = ["--token-churner", ownerToken, $durationSec],
+        args = ["--token-churner", ownerToken, stopPath,
+                $ChurnerSafetyCapSec],
         options = {poParentStreams})
     finally:
       if hadRecord:
         putEnv("REPRO_TREE_RECORD", priorRecord)
       else:
         delEnv("REPRO_TREE_RECORD")
+
+  proc awaitRunnerReleasingChurner(runnerProcess: Process;
+                                   tracePath, stopPath: string;
+                                   processGroup: int; timeoutSec: float):
+      tuple[exitCode: int; retryObserved: bool] =
+    ## Wait for the runner to exit while a token churner keeps an exact-token
+    ## owner alive, and release the churner (create ``stopPath``) only once
+    ## the runner's production cleanup trace shows its FINAL reaper retrying:
+    ## the first TERM-phase owner snapshot for ``processGroup`` recorded
+    ## after that group's supervisor anchor was reaped. Every snapshot before
+    ## the reap belongs to the first cleanup, so this line exists only if the
+    ## first bounded cleanup has already failed.
+    ##
+    ## This replaces a fixed churn duration (12.5 s from churner start)
+    ## that had to outlast the runner's 5 s TERM grace plus 5 s post-KILL
+    ## verification measured from a LATER moment: the churner's own start-up,
+    ## the release of the case and the runner noticing its exit all came out
+    ## of a 2.5 s margin, and on a loaded host the churner stopped while the
+    ## first verification was still polling. That cleanup then succeeded and
+    ## the case could not observe the retry it exists to exercise.
+    ##
+    ## The release has ample slack: the retry's own TERM grace keeps polling
+    ## for up to 5 s while the TERM-ignoring owner is alive, and the churner
+    ## notices the stop file within one 10 ms poll.
+    ##
+    ## ``exitCode`` is -1 when the runner outlived ``timeoutSec``.
+    let anchorReaped = "anchor-reaped group=" & $processGroup
+    let retryStarted =
+      "owner-snapshot group=" & $processGroup & " signal=" & $SIGTERM & " "
+    result.exitCode = -1
+    let deadline = epochTime() + timeoutSec
+    while epochTime() < deadline:
+      result.exitCode = runnerProcess.peekExitCode()
+      if result.exitCode != -1:
+        break
+      if not result.retryObserved and fileExists(tracePath):
+        var reaped = false
+        for event in readFile(tracePath).splitLines():
+          if event == anchorReaped:
+            reaped = true
+          elif reaped and event.startsWith(retryStarted):
+            result.retryObserved = true
+            break
+        if result.retryObserved:
+          writeFile(stopPath, "stop\n")
+      sleep(20)
+    if not fileExists(stopPath):
+      writeFile(stopPath, "stop\n")
 
   proc stopExactFixtureProcess(process: Process; expectedPid: int) =
     ## The Process handle remains our unreaped child identity even after the
@@ -727,13 +793,78 @@ else:
     if not condition:
       raise newException(IOError, message)
 
-  const InterruptCleanupDeadlineSec = 25.0
-    ## The runner uses one global 5-second TERM grace followed by one global
-    ## 5-second post-KILL owner/reap barrier, independent of the number of
-    ## active groups. Allow an additional 15 seconds for scheduler delay,
-    ## three worker joins, summary publication, and the controller poll while
-    ## retaining a hard end-to-end bound. This was derived from the production
-    ## cleanup phases, not multiplied serially per group.
+  const InterruptHangGuardSec = 180.0
+    ## How long the controller waits for a signalled runner before declaring
+    ## it hung. NOT a performance bound. The runner uses one global 5-second
+    ## TERM grace followed by one global 5-second post-KILL owner/reap
+    ## barrier, independent of the number of active groups; that shape (as
+    ## opposed to serial per-group cleanup) is asserted from the production
+    ## cleanup trace by ``assertOneGlobalGracePhase``, not from wall time.
+    ##
+    ## This used to be a 25 s end-to-end bound (10 s of cleanup phases plus
+    ## 15 s for scheduler delay, worker joins and summary publication). A
+    ## runner that is merely starved past that allowance (host load 100-200
+    ## on 32 cores; at load ~50 it already takes up to 12 s) was SIGKILLed by
+    ## the controller before it wrote its summary, and the case then died in
+    ## ``require fileExists(summary)`` with no result document at all.
+
+  proc assertOneGlobalGracePhase(tracePath: string;
+                                 processGroups: openArray[int]) =
+    ## The production cleanup trace shows ONE graceful phase for all groups:
+    ## every group was sent TERM before any group was sent KILL, and each
+    ## group's supervisor was reaped only after its KILL. A runner that
+    ## cleaned the groups serially (TERM, grace, KILL per group) fails the
+    ## first check whatever the host load.
+    ensureCleanupSafe(fileExists(tracePath),
+      "runner cleanup trace was not written")
+    let events = readFile(tracePath).splitLines()
+    var lastTerm = -1
+    var firstKill = events.len
+    for processGroup in processGroups:
+      let termAt = events.find("group-signal-attempt group=" &
+        $processGroup & " signal=" & $SIGTERM)
+      let killAt = events.find("group-signal-attempt group=" &
+        $processGroup & " signal=" & $SIGKILL)
+      var reapedAt = events.find("anchor-reaped group=" & $processGroup)
+      if reapedAt < 0:
+        reapedAt = events.find(
+          "anchor-already-reaped group=" & $processGroup)
+      check termAt >= 0
+      check killAt > termAt
+      check reapedAt > killAt
+      if termAt < 0 or killAt < 0 or reapedAt <= killAt:
+        checkpoint("cleanup trace:\n" & events.join("\n"))
+      lastTerm = max(lastTerm, termAt)
+      firstKill = min(firstKill, killAt)
+    check lastTerm < firstKill
+
+  proc killOrphanedTrees(treePath: string) =
+    ## Only for a runner this controller had to SIGKILL (hung past the guard,
+    ## or the case failed before signalling it): nothing will clean the
+    ## groups it owned, and their TERM-ignoring trees would outlive the case
+    ## -- a probe that stalled the runner past the old 25 s bound left 84
+    ## such processes alive for hours. Kill each recorded group whose
+    ## recorded member still belongs to it.
+    for record in parseRecords(treePath):
+      if record.processGroup > 0 and processExists(record.pid) and
+          getpgid(Pid(record.pid)) == Pid(record.processGroup):
+        discard kill(Pid(-record.processGroup), SIGKILL)
+
+  proc availableRunnerOutput(process: Process): string =
+    ## What a finished (or killed) runner left in its merged stdout pipe,
+    ## read without blocking: orphans of a killed runner may still hold the
+    ## write end, so a blocking read to EOF could hang the controller.
+    let fd = cint(process.outputHandle)
+    let flags = fcntl(fd, F_GETFL)
+    if flags == -1 or fcntl(fd, F_SETFL, flags or O_NONBLOCK) == -1:
+      return
+    var buffer: array[4096, char]
+    while result.len < 256 * 1024:
+      let count = posix.read(fd, addr buffer[0], buffer.len)
+      if count <= 0:
+        break
+      for i in 0 ..< count:
+        result.add(buffer[i])
 
   proc assertTreeShapeAndCleanup(treeRecords: seq[ProcessRecord];
                                 sentinel: ProcessRecord; label = "") =
@@ -816,7 +947,7 @@ else:
       stopExactFixtureProcess(sentinelProcess, sentinelPid)
       sentinelCleanupPending = false
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary), "runner wrote no summary")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 0
@@ -858,8 +989,12 @@ else:
       sentinelRecord = recordFor(sentinelRecords, "sentinel")
 
       let treePath = scratch / "trees.csv"
+      let cleanupTracePath = scratch / "cleanup-trace.log"
       putEnv("REPRO_TREE_RECORD", treePath)
-      defer: delEnv("REPRO_TREE_RECORD")
+      putEnv("REPRO_TEST_RUNNER_CLEANUP_TRACE", cleanupTracePath)
+      defer:
+        delEnv("REPRO_TREE_RECORD")
+        delEnv("REPRO_TEST_RUNNER_CLEANUP_TRACE")
       let summary = scratch / "summary.json"
       let runnerProcess = startProcess(runner,
         workingDir = root,
@@ -869,6 +1004,7 @@ else:
       var exitCode = -1
       var elapsed = 0.0
       var treeRecords: seq[ProcessRecord]
+      var runnerOutput = ""
       try:
         for label in labels:
           let ready = waitForRoles(treePath,
@@ -886,7 +1022,7 @@ else:
 
         let started = epochTime()
         discard kill(Pid(runnerProcess.processID), SIGINT)
-        let deadline = epochTime() + InterruptCleanupDeadlineSec
+        let deadline = epochTime() + InterruptHangGuardSec
         while epochTime() < deadline:
           exitCode = runnerProcess.peekExitCode()
           if exitCode != -1:
@@ -906,17 +1042,25 @@ else:
             discard runnerProcess.waitForExit()
           except CatchableError:
             discard
+        if exitCode == -1:
+          killOrphanedTrees(treePath)
+        runnerOutput = availableRunnerOutput(runnerProcess)
         close(runnerProcess)
 
+      if exitCode != 128 + int(SIGINT):
+        checkpoint("runner exit " & $exitCode & " after " & $elapsed &
+          "s; output:\n" & runnerOutput)
       check exitCode == 128 + int(SIGINT)
       check elapsed >= 4.0
-      check elapsed < InterruptCleanupDeadlineSec
       for label in labels:
         assertTreeShapeAndCleanup(treeRecords, sentinelRecord, label)
+      assertOneGlobalGracePhase(cleanupTracePath,
+        labels.mapIt(recordFor(treeRecords, "root", it).processGroup))
       stopExactFixtureProcess(sentinelProcess, sentinelPid)
       sentinelCleanupPending = false
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary),
+        "SIGINT runner wrote no summary (exit " & $exitCode & ")")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 3
       check report{"summary"}{"passed"}.getInt(-1) == 0
@@ -1032,7 +1176,7 @@ else:
       stopExactFixtureProcess(sentinelProcess, sentinelPid)
       sentinelCleanupPending = false
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary), "runner wrote no summary")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 1
@@ -1104,12 +1248,13 @@ else:
       check getFilePermissions(stateDir) ==
         {fpUserRead, fpUserWrite, fpUserExec}
 
-      # Replenish a real exact-token owner beyond the initial 5-second TERM
-      # grace plus 5-second post-KILL verification. The first cleanup must
-      # therefore fail after reaping its supervisor; the runner's final
-      # fail-closed reaper then retries after replenishment stops.
+      # Replenish a real exact-token owner until the runner's final reaper
+      # has begun its retry. The first cleanup therefore fails after reaping
+      # its supervisor; the runner's final fail-closed reaper then retries
+      # after replenishment stops.
+      let stopPath = scratch / "churner-stop"
       let churner = startTokenChurner(
-        fixture, treePath, ownerToken, 12.5)
+        fixture, treePath, ownerToken, stopPath)
       let churnerPid = churner.processID
       var churnerCleanupPending = true
       defer:
@@ -1126,16 +1271,19 @@ else:
       check churnerRecord.processGroup != rootRecord.processGroup
 
       writeFile(continuePath, "continue\n")
-      var exitCode = -1
-      let deadline = epochTime() + 35.0
-      while epochTime() < deadline:
-        exitCode = runnerProcess.peekExitCode()
-        if exitCode != -1:
-          break
-        sleep(20)
-      if exitCode == -1 and runnerProcess.outputStream != nil:
+      let (exitCode, retryObserved) = awaitRunnerReleasingChurner(
+        runnerProcess, cleanupTracePath, stopPath, rootRecord.processGroup,
+        60.0)
+      if exitCode == -1:
         checkpoint("post-reap retry runner exceeded its controller deadline")
+      if exitCode != 1 or not retryObserved:
+        checkpoint("cleanup trace:\n" &
+          (if fileExists(cleanupTracePath): readFile(cleanupTracePath)
+           else: "<absent>"))
       check exitCode == 1
+      # The first cleanup failed and the final reaper retried: the trace
+      # carries a TERM-phase owner snapshot after the anchor reap.
+      check retryObserved
 
       let allRecords = parseRecords(treePath)
       let forgedOwners = allRecords.filterIt(it.role == "forged-owner")
@@ -1171,7 +1319,7 @@ else:
       stopExactFixtureProcess(churner, churnerPid)
       churnerCleanupPending = false
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary), "runner wrote no summary")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 0
@@ -1221,19 +1369,25 @@ else:
       let treePath = scratch / "tree.csv"
       let tokenPath = scratch / "owner-token"
       let continuePath = scratch / "continue"
+      let cleanupTracePath = scratch / "cleanup-trace.log"
       putEnv("REPRO_TREE_RECORD", treePath)
       putEnv("REPRO_TREE_TOKEN_FILE", tokenPath)
       putEnv("REPRO_TREE_CONTINUE_FILE", continuePath)
+      putEnv("REPRO_TEST_RUNNER_CLEANUP_TRACE", cleanupTracePath)
       defer:
         delEnv("REPRO_TREE_RECORD")
         delEnv("REPRO_TREE_TOKEN_FILE")
         delEnv("REPRO_TREE_CONTINUE_FILE")
+        delEnv("REPRO_TEST_RUNNER_CLEANUP_TRACE")
 
       let summary = scratch / "summary.json"
       let runnerProcess = startProcess(runner,
         workingDir = root,
         args = runnerArgs(binDir, summary, scratch / "results", 60),
         options = {poStdErrToStdOut})
+      # As in the post-reap-retry case: the runner snapshots its trace path
+      # at start-up, and the churner must not inherit it.
+      delEnv("REPRO_TEST_RUNNER_CLEANUP_TRACE")
       defer:
         if runnerProcess.peekExitCode() == -1:
           try:
@@ -1254,8 +1408,11 @@ else:
 
       # Same replenishing churner as the post-reap-retry scenario: real
       # exact-token owners, outside the runner-owned group, alive past the
-      # runner's bounded TERM grace and post-KILL verification window.
-      let churner = startTokenChurner(fixture, treePath, ownerToken, 12.5)
+      # runner's bounded TERM grace and post-KILL verification window and
+      # released only once the final reaper has begun its retry.
+      let stopPath = scratch / "churner-stop"
+      let churner = startTokenChurner(fixture, treePath, ownerToken,
+        stopPath)
       let churnerPid = churner.processID
       var churnerCleanupPending = true
       defer:
@@ -1274,14 +1431,15 @@ else:
       # Release the case: it writes its PASS document and exits 0 while the
       # churner is still replenishing owners.
       writeFile(continuePath, "continue\n")
-      var exitCode = -1
-      let deadline = epochTime() + 60.0
-      while epochTime() < deadline:
-        exitCode = runnerProcess.peekExitCode()
-        if exitCode != -1:
-          break
-        sleep(20)
+      let (exitCode, retryObserved) = awaitRunnerReleasingChurner(
+        runnerProcess, cleanupTracePath, stopPath, rootRecord.processGroup,
+        60.0)
+      if exitCode != 1 or not retryObserved:
+        checkpoint("cleanup trace:\n" &
+          (if fileExists(cleanupTracePath): readFile(cleanupTracePath)
+           else: "<absent>"))
       check exitCode == 1
+      check retryObserved
 
       let allRecords = parseRecords(treePath)
       let forgedOwners = allRecords.filterIt(it.role == "forged-owner")
@@ -1291,7 +1449,7 @@ else:
       stopExactFixtureProcess(churner, churnerPid)
       churnerCleanupPending = false
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary), "runner wrote no summary")
       let report = parseFile(summary)
       let entry = report{"tests"}[0]
       # The verdict: FAIL, and counted where a gate looks for defects.
@@ -1372,7 +1530,7 @@ else:
       check canBindLoopback(respawner.port)
       check canBindLoopback(replacement.port)
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary), "runner wrote no summary")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 1
@@ -1457,7 +1615,7 @@ else:
       stopExactFixtureProcess(collisionProcess, collisionPid)
       collisionCleanupPending = false
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary), "runner wrote no summary")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 1
@@ -1483,8 +1641,15 @@ else:
           discard execCmdEx("launchctl bootout " &
             quoteShell("gui/" & $getuid() & "/" & label))
         elif defined(linux):
-          let unit = "repro-daemon-" & endpoint.extractFilename & ".service"
-          discard execCmdEx("systemctl --user stop " & quoteShell(unit))
+          # Asks the runtime for the name rather than restating the
+          # derivation: this teardown stopped the wrong unit the moment the
+          # derivation stopped being the endpoint's basename, and a teardown
+          # that silently stops nothing is how the leak this suite is about
+          # gets re-created.
+          var unitConfig = defaultUserDaemonConfig(devMode = false)
+          unitConfig.endpoint = endpoint
+          discard execCmdEx("systemctl --user stop " &
+            quoteShell(systemdUnitName(unitConfig)))
         try:
           removeFile(endpoint)
         except OSError:
@@ -1597,7 +1762,7 @@ else:
         let buildWorker = recordFor(records, "build-worker")
         check not processExists(buildWorker.pid)
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary), "runner wrote no summary")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 1
@@ -1653,8 +1818,12 @@ else:
       sentinelRecord = recordFor(sentinelRecords, "sentinel")
 
       let treePath = scratch / "tree.csv"
+      let cleanupTracePath = scratch / "cleanup-trace.log"
       putEnv("REPRO_TREE_RECORD", treePath)
-      defer: delEnv("REPRO_TREE_RECORD")
+      putEnv("REPRO_TEST_RUNNER_CLEANUP_TRACE", cleanupTracePath)
+      defer:
+        delEnv("REPRO_TREE_RECORD")
+        delEnv("REPRO_TEST_RUNNER_CLEANUP_TRACE")
       let summary = scratch / "summary.json"
       let runnerProcess = startProcess(runner,
         workingDir = root,
@@ -1664,6 +1833,7 @@ else:
       var exitCode = -1
       var elapsed = 0.0
       var treeRecords: seq[ProcessRecord]
+      var runnerOutput = ""
       try:
         treeRecords = waitForRoles(treePath,
           ["root", "child", "grandchild"])
@@ -1671,7 +1841,7 @@ else:
           "SIGTERM owned tree did not become ready")
         let started = epochTime()
         discard kill(Pid(runnerProcess.processID), SIGTERM)
-        let deadline = epochTime() + InterruptCleanupDeadlineSec
+        let deadline = epochTime() + InterruptHangGuardSec
         while epochTime() < deadline:
           exitCode = runnerProcess.peekExitCode()
           if exitCode != -1:
@@ -1691,16 +1861,24 @@ else:
             discard runnerProcess.waitForExit()
           except CatchableError:
             discard
+        if exitCode == -1:
+          killOrphanedTrees(treePath)
+        runnerOutput = availableRunnerOutput(runnerProcess)
         close(runnerProcess)
 
+      if exitCode != 128 + int(SIGTERM):
+        checkpoint("runner exit " & $exitCode & " after " & $elapsed &
+          "s; output:\n" & runnerOutput)
       check exitCode == 128 + int(SIGTERM)
       check elapsed >= 4.0
-      check elapsed < InterruptCleanupDeadlineSec
       assertTreeShapeAndCleanup(treeRecords, sentinelRecord)
+      assertOneGlobalGracePhase(cleanupTracePath,
+        [recordFor(treeRecords, "root").processGroup])
       stopExactFixtureProcess(sentinelProcess, sentinelPid)
       sentinelCleanupPending = false
 
-      require fileExists(summary)
+      ensureCleanupSafe(fileExists(summary),
+        "SIGTERM runner wrote no summary (exit " & $exitCode & ")")
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 0

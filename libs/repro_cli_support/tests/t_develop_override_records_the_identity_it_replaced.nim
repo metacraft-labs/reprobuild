@@ -92,48 +92,30 @@ package appAlpha:
   discard
 """
 
-  SiblingRecipe = """
-import repro_project_dsl
-
-package libfoo:
-  config:
-    ## Enable TLS support.
-    enableTls: variant bool = true
-    ## Which optimisation profile the library is built with.
-    profile: variant string = "release"
-
-  build:
-    discard
-"""
-    ## A develop sibling that declares variants. The `build:` block is not
-    ## decoration: `buildCode` emits the provider's `runPackageProvider` entry
-    ## point only for a recipe that has one, so a recipe without it compiles to
-    ## a binary that runs its module init and exits without ever answering the
-    ## protocol. A develop sibling is a project you build, so this is what one
-    ## looks like — and `a recipe with no build: block cannot be asked` below
-    ## pins the other case as the known limitation it is.
-
-  SiblingRecipeWithoutVariants = """
-import repro_project_dsl
-
-package libfoo:
-  build:
-    discard
-"""
-    ## The same buildable shape, declaring no variants — so a case asserting
-    ## that nothing was recorded is asserting that the sibling HAS nothing,
-    ## not that it could not be asked.
-
-  SiblingRecipeVariantsButNoBuild = """
-import repro_project_dsl
-
-package libfoo:
-  config:
-    ## Enable TLS support.
-    enableTls: variant bool = true
-"""
-    ## Declares a variant and cannot answer the provider protocol. The known
-    ## limitation, recorded rather than papered over.
+  SiblingCheckouts = "tests/fixtures/develop-override-records"
+    ## The develop siblings are CHECKED-IN checkouts at stable paths, one per
+    ## recipe shape (see that directory's README):
+    ##
+    ##   * ``plain``              — buildable, declares no variants, no
+    ##     ``VERSION``; a case asserting that nothing was recorded is asserting
+    ##     that the sibling HAS nothing, not that it could not be asked;
+    ##   * ``plain-with-version`` — the same recipe plus a ``VERSION`` file,
+    ##     the CONSUMER's second source;
+    ##   * ``variants``           — declares ``enableTls`` and ``profile``. Its
+    ##     ``build:`` block is not decoration: ``buildCode`` emits the
+    ##     provider's ``runPackageProvider`` entry point only for a recipe that
+    ##     has one;
+    ##   * ``variants-no-build``  — declares a variant and cannot answer the
+    ##     provider protocol; since 0e7146a92 the probe runs such a recipe's
+    ##     initialiser directly.
+    ##
+    ## Stable, because the probe reaches the sibling's declarations through
+    ## the engine's interface-extraction and provider-compile edges, whose
+    ## action-cache entries are keyed by the recipe's location. A fresh copy
+    ## per process made every case compile the sibling from scratch; one
+    ## checkout per shape lets the engine's own cache serve every case after
+    ## the first. Nothing here writes into them — ``repro develop`` writes only
+    ## into the consumer — and the consumer stays per process.
 
 let NoPackages: seq[LockedPackage] = @[]
   ## A consumer with no committed lock at all — the case the engine must not
@@ -171,16 +153,13 @@ proc writeConsumer(root: string; lockedPackages: openArray[LockedPackage]) =
       ld.packages.add(p)
     writeFile(root / "repro.lock", serializeLockedDependencies(ld))
 
-proc writeSibling(root, recipe: string; versionFile = ""): string =
-  ## A real develop checkout: a recipe the provider probe can compile, and
-  ## optionally the `VERSION` file that is the CONSUMER's second source. The
-  ## two cases that assert on a recorded version deliberately do NOT write one,
-  ## so a passing assertion cannot have come from the fallback.
-  result = root / DevelopedPackage
-  createDir(result)
-  writeFile(result / "repro.nim", recipe)
-  if versionFile.len > 0:
-    writeFile(result / "VERSION", versionFile & "\n")
+proc siblingCheckout(shape: string): string =
+  ## The checked-in develop checkout for ``shape`` (see ``SiblingCheckouts``).
+  ## Absolute, because it is what the override document records and what the
+  ## cases compare ``path`` against.
+  result = repoRoot() / SiblingCheckouts / shape / DevelopedPackage
+  doAssert fileExists(result / "repro.nim"),
+    "develop sibling fixture missing: " & result
 
 proc developInto(consumerRoot, checkout: string;
                  dependency = DevelopedPackage): string =
@@ -306,7 +285,7 @@ proc solvedVersionOf(package: string): seq[string] =
 
 type
   Scenario = object
-    root: string          ## the scratch tree holding consumer and sibling
+    root: string          ## the per-process scratch tree holding the consumer
     checkout: string      ## the develop checkout the override points at
     metadataPath: string  ## the document the verb reported writing
 
@@ -362,7 +341,7 @@ proc nameTheRealCliForTheEngine() =
       "reprobuild.apps.reprobuild"))
 
 proc scenario(label: string; lockedPackages: openArray[LockedPackage];
-              recipe: string; versionFile = ""): Scenario =
+              shape: string): Scenario =
   ## Build `label`'s scenario, or return the one already built for it. Every
   ## accessor below funnels through here, so each label's real verb run
   ## happens exactly once per process no matter how many cases read it.
@@ -371,7 +350,7 @@ proc scenario(label: string; lockedPackages: openArray[LockedPackage];
     var built: Scenario
     built.root = scratchRoot(label)
     writeConsumer(built.root / "app", lockedPackages)
-    built.checkout = writeSibling(built.root, recipe, versionFile)
+    built.checkout = siblingCheckout(shape)
     built.metadataPath = developInto(built.root / "app", built.checkout)
     builtScenarios[label] = built
   builtScenarios[label]
@@ -384,30 +363,30 @@ proc lockedSibling(): Scenario =
       LockedPackage(name: DevelopedPackage, version: LockedVersion,
                     source: DevelopedPackage),
       LockedPackage(name: "zlib", version: "1.2.13", source: "zlib")],
-    SiblingRecipeWithoutVariants)
+    "plain")
 
 proc unlockedSibling(): Scenario =
   ## No committed lock and no `VERSION` file: the engine knows nothing and
   ## the consumer's chain runs to its end, which is a refusal.
-  scenario("unlocked", NoPackages, SiblingRecipeWithoutVariants)
+  scenario("unlocked", NoPackages, "plain")
 
 proc strangerLockSibling(): Scenario =
   ## A lock that names somebody else. The engine still knows nothing about
   ## THIS dependency, and the checkout's `VERSION` file is what answers.
   scenario("stranger", @[
       LockedPackage(name: "zlib", version: "1.2.13", source: "zlib")],
-    SiblingRecipeWithoutVariants, versionFile = CheckoutFileVersion)
+    "plain-with-version")
 
 proc variantSibling(): Scenario =
   ## A sibling whose recipe really declares variants.
   scenario("variants", @[
       LockedPackage(name: DevelopedPackage, version: LockedVersion,
                     source: DevelopedPackage)],
-    SiblingRecipe)
+    "variants")
 
 proc unaskableSibling(): Scenario =
-  ## A sibling that declares a variant and cannot be asked about it.
-  scenario("unaskable", NoPackages, SiblingRecipeVariantsButNoBuild)
+  ## A sibling that declares a variant and has no protocol dispatcher.
+  scenario("unaskable", NoPackages, "variants-no-build")
 
 addExitProc(proc () =
   # Reads the memo rather than the accessors: calling those at exit would
@@ -546,19 +525,37 @@ suite "the engine records the sibling's variant declarations":
     check not entry.hasKey("version")
     check entry.len == 2
 
-  test "a recipe with no build: block cannot be asked, and that is recorded here":
-    # The KNOWN LIMITATION, pinned as an observed fact rather than left for
-    # somebody to discover. `buildCode` emits the provider's protocol entry
-    # point only for a recipe with a `build:` (or `devEnv:`) body, so a recipe
-    # without one compiles to a binary that runs its module init and exits
-    # without answering — and the probe reports nothing, exactly as it would
-    # for a provider that failed to compile.
+  test "a recipe with no build: block is asked through its initialiser":
+    # THIS CASE USED TO PIN THE OPPOSITE, as a known limitation: `buildCode`
+    # emits the provider's protocol dispatcher only for a recipe with a
+    # `build:` (or `devEnv:`) body, and the probe used to send such a binary a
+    # manifest request it could not answer, discarding the solver inputs its
+    # module init had already written. 0e7146a92 ("Include resource-provider
+    # constraints in refreshed locks") closed that: for a declaration-only
+    # module `solverInputsFromCompiledProvider` now runs the binary's
+    # initialiser alone and reads the emission — the fix the writer's own
+    # doc-comment named ("teaching that probe to keep inputs the provider
+    # demonstrably wrote"). The limitation is gone, so the case asserts the
+    # declaration ARRIVES rather than that it is missing.
     #
     # The premise first, so this cannot silently become a test of something
-    # else: the recipe really does declare a variant.
-    check "enableTls: variant bool = true" in
-      readFile(unaskableSibling().checkout / "repro.nim")
-    check not overrideEntry(unaskableSibling().metadataPath).hasKey("variants")
+    # else: the recipe really does declare a variant, and has no `build:`.
+    let recipe = readFile(unaskableSibling().checkout / "repro.nim")
+    check "enableTls: variant bool = true" in recipe
+    check "build:" notin recipe
+    let entry = overrideEntry(unaskableSibling().metadataPath)
+    check entry.hasKey("variants")
+    var byName = initTable[string, JsonNode]()
+    if entry.hasKey("variants"):
+      for item in entry["variants"]:
+        byName[item["name"].getStr()] = item
+    # Exactly the one declaration, with its declared default — not the
+    # two-variant sibling's set leaking in, and not a synthesized value.
+    check byName.len == 1
+    check "enableTls" in byName
+    if "enableTls" in byName:
+      check byName["enableTls"]["kind"].getStr() == "bool"
+      check byName["enableTls"]["default"].getStr() == "true"
 
 suite "an override document written before this change still loads":
   ## Every override on disk today carries `node` and `path` and nothing else.

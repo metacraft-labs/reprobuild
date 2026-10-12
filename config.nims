@@ -697,13 +697,23 @@ addPackagePath("NIMCRYPTO_SRC", [
   ".." / "codetracer" / "libs" / "nimcrypto",
   ".." / "nimcrypto",
 ], "nimcrypto" / "hash.nim")
-# Peer-Cache-BearSSL M0: status-im/nim-bearssl. The package's entry module
-# is `bearssl.nim` at the repo root with submodules under `bearssl/`, so the
-# repo root itself is the path we want on --path. Marker is `bearssl.nim`.
+# Peer-Cache-BearSSL M0: status-im/nim-bearssl. The package's entry module is
+# `bearssl.nim` at the repo root with submodules under `bearssl/`, so the repo
+# root itself is the path we want on --path.
+#
+# The MARKER is `bearssl/abi/consttypes.nim`, not that root file. `bearssl.nim`
+# is present in every revision ever published, including ones predating the
+# `bearssl/abi/` module tree `repro_deploy_agent` imports, so a probe testing
+# only for it accepts a checkout that cannot satisfy the import and the build
+# dies tens of modules later on `cannot open file: bearssl/abi/consttypes`.
+# Probing for the module makes this check reject exactly what the compiler
+# would reject. `repro.nim` (via `repro_dsl_stdlib/source_only_packages`),
+# `scripts/source_paths.sh` and `scripts/release/stage_release_sources.sh`
+# spell the same string for the same reason.
 addPackagePath("BEARSSL_SRC", [
   ".." / "nim-bearssl",
   "libs" / "nim-bearssl",
-], "bearssl.nim", useDevShellFallback = true)
+], "bearssl/abi/consttypes.nim", useDevShellFallback = true)
 addPackagePath("RESULTS_SRC", [
   "libs" / "results" / "src",
 ], "results.nim")

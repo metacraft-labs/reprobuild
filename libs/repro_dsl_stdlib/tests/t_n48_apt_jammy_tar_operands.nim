@@ -78,19 +78,29 @@
 ##     is that the fix did not break the platform it does not apply to, and
 ##     that the ``--force-local``-then-retry shape extracts the same bytes.
 
-import std/[os, osproc, sequtils, strtabs, strutils, unittest]
+import std/[exitprocs, os, osproc, sequtils, strtabs, strutils, unittest]
 
 import repro_dsl_stdlib/packages/apt_jammy {.all.}
 from repro_core/paths import extendedPath
 from repro_core/host_tar import resolveHostTar, HostTarOverrideEnv
 
-const N48Root = "build/test-tmp/t-n48-apt-jammy"
+let N48Root = "build/test-tmp/t-n48-apt-jammy/" & $getCurrentProcessId()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
   ## ``createTempDir``: the defect under test is that GNU tar unquotes the
   ## path it is handed, so what the case proves depends entirely on which
   ## backslashes are in that path, and a temp root is whatever ``TMPDIR``
   ## happens to be. The first scratch root W16 was probed under contained
   ## ``\7``, which GNU tar read as an octal escape.
+  ##
+  ## Per PROCESS, though: the runner executes every case of this binary in
+  ## its own process, concurrently with the others. One shared root let each
+  ## case's ``n48Reset`` delete the payload or archive another case's ``tar``
+  ## was still reading ("File removed before we read it"). A decimal pid adds
+  ## no backslash, so the vacuity guarantee above is unchanged.
+
+addExitProc(proc () =
+  try: removeDir(extendedPath(N48Root))
+  except CatchableError: discard)
 
 const N48RaisingFirstChars = {'a', 'b', 'f', 'n', 'r', 't', 'v'}
   ## The seven letters GNU tar turns into a control character. ``\0`` is NOT

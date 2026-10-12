@@ -118,9 +118,11 @@ type
     libAPath: string       ## the developer's clone
     seedSha: string
     daemonKey: string
+    certStore: string      ## the scratch local certificate store (user root)
 
 proc setupFixture(gitBin, certificatesTable: string): Fixture =
   result.scratch = createTempDir("repro-tc6-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"
@@ -230,13 +232,16 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, headSha, currentPlatformTag())
-  check fileExists(certFile)
-  result = readCertificateFile(certFile)
-  check result.vcs.commit == headSha
+  # TC-8c: the certificate is in the local store under the tested CONTENT
+  # (HEAD's tree, the tree being clean); the record names that content and,
+  # informationally, the commit it was issued on top of.
+  let content = treeContentId(gitBin, fx.libAPath, headSha)
+  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
+  check result.vcs.base == headSha
+  check result.vcs.content == content
   check "t-unit" in result.targets
-  let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
+  # The note is keyed by that tree, on the shared notes ref.
+  let att = attachCertificate(gitBin, fx.libAPath, result)
   check att.ok
 
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =
@@ -314,7 +319,7 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
       # currency precondition of issuance holds (the lock binds the closure at
       # the commit being certified).
       seedLock(fx)
-      let cert = issueAndAttachCert(gitBin, fx, newSha)
+      discard issueAndAttachCert(gitBin, fx, newSha)
       rewindUpstreamToSeed(gitBin, fx)
       # Confirm the rewind: the upstream tip is back at seed before the gateway
       # push, so the forward assertion below proves the gateway advanced it.
@@ -323,15 +328,16 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
       # value ``wirePushGateway`` filled in on the first wiring).
       #
       # TC-7: there is no lock DIGEST to copy out of the certificate any more.
-      # The gateway resolves the lock ITSELF, in the per-repo lock subtree
-      # below, keyed by the commit the certificate attests — so a certificate
-      # naming a commit with no committed lock record is refused on the
-      # receiving side even when its signature is impeccable.
+      # This fixture's project opted into a lock record store, so the gateway
+      # resolves the lock ITSELF, in the per-repo lock subtree below, keyed by
+      # the PUSHED commit (never by the certificate's ``base``) — so a pushed
+      # commit with no lock record is refused on the receiving side even when
+      # the certificate's signature is impeccable.
       let gatewayLockRecordsDir = lockRecordsDirFor(
         fx.workspaceRoot / ".repro" / "manifests", "lib-a", "lib-a")
       check dirExists(gatewayLockRecordsDir)
       check resolveLockAtCommit(gatewayLockRecordsDir,
-        cert.vcs.commit).status == lacPresent
+        newSha).status == lacPresent
       writeFile(gatewayConfigPath(fx.gatewayBare),
         serializeGatewayConfig(GatewayConfig(
           gateMode: cgmRequired,

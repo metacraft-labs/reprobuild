@@ -12,6 +12,7 @@
 ## documented in the M4 hand-off.
 
 import std/[os, osproc, strutils, tables, unittest]
+import repro_test_support/reasoned_skip
 from repro_core/paths import extendedPath
 
 import repro_local_store
@@ -19,8 +20,10 @@ import repro_dsl_stdlib/packages_schema
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-installer-innosetup-fpc"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-installer-innosetup-fpc" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):

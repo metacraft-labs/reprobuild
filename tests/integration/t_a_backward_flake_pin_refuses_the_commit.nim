@@ -46,6 +46,7 @@
 ## headers of `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import nf3_override_state_fixture
 

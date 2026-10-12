@@ -378,7 +378,7 @@ suite "NF-1: a sibling override excludes gitignored build output":
       createDir(plain)
       writeFile(plain / "flake.nix", "{ outputs = _: { }; }\n")
       check flakePrintDevEnvArgv("nix", ".", "", @[("plain-src", plain)]) ==
-        @["nix", "print-dev-env", ".",
+        @["nix", "print-dev-env", "--no-write-lock-file", ".",
           "--override-input", "plain-src", "path:" & plain]
 
       # ---- (7) a sibling with an UNINITIALISED submodule ------------------

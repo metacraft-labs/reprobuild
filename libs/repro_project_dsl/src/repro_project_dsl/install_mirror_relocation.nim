@@ -20,6 +20,22 @@
 ## and where it moves to; ``auditInstallMirrorRelocatability`` asks that of
 ## every ELF in a mirror.
 ##
+## Not every such path can be rewritten, and the ones that cannot split in
+## two along a line that decides whether the mirror is usable at all:
+##
+## * A path under the producing build's own WORK TREE
+##   (``<recipe>/build/out/usr/lib``, ``<recipe>/.repro/build/…``,
+##   ``<recipe>/outputs/out/lib``) names a directory that was never
+##   published. There is nowhere to point it: no consumer has that
+##   directory, and no consumer ever will. Such a mirror is REFUSED —
+##   including on the machine that built it, where the directory is still
+##   present and the defect is therefore invisible unless it is decided by
+##   shape rather than by looking.
+## * A path into the TARGET ROOTFS (``/usr/lib/systemd``) is reported and
+##   not refused. It is unresolvable while the mirror is read where it
+##   stands and correct once the mirror has been staged into the image it
+##   was built for, and nothing here can tell those two apart.
+##
 ## The classifier is deliberately PURE — path arithmetic, no filesystem. What
 ## exists on disk is a different question with a different answer on every
 ## host, and mixing the two is how "it worked where I ran it" becomes a
@@ -37,6 +53,14 @@ const
   ImmutableStoreRoots* = ["/nix/store/", "/repro/store/"]
     ## Content-addressed roots. A path under one of these denotes the same
     ## bytes on every host that has it, so it is portable by construction.
+
+  RecipeWorkTreeDirs* = ["build", ".repro/build", "outputs/out"]
+    ## The directories a recipe creates under its OWN root while it builds:
+    ## the out-of-tree build directory and its ``out`` staging child, the
+    ## engine's per-recipe scratch, and the outputs tree. None of them is
+    ## published, so none of them can exist for a consumer — which is what
+    ## makes a run path naming one refusable by shape alone, with no
+    ## calibration build and no filesystem lookup.
 
   MaxReportedMirrorPaths* = 5
     ## How many DISTINCT offending paths one mirror may name before the rest
@@ -57,8 +81,21 @@ type
     rvPortable        ## Survives the move unchanged.
     rvOwnMirror       ## Inside the mirror being audited; moves with it.
     rvRemappable      ## Names a sibling mirror under a FOREIGN recipes root.
+    rvRecipeWorkTree  ## Names a directory the producing build created under
+                      ## its own recipe root. Unlike ``rvForeign`` this is
+                      ## not merely unrewritable here — it can exist for NO
+                      ## consumer, on any host, ever, because a work tree is
+                      ## not part of what gets published. So it is refused
+                      ## rather than reported, and refused on the PRODUCER's
+                      ## host too, where the directory still happens to be
+                      ## sitting there.
     rvForeign         ## Absolute, outside the store, and not of any shape
-                      ## this module knows how to rewrite.
+                      ## this module knows how to rewrite. A target-rootfs
+                      ## path (``/usr/lib/systemd``) lands here and is
+                      ## deliberately NOT refused: it is wrong for a mirror
+                      ## read in place and right once the mirror has been
+                      ## staged into the image it was built for, and this
+                      ## module cannot tell which of the two is happening.
 
   ElfRuntimeFacts* = object
     isElf*: bool
@@ -279,6 +316,50 @@ proc splitMirrorPath*(value: string):
   if depName.len == 0 or depName == "." or depName == "..": return
   (true, depName, tail)
 
+proc splitRecipeWorkTreePath*(value: string):
+    tuple[matched: bool, recipeName, workTree, rest: string] =
+  ## Split ``<anyRoot>/<recipe>/<workTree>/<rest>``, where ``<workTree>`` is
+  ## one of ``RecipeWorkTreeDirs``.
+  ##
+  ## Symmetric with ``splitMirrorPath`` on purpose: both read a path back
+  ## into the recipe it belonged to, and both apply the same test to the
+  ## segment they take as the recipe's name — a traversal component is not a
+  ## name, and a rule that accepted one would be reasoning about a directory
+  ## outside the tree it was handed.
+  ##
+  ## The mirror is checked FIRST and wins. A published mirror may perfectly
+  ## well ship a directory called ``build`` — some projects install their
+  ## own build machinery — and that directory travels with the package, so
+  ## it is not a work tree however much it reads like one.
+  let v = normalizeSlashes(value)
+  if not v.startsWith("/"): return
+  if splitMirrorPath(v).matched: return
+  # Matched SEGMENT BY SEGMENT off ``RecipeWorkTreeDirs`` rather than by
+  # substring: ``/usr/lib/rebuilding`` contains "build" and names no work
+  # tree. The outer loop is the position, so the leftmost work tree in the
+  # path wins — which is what makes ``<recipe>/.repro/build/…`` report its
+  # recipe as ``<recipe>`` and not as ``.repro``.
+  let segments = v.strip(chars = {'/'}).split('/')
+  for i in 0 ..< segments.len:
+    for workTree in RecipeWorkTreeDirs:
+      let want = workTree.split('/')
+      if i + want.len > segments.len: continue
+      var matched = true
+      for k in 0 ..< want.len:
+        if segments[i + k] != want[k]:
+          matched = false
+          break
+      if not matched: continue
+      # A work tree sits UNDER a recipe root, so there has to be one in
+      # front of it. ``/build/out/lib`` names no recipe and is somebody's
+      # root filesystem.
+      if i == 0: return
+      let recipeName = segments[i - 1]
+      if recipeName.len == 0 or recipeName == "." or recipeName == "..":
+        return
+      return (true, recipeName, workTree,
+              segments[min(i + want.len, segments.len) .. ^1].join("/"))
+
 proc installMirrorCheckoutRoots*(mirrorRoot: string):
     tuple[matched: bool, recipesRoot, packageName: string] =
   ## Read a mirror root back into the two names that identify it:
@@ -318,6 +399,14 @@ proc classifyInstallMirrorPath*(value, recipesRoot, mirrorRoot: string):
   for storeRoot in ImmutableStoreRoots:
     if v.startsWith(storeRoot): return rvPortable
   if isUnder(v, mirrorRoot): return rvOwnMirror
+  # BEFORE the ``recipesRoot`` line, and that order is the whole of the
+  # publish-side rule. On the PRODUCER's host a baked-in work tree sits
+  # under the producer's own recipes root, so ``isUnder`` would call it
+  # portable and the artifact would be published with it — which is exactly
+  # how a path that can exist for no consumer gets into a cache. Deciding
+  # the work-tree shape first is what gives the rule a reachable input on
+  # the one host that can still prevent it.
+  if splitRecipeWorkTreePath(v).matched: return rvRecipeWorkTree
   if isUnder(v, recipesRoot): return rvPortable
   let remapped = remapInstallMirrorPath(v, recipesRoot)
   if remapped.len == 0: return rvForeign
@@ -382,6 +471,12 @@ proc describeMirrorPathFinding*(packageName: string;
   of rvRemappable:
     result.add(", which belongs to another checkout of this recipe set; here it is ")
     result.add(finding.remapped)
+  of rvRecipeWorkTree:
+    let split = splitRecipeWorkTreePath(finding.value)
+    result.add(", which is the \"" & split.workTree & "\" work tree of \"" &
+      split.recipeName & "\" on the machine that built this. A work tree is " &
+      "not published, so that directory exists on no other machine and this " &
+      "path can never resolve anywhere else.")
   of rvForeign:
     result.add(", which is outside every content-addressed store and outside this checkout")
   else:
@@ -421,9 +516,25 @@ proc relocateInstallMirror*(mirrorRoot, recipesRoot: string;
   ## enough to look like it works.
   result.audit = auditInstallMirrorRelocatability(mirrorRoot, recipesRoot)
   var remappable: seq[MirrorPathFinding]
+  var workTrees = 0
   for finding in result.audit.findings:
-    if finding.verdict == rvRemappable:
-      remappable.add(finding)
+    case finding.verdict
+    of rvRemappable: remappable.add(finding)
+    of rvRecipeWorkTree: inc workTrees
+    else: discard
+  # Refused BEFORE anything is rewritten. A mirror carrying a work-tree path
+  # cannot be made self-contained by any rewrite this module can perform —
+  # there is no directory on this host, or on any host, for the path to be
+  # pointed at — so rewriting the entries that ARE repairable would produce
+  # precisely the partial state the doc comment above calls the worst of the
+  # three, and would do it to an artifact the caller is about to discard.
+  if workTrees > 0:
+    result.error = "the mirror names " & $workTrees & " run-path entr" &
+      (if workTrees == 1: "y" else: "ies") &
+      " under the work trees of the build that produced it; those " &
+      "directories are not published, so no consumer has them and the " &
+      "mirror cannot be made self-contained"
+    return
   if remappable.len == 0:
     # Nothing to rewrite. ``ok`` reports the rewrite, not the mirror's
     # health: surviving ``rvForeign`` paths stay in ``audit`` for the

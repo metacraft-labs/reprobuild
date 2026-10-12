@@ -224,9 +224,20 @@ suite "the measurement policy parser is fail-closed":
     policyWith(MockDevPolicy, "allow_mock = true", "allow_mock = false"),
     "has to be said twice"
 
-  refuses "the evidence-backed posture is refused, not silently ignored",
+  # The evidence-backed posture is implemented now, so the clause is no
+  # longer refused outright. What replaces that case is the two ways it
+  # is still refused: half-written, and stated where it can decide
+  # nothing.
+  refuses "an evidence clause missing a key is refused, not defaulted",
     MockDevPolicy & "\n[measurements.evidence]\nmin_signatures = 2\n",
-    "this build cannot evaluate"
+    "the required key \"measurements.evidence.known_keys\" is absent"
+
+  refuses "an evidence clause beside allow_mock is refused",
+    MockDevPolicy & "\n[measurements.evidence]\nmin_signatures = 2\n" &
+      "known_keys = [\"aabb\", \"ccdd\"]\n" &
+      "require_transparency_log = false\n",
+    "[measurements.evidence] admits a manifest on the strength of " &
+      "rebuilder signatures"
 
   refuses "a manifest pin that is not a sha256 digest is refused",
     policyWith(tpmPolicyText(), sampleManifestDigest(), "sha256:short"),

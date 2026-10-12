@@ -78,14 +78,14 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "41ab1b987aba67e8bcc34a5945ac33e17b6418ed";
-    hash = "sha256-Lv0i9MBGkwPFfEaOxB7y9ixwt7dOvJIKj3W4R/BpyOY=";
+    rev = "4aa8892844a43ac59d4be74a4f992161b09491fe";
+    hash = "sha256-YaTqCD29nafQiGMs65Nhsw0DsvCCD/eM4ALhUhI1EPA=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
-    hash = "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=";
+    rev = "7b8b587c72ec31f6825ae124ab89ad7954f6dca7";
+    hash = "sha256-VCiyNGJXQzYtAaNAlwW7e2Bs6182QKPt991VD+NIzNA=";
   },
   # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
   # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
@@ -105,8 +105,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "07cc4afc823a7c631d9ef9fdf4522f4d219c46a8";
-    hash = "sha256-bLG7RtdIseK8D4qrD+4PkOuIE2rUy8ou0I1ppBVPH4U=";
+    rev = "0b0476ad55e97f1f96a77367f205fae5fac47a16";
+    hash = "sha256-/Ag6oHtUwYZYWcKEywy4FjMYxDWFrRZbFMADAlm01SI=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -123,8 +123,8 @@
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
-    rev = "033f00a1d9df8d7e2cb0368010746acc272a9dce";
-    hash = "sha256-L5N0v9haMBtmCjkt3aw4V6dBPPJqqHY17YZL2Muedsk=";
+    rev = "f8781d4b5514ee9bbcdee0de701dc4bd8090a061";
+    hash = "sha256-QtdGgLaIq6GAtBkf/+0jATeKDP187dCDamQlwvuUZmo=";
   },
   ctTestRunnerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -145,8 +145,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "7a79877992908f64d3c8318bb7b20078ff5d1bf4";
-    hash = "sha256-7wTdJkutu2VDQFuKIzZgAzJ7X8J3pHXbr3dEcqcVH2Q=";
+    rev = "3590066e9c9dc82ca758ff2d7918f3b6f8304f35";
+    hash = "sha256-KD47AShW5Y8trE9vY4WrPtk/ot6qagq3p4vhPw/mQBU=";
   },
 }:
 let

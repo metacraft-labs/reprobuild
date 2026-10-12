@@ -27,8 +27,9 @@
 ##
 ## The fix is to make each arm assert something only a gate that READ the
 ## pushed certificate note can produce. Every push now carries a REAL
-## certificate note — attached to the pushed commit, pushed on
-## ``refs/notes/reprobuild/certificates`` alongside the branch — signed by a
+## certificate note — attached to the pushed commit's TREE (TC-8c), pushed on
+## ``refs/notes/test-certificates/certificates`` alongside the branch — signed
+## by a
 ## key that is deliberately NOT in the (empty) registry. The gateway must
 ## therefore report, in its own words, that it saw a certificate and rejected
 ## it BY KEY ID:
@@ -179,8 +180,12 @@ proc attachUntrustedCert(gitBin: string; fx: ModeFixture; commit: string):
     issuedAt: "2026-08-27T00:00:00Z",
     issuer: "w9-modes-fixture",
     keyId: modesUnregisteredKeyId,
-    vcs: TestCertificateVcs(repo: "clone", commit: commit,
-      clean: true, untracked: false),
+    # TC-8b: the record names the commit's CONTENT (its tree), which is what
+    # makes it describe the pushed commit; ``base`` is informational.
+    vcs: TestCertificateVcs(repo: "clone",
+      content: "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
+        q(fx.clone) & " rev-parse " & commit & "^{tree}").strip(),
+      untracked: false, base: commit),
     commands: @[TestCertificateCommand(argv: @["repro", "test"])],
     signature: TestCertificateSignature(
       algorithm: "ed25519",
@@ -188,7 +193,7 @@ proc attachUntrustedCert(gitBin: string; fx: ModeFixture; commit: string):
       # registry, so TC-5 stops at ``svUnregisteredKey`` before any crypto.
       value: "dzktbW9kZXMtbm90LWEtcmVhbC1zaWduYXR1cmU="))
   cert.result = tcrPassed
-  let att = attachCertificate(gitBin, fx.clone, commit, cert)
+  let att = attachCertificate(gitBin, fx.clone, cert)
   doAssert att.ok, att.diagnostic
   cert
 
@@ -338,6 +343,12 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         " rev-parse HEAD").strip()
       doAssert covered != uncovered,
         "fixture collision: the two commits have the same sha"
+      # TC-8c: notes are keyed by the TREE the content names; a reader
+      # evaluating a commit looks the note up on ``<commit>^{tree}``.
+      let coveredTree = requireGit(q(gitBin) & " -C " & q(repo) &
+        " rev-parse " & covered & "^{tree}").strip()
+      let uncoveredTree = requireGit(q(gitBin) & " -C " & q(repo) &
+        " rev-parse " & uncovered & "^{tree}").strip()
 
       var cert = TestCertificate(
         schema: testCertificateSchemaV1,
@@ -348,14 +359,16 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         issuedAt: "2026-08-27T00:00:00Z",
         issuer: "w11-fixture",
         keyId: "w11-note-read-key",
-        vcs: TestCertificateVcs(repo: "repo", commit: covered,
-          clean: true, untracked: false),
+        vcs: TestCertificateVcs(repo: "repo",
+          content: "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
+            q(repo) & " rev-parse " & covered & "^{tree}").strip(),
+          untracked: false, base: covered),
         commands: @[TestCertificateCommand(argv: @["repro", "test"])],
         signature: TestCertificateSignature(
           algorithm: "ed25519",
           value: "dzExLW5vdC1hLXJlYWwtc2lnbmF0dXJl"))
       cert.result = tcrPassed
-      let att = attachCertificate(gitBin, repo, covered, cert)
+      let att = attachCertificate(gitBin, repo, cert)
       check att.ok
 
       # ---- (1) the note IS there and readable -----------------------------
@@ -370,7 +383,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
 
       # ---- (2) GENUINE ABSENCE: a commit with no note, ref intact ---------
       let rawAbsent = runCmd(q(gitBin) & " -C " & q(repo) & " notes --ref " &
-        q(certificateNotesRef) & " show " & q(uncovered))
+        q(certificateNotesRef) & " show " & q(uncoveredTree))
       checkpoint("git notes show <no-note> exit=" & $rawAbsent.code &
         " output=" & rawAbsent.output.strip())
       # git's own premise, before the product's: this exit code and no other is
@@ -384,7 +397,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
 
       # ---- (3) UNREADABLE: the note blob is gone, the ref is not ----------
       let noteBlob = requireGit(q(gitBin) & " -C " & q(repo) & " notes --ref " &
-        q(certificateNotesRef) & " list " & q(covered)).strip().
+        q(certificateNotesRef) & " list " & q(coveredTree)).strip().
         splitWhitespace()[0]
       check noteBlob.len in {40, 64}
       let looseBlob = repo / ".git" / "objects" / noteBlob[0 ..< 2] /
@@ -405,7 +418,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       check refStillResolves.code == 0
       check refStillResolves.output.strip().len > 0
       let rawBroken = runCmd(q(gitBin) & " -C " & q(repo) & " notes --ref " &
-        q(certificateNotesRef) & " show " & q(covered))
+        q(certificateNotesRef) & " show " & q(coveredTree))
       checkpoint("git notes show <broken-blob> exit=" & $rawBroken.code &
         " output=" & rawBroken.output.strip())
       check rawBroken.code != 0
@@ -419,7 +432,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       # The diagnostic has to be actionable, which means naming what could not
       # be read and what git said — the wrong remedy this milestone removes is
       # the one the gate renders from this string.
-      check covered in unreadable.diagnostic
+      check coveredTree in unreadable.diagnostic
       check certificateNotesRef in unreadable.diagnostic
       check ("git notes show exit " & $rawBroken.code) in unreadable.diagnostic
       check noteBlob in unreadable.diagnostic

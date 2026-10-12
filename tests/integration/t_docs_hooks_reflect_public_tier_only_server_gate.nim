@@ -49,7 +49,7 @@ let guidePath = findUp(thisDir, "docs" / "user-guide" / "workspace-locking.md")
 
 # ``reprobuild-specs/CLI/hooks.md`` — sibling repo. From the reprobuild repo
 # root, its parent holds the sibling ``reprobuild-specs`` checkout.
-let hooksPath = findUp(thisDir, ".." / "reprobuild-specs" / "CLI" / "hooks.md")
+let hooksPath = findUp(thisDir, ".." / "reprobuild-specs" / "spec" / "CLI" / "hooks.md")
 
 suite "HL-8 docs reflect public-tier-only server gate":
 

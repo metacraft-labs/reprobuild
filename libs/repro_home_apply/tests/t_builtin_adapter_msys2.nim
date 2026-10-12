@@ -48,8 +48,10 @@ import repro_dsl_stdlib/packages_schema
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-msys2"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-msys2" /
+  testCaseScratchSlug()
 const M6FixtureArchive = "libs/repro_home_apply/tests/fixtures/m6/" &
   "mingw-w64-x86_64-fake-tool-1.0.0-1-any.pkg.tar.zst"
 
@@ -72,7 +74,8 @@ proc fileToUrl(absPath: string): string =
 # W16 — shared machinery for the destination-path cases
 # ---------------------------------------------------------------------------
 
-const W16Root = "build/test-tmp/t-builtin-adapter-msys2-w16"
+let W16Root = "build/test-tmp/t-builtin-adapter-msys2-w16/" &
+  testCaseScratchSlug()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
   ## ``createTempDir``.
   ##

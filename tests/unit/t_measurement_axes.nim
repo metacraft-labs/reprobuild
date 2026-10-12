@@ -124,6 +124,43 @@ suite "measurement axes: PRESENT (--show)":
     # The evidence presenter must not invent trace lines, or vice versa.
     check not evidence.contains("scheduler trace")
 
+suite "measurement axes: the $REPRO_STATS_DIR record's action tally":
+
+  test "the tally separates reuse from execution and counts failures":
+    # The record is what a CMake TryCompile build -- always run with
+    # ``--log=quiet`` -- leaves behind, so it is the only place a caller can
+    # learn whether a probe was served from the action cache.
+    let results = @[
+      ActionResult(id: "compile-ran", status: asSucceeded, launched: true,
+        cacheDecision: cdMiss),
+      ActionResult(id: "compile-restored", status: asCacheHit,
+        cacheDecision: cdHit),
+      ActionResult(id: "compile-cutoff", status: asUpToDate,
+        cacheDecision: cdHybridCutoff),
+      ActionResult(id: "link-unpublishable", status: asSucceeded,
+        launched: true, cacheDecision: cdNotCacheable),
+      ActionResult(id: "probe-failed", status: asFailed, launched: true,
+        cacheDecision: cdMiss),
+      ActionResult(id: "after-failure", status: asBlocked,
+        blockedBy: "probe-failed")]
+    let tally = tallyActionDecisions(results)
+    check tally.total == 6
+    check tally.launched == 3
+    check tally.cacheHit == 2
+    check tally.failed == 2
+
+    let node = actionTallyJson(tally)
+    check node["total"].getInt == 6
+    check node["launched"].getInt == 3
+    check node["cacheHit"].getInt == 2
+    check node["failed"].getInt == 2
+
+  test "an invocation that ran no build records an all-zero tally":
+    let node = actionTallyJson(tallyActionDecisions(newSeq[ActionResult]()))
+    check node["total"].getInt == 0
+    check node["launched"].getInt == 0
+    check node["cacheHit"].getInt == 0
+
 suite "measurement axes: PERSIST (--write-report and the failure report)":
 
   test "the failure report enumerates failures, never successes":

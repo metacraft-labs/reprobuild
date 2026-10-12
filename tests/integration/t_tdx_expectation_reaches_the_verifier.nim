@@ -11,8 +11,8 @@
 ## headline claims with no case.
 ##
 ## The claim here is that an expectation this build COMPUTES reaches a
-## verdict row a verifier READS. That is two halves and they are proved
-## separately:
+## verdict row a verifier READS. That is three claims and they are
+## proved separately:
 ##
 ##   * the command writes a document whose measurement is the one
 ##     computed from the firmware, and whose three runtime registers are
@@ -22,6 +22,15 @@
 ##     another real domain's — same quote, same policy, same clock. A row
 ##     that answered the same thing either way would be identical in
 ##     both, which is exactly the defect that was found one backend over.
+##   * and the row that FAILS names its two values in a DEFINED order:
+##     the observed measurement first, the manifest's expectation
+##     second. Both are 96 hex digits of the same kind, so a reader that
+##     is not this process can only tell them apart by where they sit in
+##     the sentence. If the order ever moved, a reader asking for the
+##     observed measurement would get the prediction instead and compare
+##     it against itself — agreement reported on exactly the input where
+##     there is none. The order is therefore asserted, as an order,
+##     rather than left to whoever next edits the wording.
 ##
 ## ## The negative is a real value, not a string of zeroes
 ##
@@ -289,6 +298,24 @@ proc verdictFor(reportText, manifestText: string): Verdict =
     vendorCollateral: TdxCollateralBundle(),
     hasVendorCollateral: false))
 
+proc measurementTokens(s: string; width: int): seq[string] =
+  ## Every measurement-shaped token in ``s``, in the order it appears: a
+  ## *maximal* run of hex digits exactly ``width`` characters long.
+  ##
+  ## This is deliberately not a search for a value already in hand. It is
+  ## how a reader standing outside this process picks the numbers out of a
+  ## verdict row — the row is a sentence, and the numbers in it are
+  ## identified by their shape and their position, nothing else.
+  var i = 0
+  while i < s.len:
+    if s[i] in HexDigits:
+      var j = i
+      while j < s.len and s[j] in HexDigits: inc j
+      if j - i == width: result.add s[i ..< j]
+      i = j
+    else:
+      inc i
+
 suite "the expectation reaches the verdict":
 
   test "the measurement row passes on this domain and fails on the other":
@@ -311,6 +338,73 @@ suite "the expectation reaches the verdict":
     let mismatching = verdictFor(report, manifestCarrying(other))
     check mismatching.checks[vcMeasurementMatch].outcome == coFailed
     check computed.mrtd in mismatching.checks[vcMeasurementMatch].detail
+
+  test "the measurement row names the OBSERVED value before the expected one":
+    # The violated form of this row names TWO measurement-shaped numbers:
+    # the one the machine reported, and the one the manifest predicts. The
+    # satisfied form names ONE. Readers of the row that are not this
+    # process cannot tell them apart by content — both are 96 hex digits
+    # of the same kind — so they tell them apart by POSITION, and the
+    # observed value coming first is therefore part of what this row
+    # promises rather than an accident of how the sentence was phrased.
+    #
+    # What a swap costs, concretely: a reader that wanted the observed
+    # measurement and got the predicted one would be comparing the
+    # prediction against itself. It would find agreement on exactly the
+    # input where there is none, and report a match on a genuine
+    # mismatch. Nothing in the row's text would look wrong.
+    #
+    # So the assertions below are about the ORDER of the two values and
+    # not about the words around them. Rephrasing the sentence while
+    # keeping the observed value first must pass; exchanging the two
+    # values must fail, whatever the sentence says.
+    let computed = tdxExpectationFor(TdxLaunchInputs(
+      firmware: FirmwareDstack,
+      registerLog: RegisterLogOperatorB,
+      order: thoExtendAfterTheRegion))
+    let report = reportFor(lcOperatorB)
+
+    # Observed is this domain's own measurement, out of its own quote;
+    # expected is the OTHER genuine operator's, out of the other genuine
+    # quote. Two real values, so which one a reader got is observable.
+    let observed = computed.mrtd
+    var other = computed
+    other.mrtd = TdxLaunchVectors[lcOperatorA].mrtd
+    let expected = other.mrtd
+    check observed != expected
+    check observed.len == expected.len
+
+    let mismatch = verdictFor(report, manifestCarrying(other))
+    check mismatch.checks[vcMeasurementMatch].outcome == coFailed
+    let detail = mismatch.checks[vcMeasurementMatch].detail
+    checkpoint detail
+
+    # Each value is named exactly once, which is what makes "first"
+    # mean something: a row that repeated one of them would have a
+    # first occurrence that moved with the repetition.
+    check detail.count(observed) == 1
+    check detail.count(expected) == 1
+
+    # The order, stated directly.
+    check detail.find(observed) < detail.find(expected)
+
+    # And the same order as the outside reader actually obtains it: by
+    # taking measurement-shaped numbers out of the sentence in the order
+    # they occur. The leading one is the observed measurement.
+    let mismatchTokens = measurementTokens(detail, observed.len)
+    check mismatchTokens.len >= 2
+    check mismatchTokens[0] == observed
+    check expected in mismatchTokens[1 .. ^1]
+
+    # The satisfied form of the row leads with the observed value too,
+    # so a reader does not have to know the outcome before it can read
+    # the number. (It names one value; there is no second to confuse.)
+    let agreement = verdictFor(report, manifestCarrying(computed))
+    check agreement.checks[vcMeasurementMatch].outcome == coPassed
+    let passedTokens = measurementTokens(
+      agreement.checks[vcMeasurementMatch].detail, observed.len)
+    check passedTokens.len >= 1
+    check passedTokens[0] == observed
 
   test "the row is about the measurement and not about the registers":
     # Moving a runtime register must NOT move this row: the schema's

@@ -96,6 +96,7 @@
 ## difference.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 
@@ -178,7 +179,7 @@ proc writeUserHook(fx: Fixture; hook: string) =
   setFilePermissions(path, perms)
 
 proc postCommitLog(fx: Fixture): string =
-  let path = fx.workspace / ".repro" / "workspace" /
+  let path = fx.workspace / ".repro" / "build" / "reports" /
     "post-commit-lock.log"
   if fileExists(path): readFile(path) else: ""
 
@@ -403,3 +404,107 @@ suite "managed hooks gate every worktree of a participating repo":
         # were working.
         check pushed.output.contains("config --local core.hooksPath")
         check not fx.trapWasUsed()
+
+  test "t_publication_refuses_when_a_worktree_scoped_hook_path_overrides_the_repair":
+    ## THE REPAIR VERIFIES ITS WRITE, NOT ITS OUTCOME.
+    ##
+    ## `ensureWorktreeSafeHooksPath` rewrites a relative `core.hooksPath` with
+    ## `git config --local` and then reports success from THAT COMMAND'S EXIT
+    ## CODE. Exit 0 there means "the value was stored at --local scope". It
+    ## does not mean "this is the value Git will use": `core.hooksPath` also
+    ## has a `--worktree` scope, enabled per-repository by
+    ## `extensions.worktreeConfig`, and that scope OUTRANKS `--local`.
+    ##
+    ## Measured with git 2.54.0, and asserted below rather than recalled:
+    ##
+    ##     git config --local    core.hooksPath ".git/hooks"
+    ##     git config extensions.worktreeConfig true
+    ##     git config --worktree core.hooksPath ".git/hooks"
+    ##     git config --local    core.hooksPath "$PWD/.git/hooks"   # the repair
+    ##     git config --local    --get core.hooksPath  ->  /…/app/.git/hooks
+    ##     git config --worktree --get core.hooksPath  ->  .git/hooks
+    ##     git config            --get core.hooksPath  ->  .git/hooks   ← Git's
+    ##     git config --show-origin --get core.hooksPath
+    ##                                 ->  file:.git/config.worktree  .git/hooks
+    ##
+    ## So the repair writes, git reports 0, the effective value is unchanged
+    ## and still relative — and the repair returns `ok = true, changed = true`
+    ## and prints "…so every worktree of this repo runs the managed hooks".
+    ## That is a FALSE SUCCESS CLAIM at the one place whose entire job is to be
+    ## believed: `hooksPathRefusalLines` never fires, and the publication
+    ## boundary passes a push it should have refused.
+    ##
+    ## What this case asserts is the refusal. The fix is to read the effective
+    ## value back — in the scope Git will actually use, i.e. with no scope flag
+    ## — and verify it is absolute and is the intended path. It covers every
+    ## scope-precedence surprise, not `worktreeConfig` alone; `worktreeConfig`
+    ## is merely the one that can be staged from a test.
+    ##
+    ## NOTHING IN THIS REPOSITORY ENABLES THAT EXTENSION, so this case enables
+    ## it itself. That is the whole of the artificiality here: the extension is
+    ## a stock, documented git feature (`git-config(1)`, "Configuration File
+    ## …CONFIGURATION FILE"), the values are the ones the dev shell's
+    ## `git-hooks.nix` installer really writes, and every repository, worktree,
+    ## hook and push below is real.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repositories and a real " &
+        "`git worktree add`")
+    else:
+      let fx = setup(gitBin)
+      defer: removeDirEventually(fx.scratch)
+
+      fx.writeUserHook("pre-push")
+      fx.requireHooks()
+      fx.addWorktree()
+      check fileExists(fx.worktree / ".git")
+      check not dirExists(fx.worktree / ".git")
+
+      # Stage the overriding scope. `setup` already wrote the dev shell's
+      # relative `--local` value; this adds the higher-precedence one.
+      discard fx.requireGit("config extensions.worktreeConfig true")
+      discard fx.requireGit("config --local core.hooksPath " & q(".git/hooks"))
+      discard fx.requireGit("config --worktree core.hooksPath " &
+        q(".git/hooks"))
+
+      # THE TOPOLOGY, asserted rather than assumed — a fixture in which
+      # `--local` still won would pass this case for the wrong reason.
+      let localAbs = fx.app / ".git" / "hooks"
+      discard fx.requireGit("config --local core.hooksPath " & q(localAbs))
+      check fx.requireGit("config --local --get core.hooksPath").strip() ==
+        localAbs
+      check fx.requireGit("config --worktree --get core.hooksPath").strip() ==
+        ".git/hooks"
+      check fx.effectiveHooksPath() == ".git/hooks"
+      # Put the shared value back to what the dev shell leaves, so the repair
+      # under test has the exact rewrite to attempt that it has in the field.
+      discard fx.requireGit("config --local core.hooksPath " & q(".git/hooks"))
+
+      writeFile(fx.app / "on-main.txt", "one\n")
+      discard fx.requireGit("add -A")
+      discard fx.requireGit("commit --quiet -m " & q("main commit"))
+
+      # The push runs the real managed pre-push in the MAIN worktree, where
+      # `.git/hooks` does resolve — so the gate is consulted, which is what
+      # makes its verdict the thing under test. It must REFUSE: the managed
+      # hooks cannot be put in force across this repository's worktrees, the
+      # repair cannot change that, and publishing past a gate known not to be
+      # in force is the failure `CLI/hooks.md` § "Contract Handshake And
+      # Stand-Down" forbids.
+      let pushed = fx.git("push origin main")
+      checkpoint("push output:\n" & pushed.output)
+      check pushed.code != 0
+      check pushed.output.contains("refusing to publish")
+      check pushed.output.contains("core.hooksPath")
+      # The refusal hands over a command; an operator who cannot act on one
+      # reaches for `--no-verify`, which also disables the gates that work.
+      check pushed.output.contains("config --local core.hooksPath")
+
+      # And the repair did NOT claim to have fixed anything.
+      check not pushed.output.contains(
+        "so every worktree of this repo runs the managed hooks")
+
+      # The push really was stopped: origin still has only the seed commit.
+      check fx.requireGit("rev-parse refs/heads/main", fx.origin).strip() !=
+        fx.requireGit("rev-parse HEAD").strip()
+      check not fx.trapWasUsed()

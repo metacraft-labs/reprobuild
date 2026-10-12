@@ -46,6 +46,7 @@ suite "self-spawn image identity":
     try:
       # Undeclared: refused. This is the fork-bomb guard.
       check selfSpawnIoMonitorPath("") == ""
+      check internalReproHelperCliPathForTest() == ""
 
       try:
         # The SETTER is gated behind the same define as the clear, so this
@@ -57,12 +58,24 @@ suite "self-spawn image identity":
         # Declared: accepted, under a filename that is NOT `repro`.
         check selfSpawnIoMonitorPath("") ==
           os.normalizedPath(getAppFilename())
+        check internalReproHelperCliPathForTest() ==
+          os.normalizedPath(getAppFilename())
+
+        # Portable Linux launchers run through ld-linux, so the actual image
+        # path can name the loader. The configured public launcher must win
+        # even after the running engine has declared its role.
+        let launcher = getTempDir() / "repro-release-launcher"
+        putEnv("REPRO_PUBLIC_CLI_PATH", launcher)
+        check internalReproHelperCliPathForTest() == launcher
+        check internalReproHelperCliPathForTest(launcher) == launcher
+        delEnv("REPRO_PUBLIC_CLI_PATH")
       finally:
         resetRunningImageReproCliMarkForTest()
 
       # And the refusal is restored, so the rest of this process is as safe
       # as it was before the case ran.
       check selfSpawnIoMonitorPath("") == ""
+      check internalReproHelperCliPathForTest() == ""
     finally:
       if savedEnv.len > 0:
         putEnv("REPRO_PUBLIC_CLI_PATH", savedEnv)

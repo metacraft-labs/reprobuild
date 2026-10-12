@@ -26,6 +26,7 @@ import "../hcr-linux-direct/elf_rel_reader"
 # without `--build-id` is refused `absent-sled (sled-object-build-id-mismatch)`
 # before anything about threads is exercised.
 import repro_project_dsl
+from repro_test_support import testScratchSlug
 
 const
   PatchSymbolA* = "hcr_lx_m4_patch_body_a"
@@ -71,7 +72,11 @@ proc runOrFail*(command, cwd: string): string =
   res.output
 
 proc m4WorkDir*(repoRoot: string): string =
-  result = repoRoot / "build" / "hcr-linux-m4"
+  # Private to the process running ONE case of ONE binary: several binaries
+  # import this helper and the suite runs them (and their cases) concurrently,
+  # so a shared directory had one process relink a fixture or rewrite a patch
+  # object while another was executing or parsing it.
+  result = repoRoot / "build" / "hcr-linux-m4" / testScratchSlug()
   createDir(result)
 
 proc m4CaseDir*(repoRoot: string): string =

@@ -48,9 +48,10 @@ import repro_home_apply/plan
 import repro_home_apply/realize
 import repro_home_apply/package_catalog
 import repro_dsl_stdlib/packages_schema
+from repro_test_support import testCaseScratchSlug
 
-const
-  FixtureRoot = "build/test-tmp/t-m1-realize-adapter-preference"
+let FixtureRoot = "build/test-tmp/t-m1-realize-adapter-preference" /
+  testCaseScratchSlug()
 
 # ---------------------------------------------------------------------------
 # Test-seam state — captures the args the realize side passed through to

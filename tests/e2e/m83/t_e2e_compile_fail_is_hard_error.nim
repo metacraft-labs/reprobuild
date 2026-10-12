@@ -23,6 +23,8 @@ const PlatformSkipReason =
     "validated on Windows; the apply-path harness uses Windows " &
     "stow / launcher / state-dir layout"
 
+import repro_test_support/reasoned_skip
+
 when not defined(windows):
   # The Windows-only branch below cannot be compiled here (its imports
   # and harness are Windows-shaped), so the cases are re-declared as

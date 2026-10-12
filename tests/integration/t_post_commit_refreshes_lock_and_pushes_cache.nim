@@ -167,7 +167,7 @@ suite "RA-4 — post-commit refreshes lock and pushes cache ref":
       check res.code == 0
 
       # (2) The lock was refreshed LOCALLY under the per-repo path.
-      let reportPath = workspaceRoot / ".repro" / "workspace" /
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "post-commit-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)

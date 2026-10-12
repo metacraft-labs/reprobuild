@@ -85,7 +85,8 @@ proc hookLog(fx: Fixture): string =
   if fileExists(path): readFile(path) else: ""
 
 proc postCommitLog(fx: Fixture): string =
-  let path = fx.workspace / ".repro" / "workspace" / "post-commit-lock.log"
+  let path = fx.workspace / ".repro" / "build" / "reports" /
+    "post-commit-lock.log"
   if fileExists(path): readFile(path) else: ""
 
 proc setup(gitBin: string): Fixture =

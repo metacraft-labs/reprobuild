@@ -34,7 +34,7 @@ if [[ "$archive_name" == *.zip ]]; then
     powershell -NoProfile -Command \
       "Expand-Archive -LiteralPath '$(cygpath -w "$archive_path")' -DestinationPath '$(cygpath -w "$tmp_dir")' -Force"
   elif [[ -x /c/Windows/System32/tar.exe ]]; then
-    echo "    unzip not found; extracting with Windows bsdtar (System32\\tar.exe)"
+    printf '%s\n' '    unzip not found; extracting with Windows bsdtar (System32\tar.exe)'
     /c/Windows/System32/tar.exe -xf "$archive_path" -C "$tmp_dir"
   else
     echo "ERROR: cannot extract $archive_name -- no unzip, no PowerShell, no bsdtar available" >&2
@@ -86,7 +86,10 @@ required_sources=(
   src/nim-shm-gset/src/shm_gset.nim
   src/nim-shm-queue/src/shm_queue.nim
   src/runquota/libs/runquota_core/src/runquota_core.nim
-  src/bearssl/bearssl.nim
+  # The module `repro_deploy_agent` imports, not bearssl's root file:
+  # the root file is present in revisions that cannot satisfy the
+  # import, so its presence does not show the archive can build.
+  src/bearssl/bearssl/abi/consttypes.nim
 )
 missing_sources=()
 for f in "${required_sources[@]}"; do
@@ -101,6 +104,24 @@ if (( ${#missing_sources[@]} > 0 )); then
   echo "ERROR: $archive_name cannot build a project: missing from share/repro: ${missing_sources[*]}" >&2
   echo "       Staged by scripts/release/stage_release_sources.sh." >&2
   exit 1
+fi
+
+if [[ "$archive_name" != *.zip ]]; then
+  echo "=== Verifying the packaged Nix helper and Python runtime ==="
+  # A real short-lived Unix socket server exercises its imports and runtime
+  # with no host Python on PATH. No Nix evaluation is needed for this probe.
+  (
+    helper_scratch="$(mktemp -d /tmp/repro-helper.XXXXXX)"
+    trap 'rm -rf "$helper_scratch"' EXIT
+    helper_socket="$helper_scratch/daemon.sock"
+    env -u PYTHONHOME -u PYTHONPATH PATH=/usr/bin:/bin \
+      "$pkg_dir/bin/reprobuild-nix-daemon" \
+      --socket-path "$helper_socket" --idle-exit-ms 1
+    [[ ! -e "$helper_socket" ]] || {
+      echo "ERROR: Nix helper left its socket behind" >&2
+      exit 1
+    }
+  )
 fi
 
 # ── Windows: archive self-containment ────────────────────────────────────────

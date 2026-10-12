@@ -28,7 +28,8 @@ proc parseGenerated(text: string): DependencyPathSet =
   ## real file, because that is how the engine consumes it.
   let dir = getTempDir() / "t_unmonitorable_action_depfile_guards"
   createDir(dir)
-  let path = dir / "generated.d"
+  # Per process: cases run concurrently, each writing different text here.
+  let path = dir / ("generated-" & $getCurrentProcessId() & ".d")
   writeFile(path, text)
   defer: removeFile(path)
   readRecognizedDependencyReport(MakeDepfileFormatName, path)

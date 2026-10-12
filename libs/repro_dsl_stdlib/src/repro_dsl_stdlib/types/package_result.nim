@@ -127,6 +127,21 @@ type
     destdir*: string
     components*: Table[string, string]
 
+  CabalPackageResult* = object
+    ## Returned by ``cabal_package(...)`` -- the from-source Haskell build.
+    ## Same three roles as ``CargoPackageResult``, ``buildEdge`` likewise
+    ## being the vendor step: the ``file+noindex`` repository of the pinned
+    ## Hackage closure, and the private cabal configuration that names it.
+    buildEdge*: BuildActionDef
+      ## The vendored Hackage repository (``repro_project_dsl/hackage_vendor``).
+    compileEdge*: BuildActionDef
+      ## ``cabal build <target> --offline`` on a patched copy of the source.
+    installEdge*: BuildActionDef
+      ## Copies the built executable (``cabal list-bin``) to
+      ## ``<destdir>/usr/bin``.
+    destdir*: string
+    components*: Table[string, string]
+
   GoPackageResult* = object
     ## Returned by ``go_package(...)``. Same three roles as its siblings,
     ## and the same reading of ``buildEdge`` as ``CargoPackageResult``:
@@ -412,6 +427,19 @@ proc executable*(r: NodePackageResult; name: string): Executable =
     currentOwningPackage(), "executable", name)
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
     currentOwningPackage(), "npm")
+  newExecutable(
+    install = r.installEdge,
+    executableName = name,
+    installPrefix = componentPath(r.components, "runtime"))
+
+proc executable*(r: CabalPackageResult; name: string): Executable =
+  ## Stage the installed executable and mirror the install tree, as the
+  ## cargo slice does, so the from-source resolver finds it under
+  ## ``<recipeRoot>/.repro/output/<name>/``.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "cabal")
   newExecutable(
     install = r.installEdge,
     executableName = name,

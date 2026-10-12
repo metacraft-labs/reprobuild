@@ -1,4 +1,5 @@
 import std/[json, os, osproc, sequtils, sets, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import nimcrypto/sha2 as ncSha2
 import repro_tool_profiles
@@ -6,16 +7,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
+    "f8781d4b5514ee9bbcdee0de701dc4bd8090a061"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-a9ef983e.nim"
+    "tests/fixtures/codetracer-subset/repro-f8781d4b.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-a9ef983e.nims"
+    "tests/fixtures/codetracer-subset/config-f8781d4b.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ecb87da01665a172128ec45b2eab00e8e97a709ccdd52f7291797207b84ee85e"
+    "ccf12e902fdd57ae789434591256683a46b3d35e19ba81df0d7b28cc0c0f6582"
   PinnedCodeTracerConfigPayloadSha256 =
-    "fadd0d2371f3456043db00f902d59d1c9e186b0bf97e8a52f48e10b87dd3485d"
+    "8826b81b19fbd6eaf385ff18d9f065213756ed42f42eb7a284b16a407feff94b"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by
@@ -753,8 +754,15 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
     writeFile(tailwindStyles, "{}\n")
 
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
-  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "nim-acp",
-              "nim-agent-harbor", "nim-agents", "nim-everywhere",
+  # ``isonim-tui`` is not a ``uses:`` package: CodeTracer's ``config.nims``
+  # puts ``<workspace>/isonim-tui/src`` on the compiler path when that
+  # directory exists, and its frontend imports ``isonim_tui/...`` through it
+  # (``src/frontend/viewmodel/editor/selection.nim`` since CodeTracer
+  # 8d1c99922). The fixture workspace is this temp directory, not the real
+  # one, so the sibling has to be linked here like the others or every
+  # frontend compile fails with ``cannot open file: isonim_tui/text/width``.
+  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "isonim-tui",
+              "nim-acp", "nim-agent-harbor", "nim-agents", "nim-everywhere",
               "nim-shm-gset", "nim-shm-queue", "nim-stackable-hooks"]:
     var sourcePath = codeTracerRoot.parentDir / dep
     if dep == "codetracer-trace-format-nim":
@@ -1059,6 +1067,14 @@ proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
     projectRoot)
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
+  # The contracted ``config.nims`` ``include``s
+  # ``src/frontend/test_support/force_import_isolation.nims`` unconditionally
+  # (and force-imports ``state_isolation.nim`` beside it into test-shaped
+  # programs), so every subset needs that directory whether or not it copies
+  # the rest of ``src/frontend`` -- the native subset does not, and without
+  # it every compile stops while evaluating ``config.nims``.
+  copyTree(codeTracerRoot / "src" / "frontend" / "test_support",
+    projectRoot / "src" / "frontend" / "test_support")
   addCodeTracerFixtureTransitivePaths(projectRoot)
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
@@ -1595,7 +1611,7 @@ proc checkFrontendBundleOutputs(projectRoot: string) =
   check fileExists(buildDebug(projectRoot, "subwindow.js.map"))
   check fileExists(buildDebug(projectRoot, "src/subwindow.js"))
   for stylesheet in [
-    "default_white_theme.css",
+    "default_white_theme_electron.css",
     "default_dark_theme_electron.css",
     "default_dark_theme_extension.css",
     "default_dark_theme.css",
@@ -2223,10 +2239,14 @@ when defined(macosx) or defined(linux):
       # product ships — the binary plus the startup assets `ct` reads out
       # of `<prefix>/config/` — and a set name does not rename its member.
       #
-      # This case's subset copies `src/ct` but not `src/config`, so
-      # `ctStartupAssets` is empty here and the aggregate degenerates to
-      # one member; that is why the closure is a single action. It does
-      # NOT make the aggregate a second name for that action.
+      # This case's subset copies `src/ct` but not `src/config` wholesale.
+      # The compile-closure walker (`completeCodeTracerCompileClosure`)
+      # still stages `src/config/default_config.yaml`, because the staged
+      # `src/common/config_test.nim` `staticRead`s it, so `ctStartupAssets`
+      # holds exactly that one copy (`default_layout.json` is referenced by
+      # nothing staged) and the closure is two actions: the compile and
+      # `config-default-config-yaml`. Neither makes the aggregate a second
+      # name for the compile.
       #
       # That is a MEASURED claim, not a reading of the code. Drive the
       # same pair through the UNPATCHED engine with the aggregate carrying
@@ -2236,7 +2256,7 @@ when defined(macosx) or defined(linux):
       # `target()` name. The id an edge is keyed and reported under must
       # not flip because two data files happened to be present.
       check first.contains("selectedTarget: ct")
-      check first.contains("scheduler: actions=1")
+      check first.contains("scheduler: actions=2")
       check first.contains(
         "action: ct-binary status=asSucceeded launched=true")
       check not first.contains("action: ct status=")
@@ -2262,8 +2282,10 @@ when defined(macosx) or defined(linux):
       check fileOutput.contains("executable")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 1
+      check firstReport{"actions"}.len == 2
       assertAction(firstReport, "ct-binary", "asSucceeded", true)
+      assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
+        true)
       # The aggregate's name is not an action id.
       check reportAction(firstReport, "ct").kind == JNull
       let nativeAction = reportAction(firstReport, "ct-binary")
@@ -2346,8 +2368,13 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check first.contains("defaultTarget: codetracer")
       check first.contains("selectedTarget: codetracer")
-      check first.contains("scheduler: actions=24")
-      check first.contains("action: ct status=asSucceeded launched=true")
+      # 25 = the 23 non-ct actions, ``ct-binary`` (the compile that the ``ct``
+      # aggregate names; ``ct`` itself is a selector, not an action id) and,
+      # since CodeTracer f8781d4b (CTC-3i), ``ct-test``, which now ships in
+      # ``codetracerActions`` beside ``ct``.
+      check first.contains("scheduler: actions=25")
+      check first.contains("action: ct-binary status=asSucceeded launched=true")
+      check first.contains("action: ct-test status=asSucceeded launched=true")
       check first.contains(
         "action: db-backend-record status=asSucceeded launched=true")
       check first.contains(
@@ -2365,7 +2392,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "bin/db-backend-record"))
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
-      check firstReport{"actions"}.len == 24
+      check firstReport{"actions"}.len == 25
       assertAction(firstReport, "frontend-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-public-ui-js", "asSucceeded", true)
       assertAction(firstReport, "frontend-index-js", "asSucceeded", true)
@@ -2378,7 +2405,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2393,18 +2420,19 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "config-default-config-yaml", "asSucceeded",
         true)
       assertAction(firstReport, "db-backend-record", "asSucceeded", true)
-      assertAction(firstReport, "ct", "asSucceeded", true)
+      assertAction(firstReport, "ct-binary", "asSucceeded", true)
+      assertAction(firstReport, "ct-test", "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
       check reportAction(firstReport, "c-sudoku-object-tup").kind == JNull
       check reportAction(firstReport,
         "c-sudoku-object-with-generated-header").kind == JNull
-      check reportAction(firstReport, "ct"){"dependencyPolicyKind"}.getStr() ==
+      check reportAction(firstReport, "ct-binary"){"dependencyPolicyKind"}.getStr() ==
         "dgAutomaticMonitor"
-      check hasMonitorEvidence(reportAction(firstReport, "ct"))
-      check monitorEvidenceContains(reportAction(firstReport, "ct"),
+      check hasMonitorEvidence(reportAction(firstReport, "ct-binary"))
+      check monitorEvidenceContains(reportAction(firstReport, "ct-binary"),
         "src/ct/codetracerconf.nim")
-      check declaredEvidenceContains(reportAction(firstReport, "ct"),
+      check declaredEvidenceContains(reportAction(firstReport, "ct-binary"),
         "src/ct/codetracer.nim")
 
       let aggregateIdentity =
@@ -2419,7 +2447,7 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      check secondReport{"actions"}.len == 24
+      check secondReport{"actions"}.len == 25
       assertActionCacheEffective(secondReport, "frontend-ui-js")
       assertActionCacheEffective(secondReport, "frontend-public-ui-js")
       assertActionCacheEffective(secondReport, "frontend-index-js")
@@ -2431,7 +2459,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2443,7 +2471,8 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "config-default-layout-json")
       assertActionCacheEffective(secondReport, "config-default-config-yaml")
       assertActionCacheEffective(secondReport, "db-backend-record")
-      assertActionCacheEffective(secondReport, "ct")
+      assertActionCacheEffective(secondReport, "ct-binary")
+      assertActionCacheEffective(secondReport, "ct-test")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -2466,7 +2495,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(changedReport, "frontend-subwindow-html")
       assertActionCacheEffective(changedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2481,7 +2510,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(changedReport, "config-default-layout-json")
       assertActionCacheEffective(changedReport, "config-default-config-yaml")
       assertActionCacheEffective(changedReport, "db-backend-record")
-      assertAction(changedReport, "ct", "asSucceeded", true)
+      assertAction(changedReport, "ct-binary", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
       check reportAction(changedReport, "generate-config-header").kind == JNull
@@ -2833,7 +2862,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2863,7 +2892,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2896,7 +2925,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(htmlChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(htmlChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -2939,7 +2968,7 @@ when defined(macosx) or defined(linux):
       assertAction(helperChangedReport, "frontend-src-helpers-js",
         "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3032,7 +3061,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "subwindow.html"))
       check fileExists(buildDebug(projectRoot, "src/helpers.js"))
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3073,7 +3102,7 @@ when defined(macosx) or defined(linux):
       assertAction(firstReport, "frontend-subwindow-html", "asSucceeded", true)
       assertAction(firstReport, "frontend-src-helpers-js", "asSucceeded", true)
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3127,7 +3156,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-html")
       assertActionCacheEffective(secondReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3158,7 +3187,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(cChangedReport, "frontend-subwindow-html")
       assertActionCacheEffective(cChangedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",
@@ -3191,7 +3220,7 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(headerDeletedReport, "frontend-subwindow-html")
       assertActionCacheEffective(headerDeletedReport, "frontend-src-helpers-js")
       for stylesheet in [
-        "default_white_theme.css",
+        "default_white_theme_electron.css",
         "default_dark_theme_electron.css",
         "default_dark_theme_extension.css",
         "default_dark_theme.css",

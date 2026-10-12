@@ -7,10 +7,10 @@ Reprobuild project and builds it through the public `repro build` command with
 The macOS gate does not invoke `tup`. Homebrew marks `tup` Linux-only and
 nixpkgs marks it broken on this host. Instead, the test parses and fingerprints
 the command-semantics fixture pinned from CodeTracer commit
-`a9ef983ed1e7d9a60b85034b596f55ea8b2164f5`. This is the reviewed `dev`-branch
-contract also selected by Reprobuild's `.github/sibling-repos`; using a
-Reprobuild-owned fixture keeps the oracle independent of an adjacent
-CodeTracer checkout's branch or uncommitted state. The fixture covers the exact
+`f8781d4b5514ee9bbcdee0de701dc4bd8090a061`, the revision this repository's
+`flake.lock` pins for `codetracer-src`; using a Reprobuild-owned fixture keeps
+the oracle independent of an adjacent CodeTracer checkout's branch or
+uncommitted state. The fixture covers the exact
 Tup-equivalent actions:
 
 - `!nim_js` semantics for `src/frontend/tests/ipc_registry_test.nim`
@@ -33,15 +33,15 @@ checkout. Its Nim fixture uses CodeTracer's committed `nim.cfg` search paths so
 that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
-payloads pinned from reviewed CodeTracer `dev` commit
-`a9ef983ed1e7d9a60b85034b596f55ea8b2164f5`. The files retain CodeTracer's
+payloads pinned from reviewed CodeTracer commit
+`f8781d4b5514ee9bbcdee0de701dc4bd8090a061`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/a9ef983ed1e7d9a60b85034b596f55ea8b2164f5/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/a9ef983ed1e7d9a60b85034b596f55ea8b2164f5/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/f8781d4b5514ee9bbcdee0de701dc4bd8090a061/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/f8781d4b5514ee9bbcdee0de701dc4bd8090a061/config.nims`
 
-`a9ef983e` is not an arbitrary newer commit. It is the revision this
+`f8781d4b` is not an arbitrary newer commit. It is the revision this
 repository's `flake.lock` pins for its `codetracer-src` input, so the vendored
 project contract, the Tup command-semantics extract and the flake-pinned
 CodeTracer source all name one reviewed commit instead of three. The previous
@@ -52,6 +52,25 @@ adding the build-graph gate edges and the development-environment
 activation), `config.nims` (sibling-then-override search-path order) and the
 `NIM_REPO_PATH_FLAGS` feeding `!nim_js` (the runquota library paths). The
 remedy is to refresh the fixtures, not to relax the comparison.
+
+The `f8781d4b` refresh followed the next `codetracer-src` pin. CodeTracer's
+`repro.nim` adds `ct-test` to `codetracerActions` (CTC-3i), `config.nims`
+force-imports the test-state isolation include, and `src/Tuprules.tup` gains an
+`!ct_test_orc` macro that neither extracted rule uses, so the Tup extract
+changes only in its provenance header. CodeTracer `dev` (aabb0970b when this
+pin moved) does not yet contain f8781d4b: its `src/Tuprules.tup` lacks only the
+unused `!ct_test_orc` macro, so the extracted rules still match, but its
+`repro.nim` and `config.nims` predate CTC-3i and the isolation include. The
+fail-closed in-place comparison against CI's `codetracer=dev` sibling therefore
+holds only once CodeTracer merges f8781d4b into `dev`.
+
+The `847c4630` refresh followed the previous `codetracer-src` pin. CodeTracer's
+`repro.nim` gained the `isonim-tui` sibling dependency, `config.nims` gained a
+worktree-local nimcache, and
+`!nim_js` gained a per-rule `--nimcache:/tmp/ct-nim-cache/%B_nim_js` with the
+output exclusion `| $(NIM_SIDE_OUTPUTS_IGNORE)`. The Tup-semantics test now
+reads an output section as tup does (outputs before `|`, `^regex` exclusions
+after it) and substitutes `%B`, the input's base name.
 
 The real sibling still supplies every source file copied and built by the
 tests. Using Reprobuild-owned graph/config fixtures keeps an unrelated local

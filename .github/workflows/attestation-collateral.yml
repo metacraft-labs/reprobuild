@@ -1,0 +1,93 @@
+name: Attestation collateral
+
+# The calendar half of the attestation fixture corpus.
+#
+# WHY THIS IS NOT PART OF THE TEST SUITE
+#
+# There are two clocks over this material and conflating them is the
+# expensive mistake.
+#
+# Every gate that judges pinned vendor material states its own `Now` as a
+# constant, because those gates test the EVALUATOR: a certificate chain that
+# was valid when it was captured has to evaluate the same way in five years,
+# or the test is a test of the date. `t_attestation_fixture_lifecycle` checks
+# those clocks against the windows of what they judge, hermetically, on every
+# commit -- and it never reads the wall clock or a socket.
+#
+# This job is the other clock. Its whole job is to say "three revocation lists
+# stop being usable in five days" WHILE FIVE DAYS REMAIN, and to notice that a
+# publisher is serving different bytes than the ones pinned here. Neither is a
+# property of a commit, so neither belongs on a commit's critical path: a check
+# that turns red for everybody on a morning nobody chose is a check somebody
+# turns off.
+#
+# WHAT A FAILURE MEANS
+#
+# Exit 1 means something needs attention and every line says which artifact,
+# what state it is in, when it entered or enters it, where it came from, and
+# the command that replaces it. Exit 2 means the run could not do its job --
+# an unreadable table, a fetch that did not complete -- which is deliberately
+# distinct, because "I looked and found nothing" and "I could not look" are
+# different answers and a scheduled job that conflates them eventually reports
+# the second as the first.
+#
+# `docs/attestation-fixture-operations.md` is the runbook for both.
+#
+# RUNNER CLASS
+#
+# `ubuntu-latest`. This is not a nix job: it needs python3 from the standard
+# image and outbound HTTPS, and nothing else. Provisioning a dev shell would
+# cost minutes for a shell the check never enters, and running it hosted keeps
+# a weekly job off the self-hosted pool that pull requests are waiting on.
+
+#
+# WHY THERE ARE TWO TRIGGERS AND NOT ONE
+#
+# A `schedule:` trigger runs ONLY from the repository's default branch.
+# That is not a detail: this file reached a development branch first and
+# the default branch does not carry it, so for as long as that is true
+# the weekly run does not exist -- not late, not throttled, absent. It
+# was measured rather than suspected. Between this job being added and
+# the first expiry it was meant to announce, the API recorded exactly one
+# run of it, event `push`, from the commit that introduced it; the one
+# Monday in between fell before the file existed and the next fell AFTER
+# the documents expired. A job whose only periodic trigger it cannot
+# reach is indistinguishable from a job that is passing.
+#
+# So the periodic evaluation is anchored to something that does happen on
+# the branch the work lands on: every push. The expiry half is offline,
+# costs seconds, and needs nothing but python3, so running it per landing
+# is cheaper than the checkout in front of it. The network half stays on
+# the schedule and on manual dispatch, because asking a vendor's service
+# once a week is courteous and asking it on every landing is not.
+#
+# Keep the `schedule:` line. It is correct, and it starts working the
+# moment this file reaches the default branch.
+
+on:
+  schedule:
+    # Mondays, early -- the network half.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [dev, agents]
+
+permissions:
+  contents: read
+
+jobs:
+  collateral:
+    name: Pinned collateral expiry and drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The paths filter this trigger used to carry is deliberately gone.
+      # It fired only when the ledger itself moved, which answers "did
+      # this edit break the tool" and cannot answer "has the calendar
+      # moved" -- and the calendar moves on days nobody edits a table.
+      - name: Expiry, offline, on every landing
+        if: github.event_name == 'push'
+        run: python3 tools/attestation_collateral_monitor.py --offline
+      - name: Expiry and drift, against the wall clock and the publishers
+        if: github.event_name != 'push'
+        run: python3 tools/attestation_collateral_monitor.py

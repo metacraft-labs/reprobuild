@@ -1,4 +1,4 @@
-## The verifier: eleven checks, run in order, none of them skipped
+## The verifier: thirteen checks, run in order, none of them skipped
 ## silently.
 ##
 ## ## The shape
@@ -11,11 +11,18 @@
 ## driver that stopped at the first failure would produce a verdict whose
 ## remaining rows meant "unknown" while looking like "fine".
 ##
-## The loop is over the enum, so a check cannot be dropped from the
-## dispatch without the compiler noticing (the ``case`` is exhaustive)
-## and cannot be dropped from the *record* without the verdict rejecting
-## (``coNotReached``). See ``verdict.nim``'s header for the three
-## refusals that structure holds up.
+## The loop is over the enum and the body is a ``case`` over it, so a
+## check cannot be dropped from the dispatch without the compiler
+## noticing (the ``case`` is exhaustive) and cannot be dropped from the
+## *record* without the verdict rejecting (``coNotReached``). See
+## ``verdict.nim``'s header for the three refusals that structure holds
+## up.
+##
+## That first sentence described no code for a long time: the records
+## were a straight-line sequence and the only loop over the enum was on
+## the unparseable path, so a check added to the enum and not here
+## rejected every report at run time instead of failing to compile. The
+## dispatch is a ``case`` now and the sentence is true.
 ##
 ## ## Where a skip is authorised, and where it is not
 ##
@@ -42,6 +49,20 @@
 ##     looked at is worse than one that never came.
 ##   * ``tcb-floor`` may be skipped for any tier that reports no vendor
 ##     trusted computing base.
+##   * ``evidence-quorum`` may be skipped only when the policy states no
+##     ``[measurements.evidence]`` clause **and** no attestations were
+##     supplied. A bundle that arrived is always judged, on the same
+##     grounds as a bundled certificate chain — and note *how* that is
+##     enforced: not by the ``required`` flag, which only governs what an
+##     inapplicable finding means, but by the check itself, which
+##     VIOLATES rather than declines whenever evidence arrived. A flag
+##     that looked like it carried the rule would have been a rule with
+##     no reachable input.
+##   * ``transparency-log`` may be skipped only when the policy does not
+##     require inclusion and no inclusion proof was supplied. A proof
+##     that arrived is always judged, by the same mechanism: every path
+##     on which a proof is present returns satisfied or violated, never
+##     inapplicable.
 ##
 ## Everything else is required unconditionally, ``native-evidence`` most
 ## of all.
@@ -76,6 +97,7 @@ import repro_attest
 import ./challenge
 import ./evidence
 import ./policy
+import ./quorum
 import ./snp_chain
 import ./tdx_chain
 import ./tdx_collateral
@@ -84,7 +106,7 @@ import ./trust
 import ./verdict
 import ./x509
 
-export evidence, policy, verdict, challenge, trust, x509
+export evidence, policy, verdict, challenge, trust, x509, quorum
 
 type
   VerificationRequest* = object
@@ -141,6 +163,31 @@ type
       ## Whether the field above was filled. An absent bundle is not a
       ## pass: the reader then establishes no status, and the floor
       ## check fails for any tier that is supposed to have one.
+    attestationsText*: Option[string]
+      ## The ``reproos.edge-attestations.v1`` bundle that travels with
+      ## the measurement manifest — the build plane's evidence that the
+      ## manifest is what that configuration produces.
+      ##
+      ## This one DOES come from the publisher, and that is not an
+      ## inconsistency with the rule above it. A manifest fetched from
+      ## the machine under verification would let the machine choose
+      ## what it is compared against; a *bundle* is a set of signatures
+      ## by parties the policy named in advance, and an attacker who
+      ## edits it can only make it verify less.
+    attestationsSource*: string
+    signerRoster*: seq[QuorumSigner]
+      ## The public keys of the rebuilders this verifier's operator
+      ## installed. Supplied by the caller and never taken from the
+      ## bundle, for the same reason ``trustAnchors`` is never taken
+      ## from the report. The policy says which key identifiers may
+      ## count; this says what those identifiers' keys actually are, and
+      ## the two are required to name the same set.
+    witnessedLogRoots*: seq[WitnessedLogRoot]
+      ## The transparency-log roots this verifier has witnessed. An
+      ## empty set is not "the log is fine" — it is a question that
+      ## cannot be asked, and an inclusion proof against a log with no
+      ## witnessed root here is refused, exactly as an empty revocation
+      ## list is.
 
 const
   SoftwareRootTestReportSymbol* = "verifySoftwareRootTestReport"
@@ -400,7 +447,7 @@ proc checkCertificateChain(req: VerificationRequest;
         verdict.detail)
   of abTpm2:
     # The evaluator is supplied by whichever of this module's two
-    # drivers is running. Both call the same eleven checks; the
+    # drivers is running. Both call the same thirteen checks; the
     # production one passes `evaluateProductionChain`, which has no
     # policy argument and no way to widen what it recognises. See
     # `trust.nim`'s header.
@@ -470,6 +517,197 @@ proc checkTcbFloor(p: AttestationPolicy;
   of abTpm2, abMock:
     inapplicable("the " & $inputs.backend & " backend reports no vendor " &
       "trusted computing base")
+
+# ---------------------------------------------------------------------
+# The build plane: what the edge attestations that travel with a
+# manifest are worth
+#
+# Two checks over one context, computed once. They are separate checks
+# because they answer separate questions and a policy may require either
+# alone; they share a context because both rest on the same three
+# preconditions — a manifest to make a claim about, a bundle that parses,
+# and a bundle whose subject IS that claim — and a reader who saw those
+# three reported differently by the two rows would not know which to
+# believe.
+# ---------------------------------------------------------------------
+
+type
+  EvidenceContext = object
+    supplied: bool
+      ## A bundle was handed in, whatever became of it.
+    parsed: bool
+    complaint: string
+      ## Why the bundle is not usable, when it is not. Empty otherwise.
+    bundle: EdgeAttestationBundle
+    claim: EdgeClaim
+      ## Derived from the MANIFEST this verifier holds, never from the
+      ## bundle's own ``subject``.
+    haveClaim: bool
+    quorum: QuorumEvaluation
+    inclusion: InclusionEvaluation
+    rosterComplaint: string
+    heldSigners: seq[string]
+      ## The key identifiers this verifier holds a public key for,
+      ## sorted. Taken from the roster the CALLER supplied, so the
+      ## comparison against the policy's admitted set has two
+      ## independent sides.
+
+proc evidenceContextFor(req: VerificationRequest; manifestText: string;
+                        haveManifest: bool): EvidenceContext =
+  result.supplied = req.attestationsText.isSome
+  result.heldSigners = rosterNames(req.signerRoster)
+  if haveManifest:
+    try:
+      result.claim = claimForManifest(manifestText, req.manifestSource)
+      result.haveClaim = true
+    except CatchableError as err:
+      result.complaint = "the measurement manifest yields no claim to " &
+        "attest: " & err.msg
+  if not result.supplied: return
+  try:
+    result.bundle = parseEdgeAttestationBundle(req.attestationsText.get,
+      req.attestationsSource)
+    result.parsed = true
+  except EdgeAttestationError as err:
+    result.complaint = err.msg
+    return
+  if not result.haveClaim: return
+  try:
+    result.quorum = evaluateQuorum(result.bundle, result.claim,
+                                   req.signerRoster, req.nowMs div 1000)
+  except RosterError as err:
+    result.rosterComplaint = err.msg
+  result.inclusion = evaluateInclusion(result.bundle, result.claim,
+                                       req.witnessedLogRoots)
+
+proc checkEvidenceQuorum(p: AttestationPolicy;
+                         ctx: EvidenceContext): CheckFinding =
+  ## K distinct admitted rebuilders, or a named reason why not.
+  ##
+  ## Every refusal below says a different thing, deliberately. A check
+  ## whose failures share one sentence is a check a reader cannot act on
+  ## and a gate can pass by accident.
+  if not p.acceptsEvidence:
+    if not ctx.supplied:
+      return inapplicable("the policy states no [measurements.evidence] " &
+        "clause and no edge attestations were supplied, so there was no " &
+        "quorum to count")
+    return violated("edge attestations were supplied and this policy " &
+      "states no [measurements.evidence] clause to judge them by; " &
+      "evidence that was carried and never evaluated must not be " &
+      "mistaken for evidence that was satisfied")
+  let ev = p.measurements.evidence
+  if not ctx.supplied:
+    return violated("the policy accepts a manifest on the strength of " &
+      $ev.minSignatures & " of " & $ev.knownKeys.len &
+      " rebuilder signatures and no edge attestations were supplied")
+  if not ctx.parsed:
+    return violated("the supplied edge attestations are not a document " &
+      "this build will read: " & ctx.complaint)
+  if not ctx.haveClaim:
+    return violated("edge attestations were supplied and this verifier " &
+      "holds no measurement manifest for them to be about, so there is " &
+      "no claim their signatures could be checked against" &
+      (if ctx.complaint.len > 0: " (" & ctx.complaint & ")" else: ""))
+
+  # The bundle's own subject is compared against the claim, and is used
+  # for nothing else. A bundle whose subject disagreed would already
+  # fail every signature — the statement is derived from the claim, not
+  # from the subject — so this row exists to say WHY rather than to
+  # decide anything.
+  if ctx.bundle.subject.manifestDigest != ctx.claim.manifestDigest:
+    return violated("the attestations are about the manifest " &
+      ctx.bundle.subject.manifestDigest & " and this verifier holds " &
+      ctx.claim.manifestDigest)
+  if ctx.bundle.subject.configFingerprint != ctx.claim.configFingerprint:
+    return violated("the attestations name the configuration " &
+      ctx.bundle.subject.configFingerprint.escape() &
+      " and the manifest this verifier holds was produced by " &
+      ctx.claim.configFingerprint.escape())
+
+  if ctx.rosterComplaint.len > 0:
+    return violated("this verifier's signer roster is not one a quorum " &
+      "can be counted over: " & ctx.rosterComplaint)
+  let have = ctx.heldSigners
+  for admitted in ev.knownKeys:
+    if admitted notin have:
+      return violated("the policy admits the signer " & admitted &
+        " and this verifier holds no public key for it; the quorum would " &
+        "be counted over a smaller set than the policy states, without " &
+        "the policy changing")
+  for held in have:
+    if held notin ev.knownKeys:
+      return violated("this verifier holds a public key for " & held &
+        " and the policy admits no such signer; a key the policy never " &
+        "named must not be able to contribute to its threshold")
+
+  if ctx.quorum.defects.len > 0:
+    return violated("the attestations carry " & $ctx.quorum.defects.len &
+      " entr" & (if ctx.quorum.defects.len == 1: "y" else: "ies") &
+      " that a quorum cannot be counted over, and a threshold reached " &
+      "beside a forgery is a threshold an attacker chose: " &
+      ctx.quorum.defects.join("; "))
+
+  let counted = ctx.quorum.countedSigners.len
+  if counted < ev.minSignatures:
+    return violated("the attestations carry " & $counted &
+      " valid signature(s) from admitted signers (" &
+      (if counted == 0: "none" else: ctx.quorum.countedSigners.join(", ")) &
+      ") and the policy requires " & $ev.minSignatures & " of the " &
+      $ev.knownKeys.len & " it admits")
+  satisfied("the attestations carry " & $counted &
+    " valid signature(s) from distinct admitted signers (" &
+    ctx.quorum.countedSigners.join(", ") & "), and the policy requires " &
+    $ev.minSignatures & " of the " & $ev.knownKeys.len & " it admits")
+
+proc checkTransparencyLog(p: AttestationPolicy;
+                          ctx: EvidenceContext): CheckFinding =
+  ## Inclusion in a log whose root this verifier already held.
+  let required = p.requiresTransparencyLog
+  if not ctx.supplied:
+    if required:
+      return violated("the policy requires transparency-log inclusion " &
+        "and no edge attestations were supplied to prove any")
+    return inapplicable("the policy does not require transparency-log " &
+      "inclusion and no edge attestations were supplied")
+  if not ctx.parsed:
+    if required:
+      return violated("the policy requires transparency-log inclusion " &
+        "and the supplied attestations do not parse: " & ctx.complaint)
+    return inapplicable("the supplied attestations do not parse, so this " &
+      "verifier cannot say whether they carried an inclusion proof")
+  let proofs = inclusionEntriesOf(ctx.bundle)
+  if not ctx.haveClaim:
+    if required or proofs.len > 0:
+      # A proof that ARRIVED and could not be checked is a violation
+      # even under a policy that never asked for one — the same rule the
+      # rest of this check follows, applied to the case where what is
+      # missing is the claim rather than the root.
+      return violated("an inclusion proof was supplied and this verifier " &
+        "holds no measurement manifest, so it does not know which leaf to " &
+        "look for")
+    return inapplicable("this verifier holds no measurement manifest, so " &
+      "it does not know which leaf an inclusion proof would be about")
+
+  if proofs.len == 0:
+    if required:
+      return violated("the policy requires transparency-log inclusion " &
+        "and the attestations carry no " & TransparencyLogVerifierId &
+        " entry")
+    return inapplicable("the policy does not require transparency-log " &
+      "inclusion and the attestations carry no " &
+      TransparencyLogVerifierId & " entry")
+
+  # A proof that ARRIVED is judged whatever the policy says, on the same
+  # grounds as a bundled certificate chain: a proof that was carried and
+  # not looked at is worse than one that never came.
+  if ctx.inclusion.defects.len > 0:
+    return violated("the attestations carry " &
+      $ctx.inclusion.defects.len & " inclusion proof(s) this verifier " &
+      "could not stand behind: " & ctx.inclusion.defects.join("; "))
+  satisfied("this claim is proved to sit in " &
+    $ctx.inclusion.verifiedLogs.len & " log(s) whose root this verifier " &
+    "has witnessed (" & ctx.inclusion.verifiedLogs.join(", ") & ")")
 
 # ---------------------------------------------------------------------
 # The instance's own claims — advisory, and kept away from the decision
@@ -586,29 +824,73 @@ proc verifyUsing(req: VerificationRequest;
   except BindingError as err:
     schemaFinding = violated(err.msg)
 
-  result.record(vcReportSchema, true, schemaFinding)
-  result.record(vcTierAccepted, true, checkTierAccepted(p, inputs))
-  result.record(vcBackendAccepted, true, checkBackendAccepted(p, inputs))
-  result.record(vcNativeEvidence, true, reading.finding)
-  result.record(vcReportDataBinding, true, checkReportDataBinding(inputs))
-  result.record(vcChallengeMatch, p.freshness.requireChallenge,
-    checkChallengeMatch(inputs, req.expectedChallengeHex))
-  result.record(vcChallengeFreshness,
-    p.freshness.maxChallengeAgeSeconds > 0,
-    checkChallengeFreshness(p, req.challengeIssuedAtMs, req.nowMs))
-  result.record(vcManifestPinned, p.pinsManifests,
-    (if manifestComplaint.len > 0:
-       violated("the supplied measurement manifest is not one this build " &
-         "will read: " & manifestComplaint)
-     else: checkManifestPinned(p, manifestDigest, haveManifest)))
-  result.record(vcMeasurementMatch, measurementRequired,
-    (if manifestComplaint.len > 0:
-       violated("the supplied measurement manifest is not one this build " &
-         "will read: " & manifestComplaint)
-     else: checkMeasurementMatch(inputs, manifest, haveManifest)))
-  result.record(vcCertificateChain, p.measurements.requireCertificates,
-    checkCertificateChain(req, p, inputs, evaluateChain))
-  result.record(vcTcbFloor, inputs.tier == atCvm, checkTcbFloor(p, inputs))
+  let ctx = evidenceContextFor(req,
+    (if req.manifestText.isSome: req.manifestText.get else: ""), haveManifest)
+
+  # The dispatch is a `case` inside a loop over the enum, and BOTH
+  # halves of that are load-bearing.
+  #
+  # The loop is what makes the order of the rows the order of the enum
+  # rather than the order somebody typed them in. The `case` is what
+  # makes a check added to `VerifierCheck` and not to this dispatch a
+  # COMPILE ERROR: without it, the new row would simply stay
+  # `coNotReached` and reject every report, which is fail-closed but
+  # arrives as a mystery at run time rather than as a message at build
+  # time.
+  #
+  # This module's header claimed the exhaustive `case` for a long time
+  # before there was one; the records were a straight-line sequence. The
+  # claim is true now.
+  for chk in VerifierCheck:
+    case chk
+    of vcReportSchema:
+      result.record(chk, true, schemaFinding)
+    of vcTierAccepted:
+      result.record(chk, true, checkTierAccepted(p, inputs))
+    of vcBackendAccepted:
+      result.record(chk, true, checkBackendAccepted(p, inputs))
+    of vcNativeEvidence:
+      result.record(chk, true, reading.finding)
+    of vcReportDataBinding:
+      result.record(chk, true, checkReportDataBinding(inputs))
+    of vcChallengeMatch:
+      result.record(chk, p.freshness.requireChallenge,
+        checkChallengeMatch(inputs, req.expectedChallengeHex))
+    of vcChallengeFreshness:
+      result.record(chk, p.freshness.maxChallengeAgeSeconds > 0,
+        checkChallengeFreshness(p, req.challengeIssuedAtMs, req.nowMs))
+    of vcManifestPinned:
+      result.record(chk, p.pinsManifests,
+        (if manifestComplaint.len > 0:
+           violated("the supplied measurement manifest is not one this " &
+             "build will read: " & manifestComplaint)
+         else: checkManifestPinned(p, manifestDigest, haveManifest)))
+    of vcMeasurementMatch:
+      result.record(chk, measurementRequired,
+        (if manifestComplaint.len > 0:
+           violated("the supplied measurement manifest is not one this " &
+             "build will read: " & manifestComplaint)
+         else: checkMeasurementMatch(inputs, manifest, haveManifest)))
+    of vcCertificateChain:
+      result.record(chk, p.measurements.requireCertificates,
+        checkCertificateChain(req, p, inputs, evaluateChain))
+    of vcTcbFloor:
+      result.record(chk, inputs.tier == atCvm, checkTcbFloor(p, inputs))
+    of vcEvidenceQuorum:
+      # Required exactly when the policy states an evidence clause, and
+      # NOT ALSO when a bundle merely arrived. The temptation is to add
+      # that disjunct so an unevaluatable bundle cannot be waived into a
+      # skip — but the `required` flag only decides what an
+      # *inapplicable* finding means, and the two checks below return
+      # inapplicable only on paths where no bundle was supplied. The
+      # disjunct would therefore be a rule with no reachable input, and
+      # the fail-closed behaviour it looks like it provides is already
+      # provided where it belongs: by the findings themselves, which
+      # VIOLATE rather than decline whenever evidence arrived.
+      result.record(chk, p.acceptsEvidence, checkEvidenceQuorum(p, ctx))
+    of vcTransparencyLog:
+      result.record(chk, p.requiresTransparencyLog,
+        checkTransparencyLog(p, ctx))
 
   result.seal(inputs.tier)
 
@@ -660,8 +942,37 @@ proc verifyUsing(req: VerificationRequest;
     result.caveats.add "the backend-native evidence was read by " &
       inputs.readerName.escape() & ", which is not a reader this build " &
       "carries; this verdict rests on the caller's reading of it"
-  if result.decision.isAcceptance and not p.pinsManifests:
+  # "Authenticated by nothing but the fact that it was supplied" stops
+  # being true the moment a quorum passed, so the condition carries that
+  # clause rather than resting on `pinsManifests` alone. The two are
+  # derived from the same rows the decision is, through the predicate in
+  # `verdict`, so the caveat and the decision cannot come apart.
+  if result.decision.isAcceptance and not p.pinsManifests and
+     result.checks[vcEvidenceQuorum].outcome != coPassed:
     result.caveats.add UnpinnedManifestCaveat
+  if result.decision.isAcceptance and
+     result.checks[vcEvidenceQuorum].outcome == coPassed:
+    # What a quorum establishes, and the two things it does not. Both
+    # are limits of the design rather than of this implementation, and
+    # both are stated on every acceptance that rests on one.
+    result.caveats.add DistinctSignerCaveat
+    if result.checks[vcTransparencyLog].outcome == coPassed:
+      result.caveats.add UnverifiedLogAgeCaveat
+  for caveat in ctx.quorum.caveats:
+    # What the quorum evaluation itself could not establish. Carried on
+    # every verdict it reached, accepted or not: a reader who is not
+    # told what a revocation here means cannot tell a withdrawn key
+    # from one that never signed.
+    if caveat notin result.caveats: result.caveats.add caveat
+  if ctx.parsed:
+    let unevaluated = unevaluatedVerifiers(ctx.bundle)
+    if unevaluated.len > 0:
+      # Named on every verdict, accepted or not. An attestation nobody
+      # looked at makes a bundle read better attested than the verdict
+      # it produced, and silence about it is the honest-absence shape.
+      result.caveats.add "the edge attestations carry proofs for " &
+        $unevaluated.len & " verifier(s) this build does not implement (" &
+        unevaluated.join(", ") & "); nothing in this verdict rests on them"
   if result.decision.isAcceptance:
     for chk in result.skippedChecks:
       result.caveats.add "this verdict was reached without performing the " &
@@ -684,7 +995,7 @@ when defined(reproAttestSoftwareRootTestTrust):
   proc verifySoftwareRootTestReport*(req: VerificationRequest;
                                      report: AttestationReport;
                                      reading: EvidenceReading): Verdict =
-    ## The same eleven checks, with the chain judged by the evaluator
+    ## The same thirteen checks, with the chain judged by the evaluator
     ## that additionally recognises the software-root marker.
     ##
     ## Compiled only into a build that asked for it by name; in every

@@ -185,7 +185,7 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
         if action{"id"}.getStr() == ExecuteActionId:
           executeAction = action
           break
-      check executeAction != nil
+      check not executeAction.isNil
       if executeAction != nil:
         let status = executeAction{"status"}.getStr()
         let launched = executeAction{"launched"}.getBool()

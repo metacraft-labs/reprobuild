@@ -26,8 +26,9 @@ import repro_home_apply/plan
 import repro_home_apply/catalog_lookup
 import repro_home_apply/env_binding
 import repro_home_apply/realize
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/m69-apply-e2e"
+let TmpDir = "build/test-tmp/m69-apply-e2e" / testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

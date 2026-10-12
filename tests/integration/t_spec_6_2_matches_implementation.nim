@@ -97,7 +97,8 @@ import repro_profile
 const RepoRoot = currentSourcePath.parentDir.parentDir.parentDir
 
 const
-  SpecRelPath = ".." / "reprobuild-specs" / "ReproOS-Remote-Attestation.md"
+  SpecRelPath = ".." / "reprobuild-specs" / "spec" /
+    "ReproOS-Remote-Attestation.md"
   SectionHeading = "### 6.2 Activity module"
   FenceLanguage = "nim"
 

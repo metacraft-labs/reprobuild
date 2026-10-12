@@ -167,7 +167,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     # The justification is the one already stated for the identical command:
     # this helper only compiles: it never runs what it produced, so the
     # compiler's randomness has no path to an output.
-    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
+    # Declared, so the caller's shell does not decide the edge's key; see
+    # `providerCompileLaunchEnv`.
+    env = providerCompileLaunchEnv(compilerCwd / "home"),
+    # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
+    # declared above and nothing else, so no caller variable can be an input.
+    isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
@@ -452,6 +459,18 @@ proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
     if home.len > 0:
       result.add(absolutePath(home) / ".cache" / "nix")
 
+const NixDevEnvEntropyJustification* =
+  "`nix` draws randomness in two places while evaluating a flake dev shell, " &
+  "measured with strace on `nix print-dev-env` (nix 2.32, 2026-09-29): " &
+  "five small getrandom calls at process start, before any evaluation " &
+  "(runtime and library seeding), and one 4-byte draw that names " &
+  "/tmp/nix-dev-env-<pid>-<random>, a directory the same process creates " &
+  "and deletes. Neither reaches the output: two runs produced " &
+  "byte-identical `print-dev-env` scripts, and with nix-shell's scratch " &
+  "variables left out of the capture the dev-env artifact is byte-identical " &
+  "across entries. This blesses ENTROPY from the `nix` image on the dev-env " &
+  "introspection edge only."
+
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
                                providerArtifactPath, providerArtifactId,
@@ -503,6 +522,12 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     commandStatsId = "repro dev-env introspection edge",
     cacheable = true,
     weakFingerprint = weak,
+    # Dev-Env-Warm-Entry.md §4. Scoped to this edge AND to the `nix` image:
+    # entropy from anything else in the tree (recipe code in the provider
+    # included) still withholds the entry.
+    entropyBlessedImages = [EntropyBlessedTool(image: "nix",
+      spec: "Dev-Env-Warm-Entry.md §4",
+      justification: NixDevEnvEntropyJustification)],
     dependencyPolicy = automaticMonitorGatheringPolicy(
       devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot,
         protocolRoot)))
@@ -596,6 +621,15 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   let cacheKeyPath = config.outDir / "dev-env.rbde.cache-key"
 
   createDir(extendedPath(config.outDir))
+  # This process is the activation itself (`repro exec`, the shell hook), not
+  # a monitored action, so it may keep a stamp-validated memo of the library
+  # source fingerprint: re-hashing reprobuild's whole libs tree was most of
+  # the cost of a warm entry. Project-scoped, beside the edge's other scratch.
+  setReproLibFingerprintMemoDir(config.outDir / "lib-source-fingerprint")
+  # One walk and one stat pass of reprobuild's libs tree per computation,
+  # shared by the fingerprint and the provider freshness check.
+  beginReproLibSourcesScope()
+  defer: endReproLibSourcesScope()
   let workDir =
     if config.workDir.len > 0: config.workDir else: getCurrentDir()
   var active = config

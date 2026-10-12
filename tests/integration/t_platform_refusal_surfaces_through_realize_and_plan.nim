@@ -98,6 +98,7 @@ import repro_home_apply/plan
 import repro_home_apply/realize
 import repro_home_apply/errors
 import repro_home_apply/package_catalog
+from repro_test_support import testCaseScratchSlug
 
 # ---------------------------------------------------------------------------
 # Fixture packages
@@ -145,7 +146,8 @@ const
   AuthorReason = "Test fixture for PMC-1: declared for "
   PlatformAdapterLabel = "<platform>"
   PreviewPrefix = "platform-unavailable: "
-  StoreRoot = "build/test-tmp/t-pmc1-realize-and-plan-surfaces"
+let StoreRoot = "build/test-tmp/t-pmc1-realize-and-plan-surfaces" /
+  testCaseScratchSlug()
 
 proc sandboxScoopProbe(): string =
   ## Point every Scoop lookup at a root that does not exist, so no branch of

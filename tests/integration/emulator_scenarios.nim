@@ -336,11 +336,18 @@ proc expectedDetection*(m: EmulatorMutation): FaultDetection =
     FaultDetection(caught: true, check: vcReportDataBinding,
       failing: {vcReportDataBinding})
   of emTranscript:
+    # A report that does not parse fails EVERY check, because
+    # `rejectUnparseable` records each one as required and inapplicable
+    # rather than leaving any unreached. The set is spelled out rather
+    # than written as `{low(VerifierCheck) .. high(VerifierCheck)}` so
+    # that a check added to the enum reddens here and has to be
+    # considered, which is what happened when the evidence rows arrived.
     FaultDetection(caught: true, check: vcReportSchema,
       failing: {vcReportSchema, vcTierAccepted, vcBackendAccepted,
                 vcNativeEvidence, vcReportDataBinding, vcChallengeMatch,
                 vcChallengeFreshness, vcManifestPinned, vcMeasurementMatch,
-                vcCertificateChain, vcTcbFloor})
+                vcCertificateChain, vcTcbFloor, vcEvidenceQuorum,
+                vcTransparencyLog})
   of emTime:
     FaultDetection(caught: true, check: vcChallengeFreshness,
       failing: {vcChallengeFreshness})
