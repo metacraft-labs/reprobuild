@@ -4,7 +4,7 @@
     "nimTestBinaries": 1919,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 607,
-    "staticallyDetectedRuntimeCompilerFlowTests": 109,
+    "staticallyDetectedRuntimeCompilerFlowTests": 108,
     "testEntries": 1936
   },
   "pureUnitConsolidationCandidates": [
@@ -1566,144 +1566,6 @@
         }
       ],
       "source": "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "gccPath",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "c",
-            "clangPath",
-            "codeTracerRoot",
-            "daemon",
-            "daemonBin",
-            "destPath",
-            "entries",
-            "env",
-            "gccPath",
-            "packages",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "report",
-            "reproBin",
-            "socketPath",
-            "sourcePath",
-            "status",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 1203,
-          "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "let gccPath = binDir / \"gcc\""
-        },
-        {
-          "assignedCommandVariable": "clangPath",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "c",
-            "clangPath",
-            "codeTracerRoot",
-            "daemon",
-            "daemonBin",
-            "destPath",
-            "entries",
-            "env",
-            "gccPath",
-            "packages",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "report",
-            "reproBin",
-            "socketPath",
-            "sourcePath",
-            "status",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 1204,
-          "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let clangPath = binDir / \"clang\""
-        },
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "c",
-            "clangPath",
-            "codeTracerRoot",
-            "daemon",
-            "daemonBin",
-            "destPath",
-            "entries",
-            "env",
-            "gccPath",
-            "packages",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "report",
-            "reproBin",
-            "socketPath",
-            "sourcePath",
-            "status",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 1214,
-          "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
-          "patterns": [
-            "cc"
-          ],
-          "snippet": "discard requireSuccess(shellCommand([\"cc\", sourcePath, \"-o\", gccPath]))"
-        },
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "c",
-            "clangPath",
-            "codeTracerRoot",
-            "daemon",
-            "daemonBin",
-            "destPath",
-            "entries",
-            "env",
-            "gccPath",
-            "packages",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "report",
-            "reproBin",
-            "socketPath",
-            "sourcePath",
-            "status",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 1220,
-          "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
-          "patterns": [
-            "cc"
-          ],
-          "snippet": "discard requireSuccess(shellCommand([\"cc\", stylusSourcePath, \"-o\", stylusPath]))"
-        }
-      ],
-      "source": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim"
     },
     {
       "class": "integration",
@@ -20805,7 +20667,7 @@
       "source": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 13,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
