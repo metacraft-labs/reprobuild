@@ -10059,6 +10059,26 @@ proc monitorInterest*(action: BuildAction): set[EventCategory] =
   ## switch. See `MonitorCaptureBreadth` in `repro_core/dependency_gathering`.
   declaredMonitorInterest(action.dependencyPolicy.captureBreadth)
 
+proc readsAreKeyed*(action: BuildAction): bool =
+  ## Whether everything ``action`` can read outside its own command line
+  ## reaches its cache key through the files it reads, rather than only
+  ## through its weak fingerprint.
+  ##
+  ## True for a process run under a monitor policy — its observed reads AND
+  ## probes (an absent module on a ``--path`` is a probe) are recorded and
+  ## revalidated on every lookup; ``monitorInterest`` cannot drop either
+  ## category (only ``ecAmbientReads`` is narrowable, see above) — and for a
+  ## built-in action, which reads nothing but its declared inputs. False for a
+  ## process whose dependencies come from a recognised format or a converter
+  ## alone: those name what the tool chose to report, not what it read.
+  ##
+  ## Cross-Repo-Source-Consumption §4.3 reads this to decide whether a
+  ## producer's SOURCE identity has to be folded into the action's weak
+  ## fingerprint (no: its reads already key it) or stands in for reads nothing
+  ## observed (yes).
+  action.kind != bakProcess or
+    action.dependencyPolicy.kind in MonitorPolicyKinds
+
 proc monitorEvidenceScope(config: BuildEngineConfig): EvidenceScope =
   ## The evidence scope `config` asks io-mon for — ONE definition, read by BOTH
   ## hosting forms, for exactly the reason `monitorInterest` above is one proc:

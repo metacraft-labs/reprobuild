@@ -627,11 +627,12 @@ package reprobuild:
     # shipped interface, takes the ``library``'s ``exportedPath`` (convention
     # default ``src``) as an importable root, and threads it onto THIS repo's
     # ``nim c --path:`` through ``ProducerAuxPaths.nimPathDirs``. The
-    # producer's revision + integrity then fold into every consuming action's
-    # fingerprint (SC-4), which is the whole point: before this, these three
-    # trees were inputs of every compile in this repository and appeared in no
-    # dependency graph, so no lock recorded them and nothing invalidated on
-    # their change. Same shape as ``io-mon/repro.nim``'s
+    # producer is then part of the dependency graph and of its lock, and a
+    # change to it rebuilds the compiles that READ the changed files (SC-4,
+    # scoped to observed reads since 2026-10-12), which is the whole point:
+    # before this, these three trees were inputs of every compile in this
+    # repository and appeared in no dependency graph, so no lock recorded them
+    # and nothing invalidated on their change. Same shape as ``io-mon/repro.nim``'s
     # ``"nim-stackable-hooks"`` / ``"nim-shm-queue"``,
     # ``nim-agents/repro.nim``'s ``"nim-acp"`` / ``"nim-agent-harbor"``, and
     # ``isonim-tui/repro.nim``'s four.
