@@ -11,6 +11,9 @@
 ##      repository CLEAN (the run's files go to a scratch directory, never the
 ##      repo).
 ##   3. Re-running is idempotent: no second note record is appended.
+##   4. TC-8d: a MODIFIED, uncommitted working tree is certified by its
+##      content (no clean, committed state is needed) and noted on the tree
+##      that content names.
 ##
 ## Falsifiability: a certify that ignored the run's result would issue in (1);
 ## a certify that wrote its fixture or logs into the repo would fail the
@@ -312,3 +315,27 @@ suite "P6.e — repro certify --check-set":
       let again = certifyCheckSet(fx, "true")
       check again.code == 0
       check noteRecordCount(gitBin, fx, head) == 1
+
+      # ---- 4. TC-8d: an uncommitted working tree is certified ---------------
+      # No clean, committed state is needed: the modified tree is certified by
+      # its content and noted on the tree that content names, before any
+      # commit records it.
+      writeFile(fx.libAPath / "feature.txt", "edited, not committed\n")
+      let modified = workingTreeContentIdOf(gitBin, fx.libAPath,
+        fx.scratch / "expected-index")
+      check modified != content
+      let uncommitted = certifyCheckSet(fx, "true")
+      checkpoint("uncommitted: " & uncommitted.output)
+      check uncommitted.code == 0
+      let modifiedFiles = storedCertificateFiles(fx.certStore, modified)
+      check modifiedFiles.len == 1
+      if modifiedFiles.len == 1:
+        let cert = readCertificateFile(modifiedFiles[0])
+        check cert.vcs.content == modified
+        check cert.vcs.base == head
+        check cert.targets == @["pre-commit"]
+      let modifiedTree = modified["git-tree-sha1:".len .. ^1]
+      let noted = runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " notes --ref " &
+        q(certificateNotesRef) & " show " & modifiedTree)
+      check noted.code == 0
+      check noted.output.count("# --- test-certificate ---") == 1

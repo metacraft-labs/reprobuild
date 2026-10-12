@@ -239,6 +239,19 @@ type
     cctAdvisory = "advisory"
     cctSkip = "skip"
 
+  CertificateUntrackedInputs* = enum
+    ## The resolved `[certificates] untracked_inputs`: what issuance does
+    ## about untracked, non-ignored files in the tested repository. They are
+    ## not part of the content a certificate names, so a test that read one
+    ## ran against something the certificate does not identify
+    ## (test-certificates Standard §3.2).
+    cuiReadSet = "read-set"
+      ## The DEFAULT. Withhold only when a read set captured from the run
+      ## shows that it read an untracked file. Without a read set, issue and
+      ## report `untracked = true`.
+    cuiStrict = "strict"
+      ## Withhold whenever any untracked, non-ignored file exists.
+
   CertificatePolicy* = object
     ## The resolved test-certificate gating policy for a project. The DEFAULT
     ## (every field zero / `cgmOff`) is what a project with no `[certificates]`
@@ -255,6 +268,8 @@ type
       ## default). Independent of `gateMode`: a project can require coverage on
       ## push yet still re-run in CI (advisory), or run advisory pushes yet
       ## fast-track CI (skip). Defaults to `cctAdvisory` (no trust by omission).
+    untrackedInputs*: CertificateUntrackedInputs
+      ## What issuance does about untracked files. Defaults to `cuiReadSet`.
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
@@ -424,6 +439,20 @@ proc resolveCertificatePolicy*(body: CertificatesBody;
         schemaProjectManifestV1, schemaProjectManifestV1,
         "invalid `certificates.ci_trust` value '" & raw &
           "' (expected: advisory | skip)")
+  # The untracked-inputs mode. An unknown value is an error, never the
+  # default: a misspelt "strict" that silently became "read-set" would issue
+  # certificates the project asked to withhold.
+  result.untrackedInputs = cuiReadSet
+  if body.untracked_inputs.isSome:
+    let raw = body.untracked_inputs.get().strip()
+    case raw
+    of "read-set": result.untrackedInputs = cuiReadSet
+    of "strict": result.untrackedInputs = cuiStrict
+    else:
+      raiseManifestError(projectFile, "certificates.untracked_inputs",
+        schemaProjectManifestV1, schemaProjectManifestV1,
+        "invalid `certificates.untracked_inputs` value '" & raw &
+          "' (expected: read-set | strict)")
 
 # ---- RA-18 subset tags -----------------------------------------------------
 #
