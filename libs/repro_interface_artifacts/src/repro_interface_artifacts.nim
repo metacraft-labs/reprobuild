@@ -849,15 +849,138 @@ type
     evidence: FileStamp
     artifact: ProjectInterfaceArtifact
 
-# Shared-Development-Services L4: ``toProjectInterface`` maps the DSL's
-# ``ServiceIdentityKind`` / ``ServiceScope`` onto the two interface enums
-# above BY ORDINAL, so the four pairings below are the coupling. The
-# shape (and the reason) is taken from ``repro_resources/run_edge.nim``'s
-# ``RunEdgeLeaseKind``/``LeaseKind`` assert: reordering one enum without
-# the other would not fail to compile, it would silently re-map a
-# declared identity — a ``stable`` service lifted as ``derived`` is
-# exactly the state §4.2 says forks a developer's database.
+# ---------------------------------------------------------------------------
+# THE WIRE ORDINALS OF EVERY ENUM THIS LIBRARY WRITES, ASSERTED ABSOLUTELY.
+#
+# Nine enums have `ord(x)` written into bytes this library persists. Each
+# one's number is therefore part of a persisted comparison, and a mid-enum
+# insertion silently renumbers every later member: an artifact written
+# yesterday decodes today as a DIFFERENT value, with no error at either
+# end, for a reason unrelated to any interface having changed.
+#
+# WHY ABSOLUTE AND NOT RELATIVE, measured rather than argued. The block
+# this replaces asserted CROSS-ENUM PARITY -- `ord(issWorkspace) ==
+# ord(sscWorkspace)` and three more like it. Parity is satisfiable by the
+# very edit it exists to catch: inserting a member at the SAME index in
+# both `InterfaceServiceScope` here and `ServiceScope` in
+# `repro_project_dsl` compiles clean and runs clean, while
+# `ord(issWorkspace)` moves 1 -> 2, envelope byte 84 goes 0x01 -> 0x02,
+# all 32 fingerprint bytes change, and the decode guard -- an upper bound,
+# which pins no position -- still accepts the frame. A guard a change can
+# satisfy while making the change it guards against is worse than no
+# guard, because it reads as coverage. `ServiceScope` living in another
+# library is what makes that edit natural rather than contrived, so the
+# pins for the DSL's two enums are HERE, in the consumer that turns their
+# ordinals into bytes, where a two-library edit cannot step around them.
+#
+# WHY A `static:` AND NOT A TEST. A test has to be remembered, enrolled
+# and run; this is a compile error in the file that does the writing, and
+# the message NAMES THE MEMBER THAT MOVED. The shape is taken from
+# `repro_resources/service_attach.nim`'s `ServiceMemberKind` block, which
+# is the only absolute pin of this class that existed before -- and which
+# covers a per-service digest on a DIFFERENT wire, so it protected none of
+# the nine below.
+#
+# AN UPPER BOUND IS NOT A POSITION. Eight of the nine decoders guard with
+# `if kind > byte(ord(<last member>)): fail`. That refuses an out-of-range
+# byte and says nothing about which value a given byte means, which is the
+# property a persisted ordinal needs.
+#
+# THE CARDINALITY ASSERTIONS ARE WHAT MAKE THIS COMPLETE. Without one,
+# APPENDING a member -- the safe operation -- would be invisible here, and
+# nobody would be prompted to confirm it went at the end. Adding a value
+# to any of these enums is meant to require editing this block.
+# ---------------------------------------------------------------------------
 static:
+  # 1. `HashAlgorithm` -- declared in `repro_hash`, ANOTHER LIBRARY.
+  #    Written at the head of every `ContentDigest`, so it is on the RBSZ
+  #    envelope for both envelope kinds AND in both local cache records.
+  doAssert ord(haBlake3_256) == 0, "HashAlgorithm: haBlake3_256 moved"
+  doAssert ord(haGxHash64) == 1, "HashAlgorithm: haGxHash64 moved"
+  doAssert ord(haXxh3_64) == 2, "HashAlgorithm: haXxh3_64 moved"
+  doAssert ord(high(HashAlgorithm)) == 2,
+    "HashAlgorithm grew or shrank: ContentDigest writes ord(algorithm) " &
+    "into the interface envelope -- confirm the new value was APPENDED, " &
+    "then update this assertion"
+
+  # 2. `HashDomain` -- also `repro_hash`, also every `ContentDigest`.
+  doAssert ord(hdCasContent) == 0, "HashDomain: hdCasContent moved"
+  doAssert ord(hdActionFingerprint) == 1,
+    "HashDomain: hdActionFingerprint moved"
+  doAssert ord(hdLocalInvalidation) == 2,
+    "HashDomain: hdLocalInvalidation moved"
+  doAssert ord(hdMetadataEnvelope) == 3,
+    "HashDomain: hdMetadataEnvelope moved"
+  doAssert ord(high(HashDomain)) == 3,
+    "HashDomain grew or shrank: ContentDigest writes ord(domain) into " &
+    "the interface envelope -- confirm the new value was APPENDED, then " &
+    "update this assertion"
+
+  # 3. `InterfaceParamKind` -- this file; one byte per lifted parameter,
+  #    on the envelope and in the fingerprint payload.
+  doAssert ord(ipkPositional) == 0, "InterfaceParamKind: ipkPositional moved"
+  doAssert ord(ipkFlag) == 1, "InterfaceParamKind: ipkFlag moved"
+  doAssert ord(high(InterfaceParamKind)) == 1,
+    "InterfaceParamKind grew or shrank: confirm the new value was " &
+    "APPENDED (the param encoder writes ord(kind)), then update this " &
+    "assertion"
+
+  # 4. `LibraryKind` -- declared in `repro_project_dsl`, ANOTHER LIBRARY,
+  #    and used by `InterfaceLibrary.kind` directly rather than mirrored,
+  #    so there is not even a parity assert to lean on.
+  doAssert ord(lkStatic) == 0, "LibraryKind: lkStatic moved"
+  doAssert ord(lkShared) == 1, "LibraryKind: lkShared moved"
+  doAssert ord(lkBoth) == 2, "LibraryKind: lkBoth moved"
+  doAssert ord(lkHeaderOnly) == 3, "LibraryKind: lkHeaderOnly moved"
+  doAssert ord(high(LibraryKind)) == 3,
+    "LibraryKind grew or shrank: the interface envelope writes " &
+    "ord(lib.kind) -- confirm the new value was APPENDED, then update " &
+    "this assertion"
+
+  # 5. `InterfaceResourceDeterminism` -- this file. Its doc comment says
+  #    "Ordinals MUST stay aligned with ResourceDeterminism (rdStrong=0
+  #    ... rdVolatile=3)". Until this block that was enforced only by a
+  #    runtime `check` in `t_rp4_resource_type_macro.nim`, which is a test
+  #    rather than a guarantee.
+  doAssert ord(irdStrong) == 0,
+    "InterfaceResourceDeterminism: irdStrong moved"
+  doAssert ord(irdWeak) == 1, "InterfaceResourceDeterminism: irdWeak moved"
+  doAssert ord(irdHostBound) == 2,
+    "InterfaceResourceDeterminism: irdHostBound moved"
+  doAssert ord(irdVolatile) == 3,
+    "InterfaceResourceDeterminism: irdVolatile moved"
+  doAssert ord(high(InterfaceResourceDeterminism)) == 3,
+    "InterfaceResourceDeterminism grew or shrank: the resource encoder " &
+    "writes ord(determinism) -- confirm the new value was APPENDED, then " &
+    "update this assertion"
+
+  # 6. `InterfaceServiceIdentityMode` (this file) and the DSL's
+  #    `ServiceIdentityKind` (`repro_project_dsl`), which
+  #    `toProjectInterface` casts across BY ORDINAL. Both sides pinned
+  #    absolutely: a `stable` service lifted as `derived` is the state
+  #    Shared-Development-Services.md 4.2 says forks a developer's
+  #    database, and parity alone did not rule it out.
+  doAssert ord(isimDerived) == 0,
+    "InterfaceServiceIdentityMode: isimDerived moved"
+  doAssert ord(isimStable) == 1,
+    "InterfaceServiceIdentityMode: isimStable moved"
+  doAssert ord(high(InterfaceServiceIdentityMode)) == 1,
+    "InterfaceServiceIdentityMode grew or shrank: confirm the new value " &
+    "was APPENDED, then update this assertion"
+  doAssert ord(sikDerived) == 0,
+    "ServiceIdentityKind: sikDerived moved -- repro_project_dsl changed " &
+    "under the ordinal cast in toProjectInterface"
+  doAssert ord(sikStable) == 1,
+    "ServiceIdentityKind: sikStable moved -- repro_project_dsl changed " &
+    "under the ordinal cast in toProjectInterface"
+  doAssert ord(high(ServiceIdentityKind)) == 1,
+    "ServiceIdentityKind grew or shrank in repro_project_dsl: confirm " &
+    "the new value was APPENDED and add its mirror to " &
+    "InterfaceServiceIdentityMode, then update this assertion"
+  # The parity assertions are KEPT as well, and are now the weaker half.
+  # They catch a one-sided RENAME-and-reorder that both absolute sets
+  # would also catch, and they state the coupling in one line for a
+  # reader. They are not load-bearing on their own.
   doAssert ord(isimDerived) == ord(sikDerived),
     "InterfaceServiceIdentityMode/ServiceIdentityKind drift: derived"
   doAssert ord(isimStable) == ord(sikStable),
@@ -865,6 +988,34 @@ static:
   doAssert ord(high(InterfaceServiceIdentityMode)) ==
       ord(high(ServiceIdentityKind)),
     "InterfaceServiceIdentityMode/ServiceIdentityKind cardinality drift"
+
+  # 7. `InterfaceServiceScope` (this file) and the DSL's `ServiceScope`
+  #    (`repro_project_dsl`). This is the pair the same-index mutation
+  #    defeated.
+  doAssert ord(issProject) == 0, "InterfaceServiceScope: issProject moved"
+  doAssert ord(issWorkspace) == 1,
+    "InterfaceServiceScope: issWorkspace moved"
+  doAssert ord(issUser) == 2, "InterfaceServiceScope: issUser moved"
+  doAssert ord(issSystem) == 3, "InterfaceServiceScope: issSystem moved"
+  doAssert ord(high(InterfaceServiceScope)) == 3,
+    "InterfaceServiceScope grew or shrank: confirm the new value was " &
+    "APPENDED, then update this assertion"
+  doAssert ord(sscProject) == 0,
+    "ServiceScope: sscProject moved -- repro_project_dsl changed under " &
+    "the ordinal cast in toProjectInterface"
+  doAssert ord(sscWorkspace) == 1,
+    "ServiceScope: sscWorkspace moved -- repro_project_dsl changed " &
+    "under the ordinal cast in toProjectInterface"
+  doAssert ord(sscUser) == 2,
+    "ServiceScope: sscUser moved -- repro_project_dsl changed under the " &
+    "ordinal cast in toProjectInterface"
+  doAssert ord(sscSystem) == 3,
+    "ServiceScope: sscSystem moved -- repro_project_dsl changed under " &
+    "the ordinal cast in toProjectInterface"
+  doAssert ord(high(ServiceScope)) == 3,
+    "ServiceScope grew or shrank in repro_project_dsl: confirm the new " &
+    "value was APPENDED and add its mirror to InterfaceServiceScope, " &
+    "then update this assertion"
   doAssert ord(issProject) == ord(sscProject),
     "InterfaceServiceScope/ServiceScope drift: project"
   doAssert ord(issWorkspace) == ord(sscWorkspace),
@@ -875,6 +1026,49 @@ static:
     "InterfaceServiceScope/ServiceScope drift: system"
   doAssert ord(high(InterfaceServiceScope)) == ord(high(ServiceScope)),
     "InterfaceServiceScope/ServiceScope cardinality drift"
+
+  # 8. `InterfaceEnvelopeKind` -- this file, and the WEAKEST of the nine
+  #    before this block: its ordinal becomes the envelope TYPE ID
+  #    (`ord(kind) + 101`), and both decoders compare against
+  #    `ord(<member>) + 101` -- the same expression on both sides, so the
+  #    comparison is self-referential and refuses nothing. Swapping the
+  #    two members makes every artifact on disk decode as the other kind,
+  #    silently. The type ids are pinned too, because the `+ 101` offset
+  #    is itself part of the wire.
+  doAssert ord(iekProjectInterface) == 0,
+    "InterfaceEnvelopeKind: iekProjectInterface moved -- its ordinal is " &
+    "envelope type id 101 and both decoders derive their expected id " &
+    "from this same ord(), so nothing else would have failed"
+  doAssert ord(iekProviderCompile) == 1,
+    "InterfaceEnvelopeKind: iekProviderCompile moved -- its ordinal is " &
+    "envelope type id 102 and both decoders derive their expected id " &
+    "from this same ord(), so nothing else would have failed"
+  doAssert ord(high(InterfaceEnvelopeKind)) == 1,
+    "InterfaceEnvelopeKind grew or shrank: a third envelope kind needs " &
+    "a type id of its own and a decoder -- confirm, then update this " &
+    "assertion"
+  doAssert uint16(ord(iekProjectInterface) + 101) == 101'u16,
+    "project-interface envelope type id moved off 101"
+  doAssert uint16(ord(iekProviderCompile) + 101) == 102'u16,
+    "provider-compile envelope type id moved off 102"
+
+  # 9. `FileStampKind` -- this file. ON A DIFFERENT WIRE, and that is
+  #    stated rather than glossed: `writeFileStamp` is called only from
+  #    `encodeInterfaceExtractionCacheRecord` and
+  #    `encodeProviderFreshnessCacheRecord`, which carry their own magic
+  #    and no RBSZ header. A renumbering there costs a cache miss, not a
+  #    misread artifact -- a smaller blast radius than the eight above,
+  #    and pinned on the same terms because the cost of the pin is one
+  #    line and the cost of finding it the other way is a silent
+  #    tree-wide recompile.
+  doAssert ord(fskMissing) == 0, "FileStampKind: fskMissing moved"
+  doAssert ord(fskRegular) == 1, "FileStampKind: fskRegular moved"
+  doAssert ord(fskDirectory) == 2, "FileStampKind: fskDirectory moved"
+  doAssert ord(fskOther) == 3, "FileStampKind: fskOther moved"
+  doAssert ord(high(FileStampKind)) == 3,
+    "FileStampKind grew or shrank: the two local cache records write " &
+    "ord(stamp.kind) -- confirm the new value was APPENDED, then update " &
+    "this assertion"
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]

@@ -45,6 +45,8 @@
 
 import std/[strutils, unittest]
 
+import repro_project_dsl
+
 import ./service_block_compile_probe
 
 const
@@ -199,7 +201,25 @@ const
       enableLine: "    enable stack(sso = dss11owner.sso.idp.shared(" &
         "relyingParties = replace(\"x\")))",
       refused: true,
-      phrase: "may not `replace` what the owner declared"),
+      # THE HELPER'S OWN OUTPUT, not a re-typed fragment of it. This was
+      # the FOURTH copy of §5.1's refusal wording: the round that
+      # factored the other three into `sharedServiceReplaceRefusal()`
+      # left it, and a one-word edit to the helper reddened this binary
+      # while the two in-process tests stayed green -- which is the
+      # definition of a copy free to drift.
+      #
+      # It could not simply `check sharedServiceReplaceRefusal() in
+      # err.msg` the way those two do, because what it matches is a
+      # substring of a COMPILER DIAGNOSTIC captured from a subprocess
+      # rather than an exception message in this process. The fix is to
+      # derive the PHRASE instead: the table is a `const`, the helper is
+      # a `proc` over a `&` chain of literals, so it reads in the VM.
+      #
+      # The whole text, not a slice of it: stage 1 interpolates the
+      # helper verbatim between its own subject and its own stage note,
+      # so the full string really is present, and matching all of it is
+      # what makes the coupling total.
+      phrase: sharedServiceReplaceRefusal()),
     ResolverProbe(tag: "replace-force-is-refused-too",
       enableLine: "    enable stack(sso = dss11owner.sso.idp.shared(" &
         "relyingParties = replaceForce(\"x\")))",

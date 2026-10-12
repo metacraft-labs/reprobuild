@@ -173,6 +173,10 @@ suite "L4 — identity and scope survive the gnkService payload codec":
     let tailLen = 6
     var v1 = v2[0 ..< v2.len - tailLen]
     # version u16 at offset 4, little-endian; body length u32 at 6.
+    # version-literal-ok: 1 is a FROZEN HISTORICAL version, not an offset
+    # from the current one. The property is "a v1 body still decodes, with
+    # the two L4 fields defaulted", and it must keep saying v1 whatever
+    # the current version becomes.
     v1[4] = 1'u8
     v1[5] = 0'u8
     let bodyLen = uint32(v1.len - 10)
@@ -190,14 +194,31 @@ suite "L4 — identity and scope survive the gnkService payload codec":
   test "a FUTURE version is still refused rather than misread":
     # The version check widened from `!= current` to a range so v1 could
     # be read. The property the envelope exists for has to survive that.
+    #
+    # DERIVED FROM THE CODEC, not poked as a literal. This probe used to
+    # write `3` into the version word -- the first unknown version when
+    # the current one was 2. A bump to 3 moves that literal INSIDE the
+    # accepted range, at which point the case decodes a payload it was
+    # written to see refused and asserts nothing. `v0` stays a literal
+    # because zero is refused by a clause of its own that no bump moves
+    # (`version == 0'u16 or ...`): it is the floor, not an offset from
+    # the current version.
     var v2 = encodeServicePayload(DslServiceDef(
       packageName: "p", serviceName: "s"))
+    let future = firstUnknownServicePayloadVersion()
+    check future > servicePayloadVersion()
     var v3 = v2
-    v3[4] = 3'u8
+    v3[4] = byte(future and 0xff'u16)
+    v3[5] = byte((future shr 8) and 0xff'u16)
     expect BuildActionPayloadError:
       discard decodeServicePayload(v3)
     var v0 = v2
+    # version-literal-ok: zero is the STRUCTURAL FLOOR, refused by a
+    # clause of its own (`version == 0'u16 or version > current`) that no
+    # bump moves. It is not relative to the current version and deriving
+    # it would say less than the literal does.
     v0[4] = 0'u8
+    v0[5] = 0'u8
     expect BuildActionPayloadError:
       discard decodeServicePayload(v0)
 

@@ -287,6 +287,47 @@ proc holderIdFor(label: string): string =
   serviceLeaseHolderId(root)
 
 suite "L7 §4.5 — `repro up` converges on ONE instance in any order":
+  teardown:
+    # AFTER EVERY CASE, INCLUDING ONE THAT ABORTED -- and the measured
+    # scope of that is NARROWER than the obvious reading, which is said
+    # here rather than left implicit because an overstated comment in
+    # this same file is one of the things this edit is fixing.
+    #
+    # `unittest`'s `teardown` runs on the way out of each `test` body
+    # whether the body completed or raised. The explicit call at the END
+    # of each body -- which is how this file was written, 17 times --
+    # does not run when the body aborts before reaching it.
+    #
+    # BUT A BARE `check` DOES NOT ABORT A BODY. `abortOnError` is false
+    # by default, so a failed `check` is recorded and execution CONTINUES
+    # to the end-of-body reap. Measured on a two-case probe: a body whose
+    # first statement is a failing `check` still executes the statement
+    # after it, and the teardown still runs. Aborting takes an exception
+    # or `require`.
+    #
+    # AND `spawned` IS A MODULE-LEVEL GLOBAL, so the end-of-body reap of
+    # the next case that performs one absorbs whatever an aborted earlier
+    # case left in it; the module-scope sweep on the last line catches
+    # the remainder before the process exits.
+    #
+    # SO WHAT THE `teardown` BUYS, EXACTLY: when the aborted case is the
+    # LAST one that would have reaped, its `sleep` loop survives into the
+    # rest of the run. That is the fixture it was measured in -- a
+    # failure injected into the last reaping case with the module-scope
+    # sweep removed -- where teardowns removed left 1 leaked process and
+    # teardowns present left 0. Narrower than "a failing case leaks", and
+    # it is what was measured.
+    #
+    # The sibling `t_dss11_converge_response_carries_the_instances_points`
+    # was fixed this way first; this is the same fix, applied to every
+    # suite in this file rather than only to the ones that spawn today,
+    # so a case added to a currently process-free suite cannot reopen
+    # the leak. The reap is idempotent (it clears `spawned`), so the
+    # existing end-of-body calls are left in place -- including the one
+    # inside the permutation loop of the first case, which reaps PER
+    # ITERATION and which a `teardown` could not replace.
+    reapEverySpawnedInstance()
+
   test "all six orders of three consumers end with one instance and three holders":
     ## THE GATE'S HEADLINE CLAUSE: "`repro up` run in three project
     ## directories of one workspace in **each of several orders**, every
@@ -357,6 +398,10 @@ suite "L7 §4.5 — `repro up` converges on ONE instance in any order":
     reapEverySpawnedInstance()
 
 suite "L7 §4.5 — `repro down` drops ONE reference":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "a release with other holders leaves the instance running; the last one releases it":
     ## The gate's two middle clauses: "`repro down` in one project
     ## leaving the instance running for the other two and dropping only
@@ -434,6 +479,10 @@ suite "L7 §4.5 — `repro down` drops ONE reference":
     check decision.diagnostic.contains("Nothing was stopped")
 
 suite "L7 §4.5 — a restarted daemon rebuilds the registry from the store":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "dated holders are recovered in full, with no orphan and no second start":
     ## The gate's last clause: "a daemon restart recovering the registry
     ## from the on-disk store without orphaning or double-starting".
@@ -576,6 +625,10 @@ suite "L7 §4.5 — a restarted daemon rebuilds the registry from the store":
         ServiceInstanceAttrsTypeId, encodeServiceInstanceAttrs(record))
 
 suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "the `keep` default is fully counted in memory and lossy across a restart":
     ## D-SS5 chose `keep` as the default, and §4.5 rule 3 records the
     ## consequence: "a `keep` holder's consumer id is written nowhere, so
@@ -732,6 +785,10 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
     reapEverySpawnedInstance()
 
 suite "L7 — the attach decision is L6's; only its PROVENANCE is new":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "an implementation-only change attaches with NO diagnostic":
     ## §4.3's control, now decided over a registry lookup rather than a
     ## constructed record: "a change to the implementation only (args,
@@ -792,6 +849,10 @@ suite "L7 — the attach decision is L6's; only its PROVENANCE is new":
     reapEverySpawnedInstance()
 
 suite "L7 — the registry is keyed by (identity, scope, environment)":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "two environments are two instances, and two identities are two instances":
     ## The mutation this suite is the control for is "key the registry by
     ## project root instead of (identity, scope, environment)". That
@@ -855,6 +916,10 @@ suite "L7 — the registry is keyed by (identity, scope, environment)":
     reapEverySpawnedInstance()
 
 suite "L7 — the registry refuses what it cannot do, rather than guessing":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "a registry with no liveness probe refuses instead of assuming live":
     var registry = ServiceInstanceRegistry(
       storeRoot: throwawayRoot("noprobe-store"),
@@ -893,6 +958,10 @@ suite "L7 — the registry refuses what it cannot do, rather than guessing":
       check parseReleaseOutcome(outcomeWord(outcome)) == outcome
 
 suite "L7 — the wire and store codecs round-trip what the decision reads":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "a snapshot survives the codec with every member intact":
     let snapshot = snapshotOf("l6AttBase")
     check snapshot.members.len > 0
@@ -939,6 +1008,9 @@ suite "L7 — the wire and store codecs round-trip what the decision reads":
     check not isServiceInstanceAddress("")
 
 suite "L7 §4.5 — `an instance is reaped when its last lease lapses`":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
   ## THE CLAUSE THIS SUITE EXISTS FOR, and the reason it is a suite of its
   ## own rather than a case inside the release suite: §4.5 gives an
   ## instance TWO ways to end. `repro down` by the last holder is one, and
@@ -1208,6 +1280,10 @@ suite "L7 §4.5 — `an instance is reaped when its last lease lapses`":
     check hasStateRecord(store, processless)
 
 suite "L7 — the recorded identity is validated BEFORE `waitpid` is asked":
+  teardown:
+    # Runs whether the case passed or raised -- see the first suite.
+    reapEverySpawnedInstance()
+
   test "a pid recycled onto another live child is not the recorded instance":
     ## `waitpid(pid, WNOHANG)` answers about a PID; it cannot answer about
     ## an IDENTITY. Asked first, it reported `0` — "my child, still

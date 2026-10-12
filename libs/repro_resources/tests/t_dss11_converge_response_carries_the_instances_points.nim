@@ -402,7 +402,17 @@ suite "D-SS11 §4.6 — the points survive the response frame":
     check decoded.holderSetRecoverable == original.holderSetRecoverable
     check decoded.holders == original.holders
 
-  test "an EMPTY point list round-trips as empty, not as absent":
+  test "an EMPTY point list DECODES as an empty list":
+    # TITLED FOR WHAT THE ONE ASSERTION BELOW MEASURES. It used to read
+    # "round-trips as empty, not as absent", and the "not as absent"
+    # half is a claim this body cannot make: it never looks at the
+    # bytes, so "present and empty" and "absent" are indistinguishable
+    # to it. The byte-level presence check is in the NEXT case, which
+    # asserts the four count bytes are there before removing them. A
+    # title that claims the distinction its body cannot draw is the
+    # same defect class as a guard satisfiable by the change it guards
+    # against: it reads as coverage that is somewhere else.
+    #
     # A service that converges no points is a real state, so "empty"
     # has to survive as empty. This is also the control for the
     # older-daemon case below: that case removes these four bytes, so

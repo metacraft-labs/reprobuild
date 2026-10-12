@@ -3336,6 +3336,36 @@ const
     ## property is what the magic+version envelope exists for, and
     ## widening the check to a range keeps it for v3.
 
+proc servicePayloadVersion*(): uint16 =
+  ## The service-payload envelope version THIS BUILD writes, and -- the
+  ## decoder's check being a RANGE (`0 < version <= current`) -- the
+  ## highest it reads.
+  ServicePayloadVersion
+
+proc firstUnknownServicePayloadVersion*(): uint16 =
+  ## One past `servicePayloadVersion()`: the lowest version above the
+  ## range this build accepts.
+  ##
+  ## What an "a FUTURE version is refused rather than misread" probe
+  ## wants. Before this name that probe poked a literal `3`, chosen when
+  ## the current version was 2; the next bump to 3 would have turned it
+  ## into a probe that the CURRENT version is refused -- which is false,
+  ## so it would have failed loudly. That is the lucky half of the class.
+  ## The unlucky half is the same shape one version further on, where the
+  ## literal lands inside the accepted range and the probe quietly stops
+  ## testing a refusal at all.
+  ##
+  ## AN ACCESSOR AND NOT AN EXPORT OF `ServicePayloadVersion`, and not for
+  ## the ambiguity reason an earlier round gave -- that reason was measured
+  ## FALSE (Nim diagnoses a clashing imported name at the USE site, so
+  ## exporting two same-named consts compiles until something references
+  ## the bare name). The reason is that `firstUnknown...` is a DERIVED
+  ## value: exporting the const would put `+ 1` at every call site, and
+  ## `+ 1` is only correct while the accepted range is contiguous and
+  ## open-topped. Keeping the arithmetic beside the decoder that defines
+  ## the range means one place to change if it ever is not.
+  ServicePayloadVersion + 1
+
 proc writeServiceExecutable(outp: var seq[byte]; value: ServiceExecutableRef) =
   outp.writeByte(byte(ord(value.kind)))
   outp.writeString(value.packageName)

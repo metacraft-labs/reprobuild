@@ -121,8 +121,22 @@ suite "RBPI envelope: corruption detection":
     check raised
 
   test "unsupported version raises ERbpiCorrupt(field: schemaVersion)":
+    # DERIVED FROM `RbpiSchemaVersion`, which is already exported, so this
+    # needs no accessor: one `+ 1` at the single call site is cheaper than
+    # a second name, and the derivation is visible where it is read.
+    #
+    # It used to poke a literal 7, written when the schema version was 1.
+    # The reader's check is an EQUALITY, so 7 stayed unsupported through
+    # the bumps to 2 and to 3 and the case kept passing -- but it was
+    # measuring "version 7 is refused", not "the version one past this
+    # build's is refused", and those come apart the moment the schema
+    # reaches 7. Nothing would have reddened; the case would simply have
+    # started asserting that the CURRENT version is rejected, which is the
+    # opposite property.
     var env = wrapEnvelope(smallBody())
-    env[4] = 0x07'u8  # version becomes 7
+    let unknown = RbpiSchemaVersion + 1'u16
+    env[4] = byte(unknown and 0xff'u16)
+    env[5] = byte((unknown shr 8) and 0xff'u16)
     var raised = false
     try:
       discard readEnvelope(env)

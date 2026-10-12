@@ -264,11 +264,21 @@ suite "the record epoch makes pre-epoch frames unreadable":
 
     # The frame's version is the u16 immediately after the 4-byte magic.
     check encoded[0 .. 3] == cast[seq[byte]]("RBAR")
-    # 5 is in this list and is the one that matters: it is what a binary built
+    # 5 is in this set and is the one that matters: it is what a binary built
     # from mainline writes today, and it was written by a binary whose guard
     # was dead just as surely as 2, 3 and 4 were. An epoch drawn at 5 would
     # have drained the old records and left the recent ones.
-    for stale in [2'u16, 3'u16, 4'u16, 5'u16]:
+    #
+    # DERIVED FROM THE DECODER'S OWN ACCEPT SET rather than hand-listed.
+    # The hand-listed form of this very loop existed in THREE files
+    # (here, `test_m10_observed_env_cache_key` and
+    # `t_newest_alias_and_interned_records`) and all three stopped
+    # covering version 6 when the epoch moved 6 -> 7, with nothing
+    # failing. A list that means "everything below current" has to be
+    # computed from current.
+    let refused = actionRecordVersionsThisBuildRefuses()
+    check refused.len > 0
+    for stale in refused:
       var patched = encoded
       patched[4] = byte(stale and 0xff'u16)
       patched[5] = byte((stale shr 8) and 0xff'u16)

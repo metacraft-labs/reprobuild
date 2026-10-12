@@ -99,6 +99,9 @@ suite "dev-env large environment values":
     # while measuring the wrong property, whereas this pin fails loudly
     # and names itself. The schema gate below already worked this way
     # (`DevEnvArtifactSchemaVersion - 1`); the envelope gate now does.
+    # version-literal-ok: THE pin of this file, and the comment above
+    # says why at length -- it is meant to fail loudly and name itself on
+    # a bump, while every probe below it is relative to the accessor.
     check devEnvEnvelopeVersion() == 4'u16
     # The ENCODER writes the current version at that offset. Relative,
     # and it is the control for the pokes below: if the offset were
