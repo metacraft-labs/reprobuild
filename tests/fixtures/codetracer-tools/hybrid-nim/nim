@@ -1,0 +1,34 @@
+#!/bin/sh
+# The aggregate case's `nim`: JavaScript targets compile with the dev-shell
+# Nim (the next `nim` on PATH after this directory, which is tools/nim and
+# forwards to it), native targets with CodeTracer's own Nim, which the test
+# appends as the LAST directory on PATH so that it shadows nothing else.
+set -euf
+self_dir=$(dirname "$0")
+IFS=:
+if [ "${1:-}" = "js" ]; then
+  after_self=0
+  for dir in $PATH; do
+    if [ -z "$dir" ]; then
+      continue
+    fi
+    if [ "$dir" -ef "$self_dir" ]; then
+      after_self=1
+    elif [ "$after_self" = 1 ] && [ -f "$dir/nim" ] && [ -x "$dir/nim" ]; then
+      exec "$dir/nim" "$@"
+    fi
+  done
+else
+  last=""
+  for dir in $PATH; do
+    if [ -n "$dir" ] && [ -f "$dir/nim" ] && [ -x "$dir/nim" ] &&
+        ! [ "$dir" -ef "$self_dir" ]; then
+      last="$dir/nim"
+    fi
+  done
+  if [ -n "$last" ]; then
+    exec "$last" "$@"
+  fi
+fi
+echo "nim fixture: no nim on PATH for $self_dir" >&2
+exit 127
