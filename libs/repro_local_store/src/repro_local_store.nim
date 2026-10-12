@@ -2869,6 +2869,24 @@ proc outputStateMismatch*(record: ActionResultRecord;
   inc outputStateCheckCalls
   outputStateCheckNanos += (getMonoTime() - started).inNanoseconds
 
+proc payloadlessOutputsInPlace(record: ActionResultRecord;
+                               outputRoot: string): bool =
+  ## Whether a record WITHOUT output payloads still describes the outputs on
+  ## disk: it names at least one output, recorded every one of them as
+  ## present, and each still matches (`outputStateMismatch`, Step 3.3).
+  ## `outputStateMismatch` alone skips outputs recorded as missing, so a
+  ## record that describes nothing would answer "matching" vacuously.
+  ##
+  ## Only for a caller that says where the outputs are: without an
+  ## `outputRoot` a relative output would be resolved against this process's
+  ## working directory.
+  if outputRoot.len == 0 or record.outputs.len == 0:
+    return false
+  for output in record.outputs:
+    if output.metadata.kind == ffkMissing:
+      return false
+  outputStateMismatch(record, outputRoot).len == 0
+
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
   if record.outputPayloadKind != opkCasBlobs:
@@ -5213,14 +5231,25 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         continue
     if verifyOutputBlobs:
       if candidate.outputPayloadKind != opkCasBlobs:
-        return ActionCacheLookup(status: aclMissNoOutputPayload,
-          record: candidate,
-          message: "cache record does not contain output payloads")
-      try:
-        cas.verifyOutputs(candidate)
-      except CacheIntegrityError as err:
-        return ActionCacheLookup(status: aclRejectedCorruptOutput,
-          record: candidate, message: err.msg)
+        # A record without payloads cannot RESTORE, but nothing needs
+        # restoring when every output it describes is on disk exactly as
+        # recorded: that is the in-place hit the metadata-only configuration
+        # serves (Step 3.3 below), and the restore mode is that plus putting
+        # back what is no longer there. Refusing it re-ran every action whose
+        # record was published without payloads (the S7 gate, or a record
+        # from before an edge stored any) on EVERY build, outputs untouched —
+        # against Incremental-Invalidation.md §"Validation Criteria": "a warm
+        # re-run of an unchanged graph still executes zero actions".
+        if not payloadlessOutputsInPlace(candidate, outputRoot):
+          return ActionCacheLookup(status: aclMissNoOutputPayload,
+            record: candidate,
+            message: "cache record does not contain output payloads")
+      else:
+        try:
+          cas.verifyOutputs(candidate)
+        except CacheIntegrityError as err:
+          return ActionCacheLookup(status: aclRejectedCorruptOutput,
+            record: candidate, message: err.msg)
     elif allowMetadataOnlyHit:
       # In-place local reuse: the bytes stay at their declared paths, so the
       # CAS verification above is not what protects them. Revalidate the

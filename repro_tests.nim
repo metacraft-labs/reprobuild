@@ -11583,6 +11583,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_interface_extraction_variants_keep_their_own_outputs.nim",
+    binary: "build/test-bin/t_interface_extraction_variants_keep_their_own_outputs",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_is_published_accepts_any_remote_name.nim",
     binary: "build/test-bin/t_is_published_accepts_any_remote_name",
     defines: @[],

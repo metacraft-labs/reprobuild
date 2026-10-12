@@ -9322,10 +9322,12 @@ proc recipeCompileOutputDir(kind, identity: string): string =
   ## (`recordOutputsNotOwnedBy`) at any location, and a hit restores there.
   ##
   ## Two computations with one identity (same recipe bytes and variant,
-  ## different sibling or ancestor content) share the directory. Each edge
-  ## holds the directory's lock from execution until the CLI has copied the
-  ## outputs to the caller's own paths (`extractInterfaceEdge`), and a lookup
-  ## whose bytes on disk are another record's restores its own.
+  ## different sibling or ancestor content, or a different observed
+  ## environment) share the directory. Each edge holds the directory's lock
+  ## from execution until the CLI has copied the outputs to the caller's own
+  ## paths (`extractInterfaceEdge`), and a lookup whose bytes on disk are
+  ## another record's restores its own from the record's payloads (the
+  ## extraction edge runs in the restore configuration for that reason).
   absolutePath(currentActionCacheRoot() / "recipe-compiles" / kind / identity)
 
 proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
@@ -9795,11 +9797,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     maxParallelism: 1'u32,
     stdoutLimit: 1024 * 1024,
     stderrLimit: 1024 * 1024,
-    # Outputs stay in place, metadata-only records — for the recipe-relative
-    # edge too: its outputs live at ONE path for every copy of the recipe
-    # (`recipeCompileOutputDir`), so a hit at a new location finds them where
-    # the record says and nothing needs restoring. Storing their bytes in the
-    # CAS would also write payloads into a cache configured not to hold any.
+    # The location-bound edge writes the caller's own paths: outputs stay in
+    # place and records are metadata-only. The recipe-relative edge is
+    # switched to the restore configuration below.
     rebuildMissingOutputsOnCacheHit: true,
     deferLocalOutputBlobs: true,
     bypassRunQuota: bypassRunQuota,
@@ -9820,6 +9820,27 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     skipCacheHitEvidence: skipCacheHitEvidence,
     cancelCallback: cancelCheck)
   edgeConfig.statsEnabled = statsEnabled
+  if relocatable:
+    # The recipe-relative edge's outputs live in ONE directory per identity
+    # (`recipeCompileOutputDir`), and that identity cannot name what the
+    # compile observes from its environment: the monitor records it only
+    # when the edge runs. Two runs of one recipe whose observed environments
+    # differ — `t_e2e_codetracer_in_place_project_file`'s PATH variants also
+    # differ in the `C_INCLUDE_PATH`/`LIBRARY_PATH` gcc reads, and the recipe
+    # resolves `sh`, `find`, `sort` through `PATH` — are two records over the
+    # same output paths. With metadata-only records the second run's outputs
+    # replaced the first's, so switching back found the first record's inputs
+    # unchanged, its outputs another record's, and re-ran the whole
+    # extraction (every switch, six recipes, thousands of seconds).
+    #
+    # So each record carries its outputs' bytes (a few hundred KB: the
+    # interface artifact, its stub and its input manifest; the scratch tree
+    # under `work/` is derived state and is not stored), and a hit on a
+    # record whose outputs are not the ones on disk restores ITS bytes into
+    # the directory (`enableCachedOutputRestore`, gated on the monitor seeing
+    # no undeclared surviving write). A hit whose outputs are already in
+    # place restores nothing and keeps their mtimes.
+    edgeConfig.enableCachedOutputRestore()
   # The recipe-relative outputs are shared by every caller of this edge for
   # this recipe; the caller's own copy is its own.
   var edgeLock =

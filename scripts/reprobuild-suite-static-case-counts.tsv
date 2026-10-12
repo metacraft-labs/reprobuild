@@ -116,7 +116,7 @@ libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim	nim	1
 libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	nim	5
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
 libs/repro_build_engine/tests/test_s5_own_output_is_not_a_cache_input.nim	nim	6
-libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	13
+libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	14
 libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	11
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
@@ -1293,6 +1293,7 @@ tests/integration/t_integration_variant_value_accessor.nim	nim	4
 tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	nim	1
 tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	nim	1
 tests/integration/t_interface_extraction_follows_the_selected_catalog.nim	nim	1
+tests/integration/t_interface_extraction_variants_keep_their_own_outputs.nim	nim	1
 tests/integration/t_is_published_accepts_any_remote_name.nim	nim	1
 tests/integration/t_issuance_leaves_the_user_index_untouched.nim	nim	1
 tests/integration/t_issuance_refuses_states_with_no_content_id.nim	nim	1
