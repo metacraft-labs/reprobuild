@@ -5654,7 +5654,7 @@
             "cmd",
             "tmp"
           ],
-          "line": 319,
+          "line": 330,
           "path": "tests/integration/t_spec_6_2_matches_implementation.nim",
           "patterns": [
             "nim-compile-verb"
