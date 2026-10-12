@@ -16334,21 +16334,76 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
           (if stored.contributions.len == 1: "" else: "s"))
     if item.service.registrationPoints.len > 0:
       let storeRoot = serviceInstanceStoreRoot(dlsUser)
-      let reconciled =
-        try:
-          reconcileServiceRegistrations(storeRoot, key,
-            unionMembers, unionContributors,
+      # Shared-Development-Services D-SS10 (§7.1) -- THE EDGE, AND WHAT
+      # CHANGED HERE.
+      #
+      # The registration no longer runs because this statement is below
+      # the converge. It runs because `reconcileResources` reaches it
+      # after the SERVICE NODE it `dependsOn`, and that node's provider
+      # completes on the service's DECLARED READINESS. The comment this
+      # replaces said the ordering was "a sequential step in the CLI,
+      # ordered by program order rather than by a graph edge ... It
+      # satisfies the REQUIREMENT ... without taking the decision." The
+      # decision is now taken, and the ordering is `topoOrder`'s.
+      #
+      # IT ALSO FIXES WHAT THAT ORDERING MEANT. The daemon answers
+      # converged when the instance is MATERIALISED or attached -- for a
+      # child it has just spawned, and (L9's review measured this) even
+      # for one that has already died. A registration ordered on that
+      # answer reconciles against the listening-but-unseeded instance
+      # §7.1 refuses. The service node waits for the probe instead.
+      var reconciled: tuple[set: ServiceRegistrationSet;
+        outcomes: seq[tuple[member: string;
+                            outcome: ServiceRegistrationOutcome]]]
+      var registrarRan = false
+      setServiceReadinessProber(
+        proc (url: string): bool {.closure.} =
+          readinessProbeSatisfied(url))
+      setReadinessEdgeEventSink(
+        proc (kind, service, detail: string) {.closure.} =
+          appendSessionEvent(parsed.selection.outDir, kind, service, detail))
+      setServiceRegistrar(
+        proc (attrs: ServiceRegistrationAttrs):
+            seq[tuple[member, mintedId: string]] {.closure.} =
+          reconciled = reconcileServiceRegistrations(storeRoot, key,
+            attrs.members, attrs.contributors,
             proc (member, contributor: string): string {.closure.} =
               digestHex(blake3DomainDigest(
                 ("repro-dev-registration.v1\x00" & response.address &
                  "\x00" & member).bytesOf(),
                 hdMetadataEnvelope))[0 ..< 24])
-        except CatchableError as err:
-          stderr.writeLine("repro " & commandName & ": service `" &
-            item.declaration.serviceName &
-            "`: registering its contributed members failed: " & err.msg)
-          refused.inc
-          continue
+          registrarRan = true
+          result = @[]
+          for reg in reconciled.set.registrations:
+            result.add((member: reg.member, mintedId: reg.mintedId)))
+      try:
+        let plan = planRegistrationEdge(item.declaration.serviceName,
+          response.address,
+          ServiceReadinessProbe(kind: launch.readinessKind,
+            path: launch.readinessPath, url: launch.readinessUrl,
+            timeoutMs: launch.readinessTimeoutMs),
+          unionMembers, unionContributors)
+        discard reconcileResources(plan)
+      except CatchableError as err:
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName &
+          "`: registering its contributed members failed: " & err.msg)
+        refused.inc
+        continue
+      if not registrarRan:
+        # The registrar is the ONLY thing that computes an attribute, so
+        # a reconcile that returned without calling it is a silent drop
+        # wearing the shape of a success. Refused rather than reported as
+        # "0 minted": a run that registers nothing and says so cheerfully
+        # is how a consumer ends up with an uncomputed `clientId` and a
+        # failure at the issuer.
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: the registration resource " &
+          "reconciled WITHOUT running its registrar, so nothing was " &
+          "registered and no attribute was computed. That is a defect " &
+          "in the D-SS10 readiness edge, not in this recipe; report it.")
+        refused.inc
+        continue
       for reg in reconciled.set.registrations:
         minted.add((serviceName: item.declaration.serviceName,
           member: reg.member, mintedId: reg.mintedId))
@@ -16365,6 +16420,19 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         " registration" & (if mintedCount == 1: "" else: "s") &
         " minted, " & $reusedCount & " reused, " & $withdrawnCount &
         " withdrawn")
+  # D-SS10: drop the readiness edge's installed collaborators.
+  #
+  # `setServiceReadinessProber` / `setServiceRegistrar` /
+  # `setReadinessEdgeEventSink` are module globals (the driver callbacks
+  # are `{.nimcall.}` and have no closure environment), and the registrar
+  # installed above CAPTURES this loop's `key`, `response` and
+  # `storeRoot`. Leaving it installed would mean that any later
+  # `reconcileResources` in this process -- `reconcileConsumedStateGroups`
+  # is one -- could reach a registrar bound to a declaration it has
+  # nothing to do with. No such resource exists today, so this is a
+  # hazard rather than a defect; it is cleared because the alternative is
+  # to rely on nobody adding one.
+  clearReadinessEdgeCollaborators()
   # The ledger records what was CONVERGED, including on a run where
   # another declaration refused: this project really does hold those
   # instances, and a `repro down` that did not release them would leave

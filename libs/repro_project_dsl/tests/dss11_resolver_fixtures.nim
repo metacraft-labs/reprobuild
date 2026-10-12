@@ -69,7 +69,12 @@ package dss11Owner:
         identity stable "com.example.dss11.idp"
         scope workspace
         workingDirectory "."
-        readiness none
+        ## D-SS10 (§7.1): `readiness none` cannot order a registration,
+        ## and this service `converge`s two points. An evaluable probe is
+        ## what makes the edge's completion mean something. The probe is
+        ## never evaluated by these cases -- they lift and compare
+        ## interfaces -- so the path need not exist.
+        readiness fileExists(".repro/dss11/ready")
         instance:
           lease keep
         converge relyingParties, fixtureUsers

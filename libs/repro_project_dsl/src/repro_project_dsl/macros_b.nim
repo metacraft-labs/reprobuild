@@ -3253,6 +3253,7 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     envPairs: seq[tuple[keyLit: NimNode; valueLit: NimNode]];
     restartLit: NimNode; userLit: NimNode; groupLit: NimNode;
     convergePointNames: seq[string];
+    convergeAnchor: NimNode;
     identityScope: L4ServiceIdentityScope;
     supervision: L9ServiceSupervision] =
   ## Walk a ``service:`` body and extract its setters.
@@ -3430,6 +3431,14 @@ proc m5ParseServiceBody(body: NimNode): tuple[
             m5ServiceStmtAnchor(stmt[i]))
           continue
         result.convergePointNames.add(identText(stmt[i]))
+      # D-SS10 (§7.1): the line the REGISTRATION RESOURCE is declared on,
+      # kept so `dss10RefuseRegistrationWithoutReadiness` can anchor its
+      # refusal where the author wrote the edge rather than at the
+      # `service` head. The FIRST `converge` wins: a body with two is
+      # reporting one authoring decision, and the first is where the
+      # author made it.
+      if result.convergeAnchor == nil:
+        result.convergeAnchor = stmt
     of "description":
       let lit = m5ServiceStringLitArg(stmt)
       if lit != nil:
@@ -3503,6 +3512,133 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     else:
       discard
 
+# ---------------------------------------------------------------------------
+# Shared-Development-Services D-SS10 (spec §7.1) — THE EXPANSION-TIME
+# REFUSAL: a registration ordered on a service that declares no readiness.
+#
+# §7.1, having resolved the edge as "an ordinary `dependsOn` onto the
+# service node, whose completion is its DECLARED READINESS", makes exactly
+# one shape ILLEGAL rather than merely discouraged:
+#
+#   > A service with `readiness none` cannot order a registration. [...]
+#   > with no probe there is nothing for completion to mean, so `dependsOn`
+#   > would degrade to "materialised", which is the listening-but-unseeded
+#   > instance the comment above warns about. A registration resource
+#   > ordered on such a service is **refused at expansion**, naming the
+#   > service and that it declares no readiness.
+#
+# `converge <point>` IS the declaration of that registration resource —
+# the `converge` arm above says so in its own words ("a registration is a
+# RESOURCE the resource lane reconciles after the instance answers"). So
+# the illegal shape is a `service` body carrying BOTH `converge` and no
+# evaluable probe, and this is the refusal for it.
+#
+# REFUSAL ONE OF TWO, AND WHY THERE ARE TWO. The shape L5 established for
+# a required `config:` key: `l5RefuseUnsatisfiableRequiredKeys` refuses at
+# EXPANSION, where the author's line is, and `requiredConfigurableValue`
+# refuses at RESOLUTION, where a value that got past expansion is read.
+# D-SS10's pair is this proc and `refuseRegistrationOnProbelessService` in
+# `repro_resources/readiness_edge.nim`. The second is not redundant: a
+# dev-env ARTIFACT is read back by a later `repro up`, and an artifact
+# built by a compiler that predates this refusal carries exactly the shape
+# it forbids. The two texts are deliberately distinguishable — this one
+# owns "NOTHING CAN ORDER A REGISTRATION ON IT", the resolution one owns
+# "DECLARES NO READINESS" — so a reader can tell which gate spoke.
+#
+# UNDECLARED IS REFUSED TOO, AND THAT IS THE POINT. `readiness none` and
+# no `readiness` setter at all are the same fact about completion: there is
+# no probe. Refusing only the spelling an author WROTE DOWN, while letting
+# the silent one through, would put this campaign's dominant defect class
+# inside the fix for it. The two arms differ only in the sentence that says
+# which shape was found, because the remedy differs: one author deletes a
+# word, the other adds a setter.
+# ---------------------------------------------------------------------------
+
+const
+  dss10EvaluableReadiness = "`readiness fileExists(\"<path>\")`, " &
+    "`readiness httpGet(port = <n>)` and " &
+    "`readiness httpGet(url = \"<base>\")`"
+    ## `l9RecognisedReadiness` MINUS `readiness none`, and the omission is
+    ## the point: a remedy that offered the author the very spelling the
+    ## refusal just rejected would read as a contradiction and send them
+    ## in a circle.
+  dss10ReadinessRemedy = "Declare a probe the supervisor implements -- " &
+    dss10EvaluableReadiness & " -- or remove the `converge` setter, " &
+    "which is what declares the registration."
+  dss10DegradationRule = "With no probe there is nothing for a service " &
+    "node's COMPLETION to mean, so the `dependsOn` the registration " &
+    "rides on would degrade to `materialised`: the registration would " &
+    "reconcile against an instance that is listening and has not " &
+    "finished seeding, and mint identifiers against a half-configured " &
+    "service. Shared-Development-Services.md §7.1 refuses that shape at " &
+    "expansion rather than discouraging it, because the failure is a " &
+    "RACE rather than a missing value."
+
+proc dss10RefuseRegistrationWithoutReadiness(packageName, serviceName: string;
+                                             convergePointNames: seq[string];
+                                             convergeAnchor: NimNode;
+                                             supervision: L9ServiceSupervision;
+                                             headAnchor: NimNode) =
+  ## §7.1's expansion-time refusal. Does nothing when the service
+  ## converges no contribution points (no registration resource exists to
+  ## order) or when it declares an EVALUABLE probe.
+  if convergePointNames.len == 0:
+    return
+  # `readinessDeclared` separates "the author wrote `none`" from "the
+  # author wrote nothing"; `readinessKind` is "none" / "fileExists" /
+  # "httpGet" and nothing else, because `l9ParseReadinessSetter` refuses
+  # every other word before this runs. So the ONLY accepting arm is a
+  # declared kind that is not `none`.
+  if supervision.readinessDeclared and
+     supervision.readinessKind.normalize() != "none":
+    return
+  let anchor =
+    if convergeAnchor != nil: m5ServiceStmtAnchor(convergeAnchor)
+    else: m5ServiceStmtAnchor(headAnchor)
+  # A DELIBERATE OVER-APPROXIMATION, SAID OUT LOUD. This walker sees the
+  # TYPED body only. A probe declared in a sibling `servicePlaceholder`'s
+  # opaque JSON is honoured at RUNTIME (`serviceSpecFromSummary` reads
+  # that lane, and `sharedServiceInstanceLaunch` carries it), so a recipe
+  # with the probe in the placeholder and `converge` in the typed block is
+  # refused here although it would have worked. That is the chosen
+  # trade: reading the placeholder's JSON inside a macro would be a
+  # SECOND reading of one declaration, which is the drift L9 refuses a
+  # twice-declared probe to prevent -- and the remedy is the setter L9
+  # built for exactly this. The refusal names the lane so the author
+  # meets the remedy rather than a contradiction, and the resolution-time
+  # refusal (`refuseRegistrationOnProbelessService`) is what decides the
+  # shapes expansion cannot see.
+  let shape =
+    if supervision.readinessDeclared:
+      "declares `readiness none`"
+    else:
+      "declares NO `readiness` setter at all (and if the probe is in a " &
+        "sibling `servicePlaceholder`'s JSON, that is not enough HERE: " &
+        "this gate reads the typed body only, because reading the " &
+        "placeholder's JSON in a macro would be a second reading of one " &
+        "declaration -- move the probe to the typed `readiness` setter, " &
+        "which is what it exists for)"
+  # DEDUPED, because the count has to agree with what is REGISTERED.
+  # `m5ParseServiceBody`'s `converge` arm appends every occurrence, and
+  # `addActiveServiceConvergePoint` is idempotent on a repeated name, so a
+  # body writing `converge p, p` registers ONE point. A refusal that said
+  # "2" would be reporting its own parse rather than the recipe's effect,
+  # and a reader counting points in the diagnostic would be looking for a
+  # second one that does not exist. Deduped HERE rather than in the parse
+  # so the emitted setter calls stay byte-for-byte what they were.
+  var points: seq[string] = @[]
+  for name in convergePointNames:
+    if not points.contains(name):
+      points.add(name)
+  error("service `" & serviceName & "` of package `" & packageName &
+    "` " & shape & ", and NOTHING CAN ORDER A REGISTRATION ON IT -- but " &
+    "this body `converge`s " & $points.len &
+    " contribution point" &
+    (if points.len == 1: "" else: "s") & " (`" &
+    points.join("`, `") & "`), which declares a " &
+    "REGISTRATION RESOURCE ordered on this service. " &
+    dss10DegradationRule & " " & dss10ReadinessRemedy, anchor)
+
 proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
   ## Lower ONE ``service <name>:`` statement to its wrap-and-register
   ## block, or return ``nil`` when ``stmt`` is not a recognised service
@@ -3540,6 +3676,14 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
   if not parsed.matched:
     return nil
   let parsedBody = m5ParseServiceBody(parsed.body)
+  # D-SS10 (§7.1): refuse a `converge` ordered on a service whose
+  # completion cannot mean anything. Run BEFORE any emission, so a recipe
+  # carrying the illegal shape never produces a lowered service at all --
+  # the alternative is a registration resource in the artifact that a
+  # later `repro up` must refuse a second time.
+  dss10RefuseRegistrationWithoutReadiness(packageName, parsed.serviceName,
+    parsedBody.convergePointNames, parsedBody.convergeAnchor,
+    parsedBody.supervision, stmt)
   let pkgLit = newLit(packageName)
   let svcNameLit = newLit(parsed.serviceName)
   let bodyReprLit = newLit(parsed.body.repr)

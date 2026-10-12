@@ -1134,6 +1134,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_dss10_early_attribute_read_refuses_by_name.nim",
+    binary: "build/test-bin/t_dss10_early_attribute_read_refuses_by_name",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim",
     binary: "build/test-bin/t_e2e_watch_via_adapter",
     defines: @[],
@@ -4401,6 +4410,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dss10_registration_requires_readiness.nim",
+    binary: "build/test-bin/t_dss10_registration_requires_readiness",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dss11_resolver_surface_refuses_near_misses.nim",
     binary: "build/test-bin/t_dss11_resolver_surface_refuses_near_misses",
     defines: @[],
@@ -4880,6 +4898,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim",
     binary: "build/test-bin/t_attr_ssz_envelope_roundtrip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_resources/tests/t_dss10_readiness_edge_orders_the_registration.nim",
+    binary: "build/test-bin/t_dss10_readiness_edge_orders_the_registration",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

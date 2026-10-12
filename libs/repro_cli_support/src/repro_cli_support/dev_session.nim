@@ -10,6 +10,7 @@ import repro_provider_runtime
 import repro_project_dsl                 # ServiceIdentityDef / ServiceScope
 import repro_resources/service_identity  # the (identity, scope, environment) key
 import repro_resources/service_registry  # the snapshot codec + lease words
+import repro_resources/readiness_edge    # D-SS10 (§7.1): the edge's own names
 import repro_cli_support/watch
 
 type
@@ -854,17 +855,31 @@ proc substituteMintedAttributes*(serviceName: string;
         if ':' notin key:
           known.add(key)
       known.sort()
+      # D-SS10 (§7.1) requires an early read to report WHICH ATTRIBUTE,
+      # WHICH RESOURCE and WHICH EDGE would have ordered it. All three
+      # are named below. Before §7.1 this refusal named the member and
+      # the registered set, which told the author what was missing but
+      # not what was supposed to have produced it -- and "what orders
+      # this" is the question an author reading it is actually asking.
       raise newException(ValueError,
-        "service `" & serviceName & "`: nothing minted an identifier " &
-        "for `" & member & "`, so the argument `" & token &
-        "` cannot be concretized. A shared service registers a member " &
-        "only if its `service` block `converge`s the contribution " &
-        "point that member was contributed to, and only once `repro " &
-        "up` has converged that instance. Registered members: " &
+        "service `" & serviceName & "`: the resource attribute `" &
+        ClientIdAttributeName & "` of " &
+        registrationResourceLabel(serviceName, member) &
+        " IS NOT COMPUTED, so the argument `" & token &
+        "` cannot be concretized. That attribute is computed when the " &
+        "registration resource reconciles, and the edge that orders " &
+        "the reconcile before this read is " &
+        registrationOrderingEdgeOfService(serviceName) &
+        ". A shared service registers a member only if its `service` " &
+        "block `converge`s the contribution point that member was " &
+        "contributed to, and only once `repro up` has converged that " &
+        "instance. Registered members: " &
         (if known.len == 0: "(none)" else: known.join(", ")) &
         ". Leaving the token verbatim or substituting an empty string " &
-        "would reach the service as a credential it cannot use " &
-        "(Shared-Development-Services.md D-SS10).")
+        "would reach the service as a credential it cannot use: an " &
+        "empty string is indistinguishable from a legitimately empty " &
+        "value, which is the one answer " &
+        "Shared-Development-Services.md D-SS10 forbids.")
 
 proc serviceSpecFromSummary*(projectRoot: string;
                              service: DevEnvServiceSummary;
@@ -1079,20 +1094,81 @@ proc summaryDeclaredIdentityAndScope*(
       "recipe declared, silently.")
   (declared: true, identity: identity, scope: scope)
 
+proc appendSessionEvent*(outDir: string; kind, service, detail: string) =
+  ## Append one event to the dev session's OWN `events.jsonl`, in the
+  ## same schema the supervisor's `emitEvent` writes.
+  ##
+  ## Shared-Development-Services D-SS10 (§7.1). `emitEvent` is bound to a
+  ## live `SessionState`, and the ordering D-SS10 establishes happens
+  ## BEFORE the supervisor exists: `repro up` converges the shared
+  ## instance, waits for its declared readiness and reconciles the
+  ## registration, and only then launches the supervisor. Those three
+  ## facts have to land in the same append-only log as the supervisor's,
+  ## because a reader asking "did the registration wait for readiness"
+  ## should not have to join two files on timestamps.
+  ##
+  ## ONE SCHEMA ID, not a second one. A reader (or a test) that knows
+  ## `reprobuild.dev-session.event.v1` must be able to read these rows,
+  ## and giving the pre-supervisor rows their own id would make every
+  ## such reader wrong by omission.
+  ##
+  ## `sessionId` is empty here and that is honest: the session does not
+  ## have one until the supervisor publishes it. An invented id would be
+  ## a value no other surface agrees with.
+  let node = %*{
+    "schemaId": EventSchemaId,
+    "time": nowIso(),
+    "sessionId": "",
+    "kind": kind,
+    "service": service,
+    "watchPath": "",
+    "detail": detail,
+    "cycle": 0
+  }
+  createDir(extendedPath(outDir.sessionDir))
+  let path = outDir.sessionDir / EventLogFile
+  let line = $node & "\n"
+  if fileExists(extendedPath(path)):
+    writeFile(extendedPath(path), readFile(extendedPath(path)) & line)
+  else:
+    writeFile(extendedPath(path), line)
+
+proc sessionEventLogPath*(outDir: string): string =
+  ## Where `appendSessionEvent` writes, and where the supervisor's
+  ## `emitEvent` writes. Exported so a caller does not have to
+  ## reconstruct `session/events.jsonl` from two constants.
+  outDir.sessionDir / EventLogFile
+
 proc sharedServiceInstanceLaunch*(projectRoot: string;
     service: DevEnvServiceSummary):
-    tuple[command: seq[string]; workingDir: string] =
-  ## The argv and working directory a shared instance is materialised
-  ## with, read through the SAME `serviceSpecFromSummary` the supervisor
-  ## uses for a session-owned service.
+    tuple[command: seq[string]; workingDir: string;
+          readinessKind, readinessPath, readinessUrl: string;
+          readinessTimeoutMs: int] =
+  ## The argv, working directory AND DECLARED READINESS a shared instance
+  ## is materialised with, read through the SAME `serviceSpecFromSummary`
+  ## the supervisor uses for a session-owned service.
   ##
   ## Reused rather than re-parsed so that the command the daemon runs and
   ## the command the supervisor would have run are the same bytes,
   ## including the `cwd` resolution against the project root. Two readers
   ## of `{"command": [...]}` is how an instance gets started with a
   ## relative path one of them resolved and the other did not.
+  ##
+  ## THE READINESS FIELDS ARE D-SS10's (§7.1), AND THEIR ABSENCE HERE WAS
+  ## A SILENT DROP. Before they were added, this proc returned the
+  ## command and the working directory only, and
+  ## `serviceSpecsFromArtifact` skips every service with an `instance:`
+  ## block — so a typed `readiness httpGet(...)` on a SHARED service was
+  ## parsed, validated, carried through the artifact at envelope 4,
+  ## printed by `repro dev-env --json`, and then probed by nothing at
+  ## all. The declared fact existed and no code read it. They are
+  ## returned from THIS proc rather than re-read at the call site for the
+  ## reason the paragraph above gives: one reading of one declaration.
   let spec = serviceSpecFromSummary(projectRoot, service)
-  (command: spec.command, workingDir: spec.cwd)
+  (command: spec.command, workingDir: spec.cwd,
+   readinessKind: spec.readinessKind, readinessPath: spec.readinessPath,
+   readinessUrl: spec.readinessUrl,
+   readinessTimeoutMs: spec.readinessTimeoutMs)
 
 proc serviceIndex(services: openArray[ServiceSpec]; name: string): int =
   for i, service in services:
@@ -1750,6 +1826,23 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
       config.eventLogHint() & "\n" &
       disposition)
 
+proc readinessProbeSatisfied*(url: string): bool =
+  ## The `httpGet` probe, as the resource lane's installed prober.
+  ##
+  ## This is `readinessOk`'s `httpget` arm, lifted to a named export so
+  ## `repro_resources/readiness_edge.nim` can be handed THE SAME
+  ## predicate the supervisor applies to a session-owned service. A
+  ## second, slightly different notion of "the issuer is answering" is
+  ## exactly the drift that made L9 refuse a probe declared in two
+  ## lanes.
+  if url.len == 0:
+    return false
+  try:
+    let response = httpRequest(url, "/")
+    response.status >= 200 and response.status < 500
+  except CatchableError:
+    false
+
 proc readinessOk(spec: ServiceSpec): bool =
   case spec.readinessKind.normalize()
   of "", "none":
@@ -1757,14 +1850,11 @@ proc readinessOk(spec: ServiceSpec): bool =
   of "fileexists", "file", "path":
     spec.readinessPath.len > 0 and fileExists(extendedPath(spec.readinessPath))
   of "httpget":
-    if spec.readinessUrl.len == 0:
-      false
-    else:
-      try:
-        let response = httpRequest(spec.readinessUrl, "/")
-        response.status >= 200 and response.status < 500
-      except CatchableError:
-        false
+    # DELEGATED rather than duplicated. D-SS10 hands the same predicate
+    # to the resource lane as the installed `httpGet` prober, and two
+    # copies of "the issuer is answering" is the drift L9 refuses a
+    # twice-declared probe to avoid.
+    readinessProbeSatisfied(spec.readinessUrl)
   else:
     false
 

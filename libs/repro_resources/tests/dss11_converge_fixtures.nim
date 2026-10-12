@@ -62,6 +62,13 @@ package dss11CvOne:
         identity stable "com.example.dss11cv.sso"
         scope workspace
         compatibility 1
+        ## D-SS10 (§7.1): a service that `converge`s a contribution point
+        ## must declare an EVALUABLE readiness probe -- a registration
+        ## cannot be ordered on a probeless service. Declared on all
+        ## THREE packages, including the one that converges nothing, so
+        ## the "differ in exactly one declared way" discipline above
+        ## still holds: only the `converge` list differs.
+        readiness fileExists(".repro/dss11cv/ready")
         converge relyingParties
 
 package dss11CvBoth:
@@ -79,6 +86,13 @@ package dss11CvBoth:
         identity stable "com.example.dss11cv.sso"
         scope workspace
         compatibility 1
+        ## D-SS10 (§7.1): a service that `converge`s a contribution point
+        ## must declare an EVALUABLE readiness probe -- a registration
+        ## cannot be ordered on a probeless service. Declared on all
+        ## THREE packages, including the one that converges nothing, so
+        ## the "differ in exactly one declared way" discipline above
+        ## still holds: only the `converge` list differs.
+        readiness fileExists(".repro/dss11cv/ready")
         converge relyingParties, fixtureUsers
 
 package dss11CvNone:
@@ -112,3 +126,10 @@ package dss11CvNone:
         identity stable "com.example.dss11cv.sso"
         scope workspace
         compatibility 1
+        ## D-SS10 (§7.1): a service that `converge`s a contribution point
+        ## must declare an EVALUABLE readiness probe -- a registration
+        ## cannot be ordered on a probeless service. Declared on all
+        ## THREE packages, including the one that converges nothing, so
+        ## the "differ in exactly one declared way" discipline above
+        ## still holds: only the `converge` list differs.
+        readiness fileExists(".repro/dss11cv/ready")

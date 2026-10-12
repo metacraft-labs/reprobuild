@@ -91,6 +91,11 @@ package l8MatrixOwner:
         args appendLow
         identity stable "com.metacraft-labs.l8-matrix"
         scope workspace
+        ## D-SS10 (§7.1): a service that `converge`s a contribution point
+        ## must declare an evaluable readiness probe, because the
+        ## registration's `dependsOn` onto it completes on that probe.
+        ## Never evaluated by these cases.
+        readiness fileExists(".repro/l8-matrix/ready")
         ## L8: the members of this point are REGISTERED in the instance
         ## once it answers, and the instance mints one identifier per
         ## member.
