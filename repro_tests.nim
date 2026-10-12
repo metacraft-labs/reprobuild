@@ -12177,6 +12177,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_measurement_manifest_cross_check.nim",
+    binary: "build/test-bin/t_measurement_manifest_cross_check",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_membership_model_fork_upstream_remote_alignment.nim",
     binary: "build/test-bin/t_membership_model_fork_upstream_remote_alignment",
     defines: @[],

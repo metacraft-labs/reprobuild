@@ -399,6 +399,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " attest expect --image PATH [--out PATH | --check PATH]\n       " &
           programName &
+      " attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n       " &
+          programName &
       " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n       " &
           programName &
       " prompt [--format=plain|ansi|json|<template>] [--workspace-root=PATH]\n       " &
