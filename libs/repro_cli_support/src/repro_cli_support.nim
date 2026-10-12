@@ -68239,10 +68239,15 @@ proc runFixtureCmd(cmd: seq[string]; cwd: string): tuple[code: int; output: stri
     $epochTime() & "-" & $getCurrentProcessId() & ".log")
   # Build an argv that pipes the original command through ``sh -c`` with
   # explicit stdout/stderr redirection.  When the caller already wraps
-  # in ``sh -c``, we append the redirection to the existing -c body.
+  # in ``sh -c``, the existing -c body is redirected AS A GROUP. Appending
+  # the redirection to the body text attached it to the body's LAST command
+  # only, where it overrode that command's own redirection (a test step
+  # `echo x >> tracked.txt` wrote to the log, not to the file) and where a
+  # trailing `# comment` swallowed it. The newline before `}` ends any such
+  # comment.
   var argv: seq[string] = @[]
   if cmd.len >= 3 and cmd[0] == "sh" and cmd[1] == "-c":
-    let body = cmd[2] & " >'" & logPath & "' 2>&1"
+    let body = "{ " & cmd[2] & "\n} >'" & logPath & "' 2>&1"
     argv = @["sh", "-c", body]
   else:
     var quoted: seq[string] = @[]
