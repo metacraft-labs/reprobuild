@@ -103,6 +103,7 @@ from repro_home_resources/types import ObservedState, ResourceActionKind,
   rakDestroy
 import repro_project_dsl                  # registerExtension / TypedExtensionBox
 import repro_resources/instance
+import repro_resources/service_registry  # the ONE registrations-suffix definition
 
 type
   ReadinessEdgeError* = object of CatchableError
@@ -130,11 +131,16 @@ const
     ## resource lane rather than the supervisor.
 
   ServiceNodeAddressPrefix* = "service-node:"
-  RegistrationAddressSuffix* = "/registrations"
-    ## Matches `ServiceRegistrationsAddressSuffix` in
-    ## `service_registry.nim`, so the node this reconcile orders and the
-    ## store record whose `dependsOn` already names the service are ONE
-    ## address rather than two spellings of one idea.
+  RegistrationAddressSuffix* = ServiceRegistrationsAddressSuffix
+    ## ALIASED, not re-spelled. An earlier revision declared its own
+    ## `"/registrations"` here with a comment saying it "matches"
+    ## `service_registry.nim`'s -- i.e. an invariant maintained by a
+    ## sentence, with a test that pinned the literal rather than
+    ## asserting the two were equal. Review called that out: the claim
+    ## "ONE address rather than two spellings" was stated as structural
+    ## where only a literal pin existed. Binding to the other constant
+    ## makes it structural for real -- the two cannot drift, because
+    ## there is now one definition.
 
   ClientIdAttributeName* = "clientId"
     ## §7's worked attribute: "a per-consumer OIDC client identifier does

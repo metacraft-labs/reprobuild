@@ -69,6 +69,7 @@ import std/[algorithm, json, os, osproc, strutils, tables, unittest]
 
 import repro_resources
 import repro_resources/readiness_edge
+import repro_resources/service_registry  # the ONE registrations-suffix definition
 
 const
   Svc = "sso"
@@ -269,8 +270,23 @@ suite "D-SS10 — the plan is two nodes and an ordinary dependsOn":
     # `dependsOn: @[serviceInstanceAddress(key)]`; if this module invented
     # a second spelling of the registration's address, the edge made
     # operative here would not be that one.
+    #
+    # ASSERTED AS AN EQUALITY, NOT PINNED AS A LITERAL. An earlier
+    # revision checked this against the string "/registrations", which
+    # is satisfied by two independent constants that happen to agree --
+    # exactly the drift the case exists to forbid. Review caught that:
+    # the claim "ONE address rather than two spellings" was structural
+    # in the comment and a literal pin in the code. Comparing against
+    # `service_registry`'s own function makes the two definitions the
+    # thing under test, so re-spelling either side reddens here.
+    # Compared against `service_registry`'s OWN constant, never the
+    # string. Asserting `RegistrationAddressSuffix ==
+    # ServiceRegistrationsAddressSuffix` would now be tautological,
+    # because the former is bound to the latter -- so the live
+    # assertion is that the composed address still goes through it.
+    # Re-declaring either side with a different value reddens here.
     check registrationResourceAddress(Instance) ==
-      Instance & "/registrations"
+      Instance & ServiceRegistrationsAddressSuffix
 
 suite "D-SS10 — completion is the DECLARED READINESS, not materialisation":
 
