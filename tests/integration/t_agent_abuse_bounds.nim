@@ -284,7 +284,11 @@ suite "attestation agent — abuse bounds":
     let started = epochTime()
     check stillServes(h.port)
     let elapsed = epochTime() - started
-    check elapsed < float(AbuseConnectionDeadlineMs) / 1000.0 * 6.0
+    # The bound separates "gave up per the deadline" from "spins forever";
+    # 6x the deadline was a wall-clock budget that a correct daemon missed
+    # on a loaded host (8.1 s against 7.2 s in a full suite run). 30x still
+    # fails any daemon that never answers.
+    check elapsed < float(AbuseConnectionDeadlineMs) / 1000.0 * 30.0
 
   test "garbage and empty connections do not end the daemon":
     var h = startHarness(sampleAgent(), abuseLimits())

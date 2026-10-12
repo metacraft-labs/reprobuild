@@ -153,6 +153,7 @@ tests/integration/t_hpke_rejects_wrong_recipient.nim	gate	-	HPKE fails closed: w
 tests/integration/t_hpke_rfc9180_vectors.nim	gate	-	RFC 9180 (HPKE) — the published test vectors for every mode and suite
 tests/integration/t_inference_commitment_is_hiding_and_binding.nim	gate	-	A commitment that a verifier can check without the prompt, that a
 tests/integration/t_leaked_instance_is_reaped.nim	gate	-	An instance whose owning test is killed mid-run is destroyed by the
+tests/integration/t_measurement_manifest_cross_check.nim	gate	-	Two postures over one measurement manifest, and the comparison
 tests/integration/t_mock_refused_by_prod_policy.nim	gate	-	A policy cannot both admit the mock tier and pin production
 tests/integration/t_negative_chain_fixtures.nim	gate	-	Thirteen chains, twelve of them defective, and each refused by its
 tests/integration/t_nitro_enclave_attestation_surface.nim	gate	-	AWS Nitro Enclaves attestation: five genuine documents verify through
