@@ -534,10 +534,18 @@ type
     ## certificate as a signal. Trust is an EXPLICIT project decision: an
     ## absent / omitted `ci_trust` never silently fast-tracks
     ## (Test-Certificates.md §"CI integration — skipping certified work").
+    ##
+    ## `untracked_inputs` chooses what certificate issuance does about
+    ## untracked, non-ignored files, which are outside the content a
+    ## certificate names (test-certificates Standard §3.2). `read-set` (the
+    ## default) withholds only when a read set captured from the run shows it
+    ## read one, and otherwise issues with `untracked = true`; `strict`
+    ## withholds whenever any exists.
     gate_mode*: Option[string]
     required_targets*: seq[string]
     required_platforms*: seq[string]
     ci_trust*: Option[string]
+    untracked_inputs*: Option[string]
 
   ProjectManifest* = object
     schema*: string
