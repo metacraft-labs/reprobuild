@@ -49820,6 +49820,16 @@ type
     # with no explicit routes (the single-tier / manifest-less common shape) and
     # for a gate that short-circuited before the lock write.
     participation*: seq[ParticipationOutcome]
+    certificatePolicy*: CertificatePolicy
+      ## The resolved ``[certificates]`` policy of ``project``. Certificate
+      ## issuance reuses this gate and reads its untracked-inputs mode here.
+    closureCheckouts*: seq[string]
+      ## TC-8d: the absolute path of every git checkout the gate judged
+      ## clean, published and locked — the in-scope repositories other than
+      ## the current one, and the develop-mode overrides. Issuance observes
+      ## them again after the run: they are outside the content a certificate
+      ## names, so a sibling that moved during the run is a state no
+      ## certificate could describe.
     expectedManifestRecords: seq[ExpectedLockRecord]
     deferredPublishWrites: seq[DeferredParticipationWrite]
     exitCode*: int
@@ -55970,6 +55980,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
 
   let (resolved, workspaceLocal) = resolveCheckProject(parsed)
   result.project = resolved.projectName
+  result.certificatePolicy = resolved.certificatePolicy
 
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
@@ -56441,6 +56452,17 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   for obs in observations:
     if not obs.hasGit:
       continue
+    let isIssuingRepo = parsed.issuingForCurrentHead and
+      currentRepoName.len > 0 and obs.name == currentRepoName
+    if not isIssuingRepo:
+      result.closureCheckouts.add(obs.absPath)
+    # TC-8d: when issuance reuses this gate, the current repository's working
+    # tree IS what is being certified. Its modifications are part of the
+    # content the certificate names, so they are not a reason to refuse;
+    # issuance computes that content itself. Every sibling must still be
+    # clean, because nothing in a certificate names a sibling's working tree.
+    if isIssuingRepo:
+      continue
     if not obs.isClean:
       let evidence =
         if obs.cleanDiagnostic.len > 0:
@@ -56666,6 +56688,13 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       # if non-git overrides become disallowed.
       if not discoverGitWorktree(identity, sourcePath).ok:
         continue
+      # TC-8d: an override naming the repository being certified is that
+      # repository, whose working tree is the certified content (stage 1).
+      if parsed.issuingForCurrentHead and parsed.currentRepo.len > 0 and
+          sameFilesystemPath(sourcePath, parsed.currentRepo):
+        continue
+      if sourcePath notin result.closureCheckouts:
+        result.closureCheckouts.add(sourcePath)
       let cleanRes = queryGitState(isCleanQuery(sourcePath), identity)
       if cleanRes.status != gqsOk:
         result.failures.add(CheckFailure(
@@ -56851,6 +56880,17 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # no manifest fragment. Only the genuine "no scope information" verdict
     # (``wholeWorkspace``) keeps the whole-workspace refusal.
     dirtyScopeIsExplicit: not scopeIsWholeWorkspace)
+  if parsed.issuingForCurrentHead and currentRepoName.len > 0:
+    # TC-8d: issuance certifies the current repository's working tree, so its
+    # modifications must not make the lock refresh refuse (stage 1 exempted
+    # it for the same reason). The record still pins its HEAD, which is all a
+    # record-store lock says about it; the tested content is named by the
+    # certificate, not by the lock.
+    if scopeIsWholeWorkspace:
+      for repo in resolved.repos:
+        lockArgs.dirtyScopeNames.incl(repo.name)
+    lockArgs.dirtyScopeNames.excl(currentRepoName)
+    lockArgs.dirtyScopeIsExplicit = true
   lockArgs.triggerRepo = currentRepoName
   lockArgs.triggerRepoPath =
     if currentRepoName.len > 0: parsed.currentRepo
@@ -56947,6 +56987,23 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # RA-7: surface the manifest-layer root so the caller can publish
   # (commit + push) the lock after the gate passes.
   result.recordStoreRoot = recordStoreRoot
+  # TC-8d: certifying the working tree of a repository on an UNBORN branch.
+  # A lock record is keyed by the current repository's commit, and there is
+  # none yet, so there is no record to write or to find. Under decision D8 a
+  # record-store lock is not part of the content anyway: the record is written
+  # after the first commit, as for every commit. The siblings were already
+  # judged clean and published above. Only issuance reaches this; a push
+  # always names a commit.
+  if parsed.issuingForCurrentHead and currentRepoName.len > 0:
+    var currentIsUnborn = false
+    for obs in observations:
+      if obs.name == currentRepoName and obs.hasGit and obs.headSha.len == 0:
+        currentIsUnborn = true
+    if currentIsUnborn:
+      result.lockUpdate.kind = cluNone
+      result.exitCode = 0
+      finalizePoliciesAndParticipation()
+      return
   # RA-1: resolve the latest lock via Git history over the per-repo lock
   # subtree (no shared index). MO-3: this gate read is routed through the
   # ``LockStore`` interface — the git-checkout backend delegates to the
@@ -67431,24 +67488,85 @@ proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
 
 
 # ---- TC-1 issuance: precondition evaluation + no-op decision ----------------
+#
+# TC-8d: WHAT IS CERTIFIED, AND WHEN IT IS MEASURED.
+#
+# A certificate names the CONTENT of the attested repository's tracked files
+# (test-certificates Standard §2, Content-Id §5), never a commit. So the
+# working tree is certified as it is: tracked edits, added (staged) files and
+# deleted files are part of that content, and a commit that later records
+# exactly that content is covered with no second run (Standard §3.2.2).
+# ``base`` names HEAD for information only, and is omitted on an unborn
+# branch, so the first commit of a repository is certifiable (§3.2.3).
+#
+# Standard §3.2 requires the content id to be the one the commands executed
+# against, so it is computed TWICE: by ``evaluateIssuancePreconditions``
+# before the first test command (a point Unified-Locking-And-Hooks HL-10 can
+# move to after its lock-update node), and by ``confirmTestedState`` after the
+# last one. When the two differ an edit landed during the run, no single state
+# was tested, and the certificate is withheld naming the changed paths.
+#
+# Develop-mode siblings are OUTSIDE the content, so the reused pre-push gate
+# still requires each of them to be clean, published and at the revision the
+# lock pins — the ``repro.lock`` in the tested working tree, not HEAD's, which
+# is what the gate's committed-lock stage reads. ``confirmTestedState``
+# observes them again after the run.
+#
+# Untracked files are outside the content too. ``[certificates]
+# untracked_inputs`` decides what they do (``judgeUntrackedInputs``); the
+# record reports ``untracked = true`` whenever any was present before or after
+# the run.
+#
+# Withholding never changes the run's exit code (Interactive-UX Principle 2):
+# the tests ran, and the producer declines to claim what it could not
+# establish. Every value the record binds — ``content``, ``untracked``,
+# ``base`` — is measured here from git; no flag or argument of ``repro test``
+# or ``repro certify`` supplies one.
+#
+# WHICH ISSUANCE PATHS HAVE A READ SET (D5 / Q5). Established from the code:
+#   * the fixture path (``repro test --fixture-from``, ``runFixtureCmd``) runs
+#     each command as a plain ``sh -c`` child with no filesystem monitor: NO
+#     read set;
+#   * the check-set path (``repro certify --check-set``) is the fixture path
+#     with one generated edge: NO read set;
+#   * ct-incremental traces (``--ct-incremental-trace-dir``) are consulted only
+#     through ``watchTestEdgeDecision``, a skip/re-run verdict computed by the
+#     ``ct`` binary from an EARLIER recording; nothing returns a read set, and
+#     the recording is not of this run: NO read set;
+#   * monitored edges (``repro build`` / plain ``repro test``) DO capture what
+#     each action read (the io-mon depfile the build engine folds), but that
+#     path issues no certificate until TC-8e.
+# So every path that issues today runs with ``noReadSetOnFixturePath``: the
+# default mode issues with ``untracked = true`` and says no read set was
+# captured. ``readSetFromMonitorDepFile`` is the adapter TC-8e's monitored
+# path hands ``judgeUntrackedInputs``.
 
 type
   IssuancePreconditionKind* = enum
     ## Why a certificate can / cannot be issued for the current state.
-    ipOk                ## clean closure + at locked revisions → issuable.
-    ipDirty             ## a repo in the closure has a dirty tree.
-    ipUnpublished       ## a repo in the closure has unpublished HEAD.
-    ipOffLock           ## HEAD differs from the locked revision (lock stale).
+    ipOk                ## siblings clean, published, locked; content known.
+    ipDirty             ## a SIBLING in the closure has a dirty tree.
+    ipUnpublished       ## a sibling in the closure has an unpublished HEAD.
+    ipOffLock           ## a sibling differs from the locked revision.
     ipNoWorkspace       ## not a resolvable workspace → cannot bind to a lock.
     ipNoContentId       ## the tested state has no honest content id
                         ## (Content-Id §3) → nothing a certificate could name.
+    ipNoLockInContent   ## a committed-lock project whose tested content
+                        ## carries no usable ``repro.lock``: no verifier could
+                        ## ever accept the certificate's lock.
     ipGateError         ## the gate raised (IO / resolve / VCS error).
+
+  ClosureCheckoutState* = object
+    ## One sibling checkout as observed: its HEAD and its porcelain status.
+    path*: string
+    head*: string
+    status*: string
+      ## ``git status --porcelain`` output; empty when clean.
 
   IssuancePreconditions* = object
     ## Result of evaluating the issuance preconditions by REUSING the RA-21
-    ## pre-push gate (cleanliness / develop-closure / lock-currency). On
-    ## ``ipOk`` the binding fields (``commit`` of the current repo's HEAD, the
-    ## per-repo lock subtree, ``platform``, and the MEASURED worktree state)
+    ## pre-push gate (sibling cleanliness / develop-closure / lock-currency)
+    ## and measuring the attested repository. On ``ipOk`` the binding fields
     ## are filled. On a non-OK kind, ``offender`` / ``remedy`` carry the
     ## RA-28-style ambient message (Interactive-UX Principle 2).
     ##
@@ -67458,68 +67576,266 @@ type
     ## the repository has to enforce that at ISSUANCE time or not at all.
     kind*: IssuancePreconditionKind
     commit*: string
+      ## HEAD, or "" on an unborn branch.
     lockFilePath*: string
     lockRecordsDir*: string
-      ## The per-repo lock subtree holding the committed lock record for
-      ## ``commit`` — what a verifier resolves the lock IN, now that the
-      ## certificate carries no digest.
+      ## A record-store project's per-repo lock subtree; "" for a project
+      ## whose lock is the committed ``repro.lock`` (then the lock is part of
+      ## the content, and ``evaluateIssuancePreconditions`` requires it there)
+      ## and for a record-store project on an unborn branch, which has no
+      ## record until its first commit (D8).
     platform*: string
     project*: string
     repo*: string
     repository*: string
       ## The checkout whose content the certificate names.
     content*: string
-      ## TC-8b: the content id of the tracked files of ``repository`` as the
-      ## tests will run against them (Content-Id §5, a working tree, computed
-      ## in a temporary index). Under the clean precondition, which is still
-      ## enforced, it equals ``commit``'s tree. Becomes ``vcs.content``.
+      ## The content id of the tracked files of ``repository`` as the tests
+      ## will run against them (Content-Id §5, a working tree, computed in a
+      ## temporary index), taken before the run. Becomes ``vcs.content`` only
+      ## when ``confirmTestedState`` finds the same id after the run.
     base*: string
-      ## ``commit`` again, as the record's informational ``vcs.base``.
+      ## HEAD as the record's informational ``vcs.base``; "" on an unborn
+      ## branch, where the record omits it.
     clean*: bool
-      ## MEASURED: no tracked file differed from ``commit`` at this moment.
-      ## Issuance still REQUIRES it (relaxing that is TC-8d); the record no
-      ## longer carries it, because a certificate names content, not a commit.
+      ## MEASURED: no tracked file differed from HEAD. Informational only —
+      ## a modified working tree is certified as its own content.
     untracked*: bool
-      ## MEASURED: untracked files were present. Separate from ``clean``
-      ## because they mean different things — a modified tracked file means the
-      ## tests ran against something other than ``commit``, while untracked
-      ## files usually mean scratch work but can mean a file the build picked
-      ## up. Both are reported honestly (Standard §3.2).
+      ## MEASURED before the run: untracked, non-ignored files were present.
+    untrackedPaths*: seq[string]
+      ## Those files, repository-relative, sorted.
+    untrackedInputs*: CertificateUntrackedInputs
+      ## The project's ``[certificates] untracked_inputs`` mode.
+    siblings*: seq[ClosureCheckoutState]
+      ## Every sibling checkout the gate judged, observed before the run.
     offender*: string
     remedy*: string
 
+  CapturedReadSet* = object
+    ## The files a test run read, as the RUN captured them. ``captured =
+    ## false`` means no read set exists — never "read nothing".
+    captured*: bool
+    paths*: seq[string]
+      ## Absolute paths of the files read.
+    source*: string
+      ## Where the read set came from, or why there is none.
+
+  UntrackedJudgement* = object
+    withhold*: bool
+    offending*: seq[string]
+      ## Repository-relative untracked paths that caused the withholding.
+    note*: string
+      ## Shown when the certificate is issued with ``untracked = true``
+      ## without a read set to judge by.
+
+  TestedStateWithheld* = enum
+    tswNone = ""
+    tswContentChanged = "the tracked files changed while the tests ran"
+    tswSiblingMoved = "a develop-mode sibling changed while the tests ran"
+    tswNoContentId = "the tested state has no content id"
+    tswUntrackedInput = "the tests' untracked inputs are not certifiable"
+    tswUnobservable = "the tested state could not be observed after the run"
+
+  TestedStateVerdict* = object
+    ## ``confirmTestedState``'s answer: issue (``reason == tswNone``) with the
+    ## measured ``untracked``, or withhold with ``message`` and ``remedy``.
+    reason*: TestedStateWithheld
+    message*: string
+    remedy*: string
+    untracked*: bool
+    untrackedPaths*: seq[string]
+    note*: string
+
+const noReadSetOnFixturePath* = CapturedReadSet(captured: false,
+  source: "the fixture path runs its test commands without the filesystem " &
+    "monitor, so no read set was captured")
+  ## Why every issuing path has no read set today (see the block above).
+
+type SavedOptionalGitLocks = tuple[had: bool; value: string]
+
+proc suspendOptionalGitLocks(): SavedOptionalGitLocks =
+  ## Issuance OBSERVES the user's checkouts; it must never write their
+  ## index. A plain `git status` (the reused pre-push gate runs several, in
+  ## the attested repository and in every sibling) refreshes stale stat data
+  ## and writes the index back when it can take the lock, racing a user who
+  ## stages while `repro test` runs. `GIT_OPTIONAL_LOCKS=0` (git(1),
+  ## `--no-optional-locks`) turns that off for EVERY git the issuance path
+  ## spawns, including ones no call site spells the flag for. Set for the
+  ## observation only, never for the test commands themselves.
+  result = (had: existsEnv("GIT_OPTIONAL_LOCKS"),
+    value: getEnv("GIT_OPTIONAL_LOCKS"))
+  putEnv("GIT_OPTIONAL_LOCKS", "0")
+
+proc restoreOptionalGitLocks(saved: SavedOptionalGitLocks) =
+  if saved.had: putEnv("GIT_OPTIONAL_LOCKS", saved.value)
+  else: delEnv("GIT_OPTIONAL_LOCKS")
+
+proc gitPorcelainRecords(identity: GitToolIdentity; repoRoot: string):
+    tuple[ok: bool; records: seq[string]; diagnostic: string] =
+  ## ``git status --porcelain=v1 -z`` records for ``repoRoot``, every
+  ## untracked file listed on its own. ``--no-optional-locks`` keeps git from
+  ## opportunistically rewriting the user's index while it reads it, and
+  ## ``--no-renames`` keeps each record one path long.
+  let res = gitRunPlainQuery(identity,
+    ["--no-optional-locks", "-C", repoRoot, "status", "--porcelain=v1", "-z",
+     "--no-renames", "--untracked-files=all"])
+  if res.code != 0:
+    return (ok: false, records: @[], diagnostic: "git status --porcelain " &
+      "failed (" & $res.code & "): " & res.diagnostic)
+  result.ok = true
+  for record in res.output.split('\0'):
+    if record.len >= 3:
+      result.records.add(record)
+
 proc observeWorktreeState*(identity: GitToolIdentity; repoRoot: string):
-    tuple[ok: bool; clean: bool; untracked: bool; diagnostic: string] =
-  ## MEASURE ``clean`` and ``untracked`` for a repository, separately.
+    tuple[ok: bool; clean: bool; untracked: bool; diagnostic: string;
+          untrackedPaths: seq[string]] =
+  ## MEASURE ``clean`` and ``untracked`` for a repository, separately, and
+  ## list the untracked files.
   ##
-  ## A producer MUST NOT issue when it did not check for untracked files, and
-  ## issuance still requires a clean tree at HEAD (until TC-8d) — a guess here
-  ## invalidates everything downstream (Standard §3.2). So a failed status
-  ## query is ``ok = false``, never a cheerful "clean".
+  ## A producer MUST NOT issue when it did not check for untracked files
+  ## (Standard §3.2) — a guess here invalidates everything downstream. So a
+  ## failed status query is ``ok = false``, never a cheerful "clean".
   ##
   ## ``--untracked-files=all`` rather than the default: a directory of
-  ## untracked files reports as one entry under ``normal``, and "one entry"
-  ## versus "none" is exactly the distinction being measured.
-  let res = gitRunPlainQuery(identity,
-    ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
-  if res.code != 0:
+  ## untracked files reports as one entry under ``normal``, and each file is
+  ## what the untracked-inputs judgement matches against.
+  let status = gitPorcelainRecords(identity, repoRoot)
+  if not status.ok:
     return (ok: false, clean: false, untracked: false,
-      diagnostic: "git status --porcelain failed (" & $res.code & "): " &
-        res.diagnostic)
-  result = (ok: true, clean: true, untracked: false, diagnostic: "")
-  for rawLine in res.output.splitLines():
-    if rawLine.len < 3: continue
-    if rawLine[0 .. 1] == "??":
+      diagnostic: status.diagnostic, untrackedPaths: @[])
+  result = (ok: true, clean: true, untracked: false, diagnostic: "",
+    untrackedPaths: newSeq[string]())
+  for record in status.records:
+    if record[0 .. 1] == "??":
       result.untracked = true
+      result.untrackedPaths.add(record[3 .. ^1])
     else:
       result.clean = false
+  result.untrackedPaths.sort(system.cmp[string])
+
+proc observeClosureCheckout(identity: GitToolIdentity;
+    path: string): ClosureCheckoutState =
+  ## A sibling's HEAD and porcelain status, for the before/after comparison.
+  ## A query that fails records its diagnostic in place of the answer, so a
+  ## sibling that could not be observed never compares equal to one that was.
+  result.path = path
+  let head = gitRunPlainQuery(identity, ["-C", path, "rev-parse", "HEAD"])
+  result.head =
+    if head.code == 0: head.output.strip()
+    else: "<unobservable: " & head.diagnostic & ">"
+  let status = gitRunPlainQuery(identity,
+    ["--no-optional-locks", "-C", path, "status", "--porcelain=v1"])
+  result.status =
+    if status.code == 0: status.output.strip()
+    else: "<unobservable: " & status.diagnostic & ">"
+
+proc headCommitOrUnborn(identity: GitToolIdentity; repo: string):
+    tuple[ok: bool; commit: string; diagnostic: string] =
+  ## HEAD's commit, or ``commit = ""`` on an unborn branch. ``rev-parse
+  ## --verify -q`` exits 1 quietly when HEAD names no commit; that is an unborn
+  ## branch only when HEAD is a symbolic ref, and anything else (a detached
+  ## HEAD naming a missing object) is a repository git cannot describe.
+  let head = gitRunPlainQuery(identity,
+    ["-C", repo, "rev-parse", "--verify", "-q", "HEAD^{commit}"])
+  if head.code == 0 and head.output.strip().len > 0:
+    return (ok: true, commit: head.output.strip(), diagnostic: "")
+  if head.code == 1:
+    let symbolic = gitRunPlainQuery(identity,
+      ["-C", repo, "symbolic-ref", "-q", "HEAD"])
+    if symbolic.code == 0:
+      return (ok: true, commit: "", diagnostic: "")
+    return (ok: false, commit: "", diagnostic: "HEAD names no commit and " &
+      "is not an unborn branch: " & symbolic.diagnostic)
+  (ok: false, commit: "", diagnostic: "git rev-parse HEAD failed (" &
+    $head.code & "): " & head.diagnostic)
+
+proc canonicalReadPath(path: string): string =
+  ## ``path`` with symbolic links resolved where it exists, so a read
+  ## recorded through a link (``/tmp`` on macOS, a symlinked checkout) is
+  ## placed in the repository git reports by its real path.
+  try:
+    result = expandFilename(path)
+  except OSError:
+    result = os.normalizedPath(absolutePath(path))
+
+proc repositoryRelativePath(root, path: string): string =
+  ## ``path`` relative to ``root`` with ``/`` separators, or "" when it is not
+  ## inside the repository.
+  let base = canonicalReadPath(root)
+  let full = canonicalReadPath(path)
+  if full.len <= base.len + 1 or not full.startsWith(base) or
+      full[base.len] notin {DirSep, AltSep}:
+    return ""
+  full[base.len + 1 .. ^1].replace(DirSep, '/')
+
+proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
+    repositoryRoot: string; untrackedPaths: openArray[string];
+    readSet: CapturedReadSet): UntrackedJudgement =
+  ## The untracked-inputs rule as a pure decision over the repository's
+  ## untracked files (repository-relative, as ``git status`` lists them) and
+  ## the run's read set. It runs nothing and signs nothing.
+  ##
+  ## * ``cuiStrict`` withholds whenever any untracked file exists.
+  ## * ``cuiReadSet`` withholds only for an untracked file the captured read
+  ##   set names. With no read set it issues, and ``note`` says the files
+  ##   could not be judged — it never guesses which files were read.
+  case mode
+  of cuiStrict:
+    result.offending = @untrackedPaths
+    result.withhold = result.offending.len > 0
+  of cuiReadSet:
+    if not readSet.captured:
+      if untrackedPaths.len > 0:
+        result.note = "no read set was captured for this run (" &
+          readSet.source & "), so whether the tests read the untracked " &
+          "files could not be judged; the certificate reports untracked = true"
+      return
+    var seen = initHashSet[string]()
+    for path in readSet.paths:
+      let relative = repositoryRelativePath(repositoryRoot, path)
+      if relative.len == 0:
+        continue
+      for entry in untrackedPaths:
+        if relative == entry and not seen.containsOrIncl(relative):
+          result.offending.add(relative)
+    result.offending.sort(system.cmp[string])
+    result.withhold = result.offending.len > 0
+
+proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
+  ## The files a monitored run read, from the io-mon depfile its capture
+  ## wrote: every path it opened, read, executed or listed. A depfile that is
+  ## missing or unreadable is ``captured = false``, never an empty set.
+  ##
+  ## An incomplete capture still counts: what it observed WAS read, so a hit
+  ## withholds; what it may have missed changes nothing, because without a
+  ## hit the certificate reports ``untracked = true`` either way.
+  var dep: MonitorDepFile
+  try:
+    dep = readMonitorDepFile(path)
+  except CatchableError as err:
+    return CapturedReadSet(captured: false,
+      source: "no usable read set in '" & path & "': " & err.msg)
+  result = CapturedReadSet(captured: true, source: path)
+  var seen = initHashSet[string]()
+  for record in dep.records:
+    if record.path.len == 0:
+      continue
+    if record.observationKind in {moFileOpen, moFileRead, moExecute,
+                                  moDirectoryEnumerate}:
+      if not seen.containsOrIncl(record.path):
+        result.paths.add(record.path)
 
 proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode): IssuancePreconditions =
-  ## REUSE the RA-21 gate: a certificate is issuable EXACTLY when the pre-push
-  ## gate would pass (closure clean + published + at the locked revisions).
-  ## We run the gate logic (NOT the publish side-effect) and translate its
-  ## first failure into an issuance-precondition reason + RA-28-style remedy.
+  ## REUSE the RA-21 gate for the SIBLINGS: a certificate is issuable only
+  ## when the pre-push gate would pass for them (clean + published + at the
+  ## locked revisions). We run the gate logic (NOT the publish side-effect)
+  ## and translate its first failure into an issuance-precondition reason +
+  ## RA-28-style remedy. The current repository is exempt from cleanliness
+  ## and publication: its working tree is what is certified, by content.
+  let savedLocks = suspendOptionalGitLocks()
+  defer: restoreOptionalGitLocks(savedLocks)
   result.platform = currentPlatformTag()
   var parsed = CheckArgs(
     mode: cmPrePush,
@@ -67530,8 +67846,9 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     # TC-3/RA-32 certificate stage when the gate is reused to decide whether a
     # cert is ISSUABLE. The real pre-push hook keeps it enabled.
     skipCertificateGate: true,
-    # Certify BEFORE push (Agents-Push-Gate.md §4.1): the current repo's own
-    # unpublished HEAD is the commit being certified, not a reason to refuse.
+    # Certify BEFORE push and before commit (Agents-Push-Gate.md §4.1,
+    # TC-8d): the current repo's own unpublished HEAD and its working-tree
+    # modifications are what is being certified, not reasons to refuse.
     issuingForCurrentHead: true,
     toolProvisioning:
       if toolProvisioning == tpmUnspecified: tpmPathOnly else: toolProvisioning)
@@ -67550,6 +67867,7 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     result.remedy = "investigate the workspace gate error and retry: " & err.msg
     return
   result.project = report.project
+  result.untrackedInputs = report.certificatePolicy.untrackedInputs
   if report.exitCode != 0 and report.failures.len > 0:
     let f = report.failures[0]
     result.offender = f.repo
@@ -67568,56 +67886,42 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
       # issued and the gate's own remedy is surfaced.
       result.kind = ipOffLock
     return
-  # Gate passed → issuable. Resolve the binding fields.
+  # Gate passed. A record-store project names its lock subtree here; a
+  # committed-lock project names none, and its lock is the ``repro.lock`` in
+  # the content (checked below once the content is known).
   result.lockFilePath = report.lockUpdate.lockFilePath
   result.lockRecordsDir =
     if result.lockFilePath.len > 0: parentDir(result.lockFilePath) else: ""
-  if result.lockRecordsDir.len == 0:
-    # The gate passed but no lock file was resolvable (a workspace with no
-    # lock subtree). Without a committed lock at the attested commit a
-    # verifier's framework-specific step has nothing to resolve, so decline
-    # rather than emit a certificate whose lock can never be checked.
-    result.kind = ipOffLock
-    result.offender = report.project
-    result.remedy = "create a workspace lock first — run 'repro workspace lock'"
-    return
-  # The current repo's HEAD is the commit the certificate binds to.
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
   let repoForHead =
     if currentRepo.len > 0: currentRepo else: parsed.workspaceRoot
-  let headRes = queryGitState(headShaQuery(repoForHead), identity)
-  if headRes.status == gqsOk:
-    result.commit = headRes.headSha
-  if result.commit.len == 0:
-    result.kind = ipOffLock
+  # ``base``: HEAD when there is one; an unborn branch has none, and the
+  # record then omits it (Standard §3.2.3).
+  let head = headCommitOrUnborn(identity, repoForHead)
+  if not head.ok:
+    result.kind = ipGateError
     result.offender = repoForHead
-    result.remedy = "commit your work so the certificate binds to a HEAD commit"
+    result.remedy = "could not read HEAD (" & head.diagnostic &
+      "); no certificate is issued rather than guessing"
     return
-  # MEASURE the two VCS-state fields rather than inferring them from the gate.
-  # The gate's cleanliness predicate is a conjunction ("nothing to report"),
-  # and the record needs the two halves separately and honestly.
+  result.commit = head.commit
+  # MEASURE ``untracked`` (and, for information, ``clean``) rather than
+  # inferring either from the gate.
   let observed = observeWorktreeState(identity, repoForHead)
   if not observed.ok:
     result.kind = ipGateError
     result.offender = repoForHead
-    result.remedy = "could not determine whether the working tree is clean (" &
+    result.remedy = "could not determine the working tree's state (" &
       observed.diagnostic & "); no certificate is issued rather than guessing"
     return
   result.clean = observed.clean
   result.untracked = observed.untracked
-  if not observed.clean:
-    # The clean-at-HEAD precondition is kept until TC-8d relaxes it. The gate
-    # passing does not by itself establish it, so it is checked here on the
-    # measurement rather than assumed.
-    result.kind = ipDirty
-    result.offender = repoForHead
-    result.remedy = "commit or stash the modified tracked files, then re-run"
-    return
-  # TC-8b: the record names the tested CONTENT. Computed by the TC-8a library
-  # over the working tree, in a temporary index, in the algorithm matching the
-  # repository's object format; ``base`` is HEAD, informational only.
+  result.untrackedPaths = observed.untrackedPaths
+  # The record names the tested CONTENT, computed by the TC-8a library over
+  # the working tree, in a temporary index, in the algorithm matching the
+  # repository's object format. A §3 state has no content id and is refused.
   let algorithm = repositoryContentAlgorithm(repoForHead)
   if not algorithm.ok:
     result.kind = ipGateError
@@ -67633,10 +67937,7 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
   of cioNoContentId:
     result.kind = ipNoContentId
     result.offender = repoForHead
-    var remedies: seq[string]
-    for finding in content.findings:
-      remedies.add(remedy(finding))
-    result.remedy = describe(content.findings) & " — " & remedies.join("; ")
+    result.remedy = describe(content.findings)
     return
   of cioCannotCompute, cioFailed:
     result.kind = ipGateError
@@ -67644,6 +67945,20 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     result.remedy = "could not compute the content id of the tested state (" &
       content.reason & "); no certificate is issued rather than guessing"
     return
+  if result.lockRecordsDir.len == 0 and report.recordStoreRoot.len == 0:
+    # A committed-lock project (no lock record store; a record-store project
+    # on an unborn branch names its store but no record yet): the lock the
+    # tests run with is the ``repro.lock`` in the tested content, and a
+    # verifier reads it from there (TC-8b). Content without a usable one yields a certificate no
+    # verifier would accept, so it is not issued.
+    let lock = readLockFromContent(workingTreeUnderEvaluation(repoForHead))
+    if lock.status != licPresent:
+      result.kind = ipNoLockInContent
+      result.offender = repoForHead
+      result.remedy = lock.detail
+      return
+  for path in report.closureCheckouts:
+    result.siblings.add(observeClosureCheckout(identity, path))
   result.repository = repoForHead
   result.content = content.id
   result.base = result.commit
@@ -67651,6 +67966,117 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     if report.lockUpdate.triggerRepo.len > 0: report.lockUpdate.triggerRepo
     else: result.project
   result.kind = ipOk
+
+proc changedPaths(identity: GitToolIdentity; repository, before,
+                  after: string): seq[string] =
+  ## The paths whose content differs between two ``git-tree-*`` content ids.
+  ## Both trees were written into the repository's object store by the
+  ## content-id computation. Empty when git cannot say.
+  let a = parseContentId(before)
+  let b = parseContentId(after)
+  if a.form != cifWellFormed or b.form != cifWellFormed or
+      a.algorithm == caManifestV1Sha256 or b.algorithm == caManifestV1Sha256:
+    return
+  let res = gitRunPlainQuery(identity, ["-C", repository, "diff-tree", "-r",
+    "-z", "--no-renames", "--name-only", a.digest, b.digest])
+  if res.code != 0:
+    return
+  for path in res.output.split('\0'):
+    if path.len > 0:
+      result.add(path)
+
+proc confirmTestedState*(pre: IssuancePreconditions;
+    readSet: CapturedReadSet): TestedStateVerdict =
+  ## After the last test command: is the state the run started from still
+  ## the state, so that ``pre.content`` is what every command executed
+  ## against (Standard §3.2)? And do the untracked files permit issuing?
+  ##
+  ## Computes the content id again, observes every sibling again, measures
+  ## the untracked files again, and judges them by ``pre.untrackedInputs``.
+  ## Any doubt withholds; nothing here changes a run's exit code.
+  let savedLocks = suspendOptionalGitLocks()
+  defer: restoreOptionalGitLocks(savedLocks)
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  let algorithmName = parseContentId(pre.content).algorithmName
+  let after = computeContentId(pre.repository, workingTreeState(),
+    algorithmName)
+  case after.outcome
+  of cioComputed:
+    discard
+  of cioNoContentId:
+    return TestedStateVerdict(reason: tswNoContentId,
+      message: "when the run concluded, " & describe(after.findings),
+      remedy: "leave the state alone while the tests run, then re-run " &
+        "'repro test'")
+  of cioCannotCompute, cioFailed:
+    return TestedStateVerdict(reason: tswUnobservable,
+      message: "the content id could not be computed again after the run (" &
+        after.reason & ")",
+      remedy: "investigate the git error and re-run 'repro test'; no " &
+        "certificate is issued rather than guessing")
+  if after.id != pre.content:
+    let paths = changedPaths(identity, pre.repository, pre.content, after.id)
+    return TestedStateVerdict(reason: tswContentChanged,
+      message: "their content id was " & pre.content & " before the first " &
+        "test command and " & after.id & " after the last one" &
+        (if paths.len > 0: "; changed: " & paths.join(", ") else: "") &
+        ", so no single state was tested",
+      remedy: "keep tracked files unchanged while the tests run, then re-run " &
+        "'repro test': finish the edit first, and run steps that rewrite " &
+        "tracked files (a formatter, a code generator, a lock refresh) " &
+        "before the tests rather than inside them")
+  for before in pre.siblings:
+    let now = observeClosureCheckout(identity, before.path)
+    if now.head != before.head or now.status != before.status:
+      var what: seq[string]
+      if now.head != before.head:
+        what.add("HEAD moved from " & before.head & " to " & now.head)
+      if now.status != before.status:
+        what.add("its working tree changed (status now: " &
+          (if now.status.len > 0: now.status.replace("\n", "; ")
+           else: "clean") & ")")
+      return TestedStateVerdict(reason: tswSiblingMoved,
+        message: before.path & ": " & what.join("; "),
+        remedy: "leave the develop-mode siblings unchanged while the tests " &
+          "run (finish that work first), then re-run 'repro test'")
+  let observed = observeWorktreeState(identity, pre.repository)
+  if not observed.ok:
+    return TestedStateVerdict(reason: tswUnobservable,
+      message: "untracked files could not be checked after the run (" &
+        observed.diagnostic & ")",
+      remedy: "investigate the git error and re-run 'repro test'; no " &
+        "certificate is issued rather than guessing")
+  # Untracked files present at either point were present during the run.
+  var untrackedPaths = pre.untrackedPaths
+  for path in observed.untrackedPaths:
+    if path notin untrackedPaths:
+      untrackedPaths.add(path)
+  untrackedPaths.sort(system.cmp[string])
+  result.untracked = pre.untracked or observed.untracked
+  result.untrackedPaths = untrackedPaths
+  let judgement = judgeUntrackedInputs(pre.untrackedInputs, pre.repository,
+    untrackedPaths, readSet)
+  if judgement.withhold:
+    result.reason = tswUntrackedInput
+    case pre.untrackedInputs
+    of cuiStrict:
+      result.message = "untracked files exist, and [certificates] " &
+        "untracked_inputs = \"strict\" withholds on any: " &
+        judgement.offending.join(", ")
+      result.remedy = "add each file the tests need ('git add " &
+        judgement.offending.join(" ") & "') and ignore (.gitignore) or " &
+        "delete the rest, then re-run 'repro test'; \"read-set\" withholds " &
+        "only for untracked files a captured read set shows the tests read"
+    of cuiReadSet:
+      result.message = "the tests read untracked files, which are not part " &
+        "of the content a certificate names: " &
+        judgement.offending.join(", ") & " (read set: " & readSet.source & ")"
+      result.remedy = "add the file ('git add " &
+        judgement.offending.join(" ") & "') so its content is part of what " &
+        "is certified, or ignore it (.gitignore) if it is generated or " &
+        "machine-local, then re-run 'repro test'"
+    return
+  result.note = judgement.note
 
 proc certificateNoOpDecision*(existing: openArray[TestCertificate];
     pre: IssuancePreconditions; requestedTargets: seq[string];
@@ -67715,8 +68141,10 @@ proc issueCertificate*(pre: IssuancePreconditions;
   ##
   ##   * ``vcs.content`` is the content id ``evaluateIssuancePreconditions``
   ##     computed (TC-8a, a temporary index over the working tree) and
-  ##     ``vcs.base`` is HEAD. Issuance still requires a clean tree at HEAD
-  ##     (relaxing that is TC-8d), so the content equals HEAD's tree.
+  ##     ``vcs.base`` is HEAD (omitted on an unborn branch). The working tree
+  ##     need not be clean: its content is what is named, and the caller
+  ##     issues only after ``confirmTestedState`` found the same content after
+  ##     the run and set ``pre.untracked`` to what it measured.
   ##   * PATH SCOPING (``vcs.paths``) is not issued. The standard permits it
   ##     only for a producer that knows what its tests read, and FORBIDS it
   ##     otherwise: "a producer that cannot bound its tests' input set MUST
@@ -68239,10 +68667,15 @@ proc runFixtureCmd(cmd: seq[string]; cwd: string): tuple[code: int; output: stri
     $epochTime() & "-" & $getCurrentProcessId() & ".log")
   # Build an argv that pipes the original command through ``sh -c`` with
   # explicit stdout/stderr redirection.  When the caller already wraps
-  # in ``sh -c``, we append the redirection to the existing -c body.
+  # in ``sh -c``, the existing -c body is redirected AS A GROUP. Appending
+  # the redirection to the body text attached it to the body's LAST command
+  # only, where it overrode that command's own redirection (a test step
+  # `echo x >> tracked.txt` wrote to the log, not to the file) and where a
+  # trailing `# comment` swallowed it. The newline before `}` ends any such
+  # comment.
   var argv: seq[string] = @[]
   if cmd.len >= 3 and cmd[0] == "sh" and cmd[1] == "-c":
-    let body = cmd[2] & " >'" & logPath & "' 2>&1"
+    let body = "{ " & cmd[2] & "\n} >'" & logPath & "' 2>&1"
     argv = @["sh", "-c", body]
   else:
     var quoted: seq[string] = @[]
@@ -69090,9 +69523,11 @@ proc runReproTestCommand*(args: openArray[string];
     #   1. Evaluate the issuance preconditions by REUSING the RA-21 gate.
     #   2. If a re-certify with NO relevant change → NO-OP (keep the existing
     #      cert, do NOT re-run the tests).
-    #   3. Otherwise run the tests; on a real pass in a clean state, issue a
-    #      certificate; on dirty/unpushed/off-lock, run but withhold the cert
-    #      and print the ambient remedy.
+    #   3. Otherwise run the tests; on a real pass, when the tested state was
+    #      one state (TC-8d: same content before and after, siblings
+    #      unmoved, untracked inputs allowed), issue a certificate naming that
+    #      content; otherwise, or on a dirty/unpushed/off-lock sibling, run
+    #      but withhold the cert and print the ambient remedy.
     if not opts.certify:
       # ``--no-certify``: just run, no issuance.
       var outcome: TestRunOutcome
@@ -69145,11 +69580,12 @@ proc runReproTestCommand*(args: openArray[string];
     if pre.kind != ipOk:
       let label =
         case pre.kind
-        of ipDirty: "working tree dirty"
+        of ipDirty: "a develop-mode sibling's working tree is dirty"
         of ipUnpublished: "dependency has unpushed commits"
         of ipOffLock: "repo not at the locked revision"
         of ipNoWorkspace: "not a workspace"
         of ipNoContentId: "the tested state has no content id"
+        of ipNoLockInContent: "the tested content carries no usable lock"
         of ipGateError: "workspace gate error"
         of ipOk: ""
       stderr.writeLine("repro test: no certificate — " & label &
@@ -69159,10 +69595,23 @@ proc runReproTestCommand*(args: openArray[string];
       stderr.writeLine("repro test: no certificate — the run did not pass " &
         "(result is not 'passed'); fix the failing targets and re-run")
     else:
+      # TC-8d: one tested state. The content id, the siblings and the
+      # untracked files are measured again now that the last command ran;
+      # the certificate names ``pre.content`` only if it is still the state.
+      # This path captures no read set (see ``noReadSetOnFixturePath``).
+      let tested = confirmTestedState(pre, noReadSetOnFixturePath)
+      if tested.reason != tswNone:
+        stderr.writeLine("repro test: no certificate — " & $tested.reason &
+          ": " & tested.message & " — " & tested.remedy)
+        return code
+      if tested.note.len > 0:
+        stderr.writeLine("repro test: " & tested.note)
+      var confirmed = pre
+      confirmed.untracked = tested.untracked
       # The attested commands are the argument vectors this run ACTUALLY
       # executed, in execution order — captured by the runner, never
       # reconstructed from the flags.
-      var cert = issueCertificate(pre, outcome.passedTargets,
+      var cert = issueCertificate(confirmed, outcome.passedTargets,
         outcome.commands, "repro-test@" & issuerHostTag())
       if cert.commands.len == 0:
         # A certificate recording no command asserts nothing, and the standard
@@ -69203,8 +69652,9 @@ proc runReproTestCommand*(args: openArray[string];
         writeCertificateFile(cert, opts.certificateOut)
       stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
         " covering [" & outcome.passedTargets.join(", ") & "] for " &
-        cert.platform & " for content " & cert.vcs.content & " (base " &
-        cert.vcs.base & ") → " & delivered.path &
+        cert.platform & " for content " & cert.vcs.content &
+        (if cert.vcs.base.len > 0: " (base " & cert.vcs.base & ")"
+         else: " (unborn branch: no base)") & " → " & delivered.path &
         (if opts.certificateOut.len > 0: " (copy: " & opts.certificateOut &
            ")" else: "") &
         " (signed " & certificateSignatureAlgorithm & ", key_id=" &
@@ -69239,16 +69689,20 @@ proc runCertifyCheckSet*(args: openArray[string];
   ##
   ## Runs the repository's pre-commit check set as ONE certifiable target
   ## (``pre-commit``) through the ordinary issuance path, so every TC rule
-  ## holds unchanged: a clean tree, published siblings at their locked
-  ## revisions, a real passing run, a daemon signature, and the idempotent
-  ## no-op when a covering certificate already exists. The current repo's own
-  ## HEAD need not be published (§4.1). On success the certificate is in the
+  ## holds unchanged: clean, published siblings at their locked revisions, a
+  ## real passing run, one tested state, a daemon signature, and the
+  ## idempotent no-op when a covering certificate already exists. The current
+  ## repository need be neither published (§4.1) nor committed (TC-8d): its
+  ## working tree is certified by content, and a check set that rewrites a
+  ## tracked file mid-run (an autofix) changes that content, so nothing is
+  ## issued. On success the certificate is in the
   ## standard local certificate store (TC-8c) and is attached, keyed by the
   ## tree it names, to ``certificateNotesRef`` so a push carries it to the
   ## gateway and a forward carries it upstream.
   ##
-  ## Exit: 0 = a covering certificate exists for HEAD; 2 = the check set
-  ## failed or the state is not certifiable (the reason is printed);
+  ## Exit: 0 = a covering certificate exists for the working tree; 2 = the
+  ## check set failed or the state is not certifiable (the reason is
+  ## printed);
   ## 1 = usage or tooling error.
   var currentRepo, workspaceRoot, commandOverride: string
   var passThrough: seq[string]
@@ -69294,8 +69748,8 @@ proc runCertifyCheckSet*(args: openArray[string];
       "nor pre-commit is on PATH); pass --check-set-command=SHELL")
     return 1
   # The run's working files (fixture, test-logs/) go to a scratch directory,
-  # never the repository: a check set that dirtied the tree it certifies
-  # would make its own push fail the clean-tree gate.
+  # never the repository: files the run itself wrote there would be
+  # untracked files beside the content being certified.
   let scratch = createTempDir("repro-certify-check-set-", "")
   defer: removeDir(scratch)
   var edge = newJObject()
@@ -69321,16 +69775,12 @@ proc runCertifyCheckSet*(args: openArray[string];
   let code =
     try: runReproTestCommand(testArgs, publicCliPath)
     finally: setCurrentDir(previousDir)
-  let head = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(currentRepo) &
-    " rev-parse HEAD")
-  if head.exitCode != 0:
-    stderr.writeLine("repro certify --check-set: cannot read HEAD of " &
-      currentRepo)
-    return 1
-  let commit = head.output.strip()
-  # TC-8c: the issued certificate is in the local store under the content id
-  # of the tested state — HEAD's tree, the tree being clean.
-  let evaluated = commitUnderEvaluation(currentRepo, commit)
+  # TC-8d: the working tree is what was certified, modified or not. The
+  # issued certificate is in the local store under the content id of the
+  # tracked files as they are now — the tested state, when issuance found it
+  # unchanged after the run. A check set that rewrote a tracked file (an
+  # autofix) changed that content, so issuance withheld and nothing is found.
+  let evaluated = workingTreeUnderEvaluation(currentRepo)
   let lookup = findCertificatesInLocalStore(evaluated)
   var cert: TestCertificate
   var certPath = ""
@@ -69344,8 +69794,8 @@ proc runCertifyCheckSet*(args: openArray[string];
       certPath = f.name
       break
   if code != 0 or certPath.len == 0:
-    stderr.writeLine("repro certify --check-set: NO certificate for " &
-      commit & " — " &
+    stderr.writeLine("repro certify --check-set: NO certificate for the " &
+      "working tree of " & currentRepo & " — " &
       (if code != 0: "the check set failed (output above)"
        else: "the state is not certifiable (reason above)"))
     for problem in lookup.problems:
@@ -69353,8 +69803,14 @@ proc runCertifyCheckSet*(args: openArray[string];
     return 2
   # Attach once, keyed by the tree its content names on the shared notes ref
   # (D10, D12): a re-certify that was a no-op must not append a duplicate.
+  let noteKey = certificateNoteKey(cert.vcs.content)
+  if not noteKey.ok:
+    stderr.writeLine("repro certify --check-set: certificate issued at " &
+      certPath & " but its content id names no tree to note it on: " &
+      noteKey.problem)
+    return 1
   var alreadyAttached = false
-  for existing in readAttachedCertificates(gitBin, currentRepo, commit):
+  for existing in readAttachedCertificates(gitBin, currentRepo, noteKey.oid):
     if existing.signature.value == cert.signature.value:
       alreadyAttached = true
   if not alreadyAttached:
@@ -69364,8 +69820,9 @@ proc runCertifyCheckSet*(args: openArray[string];
         certPath & " but attaching it as a git note failed: " &
         att.diagnostic)
       return 1
-  stderr.writeLine("repro certify --check-set: " & commit[0 ..< 12] &
-    " is certified for '" & checkSetTarget & "' on " & cert.platform &
+  stderr.writeLine("repro certify --check-set: content " &
+    cert.vcs.content & " is certified for '" & checkSetTarget & "' on " &
+    cert.platform &
     " (" & certPath & ")")
   0
 

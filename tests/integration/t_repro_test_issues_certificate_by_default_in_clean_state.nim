@@ -216,8 +216,8 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
       let cert = readCertificateFile(issuedFiles[0])
       check cert.schema == testCertificateSchemaV1
       # TC-8b: [certificate.vcs] names the tested CONTENT — the content id
-      # of the tracked files, which under the (still enforced) clean
-      # precondition is HEAD's tree — and HEAD only as the informational
+      # of the tracked files, which for this unmodified working tree is
+      # HEAD's tree — and HEAD only as the informational
       # ``base``. ``untracked`` is MEASURED.
       let libATree = requireGit(q(gitBin) & " -C " &
         q(fx.workspaceRoot / "lib-a") & " rev-parse " & fx.libASha &
@@ -340,10 +340,19 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
         " cat-file -e " & newSha & "^{commit}")
       check originHas.code != 0
 
-      # Still REFUSED when the tree is dirty: the exemption is about
-      # publication only, never cleanliness.
+      # TC-8d: an untracked file beside the unpushed HEAD no longer refuses.
+      # It is outside the content, so the content is still HEAD's tree, and
+      # the record says ``untracked = true`` (this path captures no read set,
+      # so the default untracked-inputs mode issues and says so).
       removeDir(fx.certStore)
       writeFile(libA / "scratch.txt", "uncommitted\n")
       let resDirty = runReproTest(fx, fixtureJson, @["--certify"])
-      check (not dirExists(fx.certStore / "v1"))
-      check resDirty.output.contains("no certificate")
+      checkpoint(resDirty.output)
+      check resDirty.code == 0
+      let withScratch = storedCerts(fx, gitBin, newSha)
+      check withScratch.len == 1
+      if withScratch.len == 1:
+        let cert = readCertificateFile(withScratch[0])
+        check cert.vcs.untracked
+        check cert.vcs.base == newSha
+      check resDirty.output.contains("no read set was captured")

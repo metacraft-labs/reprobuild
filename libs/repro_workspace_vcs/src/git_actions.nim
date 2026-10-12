@@ -736,7 +736,13 @@ proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: boo
   # every git command print ``warning: unable to find all commit-graph
   # files`` on stderr; merged into stdout that one line made a pristine tree
   # read as dirty and the pre-push gate refuse the push.
-  let res = runGitQuery(payload, ["-C", repoPath, "status", "--porcelain"])
+  #
+  # ``--no-optional-locks``: this is an observation. A plain ``git status``
+  # refreshes the index's stat data and writes the index back when it can
+  # take the lock, which races a user staging in another terminal while a
+  # push gate, or a certificate issuance reusing it, observes the tree.
+  let res = runGitQuery(payload,
+    ["--no-optional-locks", "-C", repoPath, "status", "--porcelain"])
   if res.exitCode != 0:
     return (ok: false, clean: false,
       diagnostic: "git status --porcelain failed (" & $res.exitCode & "): " &
@@ -2340,7 +2346,8 @@ proc queryGitState*(query: GitQueryAction;
     # 2. File Status
     if query.queryFiles:
       let statusRes = runGitQuery(payload,
-        ["-C", query.repoPath, "status", "--porcelain"])
+        ["--no-optional-locks", "-C", query.repoPath, "status",
+         "--porcelain"])
       if statusRes.exitCode == 0:
         isClean = true
         for rawLine in statusRes.output.splitLines():
