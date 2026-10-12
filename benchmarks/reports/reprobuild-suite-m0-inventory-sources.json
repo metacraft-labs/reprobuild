@@ -16517,7 +16517,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

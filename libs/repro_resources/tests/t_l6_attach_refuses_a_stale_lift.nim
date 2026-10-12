@@ -266,6 +266,36 @@ suite "Shared-Development-Services §4.3 — a stale lift is a refusal":
     check attachDecision(runningFrom("l6AttBase"), snapshotOf("l6AttBase"),
       established).outcome == saoRefuseStaleLift
 
+  test "establishing a generation does NOT re-stamp, so staleness does not launder":
+    ## THE RULE THIS KILLS, stated as a defect rather than a preference:
+    ## a reader that re-stamped the artifact while establishing its
+    ## generation would answer `sagStale` ONCE and `sagFresh` for ever
+    ## after, because the stamp it wrote records the CURRENT closure
+    ## against the OLD artifact. The staleness would be laundered on
+    ## disk, and the next `repro up` would attach silently -- which is
+    ## exactly the defect section 4.3's precondition exists to prevent,
+    ## re-introduced by the freshness check itself.
+    ##
+    ## That prohibition was prose-only in three comments and nothing
+    ## mechanical enforced it: a mutation adding the re-stamp survived a
+    ## full run of this file. Establishing three times is the assertion
+    ## that converts it into a control.
+    let tree = newOwnerTree("nolaunder")
+    defer: removeDir(tree.root)
+    liftIt(tree)
+    writeFile(tree.root / "shared_helper.nim", HelperV2)
+    let first = establish(tree)
+    let second = establish(tree)
+    let third = establish(tree)
+    check first.generation == sagStale
+    check second.generation == sagStale
+    check third.generation == sagStale
+    ## And the artifact must still refuse, not merely report: a reader
+    ## that laundered the stamp would pass this line while failing the
+    ## three above, so assert the decision too.
+    check attachDecision(runningFrom("l6AttBase"), snapshotOf("l6AttBase"),
+      third).outcome == saoRefuseStaleLift
+
   test "an ADDED import grows the closure, and that is a stale lift":
     ## The membership case. A check that re-hashed only the files the
     ## record NAMES would be blind to it, which is why the closure is
