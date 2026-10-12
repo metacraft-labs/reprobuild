@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1913,
+    "nimTestBinaries": 1918,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 606,
+    "pureUnitTests": 607,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1930
+    "testEntries": 1935
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -329,7 +329,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 44,
+      "count": 45,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -365,6 +365,7 @@
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
+        "libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim",
         "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
         "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
         "libs/repro_project_dsl/tests/t_dsl_outputs_forward_reference_error.nim",
@@ -1110,9 +1111,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 1036,
+      "integration": 1040,
       "platform/destructive": 120,
-      "pure unit": 606,
+      "pure unit": 607,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1291,9 +1292,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1913,
+    "nimTestBinaryCount": 1918,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1930
+    "testEntryCount": 1935
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14947,6 +14948,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_certificate_export_table_resolution",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dependency_lists_are_not_merged_at_serialization",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -25827,6 +25845,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_certificate_declaration_exports_a_selectable_name",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_certificate_declaration_exports_a_selectable_name.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_certificate_matches_by_content_never_by_base",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -25840,6 +25873,21 @@
       "source": "tests/integration/t_certificate_matches_by_content_never_by_base.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_certificate_name_collision_is_a_compile_error",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_certificate_name_collision_is_a_compile_error.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28470,6 +28518,21 @@
       "source": "tests/integration/t_hpke_rfc9180_vectors.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_implicit_test_aggregate_is_certificate_producing",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_implicit_test_aggregate_is_certificate_producing.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31357,6 +31420,21 @@
       "source": "tests/integration/t_pkgconf_bootstrap_provisioning.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_plan_reports_its_certificate_producing_nodes",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_plan_reports_its_certificate_producing_nodes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

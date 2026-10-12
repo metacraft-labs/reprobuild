@@ -27,6 +27,11 @@ var targetExportRegistry: TargetExportTable = TargetExportTable()
   ## emitting the GraphFragment so ``repro graph`` / ``repro why`` and
   ## the M2 CLI resolver consume one source of truth.
 
+var certificateDeclarationRegistry: seq[CertificateExportEntry] = @[]
+  ## Test-Certificates TC-9a: the ``certificate "<name>", <handle>``
+  ## declarations of the package whose ``build:`` body is running,
+  ## resolved by ``resolveCertificateExports``.
+
 var providerStartupBodyDepth = 0
   ## Nesting depth of the STARTUP PASS over a package's ``build:`` body.
   ##
@@ -455,6 +460,11 @@ const
     byte(ord('E')), byte(ord('T'))]
     ## Named-Targets M1: tag for the project-scoped target-export table
     ## payload carried as a metadata node on the GraphFragment.
+  CertificateExportTablePayloadMagic = [byte(ord('R')), byte(ord('C')),
+    byte(ord('E')), byte(ord('T'))]
+    ## Test-Certificates TC-9a: tag for a package's certificate-export
+    ## table, carried as a metadata node beside the target-export table.
+  CertificateExportTablePayloadVersion = 1'u16
   TargetExportTablePayloadVersion = 3'u16
     ## Spec-Implementation M5: schema bump per
     ## Build-Graph-Collections.md §"Persistence and the Target-Export
@@ -2420,6 +2430,205 @@ proc registerRunEdgeExport*(name, owningPackage, actionId: string;
     runArgs: @runArgs,
     consumes: @consumes))
 
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9a — ``certificate "<name>", <handle>``.
+#
+# Test-Certificates.md §"Marking a node": a build-graph node is marked as
+# producing a NAMED certificate. The name is a target name in the same
+# namespace as ``target "<name>", <handle>``, so it is exported into the
+# target-export table, and the marking itself travels in a separate
+# certificate-export table so the engine can ask "does this plan contain a
+# certificate-producing node?" from the stored graph alone.
+#
+# The declarations are collected while the ``build:`` body runs and resolved
+# by ``resolveCertificateExports`` when the package's fragment is assembled,
+# because only then are every target and every implicit name known.
+# ---------------------------------------------------------------------------
+
+proc resetCertificateRegistry*() {.dynOrStatic.} =
+  ## Clear the per-package certificate declarations. Called by
+  ## ``buildPackageFragment`` between package evaluations.
+  certificateDeclarationRegistry.setLen(0)
+
+proc registeredCertificateDeclarations*(): seq[CertificateExportEntry]
+    {.dynOrStatic.} =
+  ## The declarations recorded so far, in declaration order, before
+  ## resolution (``owningPackage`` is still empty).
+  certificateDeclarationRegistry
+
+proc registerCertificateDeclaration*(name: string;
+                                     nodeKind: CertificateNodeKind;
+                                     node, sourceFile: string;
+                                     sourceLine: int) {.dynOrStatic.} =
+  ## Record one ``certificate "<name>", <handle>`` declaration. The
+  ## ``certificate`` templates below call this with the call site, so a
+  ## collision diagnostic can name it.
+  certificateDeclarationRegistry.add(CertificateExportEntry(
+    name: name,
+    nodeKind: nodeKind,
+    node: node,
+    sourceFile: sourceFile,
+    sourceLine: sourceLine))
+
+template certificate*(certName: string; handle: BuildActionDef) =
+  ## Mark a build edge as producing the named certificate
+  ## (Test-Certificates.md §"Marking a node"). ``certName`` becomes a target
+  ## name exactly as ``target certName, handle`` would make it, so
+  ## ``repro test <certName>`` and ``repro build <certName>`` select the edge.
+  block:
+    const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    registerCertificateDeclaration(certName, cnkAction, handle.id,
+      reproCertificateSite.filename, reproCertificateSite.line)
+
+template certificate*(certName: string; handle: BuildTargetDef) =
+  ## Mark a build target — a ``target``, an ``aggregate`` or a ``collect``
+  ## — as producing the named certificate. The usual form names the
+  ## aggregate after the certificate:
+  ## ``certificate "unit-suite", aggregate("unit-suite", @[unit, integration])``.
+  block:
+    const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    registerCertificateDeclaration(certName, cnkTarget, handle.name,
+      reproCertificateSite.filename, reproCertificateSite.line)
+
+const implicitCertificateName* = "test"
+  ## Operator decision D15 (Test-Certificates TC-9a): whatever a plain
+  ## ``repro test`` builds in a package — the node the selector ``test``
+  ## resolves to — is marked ``certificate "test"`` with no declaration.
+
+proc certificateDeclarationSite(file: string; line: int): string =
+  if file.len == 0:
+    "an unrecorded source location"
+  else:
+    file & ":" & $line
+
+proc implicitTestCertificate(owningPackage: string;
+                             targets: openArray[BuildTargetDef]):
+    CertificateExportEntry =
+  ## D15: the node a plain ``repro test`` builds in this package, marked
+  ## ``certificate "test"``; an empty ``name`` when the package has none.
+  ##
+  ## ``repro test`` is ``repro build test``, and nothing synthesises a
+  ## ``test`` selection from test edges: a project with no ``test`` name
+  ## gets the ordinary unknown-target error. So the marking follows the
+  ## selector ``test`` through the order ``lowerProviderSnapshot``
+  ## (``resolveSelectorToActionId`` in ``repro_cli_support``) resolves it:
+  ## an edge whose action id is ``test``, then a build target named
+  ## ``test`` (``target``, ``aggregate`` or ``collect``), then a row of the
+  ## target-export table named ``test`` — an edge whose implicit name is
+  ## ``test``, for instance. Keep the two orders in step.
+  for action in buildActionRegistry:
+    if action.id == implicitCertificateName:
+      return CertificateExportEntry(name: implicitCertificateName,
+        owningPackage: owningPackage, nodeKind: cnkAction, node: action.id,
+        implicit: true)
+  for target in targets:
+    if target.name == implicitCertificateName:
+      return CertificateExportEntry(name: implicitCertificateName,
+        owningPackage: owningPackage, nodeKind: cnkTarget, node: target.name,
+        implicit: true, sourceFile: target.sourceFile,
+        sourceLine: target.sourceLine)
+  for row in targetExportRegistry.entries:
+    if row.name != implicitCertificateName or
+        row.owningPackage != owningPackage:
+      continue
+    var isTarget = false
+    for target in targets:
+      if target.name == row.actionId:
+        isTarget = true
+        break
+    return CertificateExportEntry(name: implicitCertificateName,
+      owningPackage: owningPackage,
+      nodeKind: (if isTarget: cnkTarget else: cnkAction),
+      node: row.actionId, implicit: true, sourceFile: row.sourceFile,
+      sourceLine: row.sourceLine)
+
+proc resolveCertificateExports*(owningPackage: string;
+                                targets: var seq[BuildTargetDef]):
+    CertificateExportTable {.dynOrStatic.} =
+  ## Resolve this package's certificate declarations into its
+  ## certificate-export table, and export each certificate name into the
+  ## target-export table. Called by ``buildPackageFragment`` after the
+  ## ``build:`` body ran and the explicit target rows were registered.
+  ##
+  ## * A name that already selects the marked node needs no new target: the
+  ##   ``aggregate("unit-suite", ...)`` a ``certificate "unit-suite"`` wraps,
+  ##   or the edge an implicit or ``target`` name already points at.
+  ## * Otherwise the name is exported over the handle, appended to
+  ##   ``targets`` as ``target`` (one edge) or as a one-member ``aggregate``
+  ##   (a target), so the package's fragment emits it like any other.
+  ## * A name declared twice, or one another export already uses for a
+  ##   different node, raises naming both sites. ``test`` is the exception
+  ##   to the second rule: an explicit ``certificate "test", h`` replaces the
+  ##   implicit marking of the ``test`` target instead of colliding with it.
+  ## * With no ``certificate "test", ...`` declaration, the node the
+  ##   selector ``test`` resolves to is marked implicitly (D15; see
+  ##   ``implicitTestCertificate``).
+  ##
+  ## The compile-time check in the ``package`` macro reports the literal
+  ## cases first, at the declarations; this is the check for names and
+  ## handles that are only known when the body runs.
+  var declaredTest = false
+  for i in 0 ..< certificateDeclarationRegistry.len:
+    var entry = certificateDeclarationRegistry[i]
+    entry.owningPackage = owningPackage
+    let site = certificateDeclarationSite(entry.sourceFile, entry.sourceLine)
+    if entry.name.len == 0:
+      raise newException(ValueError,
+        "certificate declared with an empty name at " & site)
+    for j in 0 ..< i:
+      let earlier = certificateDeclarationRegistry[j]
+      if earlier.name == entry.name:
+        raise newException(ValueError,
+          "certificate name '" & entry.name & "' is declared twice in " &
+            "package '" & owningPackage & "': first at " &
+            certificateDeclarationSite(earlier.sourceFile,
+              earlier.sourceLine) & ", again at " & site)
+    if entry.name == implicitCertificateName:
+      declaredTest = true
+    var selectsNode = entry.nodeKind == cnkTarget and entry.node == entry.name
+    var hasOther = false
+    var other: TargetExportEntry
+    if not selectsNode:
+      for row in targetExportRegistry.entries:
+        if row.name != entry.name or row.owningPackage != owningPackage:
+          continue
+        if entry.nodeKind == cnkAction and row.actionId == entry.node and
+            row.kind in {tekImplicit, tekExplicit}:
+          selectsNode = true
+        elif not hasOther:
+          hasOther = true
+          other = row
+    if hasOther and not selectsNode:
+      if entry.name == implicitCertificateName:
+        # D15: the explicit handle replaces the implicit marking; the
+        # ``test`` target itself is left as declared.
+        discard
+      else:
+        raise newException(ValueError,
+          "certificate name '" & entry.name & "' declared at " & site &
+            " collides with the target '" & entry.name & "' declared at " &
+            certificateDeclarationSite(other.sourceFile, other.sourceLine) &
+            " in package '" & owningPackage & "': a certificate name is a " &
+            "target name, so it must name the same node or a new name")
+    elif not selectsNode:
+      let exported =
+        case entry.nodeKind
+        of cnkAction:
+          BuildTargetDef(name: entry.name, actions: @[entry.node],
+            kind: btkTarget, sourceFile: entry.sourceFile,
+            sourceLine: entry.sourceLine)
+        of cnkTarget:
+          BuildTargetDef(name: entry.name, targets: @[entry.node],
+            kind: btkAggregate, sourceFile: entry.sourceFile,
+            sourceLine: entry.sourceLine)
+      targets.add(exported)
+      registerExplicitTargetExport(exported, owningPackage)
+    result.entries.add(entry)
+  if not declaredTest:
+    let implicitEntry = implicitTestCertificate(owningPackage, targets)
+    if implicitEntry.name.len > 0:
+      result.entries.add(implicitEntry)
+
 proc resetStateGroupRegistry*() {.dynOrStatic.} =
   ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the
   ## collected named resource subgraphs.
@@ -4168,6 +4377,68 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
 
 proc targetExportTablePayload*(table: TargetExportTable): string {.dynOrStatic.} =
   fromBytes(encodeTargetExportTablePayload(table))
+
+proc encodeCertificateExportTablePayload*(table: CertificateExportTable):
+    seq[byte] {.dynOrStatic.} =
+  ## Test-Certificates TC-9a: SSZ-style frame around a package's
+  ## certificate-export table, the payload of the
+  ## ``reprobuild.certificate-export-table.v1`` metadata node. Same framing
+  ## as the target-export table (magic, u16 version, u32 length).
+  var payload: seq[byte] = @[]
+  payload.writeU32Le(uint32(table.entries.len))
+  for entry in table.entries:
+    payload.writeString(entry.name)
+    payload.writeString(entry.owningPackage)
+    payload.writeByte(byte(ord(entry.nodeKind)))
+    payload.writeString(entry.node)
+    payload.writeByte(if entry.implicit: 1'u8 else: 0'u8)
+    payload.writeString(entry.sourceFile)
+    payload.writeU32Le(uint32(max(entry.sourceLine, 0)))
+  result.add(CertificateExportTablePayloadMagic)
+  result.writeU16Le(CertificateExportTablePayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeCertificateExportTablePayload*(bytes: openArray[byte]):
+    CertificateExportTable {.dynOrStatic.} =
+  ## Decode ``encodeCertificateExportTablePayload``. Every malformed shape
+  ## raises; nothing is repaired.
+  if bytes.len < 10:
+    raisePayload("truncated certificate export table envelope")
+  for i in 0 ..< CertificateExportTablePayloadMagic.len:
+    if bytes[i] != CertificateExportTablePayloadMagic[i]:
+      raisePayload("unknown certificate export table payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != CertificateExportTablePayloadVersion:
+    raisePayload("unsupported certificate export table payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("certificate export table payload length mismatch")
+  let entryCount = int(readU32Le(bytes, pos))
+  result.entries = newSeq[CertificateExportEntry](entryCount)
+  for i in 0 ..< entryCount:
+    var entry: CertificateExportEntry
+    entry.name = readString(bytes, pos)
+    entry.owningPackage = readString(bytes, pos)
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(high(CertificateNodeKind))):
+      raisePayload("invalid certificate export node kind")
+    entry.nodeKind = CertificateNodeKind(kindByte)
+    entry.node = readString(bytes, pos)
+    let implicitByte = readByte(bytes, pos)
+    if implicitByte > 1'u8:
+      raisePayload("invalid certificate export implicit flag")
+    entry.implicit = implicitByte == 1'u8
+    entry.sourceFile = readString(bytes, pos)
+    entry.sourceLine = int(readU32Le(bytes, pos))
+    result.entries[i] = entry
+  if pos != bytes.len:
+    raisePayload("trailing certificate export table payload bytes")
+
+proc certificateExportTablePayload*(table: CertificateExportTable): string
+    {.dynOrStatic.} =
+  fromBytes(encodeCertificateExportTablePayload(table))
 
 proc callIdentity*(call: PublicCliCall): string {.dynOrStatic.} =
   var parts = @[call.packageName, call.executableName, call.subcommand,
