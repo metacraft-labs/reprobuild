@@ -241,7 +241,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5",
+        "rev": "ffda2865615bf2ee7924b8ad30bf10631325c75f",
         "type": "github"
       },
       "original": {
@@ -2346,11 +2346,9 @@
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790298219,
-        "narHash": "sha256-vcm1w1cKQl6eaqas1mfVtm3EF8vfiS++zwZ6cBIZbHU=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "9445a8c5ec92754481041537342f4374afa10dca",
+        "rev": "d7d8145b1408f59cc6f9aac8345188ac4f13c57c",
         "type": "github"
       },
       "original": {
