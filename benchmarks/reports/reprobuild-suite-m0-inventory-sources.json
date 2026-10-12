@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1952,
+    "nimTestBinaries": 1954,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 621,
-    "staticallyDetectedRuntimeCompilerFlowTests": 110,
-    "testEntries": 1969
+    "pureUnitTests": 622,
+    "staticallyDetectedRuntimeCompilerFlowTests": 111,
+    "testEntries": 1971
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1148,10 +1148,10 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 12,
+      "graph-fixture": 13,
       "integration": 1039,
       "platform/destructive": 120,
-      "pure unit": 621,
+      "pure unit": 622,
       "unclassified": 177
     },
     "graphOwnedTestArtifacts": [
@@ -1330,9 +1330,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1952,
+    "nimTestBinaryCount": 1954,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1969
+    "testEntryCount": 1971
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1458,6 +1458,28 @@
         }
       ],
       "source": "libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 79,
+          "path": "libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim",
+          "patterns": [
+            "repro-lift-interface-artifact"
+          ],
+          "runtimeCompilerApi": "liftInterfaceArtifact",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard liftInterfaceArtifact(plan)"
+        }
+      ],
+      "source": "libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim"
     },
     {
       "class": "graph-fixture",
@@ -12019,6 +12041,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_interface_artifact_provenance_is_recorded_by_the_lift",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_l3_lift_carries_service_and_activity_signatures",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -16462,6 +16502,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_l6_attach_refuses_a_stale_lift",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_l7_instance_registry_converges_in_any_order",
       "class": "unclassified",
       "classificationReason": "imports `osproc`, which grants out-of-process reach",
@@ -16476,8 +16536,8 @@
       "owner": "libs/repro_resources",
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim",
-      "sourceSuiteCount": 10,
-      "staticCaseCount": 31,
+      "sourceSuiteCount": 11,
+      "staticCaseCount": 34,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28212,7 +28272,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_dss11_cross_process_contribution_reaches_the_instance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

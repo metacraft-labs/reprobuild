@@ -2718,6 +2718,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim",
+    binary: "build/test-bin/t_interface_artifact_provenance_is_recorded_by_the_lift",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim",
     binary: "build/test-bin/t_l3_lift_carries_service_and_activity_signatures",
     defines: @[],
@@ -4943,6 +4952,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim",
     binary: "build/test-bin/t_l6_attach_decision_has_three_outcomes",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim",
+    binary: "build/test-bin/t_l6_attach_refuses_a_stale_lift",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

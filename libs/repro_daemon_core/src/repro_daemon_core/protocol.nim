@@ -952,6 +952,30 @@ type
       ## `--force`, which has meaning ONLY together with `replace` and
       ## whose §4.5-rule-2 diagnostic differs depending on whether the
       ## holder set was recoverable.
+    generationJson*: string
+      ## Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION:
+      ## the requesting client's established answer to "does the owner's
+      ## lifted artifact correspond to the owner's current definition",
+      ## as `encodeServiceArtifactGenerationCheck` produces it.
+      ##
+      ## OPAQUE HERE for the reason `keyJson` and `snapshotJson` are:
+      ## this module stays a leaf on `repro_core`.
+      ##
+      ## IT IS THE CLIENT THAT ESTABLISHES IT, AND THAT IS NOT AN
+      ## ACCIDENT OF LAYERING. The question is about the OWNER's recipe
+      ## sources and the OWNER's artifact on disk; the daemon has never
+      ## seen either -- it holds the RUNNING instance's persisted
+      ## snapshot, which is the other side of §4.3's comparison. Asking
+      ## the daemon would reduce the check to "the running snapshot
+      ## equals the artifact's snapshot", which is exactly the vacuous
+      ## comparison §4.3's second half forbids.
+      ##
+      ## AN EMPTY STRING MEANS UNESTABLISHED, NOT FRESH. That is what a
+      ## body written before this field decodes to, and
+      ## `decodeServiceArtifactGenerationCheck` turns it into
+      ## `sagUnknownProvenance` with a `detail` saying so. The opposite
+      ## default would make the precondition vanish on a client/daemon
+      ## revision skew.
 
   DaemonServiceConvergeResponse* = object
     ok*: bool
@@ -1066,6 +1090,9 @@ proc serviceConvergeRequestBody*(request: DaemonServiceConvergeRequest):
   result.writeString(request.workingDir)
   result.writeBool(request.replace)
   result.writeBool(request.force)
+  # §4.3's precondition: appended at the END, so every field above keeps
+  # its offset.
+  result.writeString(request.generationJson)
 
 proc parseServiceConvergeRequestBody*(body: openArray[byte]):
     DaemonServiceConvergeRequest =
@@ -1079,6 +1106,13 @@ proc parseServiceConvergeRequestBody*(body: openArray[byte]):
   result.workingDir = body.readString(pos)
   result.replace = body.readBool(pos)
   result.force = body.readBool(pos)
+  if pos < body.len:
+    result.generationJson = body.readString(pos)
+  # A body written before §4.3's precondition ends here, and
+  # `generationJson` stays "". It is read as UNESTABLISHED, which
+  # refuses -- never as fresh. See the field's own comment, and
+  # `decodeServiceArtifactGenerationCheck`, which is where the "" is
+  # turned into a refusal with a sentence naming why.
 
 proc serviceConvergeResponseBody*(response: DaemonServiceConvergeResponse):
     seq[byte] =

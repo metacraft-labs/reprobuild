@@ -423,10 +423,19 @@ proc applyServiceConverge*(registry: var ServiceInstanceRegistry;
         diagnostic: "the converge request's interface snapshot could not " &
           "be decoded, so the attach decision could not be made and " &
           "nothing was started: " & err.msg)
+  # §4.3's SAME-GENERATION PRECONDITION, as the CLIENT established it.
+  #
+  # Decoded rather than defaulted, and the decoder's answer for an empty
+  # or unrecognised field is `sagUnknownProvenance` -- a refusal naming
+  # the re-lift -- never `sagFresh`. There is deliberately no branch here
+  # that substitutes a fresh answer when the field is absent: that
+  # substitution is the silent attach §4.3 was written from.
+  let generation =
+    decodeServiceArtifactGenerationCheck(request.generationJson)
   let decision =
     try:
       convergeServiceInstance(registry, key, snapshot, request.holderId,
-        policyFromTtlSeconds(request.ttlSeconds), now,
+        generation, policyFromTtlSeconds(request.ttlSeconds), now,
         replace = request.replace, force = request.force)
     except CatchableError as err:
       return DaemonServiceConvergeResponse(ok: false,

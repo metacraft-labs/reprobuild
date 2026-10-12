@@ -7196,6 +7196,305 @@ proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
 
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services §4.3's STALE-LIFT PRECONDITION — the recorded
+# provenance of a lifted interface artifact.
+#
+# §4.3 (the block added 2026-10-11): "Before comparing, establish that the
+# owner's artifact corresponds to the owner's current definition. If it cannot
+# be established -- the artifact is older than the definition, or its
+# provenance is unknown -- the decision REFUSES and says the lift is stale,
+# naming what to re-run. It does not fall through to 'fingerprint equal'."
+#
+# WHAT IS RECORDED, AND WHY IT IS THIS AND NOT ONE OF THE THINGS ALREADY HERE.
+#
+# The recorded value is `projectSourceSemanticIdentity` over the recipe's own
+# import closure: the ordered (root-relative path, content) set. It is a PURE
+# FUNCTION OF THE OWNER'S DEFINITION -- no absolute path, no `workDir`, no
+# compiler identity, no reprobuild library fingerprint -- which is the one
+# property the check needs, because the side that RE-ESTABLISHES it is a
+# DIFFERENT PROCESS ON A DIFFERENT HOST CONFIGURATION (a consumer's `repro
+# up`, reading an artifact the owner's `repro dev-env` wrote).
+#
+# Three records in this file were candidates and each loses on exactly that
+# property:
+#
+#   * `<artifact>.inputs` / `interfaceExtractionFingerprint` folds in the
+#     absolute `modulePath`, the `workDir` (a read-only `/nix/store` path for
+#     an installed engine), `nimCompilerPath()`, `libPathFlags` and
+#     `reproLibSourceFingerprint`. A consumer recomputing it gets a different
+#     digest for ENGINE reasons alone, so every fresh artifact would refuse as
+#     stale.
+#   * `<artifact>.liftkey` / `interfaceLiftActionKey` has the same defect
+#     (`nimCompilerIdentity`, `frontendRuntimeIdentity(workDir)`,
+#     `InterfaceFormatVersion`) and is additionally written ONLY by
+#     `liftInterfaceArtifact` -- the TI2 typed-contract path -- never by the
+#     extraction edge that writes `.repro/dev-env/<segment>/` and
+#     `.repro/build/<target>/`, which are the two directories the consumer's
+#     resolver actually enumerates.
+#   * `<artifact>.inputs.meta`'s `sourceStamps` ARE definition-only, but they
+#     are mtime+size stamps rather than content, so a `git checkout` that
+#     rewrites mtimes without changing content reports a FALSE stale and a
+#     `cp -p` restore reports a FALSE fresh. They are also a private type with
+#     a private decoder, and -- measured at `8b39340a0` in this checkout --
+#     `.repro/dev-env/default/` carries NEITHER `.inputs` NOR `.inputs.meta`
+#     while `.repro/build/repro/` carries both, because the relocatable
+#     extraction edge writes its outputs under the action-cache root and only
+#     the ARTIFACT and the STUB are copied to the caller's path.
+#
+# So the stamp is written beside the caller's artifact copy, by whichever
+# process publishes those bytes.
+#
+# IT IS WRITTEN ONLY WHERE THE BYTES ARE PRODUCED OR REPUBLISHED FROM THOSE
+# SOURCES, AND THERE IS DELIBERATELY NO `ensure...` VARIANT. A proc that
+# stamped an artifact it merely FOUND on disk would compute the identity of
+# the CURRENT sources and record it against an OLD artifact -- which is
+# precisely the silent attach §4.3 exists to prevent, performed by the
+# freshness check itself. If a reader wants such a proc, the answer is no.
+# ---------------------------------------------------------------------------
+
+const
+  InterfaceProvenanceSchemaId* = "reprobuild.interface-provenance.v1"
+    ## First line of the sidecar, verbatim. A sidecar whose first line is
+    ## anything else is UNKNOWN provenance, never "assume current": a
+    ## schema change is a re-lift, and reading an unknown layout
+    ## optimistically is how a stale record gets treated as a fresh one.
+
+type
+  InterfaceArtifactProvenance* = object
+    ## What a lifted interface artifact was lifted FROM, as recorded
+    ## beside it.
+    recipeFileName*: string
+      ## The recipe's BASENAME (`repro.nim` / `reprobuild.nim`), not its
+      ## path. A path would make the record false in every other
+      ## worktree of the same project, and the consumer resolves the
+      ## recipe from the owner's directory anyway.
+    resourceModule*: string
+      ## The separate resource module's path RELATIVE TO THE RECIPE'S
+      ## DIRECTORY, or "" when the recipe declared none. Relative and not
+      ## a basename, because the TI2 producer shape puts it in a
+      ## subdirectory (`<root>/repro/resources.nim`) and a basename would
+      ## not resolve. Carried because it CHANGES THE CLOSURE: a
+      ## re-establishment that ignored it would walk a different source
+      ## set than the lift did and report a difference that is an
+      ## artefact of the walk.
+    extraPaths*: seq[string]
+      ## The extra `--path` search roots, recipe-relative, same reason.
+    includeSiblingSources*: bool
+      ## Which `discoverNimSources` census produced the closure. Same
+      ## reason again, and it is the one of the four that is a BOOL --
+      ## so a default-constructed record silently claims `false`, which
+      ## is why `readInterfaceArtifactProvenance` refuses a sidecar that
+      ## does not state it.
+    closureIdentity*: string
+      ## Lowercase hex of `projectSourceSemanticIdentity` over that
+      ## closure. THE comparand.
+    sourceDigests*: seq[tuple[path, digest: string]]
+      ## Per-source (root-relative path, content digest). Diagnostics
+      ## only -- the comparand above is the single value that decides --
+      ## and they exist so a refusal can NAME the source that moved
+      ## instead of saying only that something did.
+
+proc interfaceArtifactProvenancePath*(artifactPath: string): string =
+  ## The sidecar's path. Named `.provenance` rather than reusing one of
+  ## the freshness sidecars because it answers a different question: the
+  ## others decide whether the ENGINE should re-run the lift, this one
+  ## decides whether a THIRD PARTY may compare against the result.
+  artifactPath & ".provenance"
+
+proc recipeClosureSourceDigests*(modulePath: string;
+                                 resourceModule = "";
+                                 extraPaths: openArray[string] = [];
+                                 includeSiblingSources = false):
+    tuple[identity: string; sources: seq[tuple[path, digest: string]]] =
+  ## The owner's definition, as a single comparand plus the per-source
+  ## detail a diagnostic needs.
+  ##
+  ## The closure is RE-DISCOVERED rather than read from a recorded list,
+  ## and that is the point: adding an import adds a file, so a check that
+  ## re-hashed only the files the record names could not see a definition
+  ## grow. The recorded list is compared against this one for NAMING, not
+  ## for membership.
+  var sources: seq[string] = @[]
+  for src in discoverNimSources(modulePath, extraPaths, includeSiblingSources):
+    let normalized = normalizedStampPath(src)
+    if normalized notin sources:
+      sources.add(normalized)
+  if resourceModule.len > 0:
+    for src in discoverNimSources(resourceModule, extraPaths,
+                                  includeSiblingSources):
+      let normalized = normalizedStampPath(src)
+      if normalized notin sources:
+        sources.add(normalized)
+  result.identity =
+    toHex(projectSourceSemanticIdentity(sources).bytes).toLowerAscii()
+  let root = commonSourceRoot(sources)
+  for path in sources:
+    let relPath =
+      if root.len > 0 and path == root: extractFilename(path)
+      elif root.len > 0 and path.startsWith(root & "/"):
+        path[root.len + 1 .. ^1]
+      else: extractFilename(path)
+    let content =
+      if fileExists(extendedPath(path)): readFile(extendedPath(path))
+      else: ""
+    result.sources.add((path: relPath,
+      digest: toHex(blake3DomainDigest(toBytes(content),
+        hdActionFingerprint).bytes).toLowerAscii()))
+
+proc renderInterfaceArtifactProvenance*(value: InterfaceArtifactProvenance):
+    string =
+  ## The sidecar's bytes. A line-oriented text format rather than JSON so
+  ## this module takes no new import, and strictly keyed so an unknown
+  ## line is a refusal rather than a field quietly ignored.
+  var lines = @[InterfaceProvenanceSchemaId,
+    "recipe " & value.recipeFileName,
+    "resource-module " & (if value.resourceModule.len == 0: "-"
+                          else: value.resourceModule),
+    "sibling-sources " & (if value.includeSiblingSources: "1" else: "0"),
+    "closure-identity " & value.closureIdentity]
+  for extra in value.extraPaths:
+    lines.add("extra-path " & extra)
+  for src in value.sourceDigests:
+    lines.add("source " & src.digest & " " & src.path)
+  lines.join("\n") & "\n"
+
+proc parseInterfaceArtifactProvenance*(text: string):
+    Option[InterfaceArtifactProvenance] =
+  ## `none` means UNKNOWN PROVENANCE, in every failure mode: a wrong
+  ## schema line, a missing required key, an unknown key, a malformed
+  ## `source` row. There is no partial success, because a partially
+  ## understood record is one whose comparand might have come from a
+  ## different scheme.
+  var value = InterfaceArtifactProvenance()
+  var sawRecipe = false
+  var sawResourceModule = false
+  var sawSibling = false
+  var sawIdentity = false
+  var first = true
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if first:
+      first = false
+      if line != InterfaceProvenanceSchemaId:
+        return none(InterfaceArtifactProvenance)
+      continue
+    if line.len == 0:
+      continue
+    let sep = line.find(' ')
+    if sep <= 0:
+      return none(InterfaceArtifactProvenance)
+    let key = line[0 ..< sep]
+    let rest = line[sep + 1 .. ^1].strip()
+    case key
+    of "recipe":
+      if sawRecipe or rest.len == 0: return none(InterfaceArtifactProvenance)
+      value.recipeFileName = rest
+      sawRecipe = true
+    of "resource-module":
+      if sawResourceModule: return none(InterfaceArtifactProvenance)
+      value.resourceModule = (if rest == "-": "" else: rest)
+      sawResourceModule = true
+    of "sibling-sources":
+      if sawSibling or rest notin ["0", "1"]:
+        return none(InterfaceArtifactProvenance)
+      value.includeSiblingSources = rest == "1"
+      sawSibling = true
+    of "closure-identity":
+      if sawIdentity or rest.len == 0: return none(InterfaceArtifactProvenance)
+      value.closureIdentity = rest
+      sawIdentity = true
+    of "extra-path":
+      if rest.len == 0: return none(InterfaceArtifactProvenance)
+      value.extraPaths.add(rest)
+    of "source":
+      let gap = rest.find(' ')
+      if gap <= 0: return none(InterfaceArtifactProvenance)
+      value.sourceDigests.add((path: rest[gap + 1 .. ^1].strip(),
+        digest: rest[0 ..< gap]))
+    else:
+      # An unknown key is UNKNOWN PROVENANCE, not a field to skip. A
+      # writer that added a key this reader does not understand may well
+      # have changed what `closure-identity` means.
+      return none(InterfaceArtifactProvenance)
+  if not (sawRecipe and sawResourceModule and sawSibling and sawIdentity):
+    return none(InterfaceArtifactProvenance)
+  some(value)
+
+proc readInterfaceArtifactProvenance*(artifactPath: string):
+    Option[InterfaceArtifactProvenance] =
+  ## The recorded provenance of the artifact at `artifactPath`, or `none`
+  ## when there is none to read. ABSENT AND UNREADABLE ARE THE SAME
+  ## ANSWER and it is `none`: both are "cannot be established", which
+  ## §4.3 makes a refusal.
+  let path = interfaceArtifactProvenancePath(artifactPath)
+  if not fileExists(extendedPath(path)):
+    return none(InterfaceArtifactProvenance)
+  try:
+    parseInterfaceArtifactProvenance(readFile(extendedPath(path)))
+  except CatchableError:
+    none(InterfaceArtifactProvenance)
+
+proc writeInterfaceArtifactProvenance*(artifactPath, modulePath: string;
+                                       resourceModule = "";
+                                       extraPaths: openArray[string] = [];
+                                       includeSiblingSources = false) =
+  ## Record what the artifact just published at `artifactPath` was lifted
+  ## from. Call this ONLY from a site that produced or republished those
+  ## bytes from `modulePath`'s closure -- see this section's header for
+  ## why there is no `ensure` variant.
+  ##
+  ## A failure to write is swallowed, exactly as
+  ## `writeInterfaceExtractionCacheRecord` swallows its own: the artifact
+  ## is still correct, and the consequence of a missing sidecar is a
+  ## REFUSAL naming the re-lift rather than a silent attach. That is the
+  ## safe direction, and it is the reason this write is allowed to be
+  ## best-effort at all.
+  try:
+    # RECORDED RELATIVE TO THE RECIPE'S OWN DIRECTORY, not as a basename.
+    #
+    # A basename was the first spelling and it is wrong for the shape
+    # this repository actually uses: the TI2 separate-resource-module
+    # producer puts its module at `<root>/repro/resources.nim`, whose
+    # basename resolves to `<root>/resources.nim` -- a file that does
+    # not exist, so every such producer would answer "provenance
+    # unknown" and refuse. Relative keeps the record true in any
+    # worktree AND resolvable by the reader.
+    #
+    # A path that is NOT under the recipe's directory falls back to its
+    # basename, which the reader will not find and will answer UNKNOWN
+    # PROVENANCE for -- a refusal naming the re-lift. That is the safe
+    # direction and it is a LIMIT, not a design: an out-of-tree resource
+    # module or extra path is not re-establishable from the owner's
+    # directory alone, and inventing an absolute path here would make
+    # the record false in every other checkout.
+    let recipeDir = parentDir(normalizedStampPath(modulePath))
+    proc recipeRelative(path: string): string =
+      let normalized = normalizedStampPath(path)
+      if recipeDir.len > 0 and normalized.startsWith(recipeDir & "/"):
+        normalized[recipeDir.len + 1 .. ^1]
+      else:
+        extractFilename(normalized)
+    var extras: seq[string] = @[]
+    for extra in extraPaths:
+      if extra.len > 0:
+        extras.add(recipeRelative(extra))
+    let closure = recipeClosureSourceDigests(modulePath, resourceModule,
+      extraPaths, includeSiblingSources)
+    writeFile(extendedPath(interfaceArtifactProvenancePath(artifactPath)),
+      renderInterfaceArtifactProvenance(InterfaceArtifactProvenance(
+        recipeFileName: extractFilename(normalizedStampPath(modulePath)),
+        resourceModule:
+          if resourceModule.len == 0: ""
+          else: recipeRelative(resourceModule),
+        extraPaths: extras,
+        includeSiblingSources: includeSiblingSources,
+        closureIdentity: closure.identity,
+        sourceDigests: closure.sources)))
+  except CatchableError:
+    discard
+
 proc computeProviderArtifactId*(
     inputSources: openArray[string];
     interfaceFingerprint: ContentDigest;
@@ -8247,3 +8546,14 @@ proc liftInterfaceArtifact*(plan: InterfaceLiftPlan): ProjectInterfaceArtifact =
       toHex(plan.interfaceLiftActionKey.bytes))
   except CatchableError:
     discard
+  # Shared-Development-Services §4.3's stale-lift precondition. Recorded
+  # HERE, where the bytes were just produced from this plan's module, and
+  # NOT in the `interfaceArtifactFresh` short-circuit above: that branch
+  # returns an artifact it merely found, and stamping it would record the
+  # CURRENT closure against an artifact of unknown age. `extraPaths` is
+  # passed so the recorded closure is the one the lift actually walked;
+  # `includeSiblingSources` is left at its default, and the sidecar
+  # records which census it used so the re-establishment walks the same
+  # one.
+  writeInterfaceArtifactProvenance(plan.artifactPath, plan.modulePath,
+    resourceModule = plan.resourceModule, extraPaths = plan.extraPaths)

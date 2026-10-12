@@ -9491,9 +9491,16 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     # No engine-executable image to spawn back into. Embedded callers and
     # the bootstrap path land here; they get the pre-existing in-process
     # extraction, which is the same code the helper runs.
-    return extractInterfaceFromModule(modulePath, artifactPath, stubPath,
+    result = extractInterfaceFromModule(modulePath, artifactPath, stubPath,
       workDir, scratchDir, requireStub, resourceModule, extraPaths,
       consumerRoot)
+    # Shared-Development-Services §4.3's stale-lift precondition -- see
+    # the publish sites at the foot of this proc for the full note. This
+    # is the embedded/bootstrap path, and it produced the bytes in this
+    # process, so it records their provenance like the others.
+    writeInterfaceArtifactProvenance(artifactPath, modulePath,
+      resourceModule = resourceModule, extraPaths = extraPaths)
+    return
 
   # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
   # compiles" (owner decision 2026-10-09): the extraction runs IN the
@@ -9790,6 +9797,29 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
         publishIfChanged(stubPath, readFile(extendedPath(edgeStubPath)))
     else:
       result = readInterfaceArtifact(artifactPath)
+    # Shared-Development-Services §4.3's STALE-LIFT PRECONDITION: record
+    # what the artifact at the CALLER's path was lifted from, beside it.
+    #
+    # HERE, in the parent, rather than in the edge child, and the reason
+    # is measured. For a relocatable edge the child writes its outputs
+    # under the action-cache root (`recipeCompileOutputDir`) and only the
+    # ARTIFACT and the STUB are copied to `artifactPath` -- which is why,
+    # at `8b39340a0`, `.repro/dev-env/default/` in this checkout carries
+    # neither `.inputs` nor `.inputs.meta` while `.repro/build/repro/`
+    # carries both. A sidecar written by the child would therefore be
+    # absent from exactly the two directories a consumer's resolver
+    # enumerates (`.repro/dev-env/*/`, `.repro/build/*/`).
+    #
+    # This runs on a cache HIT as well as on a RUN, and that is sound
+    # rather than lax: the engine has just decided these bytes are the
+    # correct output for this recipe's current inputs, so the closure
+    # hashed here is the closure they were produced from. What is NOT
+    # done is stamping an artifact nobody asked the engine about -- see
+    # the session-result short-circuit above, which returns without
+    # stamping, and `writeInterfaceArtifactProvenance`'s own note on why
+    # there is no `ensure` variant.
+    writeInterfaceArtifactProvenance(artifactPath, modulePath,
+      resourceModule = resourceModule, extraPaths = extraPaths)
     interfaceEdgeSessionResults[sessionKey] = result
   finally:
     releaseInterfaceArtifactLock(artifactLock)
@@ -10872,6 +10902,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               let stagedPath = projectionPath & ".projection-tmp"
               writeInterfaceArtifact(stagedPath, producerArtifact)
               moveFile(extendedPath(stagedPath), extendedPath(projectionPath))
+            # Shared-Development-Services §4.3's stale-lift precondition.
+            #
+            # FOUND BY GOING LOOKING, not by a failing test. This is a
+            # SECOND publication of a producer's interface, at a path
+            # `extractInterfaceEdge` above did not write -- and it is one
+            # of the two directories a consumer's resolver enumerates
+            # (`ownerInterfaceCandidates`: `.repro/dev-env/*/` and
+            # `.repro/build/*/`). Left unstamped it would be found,
+            # answered "provenance unknown" and refused: the safe
+            # direction, but a refusal with the wrong cause for a
+            # producer that had just been lifted correctly. Stamped here
+            # rather than by an `ensure` helper, because this is the site
+            # that produced those bytes from `recipeDir / "repro.nim"`.
+            writeInterfaceArtifactProvenance(projectionPath,
+              recipeDir / "repro.nim")
           finally:
             releaseInterfaceArtifactLock(projectionLock)
         let dependencies =
@@ -15625,6 +15670,155 @@ proc liftedServiceDeclaration(interfacePath, serviceName: string):
     serviceName & "` but no row for it, which cannot happen; refusing " &
     "rather than resolving a default identity")
 
+proc ownerArtifactGeneration*(artifactPath, ownerRecipeDir,
+                              ownerPackage, ownerProject: string):
+    ServiceArtifactGenerationCheck =
+  ## Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION,
+  ## ESTABLISHED: does the owner's lifted interface artifact correspond
+  ## to the owner's definition as it stands on disk right now?
+  ##
+  ## § THE MECHANISM, AND WHY IT IS THIS ONE
+  ##
+  ## The lift records a PROVENANCE STAMP beside the artifact -- the
+  ## content-addressed semantic identity of the recipe's own import
+  ## closure (`recipeClosureSourceDigests`, over
+  ## `projectSourceSemanticIdentity`). This proc reads that stamp,
+  ## RE-WALKS the owner's recipe closure, and compares. Three answers,
+  ## because §4.3 names three states.
+  ##
+  ## The comparand is a pure function of the owner's SOURCES -- no
+  ## absolute path, no `workDir`, no compiler identity, no reprobuild
+  ## library fingerprint -- which is the property the check needs,
+  ## because the process that re-establishes it is a different process
+  ## in a different directory, often with a different engine install,
+  ## from the one that recorded it. The three records already in the
+  ## tree all fail that test; `repro_interface_artifacts`'
+  ## provenance section says exactly how, for each.
+  ##
+  ## THE CLOSURE IS RE-DISCOVERED, NOT RE-HASHED FROM THE RECORDED
+  ## LIST. Adding an import adds a file, so a check that hashed only the
+  ## files the record names could not see a definition grow -- and that
+  ## is not hypothetical here: `extractInterfaceEdge`'s own header
+  ## records a previous hand-rolled gate being UNSOUND for the mirror
+  ## reason (its key could not see a file the recipe acquires during
+  ## macro expansion). The recorded per-source digests are used only to
+  ## NAME what moved.
+  ##
+  ## § WHAT IS AND IS NOT ESTABLISHED
+  ##
+  ## This establishes "the artifact was lifted from the recipe closure
+  ## that is on disk now". It does NOT establish that the closure is
+  ## everything the lift read: a `staticRead`, a `staticExec`, or a
+  ## `dslDeps` package the recipe acquires during macro expansion is
+  ## seen by the engine's monitored read set and NOT by
+  ## `discoverNimSources`. So a `sagFresh` answer is a true statement
+  ## about the import closure and a conservative one about everything
+  ## else -- it can miss a staleness, and it cannot invent one. That
+  ## asymmetry is the right direction (§4.3 makes a refusal cheap and a
+  ## silent attach expensive) but it is a LIMIT, stated here rather than
+  ## left for a reader to discover, and it is the residue a lift-side
+  ## stamp over the monitored read set would close.
+  result = ServiceArtifactGenerationCheck(
+    generation: sagUnknownProvenance,
+    artifactPath: artifactPath,
+    ownerPackage: ownerPackage,
+    ownerProject: ownerProject,
+    movedSources: @[])
+  let recorded = readInterfaceArtifactProvenance(artifactPath)
+  if recorded.isNone:
+    result.detail =
+      "No readable provenance record is beside it, at " &
+      interfaceArtifactProvenancePath(artifactPath) &
+      " -- so what it was lifted from is unknown. An artifact produced " &
+      "before the lift recorded provenance reads exactly like this, and " &
+      "it is answered with a refusal rather than an assumption."
+    return
+  let provenance = recorded.get
+  if provenance.recipeFileName.len == 0 or ownerRecipeDir.len == 0:
+    result.detail =
+      "Its provenance record names no recipe file (or the owning " &
+      "project's directory is not known here), so the definition to " &
+      "compare it against cannot be located."
+    return
+  let recipePath = ownerRecipeDir / provenance.recipeFileName
+  if not fileExists(extendedPath(recipePath)):
+    result.detail =
+      "Its provenance record says it was lifted from `" &
+      provenance.recipeFileName & "`, and there is no such file at " &
+      recipePath & " -- so the current definition cannot be read."
+    return
+  # A declared resource module / extra path CHANGES THE CLOSURE, so one
+  # that cannot be resolved here is UNKNOWN provenance and not a closure
+  # walked without it. Walking a narrower closure would compute a
+  # different identity and report a difference that is an artefact of
+  # this proc, which is a false refusal -- still the safe direction, but
+  # a refusal that names the wrong cause, and this names the right one.
+  var resourceModule = ""
+  if provenance.resourceModule.len > 0:
+    resourceModule = ownerRecipeDir / provenance.resourceModule
+    if not fileExists(extendedPath(resourceModule)):
+      result.detail =
+        "Its provenance record says the lift included the separate " &
+        "resource module `" & provenance.resourceModule & "`, and there " &
+        "is no such file at " & resourceModule & " -- so the closure it " &
+        "was lifted from cannot be re-walked."
+      return
+  var extraPaths: seq[string] = @[]
+  for extra in provenance.extraPaths:
+    let resolved = ownerRecipeDir / extra
+    if not dirExists(extendedPath(resolved)):
+      result.detail =
+        "Its provenance record says the lift searched the extra path `" &
+        extra & "`, and there is no such directory at " & resolved &
+        " -- so the closure it was lifted from cannot be re-walked."
+      return
+    extraPaths.add(resolved)
+  var current: tuple[identity: string;
+                     sources: seq[tuple[path, digest: string]]]
+  try:
+    current = recipeClosureSourceDigests(recipePath, resourceModule,
+      extraPaths, provenance.includeSiblingSources)
+  except CatchableError as err:
+    result.detail =
+      "The owner's definition at " & recipePath & " could not be walked " &
+      "to compute its current source closure (" & err.msg & ")."
+    return
+  result.recordedIdentity = provenance.closureIdentity
+  result.currentIdentity = current.identity
+  if provenance.closureIdentity == current.identity:
+    result.generation = sagFresh
+    return
+  result.generation = sagStale
+  # WHICH sources moved, from the per-source digests both sides carry.
+  # Named in the running instance's... no: named in the RECORD's order
+  # first (changed and removed), then the additions, which is the same
+  # shape `memberDifferences` uses and for the same reason -- a reader
+  # scanning a refusal should meet the two sides in one order.
+  var recordedByPath = initTable[string, string]()
+  for src in provenance.sourceDigests:
+    recordedByPath[src.path] = src.digest
+  var currentByPath = initTable[string, string]()
+  for src in current.sources:
+    currentByPath[src.path] = src.digest
+  for src in provenance.sourceDigests:
+    if src.path notin currentByPath:
+      result.movedSources.add(src.path & " (removed)")
+    elif currentByPath[src.path] != src.digest:
+      result.movedSources.add(src.path & " (edited)")
+  for src in current.sources:
+    if src.path notin recordedByPath:
+      result.movedSources.add(src.path & " (added)")
+  if result.movedSources.len == 0:
+    # The identities differ and no per-source row explains it. Said out
+    # loud rather than reported as an empty list: it means the recorded
+    # rows and the comparand were produced by different schemes, which
+    # is a defect in this pair of procs and not a fact about the owner.
+    result.movedSources.add(
+      "(the recorded source rows do not explain the difference -- the " &
+      "closure identity is what decided, and the two were computed by " &
+      "schemes that disagree; this is a reprobuild defect, not an " &
+      "owner's edit)")
+
 proc ownerInterfaceCandidates(ownerRecipeDir: string): seq[string] =
   ## Every path the owner's lifted interface could be at, in a
   ## deterministic order.
@@ -15793,7 +15987,16 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         command: @[],
         workingDir: projectRoot,
         replace: false,
-        force: false))
+        force: false,
+        # §4.3's SAME-GENERATION PRECONDITION, established HERE because
+        # this is the process that can: it knows the owner's recipe
+        # directory (`resolution.ownerRecipeDir`) and which artifact
+        # under it answered (`liftedFrom`). The daemon knows neither --
+        # it holds the RUNNING instance's snapshot, which is the other
+        # side of the comparison.
+        generationJson: encodeServiceArtifactGenerationCheck(
+          ownerArtifactGeneration(liftedFrom, resolution.ownerRecipeDir,
+            resolution.ownerPackage, lifted.snapshot.projectName))))
     let outcome =
       try:
         parseConvergeOutcome(response.outcome)
@@ -15937,6 +16140,10 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
     return 0
   let projectRoot = parsed.selection.projectRoot
   let holderId = serviceLeaseHolderId(projectRoot)
+  # The one artifact path this proc reads its lifted declarations from,
+  # named once so the §4.3 generation check below and
+  # `liftedServiceDeclaration` cannot be pointed at two different files.
+  let interfacePathForGeneration = edge.interfacePath
   var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
   var minted: seq[tuple[serviceName, member, mintedId: string]] = @[]
   var refused = 0
@@ -15996,7 +16203,25 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         command: launch.command,
         workingDir: launch.workingDir,
         replace: parsed.replace,
-        force: parsed.force))
+        force: parsed.force,
+        # §4.3's SAME-GENERATION PRECONDITION, on the OWNER's own
+        # converge too.
+        #
+        # It is tempting to claim `sagFresh` by construction here --
+        # this artifact is `edge.interfacePath`, which the dev-env edge
+        # this very command just ran produced. It is not claimed, and
+        # the reason is measured: `repro_dev_env_engine`'s own
+        # `useCachedInterface` gate is keyed by `devEnvCacheKey`, whose
+        # `projectFile=` part fingerprints the recipe FILE and not its
+        # import closure, so an edit to a module the recipe imports does
+        # not move that key and the edge can hand back an interface
+        # older than the definition. An owner that attaches to its own
+        # instance on a stale artifact is the same defect as a consumer
+        # doing so -- so the owner establishes it the same way, from the
+        # same stamp, rather than asserting it.
+        generationJson: encodeServiceArtifactGenerationCheck(
+          ownerArtifactGeneration(interfacePathForGeneration,
+            projectRoot, snapshot.packageName, snapshot.projectName))))
     let outcome =
       try:
         parseConvergeOutcome(response.outcome)

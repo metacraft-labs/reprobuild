@@ -341,13 +341,111 @@ type
       ## running", which is why the snapshot carries its project name.
     holders*: seq[ServiceInstanceHolder]
 
+  ServiceArtifactGeneration* = enum
+    ## §4.3's STALE-LIFT PRECONDITION: whether the owner's lifted
+    ## artifact has been established to correspond to the owner's current
+    ## definition.
+    ##
+    ## THREE VALUES BECAUSE §4.3 NAMES THREE STATES, and the one that
+    ## must not be folded into another is `sagUnknownProvenance`. §4.3:
+    ## "If it cannot be established -- the artifact is older than the
+    ## definition, **or its provenance is unknown** -- the decision
+    ## refuses". Collapsing unknown into `sagFresh` is the exact silent
+    ## attach the clause exists to prevent, and it is the reason this is
+    ## an enum rather than a `bool stale`: a bool has no third state, so
+    ## "I could not tell" would have had to be spelled as one of the two
+    ## answers, and the tempting one is "fine".
+    ##
+    ## `sagUnknownProvenance` IS THE ZERO VALUE, deliberately. A
+    ## default-constructed `ServiceArtifactGenerationCheck` -- one a
+    ## caller forgot to fill, or one decoded from a wire body written by
+    ## a build that did not carry this field -- therefore means REFUSE,
+    ## not ATTACH. The safe direction is the default direction.
+    sagUnknownProvenance
+    sagStale
+    sagFresh
+
+  ServiceArtifactGenerationCheck* = object
+    ## The ESTABLISHED answer, plus everything a refusal has to print.
+    ##
+    ## This object is DATA, not a probe: `attachDecision` neither reads
+    ## the filesystem nor recomputes anything, exactly as it does not for
+    ## the snapshots. Establishing the answer is the caller's -- see
+    ## `repro_cli_support`'s `ownerArtifactGeneration`, which reads the
+    ## recorded provenance beside the owner's artifact and re-walks the
+    ## owner's recipe closure. Keeping this a pure function of its
+    ## arguments is what lets the decision be measured against a
+    ## constructed record, which is what L6 established and this
+    ## preserves.
+    generation*: ServiceArtifactGeneration
+    artifactPath*: string
+      ## The owner's artifact the comparand was read from. Named in the
+      ## refusal, because "the lift is stale" is unactionable without
+      ## saying WHICH artifact -- the consumer locates it by enumerating
+      ## `.repro/dev-env/*/` and `.repro/build/*/`, so there is no single
+      ## path a reader could infer.
+    ownerPackage*: string
+    ownerProject*: string
+      ## The project to re-run the lift IN. §4.3 requires the refusal to
+      ## name "what to re-run", and the owner's project is the other half
+      ## of that: `repro dev-env` in the consumer's own directory would
+      ## not move the owner's artifact.
+    recordedIdentity*: string
+      ## The closure identity recorded beside the artifact, and "" when
+      ## none could be read.
+    currentIdentity*: string
+      ## The closure identity of the owner's definition as it stands
+      ## now, and "" when it could not be computed.
+    movedSources*: seq[string]
+      ## On `sagStale`, the owner's sources whose content differs from
+      ## the record, plus those added or removed, as root-relative paths
+      ## with a word saying which. Diagnostics only -- the identities
+      ## above are what decided -- and present for the same reason
+      ## `memberDifferences` is: a refusal that names nothing is a
+      ## refusal the author cannot act on.
+    detail*: string
+      ## On `sagUnknownProvenance`, WHY it could not be established, in
+      ## the establishing caller's own words. Carried rather than
+      ## re-derived here, because this module cannot see the filesystem
+      ## fact that produced it.
+
   ServiceAttachOutcome* = enum
     saoAttachSilently      ## §4.3 row 1
     saoAttachWithWarning   ## §4.3 row 2
     saoRefuseMajor         ## §4.3 row 3
+    saoRefuseStaleLift
+      ## §4.3's PRECONDITION, not a fourth row: the owner's artifact is
+      ## older than the owner's definition, so the fingerprint this
+      ## module would compare was computed from a definition nobody is
+      ## running. §4.3: the decision "refuses and says the lift is
+      ## stale, naming what to re-run. It does not fall through to
+      ## 'fingerprint equal'."
+      ##
+      ## APPENDED, with `saoRefuseUnknownProvenance`, after the three row
+      ## values, so no existing ordinal moves. Nothing persists this
+      ## enum by ordinal today -- `ServiceConvergeOutcome` is what
+      ## crosses the daemon wire and it travels as a WORD -- but the
+      ## three row values are quoted by ordinal in the milestone's
+      ## evidence drawers and in `t_l6_attach_decision_has_three_
+      ## outcomes.nim`'s all-ordered-pairs table, and renumbering them
+      ## would silently rewrite what those cases claim.
+    saoRefuseUnknownProvenance
+      ## §4.3's PRECONDITION, its second failure mode: the artifact's
+      ## provenance could not be established at all. A SEPARATE value
+      ## from `saoRefuseStaleLift` because the remedies differ -- a
+      ## stale lift is re-lifted, an unprovenanced one may be an
+      ## artifact from a build that recorded nothing -- and because
+      ## folding the two would make it impossible to assert that
+      ## "unknown" was not quietly treated as "fresh".
 
   ServiceAttachDecision* = object
     outcome*: ServiceAttachOutcome
+    generation*: ServiceArtifactGeneration
+      ## The precondition's answer, carried on every decision -- not
+      ## only on the two refusals. A caller that wants to assert "this
+      ## attach was decided against a SAME-GENERATION artifact" can read
+      ## it, and a reader of a log line can see which generation an
+      ## attach was granted under.
     diagnostic*: string
       ## The warning or the refusal, rendered. EMPTY if and only if the
       ## outcome is `saoAttachSilently` -- asserted in both directions,
@@ -775,16 +873,72 @@ proc renderDifferences(differences: seq[ServiceMemberDifference]): string =
 # §4.3 — the three-outcome decision.
 # ---------------------------------------------------------------------------
 
+proc generationWord*(generation: ServiceArtifactGeneration): string =
+  ## The phrase a diagnostic uses for a generation.
+  case generation
+  of sagFresh: "same-generation"
+  of sagStale: "stale"
+  of sagUnknownProvenance: "unestablished"
+
+proc freshLiftGeneration*(artifactPath, ownerPackage, ownerProject,
+                          identity: string): ServiceArtifactGenerationCheck =
+  ## A `sagFresh` check, for a caller that HAS established the
+  ## correspondence. Named rather than inline so every such site is
+  ## greppable: `sagFresh` is the one value that lets the comparison
+  ## proceed, so "who claims it" is a question a reviewer should be able
+  ## to answer with one search.
+  ServiceArtifactGenerationCheck(generation: sagFresh,
+    artifactPath: artifactPath, ownerPackage: ownerPackage,
+    ownerProject: ownerProject, recordedIdentity: identity,
+    currentIdentity: identity, movedSources: @[], detail: "")
+
+proc reliftRemedy(check: ServiceArtifactGenerationCheck): string =
+  ## WHAT TO RE-RUN, which §4.3 requires the refusal to name. One
+  ## spelling, shared by both refusals, so the two cannot drift into
+  ## naming different remedies for one cause.
+  "Re-run `repro dev-env` in the project that declares `" &
+  (if check.ownerPackage.len > 0: check.ownerPackage else: "<unknown>") &
+  "`" &
+  (if check.ownerProject.len > 0: " (project `" & check.ownerProject & "`)"
+   else: "") &
+  " to re-lift its interface, then run this command again."
+
 proc attachDecision*(running: RunningServiceInstance;
-                     requested: ServiceInterfaceSnapshot):
+                     requested: ServiceInterfaceSnapshot;
+                     generation: ServiceArtifactGenerationCheck):
     ServiceAttachDecision =
-  ## §4.3, as a total function. Exactly one of three outcomes, decided in
-  ## this order and no other:
+  ## §4.3, as a total function. Exactly one of FIVE outcomes: §4.3's
+  ## three table rows, and the two refusals its SAME-GENERATION
+  ## PRECONDITION owes. Decided in this order and no other:
   ##
+  ##   0. the owner's artifact has not been established to correspond to
+  ##      the owner's current definition -> refuse. Unknown provenance
+  ##      and a stale artifact are DIFFERENT refusals.
   ##   1. the MAJOR compatibility fields differ -> refuse;
   ##   2. else the interface fingerprints are equal -> attach silently;
   ##   3. else -> attach and warn, naming both fingerprints, the owning
   ##      project and the differing members.
+  ##
+  ## § WHY STEP 0 IS FIRST, AND WHY IT IS NOT A FOURTH ROW
+  ##
+  ## §4.3: "Before comparing, establish that the owner's artifact
+  ## corresponds to the owner's current definition." The major check is
+  ## part of comparing -- `compatibilityMajor` is read off the very
+  ## snapshot whose freshness is in question -- so running it first would
+  ## decide the hardest outcome from a value that may be two generations
+  ## old. It is a precondition and not a row for the reason the spec
+  ## gives: a row is selected by comparing the two sides, and this is
+  ## selected by a fact about ONE side.
+  ##
+  ## THE PARAMETER IS REQUIRED AND HAS NO DEFAULT. There is deliberately
+  ## no two-argument overload: a default would have to be either
+  ## `sagFresh` -- which is "collapse unknown into fresh", the defect
+  ## this clause was written from -- or `sagUnknownProvenance`, which
+  ## would refuse silently for callers that never heard of the
+  ## parameter. A missing argument is instead a COMPILE ERROR at the
+  ## call site, which is the only form of this check that cannot be
+  ## forgotten. That is a structural guarantee; `t_l6_attach_refuses_a_
+  ## stale_lift.nim` asserts it with `compiles()`.
   ##
   ## THE ORDER IS THE SPEC'S, AND -- SAID PRECISELY, BECAUSE THIS
   ## COMMENT CLAIMED THE STRONGER THING AND L6's SECOND REVIEW MEASURED
@@ -809,6 +963,7 @@ proc attachDecision*(running: RunningServiceInstance;
   let runningSnapshot = running.interfaceSnapshot
   result = ServiceAttachDecision(
     serviceName: requested.serviceName,
+    generation: generation.generation,
     runningFingerprint: runningSnapshot.fingerprint,
     requestedFingerprint: requested.fingerprint,
     runningMajor: runningSnapshot.compatibilityMajor,
@@ -816,6 +971,63 @@ proc attachDecision*(running: RunningServiceInstance;
     runningProject: runningSnapshot.projectName,
     runningPackage: runningSnapshot.packageName,
     differences: @[])
+  # § STEP 0 — §4.3's SAME-GENERATION PRECONDITION.
+  #
+  # `differences` is deliberately left EMPTY on both refusals. Naming
+  # members here would describe a diff between the running instance and
+  # an artifact that does not describe the owner's definition, which is
+  # a list of differences that may not exist -- and the campaign's
+  # dominant defect is exactly a surface that looks informative and is
+  # not. The refusal names the ARTIFACT and the RE-LIFT instead, which
+  # are the two facts that are true.
+  case generation.generation
+  of sagUnknownProvenance:
+    result.outcome = saoRefuseUnknownProvenance
+    result.diagnostic =
+      "refusing to attach to the running instance of service `" &
+      requested.serviceName & "`: the owner's lifted interface artifact " &
+      (if generation.artifactPath.len > 0:
+         "at " & generation.artifactPath & " "
+       else: "") &
+      "cannot be shown to correspond to the owner's current definition, " &
+      "so there is nothing trustworthy to compare. " &
+      (if generation.detail.len > 0: generation.detail & " " else: "") &
+      "Shared-Development-Services.md §4.3: \"If it cannot be " &
+      "established -- the artifact is older than the definition, or its " &
+      "provenance is unknown -- the decision refuses and says the lift " &
+      "is stale, naming what to re-run. It does not fall through to " &
+      "'fingerprint equal'.\" " & reliftRemedy(generation)
+    return
+  of sagStale:
+    var moved = ""
+    if generation.movedSources.len > 0:
+      moved = " Changed since the lift: " &
+        generation.movedSources.join("; ") & "."
+    result.outcome = saoRefuseStaleLift
+    result.diagnostic =
+      "refusing to attach to the running instance of service `" &
+      requested.serviceName & "`: THE LIFT IS STALE. The owner's " &
+      "interface artifact" &
+      (if generation.artifactPath.len > 0:
+         " at " & generation.artifactPath
+       else: "") &
+      " was lifted from source closure " &
+      (if generation.recordedIdentity.len > 0: generation.recordedIdentity
+       else: "<unrecorded>") &
+      ", and the owner's definition is now " &
+      (if generation.currentIdentity.len > 0: generation.currentIdentity
+       else: "<uncomputable>") & "." & moved &
+      " The interface fingerprint this decision would compare therefore " &
+      "describes a definition nobody is running, and comparing it would " &
+      "attach SILENTLY whenever the stale answer happens to match. " &
+      "Shared-Development-Services.md §4.3: \"A refusal here is cheap " &
+      "and self-correcting: the remedy is re-lifting, which the owner " &
+      "can always do. A silent attach is neither -- it hands the " &
+      "consumer a handle built against a definition nobody is " &
+      "running.\" " & reliftRemedy(generation)
+    return
+  of sagFresh:
+    discard
   if runningSnapshot.compatibilityMajor != requested.compatibilityMajor:
     result.outcome = saoRefuseMajor
     result.differences = memberDifferences(runningSnapshot, requested)

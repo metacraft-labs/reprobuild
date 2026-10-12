@@ -600,6 +600,42 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     check mintedFor(applied, SecondConsumerMember).len > 0
     check contributorFor(applied, SecondConsumerMember) == ConsumerPackage
 
+  test "the owner's definition moved and its artifact did not: a STALE LIFT":
+    # Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION,
+    # measured END TO END THROUGH THE REAL CLI, against a real owner
+    # whose recipe has just been edited.
+    #
+    # THIS CASE EXISTS BECAUSE THE NEXT ONE USED TO CONFLATE TWO THINGS.
+    # The skew case below edits the owner's recipe and does NOT re-lift,
+    # so before the precondition existed the consumer's resolver read an
+    # artifact describing the OLD definition -- and §4.3's table, reading
+    # only that artifact, said nothing. H6 recorded exactly that: the
+    # attach reported `AttachSilently` and the refusal came entirely from
+    # the point-level check. With the precondition in place the stale
+    # artifact is caught FIRST, which is what the clause is for, and the
+    # two refusals are now separable: this case is the stale one, and the
+    # next re-lifts so that the point-level one is what fires.
+    # ONLY the owner's recipe moves. The consumer's is left exactly as the
+    # previous case left it, so the ONE thing that changed between a
+    # passing `consumerUp` and this one is the owner's definition having
+    # moved out from under its artifact.
+    writeFile(c.ownerProject / "repro.nim", ownerRecipe(true))
+    let stale = consumerUp(c)
+    checkpoint("consumer up (stale lift):\n" & stale.output)
+    check stale.exitCode == 1
+    check stale.output.contains("THE LIFT IS STALE")
+    # It NAMES the artifact it read, the source that moved, and the
+    # command to re-run -- §4.3's "naming what to re-run".
+    check stale.output.contains("project-interface.rbsz")
+    check stale.output.contains("repro.nim (edited)")
+    check stale.output.contains("Re-run `repro dev-env` in the project " &
+      "that declares `" & OwnerPackage & "`")
+    # And it is a REFUSAL, so NOTHING was deposited and nothing dropped:
+    # the instance's contribution set still holds exactly what the
+    # previous case left on it.
+    check c.contributionSet.contributions.len == 1
+    check memberCount(c.registrationSet) == 3
+
   test "a contribution to a point the RUNNING instance does not declare is refused":
     # THE VERSION-SKEW CASE, measured rather than simulated.
     #
@@ -621,6 +657,21 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     # absent point is the refusing row, not the warning row, because the
     # consumer asked for something the instance cannot do."
     writeFile(c.ownerProject / "repro.nim", ownerRecipe(true))
+    # RE-LIFT THE OWNER, AND DO NOT RE-MATERIALISE IT. Added when §4.3's
+    # same-generation precondition landed, and it is what makes this case
+    # measure the point-level refusal rather than the stale-lift one --
+    # the case above is the stale-lift half, deliberately separate.
+    #
+    # `repro shell` re-derives the owner's dev-env (and so re-lifts its
+    # interface artifact and re-records its provenance) WITHOUT
+    # converging any shared instance: converging is `repro up` / `repro
+    # dev`. So after this the owner's artifact describes the NEW
+    # definition, the RUNNING instance still carries the snapshot it was
+    # materialised with, and that is precisely the skew §4.6 names.
+    let relift = c.runRepro(c.ownerProject,
+      @["shell", "--activity=" & OwnerActivity, "--print-env=json"])
+    checkpoint("owner re-lift (no re-materialise):\n" & relift.output)
+    check relift.exitCode == 0
     writeFile(c.consumerProject / "repro.nim",
       consumerRecipe(UnconvergedPoint & " = append(\"" & SkewMember &
         "\")"))

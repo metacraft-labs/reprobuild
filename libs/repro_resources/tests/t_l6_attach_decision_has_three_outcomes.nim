@@ -73,6 +73,41 @@ import ./l6_attach_fixtures
 # Snapshots, from the real lift.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# §4.3's SAME-GENERATION PRECONDITION, as this suite supplies it.
+#
+# `attachDecision` takes a REQUIRED third argument since §4.3's
+# stale-lift precondition was implemented, and there is deliberately NO
+# two-argument overload -- so every call in this file names the
+# generation it is deciding under, and a call that omitted it would be a
+# compile error rather than a silent `sagFresh`.
+#
+# NOT A MOCK; the file's mock policy above is unchanged. A
+# `ServiceArtifactGenerationCheck` is a record of an answer, not a
+# collaborator: nothing is stubbed, no filesystem probe is replaced, and
+# `attachDecision` remains a pure function of its three arguments.
+#
+# `sagFresh` IS THE CORRECT ANSWER FOR EVERY CASE HERE, not the
+# convenient one. Both sides of each comparison come from ONE lift of
+# one fixture package performed in this process, so they are
+# same-generation by construction -- there is no artifact on disk for
+# them to be stale against. That is also precisely why this file cannot
+# measure the precondition: the two PRECONDITION outcomes
+# (`saoRefuseStaleLift`, `saoRefuseUnknownProvenance`) are measured in
+# `t_l6_attach_refuses_a_stale_lift.nim`, against a REAL provenance
+# stamp written by a REAL lift and a REAL recipe edited on disk.
+#
+# WHAT THIS FILE NOW ALSO CONTROLS, by passing `sagFresh` everywhere: a
+# fresh artifact still selects §4.3's three ROW outcomes unchanged. A
+# precondition that refused unconditionally, or that mis-ordered itself
+# against the major check, reddens every suite below.
+# ---------------------------------------------------------------------------
+
+proc freshLiftForThisSuite(): ServiceArtifactGenerationCheck =
+  freshLiftGeneration(artifactPath = "<constructed in-process>",
+    ownerPackage = "l6_attach_fixtures", ownerProject = "l6_attach_fixtures",
+    identity = "same-generation-by-construction")
+
 proc packageDefNamed(name: string): PackageDef =
   for pkg in registeredPackages():
     if pkg.packageName == name:
@@ -206,7 +241,7 @@ suite "L6 §4.3 row 1 — equal fingerprints attach SILENTLY":
     # `restart` and one `env` pair, on BOTH its services. None of it is
     # what a consumer compiles against.
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttOtherImpl"))
+      snapshotOf("l6AttOtherImpl"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachSilently
     check decision.diagnostic == ""
@@ -240,7 +275,7 @@ suite "L6 §4.3 row 1 — equal fingerprints attach SILENTLY":
 
   test "a definition compared with itself attaches silently":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttBase"))
+      snapshotOf("l6AttBase"), freshLiftForThisSuite())
     check decision.outcome == saoAttachSilently
     check decision.diagnostic == ""
 
@@ -248,7 +283,7 @@ suite "L6 §4.3 row 1 — equal fingerprints attach SILENTLY":
     # Why the undeclared major is 0 and not 1: every definition that
     # declares nothing, and every pre-v23 artifact, has to agree.
     let decision = attachDecision(runningFrom("l6AttUndeclaredA"),
-      snapshotOf("l6AttUndeclaredB"))
+      snapshotOf("l6AttUndeclaredB"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.runningMajor == 0'u32
     check decision.requestedMajor == 0'u32
@@ -262,7 +297,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
 
   test "an ADDED config key warns, and the warning names it":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttAddedKey"))
+      snapshotOf("l6AttAddedKey"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     let diff = differenceNamed(decision, smkConfigKey, "fixtureUsers")
@@ -272,7 +307,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
 
   test "a RETYPED config key warns, naming both signatures":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttChangedKeyType"))
+      snapshotOf("l6AttChangedKeyType"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     let diff = differenceNamed(decision, smkConfigKey, "port")
@@ -288,7 +323,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
     # spells it out of the two fields that already exist and the envelope
     # gained no field for it. This case is the proof that it is visible.
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttRequiredKey"))
+      snapshotOf("l6AttRequiredKey"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     let diff = differenceNamed(decision, smkConfigKey, "port")
@@ -299,7 +334,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
 
   test "a RETYPED activity parameter warns":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttOtherParamType"))
+      snapshotOf("l6AttOtherParamType"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     let diff = differenceNamed(decision, smkActivityParam, "pg")
@@ -310,7 +345,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
 
   test "a DELETED sibling service warns, as a removal":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttNoSibling"))
+      snapshotOf("l6AttNoSibling"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     let diff = differenceNamed(decision, smkSiblingService, "bootstrap")
@@ -321,7 +356,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
     # §4.3: "The warning names both fingerprints, the project whose
     # definition is running, and the members that differ."
     let running = runningFrom("l6AttBase")
-    let decision = attachDecision(running, snapshotOf("l6AttAddedKey"))
+    let decision = attachDecision(running, snapshotOf("l6AttAddedKey"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.diagnostic.contains(running.interfaceSnapshot.fingerprint)
     check decision.diagnostic.contains(snapshotOf("l6AttAddedKey").fingerprint)
@@ -366,7 +401,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
       ("l6AttOrderAPlusFront", "l6AttOrderA")]
     for (runningPkg, requestedPkg) in warnPairs:
       let decision = attachDecision(runningFrom(runningPkg),
-        snapshotOf(requestedPkg))
+        snapshotOf(requestedPkg), freshLiftForThisSuite())
       checkpoint(runningPkg & " <- " & requestedPkg)
       check decision.outcome == saoAttachWithWarning
       check decision.differences.len > 0
@@ -381,7 +416,7 @@ suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
 
   test "the warning says the handle's members are usable":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttAddedKey"))
+      snapshotOf("l6AttAddedKey"), freshLiftForThisSuite())
     check decision.diagnostic.contains("usable")
     check decision.diagnostic.contains("--replace")
 
@@ -447,7 +482,7 @@ suite "L6 §4.3 row 2 — a pure REORDER warns, and the warning names it":
     # was never broken, asserted so a future canonicalisation of the
     # digest input reddens here too.
     check running.interfaceSnapshot.fingerprint != requested.fingerprint
-    let decision = attachDecision(running, requested)
+    let decision = attachDecision(running, requested, freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     check decision.differences.len == 2
@@ -483,7 +518,7 @@ suite "L6 §4.3 row 2 — a pure REORDER warns, and the warning names it":
     let running = runningFrom("l6AttParamOrderA")
     let requested = snapshotOf("l6AttParamOrderB")
     check running.interfaceSnapshot.fingerprint != requested.fingerprint
-    let decision = attachDecision(running, requested)
+    let decision = attachDecision(running, requested, freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     check decision.differences.len == 2
@@ -509,7 +544,7 @@ suite "L6 §4.3 row 2 — a pure REORDER warns, and the warning names it":
     # `memberDifferences` therefore counts positions only among the
     # members BOTH sides carry, where the insertion changes nothing.
     let decision = attachDecision(runningFrom("l6AttOrderA"),
-      snapshotOf("l6AttOrderAPlusFront"))
+      snapshotOf("l6AttOrderAPlusFront"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     check decision.differences.len == 1
@@ -527,7 +562,7 @@ suite "L6 §4.3 row 2 — a pure REORDER warns, and the warning names it":
 
   test "ANTI-SPRAY, the mirror: REMOVING the front key is ONE removal":
     let decision = attachDecision(runningFrom("l6AttOrderAPlusFront"),
-      snapshotOf("l6AttOrderA"))
+      snapshotOf("l6AttOrderA"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoAttachWithWarning
     check decision.differences.len == 1
@@ -540,7 +575,7 @@ suite "L6 §4.3 row 2 — a pure REORDER warns, and the warning names it":
     # neighbours must not be reported as moved -- a changed member still
     # occupies its slot in the shared subsequence.
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttChangedKeyType"))
+      snapshotOf("l6AttChangedKeyType"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check changesOfKind(decision, smcReordered) == 0
     let diff = differenceNamed(decision, smkConfigKey, "port")
@@ -569,7 +604,7 @@ suite "L6 §4.3 row 2 — a pure REORDER warns, and the warning names it":
     for pkg in ["l6AttOrderA", "l6AttOrderB", "l6AttParamOrderA",
                 "l6AttOrderAPlusFront", "l6AttBase"]:
       checkpoint(pkg)
-      let decision = attachDecision(runningFrom(pkg), snapshotOf(pkg))
+      let decision = attachDecision(runningFrom(pkg), snapshotOf(pkg), freshLiftForThisSuite())
       check decision.outcome == saoAttachSilently
       check decision.differences.len == 0
       # The diff itself, not routed through the short-circuit.
@@ -583,7 +618,7 @@ suite "L6 §4.3 row 3 — a differing MAJOR refuses":
 
   test "a different declared major refuses rather than warning":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttOtherMajor"))
+      snapshotOf("l6AttOtherMajor"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoRefuseMajor
     check decision.runningMajor == 2'u32
@@ -591,7 +626,7 @@ suite "L6 §4.3 row 3 — a differing MAJOR refuses":
 
   test "the refusal names both majors, both projects and the service":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttOtherMajor"))
+      snapshotOf("l6AttOtherMajor"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.diagnostic.contains("MAJOR compatibility field is 2")
     check decision.diagnostic.contains("declares 3")
@@ -606,7 +641,7 @@ suite "L6 §4.3 row 3 — a differing MAJOR refuses":
     # would make the undeclared value a wildcard and the refusal
     # unreachable for exactly the recipes that have not been updated.
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttUndeclaredA"))
+      snapshotOf("l6AttUndeclaredA"), freshLiftForThisSuite())
     checkpoint(decision.diagnostic)
     check decision.outcome == saoRefuseMajor
     check decision.runningMajor == 2'u32
@@ -636,11 +671,11 @@ suite "L6 §4.3 row 3 — a differing MAJOR refuses":
     let running = runningFrom("l6AttBase")
     let requested = snapshotOf("l6AttOtherMajor")
     check running.interfaceSnapshot.fingerprint != requested.fingerprint
-    check attachDecision(running, requested).outcome == saoRefuseMajor
+    check attachDecision(running, requested, freshLiftForThisSuite()).outcome == saoRefuseMajor
 
   test "a refusal still reports the differing members, for the report":
     let decision = attachDecision(runningFrom("l6AttBase"),
-      snapshotOf("l6AttOtherMajor"))
+      snapshotOf("l6AttOtherMajor"), freshLiftForThisSuite())
     let diff = differenceNamed(decision, smkSignature, "compatibility")
     check diff.isSome
     check diff.get.runningSignature == "2"
@@ -676,7 +711,7 @@ suite "L6 — exactly one of three, for every pair in the fixture set":
       for requestedPkg in packages:
         let running = runningFrom(runningPkg)
         let requested = snapshotOf(requestedPkg)
-        let decision = attachDecision(running, requested)
+        let decision = attachDecision(running, requested, freshLiftForThisSuite())
         let expected =
           if running.interfaceSnapshot.compatibilityMajor !=
               requested.compatibilityMajor: saoRefuseMajor
@@ -718,8 +753,8 @@ suite "L6 — exactly one of three, for every pair in the fixture set":
       ("l6AttBase", "l6AttOtherMajor"), ("l6AttBase", "l6AttOtherImpl")]
     for (a, b) in pairs:
       checkpoint(a & " / " & b)
-      check attachDecision(runningFrom(a), snapshotOf(b)).outcome ==
-        attachDecision(runningFrom(b), snapshotOf(a)).outcome
+      check attachDecision(runningFrom(a), snapshotOf(b), freshLiftForThisSuite()).outcome ==
+        attachDecision(runningFrom(b), snapshotOf(a), freshLiftForThisSuite()).outcome
 
 suite "L6 — a snapshot of a service the lift does not carry is refused":
 

@@ -231,7 +231,26 @@ proc convergeRequestFor(key: ServiceInstanceKey; package, holderId,
     command: instanceCommand(),
     workingDir: workingDir,
     replace: false,
-    force: false)
+    force: false,
+    # §4.3's SAME-GENERATION PRECONDITION, which the daemon now decides
+    # before §4.3's table. SUPPLIED HERE BECAUSE A REQUEST THAT OMITS IT
+    # REFUSES: the decoder reads an absent field as
+    # `sagUnknownProvenance`, never as fresh, and this suite's regression
+    # when the precondition landed was exactly that -- `applyServiceConverge`
+    # answered `RefuseUnknownProvenance` where the case expects
+    # `AttachWithWarning`. That refusal is the correct new behaviour for a
+    # client that established nothing; this suite is about what the
+    # RESPONSE reports about the running instance's contribution points,
+    # so it establishes the generation and leaves §4.3's precondition to
+    # `t_l6_attach_refuses_a_stale_lift.nim`.
+    #
+    # `sagFresh` is correct and not convenient: both snapshots come from
+    # one lift of one fixture module in this process, so there is no
+    # artifact on disk for either to be stale against.
+    generationJson: encodeServiceArtifactGenerationCheck(
+      freshLiftGeneration("<constructed in-process>",
+        "dss11_resolver_fixtures", "dss11_resolver_fixtures",
+        "same-generation-by-construction")))
 
 proc materialiseFrom(registry: var ServiceInstanceRegistry;
                      key: ServiceInstanceKey;

@@ -85,6 +85,37 @@ import ./l6_attach_fixtures
 # widening that file's surface for this one.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# §4.3's SAME-GENERATION PRECONDITION, as this suite supplies it.
+#
+# `convergeServiceInstance` gained a REQUIRED `generation` argument when
+# §4.3's stale-lift precondition was implemented, and every call in this
+# file passes `sagFresh` through this one named helper.
+#
+# IT IS NOT A MOCK AND THE SUITE'S MOCK POLICY IS UNCHANGED. There is
+# nothing to mock: `ServiceArtifactGenerationCheck` is a plain record of
+# an answer already established, `attachDecision` is a pure function of
+# it, and no filesystem probe is stubbed out or replaced. What this suite
+# measures is the registry's handling of §4.5's converge and §4.3's three
+# ROW outcomes; the two PRECONDITION outcomes are measured where they
+# belong, in `t_l6_attach_refuses_a_stale_lift.nim`, against a REAL
+# recorded provenance stamp and a REAL recipe closure on disk.
+#
+# `sagFresh` is correct for these cases rather than convenient: each
+# constructs its running instance and its requested snapshot from ONE
+# lift of one fixture package in this process, so the two sides are
+# same-generation by construction. Passing anything else would make
+# every case here refuse before reaching the branch it exists to test --
+# which is exactly what the mutation "collapse the precondition into an
+# unconditional refusal" does, and is why that mutation reddens this
+# file too.
+# ---------------------------------------------------------------------------
+
+proc freshLiftForThisSuite(): ServiceArtifactGenerationCheck =
+  freshLiftGeneration(artifactPath = "<constructed in-process>",
+    ownerPackage = "l6_attach_fixtures", ownerProject = "l6_attach_fixtures",
+    identity = "same-generation-by-construction")
+
 proc packageDefNamed(name: string): PackageDef =
   for pkg in registeredPackages():
     if pkg.packageName == name:
@@ -273,7 +304,8 @@ proc convergeOne(registry: var ServiceInstanceRegistry;
   ## (the process does not exist when the decision is made), so a caller
   ## that wants both does both.
   result = convergeServiceInstance(registry, key, snapshotOf(package),
-    holderId, policy, now, replace = replace, force = force)
+    holderId, freshLiftForThisSuite(), policy, now,
+    replace = replace, force = force)
   if result.outcome == scoMaterialise:
     discard recordMaterialisedInstance(registry, key, snapshotOf(package),
       materialise(workingDir), holderId, policy, now)
@@ -575,7 +607,7 @@ suite "L7 §4.5 — a restarted daemon rebuilds the registry from the store":
     # And the registry is back to "no instance present", so §4.5's
     # "materialises it otherwise" fires.
     let decision = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttBase"), holderIdFor("b"))
+      snapshotOf("l6AttBase"), holderIdFor("b"), freshLiftForThisSuite())
     check decision.outcome == scoMaterialise
     check not decision.hadInstance
     reapEverySpawnedInstance()
@@ -671,8 +703,8 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
 
     # RULE 1: `--replace` refuses, and names the uncertainty.
     let refusal = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttBase"), holderIdFor("taker"), keep(), getTime(),
-      replace = true)
+      snapshotOf("l6AttBase"), holderIdFor("taker"),
+      freshLiftForThisSuite(), keep(), getTime(), replace = true)
     check refusal.outcome == scoRefuseUnknownHolders
     check refusal.diagnostic.contains("UNRECOVERABLE")
     check refusal.diagnostic.contains("§4.5 rule 1")
@@ -690,7 +722,8 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
     # RULE 2: `--force` proceeds, and says holders may exist it cannot
     # name.
     let forced = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttBase"), holderIdFor("taker"), keep(), getTime(),
+      snapshotOf("l6AttBase"), holderIdFor("taker"),
+      freshLiftForThisSuite(), keep(), getTime(),
       replace = true, force = true)
     check forced.outcome == scoForcedOverOtherHolders
     check forced.diagnostic.contains(
@@ -714,7 +747,8 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
       policy = delayed(hours = 1))
     let recoverable = convergeServiceInstance(registry, key,
       snapshotOf("l6AttBase"), holderIdFor("taker"),
-      delayed(hours = 1), getTime(), replace = true, force = true)
+      freshLiftForThisSuite(), delayed(hours = 1), getTime(),
+      replace = true, force = true)
     check recoverable.outcome == scoForcedOverOtherHolders
     # The RECOVERABLE path's text is L6's `replaceDecision` text: it
     # names the holder it is overriding and makes no claim about
@@ -768,8 +802,8 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
     var registry = freshRegistry(storeRoot)
     check registry.lookupServiceInstance(key).get.holderRecovery == hrTotal
     let refusal = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttBase"), mine, delayed(hours = 3), getTime(),
-      replace = true)
+      snapshotOf("l6AttBase"), mine, freshLiftForThisSuite(),
+      delayed(hours = 3), getTime(), replace = true)
     check refusal.outcome == scoRefuseOtherHolders
     check refusal.replace.blockingHolders == @[theirs]
     check refusal.diagnostic.contains(theirs)
@@ -778,8 +812,8 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
     check releaseServiceInstance(registry, key, theirs).outcome ==
       srlDroppedHolder
     let proceed = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttBase"), mine, delayed(hours = 3), getTime(),
-      replace = true)
+      snapshotOf("l6AttBase"), mine, freshLiftForThisSuite(),
+      delayed(hours = 3), getTime(), replace = true)
     check proceed.outcome == scoReplace
     check proceed.diagnostic == ""
     reapEverySpawnedInstance()
@@ -800,7 +834,8 @@ suite "L7 — the attach decision is L6's; only its PROVENANCE is new":
     discard convergeOne(registry, key, "l6AttBase", holderIdFor("a"),
       keyRoot, policy = delayed(hours = 1))
     let decision = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttOtherImpl"), holderIdFor("b"), delayed(hours = 1))
+      snapshotOf("l6AttOtherImpl"), holderIdFor("b"),
+      freshLiftForThisSuite(), delayed(hours = 1))
     check decision.outcome == scoAttachSilently
     check decision.diagnostic == ""
     check decision.attach.outcome == saoAttachSilently
@@ -817,7 +852,8 @@ suite "L7 — the attach decision is L6's; only its PROVENANCE is new":
       policy = delayed(hours = 1))
     let second = holderIdFor("b")
     let decision = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttAddedKey"), second, delayed(hours = 1))
+      snapshotOf("l6AttAddedKey"), second, freshLiftForThisSuite(),
+      delayed(hours = 1))
     check decision.outcome == scoAttachWithWarning
     check decision.diagnostic.len > 0
     check decision.attach.differences.len > 0
@@ -840,13 +876,103 @@ suite "L7 — the attach decision is L6's; only its PROVENANCE is new":
       policy = delayed(hours = 1))
     let refused = holderIdFor("b")
     let decision = convergeServiceInstance(registry, key,
-      snapshotOf("l6AttOtherMajor"), refused, delayed(hours = 1))
+      snapshotOf("l6AttOtherMajor"), refused, freshLiftForThisSuite(),
+      delayed(hours = 1))
     check decision.outcome == scoRefuseMajor
     check convergeRefused(decision.outcome)
     check decision.attach.outcome == saoRefuseMajor
     check registry.holderNames(key) == @[first]
     check not registry.holderNames(key).contains(refused)
     reapEverySpawnedInstance()
+
+suite "L7 — §4.3's SAME-GENERATION PRECONDITION, at the converge":
+  ## ADDED when the precondition was implemented. The decision itself is
+  ## measured in `t_l6_attach_refuses_a_stale_lift.nim`, against a REAL
+  ## provenance stamp on disk; what only a registry can measure is the
+  ## CONSEQUENCE of its two refusals -- the outcome word that crosses the
+  ## daemon wire, and the holder the consumer must NOT be recorded as.
+  ##
+  ## The `sagStale` / `sagUnknownProvenance` values here are constructed,
+  ## and that is not a mock: a `ServiceArtifactGenerationCheck` is a
+  ## record of an answer the CLIENT established from the owner's recipe
+  ## and the owner's artifact, neither of which exists in this process.
+  ## The establishment is measured where it happens.
+  teardown:
+    reapEverySpawnedInstance()
+
+  test "a STALE generation refuses, takes no holder, and reads as refused":
+    let storeRoot = throwawayRoot("stale-store")
+    let keyRoot = throwawayRoot("stale-keyroot")
+    let key = keyFor("l6AttBase", keyRoot)
+    var registry = freshRegistry(storeRoot)
+    let first = holderIdFor("a")
+    discard convergeOne(registry, key, "l6AttBase", first, keyRoot,
+      policy = delayed(hours = 1))
+    let refused = holderIdFor("b")
+    # The SAME definition on both sides, so the fingerprints agree and
+    # §4.3's table alone would select row 1 -- `scoAttachSilently`, with
+    # the holder taken. The generation is the only thing that differs.
+    let decision = convergeServiceInstance(registry, key,
+      snapshotOf("l6AttBase"), refused,
+      ServiceArtifactGenerationCheck(generation: sagStale,
+        artifactPath: keyRoot / "project-interface.rbsz",
+        ownerPackage: "l6AttBase", ownerProject: "l6AttBase",
+        recordedIdentity: "aa", currentIdentity: "bb",
+        movedSources: @["repro.nim (edited)"]),
+      delayed(hours = 1))
+    check decision.outcome == scoRefuseStaleLift
+    check convergeRefused(decision.outcome)
+    check decision.attach.outcome == saoRefuseStaleLift
+    check decision.diagnostic.contains("THE LIFT IS STALE")
+    check decision.diagnostic.contains("repro dev-env")
+    # NOT HELD. A refused consumer recorded as a holder would make
+    # `repro down` elsewhere release an instance it never used.
+    check registry.holderNames(key) == @[first]
+    check not registry.holderNames(key).contains(refused)
+    # The outcome word survives the wire, so a client reports the
+    # refusal rather than an unknown outcome.
+    check parseConvergeOutcome(outcomeWord(decision.outcome)) ==
+      scoRefuseStaleLift
+
+  test "an UNESTABLISHED generation refuses the same way, and differently":
+    let storeRoot = throwawayRoot("unprov-store")
+    let keyRoot = throwawayRoot("unprov-keyroot")
+    let key = keyFor("l6AttBase", keyRoot)
+    var registry = freshRegistry(storeRoot)
+    let first = holderIdFor("a")
+    discard convergeOne(registry, key, "l6AttBase", first, keyRoot,
+      policy = delayed(hours = 1))
+    let refused = holderIdFor("b")
+    let decision = convergeServiceInstance(registry, key,
+      snapshotOf("l6AttBase"), refused, ServiceArtifactGenerationCheck(),
+      delayed(hours = 1))
+    check decision.outcome == scoRefuseUnknownProvenance
+    check convergeRefused(decision.outcome)
+    check decision.attach.outcome == saoRefuseUnknownProvenance
+    check not decision.diagnostic.contains("THE LIFT IS STALE")
+    check registry.holderNames(key) == @[first]
+    check parseConvergeOutcome(outcomeWord(decision.outcome)) ==
+      scoRefuseUnknownProvenance
+
+  test "a FRESH generation still attaches and still takes the holder":
+    ## The control for the two cases above: the same converge, the same
+    ## snapshots, the same registry -- only the generation changes, and
+    ## the holder IS taken. A precondition that refused unconditionally
+    ## would pass both cases above and fail this one.
+    let storeRoot = throwawayRoot("genfresh-store")
+    let keyRoot = throwawayRoot("genfresh-keyroot")
+    let key = keyFor("l6AttBase", keyRoot)
+    var registry = freshRegistry(storeRoot)
+    let first = holderIdFor("a")
+    discard convergeOne(registry, key, "l6AttBase", first, keyRoot,
+      policy = delayed(hours = 1))
+    let second = holderIdFor("b")
+    let decision = convergeServiceInstance(registry, key,
+      snapshotOf("l6AttBase"), second, freshLiftForThisSuite(),
+      delayed(hours = 1))
+    check decision.outcome == scoAttachSilently
+    check decision.diagnostic == ""
+    check registry.holderNames(key) == sorted(@[first, second])
 
 suite "L7 — the registry is keyed by (identity, scope, environment)":
   teardown:
@@ -941,7 +1067,7 @@ suite "L7 — the registry refuses what it cannot do, rather than guessing":
     var registry = freshRegistry(storeRoot)
     expect ServiceRegistryError:
       discard convergeServiceInstance(registry, key,
-        snapshotOf("l6AttBase"), "")
+        snapshotOf("l6AttBase"), "", freshLiftForThisSuite())
     expect ServiceRegistryError:
       discard releaseServiceInstance(registry, key, "")
 
@@ -979,7 +1105,8 @@ suite "L7 — the wire and store codecs round-trip what the decision reads":
     # only thing the snapshot is for.
     let running = runningServiceInstance(
       keyFor("l6AttBase", throwawayRoot("codec-keyroot")), decoded, [])
-    check attachDecision(running, snapshot).outcome == saoAttachSilently
+    check attachDecision(running, snapshot,
+      freshLiftForThisSuite()).outcome == saoAttachSilently
 
   test "a key survives the codec, and an unknown scope word is refused":
     for environment in ["", "dev", "production/with-slash"]:

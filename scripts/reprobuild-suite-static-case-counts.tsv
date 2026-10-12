@@ -308,6 +308,7 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
+libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
 libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim	nim	15
 libs/repro_interface_artifacts/tests/t_l3_lifted_symbols_compile_in_a_consumer.nim	nim	9
 libs/repro_interface_artifacts/tests/t_l3_service_activity_codec_roundtrip.nim	nim	19
@@ -556,7 +557,8 @@ libs/repro_resources/tests/t_l3_reaper.nim	nim	13
 libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	46
 libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	17
 libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	40
-libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim	nim	31
+libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim	nim	13
+libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim	nim	34
 libs/repro_resources/tests/t_l8_registrations_mint_once_and_reach_argv.nim	nim	10
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
@@ -1215,7 +1217,7 @@ tests/integration/t_develop_selectors_compose_in_fixed_order.nim	nim	1
 tests/integration/t_develop_set_is_union_of_all_backends.nim	nim	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
 tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	nim	2
-tests/integration/t_dss11_cross_process_contribution_reaches_the_instance.nim	nim	3
+tests/integration/t_dss11_cross_process_contribution_reaches_the_instance.nim	nim	4
 tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim	nim	12
 tests/integration/t_e2e_cross_compilation_aarch64.nim	nim	2
 tests/integration/t_e2e_engine_shim_removed.nim	nim	2

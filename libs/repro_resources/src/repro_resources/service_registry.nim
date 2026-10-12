@@ -286,6 +286,19 @@ type
     scoAttachSilently
     scoAttachWithWarning
     scoRefuseMajor
+    scoRefuseStaleLift
+      ## §4.3's SAME-GENERATION PRECONDITION: the owner's lifted
+      ## artifact is older than the owner's definition. Appended after
+      ## the §4.3 row values so no existing ordinal moves; the wire
+      ## carries `outcomeWord`, which is derived from the NAME, so a
+      ## client built against a revision that lacks this value reports
+      ## an unknown outcome word by name instead of reading some other
+      ## outcome -- which is `parseConvergeOutcome`'s whole point.
+    scoRefuseUnknownProvenance
+      ## The precondition's other failure: the correspondence could not
+      ## be established at all. Distinct from `scoRefuseStaleLift` for
+      ## the reason `saoRefuseUnknownProvenance` is distinct from
+      ## `saoRefuseStaleLift`.
     scoReplace
     scoRefuseOtherHolders
     scoForcedOverOtherHolders
@@ -925,6 +938,7 @@ proc convergeServiceInstance*(registry: var ServiceInstanceRegistry;
                               key: ServiceInstanceKey;
                               snapshot: ServiceInterfaceSnapshot;
                               holderId: string;
+                              generation: ServiceArtifactGenerationCheck;
                               policy: LeasePolicy = keep();
                               now: Time = getTime();
                               replace = false;
@@ -1000,13 +1014,25 @@ proc convergeServiceInstance*(registry: var ServiceInstanceRegistry;
     of sroForcedOverOtherHolders:
       result.outcome = scoForcedOverOtherHolders
     return
-  result.attach = attachDecision(entry.instance, snapshot)
+  result.attach = attachDecision(entry.instance, snapshot, generation)
   result.diagnostic = result.attach.diagnostic
   case result.attach.outcome
   of saoAttachSilently: result.outcome = scoAttachSilently
   of saoAttachWithWarning: result.outcome = scoAttachWithWarning
   of saoRefuseMajor:
     result.outcome = scoRefuseMajor
+    return
+  of saoRefuseStaleLift:
+    # §4.3's precondition. THE HOLDER IS NOT TAKEN, for the same reason
+    # it is not taken on a major refusal: the consumer did not get a
+    # usable handle. Said as its own branch rather than folded into the
+    # major one so this `case` stays exhaustive by compiler check --
+    # which is what makes a future outcome impossible to add without
+    # deciding what the registry does with it.
+    result.outcome = scoRefuseStaleLift
+    return
+  of saoRefuseUnknownProvenance:
+    result.outcome = scoRefuseUnknownProvenance
     return
   # Attached: take this consumer's lease on the instance. The holder set
   # is the entry's own -- the authoritative one -- with this consumer
@@ -1129,10 +1155,95 @@ proc convergeAttached*(outcome: ServiceConvergeOutcome): bool =
   ## disagree about which outcomes count as attached.
   outcome in {scoAttachSilently, scoAttachWithWarning}
 
+proc generationToJson(check: ServiceArtifactGenerationCheck): JsonNode =
+  %*{"generation": $check.generation,
+     "artifactPath": check.artifactPath,
+     "ownerPackage": check.ownerPackage,
+     "ownerProject": check.ownerProject,
+     "recordedIdentity": check.recordedIdentity,
+     "currentIdentity": check.currentIdentity,
+     "movedSources": check.movedSources,
+     "detail": check.detail}
+
+proc encodeServiceArtifactGenerationCheck*(
+    check: ServiceArtifactGenerationCheck): string =
+  ## §4.3's precondition answer, as wire JSON, for the daemon converge
+  ## request. ONE codec, like the snapshot's, so the answer a client
+  ## established and the answer the daemon decides on cannot be two
+  ## different things.
+  $generationToJson(check)
+
+proc decodeServiceArtifactGenerationCheck*(text: string):
+    ServiceArtifactGenerationCheck =
+  ## The inverse. EVERY failure mode yields `sagUnknownProvenance`, with
+  ## a `detail` saying which, and that is the load-bearing decision in
+  ## this proc:
+  ##
+  ##   * an EMPTY string -- which is what a request body written by a
+  ##     build predating this field decodes to, and what a caller that
+  ##     forgot the field sends;
+  ##   * unparsable JSON, a non-object, or a `generation` word this
+  ##     build does not know.
+  ##
+  ## None of them may yield `sagFresh`. A wire-compatibility default of
+  ## "fresh" would make §4.3's precondition disappear the moment a
+  ## client and a daemon were built from different revisions -- the
+  ## silent attach, re-introduced by the codec rather than by the
+  ## policy. It is NOT raised as an error either: a refusal naming the
+  ## re-lift is a decision the consumer can act on, and an exception
+  ## would surface as "the daemon failed" rather than "your owner's
+  ## artifact is not trustworthy".
+  result = ServiceArtifactGenerationCheck(
+    generation: sagUnknownProvenance, movedSources: @[])
+  if text.len == 0:
+    result.detail =
+      "The converge request carried no artifact-generation answer at " &
+      "all, which is what a client built before " &
+      "Shared-Development-Services.md §4.3's same-generation " &
+      "precondition sends. It is read as UNESTABLISHED rather than as " &
+      "fresh, on purpose."
+    return
+  var node: JsonNode
+  try:
+    node = parseJson(text)
+  except CatchableError as err:
+    result.detail = "The artifact-generation answer on the converge " &
+      "request is unparsable (" & err.msg & "), so nothing was established."
+    return
+  if node.kind != JObject:
+    result.detail = "The artifact-generation answer on the converge " &
+      "request is not a JSON object, so nothing was established."
+    return
+  result.artifactPath = node{"artifactPath"}.getStr("")
+  result.ownerPackage = node{"ownerPackage"}.getStr("")
+  result.ownerProject = node{"ownerProject"}.getStr("")
+  result.recordedIdentity = node{"recordedIdentity"}.getStr("")
+  result.currentIdentity = node{"currentIdentity"}.getStr("")
+  result.detail = node{"detail"}.getStr("")
+  let moved = node{"movedSources"}
+  if not moved.isNil and moved.kind == JArray:
+    for item in moved:
+      result.movedSources.add(item.getStr(""))
+  let word = node{"generation"}.getStr("")
+  var matched = false
+  for candidate in ServiceArtifactGeneration:
+    if $candidate == word:
+      result.generation = candidate
+      matched = true
+      break
+  if not matched:
+    result.generation = sagUnknownProvenance
+    result.detail =
+      "The converge request names artifact generation `" & word &
+      "`, which this build does not know; read as UNESTABLISHED rather " &
+      "than as fresh." &
+      (if result.detail.len > 0: " (" & result.detail & ")" else: "")
+
 proc convergeRefused*(outcome: ServiceConvergeOutcome): bool =
   ## Whether the converge refused. `scoForcedOverOtherHolders` is NOT a
   ## refusal -- it proceeded -- and `scoMaterialise` is not either.
-  outcome in {scoRefuseMajor, scoRefuseOtherHolders,
+  outcome in {scoRefuseMajor, scoRefuseStaleLift,
+              scoRefuseUnknownProvenance, scoRefuseOtherHolders,
               scoRefuseUnknownHolders}
 
 proc outcomeWord*(outcome: ServiceConvergeOutcome): string =
