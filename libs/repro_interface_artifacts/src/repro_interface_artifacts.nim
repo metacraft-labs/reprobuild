@@ -583,6 +583,11 @@ type
       ## RP1: the v1 ``ProviderCompileActionKey`` used as the engine edge's
       ## action key. See ``computeProviderCompileActionKey``.
     workDir*: string
+    frontendRuntimeIdentity*: string
+      ## ``frontendRuntimeIdentity(workDir)`` as this plan computed it: the
+      ## digest of every reprobuild library source (~14 MB hashed when no
+      ## memo is set). Kept so a derived plan
+      ## (``recipeRelativeProviderCompilePlan``) does not hash it again.
     fingerprintInputStamps*: seq[FileStamp]
       ## Stamps of EVERY file whose content feeds ``providerFingerprint``,
       ## captured when the plan was made: the recipe's own source closure plus
@@ -6138,11 +6143,16 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
 
 proc providerFingerprintFor*(inputSources: openArray[string];
                              interfaceFingerprint: ContentDigest;
-                             workDir = getCurrentDir()): ContentDigest =
+                             workDir = getCurrentDir();
+                             libFingerprint = ""): ContentDigest =
+  ## ``libFingerprint``: ``reproLibSourceFingerprint(workDir)`` when the
+  ## caller already has it.
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.providerSources.v2")
   payload.writeDigest(interfaceFingerprint)
-  payload.writeString(reproLibSourceFingerprint(workDir))
+  payload.writeString(
+    if libFingerprint.len > 0: libFingerprint
+    else: reproLibSourceFingerprint(workDir))
   for path in inputSources:
     payload.writeString(path)
     let content = toBytes(readFile(extendedPath(path)))
@@ -6243,7 +6253,8 @@ proc commonSourceRoot(paths: openArray[string]): string =
       prefix = up
   prefix
 
-proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
+proc projectSourceSemanticIdentity*(inputSources: openArray[string];
+                                    sourceNames: openArray[string] = []):
     ContentDigest =
   ## The semantic identity of the project's own provider source closure:
   ## the ordered (root-relative path, content) set of the ``.nim`` sources
@@ -6254,15 +6265,22 @@ proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
   ## ``ProviderArtifactId`` (the RP1 sharing property). In v1 this is the
   ## whole source closure; RP6 will split the private-impl portion out so
   ## it does not re-key downstream.
+  ##
+  ## ``sourceNames``, when given (one per source), are the names the
+  ## identity uses instead: a recipe-relative provider compile passes each
+  ## source as it names it relative to the recipe (``relocatableName``), so
+  ## a closure reaching ``../shared`` does not fold the name of the recipe's
+  ## own directory into the identity.
   var normalized: seq[string] = @[]
   for path in inputSources:
     normalized.add(normalizedStampPath(path))
   let root = commonSourceRoot(normalized)
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.projectSourceSemanticIdentity.v1")
-  for path in normalized:
+  for i, path in normalized:
     let relPath =
-      if root.len > 0 and path == root: extractFilename(path)
+      if sourceNames.len == normalized.len: sourceNames[i]
+      elif root.len > 0 and path == root: extractFilename(path)
       elif root.len > 0 and path.startsWith(root & "/"):
         path[root.len + 1 .. ^1]
       else: extractFilename(path)
@@ -6280,8 +6298,12 @@ proc computeProviderArtifactId*(
     providerImplementationImports: openArray[string] = [];
     publicDependencyInterfaceFingerprints: openArray[string] = [];
     providerCompileOptions: openArray[string] = [];
-    workDir = getCurrentDir()): ContentDigest =
+    workDir = getCurrentDir();
+    sourceNames: openArray[string] = [];
+    frontendIdentity = ""): ContentDigest =
   ## The v1 ``ProviderArtifactId`` (Provider-Runtime-Protocol-v1.md §1).
+  ## ``frontendIdentity``: ``frontendRuntimeIdentity(workDir)`` when the
+  ## caller already has it.
   ##
   ## ``publicDependencyInterfaceFingerprints`` is the SHARING key: two
   ## consumers whose lock resolves the same dependency version pass the
@@ -6290,8 +6312,10 @@ proc computeProviderArtifactId*(
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.providerArtifactId.v1")
   payload.writeU32Le(ProviderProtocolVersionV1)
-  payload.writeString(frontendRuntimeIdentity(workDir))
-  payload.writeDigest(projectSourceSemanticIdentity(inputSources))
+  payload.writeString(
+    if frontendIdentity.len > 0: frontendIdentity
+    else: frontendRuntimeIdentity(workDir))
+  payload.writeDigest(projectSourceSemanticIdentity(inputSources, sourceNames))
   # The interface fingerprint is the project's own public-signature
   # identity; carried so an interface-only change re-keys the artifact.
   payload.writeDigest(interfaceFingerprint)
@@ -6755,11 +6779,86 @@ proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
     providerCompileOptions = compileOptions, workDir = workDir)
   computeProviderCompileActionKey(providerArtifactId, sources, sources)
 
+proc recipeRelativeProviderDefines*(anchors: openArray[string]):
+    seq[string] =
+  ## The defines that make a provider compile RECIPE-RELATIVE: the DSL then
+  ## records the recipe's source sites relative to the recipe
+  ## (``repro_core/relocation.recipeSourceName``), outside ``anchors``.
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles"; Provider-Runtime-Protocol-v1.md, "Paths in responses".
+  @["--define:reproRecipeRelative",
+    "--define:reproRecipeAnchors=" & anchors.join(":")]
+
+proc recipeRelativeCompileOption*(arg, recipeDir: string): string =
+  ## A provider compile option as the recipe-relative compile keys it: the
+  ## recipe's own directory is `.` (the edge runs there).
+  if arg == "--path:" & recipeDir: "--path:." else: arg
+
+proc recipeRelativeProviderCompilePlan*(plan: ProviderCompilePlan;
+    modulePath, outputBinaryPath: string;
+    relocationAnchors: openArray[string]): ProviderCompilePlan =
+  ## ``plan`` (an ordinary provider-compile plan of ``modulePath``) as the
+  ## RECIPE-RELATIVE provider-compile edge plans it
+  ## (Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles"), writing ``outputBinaryPath``. The compile is told to record
+  ## the recipe's source sites relative to the recipe
+  ## (``recipeRelativeProviderDefines``), and its two identities name what
+  ## lies beside the recipe relative to it - the sources, ``--path:.`` - so a
+  ## byte-identical copy of the recipe at another path, in another worktree or
+  ## under another work root plans the SAME ``ProviderArtifactId`` and
+  ## ``ProviderCompileActionKey``. ``relocationAnchors`` are the edge's
+  ## anchors (``effectiveAnchors``). Derived rather than re-planned: the
+  ## sources, fingerprints and library identity are the caller's.
+  let absoluteModulePath = absolutePath(modulePath)
+  let recipeDir = parentDir(absoluteModulePath)
+  let normalizedOutputPath = absolutePath(
+    normalizedProviderOutputPath(outputBinaryPath))
+  var command: seq[string] = @[]
+  for arg in plan.compilerCommand:
+    command.add(if arg.startsWith("--out:"): "--out:" & normalizedOutputPath
+                else: arg)
+  # Before the trailing module argument: flags after it are run args.
+  for flag in recipeRelativeProviderDefines(relocationAnchors):
+    command.insert(flag, command.len - 1)
+  var compileOptions: seq[string] = @[]
+  for i in 1 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg == normalizedOutputPath or arg == absoluteModulePath:
+      continue
+    compileOptions.add(recipeRelativeCompileOption(arg, recipeDir))
+  var sourceNames: seq[string] = @[]
+  for source in plan.inputSources:
+    sourceNames.add(relocatableName(source, recipeDir, relocationAnchors))
+  let frontend =
+    if plan.frontendRuntimeIdentity.len > 0: plan.frontendRuntimeIdentity
+    else: frontendRuntimeIdentity(plan.workDir)
+  result = plan
+  result.frontendRuntimeIdentity = frontend
+  result.outputBinaryPath = normalizedOutputPath
+  result.compilerCommand = command
+  result.providerArtifactId = computeProviderArtifactId(
+    plan.inputSources, plan.interfaceFingerprint,
+    providerCompileOptions = compileOptions, workDir = plan.workDir,
+    sourceNames = sourceNames, frontendIdentity = frontend)
+  result.providerCompileActionKey = computeProviderCompileActionKey(
+    result.providerArtifactId, sourceNames, sourceNames)
+  result.compileEdge = providerCompileEdge(plan.inputSources,
+    normalizedOutputPath, command, plan.interfaceFingerprint,
+    plan.providerFingerprint, workDir = plan.workDir,
+    knownActionFingerprint = some(result.providerCompileActionKey))
+
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
                           workDir = getCurrentDir();
                           scratchDir = "";
-                          includeSiblingSources = false): ProviderCompilePlan =
+                          includeSiblingSources = false;
+                          recipeRelative = false;
+                          relocationAnchors: openArray[string] = []):
+    ProviderCompilePlan =
+  ## ``recipeRelative``: the plan of the recipe-relative provider-compile edge
+  ## (``recipeRelativeProviderCompilePlan``); ``relocationAnchors`` are its
+  ## anchors.
   # The compiler runs in an exclusive scratch CWD, so every path that belongs
   # to the provider itself must be independent of that CWD.
   let absoluteModulePath = absolutePath(modulePath)
@@ -6767,8 +6866,10 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     normalizedProviderOutputPath(outputBinaryPath))
   let sources = discoverNimSources(absoluteModulePath,
     includeSiblingSources = includeSiblingSources)
+  # Hashed once: it feeds both the provider fingerprint and the artifact id.
+  let frontend = frontendRuntimeIdentity(workDir)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint,
-    workDir)
+    workDir, libFingerprint = frontend)
   let command = providerCompileCommand(absoluteModulePath,
     normalizedOutputPath, workDir, scratchDir)
   # RP1: derive the v1-named identities. The ``providerCompileOptions`` set is
@@ -6783,7 +6884,8 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     compileOptions.add(arg)
   let providerArtifactId = computeProviderArtifactId(
     sources, interfaceFingerprint,
-    providerCompileOptions = compileOptions, workDir = workDir)
+    providerCompileOptions = compileOptions, workDir = workDir,
+    frontendIdentity = frontend)
   let providerCompileActionKey = computeProviderCompileActionKey(
     providerArtifactId, sources, sources)
   # The engine edge is keyed by the v1 ProviderCompileActionKey so the
@@ -6791,7 +6893,7 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
   let edge = providerCompileEdge(sources, normalizedOutputPath, command,
     interfaceFingerprint, providerFingerprint, workDir = workDir,
     knownActionFingerprint = some(providerCompileActionKey))
-  ProviderCompilePlan(
+  result = ProviderCompilePlan(
     inputSources: sources,
     outputBinaryPath: normalizedOutputPath,
     compilerCommand: command,
@@ -6801,12 +6903,16 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     providerArtifactId: providerArtifactId,
     providerCompileActionKey: providerCompileActionKey,
     workDir: workDir,
+    frontendRuntimeIdentity: frontend,
     # Same input set ``providerFingerprintFor`` just hashed, stamped rather
     # than read: the recipe closure plus the reprobuild library sources.
     # ``reproLibStampsForCache`` is empty for an immutable-store workDir,
     # where those files cannot change and so need no snapshot.
     fingerprintInputStamps: fileStamps(sources) &
       reproLibStampsForCache(workDir))
+  if recipeRelative:
+    result = recipeRelativeProviderCompilePlan(result, absoluteModulePath,
+      normalizedOutputPath, relocationAnchors)
 
 proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
                                    interfaceFingerprint,
@@ -7075,7 +7181,10 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
                             artifactPath = "";
                             workDir = getCurrentDir();
                             scratchDir = "";
-                            useFreshnessCache = true): ProviderCompileArtifact =
+                            useFreshnessCache = true;
+                            recipeRelative = false;
+                            relocationAnchors: openArray[string] = []):
+    ProviderCompileArtifact =
   ## ``useFreshnessCache`` controls the built-in warm short-circuit. It is
   ## ``false`` for exactly one caller: the child of the provider-compile EDGE
   ## (``repro __repro-compile-provider``). This mirrors
@@ -7089,9 +7198,16 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   ## from monitored evidence that DOES see those files; consulting the narrower
   ## key inside the child would veto the engine's decision and re-publish the
   ## very stale binary the edge was re-run to replace.
+  ##
+  ## ``recipeRelative`` (the child of the recipe-relative edge): compile with
+  ## ``recipeRelativeProviderDefines`` and write an artifact that names the
+  ## recipe's files relative to the recipe, with no freshness sidecar — the
+  ## caller's own artifact and sidecar are written by the CLI from ITS plan
+  ## (``publishRecipeRelativeProviderCompile``).
   let plan = providerCompilePlan(modulePath, outputBinaryPath,
     interfaceFingerprint, workDir, scratchDir,
-    includeSiblingSources = useFreshnessCache)
+    includeSiblingSources = useFreshnessCache,
+    recipeRelative = recipeRelative, relocationAnchors = relocationAnchors)
   if useFreshnessCache and artifactPath.len > 0 and
       providerCompileArtifactFresh(artifactPath,
         plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint,
@@ -7140,8 +7256,93 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     outputBinaryFingerprint: casDigest(toBytes(readFile(
         extendedPath(plan.outputBinaryPath)))),
     executionResult: execution)
+  if recipeRelative:
+    let recipeDir = parentDir(absolutePath(modulePath))
+    let absoluteModulePath = absolutePath(modulePath)
+    let anchors = @relocationAnchors
+    for source in result.inputSources.mitems:
+      source = relocatableName(source, recipeDir, anchors)
+    for input in result.compileEdge.declaredInputs.mitems:
+      input = relocatableName(input, recipeDir, anchors)
+    result.compilerCommand = result.compilerCommand.mapIt(
+      if it == absoluteModulePath: extractFilename(it)
+      else: recipeRelativeCompileOption(it, recipeDir))
+    if artifactPath.len > 0:
+      writeProviderCompileArtifact(artifactPath, result)
+    return
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, result)
+
+proc encodeInterfaceFingerprintArg*(digest: ContentDigest): string =
+  ## The interface fingerprint as the recipe-relative provider-compile edge
+  ## passes it on its argv (``--interface-fingerprint``). The caller's
+  ## interface ARTIFACT is not an input of that edge: it lives in the work
+  ## root's metadata directory and names source locations at the caller's
+  ## location, so its path and bytes would bind the edge to one location.
+  $ord(digest.algorithm) & "." & $ord(digest.domain) & "." &
+    toHex(digest.bytes).toLowerAscii
+
+proc decodeInterfaceFingerprintArg*(text: string): ContentDigest =
+  let parts = text.split('.')
+  if parts.len != 3 or parts[2].len != 64:
+    raise newException(ValueError, "malformed interface fingerprint: " & text)
+  result.algorithm = HashAlgorithm(parseInt(parts[0]))
+  result.domain = HashDomain(parseInt(parts[1]))
+  for i in 0 ..< 32:
+    result.bytes[i] = byte(parseHexInt(parts[2][2 * i .. 2 * i + 1]))
+
+proc publishRecipeRelativeProviderCompile*(plan: ProviderCompilePlan;
+    edgeArtifactPath, artifactPath, modulePath: string;
+    workDir = getCurrentDir()): ProviderCompileArtifact =
+  ## The caller's side of a recipe-relative provider compile: the edge wrote
+  ## its binary and a recipe-relative artifact under the action-cache root
+  ## (shared by every copy of the recipe); the caller's binary
+  ## (``plan.outputBinaryPath``), artifact and freshness sidecar are composed
+  ## here from the CALLER's plan, which names this copy's files. Each file
+  ## is rewritten only when its bytes change, so a served edge leaves the
+  ## caller's files - and every key on their mtimes - untouched.
+  let edge = readProviderCompileArtifact(edgeArtifactPath)
+  let edgeBinary = normalizedProviderOutputPath(edge.outputBinaryPath)
+  let binary = normalizedProviderOutputPath(plan.outputBinaryPath)
+  var current = false
+  if fileExists(extendedPath(binary)):
+    try:
+      current = casDigest(toBytes(readFile(extendedPath(binary)))) ==
+        edge.outputBinaryFingerprint
+    except CatchableError:
+      current = false
+  if not current:
+    createDir(extendedPath(parentDir(binary)))
+    let staged = binary & ".tmp." & $getCurrentProcessId()
+    copyFile(extendedPath(edgeBinary), extendedPath(staged))
+    setFilePermissions(extendedPath(staged),
+      getFilePermissions(extendedPath(edgeBinary)))
+    moveFile(extendedPath(staged), extendedPath(binary))
+    discard stageHostDynlibsBesideBinary(parentDir(binary))
+  result = ProviderCompileArtifact(
+    inputSources: plan.inputSources,
+    outputBinaryPath: plan.outputBinaryPath,
+    compilerCommand: plan.compilerCommand,
+    compileEdge: plan.compileEdge,
+    interfaceFingerprint: plan.interfaceFingerprint,
+    providerFingerprint: plan.providerFingerprint,
+    outputBinaryFingerprint: edge.outputBinaryFingerprint,
+    executionResult: edge.executionResult)
+  let encoded = toByteString(encodeProviderCompileArtifact(result))
+  var unchanged = false
+  if fileExists(extendedPath(artifactPath)):
+    try:
+      unchanged = readFile(extendedPath(artifactPath)) == encoded
+    except CatchableError:
+      unchanged = false
+  if not unchanged:
+    createDir(extendedPath(parentDir(artifactPath)))
+    let staged = artifactPath & ".tmp." & $getCurrentProcessId()
+    writeFile(extendedPath(staged), encoded)
+    moveFile(extendedPath(staged), extendedPath(artifactPath))
+  if not unchanged or
+      not fileExists(extendedPath(providerFreshnessCachePath(artifactPath))):
     writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, result)
 
 # ---------------------------------------------------------------------

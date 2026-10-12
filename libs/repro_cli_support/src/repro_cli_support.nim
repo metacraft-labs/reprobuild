@@ -9341,6 +9341,141 @@ proc publishIfChanged(path, content: string) =
   writeFile(extendedPath(staged), content)
   moveFile(extendedPath(staged), extendedPath(path))
 
+type
+  RecipeRelativeProviderCompile = object
+    ## The recipe-relative provider-compile edge for one caller
+    ## (`runProviderCompileEdge`). Inactive: the location-bound edge runs.
+    active: bool
+    recipeDir: string
+    anchors: seq[string]
+    edgePlan: ProviderCompilePlan
+      ## The plan as the edge keys it: recipe-relative identities, the
+      ## binary under `recipeCompileOutputDir("provider", ...)`.
+    edgeArtifactPath: string
+
+proc planRecipeRelativeProviderCompile(callerPlan: ProviderCompilePlan;
+    modulePath, helperCliPath, workDir, providerRoot: string):
+    RecipeRelativeProviderCompile =
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles", stage 2 (owner decision 2026-10-11, "relative on the wire"):
+  ## the provider compile runs IN the recipe's directory, is keyed by
+  ## identities that name what lies beside the recipe relative to it, and
+  ## produces a binary that records the recipe's source sites relative to
+  ## the recipe. The provider is launched with its working directory at the
+  ## recipe (`providerRoot`, the project root it evaluates), so those names
+  ## resolve to the copy it runs beside, and the engine resolves the ones in
+  ## its responses there (Provider-Runtime-Protocol-v1.md, "Paths in
+  ## responses"). A byte-identical recipe at another path, in another
+  ## worktree or under another work root is then served by one compile.
+  ##
+  ## Only where that holds: a recipe that is the project root its provider
+  ## runs in, and an edge that can publish (a monitor-injectable compiler).
+  let recipeDir = parentDir(absolutePath(modulePath))
+  if helperCliPath.len == 0 or not providerCompileCacheable(callerPlan) or
+      not recipeRelativeCompilePossible(recipeDir, providerRoot):
+    return
+  result.active = true
+  result.recipeDir = recipeDir
+  result.anchors = effectiveAnchors(recipeDir,
+    recipeCompileRelocationAnchors(workDir, helperCliPath,
+      callerPlan.compilerCommand))
+  # Derived from the caller's plan, whose sources and fingerprints are this
+  # recipe's. The identities do not depend on the output path (`--out:` is
+  # output-location noise), so the outputs are placed afterwards in the
+  # directory the key names.
+  let keyed = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
+    callerPlan.outputBinaryPath, result.anchors)
+  let edgeDir = recipeCompileOutputDir("provider",
+    toHex(keyed.providerCompileActionKey.bytes).toLowerAscii)
+  result.edgePlan = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
+    edgeDir / "provider" / "project-provider", result.anchors)
+  doAssert result.edgePlan.providerCompileActionKey ==
+    keyed.providerCompileActionKey
+  result.edgeArtifactPath = edgeDir / "provider-compile.rbsz"
+
+proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
+    modulePath, helperCliPath, workDir: string): BuildAction =
+  ## The recipe-relative twin of `providerCompileBuildAction`. Its argv names
+  ## the recipe by file name and everything else by a location-independent
+  ## path (the reprobuild checkout, the action-cache root); its outputs and
+  ## scratch live under the action-cache root, so the recipe's tree is never
+  ## written; its record names what the compile observed beside the recipe
+  ## relative to it (`relocatable`).
+  let edgeDir = parentDir(edge.edgeArtifactPath)
+  let scratchDir = edgeDir / "work"
+  createDir(extendedPath(scratchDir))
+  createDir(extendedPath(parentDir(edge.edgePlan.outputBinaryPath)))
+  var command = @[
+    helperCliPath,
+    "__repro-compile-provider",
+    "--recipe-relative",
+    "--module", extractFilename(modulePath),
+    "--out", edge.edgePlan.outputBinaryPath,
+    "--artifact", edge.edgeArtifactPath,
+    "--interface-fingerprint",
+      encodeInterfaceFingerprintArg(edge.edgePlan.interfaceFingerprint),
+    "--work-dir", workDir,
+    "--scratch-dir", scratchDir]
+  for anchor in edge.anchors:
+    command.add("--anchor")
+    command.add(anchor)
+  var inputs: seq[string] = @[]
+  for source in edge.edgePlan.inputSources:
+    inputs.add(relocatableName(source, edge.recipeDir, edge.anchors))
+  action(ProviderCompileActionId, command,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = edge.recipeDir,
+    inputs = inputs,
+    # No freshness sidecar: the caller's artifact and sidecar are written by
+    # the CLI from the caller's plan (`publishRecipeRelativeProviderCompile`).
+    outputs = @[edge.edgePlan.outputBinaryPath, edge.edgeArtifactPath],
+    commandStatsId = "repro provider compile edge",
+    cacheable = true,
+    weakFingerprint = edge.edgePlan.providerCompileActionKey,
+    # A copy of the recipe carries new mtimes; HYBRID compares its content
+    # when the metadata moved, which is what lets that copy be served.
+    actionCachePolicy = ffpHybrid,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
+    env = providerCompileLaunchEnv(scratchDir / "home"),
+    isolateHostEnvironment = true,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      providerCompileIgnoredInputPrefixes(scratchDir)),
+    relocatable = true,
+    relocationAnchors = edge.anchors)
+
+proc runProviderCompileEdge(plan: ProviderCompilePlan;
+    modulePath, interfacePath, artifactPath, helperCliPath, workDir,
+    scratchDir, providerRoot: string; config: BuildEngineConfig):
+    BuildRunResult =
+  ## Run the provider-compile edge for `plan` (the caller's plan: its binary
+  ## and artifact paths are the caller's) and leave the caller's binary,
+  ## artifact and freshness sidecar in place. Recipe-relative where
+  ## `planRecipeRelativeProviderCompile` allows it, location-bound
+  ## (`providerCompileBuildAction`) otherwise. `providerRoot` is the project
+  ## root the caller will launch the provider in.
+  let edge = planRecipeRelativeProviderCompile(plan, modulePath,
+    helperCliPath, workDir, providerRoot)
+  if not edge.active:
+    return runBuild(graph([providerCompileBuildAction(plan, modulePath,
+      interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
+      config)
+  # Every copy of the recipe shares the edge's outputs; hold them from
+  # execution until this caller has its own copy.
+  var edgeLock = acquireInterfaceArtifactLock(edge.edgeArtifactPath)
+  try:
+    result = runBuild(graph([recipeRelativeProviderCompileAction(edge,
+      modulePath, helperCliPath, workDir)]), config)
+    if not result.hasFailedActions() and not config.dryRun and
+        fileExists(extendedPath(edge.edgeArtifactPath)) and
+        fileExists(extendedPath(edge.edgePlan.outputBinaryPath)):
+      discard publishRecipeRelativeProviderCompile(plan,
+        edge.edgeArtifactPath, artifactPath, modulePath, workDir)
+  finally:
+    releaseInterfaceArtifactLock(edgeLock)
+
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
   ## keyed by the edge's own identity (its argv hash).
@@ -11449,10 +11584,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       provider = cachedProvider.get()
     else:
       invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-      let providerCompileAction = providerCompileBuildAction(providerPlan,
-        modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
-        compileScratchDir)
       var providerCompileConfig = BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
@@ -11506,8 +11637,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # stale daemon) is visibly attributed to the launch path rather
       # than the cache-freshness check above.
       progressRenderer.renderPhase("running provider compile")
-      providerCompileResult = runBuild(graph([providerCompileAction]),
-        providerCompileConfig)
+      providerCompileResult = runProviderCompileEdge(providerPlan,
+        modulePath, interfacePath, providerArtifactPath,
+        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        compileScratchDir, result.projectRoot, providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
       warnRunQuotaBypassIfUsed(providerCompileResult,
         enabled = fallbackToRunQuotaBypass)
@@ -12217,26 +12350,44 @@ proc runProviderCompileHelper(args: openArray[string]): int =
   let interfacePath = valueAfterFlag(args, "--interface")
   let workDir = valueAfterFlag(args, "--work-dir")
   let scratchDir = valueAfterFlag(args, "--scratch-dir")
+  let interfaceFingerprintArg = valueAfterFlag(args, "--interface-fingerprint")
+  # A recipe-relative compile (`recipeRelativeProviderCompileAction`) runs
+  # with its cwd at the recipe, names the recipe by file name, and takes the
+  # interface fingerprint itself rather than the caller's interface artifact.
+  let recipeRelative = "--recipe-relative" in args
+  var anchors: seq[string] = @[]
+  for i in 0 ..< args.len - 1:
+    if args[i] == "--anchor" and args[i + 1].len > 0:
+      anchors.add(args[i + 1])
   for (name, value) in [
     ("--module", modulePath),
     ("--out", outputPath),
     ("--artifact", artifactPath),
-    ("--interface", interfacePath),
+    ("--interface",
+      if interfaceFingerprintArg.len > 0: interfaceFingerprintArg
+      else: interfacePath),
     ("--work-dir", workDir)
   ]:
     if value.len == 0:
       stderr.writeLine("repro provider compile: missing " & name)
       return 2
   try:
-    let interfaceArtifact = readInterfaceArtifact(interfacePath)
+    let interfaceFingerprint =
+      if interfaceFingerprintArg.len > 0:
+        decodeInterfaceFingerprintArg(interfaceFingerprintArg)
+      else:
+        readInterfaceArtifact(interfacePath).interfaceFingerprint
     # ``useFreshnessCache = false``: reaching this process at all means the
     # engine already decided the edge must run, from monitored evidence that
     # sees more than the recipe's import closure. Re-asking the narrower
     # text-closure key here would veto that decision and re-publish the stale
     # binary the edge was re-run to replace.
-    discard compileProviderBinary(modulePath, outputPath,
-      interfaceArtifact.interfaceFingerprint, artifactPath, workDir,
-      scratchDir, useFreshnessCache = false)
+    discard compileProviderBinary(absolutePath(modulePath),
+      absolutePath(outputPath), interfaceFingerprint,
+      absolutePath(artifactPath), absolutePath(workDir),
+      (if scratchDir.len > 0: absolutePath(scratchDir) else: ""),
+      useFreshnessCache = false, recipeRelative = recipeRelative,
+      relocationAnchors = anchors)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
@@ -12373,7 +12524,9 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   if not fileExists(extendedPath(responsePath)):
     raise newException(IOError, "provider did not write response: " &
       responsePath)
-  readProviderResponseFile(responsePath)
+  result = readProviderResponseFile(responsePath)
+  # Provider-Runtime-Protocol-v1.md, "Paths in responses".
+  result.resolveRelativeResponsePaths(cwd)
 
 const DevelopOverridesEnvVar = "REPRO_DEVELOP_OVERRIDES_FILE"
   ## The env var naming the develop-override document. One spelling, because
@@ -24753,10 +24906,6 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     result.providerCompileCacheHit = true
   else:
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-    let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
-      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -24779,8 +24928,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       forceRebuild: forceRefresh,
       suppressTrace: true,
       skipCacheHitEvidence: true)
-    let providerCompileResult = runBuild(graph([providerCompileAction]),
-      providerCompileConfig)
+    let providerCompileResult = runProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
@@ -24794,7 +24945,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # already-present outputs against a revalidated action-cache record
     # (``asUpToDate``). Either way no compile ran.
     for item in providerCompileResult.results:
-      if item.id == providerCompileAction.id:
+      if item.id == ProviderCompileActionId:
         result.providerCompileCacheHit = item.status in {asCacheHit, asUpToDate}
     if not fileExists(extendedPath(providerArtifactPath)):
       raise newException(IOError,
@@ -24857,6 +25008,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   # Metadata consumers do not need tool resolution or a lowered action graph.
   result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
+  # A recipe-relative provider names its recipe's files relative to the
+  # project root it ran in (Provider-Runtime-Protocol-v1.md, "Paths in
+  # responses"); the listing names them where they are.
+  for entry in result.targetExportTable.entries.mitems:
+    entry.sourceFile = rebasedName(entry.sourceFile, projectRoot)
   for fragment in refresh.snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkMetadata and
@@ -24965,10 +25121,6 @@ proc refreshRecipeProviderSnapshot(target: string;
     provider = cachedProvider.get()
   else:
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-    let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
-      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -24988,8 +25140,10 @@ proc refreshRecipeProviderSnapshot(target: string;
       forceRebuild: false,
       suppressTrace: true,
       skipCacheHitEvidence: true)
-    let providerCompileResult = runBuild(graph([providerCompileAction]),
-      providerCompileConfig)
+    let providerCompileResult = runProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
@@ -70697,10 +70851,20 @@ proc tryLoadDurableSolverProviderArtifacts(
       providerArtifactPath, modulePath, providerBinaryPath,
       interfaceArtifact.interfaceFingerprint, compileWorkDir)
     if provider.isNone:
-      let providerAction = providerCompileBuildAction(plan,
-        modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
-        outDir / "provider-work")
+      # The edge the build ran: recipe-relative where it could be
+      # (`runProviderCompileEdge`), whose record is keyed by the recipe-relative
+      # plan, not by the caller's.
+      let helperCliPath = internalReproHelperCliPath(publicCliPath)
+      let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
+        helperCliPath, compileWorkDir, projectRootForModule(modulePath))
+      let providerAction =
+        if relocated.active:
+          recipeRelativeProviderCompileAction(relocated, modulePath,
+            helperCliPath, compileWorkDir)
+        else:
+          providerCompileBuildAction(plan,
+            modulePath, interfacePath, providerArtifactPath,
+            helperCliPath, compileWorkDir, outDir / "provider-work")
       let validation = runBuild(graph([providerAction]), BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
@@ -70867,10 +71031,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
         let plan = providerCompilePlan(modulePath, providerBinaryPath,
           artifact.interfaceFingerprint, compileWorkDir, scratchDir)
         invalidateStaleProviderCompileArtifact(plan, providerArtifactPath)
-        let compileAction = providerCompileBuildAction(plan,
+        # The provider runs below with its cwd at the project directory.
+        let providerRoot =
+          if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
+        let compiled = runProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
-          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir)
-        let compiled = runBuild(graph([compileAction]), BuildEngineConfig(
+          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir,
+          providerRoot, BuildEngineConfig(
           cacheRoot: cacheRoot,
           actionCacheRoot: currentActionCacheRoot(),
           runQuotaCliPath: publicCliPath,

@@ -164,8 +164,12 @@ proc placementLiteral(node: NimNode; fallback: CliArgPlacement):
     fallback
 
 proc lineFile(node: NimNode): tuple[file: string; line: int] =
+  ## The source site the DSL RECORDS for `node`. Nim's line information is
+  ## always absolute; a recipe-relative provider compile names the recipe's
+  ## own files relative to it instead (`recipeSourceName`), so the provider
+  ## binary describes the copy of the recipe it runs beside.
   let info = node.lineInfoObj()
-  (info.filename, info.line)
+  (recipeSourceName(info.filename), info.line)
 
 proc calleeName(node: NimNode): string =
   if node.kind in {nnkCall, nnkCommand} and node.len > 0:
@@ -2364,7 +2368,8 @@ proc parsePackageDef(name: NimNode; body: NimNode;
       let psLoc = stmt.lineInfoObj
       result.packageSources.add(PackageSourceDecl(
         packageName: sourcedPackage, source: provenance,
-        sourceFile: psLoc.filename, sourceLine: psLoc.line))
+        sourceFile: recipeSourceName(psLoc.filename),
+        sourceLine: psLoc.line))
     elif calleeName(stmt).normalize == "uses":
       # Entries arrive in `resolvedUses`, routed below: stage 1 lowered this
       # block into an expression and the compiler evaluated its `when`s.
