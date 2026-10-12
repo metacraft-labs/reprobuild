@@ -570,3 +570,121 @@ proc attestedImageManifest*(configFingerprint, ukiImage, verityImageDigest,
   # visibly EMPTY: "this build computed no expectation for you" is a
   # statement and a missing key is not.
   validateAttestedImageManifest(result)
+
+# ---------------------------------------------------------------------
+# Comparing two manifests, field by field
+# ---------------------------------------------------------------------
+
+type
+  ManifestFieldDivergence* = object
+    ## One field two manifests disagree about, named the way this schema
+    ## names it, with both values beside it.
+    ##
+    ## A comparison that answered "they differ" would diagnose nothing:
+    ## the document is mostly hex, and the operator who has to act on a
+    ## divergence needs to know WHICH expectation moved, because the
+    ## answer decides what to look at. A moved ``imageOutputs.uki`` with
+    ## an unmoved ``expected.tpm[0].pcr11`` is a different incident from
+    ## the reverse.
+    field*: string
+    left*, right*: string
+
+  ManifestComparison* = object
+    compared*: int
+      ## How many fields were actually put side by side.
+      ##
+      ## Carried out because it is the one number that says the
+      ## comparison happened. An empty divergence list means "they
+      ## agree" only if something was compared; a diff that compared
+      ## nothing agrees with everything, and a reader of the result
+      ## cannot tell the two apart from the list alone.
+    divergences*: seq[ManifestFieldDivergence]
+
+proc diffAttestedImageManifests*(left, right: AttestedImageManifest):
+    ManifestComparison =
+  ## Every field of two manifests, compared, with every disagreement
+  ## named.
+  ##
+  ## ## Why the count is checked against the schema's own key lists
+  ##
+  ## The failure mode of a hand-written field comparison is a field
+  ## nobody added to it: the schema grows a key, the renderer and the
+  ## parser learn it, and this procedure keeps returning "they agree"
+  ## about documents that differ in it. Nothing about that is visible —
+  ## the comparison still passes, which is exactly the wrong direction
+  ## to fail in.
+  ##
+  ## So the number of comparisons performed below is checked against the
+  ## number the schema's own ``*Keys`` arrays imply. The two sides of
+  ## that equation are independent: one is how many times the code below
+  ## compared something, the other is derived from the key lists the
+  ## parser enforces. A key added to the schema and not to this
+  ## procedure therefore raises here rather than being silently agreed
+  ## about.
+  var compared = 0
+  var divergences: seq[ManifestFieldDivergence] = @[]
+
+  proc compare(field, a, b: string) =
+    inc compared
+    if a != b:
+      divergences.add ManifestFieldDivergence(field: field, left: a, right: b)
+
+  compare("configFingerprint", left.configFingerprint,
+          right.configFingerprint)
+  compare("imageOutputs.uki", left.imageOutputs.uki, right.imageOutputs.uki)
+  compare("imageOutputs.verityImage", left.imageOutputs.verityImage,
+          right.imageOutputs.verityImage)
+  compare("imageOutputs.verityRootHash", left.imageOutputs.verityRootHash,
+          right.imageOutputs.verityRootHash)
+
+  # Each backend's row COUNT is a field of its own. Two manifests whose
+  # confidential-launch arrays hold three rows and two are not "equal
+  # for the first two rows"; they are documents that publish different
+  # numbers of expectations, and comparing only the overlap would report
+  # the shorter one as agreeing with the longer.
+  compare("expected." & BackendSevSnp & ".count",
+          $left.sevSnp.len, $right.sevSnp.len)
+  let sevRows = min(left.sevSnp.len, right.sevSnp.len)
+  for i in 0 ..< sevRows:
+    let at = "expected." & BackendSevSnp & "[" & $i & "]"
+    compare(at & ".vcpus", $left.sevSnp[i].vcpus, $right.sevSnp[i].vcpus)
+    compare(at & ".vcpuType", left.sevSnp[i].vcpuType,
+            right.sevSnp[i].vcpuType)
+    compare(at & ".ovmf", left.sevSnp[i].ovmf, right.sevSnp[i].ovmf)
+    compare(at & ".policy", left.sevSnp[i].policy, right.sevSnp[i].policy)
+    compare(at & ".measurement", left.sevSnp[i].measurement,
+            right.sevSnp[i].measurement)
+
+  compare("expected." & BackendTdx & ".count", $left.tdx.len, $right.tdx.len)
+  let tdxRows = min(left.tdx.len, right.tdx.len)
+  for i in 0 ..< tdxRows:
+    let at = "expected." & BackendTdx & "[" & $i & "]"
+    compare(at & ".mrtd", left.tdx[i].mrtd, right.tdx[i].mrtd)
+    compare(at & ".rtmr0", left.tdx[i].rtmr0, right.tdx[i].rtmr0)
+    compare(at & ".rtmr1", left.tdx[i].rtmr1, right.tdx[i].rtmr1)
+    compare(at & ".rtmr2", left.tdx[i].rtmr2, right.tdx[i].rtmr2)
+
+  compare("expected." & BackendTpm & ".count", $left.tpm.len, $right.tpm.len)
+  let tpmRows = min(left.tpm.len, right.tpm.len)
+  for i in 0 ..< tpmRows:
+    let at = "expected." & BackendTpm & "[" & $i & "]"
+    compare(at & ".pcr11", left.tpm[i].pcr11, right.tpm[i].pcr11)
+    compare(at & ".eventLogTemplate", left.tpm[i].eventLogTemplate,
+            right.tpm[i].eventLogTemplate)
+
+  # `TopLevelKeys` minus three: `schema` is not a field of the record,
+  # and `imageOutputs` and `expected` are compared through their own key
+  # lists rather than as units.
+  let implied =
+    (TopLevelKeys.len - 3) + ImageOutputKeys.len + KnownBackends.len +
+    sevRows * SevSnpKeys.len + tdxRows * TdxKeys.len +
+    tpmRows * TpmKeys.len
+  if compared != implied:
+    raise newException(ManifestError,
+      "this build compared " & $compared & " fields of a " &
+      AttestedImageSchema & " document and its schema has " & $implied &
+      "; a field-by-field comparison that does not cover every field " &
+      "reports agreement about documents that differ, so it is refused " &
+      "rather than trusted")
+
+  ManifestComparison(compared: compared, divergences: divergences)

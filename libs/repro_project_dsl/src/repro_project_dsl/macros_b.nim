@@ -297,8 +297,107 @@ proc usesInstallMirrorBuildCall(body: NimNode): bool =
     if usesInstallMirrorBuildCall(child):
       return true
 
+proc literalExportCall(node: NimNode):
+    tuple[callee, name: string] =
+  ## TC-9a: recognise ``certificate "n", h`` and the target-exporting calls
+  ## (``target``, ``exportTarget``, ``aggregate``, ``collect``) whose name is
+  ## a string literal, in either call or command syntax. Anything else —
+  ## a computed name, an unrelated call — returns an empty callee and is
+  ## left to the runtime check in ``resolveCertificateExports``.
+  if node.kind notin {nnkCall, nnkCommand} or node.len < 2:
+    return
+  let callee = node[0]
+  if callee.kind notin {nnkIdent, nnkSym}:
+    return
+  if node[1].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return
+  for candidate in ["certificate", "target", "exportTarget", "aggregate",
+                    "collect"]:
+    if callee.eqIdent(candidate):
+      return (callee: candidate, name: node[1].strVal)
+
+type
+  CertificateSourceDecl = tuple[name: string; call, handle: NimNode]
+  ExportSourceDecl = tuple[name: string; call: NimNode; boundTo: string;
+                           handleRepr: string]
+
+proc collectCertificateSourceDecls(node: NimNode; boundTo: string;
+    certificates: var seq[CertificateSourceDecl];
+    exports: var seq[ExportSourceDecl]) =
+  ## Walk a ``build:`` body for ``checkCertificateDeclarations``.
+  ## ``boundTo`` is the variable a ``let`` / ``var`` binds ``node`` to.
+  let recognised = literalExportCall(node)
+  if recognised.callee.len > 0:
+    if recognised.callee == "certificate":
+      certificates.add((name: recognised.name, call: node,
+        handle: (if node.len >= 3: node[2] else: newEmptyNode())))
+    else:
+      let handleRepr =
+        if recognised.callee in ["target", "exportTarget"] and
+            node.len >= 3 and node[2].kind in {nnkIdent, nnkSym}:
+          node[2].strVal
+        else: ""
+      exports.add((name: recognised.name, call: node, boundTo: boundTo,
+        handleRepr: handleRepr))
+  if node.kind in {nnkLetSection, nnkVarSection}:
+    for defs in node:
+      if defs.kind == nnkIdentDefs and defs.len == 3 and
+          defs[0].kind in {nnkIdent, nnkSym}:
+        collectCertificateSourceDecls(defs[2], defs[0].strVal, certificates,
+          exports)
+      else:
+        collectCertificateSourceDecls(defs, "", certificates, exports)
+    return
+  for child in node:
+    collectCertificateSourceDecls(child, "", certificates, exports)
+
+proc checkCertificateDeclarations(buildBody: NimNode) =
+  ## Test-Certificates TC-9a: a certificate name is a target name in the
+  ## same namespace (Test-Certificates.md §"Marking a node"). Report the
+  ## collisions visible in the source as compile errors naming both
+  ## declarations: a certificate name declared twice, and a certificate
+  ## name another ``target`` / ``aggregate`` / ``collect`` exports over a
+  ## different handle. ``test`` may be declared over a handle other than the
+  ## ``test`` target: it replaces the implicit marking (D15).
+  ##
+  ## "Same handle" is decided syntactically: the export IS the
+  ## certificate's handle (``certificate "u", aggregate("u", ...)``), the
+  ## handle is the variable the export was bound to (``let u = aggregate(
+  ## "u", ...)`` then ``certificate "u", u``), or both name one variable
+  ## (``target "u", h`` and ``certificate "u", h``). Names and handles only
+  ## known when the body runs are checked there, by
+  ## ``resolveCertificateExports``.
+  var certificates: seq[CertificateSourceDecl] = @[]
+  var exports: seq[ExportSourceDecl] = @[]
+  collectCertificateSourceDecls(buildBody, "", certificates, exports)
+  for i in 0 ..< certificates.len:
+    for j in 0 ..< i:
+      if certificates[j].name == certificates[i].name:
+        error("certificate name '" & certificates[i].name &
+          "' is declared twice: first at " & certificates[j].call.lineInfo &
+          ", again here", certificates[i].call)
+  for cert in certificates:
+    if cert.name == "test":
+      continue
+    let handleName =
+      if cert.handle.kind in {nnkIdent, nnkSym}: cert.handle.strVal else: ""
+    for exported in exports:
+      if exported.name != cert.name:
+        continue
+      let sameHandle =
+        exported.call == cert.handle or
+          (handleName.len > 0 and
+            (exported.boundTo == handleName or
+             exported.handleRepr == handleName))
+      if not sameHandle:
+        error("certificate name '" & cert.name & "' collides with the " &
+          "target '" & cert.name & "' declared at " &
+          exported.call.lineInfo & ": a certificate name is a target " &
+          "name, so it must name the same node or a new name", cert.call)
+
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let buildBody = collectBuildStatements(body, pkg.packageName)
+  checkCertificateDeclarations(buildBody)
   let devEnvBody = collectDevEnvStatements(body)
   if buildBody.len == 0 and devEnvBody.len == 0:
     return newStmtList()
@@ -432,6 +531,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
         when defined(reproProviderMode):
           if registeredShellActions(`pkgNameLit`).len == 0:
             resetTargetExportRegistry()
+            resetCertificateRegistry()
             setCurrentOwningPackageOverride(`pkgNameLit`)
             beginProviderStartupBody(`pkgNameLit`)
             try:
@@ -446,6 +546,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
               endProviderStartupBody()
               clearCurrentOwningPackageOverride()
               resetTargetExportRegistry()
+              resetCertificateRegistry()
     else:
       newStmtList()
   # M9.R.15q.2.1 — translate shell-action rows into BuildActionDef rows.

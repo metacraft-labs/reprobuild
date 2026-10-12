@@ -317,6 +317,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
+      " certificates list|plan [SELECTOR...] [--no-certify] [--json]\n       " &
+          programName &
       " bench [build options]\n       " &
           programName &
       " lint [build options]\n       " &
@@ -398,6 +400,8 @@ proc renderUsage*(programName: string): string =
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
       " attest expect --image PATH [--out PATH | --check PATH]\n       " &
+          programName &
+      " attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n       " &
           programName &
       " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n       " &
           programName &
@@ -25525,6 +25529,370 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
         echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
           entry.name & "  " & source
   0
+
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9a — named certificates in the build graph.
+#
+# ``certificate "<name>", <handle>`` in a ``repro.nim`` marks a node as
+# producing a named certificate (Test-Certificates.md §"Marking a node"). The
+# provider records the markings in each package fragment's
+# ``reprobuild.certificate-export-table.v1`` metadata node; this section reads
+# them back from the stored graph and answers the question HL-10 (the
+# lock-update node) and TC-8e (issuance) ask of a plan: which
+# certificate-producing nodes does it materialize, and in which repository?
+# Nothing here issues or signs a certificate.
+# ---------------------------------------------------------------------------
+
+const certificateExportTableStableName* =
+  "reprobuild.certificate-export-table.v1"
+
+proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot):
+    CertificateExportTable =
+  ## Union every package fragment's certificate-export table. A fragment
+  ## without the node marks nothing. Static metadata: it is read from the
+  ## stored graph and never runs the provider.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == certificateExportTableStableName:
+        let perPackage =
+          decodeCertificateExportTablePayload(toBytes(node.payload))
+        for entry in perPackage.entries:
+          result.entries.add(entry)
+
+type
+  CertificatePlanPart* = object
+    ## One repository's share of a plan: the stored graph of the project the
+    ## plan builds there, and the action ids (as the provider declared them,
+    ## before target aliasing) the plan materializes from it.
+    repository*: string
+    certificates*: CertificateExportTable
+    targets*: Table[string, BuildTargetDef]
+    materialized*: HashSet[string]
+
+  CertificatePlan* = object
+    ## A plan as the certificate query sees it. ``noCertify`` is
+    ## ``--no-certify``: it removes every marking from the plan.
+    parts*: seq[CertificatePlanPart]
+    noCertify*: bool
+
+  CertificatePlanNode* = object
+    ## One certificate-producing node a plan materializes.
+    name*: string
+    owningPackage*: string
+    nodeKind*: CertificateNodeKind
+    node*: string
+    implicit*: bool
+    repository*: string
+    sourceFile*: string
+    sourceLine*: int
+
+proc certificateRepositoryRoot*(projectRoot: string): string =
+  ## The repository a project belongs to: the nearest ancestor of
+  ## ``projectRoot`` (itself included) carrying a ``.git`` entry, which is a
+  ## directory in a main checkout and a file in a linked worktree or a
+  ## submodule. A project outside any repository is its own root.
+  let start = absolutePath(projectRoot)
+  var dir = start
+  while dir.len > 0:
+    if dirExists(extendedPath(dir / ".git")) or
+        fileExists(extendedPath(dir / ".git")):
+      return dir
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  start
+
+proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
+                          projectRoot: string;
+                          selectors: openArray[string]):
+    CertificatePlanPart =
+  ## Resolve ``selectors`` against ``snapshot`` and record the actions their
+  ## union materializes, by the rules ``lowerProviderSnapshot`` applies: a
+  ## qualified ``<package>:<name>``, an action id, a build-target name, then
+  ## an implicit or explicit export name; a target selects the closure of
+  ## its members, an action the closure of its dependencies. An unknown or
+  ## ambiguous selector raises the same errors ``repro build`` reports.
+  result.repository = certificateRepositoryRoot(projectRoot)
+  result.certificates = aggregateCertificateExportTable(snapshot)
+  result.targets = initTable[string, BuildTargetDef]()
+  var declared: seq[BuildActionDef] = @[]
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        declared.add(decodeBuildActionPayload(toBytes(node.payload)))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        result.targets[target.name] = target
+  var byId = initTable[string, BuildActionDef]()
+  for action in inferDeclaredActionDeps(declared, projectRoot):
+    byId[action.id] = action
+  let exportTable = aggregateTargetExportTable(snapshot)
+
+  proc resolveRoot(selector: string; targets: Table[string, BuildTargetDef]):
+      string =
+    for entry in exportTable.entries:
+      if entry.owningPackage & ":" & entry.name == selector:
+        return entry.actionId
+    if byId.hasKey(selector) or targets.hasKey(selector):
+      return selector
+    var owners: seq[string] = @[]
+    var chosen = ""
+    for entry in exportTable.entries:
+      if entry.name == selector:
+        if owners.find(entry.owningPackage) < 0:
+          owners.add(entry.owningPackage)
+        chosen = entry.actionId
+    if owners.len > 1:
+      var candidates: seq[string] = @[]
+      for owner in owners:
+        candidates.add(owner & ":" & selector)
+      candidates.sort()
+      var err = newException(BuildTargetAmbiguousError,
+        "target '" & selector & "' is exported by multiple packages: " &
+          candidates.join(", ") &
+          " — re-run with the qualified <package>:<name> form")
+      err.selectorName = selector
+      err.candidates = candidates
+      raise err
+    if owners.len == 1:
+      return chosen
+    var known: seq[string] = @[]
+    for id in byId.keys:
+      known.add(id)
+    for name in targets.keys:
+      known.add(name)
+    for entry in exportTable.entries:
+      if known.find(entry.name) < 0:
+        known.add(entry.name)
+    var err = newException(BuildTargetUnknownError,
+      "unknown build target: " & selector)
+    err.selectorName = selector
+    err.suggestions = topLevenshteinCandidates(selector, known)
+    raise err
+
+  var materialized = initHashSet[string]()
+  var expanded = initHashSet[string]()
+  proc includeAction(actionId: string) =
+    if materialized.contains(actionId) or not byId.hasKey(actionId):
+      return
+    materialized.incl(actionId)
+    for dep in byId[actionId].deps:
+      includeAction(dep)
+  proc includeTarget(name: string; targets: Table[string, BuildTargetDef]) =
+    if expanded.contains(name) or not targets.hasKey(name):
+      return
+    expanded.incl(name)
+    for nested in targets[name].targets:
+      includeTarget(nested, targets)
+    for actionId in targets[name].actions:
+      includeAction(actionId)
+  for selector in selectors:
+    if selector.len == 0:
+      continue
+    let root = resolveRoot(selector, result.targets)
+    if result.targets.hasKey(root):
+      includeTarget(root, result.targets)
+    else:
+      includeAction(root)
+  result.materialized = materialized
+
+proc certificateNodeMaterialized(part: CertificatePlanPart;
+                                 entry: CertificateExportEntry): bool =
+  ## A marked edge is materialized when the plan builds it. A marked target
+  ## is materialized when the plan builds every edge the target groups,
+  ## nested targets included: it "passes when it and its whole closure
+  ## materialize" (Test-Certificates.md §"Marking a node"), so a plan that
+  ## builds only some of its members does not contain it. A target that
+  ## groups no edge is never materialized.
+  case entry.nodeKind
+  of cnkAction:
+    part.materialized.contains(entry.node)
+  of cnkTarget:
+    var members: seq[string] = @[]
+    var seen = initHashSet[string]()
+    var pending = @[entry.node]
+    while pending.len > 0:
+      let name = pending.pop()
+      if seen.contains(name) or not part.targets.hasKey(name):
+        continue
+      seen.incl(name)
+      for nested in part.targets[name].targets:
+        pending.add(nested)
+      for actionId in part.targets[name].actions:
+        members.add(actionId)
+    if members.len == 0:
+      return false
+    for actionId in members:
+      if not part.materialized.contains(actionId):
+        return false
+    true
+
+proc planCertificateNodes*(plan: CertificatePlan): seq[CertificatePlanNode] =
+  ## Test-Certificates TC-9a: the certificate-producing nodes ``plan``
+  ## materializes, each with the repository it belongs to, in plan-part and
+  ## declaration order. Empty for a ``--no-certify`` plan. HL-10 adds the
+  ## lock-update node to a plan for which this is non-empty; TC-8e issues one
+  ## certificate per returned name when its node passes.
+  if plan.noCertify:
+    return @[]
+  for part in plan.parts:
+    for entry in part.certificates.entries:
+      if certificateNodeMaterialized(part, entry):
+        result.add(CertificatePlanNode(
+          name: entry.name,
+          owningPackage: entry.owningPackage,
+          nodeKind: entry.nodeKind,
+          node: entry.node,
+          implicit: entry.implicit,
+          repository: part.repository,
+          sourceFile: entry.sourceFile,
+          sourceLine: entry.sourceLine))
+
+proc certificateNodeKindText(kind: CertificateNodeKind): string =
+  case kind
+  of cnkAction: "action"
+  of cnkTarget: "target"
+
+proc runCertificatesCommand*(args: openArray[string];
+                             publicCliPath: string): int =
+  ## ``repro certificates list [--json]`` prints the certificate names the
+  ## current project declares and the node each marks, implicit ``test``
+  ## marking included. ``repro certificates plan [SELECTOR...] [--no-certify]
+  ## [--json]`` prints the certificate-producing nodes the plan for
+  ## ``SELECTOR...`` materializes (``test`` when none is given, as for
+  ## ``repro test``), with their repositories. Both read the project's stored
+  ## graph; neither builds, runs a test or issues a certificate.
+  const usage = "usage: repro certificates list [--json] " &
+    "[--tool-provisioning=MODE] [--no-runquota]\n" &
+    "       repro certificates plan [SELECTOR...] [--no-certify] [--json] " &
+    "[--tool-provisioning=MODE] [--no-runquota]"
+  if args.len == 0 or args[0] in ["-h", "--help", "help"]:
+    stderr.writeLine(usage)
+    return (if args.len == 0: 2 else: 0)
+  let sub = args[0]
+  if sub notin ["list", "plan"]:
+    stderr.writeLine("repro certificates: unknown subcommand: " & sub)
+    stderr.writeLine(usage)
+    return 2
+  var asJson = false
+  var noCertify = false
+  var bypassRunQuota = false
+  var mode = tpmPathOnly
+  var selectors: seq[string] = @[]
+  for i in 1 ..< args.len:
+    let arg = args[i]
+    if arg == "--json":
+      asJson = true
+    elif arg == "--no-certify" and sub == "plan":
+      noCertify = true
+    elif arg == "--no-runquota":
+      bypassRunQuota = true
+    elif arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(arg["--tool-provisioning=".len .. ^1])
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro certificates " & sub & ": unknown flag: " & arg)
+      return 2
+    elif sub == "plan":
+      selectors.add(arg)
+    else:
+      stderr.writeLine("repro certificates list: unexpected argument: " & arg)
+      return 2
+  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
+  try:
+    if sub == "list":
+      let info = prepareBuildGraphInspection(".", mode, publicCliPath,
+        selectDefaultAction = false, lowerGraph = false)
+      let table = aggregateCertificateExportTable(info.snapshot)
+      if asJson:
+        var arr = newJArray()
+        for entry in table.entries:
+          arr.add(%*{
+            "name": entry.name,
+            "package": entry.owningPackage,
+            "nodeKind": certificateNodeKindText(entry.nodeKind),
+            "node": entry.node,
+            "implicit": entry.implicit,
+            "source-file": entry.sourceFile,
+            "source-line": entry.sourceLine
+          })
+        echo $(%*{
+          "schemaId": "reprobuild.certificates-list.v1",
+          "projectRoot": info.projectRoot,
+          "certificates": arr
+        })
+      elif table.entries.len == 0:
+        echo "repro certificates list: this project declares no certificate"
+      else:
+        for entry in table.entries:
+          echo entry.name & "  " &
+            (if entry.implicit: "implicit" else: "declared") & "  " &
+            entry.owningPackage & "  " &
+            certificateNodeKindText(entry.nodeKind) & " " & entry.node &
+            "  " & entry.sourceFile & ":" & $entry.sourceLine
+      return 0
+    # ``plan``: resolve the selectors the way ``repro build`` does, so a
+    # ``<sibling>:<name>`` selector plans the sibling project.
+    if selectors.len == 0:
+      selectors = @["test"]
+    let resolved = parseAndResolveSelectors(selectors,
+      "repro certificates plan")
+    # The anchor carries the first name as its fragment: ``.#<name>`` for
+    # this project, ``<sibling project file>#<name>`` for a sibling.
+    let anchorName = splitTarget(resolved.target).fragment
+    var names: seq[string] = @[]
+    if anchorName.len > 0:
+      names.add(anchorName)
+    for name in resolved.extraNameSelectors:
+      if names.find(name) < 0:
+        names.add(name)
+    let info = prepareBuildGraphInspection(resolved.target, mode,
+      publicCliPath, selectDefaultAction = false, lowerGraph = false)
+    let plan = CertificatePlan(
+      parts: @[certificatePlanPart(info.snapshot, info.projectRoot, names)],
+      noCertify: noCertify)
+    let nodes = planCertificateNodes(plan)
+    if asJson:
+      var arr = newJArray()
+      for node in nodes:
+        arr.add(%*{
+          "name": node.name,
+          "package": node.owningPackage,
+          "nodeKind": certificateNodeKindText(node.nodeKind),
+          "node": node.node,
+          "implicit": node.implicit,
+          "repository": node.repository
+        })
+      echo $(%*{
+        "schemaId": "reprobuild.certificate-plan.v1",
+        "selectors": names,
+        "noCertify": noCertify,
+        "nodes": arr
+      })
+    elif nodes.len == 0:
+      echo "repro certificates plan: the plan contains no " &
+        "certificate-producing node" &
+        (if noCertify: " (--no-certify)" else: "")
+    else:
+      for node in nodes:
+        echo node.name & "  " &
+          (if node.implicit: "implicit" else: "declared") & "  " &
+          certificateNodeKindText(node.nodeKind) & " " & node.node & "  " &
+          node.repository
+    return 0
+  except BuildTargetUnknownError as err:
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetAmbiguousError as err:
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro certificates " & sub & ": error: " & err.msg)
+    return 1
 
 proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode =
   let action = requireAction(info.actions, focus)
@@ -79837,6 +80205,10 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro test: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len > 0 and args[0] == "certificates":
+    # TC-9a: list the project's named certificates, or the
+    # certificate-producing nodes a plan materializes.
+    return runCertificatesCommand(args[1 .. ^1], publicCliPath)
   if programName == "repro" and args.len > 0 and args[0] == "certify":
     # TC-1: ``repro certify`` is the explicit "run the full required set to
     # obtain a certificate" form — an alias for ``repro test --certify``

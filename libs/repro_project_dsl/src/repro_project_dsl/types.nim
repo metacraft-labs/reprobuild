@@ -1319,6 +1319,39 @@ type
     entries*: seq[TargetExportEntry]
     ambiguities*: seq[TargetExportAmbiguity]
 
+  CertificateNodeKind* = enum
+    ## Test-Certificates TC-9a: what a ``certificate "<name>", <handle>``
+    ## marking points at. The byte is positional in the certificate-export
+    ## table payload; append new values, never insert.
+    cnkAction  ## a single build edge (``BuildActionDef.id``)
+    cnkTarget  ## a build target: ``target``, ``aggregate`` or ``collect``
+               ## (``BuildTargetDef.name``)
+
+  CertificateExportEntry* = object
+    ## Test-Certificates TC-9a: one row of a package's certificate-export
+    ## table (Test-Certificates.md §"Marking a node"). The name is also a
+    ## row of the target-export table, so ``repro build <name>`` selects
+    ## the node; this table records that the node PRODUCES a named
+    ## certificate, which the target-export table cannot express.
+    name*: string
+      ## The certificate name. It maps onto the test-certificate standard
+      ## as a ``targets`` entry.
+    owningPackage*: string
+    nodeKind*: CertificateNodeKind
+    node*: string
+      ## ``cnkAction``: the action id. ``cnkTarget``: the build-target name.
+    implicit*: bool
+      ## True for the marking the DSL applies, with no ``certificate
+      ## "test", ...`` declaration, to the node a plain ``repro test``
+      ## builds: the one the selector ``test`` resolves to (D15).
+    sourceFile*: string
+    sourceLine*: int
+      ## The declaration site. For an implicit row, the site of the
+      ## ``test`` target or export row when one was recorded.
+
+  CertificateExportTable* = object
+    entries*: seq[CertificateExportEntry]
+
   StateGroupDef* = object
     ## Named-Runnable-Edges N0 (spec §3.3): a named resource subgraph —
     ## the leasable/reapable unit. ``members`` are the resource addresses
