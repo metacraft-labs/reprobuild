@@ -621,6 +621,12 @@ const
     "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",
     "t_e2e_native_shell_hooks",
+    # Its arms assert how OFTEN unsafe publication tears a running thread
+    # (at least half of 24 runs). How often a hot thread sits inside the
+    # eight published bytes depends on the threads getting CPU; under the
+    # parallel phase's load tier-1 crashed 10/24 (run 32) against a passing
+    # run alone, so the frequency claim is only measurable on a quiet host.
+    "t_e2e_hcr_linux_concurrent_patch_no_torn_instruction",
     "t_e2e_repro_dev_sessions",
     "t_e2e_shell_hook_noop_latency",
     "t_repro_https_cache_end_to_end",
