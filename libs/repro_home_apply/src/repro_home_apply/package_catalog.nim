@@ -1295,7 +1295,8 @@ proc resolveProfilePackage*(packageId: string;
                             contributor = none(string);
                             inventory = HostInventory();
                             scoop: ScoopHostInventory = nil;
-                            availability = none(PackageAvailability)):
+                            availability = none(PackageAvailability);
+                            lockIdentity = ""):
     ProfilePackageResolution =
   ## Resolve one profile package reference for ``target`` under ``policy``.
   ##
@@ -1305,7 +1306,8 @@ proc resolveProfilePackage*(packageId: string;
   ## realizer can realize. ``availability`` overrides the registry lookup
   ## for tests that need a declaration without a linked definition;
   ## ``scoop`` supplies the cache-hit verdict for a declared Scoop
-  ## realization on a Windows host.
+  ## realization on a Windows host. ``lockIdentity`` pins the exact
+  ## realization a home-profile lock recorded (``SelectionRequest``).
   let projected = profileToolUse(packageId)
   let useDef = projected.useDef
   var probeNames = binaries
@@ -1318,6 +1320,7 @@ proc resolveProfilePackage*(packageId: string;
     policy: policy,
     version: requestedVersion,
     contributor: contributor,
+    lockIdentity: lockIdentity,
     availability:
       if availability.isSome: availability.get
       else: packageAvailability(packageId),

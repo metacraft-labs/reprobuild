@@ -11493,8 +11493,8 @@
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": true,
       "source": "libs/repro_home_apply/tests/t_home_profile_lock.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 8,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17272,8 +17272,8 @@
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_realization_selection.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -93,8 +93,11 @@ That single command:
    `env.userVariable`.
 9. Records what it selected — kind, contributor, version and lock
    identity, plus the selection policy — in `home.lock` beside
-   `home.nim`. The next apply keeps those selections until you change
-   the policy or pass `--relock`.
+   `home.nim`. The next apply installs exactly those realizations, even
+   after a reprobuild update adds a newer one, until you change the
+   policy or pass `--relock`. If a locked realization is no longer
+   offered, plan and apply stop and ask for `--relock` rather than
+   picking another one.
 
 Expected output (abridged):
 
@@ -209,6 +212,10 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
 - **The plan names a different realization than you expected**: check
   `adapterPreference:` (the selection policy) and `home.lock` (a recorded
   selection is kept until the policy changes or you pass `--relock`).
+- **"the home-profile lock pins <package> … which is no longer offered"**:
+  the realization recorded in `home.lock` was withdrawn from the package
+  definition. Run `repro home apply --plan --relock` to see what would be
+  selected instead, then `repro home apply --relock` to take it.
   `repro home apply --plan --target-platform macos --target-arch arm64`
   shows what another platform would select.
 - **`repro home apply` fails realizing one of the M69-deferred-8 tools**:

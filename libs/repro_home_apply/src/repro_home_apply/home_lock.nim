@@ -13,12 +13,23 @@
 ##
 ## * a recorded NON-ambient selection pins the next resolution of the same
 ##   package for the same target, provided the target's recorded policy still
-##   equals the profile's current policy;
+##   equals the profile's current policy. The pin is the selection's kind,
+##   contributor AND lock identity (``contributorLockIdentity`` form, the
+##   identity ``uses:`` records): exactly the recorded realization is
+##   eligible, so a realization added to the definition later is not
+##   selected, and a withdrawn one fails asking for ``--relock`` instead of
+##   being replaced silently;
 ## * an ambient selection (PATH, the host's Scoop inventory) is recorded but
 ##   never pinned — it is not reproducible by construction;
 ## * a target whose recorded policy differs from the current one is
 ##   re-derived: editing ``adapterPreference:`` is an explicit change of
-##   selection basis.
+##   selection basis. So is a record whose ``version`` differs from the
+##   reference's exact version pin (``package(jdk, "21.0.5")`` edited to
+##   another version);
+## * a record with an empty ``lock_identity`` (a hand-written record, or one
+##   from before identities were pinned) pins kind and contributor only; the
+##   next apply re-records it with the identity it selected, so the lock
+##   pins it from then on. ``--plan`` does not write that upgrade.
 ##
 ## On-disk format: the TOML subset of ``repro_lock/toml_subset`` (scalar keys
 ## and an array of inline tables per target), schema
@@ -69,6 +80,17 @@ type
     targets*: seq[HomeLockTarget]
 
   EHomeLockParse* = object of ValueError
+
+  HomeLockPin* = object
+    ## What a lock record imposes on the next resolution of its package.
+    kind*: RealizationKind
+    contributor*: string
+    version*: string
+      ## The recorded version, for diagnostics ("" when the realization
+      ## names none).
+    lockIdentity*: string
+      ## The recorded lock identity; "" for a record that carries none, which
+      ## then pins kind and contributor only.
 
 proc homeProfileLockPath*(profileDir: string): string =
   profileDir / HomeProfileLockFileName
@@ -230,16 +252,21 @@ proc lockedTarget*(lock: HomeProfileLock; target: string):
   none(HomeLockTarget)
 
 proc lockedPin*(lockTarget: Option[HomeLockTarget]; packageId: string;
-                policy: SelectionPolicy):
-    Option[tuple[kind: RealizationKind; contributor: string]] =
-  ## The pin a lock record imposes on ``packageId``: its kind and contributor,
-  ## when the record exists, is not ambient, and was made under ``policy``.
+                policy: SelectionPolicy; requestedVersion = ""):
+    Option[HomeLockPin] =
+  ## The pin a lock record imposes on ``packageId``: its kind, contributor
+  ## and lock identity, when the record exists, is not ambient, was made
+  ## under ``policy``, and — when the reference pins an exact
+  ## ``requestedVersion`` — recorded that version.
   if lockTarget.isNone or lockTarget.get.policy != policy:
-    return none(tuple[kind: RealizationKind; contributor: string])
+    return none(HomeLockPin)
   for p in lockTarget.get.packages:
     if p.package == packageId and not p.ambient:
-      return some((kind: p.kind, contributor: p.contributor))
-  none(tuple[kind: RealizationKind; contributor: string])
+      if requestedVersion.len > 0 and p.version != requestedVersion:
+        return none(HomeLockPin)
+      return some(HomeLockPin(kind: p.kind, contributor: p.contributor,
+        version: p.version, lockIdentity: p.lockIdentity))
+  none(HomeLockPin)
 
 proc withTarget*(lock: HomeProfileLock; record: HomeLockTarget):
     HomeProfileLock =

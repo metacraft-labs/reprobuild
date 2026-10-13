@@ -460,12 +460,14 @@ proc resolveInContext*(ctx: ProfileResolutionContext;
                        p: PlannedPackage): ProfilePackageResolution =
   ## Resolve one planned package in ``ctx``. A lock pin (a non-ambient
   ## selection recorded under the current policy) narrows the policy to the
-  ## pinned kind and pins the contributor; when the pinned realization is no
-  ## longer offered, the failure names the lock instead of silently
-  ## re-selecting (Provisioning-Contributions.md §"The home-profile lock").
+  ## pinned kind and pins the contributor and the lock identity, so exactly
+  ## the recorded realization is eligible; when it is no longer offered, the
+  ## failure names the lock and ``--relock`` instead of silently re-selecting
+  ## (Provisioning-Contributions.md §"The home-profile lock").
   let pin =
-    if ctx.relock: none(tuple[kind: RealizationKind; contributor: string])
-    else: lockedPin(ctx.lockTarget, p.packageId, ctx.policy)
+    if ctx.relock: none(HomeLockPin)
+    else: lockedPin(ctx.lockTarget, p.packageId, ctx.policy,
+      p.requestedVersion)
   if pin.isNone:
     return resolveProfilePackage(p.packageId, ctx.target, ctx.policy,
       requestedVersion = p.requestedVersion, binaries = p.binaries,
@@ -474,12 +476,19 @@ proc resolveInContext*(ctx: ProfileResolutionContext;
     resolveProfilePackage(p.packageId, ctx.target, @[pin.get.kind],
       requestedVersion = p.requestedVersion, binaries = p.binaries,
       contributor = some(pin.get.contributor), inventory = ctx.inventory,
-      scoop = ctx.scoop)
+      scoop = ctx.scoop, lockIdentity = pin.get.lockIdentity)
   except EMissingRealization as err:
+    let locked =
+      (if pin.get.version.len > 0: " at version " & pin.get.version
+       else: "") &
+      (if pin.get.lockIdentity.len > 0:
+         " (lock identity " &
+           displayLockIdentity(pin.get.lockIdentity).escape() & ")"
+       else: "")
     var e = newException(EMissingRealization,
       "the home-profile lock pins " & p.packageId & " for " &
       describeTarget(ctx.target) & " to its " & $pin.get.kind &
-      " realization from " & contributorLabel(pin.get.contributor) &
+      " realization from " & contributorLabel(pin.get.contributor) & locked &
       ", which is no longer offered (" & err.msg & "). Re-select with " &
       "`repro home apply --relock`.")
     e.packageName = err.packageName

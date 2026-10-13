@@ -54,6 +54,72 @@ let windows = realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
 proc pathInventory(found: string): HostInventory =
   result.probePath = proc(names: seq[string]): string = found
 
+suite "realization_selection: lock-identity pin":
+  # Provisioning-Contributions.md §"The home-profile lock": a recorded
+  # selection pins its lock identity, so exactly that realization is
+  # eligible.
+
+  test "a pinned identity selects the locked record over a newer default":
+    # Mutation: ignoring ``request.lockIdentity`` selects "new" (declaration
+    # order), which is what an unpinned request does.
+    let use = InterfaceToolUse(packageSelector: "demo", tarballProvisioning: @[
+      tarball("new", os = "linux", version = "2.0", sha256 = repeat('b', 64)),
+      tarball("old", os = "linux", version = "1.0", sha256 = repeat('c', 64))])
+    check selectRealization(use, request(linux, @[rkTarball])).tarball.url ==
+      "new"
+    var req = request(linux, @[rkTarball], contributor = some(""))
+    req.lockIdentity = "sha256:" & repeat('c', 64)
+    let sel = selectRealization(use, req)
+    check sel.tarball.url == "old"
+    check sel.version == "1.0"
+    check sel.lockIdentity == req.lockIdentity
+
+  test "a pinned contributor identity matches the contributor form":
+    let use = InterfaceToolUse(packageSelector: "demo", tarballProvisioning: @[
+      tarball("canonical", os = "linux"),
+      tarball("contrib", os = "linux", contributor = "github:x/y")])
+    var req = request(linux, @[rkTarball])
+    req.lockIdentity = "contributor:github:x/y\nsha256:" & repeat('a', 64)
+    # Same digest, two contributors: the identity alone disambiguates.
+    check selectRealization(use, req).tarball.url == "contrib"
+
+  test "a withdrawn identity is a miss naming it and what is offered, " &
+      "never a re-selection":
+    let use = InterfaceToolUse(packageSelector: "demo",
+      tarballProvisioning: @[
+        tarball("new", os = "linux", version = "2.0", sha256 = repeat('b', 64))],
+      nixProvisioning: @[nixRecord("nixpkgs#demo")])
+    var req = request(linux, @[rkTarball, rkNix, rkPath],
+      contributor = some(""), inventory = pathInventory("/usr/bin/demo"))
+    req.lockIdentity = "sha256:" & repeat('c', 64)
+    req.target.isHost = true
+    try:
+      discard selectRealization(use, req)
+      check false
+    except EMissingRealization as err:
+      check err.steps.len == 3
+      check err.steps[0].reason.contains("sha256:" & repeat('c', 64))
+      check err.steps[0].reason.contains("no longer offered")
+      check err.steps[0].reason.contains("sha256:" & repeat('b', 64))
+      # Neither another nix record nor PATH substitutes for the locked one.
+      check not err.steps[1].selected
+      check not err.steps[2].selected
+
+  test "nix and scoop records are pinned by their lock identity too":
+    let nixUse = InterfaceToolUse(packageSelector: "demo", nixProvisioning: @[
+      nixRecord("nixpkgs#demo-next"), nixRecord("nixpkgs#demo")])
+    var nixReq = request(linux, @[rkNix])
+    nixReq.lockIdentity = "nixpkgs#demo"
+    check selectRealization(nixUse, nixReq).nix.selector == "nixpkgs#demo"
+    let scoopUse = InterfaceToolUse(packageSelector: "demo",
+      scoopProvisioning: @[scoopRecord("demo-next", "2.0"),
+        scoopRecord("demo", "1.0")])
+    var scoopReq = request(windows, @[rkScoop])
+    scoopReq.lockIdentity = "scoop:main/demo"
+    let scoopSel = selectRealization(scoopUse, scoopReq)
+    check scoopSel.scoop.app == "demo"
+    check scoopSel.version == "1.0"
+
 suite "realization_selection: tarball":
 
   test "the most specific (cpu, os) coordinate wins over a catch-all":

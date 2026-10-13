@@ -76,6 +76,14 @@ type
       ## Contributor pin (from a lock, a policy or
       ## ``REPRO_PROVISIONING_CONTRIBUTOR``). ``some("")`` pins the canonical
       ## package provider; ``none`` lets a unique contributor select.
+    lockIdentity*: string
+      ## Lock-identity pin, "" for none: the ``lockIdentity`` a previous
+      ## selection recorded (``contributorLockIdentity`` form). When set, a
+      ## declared record is eligible only when its own lock identity equals
+      ## it, so a realization added to the definition later is never chosen
+      ## over the locked one, and a withdrawn one is a miss rather than a
+      ## silent re-selection. The host inventory (``path``, Scoop bucket
+      ## discovery) is not consulted: an ambient selection is never pinned.
     availability*: PackageAvailability
       ## The package's declared ``platforms:`` (PMC-1).
     probeNames*: seq[string]
@@ -147,6 +155,8 @@ type
     kcNoRecords          ## the package declares no realization of this kind
     kcNoneForTarget      ## records exist, none for the target platform
     kcVersionNotOffered  ## records exist for the target, not at the pin
+    kcLockedIdentityNotOffered
+      ## records of this kind exist, none carries the pinned lock identity
     kcContributorNotOffered
     kcAmbiguous
     kcCapabilityShortfall
@@ -252,6 +262,55 @@ proc scoopRealizationLockIdentity*(record: InterfaceScoopProvisioning):
   else:
     "scoop:" & record.bucket & "/" & record.app
 
+proc recordLockIdentity*(record: InterfaceTarballProvisioning): string =
+  ## The lock identity selecting ``record`` produces — what a lock records
+  ## for it and what a lock-identity pin is compared against.
+  contributorLockIdentity(record.contributor,
+    tarballRealizationLockIdentity(record))
+
+proc recordLockIdentity*(record: InterfaceNixProvisioning): string =
+  contributorLockIdentity(record.contributor,
+    nixRealizationLockIdentity(record))
+
+proc recordLockIdentity*(record: InterfaceScoopProvisioning): string =
+  contributorLockIdentity(record.contributor,
+    scoopRealizationLockIdentity(record))
+
+proc displayLockIdentity*(identity: string): string =
+  ## A lock identity on one line: the contributor form separates the
+  ## contributor from the realization identity with a newline.
+  identity.replace("\n", " ")
+
+proc contributorAllowed(candidate: string; pin: Option[string]): bool =
+  pin.isNone or pin.get == candidate
+
+proc withLockedIdentity[T](records: seq[T]; identity: string;
+                           contributor: Option[string]):
+    tuple[kept: seq[T]; withheld: seq[string]] =
+  ## ``records`` narrowed to those whose lock identity is ``identity``
+  ## (unchanged when ``identity`` is ""). ``withheld`` lists the identities
+  ## of the records the narrowing removed that the contributor pin would
+  ## have admitted, for the diagnostic.
+  if identity.len == 0:
+    return (records, @[])
+  for record in records:
+    let own = recordLockIdentity(record)
+    if own == identity:
+      result.kept.add(record)
+    elif contributorAllowed(record.contributor, contributor) and
+        own notin result.withheld:
+      result.withheld.add(own)
+
+proc lockedIdentityMiss(kind: RealizationKind; identity: string;
+                        withheld: seq[string]): KindChoice =
+  KindChoice(status: kcLockedIdentityNotOffered, index: -1,
+    detail: "the locked " & $kind & " realization " &
+      displayLockIdentity(identity).escape() & " is no longer offered" &
+      (if withheld.len > 0:
+         " (offered: " & withheld.mapIt(displayLockIdentity(it)).join(", ") &
+         ")"
+       else: ""))
+
 # ---------------------------------------------------------------------------
 # Which realizer a tarball record needs
 # ---------------------------------------------------------------------------
@@ -330,9 +389,6 @@ proc tarballArm*(record: InterfaceTarballProvisioning):
       features.badToken & "'")
   (true, PlatformBinary(cpu: cpu.cpu, os: os.os, cpu_level: level.level,
     cpu_features: features.features), "")
-
-proc contributorAllowed(candidate: string; pin: Option[string]): bool =
-  pin.isNone or pin.get == candidate
 
 proc describeCoverage(records: openArray[InterfaceTarballProvisioning]):
     string =
@@ -592,10 +648,17 @@ proc selectRealization*(useDef: InterfaceToolUse;
     var choice: KindChoice
     case kind
     of rkTarball:
-      choice = selectTarballRecord(useDef.tarballProvisioning, target,
-        request.version, request.contributor)
+      let records = withLockedIdentity(useDef.tarballProvisioning,
+        request.lockIdentity, request.contributor)
+      choice =
+        if records.kept.len == 0 and request.lockIdentity.len > 0 and
+            useDef.tarballProvisioning.len > 0:
+          lockedIdentityMiss(kind, request.lockIdentity, records.withheld)
+        else:
+          selectTarballRecord(records.kept, target, request.version,
+            request.contributor)
       if choice.status == kcSelected:
-        let record = useDef.tarballProvisioning[choice.index]
+        let record = records.kept[choice.index]
         result.kind = rkTarball
         result.contributor = record.contributor
         result.tarball = record
@@ -603,19 +666,33 @@ proc selectRealization*(useDef: InterfaceToolUse;
         result.realizationLockIdentity =
           tarballRealizationLockIdentity(record)
     of rkNix:
-      choice = selectNixRecord(useDef.nixProvisioning, target,
-        request.version, request.contributor)
+      let records = withLockedIdentity(useDef.nixProvisioning,
+        request.lockIdentity, request.contributor)
+      choice =
+        if records.kept.len == 0 and request.lockIdentity.len > 0 and
+            useDef.nixProvisioning.len > 0:
+          lockedIdentityMiss(kind, request.lockIdentity, records.withheld)
+        else:
+          selectNixRecord(records.kept, target, request.version,
+            request.contributor)
       if choice.status == kcSelected:
-        let record = useDef.nixProvisioning[choice.index]
+        let record = records.kept[choice.index]
         result.kind = rkNix
         result.contributor = record.contributor
         result.nix = record
         result.realizationLockIdentity = nixRealizationLockIdentity(record)
     of rkScoop:
-      choice = selectScoopRecord(useDef.scoopProvisioning, target,
-        request.version, request.contributor)
+      let records = withLockedIdentity(useDef.scoopProvisioning,
+        request.lockIdentity, request.contributor)
+      choice =
+        if records.kept.len == 0 and request.lockIdentity.len > 0 and
+            useDef.scoopProvisioning.len > 0:
+          lockedIdentityMiss(kind, request.lockIdentity, records.withheld)
+        else:
+          selectScoopRecord(records.kept, target, request.version,
+            request.contributor)
       if choice.status == kcSelected:
-        let record = useDef.scoopProvisioning[choice.index]
+        let record = records.kept[choice.index]
         result.kind = rkScoop
         result.contributor = record.contributor
         result.scoop = record
@@ -623,7 +700,7 @@ proc selectRealization*(useDef: InterfaceToolUse;
         result.realizationLockIdentity = scoopRealizationLockIdentity(record)
       elif choice.status == kcNoRecords and scoopServesTarget(target) and
           target.isHost and request.inventory.probeScoop != nil and
-          request.contributor.isNone:
+          request.contributor.isNone and request.lockIdentity.len == 0:
         # Host inventory: a Scoop app of the package's name, installed or
         # offered by a configured bucket, when the definition declares no
         # scoop realization. Ambient — recorded, never pinned.
@@ -661,6 +738,10 @@ proc selectRealization*(useDef: InterfaceToolUse;
       elif request.contributor.isSome:
         choice.status = kcContributorNotOffered
         choice.detail = "a contributor is pinned; PATH has no contributor"
+      elif request.lockIdentity.len > 0:
+        choice.status = kcLockedIdentityNotOffered
+        choice.detail = "a lock identity is pinned; an executable on PATH " &
+          "has none"
       elif request.version.len > 0:
         choice.status = kcVersionNotOffered
         choice.detail = "an executable on PATH names no version, so none " &
