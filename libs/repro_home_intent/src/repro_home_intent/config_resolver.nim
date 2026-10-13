@@ -36,6 +36,43 @@ type
     activeActivities*: HashSet[string]
     ## Activities that contributed packages to this resolution.
 
+# ---------------------------------------------------------------------------
+# Guard walkers: the one place that decides which guarded resources and
+# config entries a host gets. The planner (`repro_home_apply`), the
+# effective-config resolver below, `repro home get` and
+# `repro home export --target` all call these.
+# ---------------------------------------------------------------------------
+
+proc collectApplicable(nodes: seq[IntentNode]; leaf: NodeKind;
+                       ctx: HostContext; userEval: UserPredicateEvaluator;
+                       into: var seq[IntentNode]) =
+  for node in nodes:
+    if node.kind == leaf:
+      into.add node
+    elif node.kind == nkCondBlock:
+      if predicateHolds(node.predicateAst, ctx, userEval):
+        collectApplicable(node.condChildren, leaf, ctx, userEval, into)
+    else:
+      raise newException(ValueError, "internal: unexpected " & $node.kind &
+        " where a " & $leaf & " or a guarded block was expected")
+
+proc applicableResourceEntries*(nodes: seq[IntentNode]; ctx: HostContext;
+                                userEval: UserPredicateEvaluator = nil):
+    seq[IntentNode] =
+  ## The `nkResourceEntry`s of a `resources:` block body (or of a guarded
+  ## block inside one) that apply on `ctx`, in declaration order: an entry
+  ## inside an `nkCondBlock` is included only when the guard holds.
+  collectApplicable(nodes, nkResourceEntry, ctx, userEval, result)
+
+proc applicableConfigEntries*(pkg: IntentNode; ctx: HostContext;
+                              userEval: UserPredicateEvaluator = nil):
+    seq[IntentNode] =
+  ## The `nkConfigEntry`s of one `config:` package block that apply on
+  ## `ctx`, in declaration order (guarded entries only when the guard
+  ## holds).
+  doAssert pkg.kind == nkConfigPackage
+  collectApplicable(pkg.configEntries, nkConfigEntry, ctx, userEval, result)
+
 proc walkBody(children: seq[IntentNode]; ctx: HostContext;
               userEval: UserPredicateEvaluator;
               outPkgs: var HashSet[string]) =
@@ -44,7 +81,7 @@ proc walkBody(children: seq[IntentNode]; ctx: HostContext;
     of nkPackageRef:
       outPkgs.incl ch.packageName
     of nkCondBlock:
-      if evaluateBool(ch.predicateAst, ctx, userEval):
+      if predicateHolds(ch.predicateAst, ctx, userEval):
         walkBody(ch.condChildren, ctx, userEval, outPkgs)
     else: discard
 
@@ -91,7 +128,7 @@ proc resolveEffectiveConfig*(profile: Profile;
     if ch.kind == nkConfigBlock:
       for pkg in ch.configPackages:
         var table = initOrderedTable[string, string]()
-        for entry in pkg.configEntries:
+        for entry in applicableConfigEntries(pkg, ctx, userEval):
           table[entry.configKey] = entry.configValueSource
         if pkg.configPackageName in result.enabledPackages:
           result.overrides[pkg.configPackageName] = table

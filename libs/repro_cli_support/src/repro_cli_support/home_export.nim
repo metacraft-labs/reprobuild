@@ -19,27 +19,42 @@
 ## * `provenance.profile.inputs` is the set of profile-directory files io-mon
 ##   observed the compile edge read — the edge's own dependency record, not a
 ##   scan of `import` lines.
+## * `platforms` compares the intent with the profile evaluated for every
+##   target platform by the platform-probe edge (`probeProfilePlatforms`), so
+##   a document whose content a compile-time `when defined(...)` decided says
+##   so, per platform.
+##
+## `evaluateHomeExport` is the consumer side: it evaluates a document's
+## guards for a target platform and host with the planner's own rules, and
+## refuses a target the document cannot describe.
 ##
 ## The module performs no plan or apply step and writes nothing; the caller
-## compiles (`compileProfileToRbpi`) and hands the result in.
+## compiles (`compileProfileToRbpi`, `probeProfilePlatforms`) and hands the
+## results in.
 
-import std/[algorithm, json, os, sets, strutils, tables]
+import std/[algorithm, json, options, os, sets, strutils, tables]
 from repro_core/paths import extendedPath
 
 import blake3
 import repro_core
+import repro_home_intent
 import repro_home_apply
 import repro_profile_compile
 from repro_profile/types import ProfileIntent
-from repro_profile/emit import emitProfileIntentJson
+from repro_profile/emit import emitProfileIntentJson, parseProfileIntentJson
 
 const
   HomeExportFormat* = "repro.home.export"
     ## Value of the document's `format` field. Identifies the document kind
     ## so a consumer handed some other JSON file fails loudly.
-  HomeExportSchemaVersion* = 1
-    ## Value of the document's `schemaVersion` field.
-  HomeExportComparedFields* = ["format", "schemaVersion", "selection", "intent"]
+  HomeExportSchemaVersion* = 2
+    ## Value of the document's `schemaVersion` field. Version 2 (GM3): the
+    ## intent's resources and config overrides carry a `guard`, and the
+    ## `platforms` map says which platforms the document describes. A
+    ## version-1 reader would apply a guarded resource on every platform, so
+    ## this is a new version, not a compatible addition.
+  HomeExportComparedFields* = ["format", "schemaVersion", "selection",
+    "intent", "platforms"]
     ## The top-level fields `--check` compares. `provenance` is deliberately
     ## absent: it records how the document was produced (which `repro`, from
     ## which files, on which platform), not what it tells a consumer, and
@@ -69,6 +84,29 @@ type
   ProfileInput* = object
     path*: string    ## relative to the profile directory, `/`-separated
     blake3*: string  ## BLAKE3-256 of the file's bytes, lower-case hex
+
+  PlatformStatus* = enum
+    ## Whether an export describes a target platform (`platforms` field).
+    psSame = "same"
+      ## The profile evaluated for that platform declares exactly the
+      ## exported intent.
+    psDiffers = "differs"
+      ## It declares something else: a compile-time `when defined(...)`
+      ## changed the intent. Consumers refuse the document for it.
+    psUnevaluated = "unevaluated"
+      ## The probe could not evaluate the profile for it (or could not be
+      ## trusted at all); treated as `differs`.
+
+  PlatformDependence* = object
+    statuses*: seq[(string, PlatformStatus)]
+      ## One entry per `ProfileTargetPlatforms` platform, in table order.
+    diagnostics*: seq[(string, string)]
+      ## Why each unevaluated platform is unevaluated.
+
+  HomeExportRefused* = object of CatchableError
+    ## `evaluateHomeExport` was asked for a target the document cannot
+    ## describe. The message names the target, the compiling platform and
+    ## the reason.
 
 # ---------------------------------------------------------------------------
 # Selection.
@@ -142,6 +180,55 @@ proc profileDigest*(inputs: openArray[ProfileInput]): string =
     canonical.add input.path & "\t" & input.blake3 & "\n"
   blake3.toHex(blake3.digest(canonical))
 
+# ---------------------------------------------------------------------------
+# Platform dependence.
+# ---------------------------------------------------------------------------
+
+proc platformDependence*(intent: ProfileIntent;
+                         outcomes: openArray[ProbeOutcome]):
+    PlatformDependence =
+  ## Compare the exported (native) intent with the platform probe's
+  ## evaluation of the profile for each target platform.
+  ##
+  ## The probe evaluates in Nim's compile-time VM, so it is trusted only
+  ## when its evaluation for the COMPILING platform reproduces the native
+  ## intent byte for byte (both rendered by `emitProfileIntentJson`). When it
+  ## does not, nothing it says about other platforms is used: every other
+  ## platform is unevaluated.
+  let native = emitProfileIntentJson(intent)
+  let compiling = compilingPlatformSystem()
+  var byPlatform = initTable[string, ProbeOutcome]()
+  for o in outcomes:
+    byPlatform[o.system] = o
+  var trustReason = ""
+  if findTargetPlatform(compiling) < 0:
+    trustReason = "the compiling platform " & compiling &
+      " is not a probed platform"
+  elif compiling notin byPlatform or not byPlatform[compiling].evaluated:
+    trustReason = "the probe could not evaluate the profile for the " &
+      "compiling platform " & compiling
+  elif byPlatform[compiling].intentJson != native:
+    trustReason = "the probe's compile-time evaluation of the profile for " &
+      "the compiling platform " & compiling & " differs from its native " &
+      "run (the profile does something Nim's compile-time VM does not " &
+      "reproduce), so the probe cannot vouch for any platform"
+  for t in ProfileTargetPlatforms:
+    var status = psUnevaluated
+    var why = ""
+    if t.system notin byPlatform:
+      why = "the probe reported nothing for this platform"
+    elif not byPlatform[t.system].evaluated:
+      why = byPlatform[t.system].diagnostic
+    elif trustReason.len > 0:
+      why = trustReason
+    elif byPlatform[t.system].intentJson == native:
+      status = psSame
+    else:
+      status = psDiffers
+    result.statuses.add (t.system, status)
+    if status == psUnevaluated:
+      result.diagnostics.add (t.system, why)
+
 proc stringArray(items: openArray[string]): JsonNode =
   result = newJArray()
   for item in items:
@@ -149,6 +236,7 @@ proc stringArray(items: openArray[string]): JsonNode =
 
 proc buildHomeExport*(intent: ProfileIntent;
                       artifact: ProfileCompileArtifact;
+                      probe: ProfilePlatformProbeArtifact;
                       profilePath, host: string;
                       hostSource: HostSource): JsonNode =
   ## Assemble the export document (schema version `HomeExportSchemaVersion`)
@@ -162,6 +250,13 @@ proc buildHomeExport*(intent: ProfileIntent;
   for input in inputs:
     inputsNode.add %*{"path": input.path, "blake3": input.blake3}
   let revision = sourceRevisionString()
+  let dependence = platformDependence(intent, probe.outcomes)
+  var platformsNode = newJObject()
+  for (system, status) in dependence.statuses:
+    platformsNode[system] = %($status)
+  var probeNode = newJObject()
+  for (system, why) in dependence.diagnostics:
+    probeNode[system] = %why
 
   result = newJObject()
   result["format"] = %HomeExportFormat
@@ -172,6 +267,7 @@ proc buildHomeExport*(intent: ProfileIntent;
     "activities": stringArray(selection.activities),
     "unknownActivities": stringArray(selection.unknownActivities)}
   result["intent"] = parseJson(emitProfileIntentJson(intent))
+  result["platforms"] = platformsNode
   result["provenance"] = %*{
     "repro": {
       "version": versionString(),
@@ -183,9 +279,11 @@ proc buildHomeExport*(intent: ProfileIntent;
       "inputs": inputsNode},
     "dataFiles": newJArray(),
     "compile": {
+      "target": compilingPlatformSystem(),
       "os": hostOS,
       "cpu": hostCPU,
-      "defines": stringArray(ProfileCompileDefines)}}
+      "defines": stringArray(ProfileCompileDefines),
+      "probe": probeNode}}
 
 proc renderHomeExport*(doc: JsonNode): string =
   ## Two-space indented JSON with a trailing newline: a committed snapshot
@@ -367,10 +465,128 @@ proc provenanceNotes*(snapshot, fresh: JsonNode): seq[string] =
         return nil
       result = result[key]
   for path in [@["repro", "version"], @["repro", "sourceRevision"],
-               @["profile", "digest"], @["compile", "os"],
-               @["compile", "cpu"]]:
+               @["profile", "digest"], @["compile", "target"],
+               @["compile", "os"], @["compile", "cpu"]]:
     let a = at(snapshot, @["provenance"] & path)
     let b = at(fresh, @["provenance"] & path)
     if (a.isNil and not b.isNil) or (not a.isNil and (b.isNil or a != b)):
       result.add "provenance." & path.join(".") & ": snapshot " &
         shortValue(a) & ", now " & shortValue(b)
+
+# ---------------------------------------------------------------------------
+# Evaluation for a target (the consumer side).
+# ---------------------------------------------------------------------------
+
+proc docAt(doc: JsonNode; path: openArray[string]): JsonNode =
+  result = doc
+  for key in path:
+    if result.isNil or result.kind != JObject or not result.hasKey(key):
+      return nil
+    result = result[key]
+
+proc requireExportDocument(doc: JsonNode) =
+  if doc.isNil or doc.kind != JObject or
+      doc.getOrDefault("format") != %HomeExportFormat:
+    raise newException(ValueError, "not a `" & HomeExportFormat &
+      "` document")
+  let version = doc.getOrDefault("schemaVersion")
+  if version != %HomeExportSchemaVersion:
+    raise newException(ValueError, "export schema version " &
+      (if version.isNil: "(absent)" else: $version) & " is not " &
+      $HomeExportSchemaVersion & ", the version this repro evaluates; " &
+      "re-export")
+
+proc refusalReason*(doc: JsonNode; system: string): string =
+  ## Why `doc` cannot describe `system`, or "" when it can. A document
+  ## always describes the platform that compiled it; any other platform
+  ## needs `platforms[system] == "same"`.
+  let compiledFor = docAt(doc, ["provenance", "compile", "target"])
+  let compiled = if compiledFor.isNil: "" else: compiledFor.getStr
+  if system == compiled:
+    return ""
+  let status = docAt(doc, ["platforms", system])
+  let statusText = if status.isNil: "" else: status.getStr
+  if statusText == $psSame:
+    return ""
+  let origin = "this export was compiled on " &
+    (if compiled.len > 0: compiled else: "an unrecorded platform")
+  if statusText == $psDiffers:
+    return origin & ", and evaluated for " & system & " the profile " &
+      "declares a different intent: a compile-time `when defined(...)` " &
+      "decided part of it for " & compiled & ". Select platforms with " &
+      "runtime predicates (`when macos():`) so one export describes every " &
+      "platform, or export on " & system & "."
+  let probe = docAt(doc, ["provenance", "compile", "probe", system])
+  let why = if probe.isNil: "no probe result" else: probe.getStr
+  origin & ", and the platform probe could not evaluate the profile for " &
+    system & ", so whether a compile-time `when defined(...)` changes it " &
+    "there is unknown (" & why.splitLines()[0] & "). Export on " & system &
+    " instead."
+
+proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
+    JsonNode =
+  ## Evaluate an export document for target platform `system` (a
+  ## `ProfileTargetPlatforms` name, e.g. `aarch64-darwin`) and host `host`
+  ## (default: the document's `selection.host`), with the planner's rules:
+  ## the activities `enabledActivitiesFor` enables, the packages `buildPlan`
+  ## plans under the target's predicate facts, and the resources and config
+  ## overrides whose guards hold there (`applicableResourceEntries` /
+  ## `applicableConfigEntries`, the walkers the planner applies). Resources
+  ## are the home-scope ones the home planner plans.
+  ##
+  ## Returns the `evaluation` object (`docs/user-guide/home-export.md`).
+  ## Raises `HomeExportRefused` when the document cannot describe `system`
+  ## (`refusalReason`), `ValueError` for a document of another format or
+  ## version or an unknown platform name.
+  requireExportDocument(doc)
+  let index = findTargetPlatform(system)
+  if index < 0:
+    raise newException(ValueError, "unknown target platform '" & system &
+      "' (known: " & targetSystemNames().join(", ") & ")")
+  let refusal = refusalReason(doc, system)
+  if refusal.len > 0:
+    raise newException(HomeExportRefused, "cannot evaluate this export " &
+      "for " & system & ": " & refusal)
+  let selectedHost =
+    if host.len > 0: host
+    else: doc["selection"]["host"].getStr
+  let rootNode = docAt(doc, ["provenance", "profile", "root"])
+  let root = if rootNode.isNil: "home.nim" else: rootNode.getStr
+  let intent = parseProfileIntentJson($doc["intent"])
+  let profile = profileIntentToHomeProfile(intent, root)
+  let ctx = targetHostContext(ProfileTargetPlatforms[index], selectedHost)
+
+  let plan = buildPlan(profile, "", ctx)
+  var packages = newJArray()
+  for p in plan.packages:
+    packages.add %*{"name": p.packageId, "version": p.requestedVersion,
+      "binaries": stringArray(p.binaries), "activity": p.fromActivity}
+  let selection = hostSelection(intent, root, selectedHost)
+
+  var resources = newJArray()
+  let resourcesBlock = findResourcesBlock(profile)
+  if resourcesBlock.isSome:
+    for entry in applicableResourceEntries(
+        resourcesBlock.get.resourcesEntries, ctx):
+      resources.add doc["intent"]["resources"][
+        entry.resourceIntentOrdinal - 1]
+  # The planner groups overrides by package; report them in the intent's
+  # declaration order.
+  var ordinals: seq[int]
+  let configBlock = findConfigBlock(profile)
+  if configBlock.isSome:
+    for pkg in configBlock.get.configPackages:
+      for entry in applicableConfigEntries(pkg, ctx):
+        ordinals.add entry.configIntentOrdinal
+  ordinals.sort()
+  var overrides = newJArray()
+  for ordinal in ordinals:
+    overrides.add doc["intent"]["configOverrides"][ordinal - 1]
+
+  result = %*{
+    "target": system,
+    "host": selectedHost,
+    "activities": stringArray(selection.activities),
+    "packages": packages,
+    "resources": resources,
+    "configOverrides": overrides}

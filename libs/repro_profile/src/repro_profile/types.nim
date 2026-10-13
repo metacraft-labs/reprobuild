@@ -148,6 +148,14 @@ type
     pkg*: string
     key*: string
     value*: ConfigValue
+    guard*: PredicateExpr
+      ## The runtime predicate under which this override applies; an empty
+      ## `guard.expr` means "on every host". Set by a `when <pred>:` around
+      ## the entry in `config:` (or by `guarded(...)` in a helper) and
+      ## evaluated by the planner against the target host, exactly like an
+      ## activity body's `aekWhenGuard`. Carried as predicate TEXT, so an
+      ## export describes every platform's overrides whatever platform
+      ## compiled the profile.
 
   FieldValueKind* = enum
     fvkString
@@ -241,6 +249,14 @@ type
     address*: string      ## optional named address; empty if unset
     fields*: Table[string, FieldValue]
     dependsOn*: seq[ResourceAddress]
+    guard*: PredicateExpr
+      ## The runtime predicate under which this resource is declared; an
+      ## empty `guard.expr` means "on every host". Set by a `when <pred>:`
+      ## around the constructor in `resources:` (or by `guarded(...)` in a
+      ## helper template) and evaluated by the planner against the target
+      ## host. Two resources may share an address when their guards select
+      ## different hosts; the planner rejects a duplicate only among the
+      ## resources a host actually gets.
 
   PredicateExpr* = object
     expr*: string         ## canonical-stringified predicate; apply-

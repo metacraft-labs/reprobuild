@@ -505,6 +505,8 @@ proc renderInternalUsage*(programName: string): string =
       "helper (alias of __repro-extract-interface)\n" &
     "  compile-profile …                           profile-compile helper " &
       "(alias of __repro-compile-profile)\n" &
+    "  probe-profile-platforms …                   profile platform-probe " &
+      "helper (alias of __repro-probe-profile-platforms)\n" &
     "  dev-env-introspect …                        dev-env introspection " &
       "helper (alias of __repro-dev-env-introspect)\n" &
     "  render-dev-env-shell …                      dev-env shell renderer " &
@@ -73049,6 +73051,7 @@ const internalHelperAliases = {
   "compile-provider": "__repro-compile-provider",
   "extract-interface": "__repro-extract-interface",
   "compile-profile": "__repro-compile-profile",
+  "probe-profile-platforms": "__repro-probe-profile-platforms",
   "dev-env-introspect": "__repro-dev-env-introspect",
   "render-dev-env-shell": "__repro-render-dev-env-shell",
   "direnv-activate": "__repro-direnv-activate",
@@ -80053,6 +80056,13 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runProfileCompileHelper(helperArgs)
+  if args.len > 0 and args[0] == "__repro-probe-profile-platforms":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runProfilePlatformProbeHelper(helperArgs)
   if args.len > 0 and args[0] == "__repro-dev-env-introspect":
     let helperArgs =
       if args.len > 1:

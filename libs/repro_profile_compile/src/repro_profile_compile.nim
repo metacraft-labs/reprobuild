@@ -24,6 +24,7 @@ import ./repro_profile_compile/sources
 import ./repro_profile_compile/compile
 import ./repro_profile_compile/edge
 import ./repro_profile_compile/helper
+import ./repro_profile_compile/platforms
 import ./repro_profile_compile/adapter_home
 import ./repro_profile_compile/adapter_system
 import ./repro_profile_compile/infra_apply_broker
@@ -58,6 +59,25 @@ export compile.rbpiBytesFromJson
 export compile.writeBytesAtomic
 export compile.readBytes
 export compile.rbpiEnvelopeIsValid
+export compile.stageProfileConfig
+export compile.unstageProfileConfig
+export compile.startProfileNim
+export compile.finishProfileNim
+# Target platforms and the platform probe (GM3).
+export platforms.ProfileTargetPlatform
+export platforms.ProfileTargetPlatforms
+export platforms.ProfilePlatformProbeVersion
+export platforms.findTargetPlatform
+export platforms.targetSystemNames
+export platforms.compilingPlatformSystem
+export platforms.targetHostContext
+export platforms.ProfileNimConfig
+export platforms.resolveProfileNimConfig
+export platforms.profileProbeArgv
+export platforms.ProbeOutcome
+export platforms.runProfilePlatformProbes
+export platforms.encodeProbeOutcomes
+export platforms.decodeProbeOutcomes
 
 # Build-graph edge + public entry point.
 export edge.ProfileCompileArtifact
@@ -71,9 +91,16 @@ export edge.ProfileCompileScratchEnvNames
 export edge.ProfileCompileEnvPassthrough
 export edge.profileCompileEngineConfig
 export edge.compileProfileToRbpi
+export edge.ProfilePlatformProbeActionId
+export edge.ProfilePlatformProbeArtifact
+export edge.cachedPlatformProbePath
+export edge.cachedPlatformProbeScratch
+export edge.profilePlatformProbeWeakFingerprint
+export edge.probeProfilePlatforms
 
 # Internal helper subcommand body.
 export helper.runProfileCompileHelper
+export helper.runProfilePlatformProbeHelper
 
 # Phase D adapters: ProfileIntent -> apply-pipeline IRs.
 export adapter_home.profileIntentToHomeProfile

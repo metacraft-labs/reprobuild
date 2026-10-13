@@ -41,6 +41,7 @@ import repro_profile_intent/envelope as profile_envelope
 
 import ./sources
 import ./compile
+import ./platforms
 
 # ---------------------------------------------------------------------------
 # Public types.
@@ -424,3 +425,123 @@ proc compileProfileToRbpi*(profileRoot: string;
     cacheMissReason: edge.cacheMissReason,
     cachePublishSkipReason: edge.cachePublishSkipReason,
     observedInputs: edge.evidence.monitorReads.paths())
+
+# ---------------------------------------------------------------------------
+# The platform-probe edge.
+#
+# A second monitored edge beside the compile, run only by `repro home
+# export`: it evaluates the profile for every target platform
+# (`platforms.nim`) and publishes the outcomes. It is its own edge, not a
+# step of the compile, because only the export needs it -- `repro home
+# apply` would otherwise pay six `nim check`s on every cold compile -- and
+# like the compile it decides nothing about freshness itself: the action
+# cache answers from what io-mon observed the checks read.
+# ---------------------------------------------------------------------------
+
+const ProfilePlatformProbeActionId* = "__repro_profile_platform_probe"
+
+type
+  ProfilePlatformProbeArtifact* = object
+    ## Result of a platform probe: one outcome per `ProfileTargetPlatforms`
+    ## entry, plus the engine's decision about the edge (as for
+    ## `ProfileCompileArtifact`).
+    path*: string
+    outcomes*: seq[ProbeOutcome]
+    edgeLaunched*: bool
+    cacheDecision*: CacheDecision
+    cacheMissReason*: string
+
+proc cachedPlatformProbePath*(stateDir, profileKey: string): string =
+  profileCacheDir(stateDir) / profileKey & ".platforms.json"
+
+proc cachedPlatformProbeScratch*(stateDir, profileKey: string): string =
+  ## The probe's per-platform `--nimcache` directories: derived state,
+  ## excluded from the edge's recorded inputs like the compile's nimcache.
+  profileCacheDir(stateDir) / "platform-probe" / profileKey
+
+proc profilePlatformProbeWeakFingerprint*(nimExe, publicCliPath,
+                                          outPath: string): ContentDigest =
+  ## Declared identity only, as for `profileCompileWeakFingerprint`: which
+  ## compiler and helper, where the output lands, which document version
+  ## and which platforms. Everything the profile reads is observed.
+  weakFingerprintFromText(
+    "repro.profile.platform-probe.v1\n" &
+    "compiler=" & nimExe & "\n" &
+    "helper=" & publicCliPath & "\n" &
+    "output=" & outPath & "\n" &
+    "probe-version=" & $ProfilePlatformProbeVersion & "\n" &
+    "platforms=" & targetSystemNames().join(",") & "\n")
+
+proc probeProfilePlatforms*(profileRoot: string;
+                            opts: ProfileCompileOptions):
+    ProfilePlatformProbeArtifact =
+  ## Run (or answer from the action cache) the platform-probe edge for
+  ## `profileRoot`. Uses the compile's `stateDir`, `publicCliPath`,
+  ## `repoRoot` and `workDir`; `forceRebuild` removes the published
+  ## document first. Raises `ProfileCompileError` when the edge fails.
+  if opts.stateDir.len == 0:
+    raiseProfileCompile("probeProfilePlatforms: stateDir is required")
+  if opts.publicCliPath.len == 0:
+    raiseProfileCompile("probeProfilePlatforms: publicCliPath is required")
+  let absProfile = absolutePath(profileRoot)
+  if not fileExists(extendedPath(absProfile)):
+    raiseProfileCompile("probeProfilePlatforms: profile root does not " &
+      "exist: " & absProfile)
+  let repoRoot =
+    if opts.repoRoot.len > 0: opts.repoRoot
+    else: reprobuildRepoRoot()
+  createDir(extendedPath(profileCacheDir(opts.stateDir)))
+  let key = profileCompileKey(absProfile)
+  let outPath = cachedPlatformProbePath(opts.stateDir, key)
+  let scratch = cachedPlatformProbeScratch(opts.stateDir, key)
+  let nimExe =
+    try:
+      resolveProfileNimCompiler()
+    except CompileFailure as err:
+      raiseProfileCompile(err.msg)
+  if opts.forceRebuild and fileExists(extendedPath(outPath)):
+    removeFile(extendedPath(outPath))
+  let weak = profilePlatformProbeWeakFingerprint(nimExe, opts.publicCliPath,
+    outPath)
+  let argv = @[
+    opts.publicCliPath,
+    "__repro-probe-profile-platforms",
+    "--profile", absProfile,
+    "--out", outPath,
+    "--nimcache", scratch,
+    "--repo-root", repoRoot
+  ]
+  let cwd =
+    if opts.workDir.len > 0: opts.workDir
+    else: absProfile.parentDir
+  let buildAction = action(ProfilePlatformProbeActionId, argv,
+    # Named-Lock-Files §7.2: no solved package instance reaches this edge.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = cwd,
+    outputs = @[outPath],
+    commandStatsId = "repro profile platform probe edge",
+    cacheable = true,
+    weakFingerprint = weak,
+    envPassthrough = ProfileCompileEnvPassthrough,
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      @[absolutePath(scratch)]))
+  let config = profileCompileEngineConfig(opts.stateDir, opts.publicCliPath)
+  let runResult = runBuild(graph(@[buildAction]), config)
+  if runResult.hasFailedActions():
+    raiseProfileCompile(actionFailureDiagnostic(runResult))
+  if not fileExists(extendedPath(outPath)):
+    raiseProfileCompile("platform probe edge did not write its output: " &
+      outPath)
+  var edge = ActionResult(id: ProfilePlatformProbeActionId)
+  for item in runResult.results:
+    if item.id == ProfilePlatformProbeActionId:
+      edge = item
+  let outcomes =
+    try:
+      decodeProbeOutcomes(readFile(extendedPath(outPath)))
+    except CatchableError as err:
+      raiseProfileCompile("platform probe edge wrote an unreadable " &
+        "document " & outPath & ": " & err.msg)
+  ProfilePlatformProbeArtifact(path: outPath, outcomes: outcomes,
+    edgeLaunched: edge.launched, cacheDecision: edge.cacheDecision,
+    cacheMissReason: edge.cacheMissReason)

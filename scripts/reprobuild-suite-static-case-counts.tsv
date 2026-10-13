@@ -414,6 +414,7 @@ libs/repro_platform/tests/test_msvc_env_merge.nim	nim	9
 libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	18
 libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	137
 libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2
+libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	1
 libs/repro_profile_compile/tests/t_smoke_apply_integration.nim	nim	4
@@ -961,6 +962,8 @@ tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim	nim	1
 tests/e2e/m80/t_integration_plan_classifier_bucket_drift_is_cache_hit.nim	nim	0
 tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim	nim	0
 tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim	nim	6
+tests/e2e/m83/t_e2e_export_describes_other_platform_resources.nim	nim	2
+tests/e2e/m83/t_e2e_export_refuses_compile_time_dependent_intent.nim	nim	8
 tests/e2e/m83/t_e2e_home_export_check_detects_stale_snapshot.nim	nim	2
 tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim	nim	2
 tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim	nim	3

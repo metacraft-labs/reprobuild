@@ -111,6 +111,15 @@ proc nimSpawnCount*(sb: ProfileSandbox): int =
     if line.strip().len > 0:
       inc result
 
+proc nimSpawnCount*(sb: ProfileSandbox; command: string): int =
+  ## How many logged `nim` invocations ran `command` (`c` for the profile
+  ## compile, `check` / `dump` for `repro home export`'s platform probe).
+  if not fileExists(extendedPath(sb.spyLog)):
+    return 0
+  for line in readFile(extendedPath(sb.spyLog)).splitLines():
+    if line.startsWith("nim " & command & " "):
+      inc result
+
 proc publishedRbpiPath*(sb: ProfileSandbox): string =
   ## Where the profile-compile edge publishes this sandbox's envelope.
   cachedRbpiPath(sb.stateDir, profileCompileKey(sb.profilePath))
@@ -186,6 +195,10 @@ type
     stderr*: string
     nimSpawns*: int
       ## How many `nim` invocations the spy logged during THIS run.
+    nimCompileSpawns*: int
+      ## Of those, how many were `nim c` -- the profile compile (the rest are
+      ## `repro home export`'s platform probe: one `nim dump`, one
+      ## `nim check` per target platform).
 
 proc runRepro*(sb: ProfileSandbox; args: openArray[string];
                host = DefaultSandboxHost): ReproRun =
@@ -195,6 +208,7 @@ proc runRepro*(sb: ProfileSandbox; args: openArray[string];
   ## rather than a second pipe, so a chatty stderr cannot fill its pipe while
   ## the parent is still draining stdout. POSIX only, like the spy.
   let before = sb.nimSpawnCount()
+  let compilesBefore = sb.nimSpawnCount("c")
   let errFile = sb.root / "last-stderr.txt"
   var env = sb.sandboxEnv(host)
   env["GM_HARNESS_STDERR"] = errFile
@@ -215,6 +229,7 @@ proc runRepro*(sb: ProfileSandbox; args: openArray[string];
   result.stderr =
     if fileExists(errFile): readFile(errFile) else: ""
   result.nimSpawns = sb.nimSpawnCount() - before
+  result.nimCompileSpawns = sb.nimSpawnCount("c") - compilesBefore
 
 proc treeFingerprint*(root: string; excludePrefixes: openArray[string] = []):
     seq[string] =

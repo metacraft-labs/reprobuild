@@ -1157,25 +1157,18 @@ proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
                              into: var DesiredSet) =
   ## Walk a `resources:` block body, emitting one `Resource` per
   ## reachable `nkResourceEntry`. A `nkCondBlock` is recursed into
-  ## only when its predicate evaluates true against the host —
-  ## reusing the planner's `evaluateHostPredicate` so a
+  ## only when its predicate evaluates true against the host
+  ## (`applicableResourceEntries`, the one guard walker), so a
   ## `when windows:`-guarded resource is materialized on Windows and
-  ## absent under a non-matching predicate.
-  for node in nodes:
-    case node.kind
-    of nkResourceEntry:
-      let r = resourceFromEntry(profilePath, homeDir, node)
-      if r.address in into.resources:
-        resourceProfileError(profilePath, node.resourceHeaderLine,
-          "duplicate resource address `" & r.address &
-          "` in the profile's `resources:` block")
-      into.add(r)
-    of nkCondBlock:
-      if evaluateHostPredicate(node.predicateAst, ctx):
-        collectProfileResources(profilePath, homeDir, ctx,
-          node.condChildren, into)
-    else:
-      discard
+  ## absent under a non-matching predicate. Two guarded resources may
+  ## share an address as long as no host gets both.
+  for node in applicableResourceEntries(nodes, ctx):
+    let r = resourceFromEntry(profilePath, homeDir, node)
+    if r.address in into.resources:
+      resourceProfileError(profilePath, node.resourceHeaderLine,
+        "duplicate resource address `" & r.address &
+        "` in the profile's `resources:` block")
+    into.add(r)
 
 proc parseProfileResources*(profile: Profile; homeDir: string;
                             ctx: HostContext):

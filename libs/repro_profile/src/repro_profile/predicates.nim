@@ -185,3 +185,73 @@ proc `in`*(a: PredicateValue, b: openArray[string]): PredicateExpr =
 
 proc predicate*(s: string): PredicateExpr =
   PredicateExpr(expr: s)
+
+# ---------------------------------------------------------------------
+# Guards: a runtime predicate attached to intent elements.
+#
+# An activity body carries its guards as a tree (`aekWhenGuard` around a
+# list of elements). Resources and config overrides are flat lists, so each
+# one carries its own `guard`. Both are evaluated by the planner against the
+# target host, never by the compile, which is what lets one compiled profile
+# describe every platform (Gradual-Nix-To-Reprobuild-Migration.md §Platform-
+# neutral intent). The `profile` macro lowers a runtime `when <pred>:` inside
+# `resources:` / `config:` onto `guarded(...)`; helper modules call the same
+# helpers directly.
+# ---------------------------------------------------------------------
+
+proc conjoinGuard*(outer, inner: PredicateExpr): PredicateExpr =
+  ## `outer and inner`, where an empty expression means "always". Nested
+  ## guards conjoin, so a resource inside `when linux():` inside
+  ## `when arm64():` carries `arm64 and linux`.
+  if inner.expr.len == 0:
+    outer
+  elif outer.expr.len == 0:
+    inner
+  else:
+    combineAnd(outer, inner)
+
+proc guarded*(pred: PredicateExpr;
+              elements: openArray[ActivityElement]): ActivityElement =
+  ## An activity-body element that enables `elements` only on hosts where
+  ## `pred` holds — the helper-proc spelling of `when <pred>:` in an activity
+  ## body:
+  ##
+  ## ```nim
+  ## proc secrets*(): seq[ActivityElement] =
+  ##   @[package "age",
+  ##     guarded(linux(), [package "bitwarden", package "pinentry"])]
+  ## ```
+  ActivityElement(kind: aekWhenGuard, predicate: pred,
+    guardedBody: @elements)
+
+proc applyGuard*(target: var seq[ResourceIntent]; start: int;
+                 pred: PredicateExpr) =
+  ## Conjoin `pred` into the guard of every resource appended since `start`.
+  for i in start ..< target.len:
+    target[i].guard = conjoinGuard(pred, target[i].guard)
+
+proc applyGuard*(target: var seq[ConfigOverride]; start: int;
+                 pred: PredicateExpr) =
+  ## Conjoin `pred` into the guard of every override appended since `start`.
+  for i in start ..< target.len:
+    target[i].guard = conjoinGuard(pred, target[i].guard)
+
+template guarded*[T: ResourceIntent | ConfigOverride](
+    target: var seq[T]; pred: PredicateExpr; body: untyped) =
+  ## Guard every resource (or config override) `body` appends to `target`
+  ## by `pred`. This is the helper-template spelling of a runtime
+  ## `when <pred>:` inside `resources:` / `config:`:
+  ##
+  ## ```nim
+  ## template zshResources*(targetResources: var seq[ResourceIntent]) =
+  ##   guarded(targetResources, linux() or macos()):
+  ##     shellIntegration(targetResources, hostFile = "~/.zshrc", ...)
+  ## ```
+  ##
+  ## The body runs on every host (it only DECLARES intent); what the guard
+  ## changes is where the planner applies the result.
+  block:
+    let guardStart = target.len
+    let guardPred = pred
+    body
+    applyGuard(target, guardStart, guardPred)

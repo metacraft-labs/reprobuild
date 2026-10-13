@@ -148,9 +148,7 @@ proc evaluateHostPredicate*(predicateAst: PredNode; ctx: HostContext): bool =
   ## Evaluate a profile predicate against the host facts selected for
   ## this apply. For normal local applies `ctx` is the current host; for
   ## M71 Phase B local bundle evaluation it is an explicit target host.
-  if predicateAst == nil:
-    return true
-  evaluateBool(predicateAst, ctx)
+  predicateHolds(predicateAst, ctx)
 
 proc evaluateHostPredicate*(predicateAst: PredNode; host: string): bool =
   ## Compatibility wrapper for older call sites that only provide a
@@ -359,16 +357,17 @@ proc topologicallySortPackages*(packages: seq[PlannedPackage];
     dec remaining
   emitted
 
-proc collectConfigContributions(profile: Profile): seq[ConfigContribution] =
+proc collectConfigContributions(profile: Profile; ctx: HostContext):
+    seq[ConfigContribution] =
+  ## The `config:` overrides that apply on `ctx`: a guarded override (GM3)
+  ## contributes only where its guard holds (`applicableConfigEntries`).
   for ch in profile.root.children:
     if ch.kind != nkConfigBlock:
       continue
     for pkgNode in ch.configPackages:
       if pkgNode.kind != nkConfigPackage:
         continue
-      for entry in pkgNode.configEntries:
-        if entry.kind != nkConfigEntry:
-          continue
+      for entry in applicableConfigEntries(pkgNode, ctx):
         result.add(ConfigContribution(
           packageName: pkgNode.configPackageName,
           configKey: entry.configKey,
@@ -419,7 +418,7 @@ proc buildPlan*(profile: Profile; profileDir: string;
   result.launchers.sort(proc(a, b: PlannedLauncher): int =
     cmp(a.commandName, b.commandName))
   # Harvest `config:` block contributions for the suppression layer.
-  result.configContributions = collectConfigContributions(profile)
+  result.configContributions = collectConfigContributions(profile, ctx)
   # `generatedFiles` is empty in Phase A unless a package output
   # synthesizer fills it. The stow synthesizer (Phase B) populates it
   # too; both feed into the same list and the suppression pass

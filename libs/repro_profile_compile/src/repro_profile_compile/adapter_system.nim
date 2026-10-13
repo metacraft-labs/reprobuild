@@ -690,6 +690,17 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
   for r in p.resources:
     if not isSystemScopeResource(r.kind):
       continue
+    # A runtime guard (`when linux():` around a resource, GM3) is
+    # evaluated by the HOME planner. The system path has no host-selection
+    # step yet, so it would apply a guarded system resource on every host;
+    # refuse instead of dropping the guard.
+    if r.guard.expr.len > 0:
+      raise newException(ValueError,
+        "system-scope resource " & r.kind &
+        (if r.address.len > 0: " `" & r.address & "`" else: "") &
+        " is under a runtime predicate `" & r.guard.expr & "`; system " &
+        "profiles do not evaluate runtime predicates yet -- use a " &
+        "compile-time `when defined(...)` for system-scope resources")
     result.resources.add(buildSystemResource(r))
 
 # ---------------------------------------------------------------------------

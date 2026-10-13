@@ -2560,10 +2560,13 @@ proc lookupConfigurableInProfile(prof: Profile; pkg, key: string):
   let cfgOpt = findConfigBlock(prof)
   if cfgOpt.isNone:
     return (false, "")
+  # A guarded override (GM3) is this host's value only where its guard
+  # holds; the planner's own walker decides that.
+  let ctx = currentHostContext()
   for pkgNode in cfgOpt.get.configPackages:
     if pkgNode.configPackageName != pkg:
       continue
-    for entry in pkgNode.configEntries:
+    for entry in applicableConfigEntries(pkgNode, ctx):
       if entry.configKey == key:
         return (true, entry.configValueSource)
   (false, "")
@@ -3355,26 +3358,37 @@ proc runHomeMigrateFromEnvScripts(args: openArray[string]): int =
 # ---------------------------------------------------------------------------
 
 const HomeExportUsage = """usage: repro home export [--profile-dir DIR] [--host NAME] [--format json]
-                          [--check FILE]
+                          [--target SYSTEM | --check FILE]
 
 Print the evaluated home-profile intent as JSON: the profile's activities,
 config overrides, hosts map and resources exactly as the planner consumes
-them, the activities the planner enables on the selected host, and the
-provenance of the document (repro version and source revision, the profile
-files the compile read with their digests, the compile platform).
+them (runtime `when` guards included, as predicate text), the activities the
+planner enables on the selected host, which target platforms the document
+describes, and the provenance of the document (repro version and source
+revision, the profile files the compile read with their digests, the compile
+platform).
 
-The profile is compiled through the normal profile-compile edge (an unchanged
-profile is an action-cache hit). Nothing is planned, applied or recorded.
+The profile is compiled through the normal profile-compile edge and evaluated
+for every target platform by the platform-probe edge (an unchanged profile is
+an action-cache hit for both). Nothing is planned, applied or recorded.
 
-  --host NAME     select NAME instead of the current host. $REPRO_HOST takes
-                  precedence over --host, as for every repro home command;
-                  passing both with different values is refused.
-  --format json   the output format (json is the only one).
-  --check FILE    compare FILE, a committed export, with a fresh export instead
-                  of printing. Exit 0 when the selection and intent agree, 1
-                  with a list of differences when they do not. Provenance
-                  (repro version, file digests, platform) is reported but never
-                  makes the check fail.
+  --host NAME      select NAME instead of the current host. $REPRO_HOST takes
+                   precedence over --host, as for every repro home command;
+                   passing both with different values is refused.
+  --format json    the output format (json is the only one).
+  --target SYSTEM  also evaluate the guards for platform SYSTEM (x86_64-linux,
+                   aarch64-linux, x86_64-darwin, aarch64-darwin, x86_64-windows,
+                   aarch64-windows) and the selected host, and add the result as
+                   `evaluation`. Refused (exit 3) when the profile's compile-time
+                   `when defined(...)` makes this export wrong for SYSTEM.
+  --check FILE     compare FILE, a committed export, with a fresh export instead
+                   of printing. Exit 0 when the selection, intent and platforms
+                   agree, 1 with a list of differences when they do not.
+                   Provenance (repro version, file digests, platform) is reported
+                   but never makes the check fail.
+
+Exit codes: 0 printed / current; 1 stale snapshot or export failed; 2 usage;
+3 the export cannot describe the --target platform.
 
 Schema: docs/user-guide/home-export.md in the Reprobuild documentation."""
 
@@ -3382,10 +3396,12 @@ proc runHomeExport(args: openArray[string]): int =
   ## `repro home export` — see `HomeExportUsage` and `home_export.nim`.
   ## Exit codes: 0 printed / snapshot current; 1 snapshot stale, or the
   ## profile could not be found or compiled; 2 usage error, including an
-  ## unreadable or non-JSON `--check` file.
+  ## unreadable or non-JSON `--check` file and an unknown `--target`; 3 the
+  ## export cannot describe the `--target` platform.
   var hostFlag = ""
   var format = "json"
   var checkFile = ""
+  var target = ""
   var i = 0
   try:
     while i < args.len:
@@ -3405,6 +3421,12 @@ proc runHomeExport(args: openArray[string]): int =
         if checkFile.len == 0:
           stderr.writeLine("repro home export: --check needs a file")
           return 2
+      elif a == "--target" or a.startsWith("--target="):
+        target = parseFlagValue(args, i, "--target")
+        if findTargetPlatform(target) < 0:
+          stderr.writeLine("repro home export: unknown --target '" & target &
+            "' (known: " & targetSystemNames().join(", ") & ")")
+          return 2
       elif a.startsWith("--"):
         stderr.writeLine("repro home export: unknown flag: " & a)
         return 2
@@ -3418,6 +3440,10 @@ proc runHomeExport(args: openArray[string]): int =
   if format != "json":
     stderr.writeLine("repro home export: unsupported --format '" & format &
       "' (supported: json)")
+    return 2
+  if target.len > 0 and checkFile.len > 0:
+    stderr.writeLine("repro home export: --target and --check do not " &
+      "combine (a snapshot is checked as exported, unevaluated)")
     return 2
 
   # Host identity, in the precedence every `repro home` command documents
@@ -3469,14 +3495,32 @@ proc runHomeExport(args: openArray[string]): int =
         stderr.writeLine(formatProfileCompileError("repro home export",
           profilePath, err.msg, planCommand = "repro home plan"))
         return 1
+    let probe =
+      try:
+        probeProfilePlatforms(profilePath, opts)
+      except ProfileCompileError as err:
+        stderr.writeLine("repro home export: the platform probe failed: " &
+          err.msg)
+        return 1
     let intent = decodeRbpi(artifact.rbpiBytes)
-    doc = buildHomeExport(intent, artifact, profilePath, host, hostSource)
+    doc = buildHomeExport(intent, artifact, probe, profilePath, host,
+      hostSource)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except CatchableError as e:
     stderr.writeLine("repro home export: error: " & e.msg)
     return 1
 
+  if target.len > 0:
+    try:
+      doc["evaluation"] = evaluateHomeExport(doc, target, host)
+    except HomeExportRefused as err:
+      stderr.writeLine("repro home export: " & err.msg)
+      return 3
+    except CatchableError as err:
+      stderr.writeLine("repro home export: cannot evaluate for " & target &
+        ": " & err.msg)
+      return 1
   if snapshot.isNil:
     stdout.write(renderHomeExport(doc))
     return 0

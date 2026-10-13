@@ -247,6 +247,62 @@ proc profileCompileChildEnv*(repoRoot: string): StringTableRef =
   env
 
 # ---------------------------------------------------------------------------
+# What every Nim invocation over a profile needs: the profile directory's
+# staged `config.nims` and the child environment. Shared by the compile
+# (`compileProfileBinary`) and the platform probe (`platforms.nim`), so the
+# probe checks the profile in exactly the configuration it is compiled in.
+# ---------------------------------------------------------------------------
+
+proc stageProfileConfig*(profileRoot, repoRootAbs: string): string =
+  ## Stage a wrapper config.nims next to the profile so nim's parent-walk
+  ## picks it up and pulls in reprobuild's config.nims (which resolves
+  ## sibling-repo paths from env vars: NIMCRYPTO_SRC, BEARSSL_SRC, IO_MON_SRC,
+  ## etc.). Without this, a profile at e.g. C:\Users\admin\reprobuild-source\
+  ## never sees reprobuild's config.nims, and transitive imports of
+  ## repro_project_dsl -> nimcrypto/sha2 fail with "cannot open file".
+  ##
+  ## Returns the path it staged (the caller removes it with
+  ## `unstageProfileConfig`), or "" when the profile directory already has a
+  ## `config.nims` of its own or reprobuild has none.
+  let profileDir = profileRoot.parentDir
+  let stagedConfig = profileDir / "config.nims"
+  let upstreamConfig = repoRootAbs / "config.nims"
+  if fileExists(extendedPath(upstreamConfig)) and
+     not fileExists(extendedPath(stagedConfig)):
+    writeFile(extendedPath(stagedConfig),
+      "include \"" & upstreamConfig.replace('\\', '/') & "\"\n")
+    return stagedConfig
+  ""
+
+proc unstageProfileConfig*(staged: string) =
+  if staged.len > 0:
+    try: removeFile(extendedPath(staged))
+    except OSError: discard
+
+proc startProfileNim*(argv: seq[string]; repoRootAbs: string;
+                      env: StringTableRef): Process =
+  ## Start one `nim` invocation over a profile -- the compile's `nim c`, the
+  ## platform probe's `nim dump` / `nim check` -- with stderr merged into
+  ## stdout, from the reprobuild root, in `env`
+  ## (`profileCompileChildEnv`). `argv[0]` is the compiler
+  ## `resolveProfileNimCompiler` chose. The one place a profile's compiler is
+  ## launched; finish it with `finishProfileNim`.
+  startProcess(argv[0], workingDir = repoRootAbs, args = argv[1 .. ^1],
+    env = env, options = {poUsePath, poStdErrToStdOut})
+
+proc finishProfileNim*(p: Process): tuple[output: string; exitCode: int] =
+  ## Drain a `startProfileNim` process, wait for it and release it.
+  ##
+  ## N51: a `nim c` transcript is the single most short-read-prone capture
+  ## in this tree -- the compiler writes progress chatter in many small
+  ## bursts, and `readAll` ends at the first burst under 1 KiB -- so the
+  ## stream is drained, not read once.
+  let output = drainStream(p.outputStream)
+  let exitCode = p.waitForExit()
+  p.close()
+  (output: output, exitCode: exitCode)
+
+# ---------------------------------------------------------------------------
 # Direct Nim invocation (two-phase: `nim c` then run the binary).
 # ---------------------------------------------------------------------------
 
@@ -264,22 +320,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
 
-  # Stage a wrapper config.nims next to the profile so nim's parent-walk
-  # picks it up and pulls in reprobuild's config.nims (which resolves
-  # sibling-repo paths from env vars: NIMCRYPTO_SRC, BEARSSL_SRC, IO_MON_SRC,
-  # etc.). Without this, a profile at e.g. C:\Users\admin\reprobuild-source\
-  # never sees reprobuild's config.nims, and transitive imports of
-  # repro_project_dsl -> nimcrypto/sha2 fail with "cannot open file".
-  let profileDir = profileRoot.parentDir
-  let stagedConfig = profileDir / "config.nims"
-  let upstreamConfig = repoRootAbs / "config.nims"
-  var didStageConfig = false
-  if fileExists(extendedPath(upstreamConfig)) and
-     not fileExists(extendedPath(stagedConfig)):
-    writeFile(extendedPath(stagedConfig),
-      "include \"" & upstreamConfig.replace('\\', '/') & "\"\n")
-    didStageConfig = true
-
+  let stagedConfig = stageProfileConfig(profileRoot, repoRootAbs)
   let nimArgv = profileCompileArgv(nimExe, profileRoot, nimcacheDir,
     outBinary, repoRootAbs)
   if verbose:
@@ -287,18 +328,10 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
 
   try:
     let childEnv = profileCompileChildEnv(repoRootAbs)
-    var p = startProcess(nimArgv[0], workingDir = repoRootAbs,
-                         args = nimArgv[1 .. ^1],
-                         env = childEnv,
-                         options = {poUsePath, poStdErrToStdOut})
-    # N51: a `nim c` transcript is the single most short-read-prone capture
-    # in this tree — the compiler writes progress chatter in many small
-    # bursts, and `readAll` ends at the first burst under 1 KiB. `err.stderrText`
-    # below is the ONLY thing a user sees when a profile fails to compile.
-    let output = drainStream(p.outputStream)
-    let exitCode = p.waitForExit()
-    p.close()
-    let compileRes = (output: output, exitCode: exitCode)
+    # `err.stderrText` below is the ONLY thing a user sees when a profile
+    # fails to compile; `finishProfileNim` drains the whole transcript.
+    let compileRes = finishProfileNim(
+      startProfileNim(nimArgv, repoRootAbs, childEnv))
     if compileRes.exitCode != 0:
       var err = new CompileFailure
       err.msg = "nim compile failed for " & profileRoot &
@@ -326,9 +359,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     result.jsonOutput = runRes.output
     result.stderrText = compileRes.output
   finally:
-    if didStageConfig:
-      try: removeFile(extendedPath(stagedConfig))
-      except OSError: discard
+    unstageProfileConfig(stagedConfig)
 
 proc rbpiBytesFromJson*(jsonText: string): seq[byte] =
   ## Parse the JSON ProfileIntent emitted by the compiled profile and

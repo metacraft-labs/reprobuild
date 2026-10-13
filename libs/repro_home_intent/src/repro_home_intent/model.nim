@@ -76,10 +76,21 @@ type
       configPackageName*: string
       configPackageHeaderLine*: int
       configEntries*: seq[IntentNode]
+        ## `nkConfigEntry` lines, and -- in a profile adapted from a
+        ## compiled `ProfileIntent` (GM3) -- `nkCondBlock`s whose
+        ## `condChildren` are the `nkConfigEntry`s a runtime guard
+        ## selects. Walk it with `applicableConfigEntries`, which
+        ## evaluates the guards; never read the entries directly.
     of nkConfigEntry:
       configKey*: string
       configValueSource*: string     ## raw RHS bytes, no leading `=`
       configEntryLine*: int
+      configIntentOrdinal*: int
+        ## 1-based position of the `ConfigOverride` this entry was
+        ## adapted from in the compiled `ProfileIntent.configOverrides`;
+        ## 0 for an entry parsed from source text. Lets a consumer of the
+        ## planner's selection (`repro home export --target`) name the
+        ## intent element the planner chose.
     of nkHostsBlock:
       hostsHeaderLine*: int
       hostsEntries*: seq[IntentNode]
@@ -104,6 +115,10 @@ type
       resourceAddress*: string
       resourceHeaderLine*: int
       resourceAttrs*: seq[IntentNode]
+      resourceIntentOrdinal*: int
+        ## 1-based position of the `ResourceIntent` this entry was
+        ## adapted from in the compiled `ProfileIntent.resources`; 0 for
+        ## an entry parsed from source text (see `configIntentOrdinal`).
     of nkResourceAttr:
       ## A `<key> = <value>` payload line inside a resource entry.
       resourceAttrKey*: string

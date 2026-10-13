@@ -131,24 +131,34 @@ proc buildActivity(act: ActivityIntent): IntentNode =
   for elem in act.body:
     result.activityChildren.add(buildActivityElement(elem))
 
+proc guardedBy(guard: PredicateExpr; node: IntentNode): IntentNode =
+  ## `node` itself when `guard` is empty, else an `nkCondBlock` holding it
+  ## -- the IR shape the planner's guard walkers
+  ## (`applicableResourceEntries` / `applicableConfigEntries`) evaluate,
+  ## the same shape an activity body's `when` takes.
+  if guard.expr.len == 0:
+    return node
+  result = predicateExprToCondBlock(guard.expr)
+  result.condChildren.add node
+
 proc buildConfigBlock(overrides: seq[ConfigOverride]): IntentNode =
   result = IntentNode(kind: nkConfigBlock,
     configHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
   # Group overrides by package, preserving first-occurrence order.
   var pkgOrder: seq[string]
-  var byPkg: Table[string, seq[ConfigOverride]]
-  for ov in overrides:
+  var byPkg: Table[string, seq[(int, ConfigOverride)]]
+  for i, ov in overrides:
     if ov.pkg notin byPkg:
       pkgOrder.add(ov.pkg)
       byPkg[ov.pkg] = @[]
-    byPkg[ov.pkg].add(ov)
+    byPkg[ov.pkg].add((i, ov))
   for pkgName in pkgOrder:
     var pkgNode = IntentNode(kind: nkConfigPackage,
       configPackageName: pkgName,
       configPackageHeaderLine: 0,
       startLine: 0, endLine: 0, indent: 0)
-    for ov in byPkg[pkgName]:
+    for (index, ov) in byPkg[pkgName]:
       let valueSource =
         case ov.value.kind
         of cvkString:
@@ -164,11 +174,13 @@ proc buildConfigBlock(overrides: seq[ConfigOverride]): IntentNode =
         of cvkInt: $ov.value.i
         of cvkBool: (if ov.value.b: "true" else: "false")
         of cvkExpr: ov.value.expr
-      pkgNode.configEntries.add(IntentNode(kind: nkConfigEntry,
-        configKey: ov.key,
-        configValueSource: valueSource,
-        configEntryLine: 0,
-        startLine: 0, endLine: 0, indent: 0))
+      pkgNode.configEntries.add(guardedBy(ov.guard,
+        IntentNode(kind: nkConfigEntry,
+          configKey: ov.key,
+          configValueSource: valueSource,
+          configEntryLine: 0,
+          configIntentOrdinal: index + 1,
+          startLine: 0, endLine: 0, indent: 0)))
     result.configPackages.add(pkgNode)
 
 proc buildHostsBlock(hosts: Table[string, seq[string]]): IntentNode =
@@ -193,11 +205,12 @@ proc mapHomeFieldName(resourceKind, fieldName: string): string =
     return "valueKind"
   fieldName
 
-proc buildResourceEntry(r: ResourceIntent): IntentNode =
+proc buildResourceEntry(r: ResourceIntent; ordinal: int): IntentNode =
   result = IntentNode(kind: nkResourceEntry,
     resourceKind: mapResourceKind(r.kind),
     resourceAddress: r.address,
     resourceHeaderLine: 0,
+    resourceIntentOrdinal: ordinal,
     startLine: 0, endLine: 0, indent: 0)
   for fieldName, fieldValue in r.fields.pairs:
     result.resourceAttrs.add(IntentNode(kind: nkResourceAttr,
@@ -242,10 +255,11 @@ proc buildResourcesBlock(resources: seq[ResourceIntent]): IntentNode =
   result = IntentNode(kind: nkResourcesBlock,
     resourcesHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
-  for r in resources:
+  for i, r in resources:
     if not isHomeScopeResource(r.kind):
       continue
-    result.resourcesEntries.add(buildResourceEntry(r))
+    result.resourcesEntries.add(guardedBy(r.guard,
+      buildResourceEntry(r, i + 1)))
 
 proc profileIntentToHomeProfile*(p: ProfileIntent;
                                  profilePath: string): Profile =
@@ -267,6 +281,10 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
   ##   ProfileIntent.resources   -> nkResourcesBlock with home-scope kinds
   ##     ResourceIntent.fields   -> nkResourceAttr children
   ##     ResourceIntent.dependsOn-> the depends_on attribute
+  ##     ResourceIntent.guard    -> an nkCondBlock around the entry
+  ##   ConfigOverride.guard      -> an nkCondBlock around the config entry
+  ##   Each resource / config entry records its 1-based position in the
+  ##   intent (`resourceIntentOrdinal` / `configIntentOrdinal`).
   let root = IntentNode(kind: nkProfileRoot,
     name: p.name,
     headerLine: 0,
