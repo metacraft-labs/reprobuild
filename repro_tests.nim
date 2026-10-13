@@ -12006,6 +12006,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
+    binary: "build/test-bin/t_pre_push_gate_enforces_inside_a_linked_worktree",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim",
     binary: "build/test-bin/t_pre_push_lock_records_unmaterialized_declared_repo",
     defines: @[],
