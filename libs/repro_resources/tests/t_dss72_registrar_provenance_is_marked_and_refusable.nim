@@ -410,6 +410,42 @@ suite "§7.2 — which registrar is installed reaches the session event log":
     check detail.contains("registrar=" & IssuerRegistrarName)
     check detail.contains("provenance=" & $rprIssuer)
 
+  test "a SECOND sink is told too, so a two-service session logs both":
+    # THE GAP THE GUARD LEFT, and the reason it survived: deleting the
+    # `registrarAnnounced` check reddened NOTHING, because every case
+    # here installed one sink.
+    #
+    # A session that converges two shared services installs a sink per
+    # service -- a different session directory each time. With the guard
+    # left standing from the first install, the second sink is never
+    # announced to, so that service's event log cannot answer "did this
+    # workspace talk to an issuer". That is this proc's own documented
+    # defect one level down: a fact computed, correct, reaching no
+    # reader.
+    let first = newScratch("logtwosinksA")
+    defer: first.drop()
+    let second = newScratch("logtwosinksB")
+    defer: second.drop()
+    clearReadinessEdgeCollaborators()
+    defer: clearReadinessEdgeCollaborators()
+    setServiceRegistrar(flatRegistrar(),
+      ServiceRegistrarIdentity(name: IssuerRegistrarName,
+        provenance: rprIssuer))
+    first.installSink()
+    check first.countOfKind(RegistrarInstalledEventKind) == 1
+    # The second service's sink, same registrar, no re-install of it.
+    second.installSink()
+    check second.countOfKind(RegistrarInstalledEventKind) == 1
+    # And the second log names the registrar that is ACTUALLY installed,
+    # not a stale one -- the hazard if the guard were keyed on the
+    # announcement rather than on the sink.
+    let detail = second.eventDetail(RegistrarInstalledEventKind)
+    checkpoint(detail)
+    check detail.contains("registrar=" & IssuerRegistrarName)
+    check detail.contains("provenance=" & $rprIssuer)
+    # The first log did not grow a second line.
+    check first.countOfKind(RegistrarInstalledEventKind) == 1
+
   test "the announcement is made once per install, not once per reconcile":
     # A line repeated per reconcile would make a reader counting
     # registrars wrong, and would say nothing new.

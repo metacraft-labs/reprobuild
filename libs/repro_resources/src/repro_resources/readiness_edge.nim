@@ -399,6 +399,22 @@ proc setReadinessEdgeEventSink*(sink: ReadinessEdgeEventSink) =
   ## publish nothing; the ORDERING is still enforced, because it is
   ## `topoOrder`'s and not the sink's.
   installedSink = sink
+  # A NEW SINK HAS NOT BEEN TOLD ANYTHING YET, so the guard is cleared
+  # before announcing rather than left standing.
+  #
+  # Without this the announcement is suppressed for every sink after the
+  # first: a session converging TWO shared services installs a sink per
+  # service, and the second service's event log would never carry
+  # `registrar.installed` at all. That is the defect this proc's own
+  # comment above exists to prevent -- a fact computed, correct, and
+  # reaching no reader -- one level down, and it survived because
+  # deleting the guard reddened nothing.
+  #
+  # The trade is deliberate: re-installing the SAME sink twice now logs
+  # twice. A duplicate line is noise that says something true; a missing
+  # line makes "did this workspace ever talk to an issuer?" unanswerable
+  # for that service, which is the question §7.2 added the event for.
+  registrarAnnounced = false
   announceInstalledRegistrar()
 
 proc clearReadinessEdgeCollaborators*() =

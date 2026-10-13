@@ -16520,7 +16520,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_dss72_registrar_provenance_is_marked_and_refusable.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

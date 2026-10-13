@@ -556,7 +556,7 @@ libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_dss10_readiness_edge_orders_the_registration.nim	nim	24
 libs/repro_resources/tests/t_dss11_converge_response_carries_the_instances_points.nim	nim	7
 libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim	nim	21
-libs/repro_resources/tests/t_dss72_registrar_provenance_is_marked_and_refusable.nim	nim	15
+libs/repro_resources/tests/t_dss72_registrar_provenance_is_marked_and_refusable.nim	nim	16
 libs/repro_resources/tests/t_dss72_reuse_is_keyed_on_the_registrar.nim	nim	7
 libs/repro_resources/tests/t_l1_state_store.nim	nim	6
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	5
