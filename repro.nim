@@ -170,7 +170,11 @@ import ct_test_runner_install
 type
   TestGraphArtifact* = object
     path*: string      ## repo-relative output path, as the producing edge declares it
-    actionId*: string  ## the producing edge's action id
+    actionId*: string
+      ## the producing edge's action id; EMPTY for a checked-in fixture file,
+      ## which no edge produces — its path is still a typed input of the
+      ## execute edge, so editing it re-runs the test, and there is nothing to
+      ## order before it
   TestGraphArtifacts* = object
     source*: string
     artifacts*: seq[TestGraphArtifact]
@@ -210,6 +214,10 @@ const
     ## extraction keys on the compiler paths and on PATH itself, so a per-case
     ## tool directory made every case's extraction of the same recipe a
     ## (correct) cache miss.
+
+  sc7CapstoneFixtureRoot* = "tests/fixtures/sc7-capstone"
+    ## The SC-7 capstone's checked-in producer and consumer recipes; see
+    ## ``tests/fixtures/sc7-capstone/README.md``.
 
   M4ConsolidationVerificationTest* =
     "tests/integration/t_m4_pure_unit_consolidation.nim"
@@ -304,6 +312,21 @@ const
           actionId: "reprobuild.test_fixtures.rp3_provider_consumer_b"),
         TestGraphArtifact(path: rp3FixtureProviderRoot & "/plain",
           actionId: "reprobuild.test_fixtures.rp3_provider_plain")]),
+    # CHECKED-IN fixture recipes, not graph-built artifacts: no producing
+    # edge, so no action id. The test copies them into its scratch tree; their
+    # bytes are fixed so the run-wide action cache serves their recipe
+    # compiles (see the note in the test).
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim",
+      artifacts: @[
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/exeprod/repro.nim"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/libprod/repro.nim"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/libprod/greeting.h"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/consumer/repro.nim"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/consumer/main.c"),
+        TestGraphArtifact(
+          path: sc7CapstoneFixtureRoot & "/noedge-consumer/repro.nim")]),
     TestGraphArtifacts(
       source: "tools/catalog-harvester/tests/" &
         "test_harvester_app_name_validation.nim",
@@ -1637,6 +1660,11 @@ package reprobuild:
         if entry.source != spec.source:
           continue
         for artifact in entry.artifacts:
+          if artifact.actionId.len == 0:
+            # A checked-in fixture file: an input as spelled, with no
+            # producing edge to order before this one and no ``.exe``.
+            requiredBinaries.add(artifact.path)
+            continue
           let artifactPath =
             when defined(windows): artifact.path & ".exe"
             else: artifact.path
