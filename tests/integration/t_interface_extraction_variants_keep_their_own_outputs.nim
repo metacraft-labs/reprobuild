@@ -95,7 +95,7 @@ suite "interface extraction variants keep their own outputs":
       skip("the recipe-relative interface extraction is POSIX-only")
     else:
       let repoRoot = getCurrentDir()
-      let reproBin = repoRoot / "build" / "bin" / "repro"
+      let reproBin = repoRoot / "build" / "bin" / "repro".addFileExt(ExeExt)
       let nim = findExe("nim")
       if not fileExists(reproBin) or nim.len == 0:
         checkpoint("missing " & reproBin & " or nim; run `just build` first")
