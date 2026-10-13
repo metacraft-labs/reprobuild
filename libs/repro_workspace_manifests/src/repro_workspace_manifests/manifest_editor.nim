@@ -544,7 +544,9 @@ proc workspaceSettingsText*(cfg: WorkspaceSettings): string =
   f.addOpt("auto_load_envrc", cfg.foreign_env.auto_load_envrc)
   f.addOpt("auto_load_flake", cfg.foreign_env.auto_load_flake)
   if f.len > 0: blocks.add(RenderBlock(header: "[foreign_env]", entries: f))
-  assemble(schemaWorkspaceSettingsV1, @[], blocks,
+  var top: seq[RenderEntry]
+  top.addOpt("push_gateway", cfg.push_gateway)
+  assemble(schemaWorkspaceSettingsV1, top, blocks,
     extensionsBlock(cfg.extensions))
 
 proc stateWorkspaceEntries(body: WorkspaceBody): seq[RenderEntry] =

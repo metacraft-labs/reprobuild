@@ -21,6 +21,7 @@ import std/[options, os, strutils, tempfiles, unittest]
 import repro_workspace_manifests
 
 const fullSettings = """schema = "reprobuild.workspace.settings.v1"
+push_gateway = "off"
 
 # The root repo's own roles.
 [workspace]
@@ -131,6 +132,7 @@ suite "repro-workspace.toml settings.v1 decode":
     check s.records.url == some("https://git.example.invalid/acme/records.git")
     check s.records.branch == some("latest")
     check s.records.publish_locks == some(true)
+    check s.push_gateway == some("off")
     check s.privateManifestUrl.isNone
     check s.manifestRevision.isNone
 
@@ -184,6 +186,8 @@ suite "repro-workspace.toml settings.v1 decode":
     var back = readWorkspaceSettings(rewritten)
     back.path = original.path
     check back.workspace == original.workspace
+    check back.push_gateway == some("off")
+    check back.push_gateway == original.push_gateway
     check back.projects == original.projects
     check back.records == original.records
     check back.sharedLayers == original.sharedLayers

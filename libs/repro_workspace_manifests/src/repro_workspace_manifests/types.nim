@@ -113,6 +113,10 @@ const
     ## The schema of the OLD host bootstrap config `.repro-workspace.toml`
     ## (and of its `.repro-workspace-private.toml` companion). Still read;
     ## never written.
+  pushGatewayOptOutValues* = ["off"]
+    ## The values the settings files' top-level `push_gateway` key may take:
+    ## Push-Gateway-Wiring-And-Policy.md §7.4 defines exactly one, the
+    ## per-workspace opt-out `push_gateway = "off"`. Absent means the default.
   schemaWorkspaceSettingsV1* = "reprobuild.workspace.settings.v1"
     ## Workspace-Settings-Files.md §3 — the shared, committed workspace
     ## settings file `repro-workspace.toml`.
@@ -878,6 +882,9 @@ type
 
   WorkspaceBootstrap* = object
     schema*: string
+    push_gateway*: Option[string]
+      ## Push-Gateway-Wiring-And-Policy.md §7.4's per-WORKSPACE opt-out, a
+      ## top-level key; see `WorkspaceSettings.push_gateway`.
     manifest*: BootstrapManifestBody
     projects*: BootstrapProjectsBody
     verify*: BootstrapVerifyBody
@@ -960,6 +967,11 @@ type
       ## `[[manifest]]` of the shared file, in file order.
     localLayers*: seq[SettingsManifestLayer]
       ## `[[manifest]]` of the local file, in file order.
+    push_gateway*: Option[string]
+      ## Push-Gateway-Wiring-And-Policy.md §7.4's per-WORKSPACE opt-out: the
+      ## top-level `push_gateway = "off"` (the one value §7.4 defines; any
+      ## other is refused naming the file and key). Same key, same meaning in
+      ## both schemas. Shared policy, so the local file may not set it (§4).
     profiles*: seq[(string, BranchRoleDecls)]
       ## `[profiles.<name>]`, sorted by name (TOML tables are unordered).
     customRoles*: seq[CustomRoleDecl]

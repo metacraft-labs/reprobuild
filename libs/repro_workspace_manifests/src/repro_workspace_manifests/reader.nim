@@ -17,7 +17,7 @@
 #      its own (status-im/nim-toml-serialization silently default-initialises
 #      missing scalar fields).
 
-import std/[algorithm, options, os, strutils]
+import std/[algorithm, options, os, sequtils, strutils]
 import toml_serialization
 import toml_serialization/types as toml_types
 import types
@@ -110,22 +110,89 @@ proc decodeTree*(path, content, expectedSchema: string): TomlValueRef =
     raiseManifestError(path, "", expectedSchema, expectedSchema,
       "the file is not a TOML table")
 
-proc fallbackTomlMessage(): string =
+proc fallbackTomlMessage(content: string): string =
   ## Synthetic diagnostic for the case where status-im/nim-toml-serialization
-  ## raises a ``TomlError`` whose ``msg`` is the empty string. The empty-msg
-  ## arm is rare on Linux but reproducibly hit on Windows fixtures that
-  ## interpolate raw Windows paths into TOML basic strings: ``"C:\Users\..."``
-  ## is parsed as the invalid escape ``\U`` (TOML basic strings reserve
-  ## ``\u`` / ``\U`` for 4- / 8-hex-digit Unicode escapes). Without the
-  ## fallback the wrapped ``WorkspaceManifestParseError`` ends up with an
-  ## empty ``innerMessage`` and the diagnostic reads ``schema expected=X
-  ## observed=X:`` with no explanation. The fallback names the most likely
-  ## culprit so the next failure is actionable rather than opaque.
-  "TOML parser raised with no message; common cause: unescaped backslash " &
-    "in a basic string (\"...\") — TOML reads \\U / \\u / \\b / \\f / " &
-    "\\n / \\r / \\t / \\\" / \\\\ as escape sequences. If the value is a " &
-    "filesystem path or file:// URL, escape backslashes (\\\\) or switch to " &
-    "forward slashes / TOML literal strings ('...')."
+  ## raises a ``TomlError`` whose ``msg`` is the empty string and the strict
+  ## decoder's own key scan (``firstUnknownKey``) found no unknown key to name.
+  ## The backslash hint is the one cause measured for that case (Windows paths
+  ## interpolated into basic strings: ``"C:\Users\..."`` is the invalid escape
+  ## ``\U``), so it is offered only when the file contains a backslash at all;
+  ## elsewhere it would point at a culprit the file cannot hold.
+  result = "TOML parser raised with no message"
+  if '\\' in content:
+    result.add "; common cause: unescaped backslash " &
+      "in a basic string (\"...\") — TOML reads \\U / \\u / \\b / \\f / " &
+      "\\n / \\r / \\t / \\\" / \\\\ as escape sequences. If the value is a " &
+      "filesystem path or file:// URL, escape backslashes (\\\\) or switch to " &
+      "forward slashes / TOML literal strings ('...')."
+
+proc unknownKeyIn[T](node: TomlValueRef; keyPath: string; sample: T):
+    tuple[keyPath, record: string] =
+  ## The first key under ``node`` that record type ``T`` (recursively, through
+  ## its object, ``Option`` and ``seq`` fields) does not declare, with the
+  ## record that lacks it; ("", "") when every key is declared. Types the
+  ## decoder reads through a custom ``readValue`` (``Extensions`` and the
+  ## branch-role values) accept what they accept and are not descended into.
+  ## Keys are compared EXACTLY, as the decoder does (it is case-sensitive and
+  ## does not fold `_`): a style variant of a declared key (`Project` for
+  ## `project`) is a key the decoder rejects, so it must be one this finds.
+  when T is Extensions or T is BranchRoleValue or T is CustomRoleTable or
+      T is TomlValueRef or T is TomlTableRef:
+    discard
+  elif T is Option:
+    var inner: typeof(sample.get())
+    return unknownKeyIn(node, keyPath, inner)
+  elif T is seq:
+    var element: typeof(sample[0])
+    if node.kind == TomlKind.Array:
+      for i, item in node.arrayVal:
+        let found = unknownKeyIn(item, keyPath & "[" & $i & "]", element)
+        if found.keyPath.len > 0:
+          return found
+    elif node.kind == TomlKind.Tables:
+      for i, table in node.tablesVal:
+        let item = TomlValueRef(kind: TomlKind.Table, tableVal: table)
+        let found = unknownKeyIn(item, keyPath & "[" & $i & "]", element)
+        if found.keyPath.len > 0:
+          return found
+  elif T is object:
+    if node.isNil or node.kind notin {TomlKind.Table, TomlKind.InlineTable}:
+      return
+    var declared: seq[string]
+    for name, _ in fieldPairs(sample):
+      declared.add(name)
+    for key, _ in node.tableVal:
+      var known = false
+      for name in declared:
+        if name == key:
+          known = true
+          break
+      if not known:
+        return ((if keyPath.len > 0: keyPath & "." & key else: key), $T)
+    for name, field in fieldPairs(sample):
+      for key, child in node.tableVal:
+        if name == key:
+          let found = unknownKeyIn(child,
+            (if keyPath.len > 0: keyPath & "." & key else: key), field)
+          if found.keyPath.len > 0:
+            return found
+  else:
+    discard
+
+proc firstUnknownKey[T](content: string; RecordType: typedesc[T]):
+    tuple[keyPath, record: string] =
+  ## ``unknownKeyIn`` over ``content`` read as a generic tree. The pinned
+  ## toml-serialization names an unknown TOP-LEVEL key in its error but raises
+  ## an empty message for one inside a table (``[workspace] bogus = 1``), so
+  ## the strict decoder asks this after a failure whose message names no key.
+  ## ("", "") when the content does not parse as a tree either.
+  var tree: TomlValueRef
+  try:
+    tree = Toml.decode(content, TomlValueRef)
+  except CatchableError:
+    return
+  var sample: T
+  unknownKeyIn(tree, "", sample)
 
 proc decodeStrict[T](path, content, expectedSchema: string;
                      RecordType: typedesc[T]): T =
@@ -140,17 +207,28 @@ proc decodeStrict[T](path, content, expectedSchema: string;
   try:
     result = Toml.decode(content, RecordType)
   except TomlError as e:
-    let keyPath = extractStrictModeKeyPath(e.msg)
+    var keyPath = extractStrictModeKeyPath(e.msg)
+    var record = extractStrictModeRecordName(e.msg)
+    if keyPath.len == 0 or '.' notin keyPath:
+      # The parser names an unknown key without the table it sits in (and
+      # raises an empty message for some nested ones); find it ourselves so
+      # the diagnostic names the table and the key. A parser-named key is
+      # replaced only by the full path of that same key.
+      let located = firstUnknownKey(content, RecordType)
+      if located.keyPath.len > 0 and (keyPath.len == 0 or
+          located.keyPath == keyPath or
+          located.keyPath.endsWith("." & keyPath)):
+        (keyPath, record) = located
     let inner =
       if keyPath.len > 0:
-        schemaSkewMessage(path, keyPath, extractStrictModeRecordName(e.msg))
+        schemaSkewMessage(path, keyPath, record)
       elif e.msg.len > 0:
         e.msg
       else:
-        fallbackTomlMessage()
+        fallbackTomlMessage(content)
     raiseManifestError(path, keyPath, expectedSchema, expectedSchema, inner)
   except CatchableError as e:
-    let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage()
+    let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage(content)
     raiseManifestError(path, "", expectedSchema, expectedSchema, inner)
 
 template requireNonEmpty(path, expectedSchema, keyPath, value: untyped) =
@@ -969,7 +1047,7 @@ proc readSnapshot*(path: string): Snapshot =
 
 # ---- .repro/workspace-state.toml (and the old .repro/workspace.toml) -------
 
-proc readWorkspaceLocal*(path: string): WorkspaceLocal =
+proc readWorkspaceLocalStrict(path: string): WorkspaceLocal =
   ## Read a per-checkout state file: `.repro/workspace-state.toml`
   ## (`reprobuild.workspace.state.v1`) or the old `.repro/workspace.toml`
   ## (`reprobuild.workspace.local.v1`) it replaces. Both carry the same
@@ -1008,6 +1086,19 @@ proc readWorkspaceLocal*(path: string): WorkspaceLocal =
           "`" & key & "` is a key of a `repro-workspace.toml` / " &
             "`repro-workspace.local.toml` layer, not of a layer recorded in " &
             "the state file")
+
+proc readWorkspaceLocal*(path: string): WorkspaceLocal =
+  ## Read a per-checkout state file (``readWorkspaceLocalStrict``). A file
+  ## that does not parse raises the strict reader's diagnostic — except inside
+  ## ``toleratingMalformedWorkspaceFiles`` (``repro health``), where the
+  ## diagnostic is set aside for health to report as a failing
+  ## ``workspace-state`` row and the state reads as recording nothing.
+  try:
+    readWorkspaceLocalStrict(path)
+  except WorkspaceManifestParseError as err:
+    if not setAsideMalformedWorkspaceFile(err, mwkState):
+      raise
+    WorkspaceLocal(schema: schemaWorkspaceStateV1)
 
 # ---- .repro/develop-overrides.toml -----------------------------------------
 
@@ -1081,6 +1172,17 @@ proc readReprobuildConfig*(path: string): ReprobuildConfig =
   result = decodeStrict(path, content, schemaReprobuildConfigV1,
                         ReprobuildConfig)
 
+proc checkPushGatewayValue*(path, schema: string; value: Option[string]) =
+  ## Refuse a top-level `push_gateway` whose value Push-Gateway-Wiring-And-
+  ## Policy.md §7.4 does not define, naming the file and the key. The one rule
+  ## both settings schemas share, so the two readers cannot drift.
+  if value.isSome and value.get() notin pushGatewayOptOutValues:
+    raiseManifestError(path, "push_gateway", schema, schema,
+      "`push_gateway` is the per-workspace push-gateway opt-out " &
+        "(Push-Gateway-Wiring-And-Policy.md §7.4) and may only be " &
+        pushGatewayOptOutValues.mapIt("\"" & it & "\"").join(" or ") &
+        "; got \"" & value.get() & "\". Remove the key to keep the default")
+
 proc readWorkspaceBootstrap*(path: string): WorkspaceBootstrap =
   ## Read a host bootstrap config (`.repro-workspace.toml`). The only
   ## load-bearing required key is `[manifest] url` — without a manifest URL the
@@ -1097,6 +1199,7 @@ proc readWorkspaceBootstrap*(path: string): WorkspaceBootstrap =
                         WorkspaceBootstrap)
   requireNonEmpty(path, schemaWorkspaceBootstrapV1, "manifest.url",
                   result.manifest.url)
+  checkPushGatewayValue(path, schemaWorkspaceBootstrapV1, result.push_gateway)
 
   let privatePath = path.parentDir / bootstrapPrivateConfigFileName
   if (result.manifest.private_url.isNone or
