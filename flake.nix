@@ -193,7 +193,11 @@
         # ancestor.
         # Bumped to 0b0476a (2026-10-11), io-mon's `agents` tip; 1053102 is an
         # ancestor and `git diff 1053102 0b0476a -- src/` is empty.
-      url = "github:metacraft-labs/io-mon/0b0476ad55e97f1f96a77367f205fae5fac47a16";
+        # Bumped to ca28cce (2026-10-13), io-mon's `agents` tip; 0b0476a is an
+        # ancestor. 142f658 carries capture controls into explicit Linux child
+        # environments and hands nested Linux evidence back to the parent; the
+        # macOS and Windows capture paths are unchanged.
+      url = "github:metacraft-labs/io-mon/ca28cce6667f60ab5d71182a81ea4830122826f7";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -425,7 +429,12 @@
       # At f8781d4b5 (CTC-3i, `ct-test` ships beside `ct`) CodeTracer's
       # ``repro.lock`` builds against trace-format 7b8b587c, so
       # ``ct-trace-format-src`` moves to that revision in the same step.
-      url = "github:metacraft-labs/codetracer/f8781d4b5514ee9bbcdee0de701dc4bd8090a061";
+      #
+      # At 17c111fb2 (2026-10-13, the published `agents` tip; f8781d4b5 is an
+      # ancestor and ``src/ct_incremental_adapter.nim`` is unchanged) the
+      # ``repro.lock`` names trace-format 808ffdb4, so ``ct-trace-format-src``
+      # moves again with it.
+      url = "github:metacraft-labs/codetracer/17c111fb280214f6d331f1bafd560989b6bd509b";
       flake = false;
     };
 
@@ -510,7 +519,11 @@
       # Moved with ``codetracer-src`` to 7b8b587c, the revision CodeTracer
       # f8781d4b5's ``repro.lock`` names (051efd22 is an ancestor; adds the
       # --mm:none/refc build and the GC-safe reader entry points).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/7b8b587c72ec31f6825ae124ab89ad7954f6dca7";
+      # Moved with ``codetracer-src`` to 808ffdb4, the revision CodeTracer
+      # 17c111fb2's ``repro.lock`` names (7b8b587c is an ancestor; adds the ten
+      # exact I/O event kinds of trace format version 7 and a step count that
+      # counts step records only).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/808ffdb4507634c3aba0661d96cbc353420ed856";
       flake = false;
     };
     nim-stew-src = {
