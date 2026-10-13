@@ -454,6 +454,7 @@ proc projectManifestText*(manifest: ProjectManifest): string =
   certs.addNonEmpty("required_targets", c.required_targets)
   certs.addNonEmpty("required_platforms", c.required_platforms)
   certs.addOpt("ci_trust", c.ci_trust)
+  certs.addOpt("untracked_inputs", c.untracked_inputs)
   if certs.len > 0:
     blocks.add(RenderBlock(header: "[certificates]", entries: certs))
   let schema = if manifest.schema.len > 0: manifest.schema

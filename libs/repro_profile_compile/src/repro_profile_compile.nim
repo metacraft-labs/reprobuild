@@ -1,16 +1,16 @@
 ## Reprobuild profile-compile build-graph edge (M83 Phase C).
 ##
-## Profile compilation is a normal build-graph edge: source discovery,
-## fingerprint, action-cache lookup, then a `BuildAction` of kind
-## `bakProcess` submitted to `runBuild`. The CLI exposes NO user-facing
+## Profile compilation is a normal build-graph edge: a monitored
+## `BuildAction` of kind `bakProcess` submitted to `runBuild`, whose re-runs
+## the action cache decides from what io-mon observed it read. The CLI exposes NO user-facing
 ## `repro profile build` command; apply (Phase D) calls
 ## `compileProfileToRbpi` automatically when it needs a fresh
 ## `ProfileIntent`.
 ##
 ## Submodules:
 ##
-##   - `repro_profile_compile/sources` — source discovery, sibling-import
-##     walk, BLAKE3 digest, cache-layout helpers.
+##   - `repro_profile_compile/sources` — repo-root / Nim-path discovery,
+##     profile-root resolution, cache-layout helpers.
 ##   - `repro_profile_compile/compile` — direct `nim c` invocation and
 ##     the JSON->RBPI bridge. Used by the internal helper subcommand and
 ##     by tests.
@@ -29,40 +29,44 @@ import ./repro_profile_compile/adapter_system
 import ./repro_profile_compile/infra_apply_broker
 import ./repro_profile_compile/apply_build_actions
 
-# Source-discovery + digest + paths.
+# Repo-root / Nim-path discovery + cache layout.
 export sources.CompiledRepoRoot
 export sources.RepoRootEnvVar
 export sources.LibsDirName
 export sources.HomeProfileAnchor
 export sources.SystemProfileAnchor
 export sources.ProfileCacheDirName
-export sources.ProfileDigest
 export sources.reprobuildRepoRoot
 export sources.profileNimPaths
 export sources.resolveProfileRoot
-export sources.parseSiblingImports
-export sources.discoverProfileSources
-export sources.computeProfileDigest
 export sources.profileCacheDir
 export sources.cachedRbpiPath
-export sources.cachedSourcesPath
 export sources.cachedNimcacheDir
 export sources.pruneStaleProfileCache
 
 # Direct nim invocation + JSON->RBPI bridge.
 export compile.CompileFailure
-export compile.requireNimOnPath
+export compile.ProfileNimCompilerEnvVar
+export compile.resolveProfileNimCompiler
+export compile.requireReprobuildSources
+export compile.profileCompileArgv
+export compile.ProfileCompileDefines
 export compile.compileProfileBinary
 export compile.rbpiBytesFromJson
 export compile.writeBytesAtomic
 export compile.readBytes
-export compile.cachedArtifactIsValid
+export compile.rbpiEnvelopeIsValid
 
 # Build-graph edge + public entry point.
 export edge.ProfileCompileArtifact
 export edge.ProfileCompileOptions
 export edge.ProfileCompileError
+export edge.ProfileCompileActionId
+export edge.profileCompileKey
+export edge.profileCompileWeakFingerprint
 export edge.profileCompileBuildAction
+export edge.ProfileCompileScratchEnvNames
+export edge.ProfileCompileEnvPassthrough
 export edge.profileCompileEngineConfig
 export edge.compileProfileToRbpi
 

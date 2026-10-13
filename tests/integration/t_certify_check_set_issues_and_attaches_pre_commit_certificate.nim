@@ -5,10 +5,15 @@
 ##
 ##   1. A FAILING check set issues nothing and exits 2.
 ##   2. A PASSING check set on a clean, committed, UNPUBLISHED head issues a
-##      signed certificate covering `pre-commit`, attaches it to
-##      `refs/notes/reprobuild/certificates`, and leaves the repository CLEAN
-##      (the run's files go to a scratch directory, never the repo).
+##      signed certificate covering `pre-commit` into the local certificate
+##      store, attaches it on the TREE it names under the shared
+##      `refs/notes/test-certificates/certificates` (TC-8c), and leaves the
+##      repository CLEAN (the run's files go to a scratch directory, never the
+##      repo).
 ##   3. Re-running is idempotent: no second note record is appended.
+##   4. TC-8d: a MODIFIED, uncommitted working tree is certified by its
+##      content (no clean, committed state is needed) and noted on the tree
+##      that content names.
 ##
 ## Falsifiability: a certify that ignored the run's result would issue in (1);
 ## a certify that wrote its fixture or logs into the repo would fail the
@@ -111,9 +116,11 @@ type
     libAPath: string       ## the developer's clone
     seedSha: string
     daemonKey: string
+    certStore: string
 
 proc setupFixture(gitBin, certificatesTable: string): Fixture =
   result.scratch = createTempDir("repro-tc6-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"
@@ -223,16 +230,13 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, headSha, currentPlatformTag())
-  check fileExists(certFile)
-  result = readCertificateFile(certFile)
+  let content = treeContentId(gitBin, fx.libAPath, headSha)
+  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
   # TC-8b: the record names the tested CONTENT and, informationally, HEAD.
   check result.vcs.base == headSha
-  check result.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
-    " -C " & q(fx.libAPath) & " rev-parse " & headSha & "^{tree}").strip()
+  check result.vcs.content == content
   check "t-unit" in result.targets
-  let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
+  let att = attachCertificate(gitBin, fx.libAPath, result)
   check att.ok
 
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =
@@ -256,10 +260,12 @@ proc certifyCheckSet(fx: Fixture; command: string): CmdResult =
     daemonKeyEnv(fx.daemonKey, tc6KeyId)), fx.libAPath)
 
 proc noteRecordCount(gitBin: string; fx: Fixture; sha: string): int =
+  ## Records in the note on ``sha``'s TREE (TC-8c: notes are keyed by the
+  ## tree the content names, not by the commit).
   let note = runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " notes --ref " &
-    q(certificateNotesRef) & " show " & sha)
+    q(certificateNotesRef) & " show " & q(sha & "^{tree}"))
   if note.code != 0: return 0
-  note.output.count("# --- reprobuild-certificate ---")
+  note.output.count("# --- test-certificate ---")
 
 suite "P6.e — repro certify --check-set":
 
@@ -272,30 +278,32 @@ suite "P6.e — repro certify --check-set":
       defer: removeDir(fx.scratch)
       let head = makeNewCommit(gitBin, fx, "change under check\n")
       seedLock(fx)
-      let certFile = defaultCertificatePath(fx.workspaceRoot, head,
-        currentPlatformTag())
+      let content = treeContentId(gitBin, fx.libAPath, head)
 
       # ---- 1. a failing check set issues nothing --------------------------
       let failing = certifyCheckSet(fx, "echo 'lint: bad file' >&2; exit 3")
       checkpoint("failing: " & failing.output)
       check failing.code == 2
-      check not fileExists(certFile)
+      check storedCertificateFiles(fx.certStore, content).len == 0
       check noteRecordCount(gitBin, fx, head) == 0
 
       # ---- 2. a passing check set issues, signs, attaches -----------------
       let passing = certifyCheckSet(fx, "true")
       checkpoint("passing: " & passing.output)
       check passing.code == 0
-      check fileExists(certFile)
-      if fileExists(certFile):
-        let cert = readCertificateFile(certFile)
+      let files = storedCertificateFiles(fx.certStore, content)
+      check files.len == 1
+      if files.len == 1:
+        let cert = readCertificateFile(files[0])
         check cert.vcs.base == head
-        check cert.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
-          " -C " & q(fx.libAPath) & " rev-parse " & head & "^{tree}").strip()
+        check cert.vcs.content == content
         check cert.targets == @["pre-commit"]
         check cert.isSigned
         check cert.commands.len == 1
       check noteRecordCount(gitBin, fx, head) == 1
+      # Keyed by the tree, not by the commit.
+      check runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " notes --ref " &
+        q(certificateNotesRef) & " show " & head).code != 0
       let status = runCmd(q(gitBin) & " -C " & q(fx.libAPath) &
         " status --porcelain --untracked-files=all")
       check status.code == 0
@@ -307,3 +315,27 @@ suite "P6.e — repro certify --check-set":
       let again = certifyCheckSet(fx, "true")
       check again.code == 0
       check noteRecordCount(gitBin, fx, head) == 1
+
+      # ---- 4. TC-8d: an uncommitted working tree is certified ---------------
+      # No clean, committed state is needed: the modified tree is certified by
+      # its content and noted on the tree that content names, before any
+      # commit records it.
+      writeFile(fx.libAPath / "feature.txt", "edited, not committed\n")
+      let modified = workingTreeContentIdOf(gitBin, fx.libAPath,
+        fx.scratch / "expected-index")
+      check modified != content
+      let uncommitted = certifyCheckSet(fx, "true")
+      checkpoint("uncommitted: " & uncommitted.output)
+      check uncommitted.code == 0
+      let modifiedFiles = storedCertificateFiles(fx.certStore, modified)
+      check modifiedFiles.len == 1
+      if modifiedFiles.len == 1:
+        let cert = readCertificateFile(modifiedFiles[0])
+        check cert.vcs.content == modified
+        check cert.vcs.base == head
+        check cert.targets == @["pre-commit"]
+      let modifiedTree = modified["git-tree-sha1:".len .. ^1]
+      let noted = runCmd(q(gitBin) & " -C " & q(fx.libAPath) & " notes --ref " &
+        q(certificateNotesRef) & " show " & modifiedTree)
+      check noted.code == 0
+      check noted.output.count("# --- test-certificate ---") == 1

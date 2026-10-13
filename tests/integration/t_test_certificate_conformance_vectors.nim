@@ -30,7 +30,14 @@
 ##                      compute;
 ##   * ``store/``     — the store path of each certificate (7 cases), derived
 ##                      from the PARSED certificate and compared with the
-##                      hand-derived ``expected-path.txt``.
+##                      hand-derived ``expected-path.txt``;
+##   * ``notes/``     — note framing (9 cases): ``note.txt`` read through
+##                      reprobuild's note reader (``readCertificateNote``),
+##                      which must yield exactly the records and skipped pieces
+##                      ``expected.json`` lists; and, for the four writer
+##                      cases, ``add.txt`` added through the note writer
+##                      (``addCertificateToNote``), which must produce
+##                      ``expected-note.txt`` byte for byte.
 ## ``index.json`` is cross-checked in BOTH directions over every group, and a
 ## group the walker does not know — on disk or in the index — is a FAILURE:
 ## a fifth group once arrived that the previous walker silently ignored.
@@ -50,9 +57,10 @@ import repro_cli_support/content_id
 import spec_vectors_pin
 
 const
-  knownGroups = ["payload", "signature", "content", "verify", "store"]
+  knownGroups = ["payload", "signature", "content", "verify", "store",
+                 "notes"]
   expectedCounts = {"payload": 16, "signature": 6, "content": 7,
-                    "verify": 17, "store": 7}
+                    "verify": 17, "store": 7, "notes": 9}
 
 # ---------------------------------------------------------------------------
 # fields.json -> TestCertificate
@@ -189,7 +197,7 @@ suite "test-certificate.v1 conformance vectors":
       check onDisk == known
       check inIndex == known
 
-      var walked: array[5, HashSet[string]]
+      var walked: array[knownGroups.len, HashSet[string]]
       template walkedOf(group: string): untyped =
         walked[knownGroups.find(group)]
 
@@ -391,6 +399,116 @@ suite "test-certificate.v1 conformance vectors":
           checkpoint("store/" & name & ": produced " & produced &
             ", expected " & expectedPath)
         check produced == expectedPath
+        # TC-8c: and the WRITER puts it there. The vector's own bytes, written
+        # through the producer's store writer into an empty root, land at
+        # exactly the expected path, verbatim.
+        let writeRoot = scratch / "store-roots" / name
+        let document = readFile(path / "certificate.toml")
+        let published = publishCertificateDocument(writeRoot, document)
+        check published.error == ""
+        check published.path ==
+          writeRoot / expectedPath.replace('/', DirSep)
+        check fileExists(published.path) and
+          readFile(published.path) == document
+
+      # --- store/: a name collision (Transport §2.3) ----------------------
+      # ``signed-non-canonical-no-block`` is ``signed`` with its signature
+      # block removed: the same canonical payload, so the same name. Written
+      # into one root, the SIGNED copy replaces an unsigned one, and an
+      # unsigned one never replaces a signed one.
+      block:
+        let twins = scratch / "store-twins"
+        let unsignedDoc = readFile(root / "store" /
+          "signed-non-canonical-no-block" / "certificate.toml")
+        let signedDoc = readFile(root / "store" / "signed" /
+          "certificate.toml")
+        let first = publishCertificateDocument(twins, unsignedDoc)
+        check first.error == "" and not first.kept
+        let second = publishCertificateDocument(twins, signedDoc)
+        check second.error == "" and not second.kept
+        check second.path == first.path
+        check readFile(second.path) == signedDoc
+        let third = publishCertificateDocument(twins, unsignedDoc)
+        check third.error == "" and third.kept
+        check readFile(third.path) == signedDoc
+
+      # --- group 6: notes/ — note framing (Transport §3.1) ----------------
+      # Through reprobuild's REAL note reader and writer — the code that reads
+      # the note a push carries and writes the note an issuance attaches —
+      # not a second splitter written for the test.
+      let vectorKey = readFile(root / "signature" / "keys" /
+        "insecure-test-key.pub").strip()
+      var writerCases = 0
+      for path in caseDirs(root, "notes"):
+        let name = path.extractFilename
+        walkedOf("notes").incl(name)
+        let note = readFile(path / "note.txt")
+        let want = parseFile(path / "expected.json"){"pieces"}
+        let got = readCertificateNote(note)
+        if got.len != want.len:
+          checkpoint("notes/" & name & ": read " & $got.len &
+            " pieces, expected " & $want.len)
+        check got.len == want.len
+        for i in 0 ..< min(got.len, want.len):
+          let entry = got[i]
+          let expected = want[i]
+          let label = "notes/" & name & " piece " & $(i + 1)
+          if expected{"skipped"}.getBool():
+            # Reported and skipped: never yielded as a record. A leading
+            # piece is never even parsed, though ``foreign-preamble``'s would
+            # parse.
+            if entry.read.status == crsOk:
+              checkpoint(label & ": expected skipped, read a record")
+            check entry.read.status != crsOk
+            check entry.read.detail.len > 0
+            if i == 0 and name == "foreign-preamble":
+              check entry.piece.leading
+              check certificateNoteDelimiter in entry.read.detail
+            continue
+          check not entry.piece.leading
+          if entry.read.status != crsOk:
+            checkpoint(label & ": " & entry.read.detail)
+            check entry.read.status == crsOk
+            continue
+          # The canonical payload REBUILT FROM THE PARSED FIELDS.
+          let payload = canonicalCertificatePayload(entry.read.cert)
+          let expectedPayload = expected{"payload"}.getStr()
+          if payload != expectedPayload:
+            checkpoint(label & ": " & firstDifference(payload,
+              expectedPayload) & "\n--- produced ---\n" & renderBytes(payload))
+          check payload == expectedPayload
+          check entry.read.cert.isSigned == expected{"signed"}.getBool()
+          if entry.read.cert.isSigned:
+            let verdict = verifyDetachedCertificateSignature(payload,
+              vectorKey, entry.read.cert.signature.value)
+            if verdict != scValid:
+              checkpoint(label & ": signature " & $verdict)
+            check verdict == scValid
+          # A conforming note holds records in the §3.1 record form, which is
+          # exactly what the writer renders.
+          check certificateNoteRecord(entry.read.cert) == entry.piece.text
+        # Writer half: add ``add.txt`` and produce ``expected-note.txt``.
+        if fileExists(path / "add.txt"):
+          inc writerCases
+          check fileExists(path / "expected-note.txt")
+          let addText = readFile(path / "add.txt")
+          let added = readCertificateRecord(addText)
+          if added.status != crsOk:
+            checkpoint("notes/" & name & "/add.txt: " & added.detail)
+          check added.status == crsOk
+          # The record the writer renders for it is ``add.txt`` itself.
+          check certificateNoteRecord(added.cert) == addText
+          let produced = addCertificateToNote(note, added.cert)
+          let expectedNote = readFile(path / "expected-note.txt")
+          if produced.note != expectedNote:
+            checkpoint("notes/" & name & ": " &
+              firstDifference(produced.note, expectedNote) &
+              "\n--- produced ---\n" & renderBytes(produced.note))
+          check produced.note == expectedNote
+          check produced.changed == (expectedNote != note)
+        else:
+          check not fileExists(path / "expected-note.txt")
+      check writerCases == 4
 
       # --- index.json cross-check, BOTH directions, EVERY group -----------
       # A case that has silently gone missing is a case that stops testing

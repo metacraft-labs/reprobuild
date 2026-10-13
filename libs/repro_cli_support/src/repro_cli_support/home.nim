@@ -33,7 +33,7 @@
 ## matches the spec's "do NOT load packages at runtime" rule for M61
 ## while still letting the gate exercise the error path.
 
-import std/[options, os, osproc, sets, streams, strutils, tables, times]
+import std/[json, options, os, osproc, sets, streams, strutils, tables, times]
 from repro_core/paths import extendedPath
 from repro_core/process_streams import drainStream
 
@@ -49,6 +49,7 @@ import repro_local_store
 import repro_profile_intent
 import repro_profile_compile
 import ./migrate_from_env_scripts as mfes
+import ./home_export
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
@@ -236,7 +237,10 @@ proc defaultProfileCompileOptionsFor(profileRoot: string;
   result = ProfileCompileOptions(
     stateDir: stateDir,
     publicCliPath: getAppFilename(),
-    repoRoot: getEnv(RepoRootEnvVar),
+    # Empty: `compileProfileToRbpi` resolves the sources through
+    # `reprobuildRepoRoot()`, which honours `$REPROBUILD_REPO_ROOT` and the
+    # installed package's `$REPROBUILD_SOURCE_ROOT` alike.
+    repoRoot: "",
     workDir: profileRoot.parentDir,
     verbose: false,
     forceRebuild: false)
@@ -943,17 +947,6 @@ proc collectPackageOrigins(prof: Profile;
           result[pkgRef.packageName].add origin
       else: discard
 
-proc enabledActivities(prof: Profile; host: string): HashSet[string] =
-  result = initHashSet[string]()
-  result.incl "default"
-  let hostsOpt = findHostsBlock(prof)
-  if hostsOpt.isNone:
-    return
-  for entry in hostsOpt.get.hostsEntries:
-    if entry.hostName == host:
-      for a in entry.hostActivities:
-        result.incl a
-
 proc runHomeList(args: openArray[string]): int =
   var hostOverride = ""
   var i = 0
@@ -973,7 +966,7 @@ proc runHomeList(args: openArray[string]): int =
     let prof = loadProfile(profilePath)
     let host = if hostOverride.len > 0: hostOverride else: currentHost()
     let origins = collectPackageOrigins(prof, host)
-    let active = enabledActivities(prof, host)
+    let active = enabledActivitiesFor(prof, host)
     echo "repro home list: profile=" & profilePath & " host=" & host
     for pkg, sources in origins:
       var anyActive = false
@@ -1029,7 +1022,7 @@ proc runHomeWhy(args: openArray[string]): int =
     let prof = loadProfile(profilePath)
     let host = if hostOverride.len > 0: hostOverride else: currentHost()
     let origins = collectPackageOrigins(prof, host)
-    let active = enabledActivities(prof, host)
+    let active = enabledActivitiesFor(prof, host)
     if pkg notin origins:
       echo "repro home why: package `" & pkg &
         "` is NOT declared in any activity of profile " & profilePath
@@ -3357,6 +3350,157 @@ proc runHomeMigrateFromEnvScripts(args: openArray[string]): int =
 # Top-level dispatch.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# `repro home export` (evaluated intent as a versioned JSON document).
+# ---------------------------------------------------------------------------
+
+const HomeExportUsage = """usage: repro home export [--profile-dir DIR] [--host NAME] [--format json]
+                          [--check FILE]
+
+Print the evaluated home-profile intent as JSON: the profile's activities,
+config overrides, hosts map and resources exactly as the planner consumes
+them, the activities the planner enables on the selected host, and the
+provenance of the document (repro version and source revision, the profile
+files the compile read with their digests, the compile platform).
+
+The profile is compiled through the normal profile-compile edge (an unchanged
+profile is an action-cache hit). Nothing is planned, applied or recorded.
+
+  --host NAME     select NAME instead of the current host. $REPRO_HOST takes
+                  precedence over --host, as for every repro home command;
+                  passing both with different values is refused.
+  --format json   the output format (json is the only one).
+  --check FILE    compare FILE, a committed export, with a fresh export instead
+                  of printing. Exit 0 when the selection and intent agree, 1
+                  with a list of differences when they do not. Provenance
+                  (repro version, file digests, platform) is reported but never
+                  makes the check fail.
+
+Schema: docs/user-guide/home-export.md in the Reprobuild documentation."""
+
+proc runHomeExport(args: openArray[string]): int =
+  ## `repro home export` — see `HomeExportUsage` and `home_export.nim`.
+  ## Exit codes: 0 printed / snapshot current; 1 snapshot stale, or the
+  ## profile could not be found or compiled; 2 usage error, including an
+  ## unreadable or non-JSON `--check` file.
+  var hostFlag = ""
+  var format = "json"
+  var checkFile = ""
+  var i = 0
+  try:
+    while i < args.len:
+      let a = args[i]
+      if a == "--help" or a == "-h":
+        echo HomeExportUsage
+        return 0
+      elif a == "--host" or a.startsWith("--host="):
+        hostFlag = parseFlagValue(args, i, "--host")
+        if hostFlag.len == 0:
+          stderr.writeLine("repro home export: --host needs a non-empty name")
+          return 2
+      elif a == "--format" or a.startsWith("--format="):
+        format = parseFlagValue(args, i, "--format")
+      elif a == "--check" or a.startsWith("--check="):
+        checkFile = parseFlagValue(args, i, "--check")
+        if checkFile.len == 0:
+          stderr.writeLine("repro home export: --check needs a file")
+          return 2
+      elif a.startsWith("--"):
+        stderr.writeLine("repro home export: unknown flag: " & a)
+        return 2
+      else:
+        stderr.writeLine("repro home export: unexpected positional: " & a)
+        return 2
+      inc i
+  except ValueError as err:
+    stderr.writeLine("repro home export: " & err.msg)
+    return 2
+  if format != "json":
+    stderr.writeLine("repro home export: unsupported --format '" & format &
+      "' (supported: json)")
+    return 2
+
+  # Host identity, in the precedence every `repro home` command documents
+  # ($REPRO_HOST, then --host, then the OS hostname), resolved by the same
+  # `currentHost()` the planner calls. A --host that $REPRO_HOST would
+  # silently override is refused instead: an export for the wrong host is a
+  # valid-looking document with the wrong activities in it.
+  let envHost = getEnv(HomeHostEnvVar)
+  if envHost.len > 0 and hostFlag.len > 0 and envHost != hostFlag:
+    stderr.writeLine("repro home export: --host " & hostFlag &
+      " conflicts with $" & HomeHostEnvVar & "=" & envHost &
+      " (which takes precedence); unset one of them")
+    return 2
+  setHostOverride(hostFlag)
+  defer: setHostOverride("")
+  let host = currentHost()
+  let hostSource =
+    if envHost.len > 0: hsEnv
+    elif hostFlag.len > 0: hsFlag
+    else: hsHostname
+  if host.len == 0:
+    stderr.writeLine("repro home export: could not determine the host " &
+      "name; pass --host NAME")
+    return 2
+
+  var snapshot: JsonNode = nil
+  if checkFile.len > 0:
+    try:
+      snapshot = parseJson(readFile(extendedPath(checkFile)))
+    except IOError, OSError:
+      stderr.writeLine("repro home export --check: cannot read " & checkFile &
+        ": " & getCurrentExceptionMsg())
+      return 2
+    except JsonParsingError, ValueError:
+      stderr.writeLine("repro home export --check: " & checkFile &
+        " is not JSON: " & getCurrentExceptionMsg())
+      return 2
+
+  var doc: JsonNode
+  try:
+    let profilePath = loadProfilePath()
+    let stateDir = resolveStateDir()
+    var opts = defaultProfileCompileOptionsFor(profilePath, stateDir)
+    opts.reportObservedInputs = true
+    let artifact =
+      try:
+        compileProfileToRbpi(profilePath, opts)
+      except ProfileCompileError as err:
+        stderr.writeLine(formatProfileCompileError("repro home export",
+          profilePath, err.msg, planCommand = "repro home plan"))
+        return 1
+    let intent = decodeRbpi(artifact.rbpiBytes)
+    doc = buildHomeExport(intent, artifact, profilePath, host, hostSource)
+  except ENoProfile as e:
+    printNoProfile(e); return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home export: error: " & e.msg)
+    return 1
+
+  if snapshot.isNil:
+    stdout.write(renderHomeExport(doc))
+    return 0
+  let differences = diffHomeExports(snapshot, doc)
+  for note in provenanceNotes(snapshot, doc):
+    stderr.writeLine("repro home export --check: note (not compared): " & note)
+  if differences.len == 0:
+    echo "repro home export --check: " & checkFile &
+      " matches a fresh export for host " & host
+    return 0
+  stderr.writeLine("repro home export --check: " & checkFile &
+    " is stale for host " & host & " (" & $differences.len &
+    " difference(s)):")
+  for idx, line in differences:
+    if idx >= MaxReportedDifferences:
+      stderr.writeLine("  ... and " & $(differences.len - idx) & " more")
+      break
+    stderr.writeLine("  " & line)
+  let hostArg =
+    if hostSource == hsFlag: " --host " & quoteShell(host) else: ""
+  stderr.writeLine("  hint: regenerate it with `repro home export --format " &
+    "json" & hostArg & " > " & quoteShell(checkFile) & "`")
+  return 1
+
 proc runHomeCommand*(args: seq[string]): int =
   ## Implements `repro home <subcommand>` per M61. Always loads the
   ## package catalog from `$REPRO_HOME_PACKAGE_CATALOG` first; the
@@ -3386,8 +3530,8 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why | history | apply | plan | rollback | gc | set | get | " &
-      "adopt | resource | migrate-from-env-scripts} ...")
+      "list | why | history | apply | plan | export | rollback | gc | set | " &
+      "get | adopt | resource | migrate-from-env-scripts} ...")
     return 2
   case sub
   of "add": return runHomeAdd(subArgs)
@@ -3403,6 +3547,7 @@ proc runHomeCommand*(args: seq[string]): int =
   of "__transfer-bundle": return runHomeTransferBundle(subArgs)
   of "__remote-activate": return runHomeRemoteActivate(subArgs)
   of "plan": return runHomePlan(subArgs)
+  of "export": return runHomeExport(subArgs)
   of "rollback": return runHomeRollback(subArgs)
   of "gc": return runHomeGcCommand(subArgs)
   of "set": return runHomeSet(subArgs)

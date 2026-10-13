@@ -1,26 +1,31 @@
-## Agents-Push-Gate.md §4.1–§4.3 (Sovereign-CI-Fleet P6.b/P6.c/P6.d) — the
+## Agents-Push-Gate.md §4.1–§4.2 (Sovereign-CI-Fleet P6.b/P6.c) — the
 ## `agents` gate end to end on a real local gateway, with no publish-first
-## workaround:
+## workaround; and §4.3's one-ref push, as TC-8c (operator decision D12)
+## leaves it:
 ##
 ##   1. CERTIFY BEFORE PUSH (§4.1). A clean, committed, NOT-yet-published HEAD
-##      is issued a `pre-commit` certificate. Before this, issuance refused it
-##      as unpublished while the gateway refused the push without it, and the
-##      TC-6 test had to publish directly to the upstream and rewind it to mint
-##      a certificate at all.
-##   2. ANY ONE PLATFORM (§4.2). The policy says `required_platforms = ["*"]`;
-##      one certificate from the host's own platform satisfies it.
-##   3. ONE-REF PUSH (§4.3). The developer runs a plain
-##      `git push --no-verify origin main` — no notes ref. The gateway finds
-##      the certificate in the workspace certificate store and forwards.
+##      is issued a `pre-commit` certificate, delivered to the standard local
+##      certificate store (TC-8c).
+##   2. NO STORE READ AT THE GATEWAY (D12). A plain one-ref
+##      `git push --no-verify origin main` carries no certificate note, and
+##      the gateway reads no certificate store any more, so under `required`
+##      it is REFUSED — although the certificate sits in the local store.
+##      TC-8j restores the one-ref case once the reference tool propagates
+##      notes from the store.
+##   3. ANY ONE PLATFORM (§4.2), BRANCH + NOTES. The certificate is noted on
+##      the pushed tree and the branch is pushed together with the notes ref;
+##      `required_platforms = ["*"]` is met by the host's own platform and the
+##      push is forwarded.
 ##
 ## Negative control in the same fixture: a second commit with no certificate,
-## pushed the same way, is REJECTED and never reaches the upstream.
+## pushed the same way (with the notes ref), is REJECTED and never reaches the
+## upstream.
 ##
-## Falsifiability: dropping the issuance exemption leaves no certificate file
-## (step 1 fails); dropping the store carrier rejects the covered one-ref push
-## (step 3 fails); treating "*" as a literal platform rejects it too, because
-## no certificate names the platform "*" (step 2 fails); a gateway that
-## accepts everything lets the negative control through.
+## Falsifiability: dropping the issuance exemption leaves no certificate
+## (step 1 fails); reintroducing a gateway store read accepts the one-ref push
+## (step 2 fails); treating "*" as a literal platform rejects the covered push,
+## because no certificate names the platform "*" (step 3 fails); a gateway
+## that accepts everything lets the negative control through.
 ##
 ## Hermetic: local `git init --bare` repos and the REAL installed gateway hooks
 ## driving the built `repro`; no network, no mocks.
@@ -115,9 +120,11 @@ type
     libAPath: string       ## the developer's clone
     seedSha: string
     daemonKey: string
+    certStore: string      ## the scratch local certificate store (user root)
 
 proc setupFixture(gitBin, certificatesTable: string): Fixture =
   result.scratch = createTempDir("repro-tc6-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"
@@ -227,17 +234,12 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, headSha, currentPlatformTag())
-  check fileExists(certFile)
-  result = readCertificateFile(certFile)
-  # TC-8b: the record names the tested CONTENT (HEAD's tree, the tree being
-  # clean) and, informationally, the commit it was issued on top of.
+  let content = treeContentId(gitBin, fx.libAPath, headSha)
+  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
   check result.vcs.base == headSha
-  check result.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
-    " -C " & q(fx.libAPath) & " rev-parse " & headSha & "^{tree}").strip()
+  check result.vcs.content == content
   check "t-unit" in result.targets
-  let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
+  let att = attachCertificate(gitBin, fx.libAPath, result)
   check att.ok
 
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =
@@ -286,9 +288,7 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
           requiredTargets: @["pre-commit"],
           requiredPlatforms: @["*"],
           lockRecordsDir: lockDir,
-          registeredKeysPath: registeredKeyStorePath(fx.workspaceRoot),
-          certificateStoreDir: fx.workspaceRoot / ".repro" / "workspace" /
-            "certificates"))
+          registeredKeysPath: registeredKeyStorePath(fx.workspaceRoot)))
       check wired.ok
 
       # ---- 1. certify the clean, UNPUBLISHED head -------------------------
@@ -298,27 +298,45 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
       let issued = certifyPreCommit(fx)
       checkpoint("certify output: " & issued.output)
       check issued.code == 0
-      let certFile = defaultCertificatePath(fx.workspaceRoot, covered,
+      let content = treeContentId(gitBin, fx.libAPath, covered)
+      let stored = issuedCertificate(fx.certStore, content,
         currentPlatformTag())
-      check fileExists(certFile)
+      check "pre-commit" in stored.cert.targets
+      # Nothing under the workspace's retired certificate directory.
+      check not dirExists(fx.workspaceRoot / ".repro" / "workspace" /
+        "certificates") or storedCertificateFiles(fx.workspaceRoot / ".repro" /
+        "workspace" / "certificates", content).len == 0
       # Certifying published nothing.
       check not upstreamHasCommit(gitBin, fx.upstreamBare, covered)
 
-      # ---- 2+3. a plain one-ref --no-verify push is ACCEPTED + FORWARDED --
-      let push = runShell(shellCommand(@[
+      # ---- 2. a plain one-ref push is REFUSED: no note, no store read -----
+      let oneRef = runShell(shellCommand(@[
         gitBin, "-C", fx.libAPath, "push", "--no-verify", "origin", "main"],
         @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
-      checkpoint("covered one-ref push: " & push.output)
+      checkpoint("one-ref push: " & oneRef.output)
+      check oneRef.code != 0
+      check "no certificate note on the pushed tree" in oneRef.output
+      check not upstreamHasCommit(gitBin, fx.upstreamBare, covered)
+
+      # ---- 3. noted on the tree, pushed with the notes ref: FORWARDED -----
+      check attachCertificate(gitBin, fx.libAPath, stored.cert).ok
+      let push = runShell(shellCommand(@[
+        gitBin, "-C", fx.libAPath, "push", "--no-verify", "origin", "main",
+        certificateNotesRef & ":" & certificateNotesRef],
+        @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+      checkpoint("covered push: " & push.output)
       check push.code == 0
+      check "COVERED by 1 trusted certificate" in push.output
       check upstreamHasCommit(gitBin, fx.upstreamBare, covered)
 
       # ---- negative control: an uncertified commit is REJECTED ------------
       let uncovered = makeNewCommit(gitBin, fx, "uncertified change\n")
       seedLock(fx)
       let rejected = runShell(shellCommand(@[
-        gitBin, "-C", fx.libAPath, "push", "--no-verify", "origin", "main"],
+        gitBin, "-C", fx.libAPath, "push", "--no-verify", "origin", "main",
+        certificateNotesRef & ":" & certificateNotesRef],
         @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
-      checkpoint("uncovered one-ref push: " & rejected.output)
+      checkpoint("uncovered push: " & rejected.output)
       check rejected.code != 0
       check "any platform" in rejected.output
       check not upstreamHasCommit(gitBin, fx.upstreamBare, uncovered)

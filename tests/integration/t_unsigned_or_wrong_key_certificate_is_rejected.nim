@@ -14,8 +14,9 @@
 ##   (d) a cert claiming a REGISTERED key_id but signed by a DIFFERENT key →
 ##       ``svBadSignature`` (the allowed-signers line for that id is the wrong
 ##       key, so the signature does not verify).
-## The ``required`` gate, given an attached cert of each kind, must REFUSE
-## (exit 2) — no trusted cert covers the requirement.
+## The ``required`` gate, given a cert of each kind in the local certificate
+## store (TC-8c: where the client gate looks), must REFUSE (exit 2) — no
+## trusted cert covers the requirement.
 ##
 ## Falsifiability (recorded, then reverted):
 ##   - make the verifier skip the signature check (accept any attached cert) →
@@ -122,6 +123,7 @@ proc requiredPolicy(): string =
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-tc5-reject-", "")
+  discard isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -192,22 +194,26 @@ proc baseCert(fx: Fixture; keyId: string): TestCertificate =
     commands: @[TestCertificateCommand(argv: @["repro", "test"])])
 
 proc gateRefuses(fx: Fixture; cert: TestCertificate; gitBin: string): bool =
-  ## Attach ``cert`` to the pushed commit and assert the `required` gate
-  ## REFUSES (exit 2 with a certificate-coverage failure). Clears any prior
-  ## note so each case is judged on its own attached cert.
-  discard execCmdEx(quoteShellCommand(@[gitBin, "-C", fx.libAPath,
-    "notes", "--ref", certificateNotesRef, "remove", fx.libASha]))
-  let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
+  ## Deliver ``cert`` to the local certificate store — where the client gate
+  ## looks (TC-8c) — and assert the `required` gate REFUSES (exit 2 with a
+  ## certificate-coverage failure). Empties the store first so each case is
+  ## judged on its own certificate.
+  let storeRoot = getEnv("TEST_CERTIFICATES_DIR")
+  doAssert storeRoot.len > 0 and storeRoot.startsWith(fx.scratch)
+  removeDir(storeRoot)
+  let delivered = publishCertificateToLocalStore(cert, fx.libAPath)
   # ``doAssert``, NOT ``check``. A ``check`` inside a plain proc has no
   # ``testStatusIMPL`` to fail, so it prints "Check failed", sets the process
   # exit code, and leaves the case reporting ``[OK]`` (measured). That matters
-  # HERE more than anywhere else in this file: if the attach silently fails the
-  # commit carries NO cert, the `required` gate refuses it as UNCOVERED with the
-  # same ``certificate-coverage`` failure, and this proc returns true — so every
-  # negative case below would pass while testing nothing. That is precisely the
-  # vacuous-pass shape W10 exists to remove.
-  doAssert att.ok, "attachCertificate failed; the negative cases below would " &
-    "pass vacuously against a commit that carries no certificate at all"
+  # HERE more than anywhere else in this file: if the delivery silently fails
+  # the store holds NO cert, the `required` gate refuses it as UNCOVERED with
+  # the same ``certificate-coverage`` failure, and this proc returns true — so
+  # every negative case below would pass while testing nothing. That is
+  # precisely the vacuous-pass shape W10 exists to remove.
+  doAssert delivered.written and delivered.error.len == 0,
+    "the certificate was not delivered to the local store (" &
+    delivered.error & "); the negative cases below would pass vacuously " &
+    "against a commit no certificate describes"
   let refsFile = fx.scratch / "pushed-refs.txt"
   writeRefsFile(refsFile, fx.libASha)
   let res = invokeCheckPrePush(fx, refsFile)

@@ -27,4 +27,4 @@ suite "flake bootstrap pin closure":
         if locked.hasKey("repo") and
             locked["repo"].getStr() == "codetracer-trace-format-nim":
           revisions.add(locked["rev"].getStr())
-    check revisions == @["7b8b587c72ec31f6825ae124ab89ad7954f6dca7"]
+    check revisions == @["808ffdb4507634c3aba0661d96cbc353420ed856"]

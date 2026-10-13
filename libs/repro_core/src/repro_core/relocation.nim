@@ -17,7 +17,19 @@
 ## records a source location, so the two cannot disagree about which files
 ## travel with the recipe.
 
-import std/[os, strutils]
+import std/[macros, os, strutils]
+
+const
+  reproRecipeRelative* {.booldefine.} = false
+    ## Set (with `reproRecipeAnchors`) on a recipe-relative PROVIDER compile
+    ## (`repro_interface_artifacts.providerCompilePlan`). The DSL then records
+    ## the source sites it serializes - package, target, variant and
+    ## provisioning sites, nix expression files - relative to the recipe
+    ## (`recipeSourceName`), so the binary describes whichever copy of the
+    ## recipe runs it. Nim's own line information is always absolute, even
+    ## for a compile run in the recipe's directory with a relative module.
+  reproRecipeAnchors* {.strdefine.} = ""
+    ## The compile's anchors (`effectiveAnchors`), `:`-separated.
 
 proc normalizedKey(path: string): string =
   result = os.normalizedPath(path).replace('\\', '/')
@@ -69,3 +81,20 @@ proc rebasedName*(name, base: string): string =
     name
   else:
     os.normalizedPath(base / name)
+
+proc recipeSourceName*(file: string): string {.compileTime.} =
+  ## A DSL source site (`lineInfoObj().filename`, always absolute) as the
+  ## compiled program records it. In a recipe-relative provider compile
+  ## (`reproRecipeRelative`) a file outside the anchors is named relative to
+  ## the main module's directory - the recipe - which is the provider's
+  ## working directory when it runs (Provider-Runtime-Protocol-v1.md, "Paths
+  ## in responses"). Everywhere else the name is unchanged.
+  when reproRecipeRelative:
+    let base = getProjectPath()
+    var anchors: seq[string] = @[]
+    for anchor in reproRecipeAnchors.split(':'):
+      if anchor.len > 0:
+        anchors.add(anchor)
+    relocatableName(file, base, effectiveAnchors(base, anchors))
+  else:
+    file

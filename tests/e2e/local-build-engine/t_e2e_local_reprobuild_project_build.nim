@@ -850,9 +850,17 @@ when defined(macosx) or defined(linux):
       "      inputs = @[\"public/main.css\"])\n" &
       "    defaultBuildAction(aggregate)\n")
 
-proc writeM53BuiltinFsProject(path: string) =
+proc writeM53BuiltinFsProject(path: string; runSalt = "") =
+  ## `runSalt`: a case that asserts the provider is COMPILED on its first
+  ## build passes a value unique to the run (its temp root). The provider
+  ## compile is shared by every copy of identical recipe bytes that shares
+  ## the action cache (Hermetic-Builds-And-Path-Independence.md
+  ## §"Engine-internal recipe compiles"), and the suite's action cache
+  ## outlives a run, so without it the recipe this case wrote last time - or
+  ## another case's identical one - would serve that compile.
   createDir(path.splitPath.head)
   writeFile(path,
+    (if runSalt.len > 0: "# fixture run: " & runSalt & "\n" else: "") &
     "import repro_project_dsl\n\n" &
     "package m53Fs:\n" &
     "  build:\n" &
@@ -1521,7 +1529,8 @@ suite "e2e_local_reprobuild_project_build":
 
       let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
-      writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
+      writeM53BuiltinFsProject(projectRoot / "reprobuild.nim",
+        runSalt = tempRoot)
       let output = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
       check output.contains("defaultTarget: stamp")
       check output.contains(
@@ -1702,7 +1711,7 @@ suite "e2e_local_reprobuild_project_build":
       let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       let modulePath = projectRoot / "reprobuild.nim"
-      writeM53BuiltinFsProject(modulePath)
+      writeM53BuiltinFsProject(modulePath, runSalt = tempRoot)
       writeFile(projectRoot / "provider_salt.nim",
         "const providerSalt* = \"one\"\n")
       writeFile(modulePath, readFile(modulePath).replace(

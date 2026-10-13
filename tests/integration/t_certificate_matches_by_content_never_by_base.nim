@@ -27,10 +27,11 @@
 ##      covered".
 ##   5. A malformed content id is decidably INVALID (rejected), never repaired
 ##      and never unverifiable.
-##   6. The carriers judge by content too: the workspace store reader finds a
-##      certificate in a file named after another commit, and the note
-##      reader's mismatch filter keeps an other-base record and drops an
-##      other-content one.
+##   6. The carriers find and judge by content too (TC-8c): the local
+##      certificate store finds a certificate issued on top of another commit
+##      under the content id of the evaluated tree and reports a record filed
+##      under a directory it does not name; the note on the tree keeps an
+##      other-base record and reports an other-content one as misattached.
 
 import std/[os, strutils, unittest]
 
@@ -200,32 +201,51 @@ suite "TC-8b — content matching":
         state: commitUnderEvaluation(repo, amended))).binding == sbInvalid
 
     # --- 6. the carriers judge by content, not by the commit -----------------
-    # The workspace store still NAMES files after the commit checked out at
-    # issuance; the reader does not trust the name.
+    # TC-8c: the local certificate store is addressed by CONTENT, so the
+    # certificate issued on top of A is found for B — and for B amended —
+    # under the content id of their tree, and a record filed under a content
+    # directory it does not name is reported and ignored (Transport §2.4).
     let store = scratch / "store"
-    createDir(store)
-    writeCertificateFile(cert, store / (commitA[0 ..< 12] & "-linux-amd64.toml"))
-    writeCertificateFile(certFor(treeOf(repo, commitC), base = commitC,
-      platform = "linux/other"), store / (commitC[0 ..< 12] & "-linux-other.toml"))
-    let storedForB = readStoredCertificates(store,
-      commitUnderEvaluation(repo, amended))
-    check storedForB.len == 1
-    check storedForB[0].vcs.content == tested
-    let storedForC = readStoredCertificates(store,
-      commitUnderEvaluation(repo, commitC))
-    check storedForC.len == 1
-    check storedForC[0].platform == "linux/other"
-    # Notes are still FOUND by the commit they are attached to; what they say
-    # is judged by content. Attach to the amended commit: the other-base
-    # record (base = A) is kept, an other-content record is dropped.
+    let roots = CertificateStoreRoots(user: store)
+    check publishCertificateDocument(store,
+      serializeCertificateToToml(cert)).error == ""
+    let certC = certFor(treeOf(repo, commitC), base = commitC,
+      platform = "linux/other")
+    check publishCertificateDocument(store,
+      serializeCertificateToToml(certC)).error == ""
+    let storedForB = findCertificatesInLocalStore(
+      commitUnderEvaluation(repo, amended), roots)
+    check storedForB.certificates.len == 1
+    check storedForB.certificates[0].vcs.content == tested
+    check storedForB.certificates[0].vcs.base == commitA
+    let storedForC = findCertificatesInLocalStore(
+      commitUnderEvaluation(repo, commitC), roots)
+    check storedForC.certificates.len == 1
+    check storedForC.certificates[0].platform == "linux/other"
+    # Misfiled: B's certificate copied into C's content directory.
+    let cDir = store / "v1" / "git-tree-sha1" /
+      treeOf(repo, commitC)["git-tree-sha1:".len .. ^1]
+    copyFile(store / certificateStoreRelativePath(cert), cDir / "misfiled.toml")
+    let misfiled = findCertificatesInLocalStore(
+      commitUnderEvaluation(repo, commitC), roots)
+    check misfiled.certificates.len == 1
+    check misfiled.certificates[0].platform == "linux/other"
+    check misfiled.problems.len == 1
+    check "misfiled.toml" in misfiled.problems.join("\n")
+    # Notes are keyed by the TREE the content names (Transport §3): the
+    # certificate issued on top of A is noted on the tested tree, and found
+    # from the amended commit by its tree. A record attached to that tree but
+    # naming other content is ignored and reported as misattached.
     let gitBin = findExe("git")
-    check attachCertificate(gitBin, repo, amended, cert).ok
-    check attachCertificate(gitBin, repo, amended,
+    check attachCertificate(gitBin, repo, cert).ok
+    check attachCertificateRecord(gitBin, repo, tested["git-tree-sha1:".len .. ^1],
       certFor(treeOf(repo, commitC), base = amended, platform = "linux/x")).ok
-    let attached = readAttachedCertificates(gitBin, repo, amended)
-    check attached.len == 1
-    check attached[0].vcs.base == commitA
-    check attached[0].vcs.content == tested
+    let attached = readAttachedCertificatesFrom(gitBin, repo, amended,
+      certificateNotesRef)
+    check attached.certs.len == 1
+    check attached.certs[0].vcs.base == commitA
+    check attached.certs[0].vcs.content == tested
+    check attached.misattached.len == 1
 
     check libraryTempLeftovers(scratch).len == 0
     removeDir(scratch)

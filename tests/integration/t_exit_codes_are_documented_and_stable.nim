@@ -333,12 +333,23 @@ suite "the attest exit codes are documented and stable":
     # that checkout is absent altogether there is nothing to read; if it
     # is present the page must be there, so removing the file is not a
     # way out of this assertion.
-    let specsRoot = findUpDir(thisDir, ".." / "reprobuild-specs")
+    #
+    # The checkout carries TWO names: it was renamed from `reprobuild-specs`
+    # to `reprobuild-pm`, and this assertion looked only for the old one. A
+    # name that no longer exists is not an absent checkout, it is an
+    # unreachable one, and the `skip()` below reported it as the former --
+    # so this case passed by never running. Both names are accepted, newest
+    # first, because a workspace may still hold either.
+    var specsRoot = findUpDir(thisDir, ".." / "reprobuild-pm")
+    var specsName = "reprobuild-pm"
+    if specsRoot.len == 0:
+      specsRoot = findUpDir(thisDir, ".." / "reprobuild-specs")
+      specsName = "reprobuild-specs"
     if specsRoot.len == 0:
       skip()
     else:
       let docPath = findUpFile(thisDir,
-        ".." / "reprobuild-specs" / "spec" / "CLI" / "attest.md")
+        ".." / specsName / "spec" / "CLI" / "attest.md")
       check docPath.len > 0
       if docPath.len > 0:
         let md = readFile(docPath)

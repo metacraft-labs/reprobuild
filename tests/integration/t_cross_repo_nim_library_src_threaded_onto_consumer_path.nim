@@ -53,7 +53,12 @@
 ##      (no hardcoded ``../greetlib/src``).
 ##   3. Editing the sibling's ``src/greetlib.nim`` (develop) / refreshing the
 ##      pin (lock-pinned) rebuilds the consumer with the NEW stamp — the reused
-##      SC-4 fold (§4.2a.5) invalidates on the sibling's source.
+##      SC-4 invalidation (§4.2a.5). Since the scoped rule of 2026-10-12
+##      (§4.3) the monitored ``nim c`` misses on the observed read of the
+##      edited ``greetlib.nim`` (develop) and on the new revision-keyed
+##      ``--path:`` directory the refreshed pin fetches into (lock-pinned), not
+##      on a folded producer identity — so this is the end-to-end check that
+##      the narrower key still never serves a stale consumer.
 ##
 ## Falsifiability (§SC-11): the consumer's ``repro.nim`` carries NO
 ## ``--path:../greetlib/src``, so without the SC-11 ``nimPathDirs`` channel the

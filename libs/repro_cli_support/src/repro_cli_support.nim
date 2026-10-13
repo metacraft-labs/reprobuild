@@ -23,6 +23,7 @@ import repro_core/relocation
 # lint at every probe site.
 import repro_core/ambient_execution
 import repro_core/cli_images
+import repro_core/source_root
 import repro_build_engine
 import repro_cmake_trycompile
 import repro_dev_env_activation
@@ -126,6 +127,10 @@ import repro_cli_support/daemon_working_directory
 # library. Other imports also export a ``sha256Hex`` and a ``ProbeResult``;
 # this module names the content-id ones qualified.
 import repro_cli_support/content_id
+# TC-8c: certificates are written to, and found in, the standard per-user
+# local certificate store (test-certificates Transport §2).
+import repro_cli_support/certificate_store
+export certificate_store
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -313,6 +318,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
+      " certificates list|plan [SELECTOR...] [--no-certify] [--json]\n       " &
+          programName &
       " bench [build options]\n       " &
           programName &
       " lint [build options]\n       " &
@@ -394,6 +401,8 @@ proc renderUsage*(programName: string): string =
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
       " attest expect --image PATH [--out PATH | --check PATH]\n       " &
+          programName &
+      " attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n       " &
           programName &
       " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n       " &
           programName &
@@ -1913,27 +1922,16 @@ proc reprobuildLibraryWorkDir*(): string =
   ## its OWN checkout while resolving the monitor shim, or else the checkout
   ## the engine was compiled from. So a dev environment compiled every
   ## recipe against the engine's libs whatever the override said.
-  proc hasReprobuildLibs(root: string): bool =
-    dirExists(extendedPath(root / "libs" / "repro_project_dsl" / "src"))
-
-  let libsDir = getEnv("REPROBUILD_LIBS_DIR")
-  if libsDir.len > 0 and hasReprobuildLibs(libsDir.parentDir):
-    return libsDir.parentDir
-  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
-  if repoRoot.len > 0 and hasReprobuildLibs(repoRoot):
-    return repoRoot
-  let envRoot = getEnv("REPROBUILD_SOURCE_ROOT")
-  if envRoot.len > 0 and hasReprobuildLibs(envRoot):
-    return envRoot
-  let cwd = getCurrentDir()
-  if hasReprobuildLibs(cwd):
-    return cwd
-  var sourceRoot = parentDir(currentSourcePath())
-  for _ in 0 ..< 3:
-    sourceRoot = parentDir(sourceRoot)
-  if hasReprobuildLibs(sourceRoot):
-    return sourceRoot
-  cwd
+  ##
+  ## The resolution itself is `repro_core/source_root`'s
+  ## `resolveReprobuildSourceRoot`, shared with the profile compile so the two
+  ## cannot answer differently (Gradual-Nix-To-Reprobuild-Migration GM1). This
+  ## proc keeps its historical last resort, the current directory, for
+  ## callers that use the answer only as a working directory.
+  let resolved = resolveReprobuildSourceRoot()
+  if resolved.len > 0:
+    return resolved
+  getCurrentDir()
 
 proc resolveMonitorShimLibPath(): string =
   ## Develop-mode improvement: locate ``librepro_monitor_shim.{dll,so,dylib}``
@@ -4666,6 +4664,12 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ## binding whose ``contentIdentity`` is a digest of ``revision`` + ``integrity``
   ## (a refreshed pin shifts the consumer cache key; an unchanged pin does not).
   ##
+  ## Since 2026-10-12 (§4.3, scoped rule) these identities are folded only into
+  ## actions whose reads nothing observes (``readsAreKeyed`` false); a
+  ## monitored action is keyed on what it read under the producer root plus
+  ## the producer's realized directories (``producerChannelIdentity``). See
+  ## ``foldProducerSourceIdentities``.
+  ##
   ## Empty for a build that consumes no cross-repo producer, so a no-producer
   ## action's cache key is byte-identical to today
   ## (``foldOverridesIntoFingerprint`` returns the weak fingerprint unchanged
@@ -4953,49 +4957,99 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
   verifyRevisionIntegrity()
   checkoutRoot
 
+proc producerChannelIdentity*(selector: string): string =
+  ## Cross-Repo-Source-Consumption §4.3 (2026-10-12) — what a consuming action
+  ## is handed for producer ``selector`` WITHOUT reading anything: the realized
+  ## directories the splice puts on its command line and environment (``bin``
+  ## dirs on ``PATH``, C/C++ dirs on the search variables, Nim source roots on
+  ## ``nim c --path:``). Their CONTENT is not here — it reaches the key through
+  ## the files the action reads — but the directories themselves are part of
+  ## what the action runs, so they are part of its weak fingerprint.
+  ##
+  ## Stable across a source change and across a lock refresh for a producer
+  ## consumed from a workspace checkout (the directories do not move). A
+  ## producer fetched at its pin lives in a revision-keyed directory
+  ## (``fetchLockPinnedProducer``), so for it a new pin IS a new directory and
+  ## every action handed that directory misses: there the path is the only
+  ## thing that distinguishes the new content from the old, which is still on
+  ## disk unchanged.
+  var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
+  template addDirs(tag: string; dirs: seq[string]) =
+    for dir in dirs:
+      payload.add(tag)
+      payload.add(dir)
+      payload.add('\x00')
+  if producerMaterializedBinDirs.hasKey(selector):
+    addDirs("bin:", producerMaterializedBinDirs[selector])
+  if producerMaterializedAuxPaths.hasKey(selector):
+    let aux = producerMaterializedAuxPaths[selector]
+    addDirs("include:", aux.includeDirs)
+    addDirs("lib:", aux.libDirs)
+    addDirs("pkgconfig:", aux.pkgConfigDirs)
+    addDirs("cmake:", aux.cmakePrefixDirs)
+    addDirs("nimpath:", aux.nimPathDirs)
+  digestHex(blake3DomainDigest(payload.bytesOf(), hdActionFingerprint))
+
 proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ## Cross-Repo-Source-Consumption SC-4 (§4.3): after the consumer graph is
-  ## lowered, fold each materialized cross-repo producer's SOURCE identity into
-  ## the ``weakFingerprint`` of every consumer action that names the producer
-  ## via ``toolIdentityRefs``. This is the SOURCE-content arm of invalidation —
-  ## the complement of SC-2/SC-3's build-PRODUCT ``foldProducerActionHashes``.
+  ## lowered, make each materialized cross-repo producer's SOURCE reach the
+  ## cache key of every consumer action that names it via ``toolIdentityRefs``
+  ## — the SOURCE-content arm of invalidation, the complement of SC-2/SC-3's
+  ## build-PRODUCT ``foldProducerActionHashes``.
   ##
-  ## The fold is driven by ``foldOverridesIntoFingerprint``
-  ## (``override_resolution.nim:349-380``) — the fold that until SC-4 was called
-  ## ONLY from ``t_workspace_override_shadows_upstream_in_resolver.nim``, never
-  ## from the engine. Activating it HERE, at the splice seam, IS the SC-4
-  ## invalidation hook the spec calls for: a change to a develop-overridden
-  ## sibling producer's source (a new local-path root mtime -> a new
-  ## ``computeOverrideContentIdentity`` -> a new binding ``contentIdentity``)
-  ## shifts the consumer action's weak fingerprint so the consumer rebuilds. In
-  ## lock-pinned mode the source identity is the producer ``LockedDep``'s
-  ## pinned ``revision`` + ``integrity`` (``lockPinnedSourceBinding``), projected
-  ## onto the SAME fold.
+  ## WHICH ACTIONS CARRY THE PRODUCER'S IDENTITY (owner decision 2026-10-12,
+  ## §4.3). The producer's source identity — a develop override's
+  ## ``contentIdentity`` (sibling root path + mtime), a lock pin's
+  ## ``revision`` + ``integrity`` — is folded ONLY into an action whose reads
+  ## are not otherwise keyed (``readsAreKeyed`` false: a process whose
+  ## dependencies come from a recognised format or a converter alone). For
+  ## every other action the producer's content reaches the key through the
+  ## files it actually reads: the observed reads and probes under the
+  ## producer's root are revalidated on every lookup, so editing a module an
+  ## action imported misses that action, and an action that read nothing there
+  ## keeps its key. Folding the identity into it as well is what made one
+  ## ``repro lock refresh`` of ``nim-stackable-hooks`` (or a touch of its
+  ## root) miss all ~1,900 test compiles: ``attachProducerAuxRefs`` names every
+  ## Nim-source producer on every action.
   ##
-  ## An action that names NO materialized producer (or whose named producers all
-  ## resolved to non-``rpbkOverride`` bindings) keeps its ``weakFingerprint``
-  ## byte-for-byte: ``foldOverridesIntoFingerprint`` returns the input digest
-  ## unchanged when no ``rpbkOverride`` binding participates
-  ## (``override_resolution.nim:375-379``). When ``producerSourceBindings`` is
-  ## empty (the common case — no cross-repo producer), this is a whole-graph
-  ## no-op, so a no-producer action's cache key is byte-identical to today.
+  ## What such an action IS handed without reading — the realized directories
+  ## on its command line and environment — is folded instead
+  ## (``producerChannelIdentity``): a ``--path:`` that appears or moves can
+  ## change which module a compile resolves, and a cached record from a build
+  ## without it says nothing about that.
+  ##
+  ## An action that names NO materialized producer keeps its
+  ## ``weakFingerprint`` byte-for-byte, and with ``producerSourceBindings``
+  ## empty (no cross-repo producer) this is a whole-graph no-op.
   if producerSourceBindings.len == 0:
     return
   for action in actions.mitems:
     if action.toolIdentityRefs.len == 0:
       continue
-    # Collect the source bindings for this action's producer refs in the
-    # action's own ref order (stable), so the fold is deterministic. Only
-    # ``rpbkOverride`` bindings actually shift the fingerprint; the collection
-    # follows the ref order the SC-2 build-product fold already relies on.
-    var bindings: seq[ResolvedPackageBinding] = @[]
+    # Collect in the action's own ref order (stable), so the fold is
+    # deterministic — the order the SC-2 build-product fold relies on too.
+    var selectors: seq[string] = @[]
     for refName in action.toolIdentityRefs:
       if producerSourceBindings.hasKey(refName):
-        bindings.add(producerSourceBindings[refName])
-    if bindings.len == 0:
+        selectors.add(refName)
+    if selectors.len == 0:
       continue
-    action.weakFingerprint =
-      foldOverridesIntoFingerprint(action.weakFingerprint, bindings)
+    if action.readsAreKeyed:
+      var payload = "cross-repo-producer-channel-fold.v1\x00" &
+        digestHex(action.weakFingerprint) & "\x00"
+      for selector in selectors:
+        payload.add(selector)
+        payload.add('=')
+        payload.add(producerChannelIdentity(selector))
+        payload.add('\x00')
+      action.weakFingerprint =
+        blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+    else:
+      var bindings: seq[ResolvedPackageBinding] = @[]
+      for selector in selectors:
+        bindings.add(producerSourceBindings[selector])
+      action.weakFingerprint =
+        foldOverridesIntoFingerprint(action.weakFingerprint, bindings)
 
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
@@ -9258,10 +9312,12 @@ proc recipeCompileOutputDir(kind, identity: string): string =
   ## (`recordOutputsNotOwnedBy`) at any location, and a hit restores there.
   ##
   ## Two computations with one identity (same recipe bytes and variant,
-  ## different sibling or ancestor content) share the directory. Each edge
-  ## holds the directory's lock from execution until the CLI has copied the
-  ## outputs to the caller's own paths (`extractInterfaceEdge`), and a lookup
-  ## whose bytes on disk are another record's restores its own.
+  ## different sibling or ancestor content, or a different observed
+  ## environment) share the directory. Each edge holds the directory's lock
+  ## from execution until the CLI has copied the outputs to the caller's own
+  ## paths (`extractInterfaceEdge`), and a lookup whose bytes on disk are
+  ## another record's restores its own from the record's payloads (the
+  ## extraction edge runs in the restore configuration for that reason).
   absolutePath(currentActionCacheRoot() / "recipe-compiles" / kind / identity)
 
 proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
@@ -9336,6 +9392,141 @@ proc publishIfChanged(path, content: string) =
   let staged = path & ".tmp." & $getCurrentProcessId()
   writeFile(extendedPath(staged), content)
   moveFile(extendedPath(staged), extendedPath(path))
+
+type
+  RecipeRelativeProviderCompile = object
+    ## The recipe-relative provider-compile edge for one caller
+    ## (`runProviderCompileEdge`). Inactive: the location-bound edge runs.
+    active: bool
+    recipeDir: string
+    anchors: seq[string]
+    edgePlan: ProviderCompilePlan
+      ## The plan as the edge keys it: recipe-relative identities, the
+      ## binary under `recipeCompileOutputDir("provider", ...)`.
+    edgeArtifactPath: string
+
+proc planRecipeRelativeProviderCompile(callerPlan: ProviderCompilePlan;
+    modulePath, helperCliPath, workDir, providerRoot: string):
+    RecipeRelativeProviderCompile =
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles", stage 2 (owner decision 2026-10-11, "relative on the wire"):
+  ## the provider compile runs IN the recipe's directory, is keyed by
+  ## identities that name what lies beside the recipe relative to it, and
+  ## produces a binary that records the recipe's source sites relative to
+  ## the recipe. The provider is launched with its working directory at the
+  ## recipe (`providerRoot`, the project root it evaluates), so those names
+  ## resolve to the copy it runs beside, and the engine resolves the ones in
+  ## its responses there (Provider-Runtime-Protocol-v1.md, "Paths in
+  ## responses"). A byte-identical recipe at another path, in another
+  ## worktree or under another work root is then served by one compile.
+  ##
+  ## Only where that holds: a recipe that is the project root its provider
+  ## runs in, and an edge that can publish (a monitor-injectable compiler).
+  let recipeDir = parentDir(absolutePath(modulePath))
+  if helperCliPath.len == 0 or not providerCompileCacheable(callerPlan) or
+      not recipeRelativeCompilePossible(recipeDir, providerRoot):
+    return
+  result.active = true
+  result.recipeDir = recipeDir
+  result.anchors = effectiveAnchors(recipeDir,
+    recipeCompileRelocationAnchors(workDir, helperCliPath,
+      callerPlan.compilerCommand))
+  # Derived from the caller's plan, whose sources and fingerprints are this
+  # recipe's. The identities do not depend on the output path (`--out:` is
+  # output-location noise), so the outputs are placed afterwards in the
+  # directory the key names.
+  let keyed = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
+    callerPlan.outputBinaryPath, result.anchors)
+  let edgeDir = recipeCompileOutputDir("provider",
+    toHex(keyed.providerCompileActionKey.bytes).toLowerAscii)
+  result.edgePlan = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
+    edgeDir / "provider" / "project-provider", result.anchors)
+  doAssert result.edgePlan.providerCompileActionKey ==
+    keyed.providerCompileActionKey
+  result.edgeArtifactPath = edgeDir / "provider-compile.rbsz"
+
+proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
+    modulePath, helperCliPath, workDir: string): BuildAction =
+  ## The recipe-relative twin of `providerCompileBuildAction`. Its argv names
+  ## the recipe by file name and everything else by a location-independent
+  ## path (the reprobuild checkout, the action-cache root); its outputs and
+  ## scratch live under the action-cache root, so the recipe's tree is never
+  ## written; its record names what the compile observed beside the recipe
+  ## relative to it (`relocatable`).
+  let edgeDir = parentDir(edge.edgeArtifactPath)
+  let scratchDir = edgeDir / "work"
+  createDir(extendedPath(scratchDir))
+  createDir(extendedPath(parentDir(edge.edgePlan.outputBinaryPath)))
+  var command = @[
+    helperCliPath,
+    "__repro-compile-provider",
+    "--recipe-relative",
+    "--module", extractFilename(modulePath),
+    "--out", edge.edgePlan.outputBinaryPath,
+    "--artifact", edge.edgeArtifactPath,
+    "--interface-fingerprint",
+      encodeInterfaceFingerprintArg(edge.edgePlan.interfaceFingerprint),
+    "--work-dir", workDir,
+    "--scratch-dir", scratchDir]
+  for anchor in edge.anchors:
+    command.add("--anchor")
+    command.add(anchor)
+  var inputs: seq[string] = @[]
+  for source in edge.edgePlan.inputSources:
+    inputs.add(relocatableName(source, edge.recipeDir, edge.anchors))
+  action(ProviderCompileActionId, command,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = edge.recipeDir,
+    inputs = inputs,
+    # No freshness sidecar: the caller's artifact and sidecar are written by
+    # the CLI from the caller's plan (`publishRecipeRelativeProviderCompile`).
+    outputs = @[edge.edgePlan.outputBinaryPath, edge.edgeArtifactPath],
+    commandStatsId = "repro provider compile edge",
+    cacheable = true,
+    weakFingerprint = edge.edgePlan.providerCompileActionKey,
+    # A copy of the recipe carries new mtimes; HYBRID compares its content
+    # when the metadata moved, which is what lets that copy be served.
+    actionCachePolicy = ffpHybrid,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
+    env = providerCompileLaunchEnv(scratchDir / "home"),
+    isolateHostEnvironment = true,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      providerCompileIgnoredInputPrefixes(scratchDir)),
+    relocatable = true,
+    relocationAnchors = edge.anchors)
+
+proc runProviderCompileEdge(plan: ProviderCompilePlan;
+    modulePath, interfacePath, artifactPath, helperCliPath, workDir,
+    scratchDir, providerRoot: string; config: BuildEngineConfig):
+    BuildRunResult =
+  ## Run the provider-compile edge for `plan` (the caller's plan: its binary
+  ## and artifact paths are the caller's) and leave the caller's binary,
+  ## artifact and freshness sidecar in place. Recipe-relative where
+  ## `planRecipeRelativeProviderCompile` allows it, location-bound
+  ## (`providerCompileBuildAction`) otherwise. `providerRoot` is the project
+  ## root the caller will launch the provider in.
+  let edge = planRecipeRelativeProviderCompile(plan, modulePath,
+    helperCliPath, workDir, providerRoot)
+  if not edge.active:
+    return runBuild(graph([providerCompileBuildAction(plan, modulePath,
+      interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
+      config)
+  # Every copy of the recipe shares the edge's outputs; hold them from
+  # execution until this caller has its own copy.
+  var edgeLock = acquireInterfaceArtifactLock(edge.edgeArtifactPath)
+  try:
+    result = runBuild(graph([recipeRelativeProviderCompileAction(edge,
+      modulePath, helperCliPath, workDir)]), config)
+    if not result.hasFailedActions() and not config.dryRun and
+        fileExists(extendedPath(edge.edgeArtifactPath)) and
+        fileExists(extendedPath(edge.edgePlan.outputBinaryPath)):
+      discard publishRecipeRelativeProviderCompile(plan,
+        edge.edgeArtifactPath, artifactPath, modulePath, workDir)
+  finally:
+    releaseInterfaceArtifactLock(edgeLock)
 
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
@@ -9596,11 +9787,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     maxParallelism: 1'u32,
     stdoutLimit: 1024 * 1024,
     stderrLimit: 1024 * 1024,
-    # Outputs stay in place, metadata-only records — for the recipe-relative
-    # edge too: its outputs live at ONE path for every copy of the recipe
-    # (`recipeCompileOutputDir`), so a hit at a new location finds them where
-    # the record says and nothing needs restoring. Storing their bytes in the
-    # CAS would also write payloads into a cache configured not to hold any.
+    # The location-bound edge writes the caller's own paths: outputs stay in
+    # place and records are metadata-only. The recipe-relative edge is
+    # switched to the restore configuration below.
     rebuildMissingOutputsOnCacheHit: true,
     deferLocalOutputBlobs: true,
     bypassRunQuota: bypassRunQuota,
@@ -9621,6 +9810,27 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     skipCacheHitEvidence: skipCacheHitEvidence,
     cancelCallback: cancelCheck)
   edgeConfig.statsEnabled = statsEnabled
+  if relocatable:
+    # The recipe-relative edge's outputs live in ONE directory per identity
+    # (`recipeCompileOutputDir`), and that identity cannot name what the
+    # compile observes from its environment: the monitor records it only
+    # when the edge runs. Two runs of one recipe whose observed environments
+    # differ — `t_e2e_codetracer_in_place_project_file`'s PATH variants also
+    # differ in the `C_INCLUDE_PATH`/`LIBRARY_PATH` gcc reads, and the recipe
+    # resolves `sh`, `find`, `sort` through `PATH` — are two records over the
+    # same output paths. With metadata-only records the second run's outputs
+    # replaced the first's, so switching back found the first record's inputs
+    # unchanged, its outputs another record's, and re-ran the whole
+    # extraction (every switch, six recipes, thousands of seconds).
+    #
+    # So each record carries its outputs' bytes (a few hundred KB: the
+    # interface artifact, its stub and its input manifest; the scratch tree
+    # under `work/` is derived state and is not stored), and a hit on a
+    # record whose outputs are not the ones on disk restores ITS bytes into
+    # the directory (`enableCachedOutputRestore`, gated on the monitor seeing
+    # no undeclared surviving write). A hit whose outputs are already in
+    # place restores nothing and keeps their mtimes.
+    edgeConfig.enableCachedOutputRestore()
   # The recipe-relative outputs are shared by every caller of this edge for
   # this recipe; the caller's own copy is its own.
   var edgeLock =
@@ -10302,11 +10512,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     appendForwardedArgs(scheduledActions, selectedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
-    # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
-    # producer's SOURCE identity (develop ``contentIdentity`` / lock-pinned
-    # ``revision``+``integrity``) into the consumer actions that name it, so a
-    # producer SOURCE change rebuilds the consumer. No-op when nothing was
-    # materialized (byte-identical to today).
+    # Cross-Repo-Source-Consumption SC-4 (§4.3): a producer SOURCE change
+    # rebuilds the consumer actions that READ it. Actions whose reads are
+    # keyed (monitored, or built-in) get only the producer's realized
+    # directories folded; the rest get its source identity (develop
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
+    # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
@@ -11445,10 +11656,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       provider = cachedProvider.get()
     else:
       invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-      let providerCompileAction = providerCompileBuildAction(providerPlan,
-        modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
-        compileScratchDir)
       var providerCompileConfig = BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
@@ -11502,8 +11709,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # stale daemon) is visibly attributed to the launch path rather
       # than the cache-freshness check above.
       progressRenderer.renderPhase("running provider compile")
-      providerCompileResult = runBuild(graph([providerCompileAction]),
-        providerCompileConfig)
+      providerCompileResult = runProviderCompileEdge(providerPlan,
+        modulePath, interfacePath, providerArtifactPath,
+        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        compileScratchDir, result.projectRoot, providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
       warnRunQuotaBypassIfUsed(providerCompileResult,
         enabled = fallbackToRunQuotaBypass)
@@ -11914,11 +12123,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     appendForwardedArgs(scheduledActions, forwardedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
-    # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
-    # producer's SOURCE identity (develop ``contentIdentity`` / lock-pinned
-    # ``revision``+``integrity``) into the consumer actions that name it, so a
-    # producer SOURCE change rebuilds the consumer. No-op when nothing was
-    # materialized (byte-identical to today).
+    # Cross-Repo-Source-Consumption SC-4 (§4.3): a producer SOURCE change
+    # rebuilds the consumer actions that READ it. Actions whose reads are
+    # keyed (monitored, or built-in) get only the producer's realized
+    # directories folded; the rest get its source identity (develop
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
+    # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
@@ -12213,26 +12423,44 @@ proc runProviderCompileHelper(args: openArray[string]): int =
   let interfacePath = valueAfterFlag(args, "--interface")
   let workDir = valueAfterFlag(args, "--work-dir")
   let scratchDir = valueAfterFlag(args, "--scratch-dir")
+  let interfaceFingerprintArg = valueAfterFlag(args, "--interface-fingerprint")
+  # A recipe-relative compile (`recipeRelativeProviderCompileAction`) runs
+  # with its cwd at the recipe, names the recipe by file name, and takes the
+  # interface fingerprint itself rather than the caller's interface artifact.
+  let recipeRelative = "--recipe-relative" in args
+  var anchors: seq[string] = @[]
+  for i in 0 ..< args.len - 1:
+    if args[i] == "--anchor" and args[i + 1].len > 0:
+      anchors.add(args[i + 1])
   for (name, value) in [
     ("--module", modulePath),
     ("--out", outputPath),
     ("--artifact", artifactPath),
-    ("--interface", interfacePath),
+    ("--interface",
+      if interfaceFingerprintArg.len > 0: interfaceFingerprintArg
+      else: interfacePath),
     ("--work-dir", workDir)
   ]:
     if value.len == 0:
       stderr.writeLine("repro provider compile: missing " & name)
       return 2
   try:
-    let interfaceArtifact = readInterfaceArtifact(interfacePath)
+    let interfaceFingerprint =
+      if interfaceFingerprintArg.len > 0:
+        decodeInterfaceFingerprintArg(interfaceFingerprintArg)
+      else:
+        readInterfaceArtifact(interfacePath).interfaceFingerprint
     # ``useFreshnessCache = false``: reaching this process at all means the
     # engine already decided the edge must run, from monitored evidence that
     # sees more than the recipe's import closure. Re-asking the narrower
     # text-closure key here would veto that decision and re-publish the stale
     # binary the edge was re-run to replace.
-    discard compileProviderBinary(modulePath, outputPath,
-      interfaceArtifact.interfaceFingerprint, artifactPath, workDir,
-      scratchDir, useFreshnessCache = false)
+    discard compileProviderBinary(absolutePath(modulePath),
+      absolutePath(outputPath), interfaceFingerprint,
+      absolutePath(artifactPath), absolutePath(workDir),
+      (if scratchDir.len > 0: absolutePath(scratchDir) else: ""),
+      useFreshnessCache = false, recipeRelative = recipeRelative,
+      relocationAnchors = anchors)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
@@ -12369,7 +12597,9 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   if not fileExists(extendedPath(responsePath)):
     raise newException(IOError, "provider did not write response: " &
       responsePath)
-  readProviderResponseFile(responsePath)
+  result = readProviderResponseFile(responsePath)
+  # Provider-Runtime-Protocol-v1.md, "Paths in responses".
+  result.resolveRelativeResponsePaths(cwd)
 
 const DevelopOverridesEnvVar = "REPRO_DEVELOP_OVERRIDES_FILE"
   ## The env var naming the develop-override document. One spelling, because
@@ -24767,10 +24997,6 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     result.providerCompileCacheHit = true
   else:
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-    let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
-      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -24793,8 +25019,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       forceRebuild: forceRefresh,
       suppressTrace: true,
       skipCacheHitEvidence: true)
-    let providerCompileResult = runBuild(graph([providerCompileAction]),
-      providerCompileConfig)
+    let providerCompileResult = runProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
@@ -24808,7 +25036,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # already-present outputs against a revalidated action-cache record
     # (``asUpToDate``). Either way no compile ran.
     for item in providerCompileResult.results:
-      if item.id == providerCompileAction.id:
+      if item.id == ProviderCompileActionId:
         result.providerCompileCacheHit = item.status in {asCacheHit, asUpToDate}
     if not fileExists(extendedPath(providerArtifactPath)):
       raise newException(IOError,
@@ -24871,6 +25099,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   # Metadata consumers do not need tool resolution or a lowered action graph.
   result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
+  # A recipe-relative provider names its recipe's files relative to the
+  # project root it ran in (Provider-Runtime-Protocol-v1.md, "Paths in
+  # responses"); the listing names them where they are.
+  for entry in result.targetExportTable.entries.mitems:
+    entry.sourceFile = rebasedName(entry.sourceFile, projectRoot)
   for fragment in refresh.snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkMetadata and
@@ -24979,10 +25212,6 @@ proc refreshRecipeProviderSnapshot(target: string;
     provider = cachedProvider.get()
   else:
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-    let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
-      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -25002,8 +25231,10 @@ proc refreshRecipeProviderSnapshot(target: string;
       forceRebuild: false,
       suppressTrace: true,
       skipCacheHitEvidence: true)
-    let providerCompileResult = runBuild(graph([providerCompileAction]),
-      providerCompileConfig)
+    let providerCompileResult = runProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
@@ -25385,6 +25616,370 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
         echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
           entry.name & "  " & source
   0
+
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9a — named certificates in the build graph.
+#
+# ``certificate "<name>", <handle>`` in a ``repro.nim`` marks a node as
+# producing a named certificate (Test-Certificates.md §"Marking a node"). The
+# provider records the markings in each package fragment's
+# ``reprobuild.certificate-export-table.v1`` metadata node; this section reads
+# them back from the stored graph and answers the question HL-10 (the
+# lock-update node) and TC-8e (issuance) ask of a plan: which
+# certificate-producing nodes does it materialize, and in which repository?
+# Nothing here issues or signs a certificate.
+# ---------------------------------------------------------------------------
+
+const certificateExportTableStableName* =
+  "reprobuild.certificate-export-table.v1"
+
+proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot):
+    CertificateExportTable =
+  ## Union every package fragment's certificate-export table. A fragment
+  ## without the node marks nothing. Static metadata: it is read from the
+  ## stored graph and never runs the provider.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == certificateExportTableStableName:
+        let perPackage =
+          decodeCertificateExportTablePayload(toBytes(node.payload))
+        for entry in perPackage.entries:
+          result.entries.add(entry)
+
+type
+  CertificatePlanPart* = object
+    ## One repository's share of a plan: the stored graph of the project the
+    ## plan builds there, and the action ids (as the provider declared them,
+    ## before target aliasing) the plan materializes from it.
+    repository*: string
+    certificates*: CertificateExportTable
+    targets*: Table[string, BuildTargetDef]
+    materialized*: HashSet[string]
+
+  CertificatePlan* = object
+    ## A plan as the certificate query sees it. ``noCertify`` is
+    ## ``--no-certify``: it removes every marking from the plan.
+    parts*: seq[CertificatePlanPart]
+    noCertify*: bool
+
+  CertificatePlanNode* = object
+    ## One certificate-producing node a plan materializes.
+    name*: string
+    owningPackage*: string
+    nodeKind*: CertificateNodeKind
+    node*: string
+    implicit*: bool
+    repository*: string
+    sourceFile*: string
+    sourceLine*: int
+
+proc certificateRepositoryRoot*(projectRoot: string): string =
+  ## The repository a project belongs to: the nearest ancestor of
+  ## ``projectRoot`` (itself included) carrying a ``.git`` entry, which is a
+  ## directory in a main checkout and a file in a linked worktree or a
+  ## submodule. A project outside any repository is its own root.
+  let start = absolutePath(projectRoot)
+  var dir = start
+  while dir.len > 0:
+    if dirExists(extendedPath(dir / ".git")) or
+        fileExists(extendedPath(dir / ".git")):
+      return dir
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  start
+
+proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
+                          projectRoot: string;
+                          selectors: openArray[string]):
+    CertificatePlanPart =
+  ## Resolve ``selectors`` against ``snapshot`` and record the actions their
+  ## union materializes, by the rules ``lowerProviderSnapshot`` applies: a
+  ## qualified ``<package>:<name>``, an action id, a build-target name, then
+  ## an implicit or explicit export name; a target selects the closure of
+  ## its members, an action the closure of its dependencies. An unknown or
+  ## ambiguous selector raises the same errors ``repro build`` reports.
+  result.repository = certificateRepositoryRoot(projectRoot)
+  result.certificates = aggregateCertificateExportTable(snapshot)
+  result.targets = initTable[string, BuildTargetDef]()
+  var declared: seq[BuildActionDef] = @[]
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        declared.add(decodeBuildActionPayload(toBytes(node.payload)))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        result.targets[target.name] = target
+  var byId = initTable[string, BuildActionDef]()
+  for action in inferDeclaredActionDeps(declared, projectRoot):
+    byId[action.id] = action
+  let exportTable = aggregateTargetExportTable(snapshot)
+
+  proc resolveRoot(selector: string; targets: Table[string, BuildTargetDef]):
+      string =
+    for entry in exportTable.entries:
+      if entry.owningPackage & ":" & entry.name == selector:
+        return entry.actionId
+    if byId.hasKey(selector) or targets.hasKey(selector):
+      return selector
+    var owners: seq[string] = @[]
+    var chosen = ""
+    for entry in exportTable.entries:
+      if entry.name == selector:
+        if owners.find(entry.owningPackage) < 0:
+          owners.add(entry.owningPackage)
+        chosen = entry.actionId
+    if owners.len > 1:
+      var candidates: seq[string] = @[]
+      for owner in owners:
+        candidates.add(owner & ":" & selector)
+      candidates.sort()
+      var err = newException(BuildTargetAmbiguousError,
+        "target '" & selector & "' is exported by multiple packages: " &
+          candidates.join(", ") &
+          " — re-run with the qualified <package>:<name> form")
+      err.selectorName = selector
+      err.candidates = candidates
+      raise err
+    if owners.len == 1:
+      return chosen
+    var known: seq[string] = @[]
+    for id in byId.keys:
+      known.add(id)
+    for name in targets.keys:
+      known.add(name)
+    for entry in exportTable.entries:
+      if known.find(entry.name) < 0:
+        known.add(entry.name)
+    var err = newException(BuildTargetUnknownError,
+      "unknown build target: " & selector)
+    err.selectorName = selector
+    err.suggestions = topLevenshteinCandidates(selector, known)
+    raise err
+
+  var materialized = initHashSet[string]()
+  var expanded = initHashSet[string]()
+  proc includeAction(actionId: string) =
+    if materialized.contains(actionId) or not byId.hasKey(actionId):
+      return
+    materialized.incl(actionId)
+    for dep in byId[actionId].deps:
+      includeAction(dep)
+  proc includeTarget(name: string; targets: Table[string, BuildTargetDef]) =
+    if expanded.contains(name) or not targets.hasKey(name):
+      return
+    expanded.incl(name)
+    for nested in targets[name].targets:
+      includeTarget(nested, targets)
+    for actionId in targets[name].actions:
+      includeAction(actionId)
+  for selector in selectors:
+    if selector.len == 0:
+      continue
+    let root = resolveRoot(selector, result.targets)
+    if result.targets.hasKey(root):
+      includeTarget(root, result.targets)
+    else:
+      includeAction(root)
+  result.materialized = materialized
+
+proc certificateNodeMaterialized(part: CertificatePlanPart;
+                                 entry: CertificateExportEntry): bool =
+  ## A marked edge is materialized when the plan builds it. A marked target
+  ## is materialized when the plan builds every edge the target groups,
+  ## nested targets included: it "passes when it and its whole closure
+  ## materialize" (Test-Certificates.md §"Marking a node"), so a plan that
+  ## builds only some of its members does not contain it. A target that
+  ## groups no edge is never materialized.
+  case entry.nodeKind
+  of cnkAction:
+    part.materialized.contains(entry.node)
+  of cnkTarget:
+    var members: seq[string] = @[]
+    var seen = initHashSet[string]()
+    var pending = @[entry.node]
+    while pending.len > 0:
+      let name = pending.pop()
+      if seen.contains(name) or not part.targets.hasKey(name):
+        continue
+      seen.incl(name)
+      for nested in part.targets[name].targets:
+        pending.add(nested)
+      for actionId in part.targets[name].actions:
+        members.add(actionId)
+    if members.len == 0:
+      return false
+    for actionId in members:
+      if not part.materialized.contains(actionId):
+        return false
+    true
+
+proc planCertificateNodes*(plan: CertificatePlan): seq[CertificatePlanNode] =
+  ## Test-Certificates TC-9a: the certificate-producing nodes ``plan``
+  ## materializes, each with the repository it belongs to, in plan-part and
+  ## declaration order. Empty for a ``--no-certify`` plan. HL-10 adds the
+  ## lock-update node to a plan for which this is non-empty; TC-8e issues one
+  ## certificate per returned name when its node passes.
+  if plan.noCertify:
+    return @[]
+  for part in plan.parts:
+    for entry in part.certificates.entries:
+      if certificateNodeMaterialized(part, entry):
+        result.add(CertificatePlanNode(
+          name: entry.name,
+          owningPackage: entry.owningPackage,
+          nodeKind: entry.nodeKind,
+          node: entry.node,
+          implicit: entry.implicit,
+          repository: part.repository,
+          sourceFile: entry.sourceFile,
+          sourceLine: entry.sourceLine))
+
+proc certificateNodeKindText(kind: CertificateNodeKind): string =
+  case kind
+  of cnkAction: "action"
+  of cnkTarget: "target"
+
+proc runCertificatesCommand*(args: openArray[string];
+                             publicCliPath: string): int =
+  ## ``repro certificates list [--json]`` prints the certificate names the
+  ## current project declares and the node each marks, implicit ``test``
+  ## marking included. ``repro certificates plan [SELECTOR...] [--no-certify]
+  ## [--json]`` prints the certificate-producing nodes the plan for
+  ## ``SELECTOR...`` materializes (``test`` when none is given, as for
+  ## ``repro test``), with their repositories. Both read the project's stored
+  ## graph; neither builds, runs a test or issues a certificate.
+  const usage = "usage: repro certificates list [--json] " &
+    "[--tool-provisioning=MODE] [--no-runquota]\n" &
+    "       repro certificates plan [SELECTOR...] [--no-certify] [--json] " &
+    "[--tool-provisioning=MODE] [--no-runquota]"
+  if args.len == 0 or args[0] in ["-h", "--help", "help"]:
+    stderr.writeLine(usage)
+    return (if args.len == 0: 2 else: 0)
+  let sub = args[0]
+  if sub notin ["list", "plan"]:
+    stderr.writeLine("repro certificates: unknown subcommand: " & sub)
+    stderr.writeLine(usage)
+    return 2
+  var asJson = false
+  var noCertify = false
+  var bypassRunQuota = false
+  var mode = tpmPathOnly
+  var selectors: seq[string] = @[]
+  for i in 1 ..< args.len:
+    let arg = args[i]
+    if arg == "--json":
+      asJson = true
+    elif arg == "--no-certify" and sub == "plan":
+      noCertify = true
+    elif arg == "--no-runquota":
+      bypassRunQuota = true
+    elif arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(arg["--tool-provisioning=".len .. ^1])
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro certificates " & sub & ": unknown flag: " & arg)
+      return 2
+    elif sub == "plan":
+      selectors.add(arg)
+    else:
+      stderr.writeLine("repro certificates list: unexpected argument: " & arg)
+      return 2
+  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
+  try:
+    if sub == "list":
+      let info = prepareBuildGraphInspection(".", mode, publicCliPath,
+        selectDefaultAction = false, lowerGraph = false)
+      let table = aggregateCertificateExportTable(info.snapshot)
+      if asJson:
+        var arr = newJArray()
+        for entry in table.entries:
+          arr.add(%*{
+            "name": entry.name,
+            "package": entry.owningPackage,
+            "nodeKind": certificateNodeKindText(entry.nodeKind),
+            "node": entry.node,
+            "implicit": entry.implicit,
+            "source-file": entry.sourceFile,
+            "source-line": entry.sourceLine
+          })
+        echo $(%*{
+          "schemaId": "reprobuild.certificates-list.v1",
+          "projectRoot": info.projectRoot,
+          "certificates": arr
+        })
+      elif table.entries.len == 0:
+        echo "repro certificates list: this project declares no certificate"
+      else:
+        for entry in table.entries:
+          echo entry.name & "  " &
+            (if entry.implicit: "implicit" else: "declared") & "  " &
+            entry.owningPackage & "  " &
+            certificateNodeKindText(entry.nodeKind) & " " & entry.node &
+            "  " & entry.sourceFile & ":" & $entry.sourceLine
+      return 0
+    # ``plan``: resolve the selectors the way ``repro build`` does, so a
+    # ``<sibling>:<name>`` selector plans the sibling project.
+    if selectors.len == 0:
+      selectors = @["test"]
+    let resolved = parseAndResolveSelectors(selectors,
+      "repro certificates plan")
+    # The anchor carries the first name as its fragment: ``.#<name>`` for
+    # this project, ``<sibling project file>#<name>`` for a sibling.
+    let anchorName = splitTarget(resolved.target).fragment
+    var names: seq[string] = @[]
+    if anchorName.len > 0:
+      names.add(anchorName)
+    for name in resolved.extraNameSelectors:
+      if names.find(name) < 0:
+        names.add(name)
+    let info = prepareBuildGraphInspection(resolved.target, mode,
+      publicCliPath, selectDefaultAction = false, lowerGraph = false)
+    let plan = CertificatePlan(
+      parts: @[certificatePlanPart(info.snapshot, info.projectRoot, names)],
+      noCertify: noCertify)
+    let nodes = planCertificateNodes(plan)
+    if asJson:
+      var arr = newJArray()
+      for node in nodes:
+        arr.add(%*{
+          "name": node.name,
+          "package": node.owningPackage,
+          "nodeKind": certificateNodeKindText(node.nodeKind),
+          "node": node.node,
+          "implicit": node.implicit,
+          "repository": node.repository
+        })
+      echo $(%*{
+        "schemaId": "reprobuild.certificate-plan.v1",
+        "selectors": names,
+        "noCertify": noCertify,
+        "nodes": arr
+      })
+    elif nodes.len == 0:
+      echo "repro certificates plan: the plan contains no " &
+        "certificate-producing node" &
+        (if noCertify: " (--no-certify)" else: "")
+    else:
+      for node in nodes:
+        echo node.name & "  " &
+          (if node.implicit: "implicit" else: "declared") & "  " &
+          certificateNodeKindText(node.nodeKind) & " " & node.node & "  " &
+          node.repository
+    return 0
+  except BuildTargetUnknownError as err:
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetAmbiguousError as err:
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro certificates " & sub & ": error: " & err.msg)
+    return 1
 
 proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode =
   let action = requireAction(info.actions, focus)
@@ -49841,6 +50436,16 @@ type
     # with no explicit routes (the single-tier / manifest-less common shape) and
     # for a gate that short-circuited before the lock write.
     participation*: seq[ParticipationOutcome]
+    certificatePolicy*: CertificatePolicy
+      ## The resolved ``[certificates]`` policy of ``project``. Certificate
+      ## issuance reuses this gate and reads its untracked-inputs mode here.
+    closureCheckouts*: seq[string]
+      ## TC-8d: the absolute path of every git checkout the gate judged
+      ## clean, published and locked — the in-scope repositories other than
+      ## the current one, and the develop-mode overrides. Issuance observes
+      ## them again after the run: they are outside the content a certificate
+      ## names, so a sibling that moved during the run is a state no
+      ## certificate could describe.
     expectedManifestRecords: seq[ExpectedLockRecord]
     deferredPublishWrites: seq[DeferredParticipationWrite]
     exitCode*: int
@@ -51716,32 +52321,6 @@ proc certificateMayDescribe*(cert: TestCertificate;
   ## a carrier dropping it as though it were about something else.
   certificateContentBinding(cert, state).binding != sbOtherState
 
-proc readStoredCertificates*(storeDir: string;
-                             state: CertificateState): seq[TestCertificate] =
-  ## Every certificate in a workspace certificate store that may describe
-  ## ``state``. The whole store is read and each record's CONTENT decides
-  ## (``certificateMayDescribe``); file names, which still carry the commit
-  ## checked out at issuance (``defaultCertificatePath``), are not consulted,
-  ## because that commit is ``base`` and a certificate is never found by its
-  ## base. An unreadable file contributes nothing: an absent certificate is
-  ## already a refusal under ``required``, so skipping a corrupt one can only
-  ## make the gate stricter.
-  if storeDir.len == 0 or not dirExists(storeDir):
-    return
-  var paths: seq[string]
-  for kind, path in walkDir(storeDir):
-    if kind notin {pcFile, pcLinkToFile}: continue
-    if not path.endsWith(".toml"): continue
-    paths.add(path)
-  sort(paths)
-  for path in paths:
-    try:
-      let cert = readCertificateFile(path)
-      if certificateMayDescribe(cert, state):
-        result.add(cert)
-    except CatchableError:
-      discard
-
 const anyCertificatePlatform* = "*"
   ## Agents-Push-Gate.md §4.2 — the reserved ``required_platforms`` entry for
   ## a PLATFORM-NEUTRAL requirement (the pre-commit check set): one trusted
@@ -52445,6 +53024,13 @@ type
     ignored*: seq[CertificateNote]      ## another framework's — not evidence
     rejected*: seq[CertificateNote]     ## asked, and got an answer: no
     unevaluated*: seq[CertificateNote]  ## could not ask
+    contributed*: seq[CertificateNote]
+      ## evaluated end to end and counted into a required platform's union
+    covered*: seq[MissingCoverage]
+      ## per required platform, the required targets the contributing
+      ## records cover. Coverage is monotonic (§7.1), so these are covered
+      ## whatever the outcome — what a CI plan may skip even when another
+      ## record left the whole requirement unverifiable.
 
 proc certificateCouldSatisfy(cert: TestCertificate;
                              req: VerificationRequirement): bool =
@@ -52588,6 +53174,8 @@ proc evaluateCertificates*(found: openArray[FoundCertificate];
     #    ask about is simply not part of any union — a green Linux run says
     #    nothing about macOS, and saying so is not a fault to report.
     if cert.platform in perPlatform:
+      result.contributed.add(CertificateNote(certificate: f.name,
+        why: cert.platform & ": [" & cert.targets.join(", ") & "]"))
       for t in cert.targets:
         perPlatform[cert.platform].incl(t)
 
@@ -52596,9 +53184,14 @@ proc evaluateCertificates*(found: openArray[FoundCertificate];
   for platform in req.platforms:
     var missing: seq[string]
     let covered = perPlatform[platform]
+    var have: seq[string]
     for t in req.targets:
       if t notin covered:
         missing.add(t)
+      else:
+        have.add(t)
+    result.covered.add(MissingCoverage(framework: req.framework,
+      platform: platform, targets: have))
     if missing.len > 0:
       gaps.add(MissingCoverage(framework: req.framework,
         platform: platform, targets: missing))
@@ -52805,48 +53398,439 @@ proc reprobuildLockValidity*(source: ReprobuildLockSource):
   result = proc(cert: TestCertificate; state: CertificateState):
       tuple[verdict: FrameworkValidity; detail: string] {.closure, gcsafe.} =
     reprobuildLockVerdict(bound, state)
+
 # ============================================================================
-# TC-2: certificate TRANSPORT — attach/read certificates bound to a commit and
-# carry them on the push.
+# TC-8c — the standard local certificate store (Transport §2).
+#
+# Every certificate reprobuild issues is DELIVERED here, and every client-side
+# gate FINDS candidates here, under the content id of the state it judges. The
+# store is per user and addressed by content id, so a certificate issued in
+# one clone or worktree is found from another holding the same content, and a
+# certificate issued before a commit existed is found for that commit.
+#
+# reprobuild's ``repro test`` runs as the user: it writes the USER root and
+# never the system root (operator decision D1a). Readers search both roots.
+# The file-level rules (atomic write, owner-only directories, the rename-aside
+# prune, unreadable versus absent) live in ``repro_cli_support/
+# certificate_store``; this section adds what needs a certificate record: the
+# record's store path, the working-tree guard and what a lookup found.
+# ============================================================================
+
+type
+  LocalStoreLookup* = object
+    ## What a search of the local store found for one state, and what it
+    ## searched (Transport §5: "no certificates found" must be explicit about
+    ## where it looked).
+    found*: seq[FoundCertificate]
+      ## Every candidate read from the state's content directories in both
+      ## roots. A copy byte-identical to one already read is evaluated once;
+      ## every other copy is kept, so an unsigned or failing copy never hides
+      ## one that verifies. A record whose own ``content`` does not match its
+      ## directory is not here: it is reported in ``problems`` (§2.4).
+    contentIds*: seq[string]
+      ## The content ids looked under.
+    searched*: seq[string]
+      ## The directories listed, in both roots.
+    problems*: seq[string]
+      ## Reported, never silently dropped: an unreadable root, directory or
+      ## file, a record filed under another content, a root that could not
+      ## be resolved, a state whose content id could not be computed.
+    userRootUnreadable*: bool
+      ## The user root exists and could not be read: the search could not
+      ## look where reprobuild itself delivers.
+    searchFailed*: bool
+      ## The search could not look: the state's content id could not be
+      ## computed, or the user root could not be read. A consumer that finds
+      ## no coverage then reports UNVERIFIABLE, not "run the tests"
+      ## (Verification §7). A state that HAS no content id is not this: no
+      ## certificate can describe it, which is simply not covered.
+
+proc certificates*(lookup: LocalStoreLookup): seq[TestCertificate] =
+  ## The candidates that read as ``test-certificate.v1`` records.
+  for f in lookup.found:
+    if f.read.status == crsOk:
+      result.add(f.read.cert)
+
+proc localStoreContentIds(state: CertificateState):
+    tuple[ids: seq[string]; problems: seq[string]; failed: bool] =
+  ## The whole-repository content ids a lookup searches under: the
+  ## repository's own ``git-tree-*`` algorithm for a state reprobuild can
+  ## compute, else the ids the state was handed. A scoped certificate is
+  ## stored under its scoped id and is found only by a consumer that knows
+  ## the scope (§2.2); reprobuild issues none.
+  if state == nil:
+    return
+  if state.repository.len > 0:
+    let format = repositoryContentAlgorithm(state.repository, state.git)
+    if not format.ok:
+      result.problems.add("the local certificate store was not searched for " &
+        describeState(state) & ": " & format.failure)
+      result.failed = true
+      return
+    let id = stateContentId(state, $format.algorithm, [])
+    case id.outcome
+    of cioComputed:
+      result.ids.add(id.id)
+    of cioNoContentId:
+      result.problems.add(describeState(state) & " has no content id (" &
+        describe(id.findings) & "), so no certificate in the local store " &
+        "can describe it")
+    of cioCannotCompute, cioFailed:
+      result.problems.add("the local certificate store was not searched: " &
+        "the content id of " & describeState(state) & " could not be " &
+        "computed (" & id.reason & ")")
+      result.failed = true
+  else:
+    for k in state.known:
+      if k.paths.len == 0 and k.id notin result.ids:
+        result.ids.add(k.id)
+
+proc findCertificatesInLocalStore*(state: CertificateState;
+    roots = nativeCertificateStoreRoots()): LocalStoreLookup =
+  ## The native equivalent of the reference tool's ``find --commit`` /
+  ## ``--staged`` / ``--worktree`` (Transport §2.4, operator decision D2): list
+  ## ``v1/<algorithm>/<digest>/`` for the state's content id in BOTH roots and
+  ## read every record there. Nothing is decided about the records here; the
+  ## caller evaluates them.
+  for p in roots.problems:
+    result.problems.add("local certificate store: " & p)
+  let (ids, idProblems, idFailed) = localStoreContentIds(state)
+  result.contentIds = ids
+  result.searchFailed = idFailed
+  for p in idProblems:
+    result.problems.add(p)
+  for id in ids:
+    let dir = storeContentDir(id)
+    if not dir.ok:
+      result.problems.add(dir.problem)
+      continue
+    var seen: seq[string]
+    for (label, root) in [("user", roots.user), ("system", roots.system)]:
+      if root.len == 0:
+        continue
+      let listing = listStoreContentDir(root, dir.relative)
+      result.searched.add(root / dir.relative.replace('/', DirSep))
+      case listing.status
+      of slsAbsent:
+        discard
+      of slsUnreadable:
+        result.problems.add("the local certificate store's " & label &
+          " root '" & root & "' could not be read (" &
+          listing.problems.join("; ") & ")" &
+          (if label == "user": "" else: "; the user root was still searched"))
+        if label == "user":
+          result.userRootUnreadable = true
+          result.searchFailed = true
+        continue
+      of slsListed:
+        discard
+      for p in listing.problems:
+        result.problems.add("local certificate store: " & p)
+      for file in listing.files:
+        if file.bytes in seen:
+          continue                # the same certificate, in both roots
+        seen.add(file.bytes)
+        let read = readCertificateRecord(file.bytes)
+        if read.status == crsOk and read.cert.vcs.content != id:
+          result.problems.add("'" & file.path & "' is filed under " & id &
+            " but its record names content '" & read.cert.vcs.content &
+            "'; ignored (Transport §2.4)")
+          continue
+        result.found.add(FoundCertificate(name: file.path, read: read))
+
+proc publishCertificateDocument*(root, document: string;
+                                 beforeRename: PublishStepHook = nil):
+    StorePublish =
+  ## Write one rendered certificate into ``root`` under its §2.2 name. The
+  ## name is derived from the PARSED record's canonical payload — never from
+  ## the bytes — and whether it is signed, which decides between replacing
+  ## and keeping an existing file of that name, is read from the record, not
+  ## taken from the caller. The bytes written are ``document``, verbatim.
+  let read = readCertificateRecord(document)
+  if read.status != crsOk:
+    result.error = "not a test-certificate.v1 record (" & $read.status &
+      ": " & read.detail & ")"
+    return
+  let dir = storeContentDir(read.cert.vcs.content)
+  if not dir.ok:
+    result.error = dir.problem
+    return
+  let relative = certificateStoreRelativePath(read.cert)
+  if relative.len == 0:
+    result.error = "no store path for content '" & read.cert.vcs.content & "'"
+    return
+  publishStoreRecord(root, relative, document, read.cert.isSigned,
+    beforeRename)
+
+type
+  LocalStorePublishOutcome* = object
+    ## What happened when an issued certificate was delivered. Every failure
+    ## is a value: delivery is the last step of a run that already happened,
+    ## and a store that could not be written does not change the run's
+    ## verdict.
+    root*: string
+      ## The user root written to; "" when none could be resolved.
+    path*: string
+      ## The record's full path, written or not.
+    written*: bool
+      ## The record is at ``path`` — written now, or kept because the same
+      ## claim was there already.
+    kept*: bool
+    retried*: bool
+    error*: string
+    pruned*: PruneOutcome
+    retentionProblem*: string
+      ## The configured retention could not be read; the default was used.
+
+proc repositoryToplevel(repository: string): string =
+  let res = execCmdEx(quoteShellCommand(
+    ["git", "-C", repository, "rev-parse", "--show-toplevel"]),
+    options = {poUsePath})
+  if res.exitCode != 0:
+    return ""
+  res.output.strip()
+
+proc headContentDir*(repository: string): string =
+  ## The store directory (``v1/<algorithm>/<digest>``) of the repository's
+  ## ``HEAD^{tree}``, or "" when there is none (an unborn branch).
+  if repository.len == 0:
+    return ""
+  let format = repositoryContentAlgorithm(repository)
+  if not format.ok:
+    return ""
+  let head = computeContentId(repository, commitState("HEAD"),
+    format.algorithm)
+  if head.outcome != cioComputed:
+    return ""
+  let dir = storeContentDir(head.id)
+  if dir.ok: dir.relative else: ""
+
+proc publishCertificateToLocalStore*(cert: TestCertificate;
+    repository: string; roots = nativeCertificateStoreRoots();
+    keep = -1): LocalStorePublishOutcome =
+  ## Deliver one issued certificate to the USER root and prune that root
+  ## (Transport §2.3, §2.5). ``repository`` is the checkout the tests ran in:
+  ## the root must not lie inside it (a certificate never belongs in the
+  ## working tree it attests), and its ``HEAD^{tree}`` directory survives the
+  ## prune. ``keep < 0`` reads the user-level retention setting.
+  if roots.user.len == 0:
+    result.error = "the local certificate store's user root could not be " &
+      "resolved" &
+      (if roots.problems.len > 0: ": " & roots.problems.join("; ") else: "")
+    return
+  result.root = roots.user
+  let relative = certificateStoreRelativePath(cert)
+  if relative.len == 0 or not storeContentDir(cert.vcs.content).ok:
+    result.error = "content id '" & cert.vcs.content & "' cannot name a " &
+      "store directory"
+    return
+  result.path = roots.user / relative.replace('/', DirSep)
+  for tree in [repository, repositoryToplevel(repository)]:
+    if tree.len > 0 and pathIsInside(roots.user, tree):
+      result.error = "the local certificate store's user root '" &
+        roots.user & "' is inside the repository at '" & tree & "', and a " &
+        "certificate never belongs in the working tree it attests; point " &
+        "TEST_CERTIFICATES_DIR outside the repository"
+      return
+  let published = publishCertificateDocument(roots.user,
+    serializeCertificateToToml(cert))
+  result.retried = published.retried
+  if published.error.len > 0:
+    result.error = published.error
+    return
+  result.written = true
+  result.kept = published.kept
+  var count = keep
+  if count < 0:
+    let setting = certificateStoreRetention(
+      proc(name: string): string = getEnv(name))
+    count = setting.keep
+    result.retentionProblem = setting.problem
+  var protected = @[relative[0 ..< relative.rfind('/')]]
+  let head = headContentDir(repository)
+  if head.len > 0:
+    protected.add(head)
+  result.pruned = pruneStoreRoot(roots.user, count, protected)
+
+# ---- one three-valued verdict for every consumer ---------------------------
+
+type
+  ReprobuildCoverageVerdict* = object
+    ## reprobuild's coverage decision for one state, as the client gate, the
+    ## gateway and the CI plan all report it. Three-valued (Verification §7):
+    ## UNVERIFIABLE — "this consumer could not judge" — is never folded into
+    ## not-covered, whose remedy ("run the tests") would be the wrong one.
+    outcome*: VerificationOutcome
+    missing*: seq[string]
+      ## ``<platform> (missing: a, b)`` for each required platform the
+      ## evaluated records leave short. When the outcome is unverifiable this
+      ## shortfall is NOT established: an unevaluated record may cover it.
+    untrusted*: seq[string]
+      ## Records evaluated and rejected, with why.
+    unevaluated*: seq[string]
+      ## Records — and searches — that could not be evaluated, with why.
+    contributing*: int
+      ## Records counted into coverage.
+    coveredByPlatform*: seq[MissingCoverage]
+      ## The required targets covered on each required platform by records
+      ## evaluated end to end (monotonic: covered whatever the outcome).
+
+proc evaluateReprobuildCoverage*(found: openArray[FoundCertificate];
+    state: CertificateState; requiredPlatforms, requiredTargets: seq[string];
+    keys: RegisteredKeyStoreLoad; lockSource: ReprobuildLockSource;
+    couldNotLook: openArray[string] = []): ReprobuildCoverageVerdict =
+  ## Evaluate reprobuild's certificates for ``state`` with the standard's
+  ## evaluator (``evaluateCertificates``): framework first, a registered
+  ## signature (an unreadable key store is unverifiable, an empty one trusts
+  ## nobody), the content match, reprobuild's lock step from ``lockSource``,
+  ## then the per-platform union.
+  ##
+  ## ``couldNotLook`` names carriers the caller could not read (an unreadable
+  ## note, a user root that cannot be listed, a content id that could not be
+  ## computed). A certificate there might have covered the gap, so when the
+  ## evaluated records do not cover it the outcome is unverifiable (§7.1
+  ## rule 2), and when they do it is still covered (rule 1).
+  ##
+  ## ``requiredPlatforms == @["*"]`` (``anyCertificatePlatform``) is met by
+  ## any ONE platform's union on its own.
+  let candidatesFound = @found
+  proc run(platforms: seq[string]): VerificationReport =
+    evaluateCertificates(candidatesFound, state, VerificationRequirement(
+      frameworksImplemented: @[reprobuildFrameworkId],
+      framework: reprobuildFrameworkId, targets: requiredTargets,
+      platforms: platforms, requireSignature: true),
+      keys.store, keys.availability, reprobuildLockValidity(lockSource))
+  proc collect(v: var ReprobuildCoverageVerdict; r: VerificationReport) =
+    for n in r.rejected:
+      let line = n.certificate & ": " & n.why
+      if line notin v.untrusted: v.untrusted.add(line)
+    for n in r.unevaluated:
+      let line = n.certificate & ": " & n.why
+      if line notin v.unevaluated: v.unevaluated.add(line)
+  proc shortfall(r: VerificationReport): seq[string] =
+    for c in r.covered:
+      var lacking: seq[string]
+      for t in requiredTargets:
+        if t notin c.targets: lacking.add(t)
+      if lacking.len > 0:
+        result.add(c.platform & " (missing: " & lacking.join(", ") & ")")
+  for why in couldNotLook:
+    result.unevaluated.add(why)
+  if requiredPlatforms == @[anyCertificatePlatform]:
+    var candidates: seq[string]
+    var uninterpretable = false
+    for f in found:
+      if f.read.status == crsUnknownSchema:
+        uninterpretable = true
+      if f.read.status == crsOk and
+          f.read.cert.framework == reprobuildFrameworkId and
+          f.read.cert.platform notin candidates:
+        candidates.add(f.read.cert.platform)
+    var anyUnverifiable = uninterpretable
+    var best: seq[string]
+    var haveBest = false
+    if candidates.len == 0:
+      result.collect(run(@[]))
+    for platform in candidates:
+      let r = run(@[platform])
+      result.collect(r)
+      if r.outcome == voCovered:
+        result.outcome = voCovered
+        result.contributing = r.contributed.len
+        result.coveredByPlatform = r.covered
+        result.missing.setLen(0)
+        return
+      if r.outcome == voUnverifiable:
+        anyUnverifiable = true
+      var lacking: seq[string]
+      for c in r.covered:
+        for t in requiredTargets:
+          if t notin c.targets: lacking.add(t)
+      if not haveBest or lacking.len < best.len:
+        best = lacking
+        haveBest = true
+    result.missing = @["any platform (missing: " &
+      (if haveBest and best.len > 0: best.join(", ") else: "<no certificate>") &
+      ")"]
+    result.outcome =
+      if anyUnverifiable or couldNotLook.len > 0: voUnverifiable
+      else: voNotCovered
+    return
+  let r = run(requiredPlatforms)
+  result.collect(r)
+  result.contributing = r.contributed.len
+  result.coveredByPlatform = r.covered
+  result.outcome = r.outcome
+  if result.outcome == voCovered:
+    return
+  result.missing = shortfall(r)
+  if couldNotLook.len > 0:
+    result.outcome = voUnverifiable
+
+proc describeCoverageVerdict*(v: ReprobuildCoverageVerdict): string =
+  ## One line naming the shortfall, the rejected records and the unevaluated
+  ## ones — each kind under its own label, so an operator can tell "run the
+  ## tests" from "fix the configuration".
+  var parts: seq[string]
+  if v.missing.len > 0:
+    parts.add((if v.outcome == voUnverifiable: "not established: "
+               else: "") & v.missing.join("; "))
+  if v.untrusted.len > 0:
+    parts.add("untrusted certs ignored: " & v.untrusted.join("; "))
+  if v.unevaluated.len > 0:
+    parts.add("could not be evaluated: " & v.unevaluated.join("; "))
+  parts.join(" — ")
+
+# ============================================================================
+# TC-2: certificate TRANSPORT — git notes, the push-time carrier.
+# TC-8c: keyed by the TREE the certificate's content id names, on the shared
+# notes ref.
 # ============================================================================
 #
-# A certificate (TC-1) is a small TOML record that ATTESTS a state. TC-2 binds
-# an already-issued certificate to the COMMIT it attests and ships it to the
-# upstream alongside the branch, so reviewers, the gate (TC-3) and CI (TC-4)
-# read exactly what was attested.
+# A certificate (TC-1) is a small TOML record that ATTESTS content. The local
+# certificate store (above) does not leave the machine; git notes are how a
+# certificate travels WITH A PUSH, to the receiving-side gateway (TC-6) and to
+# collaborators (Transport §3).
 #
-# Carrier (Test-Certificates.md §"Transport"): **git notes** under
-# ``refs/notes/reprobuild/certificates`` keyed by the commit SHA. A note is
-# data attached to a commit WITHOUT changing the commit SHA, stored in its own
-# ref whose tree maps ``<commit-sha>`` → a blob holding the signed
-# certificate(s). We prefer notes over a ``refs/certificates/<commit>`` ref
-# because the note travels with a single, well-known ref (one refspec on the
-# push) and one commit may carry MULTIPLE certificates (typically one per
-# platform) in the SAME note.
+# Carrier: **git notes** under ``refs/notes/test-certificates/certificates``
+# — the one ref the reference tool and every conforming producer share
+# (operator decision D10) — keyed by the TREE OID the certificate's content id
+# names (``git-tree-sha1:<oid>`` / ``git-tree-sha256:<oid>``). Keying by the
+# content rather than by a commit is what the content binding needs: the
+# certificate predates the commit, and one note serves every commit with that
+# tree. A verifier evaluating commit C looks up the note on ``C^{tree}``.
+# ``refs/notes/reprobuild/certificates`` is neither read nor written any more.
 #
-# Multiple certs WITHOUT overwrite: each record is framed by a sentinel header
-# line and we APPEND (``git notes append``) rather than ``add``/overwrite, so a
-# second platform's cert accumulates next to the first instead of replacing it.
-# The reader splits on the sentinel and parses each record independently.
+# reprobuild still WRITES notes on issuance until the reference tool's
+# pre-push hook propagates them from the local store (TC-8i); the switch away
+# is TC-8j (operator decision D12).
 #
-# Mismatch defense: when reading the certs attached to commit C, a record
-# whose ``content`` is not the content id of C's tree is dropped — a
-# stale/misfiled note never masquerades as an attestation of C. (Before TC-8b
-# the record named a commit and the filter compared it with C; a record now
-# names content, and its informational ``base`` is never compared.)
+# Several certificates in one note (Transport §3.1): every record is its
+# canonical payload — plus, when signed, one blank line and the signature
+# table — PRECEDED by the line ``# --- test-certificate ---``, the framing the
+# reference tool and every conforming producer share. The writer adds a
+# record by rewriting the note blob verbatim: a new payload is appended, a
+# signed copy replaces an unsigned one in place, a payload already present is
+# not added again, and every other piece is kept byte for byte. The reader
+# splits on whole delimiter lines; a piece that does not parse is reported
+# and skipped without invalidating its neighbours, and text before the first
+# delimiter — a blob framed some other way — is reported and never parsed.
+#
+# Misattachment: a record in the note on tree T whose ``content`` does not name
+# T is IGNORED and REPORTED as a carrier fault (Transport §3) — the content
+# check would reject it anyway; reporting it separately keeps a misfiled note
+# from reading as untested content.
 
 const
-  certificateNotesRef* = "refs/notes/reprobuild/certificates"
-    ## The git-notes ref the certificate carrier lives in. Notes are NOT
-    ## pushed/fetched by default; the push path pushes this ref explicitly and
-    ## verifiers fetch it.
-  certificateRecordSentinel = "# --- reprobuild-certificate ---"
-    ## Header line that frames each certificate record inside one commit's
-    ## note. ``git notes append`` concatenates records with a blank line, so we
-    ## split on this sentinel (which never appears in a serialized cert body —
-    ## the writer only emits ``[certificate]``/``[certificate.signature]``
-    ## tables and ``key = "..."`` lines) to recover individual records
-    ## deterministically regardless of git's join.
+  certificateNotesRef* = "refs/notes/test-certificates/certificates"
+    ## The git-notes ref the certificate carrier lives in, shared with the
+    ## reference tool and ``ct test`` (D10). Notes are NOT pushed/fetched by
+    ## default; the push path pushes this ref explicitly and verifiers fetch
+    ## it.
+  certificateNoteDelimiter* = "# --- test-certificate ---"
+    ## The line that PRECEDES every record in a note (Transport §3.1). A
+    ## line, not a substring: a value holding the text with escaped newlines
+    ## around it is part of its record.
 
 proc gitNoteRun(gitBin: string;
                 args: openArray[string];
@@ -52879,54 +53863,160 @@ proc gitNoteRun(gitBin: string;
     env = receivedObjectStoreEnv(received))
   (code: res.exitCode, output: res.output)
 
-proc framedCertificateRecord(cert: TestCertificate): string =
-  ## One certificate framed by the sentinel header so multiple records in the
-  ## same note can be split apart on read.
-  certificateRecordSentinel & "\n" & serializeCertificateToToml(cert)
+proc certificateNoteRecord*(cert: TestCertificate): string =
+  ## One record as it is written into a note (Transport §3.1): the CANONICAL
+  ## PAYLOAD, followed — only when the certificate is signed — by one blank
+  ## line and the ``[certificate.signature]`` table with ``algorithm`` and
+  ## ``value``, in that order. Nothing else. Unlike
+  ## ``serializeCertificateToToml`` it never emits an empty signature table:
+  ## an unsigned record in a note is its payload alone.
+  ##
+  ## Canonical form is what makes the delimiter safe: every line is blank, a
+  ## table header or ``key = value``, and every newline inside a value is
+  ## escaped, so no line of a record can equal ``certificateNoteDelimiter``.
+  result = canonicalCertificatePayload(cert)
+  if cert.isSigned:
+    for value in [cert.signature.algorithm, cert.signature.value]:
+      if not certificateValueIsRepresentable(value):
+        raise newException(CertificateSerializationError,
+          "certificate signature has no canonical form (unescapable " &
+          "control character)")
+    result.add("\n[certificate.signature]\n")
+    result.add("algorithm = \"" &
+      tomlEscapeCert(cert.signature.algorithm) & "\"\n")
+    result.add("value = \"" & tomlEscapeCert(cert.signature.value) & "\"\n")
 
-proc splitCertificateRecords(note: string): seq[string] =
-  ## Recover the individual serialized-certificate bodies from a note blob that
-  ## may hold several appended records. Splits on the sentinel header; tolerant
-  ## of the blank lines ``git notes append`` inserts between records and of a
-  ## leading record with no preceding sentinel (defensive).
-  var current = ""
-  var started = false
-  for rawLine in note.splitLines():
-    if rawLine.strip() == certificateRecordSentinel:
-      if started and current.strip().len > 0:
-        result.add(current)
-      current = ""
-      started = true
-    elif started:
-      current.add(rawLine)
-      current.add("\n")
-  if started and current.strip().len > 0:
-    result.add(current)
+type
+  CertificateNotePiece* = object
+    ## One piece of a note blob split on the delimiter (Transport §3.1).
+    leading*: bool
+      ## The NON-EMPTY text before the first delimiter line: a blob framed
+      ## some other way, or not framed at all. Never parsed as a record, even
+      ## when it would parse.
+    text*: string
+      ## The piece's exact bytes, without the delimiter line before it.
 
-proc attachCertificate*(gitBin, repoPath, commit: string;
-                        cert: TestCertificate): tuple[ok: bool; diagnostic: string] =
-  ## Bind ``cert`` to ``commit`` in ``repoPath`` as a git note under
-  ## ``refs/notes/reprobuild/certificates`` (TC-2 carrier). The cert is
-  ## APPENDED to any note already on ``commit`` so multiple platforms'
-  ## certificates accumulate on one commit WITHOUT overwriting each other.
-  ## Returns ``ok=false`` with a diagnostic on a git failure.
-  let record = framedCertificateRecord(cert)
-  # ``git notes append`` creates the note when absent and appends otherwise,
-  # so a second platform's cert never clobbers the first. ``-F -`` would need a
-  # pipe; we pass the framed record via ``-m`` (a single message argument).
-  let res = gitNoteRun(gitBin,
-    ["-C", repoPath, "notes", "--ref", certificateNotesRef,
-     "append", "--no-separator", "-m", record, commit])
-  if res.code != 0:
-    # Older git (< 2.31) lacks ``--no-separator``; retry without it (the
-    # sentinel-based splitter tolerates the extra blank line git inserts).
-    let res2 = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", certificateNotesRef,
-       "append", "-m", record, commit])
-    if res2.code != 0:
-      return (ok: false, diagnostic: "git notes append failed: " &
-        res2.output.strip())
-  (ok: true, diagnostic: "")
+  CertificateNoteEntry* = object
+    ## What a reader yields for one piece, in blob order.
+    piece*: CertificateNotePiece
+    read*: CertificateReadResult
+      ## The parsed record (``crsOk``), or why it is not one. A leading piece
+      ## is never parsed: it reads ``crsMalformed`` with ``detail`` saying
+      ## why it was skipped.
+
+proc splitCertificateNote*(note: string): seq[CertificateNotePiece] =
+  ## Split a note blob on lines EQUAL to ``certificateNoteDelimiter`` — never
+  ## on occurrences of its text. Lines end at LF and a CR belongs to its line,
+  ## so a blob written with CRLF line endings has no delimiter line and all of
+  ## it is one leading piece. The empty piece before the first delimiter of a
+  ## conforming note is dropped; a non-empty one is returned with ``leading``.
+  var pieceStart = 0
+  var sawDelimiter = false
+  var lineStart = 0
+  template closePiece(pieceEnd: int) =
+    if sawDelimiter:
+      result.add(CertificateNotePiece(leading: false,
+        text: note[pieceStart ..< pieceEnd]))
+    elif pieceEnd > 0:
+      result.add(CertificateNotePiece(leading: true,
+        text: note[0 ..< pieceEnd]))
+  while lineStart < note.len:
+    var lineEnd = note.find('\n', lineStart)
+    let nextLine = if lineEnd < 0: note.len else: lineEnd + 1
+    if lineEnd < 0: lineEnd = note.len
+    if lineEnd < note.len and lineEnd - lineStart ==
+        certificateNoteDelimiter.len and
+        note.continuesWith(certificateNoteDelimiter, lineStart):
+      closePiece(lineStart)
+      sawDelimiter = true
+      pieceStart = nextLine
+    lineStart = nextLine
+  closePiece(note.len)
+
+proc describeLeadingNoteText(text: string): string =
+  var firstLine = text
+  let nl = firstLine.find('\n')
+  if nl >= 0: firstLine.setLen(nl)
+  firstLine = firstLine.strip(leading = false, chars = {'\r'})
+  if firstLine.len > 60: firstLine = firstLine[0 ..< 60] & "…"
+  "text before the first '" & certificateNoteDelimiter & "' line (" &
+    $text.len & " bytes, beginning '" & firstLine & "') is not a record of " &
+    "this note's framing and was skipped unread (Transport §3.1)" &
+    (if '\r' in text: "; the blob has CRLF line endings, so no line of it " &
+       "is a delimiter" else: "") &
+    ". A note framed with another delimiter — such as one written by an " &
+    "earlier reprobuild — contributes no certificate; re-issue it with " &
+    "'repro test' / 'repro certify'"
+
+proc readCertificateNote*(note: string): seq[CertificateNoteEntry] =
+  ## Every piece of a note blob, in order (Transport §3.1). A piece that does
+  ## not parse is yielded with its reason and does not invalidate its
+  ## neighbours; the leading piece is yielded unparsed, as skipped.
+  for piece in splitCertificateNote(note):
+    if piece.leading:
+      result.add(CertificateNoteEntry(piece: piece,
+        read: CertificateReadResult(status: crsMalformed,
+          detail: describeLeadingNoteText(piece.text))))
+    else:
+      result.add(CertificateNoteEntry(piece: piece,
+        read: readCertificateRecord(piece.text)))
+
+proc addCertificateToNote*(note: string; cert: TestCertificate):
+    tuple[note: string; changed: bool] =
+  ## Add ``cert`` to a note blob as Transport §3.1 requires a writer to:
+  ##
+  ##   * a piece whose payload — rebuilt from its parsed fields — equals
+  ##     ``cert``'s is the same claim. A SIGNED ``cert`` replaces that piece in
+  ##     place (its signature may be absent or may fail); an unsigned one
+  ##     never replaces it, and nothing is added;
+  ##   * otherwise the record goes after the last piece, behind its own
+  ##     delimiter line;
+  ##   * every other piece — a record not touched, one that does not parse,
+  ##     text before the first delimiter — is kept byte for byte.
+  ##
+  ## When several pieces carry the payload (a note no conforming writer
+  ## produced; the standard leaves which one a signed write replaces open)
+  ## the FIRST is replaced and the rest are kept.
+  let payload = canonicalCertificatePayload(cert)
+  let record = certificateNoteRecord(cert)
+  let pieces = splitCertificateNote(note)
+  var match = -1
+  for i, piece in pieces:
+    if piece.leading: continue
+    let read = readCertificateRecord(piece.text)
+    if read.status == crsOk and
+        canonicalCertificatePayload(read.cert) == payload:
+      match = i
+      break
+  if match >= 0 and not cert.isSigned:
+    return (note, false)
+  if match < 0:
+    var updated = note
+    if updated.len > 0 and not updated.endsWith("\n"):
+      # A delimiter is a whole line; a final piece without its LF would
+      # swallow it.
+      updated.add("\n")
+    updated.add(certificateNoteDelimiter & "\n" & record)
+    return (updated, true)
+  var updated = ""
+  for i, piece in pieces:
+    if piece.leading:
+      updated.add(piece.text)
+    else:
+      updated.add(certificateNoteDelimiter & "\n")
+      updated.add(if i == match: record else: piece.text)
+  (updated, updated != note)
+
+proc certificateNoteKey*(content: string): tuple[ok: bool; oid, problem: string] =
+  ## The object a certificate's note is attached to: the tree its content id
+  ## names (Transport §3). ``manifest-v1-sha256`` names no git object and
+  ## travels by other carriers.
+  let parsed = parseContentId(content)
+  if parsed.form == cifWellFormed and
+      parsed.algorithm in {caGitTreeSha1, caGitTreeSha256}:
+    return (true, parsed.digest, "")
+  (false, "", "content id '" & content & "' names no git tree, so the " &
+    "certificate cannot travel as a git note")
 
 type
   GitObjectReadStatus* = enum
@@ -53010,139 +54100,215 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
           "exit " & $blob.code & ": " & blob.output.strip() & ")")
   GitNoteRead(status: gorAbsent, body: "")
 
-proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
-                                   notesRef: string;
-                                   received = ReceivedObjectStore()):
-    tuple[certs: seq[TestCertificate]; status: GitObjectReadStatus;
-          diagnostic: string] =
-  ## ``readAttachedCertificatesFromRef`` plus the READ STATUS it had to throw
-  ## away to fit a ``seq`` return. The gate uses this one so it can say
-  ## "the certificate note could not be read" instead of "no certificate" —
-  ## two conditions with the same refusal but opposite remedies, and telling a
-  ## developer to mint a certificate they already minted is how this class of
-  ## defect stays alive.
+type
+  NotedCertificates* = object
+    ## What the note on one object held.
+    status*: GitObjectReadStatus
+      ## ``gorUnreadable`` is never "no certificate": the read failed.
+    diagnostic*: string
+    annotated*: string
+      ## The object the note was looked up on (a tree oid).
+    found*: seq[FoundCertificate]
+      ## Every record attached to it that names it — or that cannot be read
+      ## as naming anything else (an unknown schema, an earlier draft), so the
+      ## verifier reports it as what it is.
+    certs*: seq[TestCertificate]
+      ## The ``test-certificate.v1`` records among ``found``.
+    misattached*: seq[string]
+      ## Carrier faults: records whose ``content`` names another object.
+    framingFaults*: seq[string]
+      ## Carrier faults: text before the note's first delimiter line, which
+      ## is reported and never parsed (Transport §3.1). A piece AFTER a
+      ## delimiter that does not parse is a ``found`` record instead, read
+      ## ``crsMalformed``.
+
+proc readNoteBlob*(gitBin, repoPath, annotated, notesRef: string;
+                   received = ReceivedObjectStore()): GitNoteRead =
+  ## Read the note on ``annotated`` under ``notesRef``, telling an absent note
+  ## from one that could not be read.
   ##
-  ## ``notesRef`` may be a 40-hex notes-COMMIT SHA (the pre-receive case) or a
-  ## ref NAME (the post-receive / settled case). ``git notes --ref`` only
-  ## accepts a ref name, so we try the raw-SHA tree-walk first and fall back to
-  ## ``git notes show`` for a ref name.
+  ## ``notesRef`` may be a 40- or 64-hex notes-COMMIT id (the pre-receive
+  ## case, where the incoming ref is not in place yet) or a ref NAME (the
+  ## settled case). ``git notes --ref`` only accepts a name, so a raw id is
+  ## read by walking its tree (``noteBlobFromNotesCommit``), and a name in
+  ## three steps:
   ##
-  ## BOTH reads report unreadability apart from absence, each by classifying on
-  ## the exit code of its own steps the way ``gatewayReadPushedLock`` does:
+  ##   1. ``rev-parse --verify --quiet <notesRef>`` — no such ref means
+  ##      nothing is attached to anything: ``gorAbsent``.
+  ##   2. ``notes show`` exit ``gitNotesShowNoNoteExit`` — git's own "no note
+  ##      found for object": ``gorAbsent``.
+  ##   3. ``notes show`` exit ANYTHING ELSE (128 / ``fatal: bad object`` when
+  ##      the note blob is gone): ``gorUnreadable``, naming the step.
   ##
-  ##   * the raw-SHA read (the one the pre-receive gate depends on, where the
-  ##     object is known to have been delivered) — see
-  ##     ``noteBlobFromNotesCommit``;
-  ##   * the ref-NAME read (the post-receive / settled case), below, in three
-  ##     steps:
-  ##
-  ##       1. ``rev-parse --verify --quiet <notesRef>`` — is there a notes ref
-  ##          at all? No such ref means nothing is attached to anything, which
-  ##          is a genuine ``gorAbsent``.
-  ##       2. ``notes show`` exit ``gitNotesShowNoNoteExit`` — git's own
-  ##          "no note found for object" verdict: ``gorAbsent``.
-  ##       3. ``notes show`` exit ANYTHING ELSE (128 / ``fatal: bad object
-  ##          <sha>`` when the note blob is gone, and every other git failure):
-  ##          ``gorUnreadable``, naming the step and git's message.
-  ##
-  ## This used to fold step 3 into step 2 and report every ``git notes show``
-  ## failure as ``gorAbsent`` — the same collapse-shape that made the lock gate
-  ## a no-op, on the one read path the earlier fix left alone. It was harmless
-  ## to the VERDICT (the cert gate refuses on absence anyway) and cost the wrong
-  ## REMEDY on the fallback path the pre-receive gate takes when the
-  ## incoming-notes read yields nothing: a receiving bare whose settled notes
-  ## ref is damaged told the author to mint a certificate they had already
-  ## minted and pushed.
-  var read: GitNoteRead
-  let looksLikeSha = notesRef.len == 40 and
+  ## Folding step 3 into step 2 is the shape that told an author whose
+  ## certificate was right there in the push to mint it again.
+  let looksLikeSha = notesRef.len in [40, 64] and
     notesRef.allCharsInSet(HexDigits)
   if looksLikeSha:
-    read = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit,
+    return noteBlobFromNotesCommit(gitBin, repoPath, notesRef, annotated,
       received)
   else:
     let exists = gitNoteRun(gitBin,
       ["-C", repoPath, "rev-parse", "--verify", "--quiet", notesRef],
       received)
     if exists.code != 0 or exists.output.strip().len == 0:
-      # STEP 1 — no such notes ref here. Nothing is attached to any commit, so
-      # this is an absence and not a failed read.
-      read = GitNoteRead(status: gorAbsent, body: "")
+      # STEP 1 — no such notes ref here.
+      return GitNoteRead(status: gorAbsent, body: "")
     else:
       let res = gitNoteRun(gitBin,
-        ["-C", repoPath, "notes", "--ref", notesRef, "show", commit],
+        ["-C", repoPath, "notes", "--ref", notesRef, "show", annotated],
         received)
-      read =
+      return
         if res.code == 0:
           GitNoteRead(status: gorPresent, body: res.output)
         elif res.code == gitNotesShowNoNoteExit:
-          # STEP 2 — git looked and there is no note for this commit.
+          # STEP 2 — git looked and there is no note for this object.
           GitNoteRead(status: gorAbsent, body: "")
         else:
-          # STEP 3 — git could not complete the read. Measured: a notes ref
-          # whose note BLOB has been removed exits 128 with
-          # ``fatal: bad object <sha>`` while the ref itself still resolves, so
-          # step 1 cannot see it and only the exit code tells the two apart.
+          # STEP 3 — git could not complete the read.
           GitNoteRead(status: gorUnreadable, body: "",
-            diagnostic: "the note attached to " & commit & " under " &
+            diagnostic: "the note attached to " & annotated & " under " &
               notesRef & " in '" & repoPath & "' cannot be read (git notes " &
               "show exit " & $res.code & ": " & res.output.strip() & ")")
+
+proc readNotedCertificates*(gitBin, repoPath, annotated, notesRef: string;
+                            received = ReceivedObjectStore()):
+    NotedCertificates =
+  ## Read the note on ``annotated`` under ``notesRef`` (``readNoteBlob``) and
+  ## every piece in it (``readCertificateNote``).
+  result.annotated = annotated
+  let read = readNoteBlob(gitBin, repoPath, annotated, notesRef, received)
   result.status = read.status
   result.diagnostic = read.diagnostic
   if read.status != gorPresent or read.body.len == 0:
     return
-  # Mismatch filter: only records that may describe THIS commit's content. The
-  # note is still FOUND by the commit it is attached to (TC-8c moves lookup to
-  # content), but what it says is judged by CONTENT: a record whose content id
-  # differs from the commit's tree is dropped, so a stale or misfiled note
-  # never masquerades as an attestation of this commit. Its ``base`` is never
-  # compared — a record issued on top of another commit, for the same
-  # content, describes this one (Verification §4.1.1).
-  let evaluated = commitUnderEvaluation(repoPath, commit)
-  for body in splitCertificateRecords(read.body):
-    var cert: TestCertificate
-    try:
-      cert = parseCertificateFromToml(body)
-    except TestCertificateParseError:
+  var recordNo = 0
+  for entry in readCertificateNote(read.body):
+    if entry.piece.leading:
+      # Transport §3.1: reported and skipped, never parsed — a CARRIER fault
+      # (the note's framing), not a certificate that failed.
+      result.framingFaults.add("note on " & annotated & ": " &
+        entry.read.detail)
       continue
-    if certificateMayDescribe(cert, evaluated):
-      result.certs.add(cert)
+    inc recordNo
+    let name = "note on " & annotated & " (record " & $recordNo & ")"
+    let rec = entry.read
+    if rec.status == crsOk:
+      let key = certificateNoteKey(rec.cert.vcs.content)
+      if not key.ok or key.oid != annotated:
+        # Transport §3: ignored, and reported as a CARRIER fault rather than
+        # as untested content.
+        result.misattached.add(name & " carries a record for content '" &
+          rec.cert.vcs.content & "', not for the object it is attached to " &
+          "(misattached note; ignored)")
+        continue
+      result.certs.add(rec.cert)
+    result.found.add(FoundCertificate(name: name, read: rec))
+
+proc attachCertificateRecord*(gitBin, repoPath, annotated: string;
+                              cert: TestCertificate):
+    tuple[ok: bool; diagnostic: string] =
+  ## Add ``cert`` to the note on ``annotated`` (any object id) under
+  ## ``certificateNotesRef`` in ``repoPath`` (Transport §3.1 —
+  ## ``addCertificateToNote``), so several platforms' certificates accumulate
+  ## on one object without overwriting each other. ``attachCertificate`` is
+  ## the producer's call; this one is the bare carrier operation, which can
+  ## also misattach a record on purpose.
+  ##
+  ## The new blob is stored with ``hash-object`` and attached with
+  ## ``notes add -f -C``, which takes the blob VERBATIM: ``notes append`` and
+  ## ``-m``/``-F`` clean the message up (blank lines, trailing whitespace),
+  ## which would rewrite pieces the writer must keep byte for byte. A note
+  ## that cannot be read is never overwritten.
+  let current = readNoteBlob(gitBin, repoPath, annotated, certificateNotesRef)
+  if current.status == gorUnreadable:
+    return (ok: false, diagnostic: current.diagnostic)
+  let existing = if current.status == gorPresent: current.body else: ""
+  var added: tuple[note: string; changed: bool]
+  try:
+    added = addCertificateToNote(existing, cert)
+  except CertificateSerializationError as err:
+    return (ok: false, diagnostic: err.msg)
+  if not added.changed:
+    return (ok: true, diagnostic: "")
+  let (file, blobPath) = createTempFile("repro-cert-note-", ".txt")
+  try:
+    file.write(added.note)
+    file.close()
+    let blob = gitNoteRun(gitBin,
+      ["-C", repoPath, "hash-object", "-w", "--", blobPath])
+    let oid = blob.output.strip()
+    if blob.code != 0 or oid.len == 0 or not oid.allCharsInSet(HexDigits):
+      return (ok: false, diagnostic: "git hash-object of the note failed: " &
+        blob.output.strip())
+    let res = gitNoteRun(gitBin,
+      ["-C", repoPath, "notes", "--ref", certificateNotesRef,
+       "add", "-f", "-C", oid, annotated])
+    if res.code != 0:
+      return (ok: false, diagnostic: "git notes add failed: " &
+        res.output.strip())
+  finally:
+    removeFile(blobPath)
+  (ok: true, diagnostic: "")
+
+proc attachCertificate*(gitBin, repoPath: string;
+                        cert: TestCertificate): tuple[ok: bool; diagnostic: string] =
+  ## Attach ``cert`` as a git note on the tree its ``content`` names, under
+  ## ``certificateNotesRef`` in ``repoPath``. The tree object need not exist
+  ## in the repository: a verifier computes the id of the state in front of
+  ## it and looks the note up by that id.
+  let key = certificateNoteKey(cert.vcs.content)
+  if not key.ok:
+    return (ok: false, diagnostic: key.problem)
+  attachCertificateRecord(gitBin, repoPath, key.oid, cert)
+
+proc commitTreeOid*(gitBin, repoPath, commit: string;
+                    received = ReceivedObjectStore()):
+    tuple[ok: bool; tree, diagnostic: string] =
+  ## ``<commit>^{tree}`` in ``repoPath`` — inside a receive quarantine when
+  ## ``received`` carries its bindings.
+  let res = gitNoteRun(gitBin,
+    ["-C", repoPath, "rev-parse", "--verify", "--quiet", commit & "^{tree}"],
+    received)
+  let tree = res.output.strip()
+  if res.code != 0 or tree.len == 0 or not tree.allCharsInSet(HexDigits):
+    return (false, "", "the tree of " & commit & " cannot be resolved in '" &
+      repoPath & "' (git rev-parse exit " & $res.code & ": " & tree & ")")
+  (true, tree, "")
+
+proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
+                                   notesRef: string;
+                                   received = ReceivedObjectStore()):
+    NotedCertificates =
+  ## The certificates noted on ``<commit>^{tree}`` — what a verifier
+  ## evaluating ``commit`` looks up (Transport §3). A tree that cannot be
+  ## resolved is a failed read (``gorUnreadable``), never an absence.
+  let tree = commitTreeOid(gitBin, repoPath, commit, received)
+  if not tree.ok:
+    return NotedCertificates(status: gorUnreadable,
+      diagnostic: tree.diagnostic)
+  readNotedCertificates(gitBin, repoPath, tree.tree, notesRef, received)
 
 proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
-                                      notesRef: string;
-                                      preserveObjectStore = false):
+                                      notesRef: string):
     seq[TestCertificate] =
-  ## Like ``readAttachedCertificates`` but reads from an EXPLICIT notes ref
-  ## (a ref name OR a raw notes-commit SHA). The receiving-side gateway (TC-6)
-  ## needs this: in a ``pre-receive`` hook the certificate note arrives as a
-  ## brand-new value for ``refs/notes/reprobuild/certificates`` that has NOT
-  ## yet been moved into place (the ref update is still pending), so the
-  ## gateway resolves the certs straight from the INCOMING notes-commit SHA it
-  ## reads off the pre-receive stdin. Records whose ``content`` differs from
-  ## the content id of ``commit``'s tree are DROPPED; unparseable records are
-  ## skipped.
-  ##
-  ## This is the seq-shaped convenience wrapper for callers that hold a
-  ## settled repository and have nothing to do with a read failure; anything
-  ## that must tell a failed read from an absent note calls
+  ## The records noted on ``<commit>^{tree}`` under ``notesRef`` (a ref name
+  ## or a raw notes-commit id), for callers with nothing to do with a failed
+  ## read or a misattached record. Anything that must tell those apart calls
   ## ``readAttachedCertificatesFrom``.
   readAttachedCertificatesFrom(gitBin, repoPath, commit, notesRef).certs
 
 proc readAttachedCertificates*(gitBin, repoPath, commit: string):
     seq[TestCertificate] =
-  ## Read the certificates attached to ``commit`` (the note under
-  ## ``refs/notes/reprobuild/certificates``) in ``repoPath``. Records whose
-  ## ``content`` differs from the content id of ``commit``'s tree are DROPPED
-  ## (defense against a stale/misfiled note); unparseable records are
-  ## skipped. Returns
-  ## an empty seq when no note is attached.
+  ## The records noted on ``<commit>^{tree}`` under ``certificateNotesRef``.
+  ## Misattached and unparseable records are not returned.
   readAttachedCertificatesFromRef(gitBin, repoPath, commit, certificateNotesRef)
 
 proc pushCertificateNotes*(gitBin, repoPath, remote: string):
     tuple[ok: bool; pushed: bool; diagnostic: string] =
   ## Carry the certificate notes ref to ``remote`` (TC-2: the push path pushes
-  ## ``refs/notes/reprobuild/certificates`` explicitly, since notes are not
-  ## pushed by default). All certs attached to all pushed commits travel in the
-  ## single ref. ``pushed=false`` with ``ok=true`` means there were no
+  ## ``certificateNotesRef`` explicitly, since notes are not pushed by
+  ## default). Every noted certificate travels in the single ref. ``pushed=false`` with ``ok=true`` means there were no
   ## certificate notes to carry (benign — nothing attached).
   let probe = gitNoteRun(gitBin,
     ["-C", repoPath, "rev-parse", "--verify", "--quiet",
@@ -53213,88 +54379,77 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
         evidence: why))
       report.exitCode = 2
     return
-  # Read whatever certificates are attached to the pushed commit (TC-2 git-
-  # notes carrier), then check EACH required platform independently. The
-  # per-platform covered set is the UNION of every matching cert's targets
-  # (multi-cert union: a linux cert + a macos cert together satisfy a
-  # {linux, macos} requirement).
+  # TC-8c (operator decision D2): a client-side gate finds its candidates in
+  # the LOCAL CERTIFICATE STORE — both roots — under the content id of the
+  # state it judges (the pushed commit's tree), never in notes. That is where
+  # every conforming producer delivers, so a certificate issued before the
+  # commit existed, or in another clone of the same content, is found.
   #
-  # TC-8b: a certificate covers the pushed commit when its CONTENT is the
-  # content id of the pushed commit's tree (Verification §4.1.1); the commit
-  # it was issued on top of (``base``) is never compared.
+  # Each required platform is checked independently, and its covered set is
+  # the UNION of every contributing certificate's targets (a linux cert + a
+  # macos cert together satisfy a {linux, macos} requirement). A certificate
+  # counts only with a VALID REGISTERED SIGNATURE (TC-5), content matching
+  # the pushed commit's tree (TC-8b; its ``base`` is never compared) and
+  # reprobuild's lock step passing for that tree.
   let evaluated = commitUnderEvaluation(certRepoPath, pushedCommit)
-  var attached = readAttachedCertificates(gitBin, certRepoPath, pushedCommit)
-  # Agents-Push-Gate.md §4.3: the workspace certificate store is a second
-  # carrier, read on BOTH sides so the client gate and the gateway agree on a
-  # one-ref push of a certified commit. Same trust checks below.
-  if report.workspaceRoot.len > 0:
-    for cert in readStoredCertificates(report.workspaceRoot / ".repro" /
-        "workspace" / "certificates", evaluated):
-      attached.add(cert)
-  # TC-5: coverage now requires a VALID REGISTERED SIGNATURE. A certificate
-  # counts toward coverage ONLY when its ``key_id`` resolves to a registered,
-  # unrevoked key and the ed25519 signature over the canonical payload checks.
-  # Unsigned / wrong-key / unregistered / revoked / tampered certs are dropped
-  # BEFORE coverage, so the ``required`` gate enforces BOTH coverage AND a
-  # trusted signature. We record WHY a present-but-untrusted cert was dropped so
-  # the diagnostic distinguishes "no cert" from "cert present but not trusted".
-  let keyStore = readRegisteredKeyStore(registeredKeysPath)
-  var trusted: seq[TestCertificate] = @[]
-  var signatureNotes: seq[string] = @[]
-  for cert in attached:
-    # TC-7 §2: FILTER BY FRAMEWORK FIRST. A repository may be tested by
-    # several frameworks and their certificates share this note; another
-    # framework's record is not evidence for this gate, and it is not evidence
-    # against anything either — so it is passed over silently rather than
-    # reported as an untrusted certificate.
-    if cert.framework != reprobuildFrameworkId:
-      continue
-    let verdict = verifyCertificateSignature(cert, keyStore)
-    if verdict != svValid:
-      signatureNotes.add(cert.platform & ": " &
-        signatureVerdictReason(verdict, cert.keyId))
-      continue
-    trusted.add(cert)
-  # §4.2: reprobuild's own framework-specific validity — the lock established
-  # from the state under evaluation, not a digest a record carried. It is a
-  # property of the STATE, so it is decided once; when it fails, no
-  # certificate for this state is evidence.
-  if trusted.len > 0:
-    let lockVerdict = reprobuildLockVerdict(lockSource, evaluated)
-    if lockVerdict.verdict != fvValid:
-      for cert in trusted:
-        signatureNotes.add(cert.platform & ": " & lockVerdict.detail)
-      trusted.setLen(0)
-  let perPlatformMissing = uncoveredPlatforms(trusted,
-    policy.requiredPlatforms, policy.requiredTargets, evaluated)
-  if perPlatformMissing.len == 0:
+  let lookup = findCertificatesInLocalStore(evaluated)
+  for problem in lookup.problems:
+    report.notices.add("certificate store: " & problem)
+  let keys = readRegisteredKeyStoreChecked(registeredKeysPath)
+  let verdict = evaluateReprobuildCoverage(lookup.found, evaluated,
+    policy.requiredPlatforms, policy.requiredTargets, keys, lockSource,
+    (if lookup.searchFailed: lookup.problems else: @[]))
+  let short = pushedCommit[0 ..< min(12, pushedCommit.len)]
+  let searched =
+    if lookup.found.len == 0 and lookup.contentIds.len > 0:
+      " (no certificate found in the local store under " &
+        lookup.contentIds.join(", ") & "; searched " &
+        lookup.searched.join(", ") & ")"
+    else: ""
+  case verdict.outcome
+  of voCovered:
     if policy.gateMode == cgmAdvisory:
       report.notices.add("certificate advisory: coverage OK for " &
         policy.requiredPlatforms.join(", ") & " × [" &
-        policy.requiredTargets.join(", ") & "] at " &
-        pushedCommit[0 ..< min(12, pushedCommit.len)])
+        policy.requiredTargets.join(", ") & "] at " & short)
     # In required mode a clean pass adds no failure — the gate keeps whatever
     # exit code stage 5 set (0 on success).
-    return
-  let sigDetail =
-    if signatureNotes.len > 0:
-      " (untrusted certs ignored: " & signatureNotes.join("; ") & ")"
-    else: ""
-  let detail = perPlatformMissing.join("; ") & sigDetail
-  if policy.gateMode == cgmAdvisory:
-    report.notices.add("certificate advisory: coverage INCOMPLETE — " &
-      detail & " (run 'repro certify' on the missing platform(s); advisory " &
-      "mode does not block this push)")
-  else:
-    report.failures.add(CheckFailure(
-      repo: currentRepoName,
-      property: "certificate-coverage",
-      remediation: "run 'repro certify' (on each required platform) to " &
-        "issue the missing certificate(s), then 'repro push' to carry them " &
-        "with this push",
-      evidence: "uncovered: " & detail,
-      source: ""))
-    report.exitCode = 2
+  of voNotCovered:
+    let detail = describeCoverageVerdict(verdict) & searched
+    if policy.gateMode == cgmAdvisory:
+      report.notices.add("certificate advisory: coverage INCOMPLETE — " &
+        detail & " (run 'repro certify' on the missing platform(s); " &
+        "advisory mode does not block this push)")
+    else:
+      report.failures.add(CheckFailure(
+        repo: currentRepoName,
+        property: "certificate-coverage",
+        remediation: "run 'repro certify' (on each required platform) to " &
+          "issue the missing certificate(s), then 'repro push' to carry them " &
+          "with this push",
+        evidence: "uncovered: " & detail,
+        source: ""))
+      report.exitCode = 2
+  of voUnverifiable:
+    # Verification §7: unverifiable MUST NOT be reported as not-covered. Under
+    # ``required`` the push is still refused, but the diagnostic names WHY
+    # the certificates could not be judged — re-running tests changes nothing.
+    let detail = describeCoverageVerdict(verdict)
+    if policy.gateMode == cgmAdvisory:
+      report.notices.add("certificate advisory: coverage UNVERIFIABLE — " &
+        detail & " (advisory mode does not block this push)")
+    else:
+      report.failures.add(CheckFailure(
+        repo: currentRepoName,
+        property: "certificate-unverifiable",
+        remediation: "the certificates for " & short & " could not be " &
+          "evaluated; fix what is named (an unreadable key store or " &
+          "certificate store, an algorithm this reprobuild cannot compute, " &
+          "a record in a schema it does not implement) — re-running the " &
+          "tests changes nothing",
+        evidence: "unverifiable: " & detail,
+        source: ""))
+      report.exitCode = 2
 
 # ============================================================================
 # TC-6 — Receiving-side enforcement: the local push gateway.
@@ -53377,13 +54532,11 @@ type
     upstreamUrl*: string
       ## The real upstream (a second bare repo standing in for GitHub) the
       ## ``post-receive`` forwards the push to on success.
-    certificateStoreDir*: string
-      ## Agents-Push-Gate.md §4.3 — the workspace certificate store
-      ## (``<workspace>/.repro/workspace/certificates``) a LOCAL gateway also
-      ## reads certificates from, so a plain one-ref ``git push`` is enough:
-      ## the agent does not have to push the notes ref beside its branch.
-      ## The carrier earns no trust — the signature, coverage and lock checks
-      ## are identical for both carriers. Empty = notes ref only.
+    # TC-8c (operator decision D12): there is no certificate-store setting.
+    # The gateway reads certificates ONLY from the notes that arrive with the
+    # push; its former read of ``.repro/workspace/certificates`` is gone and
+    # nothing replaces it. A ``certificate_store`` key in an older config is
+    # ignored.
 
 proc serializeGatewayConfig*(cfg: GatewayConfig): string =
   ## Deterministic TOML writer for the gateway config.
@@ -53395,9 +54548,6 @@ proc serializeGatewayConfig*(cfg: GatewayConfig): string =
   result.add("registered_keys = \"" &
     tomlEscapeCert(cfg.registeredKeysPath) & "\"\n")
   result.add("upstream = \"" & tomlEscapeCert(cfg.upstreamUrl) & "\"\n")
-  if cfg.certificateStoreDir.len > 0:
-    result.add("certificate_store = \"" &
-      tomlEscapeCert(cfg.certificateStoreDir) & "\"\n")
   result.add("required_targets = [")
   for i, t in cfg.requiredTargets:
     if i > 0: result.add(", ")
@@ -53437,8 +54587,6 @@ proc parseGatewayConfig*(content: string): GatewayConfig =
     of "lock_records_dir": result.lockRecordsDir = parseTomlBasicValue(rhs)
     of "registered_keys": result.registeredKeysPath = parseTomlBasicValue(rhs)
     of "upstream": result.upstreamUrl = parseTomlBasicValue(rhs)
-    of "certificate_store":
-      result.certificateStoreDir = parseTomlBasicValue(rhs)
     of "required_targets": result.requiredTargets = parseTomlStringArray(rhs)
     of "required_platforms":
       result.requiredPlatforms = parseTomlStringArray(rhs)
@@ -53609,6 +54757,14 @@ type
     ## Outcome of the pre-receive certificate verify for ONE pushed branch.
     accepted*: bool
     diagnostic*: string
+    outcome*: VerificationOutcome
+      ## ``voNotCovered`` / ``voUnverifiable`` for the branch that was
+      ## refused (or, under advisory, the last one that would have been);
+      ## ``voCovered`` otherwise. Reported apart (Verification §7).
+    carrierFaults*: seq[string]
+      ## Misattached notes: records on the pushed tree's note that name other
+      ## content. Ignored, and reported as a fault of the carrier rather than
+      ## as untested content (Transport §3).
     gated*: seq[GatewayGateRecord]
       ## What the gate actually read and decided on. Empty when it read
       ## nothing — which for a branch update carrying a lock is itself the
@@ -53892,11 +55048,13 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
                         received = ReceivedObjectStore()):
     GatewayVerifyResult =
   ## The AUTHORITATIVE receiving-side check. For each pushed BRANCH update,
-  ## read the certificates that arrived for the pushed commit (from the
-  ## INCOMING ``refs/notes/reprobuild/certificates`` value — already an object
-  ## in this bare repo because the push delivered it) and, under a ``required``
-  ## policy, require that a registered-SIGNED (TC-5) certificate COVERS (TC-1)
-  ## the pushed commit for the required targets on EACH required platform.
+  ## read the certificates noted on the pushed commit's TREE (TC-8c) — from the
+  ## INCOMING ``certificateNotesRef`` value, already an object in this bare
+  ## repo's quarantine because the push delivered it, and from the settled
+  ## ref — and, under a ``required`` policy, require that a registered-SIGNED
+  ## (TC-5) certificate COVERS (TC-1) the pushed content for the required
+  ## targets on EACH required platform. The verdict is three-valued:
+  ## unverifiable is reported apart from not covered (Verification §7).
   ##
   ## REUSE, not re-implementation: the per-cert signature check is the TC-5
   ## ``verifyCertificateSignature`` and the per-platform coverage is the TC-1
@@ -53910,120 +55068,94 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
   if cfg.requiredPlatforms.len == 0:
     # Opted in but nothing to enforce (required_platforms may be none).
     return
-  # Locate the incoming notes-ref value: the new SHA the push set for
-  # ``refs/notes/reprobuild/certificates``. In pre-receive the ref is not yet
-  # in place, but the SHA is already a reachable object, so we read the note
-  # straight off that commit-ish.
+  # Locate the incoming notes-ref value: the new id the push set for
+  # ``certificateNotesRef``. In pre-receive the ref is not yet in place, but
+  # the notes commit is already an object (in the quarantine), so the note is
+  # read straight off it.
   var notesSha = ""
   for u in updates:
     if u.refName == certificateNotesRef:
       notesSha = u.newSha
-  let keyStore = readRegisteredKeyStore(cfg.registeredKeysPath)
-  let zeroSha = "0000000000000000000000000000000000000000"
+  let keys = readRegisteredKeyStoreChecked(cfg.registeredKeysPath)
+  let lockSource =
+    if cfg.lockRecordsDir.len > 0: recordStoreLockSource(cfg.lockRecordsDir)
+    else: committedLockSource()
   for u in updates:
     # Only gate branch pushes; the notes ref + tags are not the gated unit.
     if not u.refName.startsWith("refs/heads/"): continue
-    if u.newSha == zeroSha: continue  # branch deletion — nothing to attest.
+    if u.newSha.len > 0 and u.newSha.allCharsInSet({'0'}):
+      continue  # branch deletion — nothing to attest.
     let pushedCommit = u.newSha
-    # Read the certs that arrived for this commit. Prefer the incoming notes
-    # SHA (pre-receive: ref not yet updated); fall back to the well-known ref
-    # for a post-receive / already-updated read.
+    # TC-8c (Transport §3): the certificates for the pushed commit are the
+    # notes on its TREE, ``<new>^{tree}``, resolved inside the receive
+    # quarantine — read from the INCOMING notes commit and from the settled
+    # ref, both. There is NO read of a certificate store here (operator
+    # decision D12): until the reference tool propagates notes (TC-8i), a
+    # certificate reaches the gateway only as a pushed note.
     #
-    # The cert gate already fails CLOSED (an absent certificate is a refusal
-    # under ``required``), so an unreadable note does not let anything
-    # through. It does something else that cost this campaign three sessions:
-    # it reports "no covering test certificate" to an author whose certificate
-    # is right there in the push, and sends them to mint it again. So the read
-    # status is carried and NAMED, without changing any accept/reject
-    # decision.
-
-    # ``preserveObjectStore``: the certificate note arrives in the SAME push as
-    # the commit it attests, so its objects are in the push quarantine too. A
-    # scrubbed read finds no certificate for any commit and a ``required``
-    # gate then refuses every push — including the covered ones it is meant to
-    # let through.
+    # ``received``: the note arrives in the SAME push as the commit it
+    # attests, so its objects are in the quarantine too. A scrubbed read
+    # finds no certificate for any commit and a ``required`` gate then
+    # refuses every push — including the covered ones.
     #
-    # TC-8b: the certificates are judged against the pushed commit's CONTENT
-    # (Verification §4.1.1); the commit each was issued on top of is never
-    # compared.
+    # An unreadable note is carried and NAMED: "no certificate arrived" and
+    # "a certificate arrived and could not be read" have opposite remedies.
     let evaluated = commitUnderEvaluation(gatewayBareDir, pushedCommit)
-    var attached: seq[TestCertificate]
-    var noteUnreadable = ""
-    if notesSha.len > 0 and notesSha != zeroSha:
+    var found: seq[FoundCertificate]
+    var couldNotLook: seq[string]
+    var seen: seq[string]
+    var sources = @[certificateNotesRef]
+    if notesSha.len > 0 and not notesSha.allCharsInSet({'0'}):
+      sources.insert(notesSha, 0)
+    for source in sources:
       let read = readAttachedCertificatesFrom(
-        gitBin, gatewayBareDir, pushedCommit, notesSha, received)
-      attached = read.certs
+        gitBin, gatewayBareDir, pushedCommit, source, received)
       if read.status == gorUnreadable:
-        noteUnreadable = read.diagnostic
-    if attached.len == 0:
-      let read = readAttachedCertificatesFrom(
-        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef, received)
-      attached = read.certs
-      if read.status == gorUnreadable and noteUnreadable.len == 0:
-        noteUnreadable = read.diagnostic
-    # Agents-Push-Gate.md §4.3: a LOCAL gateway also reads the workspace
-    # certificate store, so a one-ref push of a certified commit is covered.
-    # The certificates are judged by exactly the same checks below.
-    for cert in readStoredCertificates(cfg.certificateStoreDir, evaluated):
-      attached.add(cert)
-    # Drop every cert that is not this framework's, or is not a
-    # registered-signed, unrevoked, valid-sig attestation, BEFORE coverage.
-    var trusted: seq[TestCertificate]
-    var sigNotes: seq[string]
-    for cert in attached:
-      # Framework filtering first: another framework's certificate is not
-      # evidence here and is not a fault to report (Standard §4).
-      if cert.framework != reprobuildFrameworkId:
-        continue
-      let verdict = verifyCertificateSignature(cert, keyStore)
-      if verdict != svValid:
-        sigNotes.add(cert.platform & ": " &
-          signatureVerdictReason(verdict, cert.keyId))
-        continue
-      trusted.add(cert)
-    # The framework-specific step (Verification §4.2), decided once for the
-    # pushed STATE: by default the ``repro.lock`` in the pushed commit's tree
-    # — read out of the received objects, as the public-tier lock gate reads
-    # it; for a project that opted into a lock record store (a configured
-    # ``lock_records_dir``), the record for the pushed commit.
-    if trusted.len > 0:
-      let lockSource =
-        if cfg.lockRecordsDir.len > 0:
-          recordStoreLockSource(cfg.lockRecordsDir)
-        else: committedLockSource()
-      let lockVerdict = reprobuildLockVerdict(lockSource, evaluated)
-      if lockVerdict.verdict != fvValid:
-        for cert in trusted:
-          sigNotes.add(cert.platform & ": " & lockVerdict.detail)
-        trusted.setLen(0)
-    let missing = uncoveredPlatforms(trusted, cfg.requiredPlatforms,
-      cfg.requiredTargets, evaluated)
-    if missing.len > 0:
-      let sigDetail =
-        if sigNotes.len > 0: " (untrusted certs ignored: " &
-          sigNotes.join("; ") & ")"
+        couldNotLook.add("certificate-note-unreadable: " & read.diagnostic &
+          " — this is NOT a missing certificate")
+      for fault in read.framingFaults & read.misattached:
+        let line = u.refName & ": carrier fault: " & fault
+        if line notin result.carrierFaults:
+          result.carrierFaults.add(line)
+      for f in read.found:
+        let key =
+          if f.read.status == crsOk: serializeCertificateToToml(f.read.cert)
+          else: f.name & "\0" & f.read.detail
+        if key in seen: continue   # the same record, incoming and settled
+        seen.add(key)
+        found.add(f)
+    # The standard's evaluator (TC-7), the gateway's three-valued verdict
+    # (TC-8c): framework first, a registered signature, content matching the
+    # pushed tree, reprobuild's lock step — by default the ``repro.lock`` in
+    # the pushed tree, or, for a project that opted into a lock record store
+    # (a configured ``lock_records_dir``), the record for the pushed commit.
+    let verdict = evaluateReprobuildCoverage(found, evaluated,
+      cfg.requiredPlatforms, cfg.requiredTargets, keys, lockSource,
+      couldNotLook)
+    case verdict.outcome
+    of voCovered:
+      # COVERED — and by WHAT. An acceptance that says nothing is
+      # indistinguishable from a gate that never read the note.
+      result.gated.add(GatewayGateRecord(refName: u.refName,
+        trustedCerts: verdict.contributing))
+    of voNotCovered, voUnverifiable:
+      let label =
+        if verdict.outcome == voUnverifiable: "unverifiable"
+        else: "uncovered"
+      let noneArrived =
+        if found.len == 0 and couldNotLook.len == 0:
+          " (no certificate note on the pushed tree under " &
+            certificateNotesRef & "; push that ref with the branch)"
         else: ""
-      # Say WHICH of the two uncovered conditions this is. "No certificate
-      # arrived" and "a certificate arrived and the gateway could not read it"
-      # have the same verdict and opposite remedies.
-      let readDetail =
-        if noteUnreadable.len > 0: " (certificate-note-unreadable: " &
-          noteUnreadable & " — this is NOT a missing certificate)"
-        else: ""
-      let detail = u.refName & ": uncovered: " & missing.join("; ") &
-        sigDetail & readDetail
+      let detail = u.refName & ": " & label & ": " &
+        describeCoverageVerdict(verdict) & noneArrived
+      result.outcome = verdict.outcome
       if cfg.gateMode == cgmRequired:
         result.accepted = false
         result.diagnostic = detail
         return
       else:  # advisory — record but accept.
         result.diagnostic = "advisory: " & detail
-    else:
-      # COVERED — and by WHAT. Same reasoning as the lock gate's record: an
-      # acceptance that says nothing is indistinguishable from a gate that
-      # never read the note.
-      result.gated.add(GatewayGateRecord(refName: u.refName,
-        trustedCerts: trusted.len))
 
 proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
                                updates: seq[GatewayRefUpdate]):
@@ -54265,11 +55397,8 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     result.diagnostic = "dry-run: would wire " & repoPath & " -> " &
       result.gatewayDir
     return
-  var cfg = GatewayConfig()
-  # Agents-Push-Gate.md §4.3: the gateway of a workspace checkout also reads
-  # that workspace's certificate store, so a one-ref push is enough.
-  cfg.certificateStoreDir = workspaceRoot / ".repro" / "workspace" /
-    "certificates"
+  # TC-8c (D12): the gateway reads certificates only from pushed notes.
+  let cfg = GatewayConfig()
   let wired = wirePushGateway(gitBin, repoPath, result.gatewayDir,
     result.upstreamUrl, cfg, remoteName)
   if not wired.ok:
@@ -54675,6 +55804,8 @@ proc runGatewayCommand*(args: openArray[string]): int =
   of "pre-receive":
     # Cert gate (TC-5/TC-1) — kept verbatim (HL-5 is ADDITIVE).
     let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg, received)
+    for fault in verdict.carrierFaults:
+      stderr.writeLine("reprobuild gateway: " & fault)
     if verdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & verdict.diagnostic)
     for rec in verdict.gated:
@@ -54682,9 +55813,17 @@ proc runGatewayCommand*(args: openArray[string]): int =
         ": certificate gate: COVERED by " & $rec.trustedCerts &
         " trusted certificate(s) read from the pushed notes object")
     if not verdict.accepted:
-      stderr.writeLine("reprobuild gateway: push REJECTED — no covering " &
-        "test certificate (run 'repro certify' then push). The receiving-" &
-        "side gateway is authoritative; '--no-verify' does not bypass it.")
+      if verdict.outcome == voUnverifiable:
+        stderr.writeLine("reprobuild gateway: push REJECTED — the pushed " &
+          "certificates could not be evaluated (UNVERIFIABLE, see above); " &
+          "fix that — re-running the tests changes nothing. The receiving-" &
+          "side gateway is authoritative; '--no-verify' does not bypass it.")
+      else:
+        stderr.writeLine("reprobuild gateway: push REJECTED — no covering " &
+          "test certificate for the pushed content (run 'repro test', then " &
+          "push the branch together with " & certificateNotesRef & "). The " &
+          "receiving-side gateway is authoritative; '--no-verify' does not " &
+          "bypass it.")
       return 1
     # HL-5 (§6 Decision 3) — the ADDITIVE PUBLIC-TIER lock gate. Runs after the
     # certificate gate; BOTH must pass. It reads the received committed
@@ -55448,6 +56587,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
 
   let (resolved, workspaceLocal) = resolveCheckProject(parsed)
   result.project = resolved.projectName
+  result.certificatePolicy = resolved.certificatePolicy
 
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
@@ -55919,6 +57059,17 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   for obs in observations:
     if not obs.hasGit:
       continue
+    let isIssuingRepo = parsed.issuingForCurrentHead and
+      currentRepoName.len > 0 and obs.name == currentRepoName
+    if not isIssuingRepo:
+      result.closureCheckouts.add(obs.absPath)
+    # TC-8d: when issuance reuses this gate, the current repository's working
+    # tree IS what is being certified. Its modifications are part of the
+    # content the certificate names, so they are not a reason to refuse;
+    # issuance computes that content itself. Every sibling must still be
+    # clean, because nothing in a certificate names a sibling's working tree.
+    if isIssuingRepo:
+      continue
     if not obs.isClean:
       let evidence =
         if obs.cleanDiagnostic.len > 0:
@@ -56144,6 +57295,13 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       # if non-git overrides become disallowed.
       if not discoverGitWorktree(identity, sourcePath).ok:
         continue
+      # TC-8d: an override naming the repository being certified is that
+      # repository, whose working tree is the certified content (stage 1).
+      if parsed.issuingForCurrentHead and parsed.currentRepo.len > 0 and
+          sameFilesystemPath(sourcePath, parsed.currentRepo):
+        continue
+      if sourcePath notin result.closureCheckouts:
+        result.closureCheckouts.add(sourcePath)
       let cleanRes = queryGitState(isCleanQuery(sourcePath), identity)
       if cleanRes.status != gqsOk:
         result.failures.add(CheckFailure(
@@ -56329,6 +57487,17 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # no manifest fragment. Only the genuine "no scope information" verdict
     # (``wholeWorkspace``) keeps the whole-workspace refusal.
     dirtyScopeIsExplicit: not scopeIsWholeWorkspace)
+  if parsed.issuingForCurrentHead and currentRepoName.len > 0:
+    # TC-8d: issuance certifies the current repository's working tree, so its
+    # modifications must not make the lock refresh refuse (stage 1 exempted
+    # it for the same reason). The record still pins its HEAD, which is all a
+    # record-store lock says about it; the tested content is named by the
+    # certificate, not by the lock.
+    if scopeIsWholeWorkspace:
+      for repo in resolved.repos:
+        lockArgs.dirtyScopeNames.incl(repo.name)
+    lockArgs.dirtyScopeNames.excl(currentRepoName)
+    lockArgs.dirtyScopeIsExplicit = true
   lockArgs.triggerRepo = currentRepoName
   lockArgs.triggerRepoPath =
     if currentRepoName.len > 0: parsed.currentRepo
@@ -56425,6 +57594,23 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # RA-7: surface the manifest-layer root so the caller can publish
   # (commit + push) the lock after the gate passes.
   result.recordStoreRoot = recordStoreRoot
+  # TC-8d: certifying the working tree of a repository on an UNBORN branch.
+  # A lock record is keyed by the current repository's commit, and there is
+  # none yet, so there is no record to write or to find. Under decision D8 a
+  # record-store lock is not part of the content anyway: the record is written
+  # after the first commit, as for every commit. The siblings were already
+  # judged clean and published above. Only issuance reaches this; a push
+  # always names a commit.
+  if parsed.issuingForCurrentHead and currentRepoName.len > 0:
+    var currentIsUnborn = false
+    for obs in observations:
+      if obs.name == currentRepoName and obs.hasGit and obs.headSha.len == 0:
+        currentIsUnborn = true
+    if currentIsUnborn:
+      result.lockUpdate.kind = cluNone
+      result.exitCode = 0
+      finalizePoliciesAndParticipation()
+      return
   # RA-1: resolve the latest lock via Git history over the per-repo lock
   # subtree (no shared index). MO-3: this gate read is routed through the
   # ``LockStore`` interface — the git-checkout backend delegates to the
@@ -57447,7 +58633,7 @@ type
     certifyDeferred: bool       ## ``--certify`` requested but TC path not wired.
     certNotesPushed: seq[string]
       ## TC-2: repo paths whose attached certificate notes
-      ## (``refs/notes/reprobuild/certificates``) were carried to the upstream.
+      ## (``certificateNotesRef``) were carried to the upstream.
     certNotesDiagnostic: string ## TC-2: a non-fatal note-push diagnostic.
     lockPublished: bool
     lockDiagnostic: string
@@ -58773,7 +59959,7 @@ proc renderPushTextLines(report: PushReport): seq[string] =
       "test-certificate campaign (not wired yet)")
   if report.certNotesPushed.len > 0:
     result.add("repro push: carried certificate notes " &
-      "(refs/notes/reprobuild/certificates) for " &
+      "(" & certificateNotesRef & ") for " &
       report.certNotesPushed.join(", "))
   if report.certNotesDiagnostic.len > 0:
     result.add("repro push: certificate-notes carry warning — " &
@@ -66569,9 +67755,9 @@ type
     noCertify: bool
       ## ``--no-certify`` was given explicitly (suppress issuance).
     certificateOut: string
-      ## ``--certificate-out=PATH`` — where to write the issued certificate.
-      ## Defaults to ``<workspaceRoot>/.repro/workspace/certificates/
-      ## <commit>-<platform>.toml`` when a workspace is resolvable.
+      ## ``--certificate-out=PATH`` — an explicit EXTRA copy of the issued
+      ## certificate (TC-8c). The certificate itself always goes to the
+      ## standard local certificate store; a path git tracks is refused.
     certWorkspaceRoot: string  ## ``--workspace-root=PATH`` for the gate.
     certCurrentRepo: string    ## ``--current-repo=PATH`` for the gate.
     certTraceDir: string
@@ -66968,24 +68154,85 @@ proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
 
 
 # ---- TC-1 issuance: precondition evaluation + no-op decision ----------------
+#
+# TC-8d: WHAT IS CERTIFIED, AND WHEN IT IS MEASURED.
+#
+# A certificate names the CONTENT of the attested repository's tracked files
+# (test-certificates Standard §2, Content-Id §5), never a commit. So the
+# working tree is certified as it is: tracked edits, added (staged) files and
+# deleted files are part of that content, and a commit that later records
+# exactly that content is covered with no second run (Standard §3.2.2).
+# ``base`` names HEAD for information only, and is omitted on an unborn
+# branch, so the first commit of a repository is certifiable (§3.2.3).
+#
+# Standard §3.2 requires the content id to be the one the commands executed
+# against, so it is computed TWICE: by ``evaluateIssuancePreconditions``
+# before the first test command (a point Unified-Locking-And-Hooks HL-10 can
+# move to after its lock-update node), and by ``confirmTestedState`` after the
+# last one. When the two differ an edit landed during the run, no single state
+# was tested, and the certificate is withheld naming the changed paths.
+#
+# Develop-mode siblings are OUTSIDE the content, so the reused pre-push gate
+# still requires each of them to be clean, published and at the revision the
+# lock pins — the ``repro.lock`` in the tested working tree, not HEAD's, which
+# is what the gate's committed-lock stage reads. ``confirmTestedState``
+# observes them again after the run.
+#
+# Untracked files are outside the content too. ``[certificates]
+# untracked_inputs`` decides what they do (``judgeUntrackedInputs``); the
+# record reports ``untracked = true`` whenever any was present before or after
+# the run.
+#
+# Withholding never changes the run's exit code (Interactive-UX Principle 2):
+# the tests ran, and the producer declines to claim what it could not
+# establish. Every value the record binds — ``content``, ``untracked``,
+# ``base`` — is measured here from git; no flag or argument of ``repro test``
+# or ``repro certify`` supplies one.
+#
+# WHICH ISSUANCE PATHS HAVE A READ SET (D5 / Q5). Established from the code:
+#   * the fixture path (``repro test --fixture-from``, ``runFixtureCmd``) runs
+#     each command as a plain ``sh -c`` child with no filesystem monitor: NO
+#     read set;
+#   * the check-set path (``repro certify --check-set``) is the fixture path
+#     with one generated edge: NO read set;
+#   * ct-incremental traces (``--ct-incremental-trace-dir``) are consulted only
+#     through ``watchTestEdgeDecision``, a skip/re-run verdict computed by the
+#     ``ct`` binary from an EARLIER recording; nothing returns a read set, and
+#     the recording is not of this run: NO read set;
+#   * monitored edges (``repro build`` / plain ``repro test``) DO capture what
+#     each action read (the io-mon depfile the build engine folds), but that
+#     path issues no certificate until TC-8e.
+# So every path that issues today runs with ``noReadSetOnFixturePath``: the
+# default mode issues with ``untracked = true`` and says no read set was
+# captured. ``readSetFromMonitorDepFile`` is the adapter TC-8e's monitored
+# path hands ``judgeUntrackedInputs``.
 
 type
   IssuancePreconditionKind* = enum
     ## Why a certificate can / cannot be issued for the current state.
-    ipOk                ## clean closure + at locked revisions → issuable.
-    ipDirty             ## a repo in the closure has a dirty tree.
-    ipUnpublished       ## a repo in the closure has unpublished HEAD.
-    ipOffLock           ## HEAD differs from the locked revision (lock stale).
+    ipOk                ## siblings clean, published, locked; content known.
+    ipDirty             ## a SIBLING in the closure has a dirty tree.
+    ipUnpublished       ## a sibling in the closure has an unpublished HEAD.
+    ipOffLock           ## a sibling differs from the locked revision.
     ipNoWorkspace       ## not a resolvable workspace → cannot bind to a lock.
     ipNoContentId       ## the tested state has no honest content id
                         ## (Content-Id §3) → nothing a certificate could name.
+    ipNoLockInContent   ## a committed-lock project whose tested content
+                        ## carries no usable ``repro.lock``: no verifier could
+                        ## ever accept the certificate's lock.
     ipGateError         ## the gate raised (IO / resolve / VCS error).
+
+  ClosureCheckoutState* = object
+    ## One sibling checkout as observed: its HEAD and its porcelain status.
+    path*: string
+    head*: string
+    status*: string
+      ## ``git status --porcelain`` output; empty when clean.
 
   IssuancePreconditions* = object
     ## Result of evaluating the issuance preconditions by REUSING the RA-21
-    ## pre-push gate (cleanliness / develop-closure / lock-currency). On
-    ## ``ipOk`` the binding fields (``commit`` of the current repo's HEAD, the
-    ## per-repo lock subtree, ``platform``, and the MEASURED worktree state)
+    ## pre-push gate (sibling cleanliness / develop-closure / lock-currency)
+    ## and measuring the attested repository. On ``ipOk`` the binding fields
     ## are filled. On a non-OK kind, ``offender`` / ``remedy`` carry the
     ## RA-28-style ambient message (Interactive-UX Principle 2).
     ##
@@ -66995,68 +68242,266 @@ type
     ## the repository has to enforce that at ISSUANCE time or not at all.
     kind*: IssuancePreconditionKind
     commit*: string
+      ## HEAD, or "" on an unborn branch.
     lockFilePath*: string
     lockRecordsDir*: string
-      ## The per-repo lock subtree holding the committed lock record for
-      ## ``commit`` — what a verifier resolves the lock IN, now that the
-      ## certificate carries no digest.
+      ## A record-store project's per-repo lock subtree; "" for a project
+      ## whose lock is the committed ``repro.lock`` (then the lock is part of
+      ## the content, and ``evaluateIssuancePreconditions`` requires it there)
+      ## and for a record-store project on an unborn branch, which has no
+      ## record until its first commit (D8).
     platform*: string
     project*: string
     repo*: string
     repository*: string
       ## The checkout whose content the certificate names.
     content*: string
-      ## TC-8b: the content id of the tracked files of ``repository`` as the
-      ## tests will run against them (Content-Id §5, a working tree, computed
-      ## in a temporary index). Under the clean precondition, which is still
-      ## enforced, it equals ``commit``'s tree. Becomes ``vcs.content``.
+      ## The content id of the tracked files of ``repository`` as the tests
+      ## will run against them (Content-Id §5, a working tree, computed in a
+      ## temporary index), taken before the run. Becomes ``vcs.content`` only
+      ## when ``confirmTestedState`` finds the same id after the run.
     base*: string
-      ## ``commit`` again, as the record's informational ``vcs.base``.
+      ## HEAD as the record's informational ``vcs.base``; "" on an unborn
+      ## branch, where the record omits it.
     clean*: bool
-      ## MEASURED: no tracked file differed from ``commit`` at this moment.
-      ## Issuance still REQUIRES it (relaxing that is TC-8d); the record no
-      ## longer carries it, because a certificate names content, not a commit.
+      ## MEASURED: no tracked file differed from HEAD. Informational only —
+      ## a modified working tree is certified as its own content.
     untracked*: bool
-      ## MEASURED: untracked files were present. Separate from ``clean``
-      ## because they mean different things — a modified tracked file means the
-      ## tests ran against something other than ``commit``, while untracked
-      ## files usually mean scratch work but can mean a file the build picked
-      ## up. Both are reported honestly (Standard §3.2).
+      ## MEASURED before the run: untracked, non-ignored files were present.
+    untrackedPaths*: seq[string]
+      ## Those files, repository-relative, sorted.
+    untrackedInputs*: CertificateUntrackedInputs
+      ## The project's ``[certificates] untracked_inputs`` mode.
+    siblings*: seq[ClosureCheckoutState]
+      ## Every sibling checkout the gate judged, observed before the run.
     offender*: string
     remedy*: string
 
+  CapturedReadSet* = object
+    ## The files a test run read, as the RUN captured them. ``captured =
+    ## false`` means no read set exists — never "read nothing".
+    captured*: bool
+    paths*: seq[string]
+      ## Absolute paths of the files read.
+    source*: string
+      ## Where the read set came from, or why there is none.
+
+  UntrackedJudgement* = object
+    withhold*: bool
+    offending*: seq[string]
+      ## Repository-relative untracked paths that caused the withholding.
+    note*: string
+      ## Shown when the certificate is issued with ``untracked = true``
+      ## without a read set to judge by.
+
+  TestedStateWithheld* = enum
+    tswNone = ""
+    tswContentChanged = "the tracked files changed while the tests ran"
+    tswSiblingMoved = "a develop-mode sibling changed while the tests ran"
+    tswNoContentId = "the tested state has no content id"
+    tswUntrackedInput = "the tests' untracked inputs are not certifiable"
+    tswUnobservable = "the tested state could not be observed after the run"
+
+  TestedStateVerdict* = object
+    ## ``confirmTestedState``'s answer: issue (``reason == tswNone``) with the
+    ## measured ``untracked``, or withhold with ``message`` and ``remedy``.
+    reason*: TestedStateWithheld
+    message*: string
+    remedy*: string
+    untracked*: bool
+    untrackedPaths*: seq[string]
+    note*: string
+
+const noReadSetOnFixturePath* = CapturedReadSet(captured: false,
+  source: "the fixture path runs its test commands without the filesystem " &
+    "monitor, so no read set was captured")
+  ## Why every issuing path has no read set today (see the block above).
+
+type SavedOptionalGitLocks = tuple[had: bool; value: string]
+
+proc suspendOptionalGitLocks(): SavedOptionalGitLocks =
+  ## Issuance OBSERVES the user's checkouts; it must never write their
+  ## index. A plain `git status` (the reused pre-push gate runs several, in
+  ## the attested repository and in every sibling) refreshes stale stat data
+  ## and writes the index back when it can take the lock, racing a user who
+  ## stages while `repro test` runs. `GIT_OPTIONAL_LOCKS=0` (git(1),
+  ## `--no-optional-locks`) turns that off for EVERY git the issuance path
+  ## spawns, including ones no call site spells the flag for. Set for the
+  ## observation only, never for the test commands themselves.
+  result = (had: existsEnv("GIT_OPTIONAL_LOCKS"),
+    value: getEnv("GIT_OPTIONAL_LOCKS"))
+  putEnv("GIT_OPTIONAL_LOCKS", "0")
+
+proc restoreOptionalGitLocks(saved: SavedOptionalGitLocks) =
+  if saved.had: putEnv("GIT_OPTIONAL_LOCKS", saved.value)
+  else: delEnv("GIT_OPTIONAL_LOCKS")
+
+proc gitPorcelainRecords(identity: GitToolIdentity; repoRoot: string):
+    tuple[ok: bool; records: seq[string]; diagnostic: string] =
+  ## ``git status --porcelain=v1 -z`` records for ``repoRoot``, every
+  ## untracked file listed on its own. ``--no-optional-locks`` keeps git from
+  ## opportunistically rewriting the user's index while it reads it, and
+  ## ``--no-renames`` keeps each record one path long.
+  let res = gitRunPlainQuery(identity,
+    ["--no-optional-locks", "-C", repoRoot, "status", "--porcelain=v1", "-z",
+     "--no-renames", "--untracked-files=all"])
+  if res.code != 0:
+    return (ok: false, records: @[], diagnostic: "git status --porcelain " &
+      "failed (" & $res.code & "): " & res.diagnostic)
+  result.ok = true
+  for record in res.output.split('\0'):
+    if record.len >= 3:
+      result.records.add(record)
+
 proc observeWorktreeState*(identity: GitToolIdentity; repoRoot: string):
-    tuple[ok: bool; clean: bool; untracked: bool; diagnostic: string] =
-  ## MEASURE ``clean`` and ``untracked`` for a repository, separately.
+    tuple[ok: bool; clean: bool; untracked: bool; diagnostic: string;
+          untrackedPaths: seq[string]] =
+  ## MEASURE ``clean`` and ``untracked`` for a repository, separately, and
+  ## list the untracked files.
   ##
-  ## A producer MUST NOT issue when it did not check for untracked files, and
-  ## issuance still requires a clean tree at HEAD (until TC-8d) — a guess here
-  ## invalidates everything downstream (Standard §3.2). So a failed status
-  ## query is ``ok = false``, never a cheerful "clean".
+  ## A producer MUST NOT issue when it did not check for untracked files
+  ## (Standard §3.2) — a guess here invalidates everything downstream. So a
+  ## failed status query is ``ok = false``, never a cheerful "clean".
   ##
   ## ``--untracked-files=all`` rather than the default: a directory of
-  ## untracked files reports as one entry under ``normal``, and "one entry"
-  ## versus "none" is exactly the distinction being measured.
-  let res = gitRunPlainQuery(identity,
-    ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
-  if res.code != 0:
+  ## untracked files reports as one entry under ``normal``, and each file is
+  ## what the untracked-inputs judgement matches against.
+  let status = gitPorcelainRecords(identity, repoRoot)
+  if not status.ok:
     return (ok: false, clean: false, untracked: false,
-      diagnostic: "git status --porcelain failed (" & $res.code & "): " &
-        res.diagnostic)
-  result = (ok: true, clean: true, untracked: false, diagnostic: "")
-  for rawLine in res.output.splitLines():
-    if rawLine.len < 3: continue
-    if rawLine[0 .. 1] == "??":
+      diagnostic: status.diagnostic, untrackedPaths: @[])
+  result = (ok: true, clean: true, untracked: false, diagnostic: "",
+    untrackedPaths: newSeq[string]())
+  for record in status.records:
+    if record[0 .. 1] == "??":
       result.untracked = true
+      result.untrackedPaths.add(record[3 .. ^1])
     else:
       result.clean = false
+  result.untrackedPaths.sort(system.cmp[string])
+
+proc observeClosureCheckout(identity: GitToolIdentity;
+    path: string): ClosureCheckoutState =
+  ## A sibling's HEAD and porcelain status, for the before/after comparison.
+  ## A query that fails records its diagnostic in place of the answer, so a
+  ## sibling that could not be observed never compares equal to one that was.
+  result.path = path
+  let head = gitRunPlainQuery(identity, ["-C", path, "rev-parse", "HEAD"])
+  result.head =
+    if head.code == 0: head.output.strip()
+    else: "<unobservable: " & head.diagnostic & ">"
+  let status = gitRunPlainQuery(identity,
+    ["--no-optional-locks", "-C", path, "status", "--porcelain=v1"])
+  result.status =
+    if status.code == 0: status.output.strip()
+    else: "<unobservable: " & status.diagnostic & ">"
+
+proc headCommitOrUnborn(identity: GitToolIdentity; repo: string):
+    tuple[ok: bool; commit: string; diagnostic: string] =
+  ## HEAD's commit, or ``commit = ""`` on an unborn branch. ``rev-parse
+  ## --verify -q`` exits 1 quietly when HEAD names no commit; that is an unborn
+  ## branch only when HEAD is a symbolic ref, and anything else (a detached
+  ## HEAD naming a missing object) is a repository git cannot describe.
+  let head = gitRunPlainQuery(identity,
+    ["-C", repo, "rev-parse", "--verify", "-q", "HEAD^{commit}"])
+  if head.code == 0 and head.output.strip().len > 0:
+    return (ok: true, commit: head.output.strip(), diagnostic: "")
+  if head.code == 1:
+    let symbolic = gitRunPlainQuery(identity,
+      ["-C", repo, "symbolic-ref", "-q", "HEAD"])
+    if symbolic.code == 0:
+      return (ok: true, commit: "", diagnostic: "")
+    return (ok: false, commit: "", diagnostic: "HEAD names no commit and " &
+      "is not an unborn branch: " & symbolic.diagnostic)
+  (ok: false, commit: "", diagnostic: "git rev-parse HEAD failed (" &
+    $head.code & "): " & head.diagnostic)
+
+proc canonicalReadPath(path: string): string =
+  ## ``path`` with symbolic links resolved where it exists, so a read
+  ## recorded through a link (``/tmp`` on macOS, a symlinked checkout) is
+  ## placed in the repository git reports by its real path.
+  try:
+    result = expandFilename(path)
+  except OSError:
+    result = os.normalizedPath(absolutePath(path))
+
+proc repositoryRelativePath(root, path: string): string =
+  ## ``path`` relative to ``root`` with ``/`` separators, or "" when it is not
+  ## inside the repository.
+  let base = canonicalReadPath(root)
+  let full = canonicalReadPath(path)
+  if full.len <= base.len + 1 or not full.startsWith(base) or
+      full[base.len] notin {DirSep, AltSep}:
+    return ""
+  full[base.len + 1 .. ^1].replace(DirSep, '/')
+
+proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
+    repositoryRoot: string; untrackedPaths: openArray[string];
+    readSet: CapturedReadSet): UntrackedJudgement =
+  ## The untracked-inputs rule as a pure decision over the repository's
+  ## untracked files (repository-relative, as ``git status`` lists them) and
+  ## the run's read set. It runs nothing and signs nothing.
+  ##
+  ## * ``cuiStrict`` withholds whenever any untracked file exists.
+  ## * ``cuiReadSet`` withholds only for an untracked file the captured read
+  ##   set names. With no read set it issues, and ``note`` says the files
+  ##   could not be judged — it never guesses which files were read.
+  case mode
+  of cuiStrict:
+    result.offending = @untrackedPaths
+    result.withhold = result.offending.len > 0
+  of cuiReadSet:
+    if not readSet.captured:
+      if untrackedPaths.len > 0:
+        result.note = "no read set was captured for this run (" &
+          readSet.source & "), so whether the tests read the untracked " &
+          "files could not be judged; the certificate reports untracked = true"
+      return
+    var seen = initHashSet[string]()
+    for path in readSet.paths:
+      let relative = repositoryRelativePath(repositoryRoot, path)
+      if relative.len == 0:
+        continue
+      for entry in untrackedPaths:
+        if relative == entry and not seen.containsOrIncl(relative):
+          result.offending.add(relative)
+    result.offending.sort(system.cmp[string])
+    result.withhold = result.offending.len > 0
+
+proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
+  ## The files a monitored run read, from the io-mon depfile its capture
+  ## wrote: every path it opened, read, executed or listed. A depfile that is
+  ## missing or unreadable is ``captured = false``, never an empty set.
+  ##
+  ## An incomplete capture still counts: what it observed WAS read, so a hit
+  ## withholds; what it may have missed changes nothing, because without a
+  ## hit the certificate reports ``untracked = true`` either way.
+  var dep: MonitorDepFile
+  try:
+    dep = readMonitorDepFile(path)
+  except CatchableError as err:
+    return CapturedReadSet(captured: false,
+      source: "no usable read set in '" & path & "': " & err.msg)
+  result = CapturedReadSet(captured: true, source: path)
+  var seen = initHashSet[string]()
+  for record in dep.records:
+    if record.path.len == 0:
+      continue
+    if record.observationKind in {moFileOpen, moFileRead, moExecute,
+                                  moDirectoryEnumerate}:
+      if not seen.containsOrIncl(record.path):
+        result.paths.add(record.path)
 
 proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode): IssuancePreconditions =
-  ## REUSE the RA-21 gate: a certificate is issuable EXACTLY when the pre-push
-  ## gate would pass (closure clean + published + at the locked revisions).
-  ## We run the gate logic (NOT the publish side-effect) and translate its
-  ## first failure into an issuance-precondition reason + RA-28-style remedy.
+  ## REUSE the RA-21 gate for the SIBLINGS: a certificate is issuable only
+  ## when the pre-push gate would pass for them (clean + published + at the
+  ## locked revisions). We run the gate logic (NOT the publish side-effect)
+  ## and translate its first failure into an issuance-precondition reason +
+  ## RA-28-style remedy. The current repository is exempt from cleanliness
+  ## and publication: its working tree is what is certified, by content.
+  let savedLocks = suspendOptionalGitLocks()
+  defer: restoreOptionalGitLocks(savedLocks)
   result.platform = currentPlatformTag()
   var parsed = CheckArgs(
     mode: cmPrePush,
@@ -67067,8 +68512,9 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     # TC-3/RA-32 certificate stage when the gate is reused to decide whether a
     # cert is ISSUABLE. The real pre-push hook keeps it enabled.
     skipCertificateGate: true,
-    # Certify BEFORE push (Agents-Push-Gate.md §4.1): the current repo's own
-    # unpublished HEAD is the commit being certified, not a reason to refuse.
+    # Certify BEFORE push and before commit (Agents-Push-Gate.md §4.1,
+    # TC-8d): the current repo's own unpublished HEAD and its working-tree
+    # modifications are what is being certified, not reasons to refuse.
     issuingForCurrentHead: true,
     toolProvisioning:
       if toolProvisioning == tpmUnspecified: tpmPathOnly else: toolProvisioning)
@@ -67087,6 +68533,7 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     result.remedy = "investigate the workspace gate error and retry: " & err.msg
     return
   result.project = report.project
+  result.untrackedInputs = report.certificatePolicy.untrackedInputs
   if report.exitCode != 0 and report.failures.len > 0:
     let f = report.failures[0]
     result.offender = f.repo
@@ -67105,56 +68552,42 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
       # issued and the gate's own remedy is surfaced.
       result.kind = ipOffLock
     return
-  # Gate passed → issuable. Resolve the binding fields.
+  # Gate passed. A record-store project names its lock subtree here; a
+  # committed-lock project names none, and its lock is the ``repro.lock`` in
+  # the content (checked below once the content is known).
   result.lockFilePath = report.lockUpdate.lockFilePath
   result.lockRecordsDir =
     if result.lockFilePath.len > 0: parentDir(result.lockFilePath) else: ""
-  if result.lockRecordsDir.len == 0:
-    # The gate passed but no lock file was resolvable (a workspace with no
-    # lock subtree). Without a committed lock at the attested commit a
-    # verifier's framework-specific step has nothing to resolve, so decline
-    # rather than emit a certificate whose lock can never be checked.
-    result.kind = ipOffLock
-    result.offender = report.project
-    result.remedy = "create a workspace lock first — run 'repro workspace lock'"
-    return
-  # The current repo's HEAD is the commit the certificate binds to.
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
   let repoForHead =
     if currentRepo.len > 0: currentRepo else: parsed.workspaceRoot
-  let headRes = queryGitState(headShaQuery(repoForHead), identity)
-  if headRes.status == gqsOk:
-    result.commit = headRes.headSha
-  if result.commit.len == 0:
-    result.kind = ipOffLock
+  # ``base``: HEAD when there is one; an unborn branch has none, and the
+  # record then omits it (Standard §3.2.3).
+  let head = headCommitOrUnborn(identity, repoForHead)
+  if not head.ok:
+    result.kind = ipGateError
     result.offender = repoForHead
-    result.remedy = "commit your work so the certificate binds to a HEAD commit"
+    result.remedy = "could not read HEAD (" & head.diagnostic &
+      "); no certificate is issued rather than guessing"
     return
-  # MEASURE the two VCS-state fields rather than inferring them from the gate.
-  # The gate's cleanliness predicate is a conjunction ("nothing to report"),
-  # and the record needs the two halves separately and honestly.
+  result.commit = head.commit
+  # MEASURE ``untracked`` (and, for information, ``clean``) rather than
+  # inferring either from the gate.
   let observed = observeWorktreeState(identity, repoForHead)
   if not observed.ok:
     result.kind = ipGateError
     result.offender = repoForHead
-    result.remedy = "could not determine whether the working tree is clean (" &
+    result.remedy = "could not determine the working tree's state (" &
       observed.diagnostic & "); no certificate is issued rather than guessing"
     return
   result.clean = observed.clean
   result.untracked = observed.untracked
-  if not observed.clean:
-    # The clean-at-HEAD precondition is kept until TC-8d relaxes it. The gate
-    # passing does not by itself establish it, so it is checked here on the
-    # measurement rather than assumed.
-    result.kind = ipDirty
-    result.offender = repoForHead
-    result.remedy = "commit or stash the modified tracked files, then re-run"
-    return
-  # TC-8b: the record names the tested CONTENT. Computed by the TC-8a library
-  # over the working tree, in a temporary index, in the algorithm matching the
-  # repository's object format; ``base`` is HEAD, informational only.
+  result.untrackedPaths = observed.untrackedPaths
+  # The record names the tested CONTENT, computed by the TC-8a library over
+  # the working tree, in a temporary index, in the algorithm matching the
+  # repository's object format. A §3 state has no content id and is refused.
   let algorithm = repositoryContentAlgorithm(repoForHead)
   if not algorithm.ok:
     result.kind = ipGateError
@@ -67170,10 +68603,7 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
   of cioNoContentId:
     result.kind = ipNoContentId
     result.offender = repoForHead
-    var remedies: seq[string]
-    for finding in content.findings:
-      remedies.add(remedy(finding))
-    result.remedy = describe(content.findings) & " — " & remedies.join("; ")
+    result.remedy = describe(content.findings)
     return
   of cioCannotCompute, cioFailed:
     result.kind = ipGateError
@@ -67181,6 +68611,20 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     result.remedy = "could not compute the content id of the tested state (" &
       content.reason & "); no certificate is issued rather than guessing"
     return
+  if result.lockRecordsDir.len == 0 and report.recordStoreRoot.len == 0:
+    # A committed-lock project (no lock record store; a record-store project
+    # on an unborn branch names its store but no record yet): the lock the
+    # tests run with is the ``repro.lock`` in the tested content, and a
+    # verifier reads it from there (TC-8b). Content without a usable one yields a certificate no
+    # verifier would accept, so it is not issued.
+    let lock = readLockFromContent(workingTreeUnderEvaluation(repoForHead))
+    if lock.status != licPresent:
+      result.kind = ipNoLockInContent
+      result.offender = repoForHead
+      result.remedy = lock.detail
+      return
+  for path in report.closureCheckouts:
+    result.siblings.add(observeClosureCheckout(identity, path))
   result.repository = repoForHead
   result.content = content.id
   result.base = result.commit
@@ -67189,7 +68633,118 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     else: result.project
   result.kind = ipOk
 
-proc certificateNoOpDecision*(existingCertPath: string;
+proc changedPaths(identity: GitToolIdentity; repository, before,
+                  after: string): seq[string] =
+  ## The paths whose content differs between two ``git-tree-*`` content ids.
+  ## Both trees were written into the repository's object store by the
+  ## content-id computation. Empty when git cannot say.
+  let a = parseContentId(before)
+  let b = parseContentId(after)
+  if a.form != cifWellFormed or b.form != cifWellFormed or
+      a.algorithm == caManifestV1Sha256 or b.algorithm == caManifestV1Sha256:
+    return
+  let res = gitRunPlainQuery(identity, ["-C", repository, "diff-tree", "-r",
+    "-z", "--no-renames", "--name-only", a.digest, b.digest])
+  if res.code != 0:
+    return
+  for path in res.output.split('\0'):
+    if path.len > 0:
+      result.add(path)
+
+proc confirmTestedState*(pre: IssuancePreconditions;
+    readSet: CapturedReadSet): TestedStateVerdict =
+  ## After the last test command: is the state the run started from still
+  ## the state, so that ``pre.content`` is what every command executed
+  ## against (Standard §3.2)? And do the untracked files permit issuing?
+  ##
+  ## Computes the content id again, observes every sibling again, measures
+  ## the untracked files again, and judges them by ``pre.untrackedInputs``.
+  ## Any doubt withholds; nothing here changes a run's exit code.
+  let savedLocks = suspendOptionalGitLocks()
+  defer: restoreOptionalGitLocks(savedLocks)
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  let algorithmName = parseContentId(pre.content).algorithmName
+  let after = computeContentId(pre.repository, workingTreeState(),
+    algorithmName)
+  case after.outcome
+  of cioComputed:
+    discard
+  of cioNoContentId:
+    return TestedStateVerdict(reason: tswNoContentId,
+      message: "when the run concluded, " & describe(after.findings),
+      remedy: "leave the state alone while the tests run, then re-run " &
+        "'repro test'")
+  of cioCannotCompute, cioFailed:
+    return TestedStateVerdict(reason: tswUnobservable,
+      message: "the content id could not be computed again after the run (" &
+        after.reason & ")",
+      remedy: "investigate the git error and re-run 'repro test'; no " &
+        "certificate is issued rather than guessing")
+  if after.id != pre.content:
+    let paths = changedPaths(identity, pre.repository, pre.content, after.id)
+    return TestedStateVerdict(reason: tswContentChanged,
+      message: "their content id was " & pre.content & " before the first " &
+        "test command and " & after.id & " after the last one" &
+        (if paths.len > 0: "; changed: " & paths.join(", ") else: "") &
+        ", so no single state was tested",
+      remedy: "keep tracked files unchanged while the tests run, then re-run " &
+        "'repro test': finish the edit first, and run steps that rewrite " &
+        "tracked files (a formatter, a code generator, a lock refresh) " &
+        "before the tests rather than inside them")
+  for before in pre.siblings:
+    let now = observeClosureCheckout(identity, before.path)
+    if now.head != before.head or now.status != before.status:
+      var what: seq[string]
+      if now.head != before.head:
+        what.add("HEAD moved from " & before.head & " to " & now.head)
+      if now.status != before.status:
+        what.add("its working tree changed (status now: " &
+          (if now.status.len > 0: now.status.replace("\n", "; ")
+           else: "clean") & ")")
+      return TestedStateVerdict(reason: tswSiblingMoved,
+        message: before.path & ": " & what.join("; "),
+        remedy: "leave the develop-mode siblings unchanged while the tests " &
+          "run (finish that work first), then re-run 'repro test'")
+  let observed = observeWorktreeState(identity, pre.repository)
+  if not observed.ok:
+    return TestedStateVerdict(reason: tswUnobservable,
+      message: "untracked files could not be checked after the run (" &
+        observed.diagnostic & ")",
+      remedy: "investigate the git error and re-run 'repro test'; no " &
+        "certificate is issued rather than guessing")
+  # Untracked files present at either point were present during the run.
+  var untrackedPaths = pre.untrackedPaths
+  for path in observed.untrackedPaths:
+    if path notin untrackedPaths:
+      untrackedPaths.add(path)
+  untrackedPaths.sort(system.cmp[string])
+  result.untracked = pre.untracked or observed.untracked
+  result.untrackedPaths = untrackedPaths
+  let judgement = judgeUntrackedInputs(pre.untrackedInputs, pre.repository,
+    untrackedPaths, readSet)
+  if judgement.withhold:
+    result.reason = tswUntrackedInput
+    case pre.untrackedInputs
+    of cuiStrict:
+      result.message = "untracked files exist, and [certificates] " &
+        "untracked_inputs = \"strict\" withholds on any: " &
+        judgement.offending.join(", ")
+      result.remedy = "add each file the tests need ('git add " &
+        judgement.offending.join(" ") & "') and ignore (.gitignore) or " &
+        "delete the rest, then re-run 'repro test'; \"read-set\" withholds " &
+        "only for untracked files a captured read set shows the tests read"
+    of cuiReadSet:
+      result.message = "the tests read untracked files, which are not part " &
+        "of the content a certificate names: " &
+        judgement.offending.join(", ") & " (read set: " & readSet.source & ")"
+      result.remedy = "add the file ('git add " &
+        judgement.offending.join(" ") & "') so its content is part of what " &
+        "is certified, or ignore it (.gitignore) if it is generated or " &
+        "machine-local, then re-run 'repro test'"
+    return
+  result.note = judgement.note
+
+proc certificateNoOpDecision*(existing: openArray[TestCertificate];
     pre: IssuancePreconditions; requestedTargets: seq[string];
     traceDir, projectRoot, cachePath: string): bool =
   ## TC-1 incremental no-op: a re-certify with NO relevant change is a NO-OP —
@@ -67197,9 +68752,9 @@ proc certificateNoOpDecision*(existingCertPath: string;
   ##
   ## The decision is driven by TWO honest signals (both must say "unchanged"):
   ##
-  ##   1. A CONTENT signal: an existing certificate at the output path
-  ##      already covers the content about to be tested (``pre.content``) on
-  ##      this platform for the requested targets. Content binds every tracked
+  ##   1. A CONTENT signal: the certificates the local store already holds
+  ##      for the content about to be tested (``pre.content``, TC-8c) cover
+  ##      it on this platform for the requested targets. Content binds every tracked
   ##      input — the committed lock included — so unchanged content plus a
   ##      covering cert means nothing relevant changed.
   ##   2. The canonical ct-incremental change signal, WHEN a trace dir is
@@ -67209,12 +68764,7 @@ proc certificateNoOpDecision*(existingCertPath: string;
   ##      When no trace dir is supplied (the hermetic-without-the-ct-stack
   ##      case) the decision rests on signal (1) alone — see the milestone
   ##      note on how the test drives this.
-  if not fileExists(existingCertPath):
-    return false
-  var existing: TestCertificate
-  try:
-    existing = readCertificateFile(existingCertPath)
-  except CatchableError:
+  if existing.len == 0:
     return false
   # The content is already computed; the state is described by it rather than
   # computed again.
@@ -67225,7 +68775,7 @@ proc certificateNoOpDecision*(existingCertPath: string;
       [KnownContentId(algorithm: algorithmName, id: pre.content)], pre.repo),
     platform: pre.platform,
     requiredTargets: requestedTargets)
-  let cov = verifyCoverage(@[existing], req)
+  let cov = verifyCoverage(existing, req)
   if not cov.covered:
     return false
   # Signal (1) says unchanged. If a trace dir is wired, also require the
@@ -67257,8 +68807,10 @@ proc issueCertificate*(pre: IssuancePreconditions;
   ##
   ##   * ``vcs.content`` is the content id ``evaluateIssuancePreconditions``
   ##     computed (TC-8a, a temporary index over the working tree) and
-  ##     ``vcs.base`` is HEAD. Issuance still requires a clean tree at HEAD
-  ##     (relaxing that is TC-8d), so the content equals HEAD's tree.
+  ##     ``vcs.base`` is HEAD (omitted on an unborn branch). The working tree
+  ##     need not be clean: its content is what is named, and the caller
+  ##     issues only after ``confirmTestedState`` found the same content after
+  ##     the run and set ``pre.untracked`` to what it measured.
   ##   * PATH SCOPING (``vcs.paths``) is not issued. The standard permits it
   ##     only for a producer that knows what its tests read, and FORBIDS it
   ##     otherwise: "a producer that cannot bound its tests' input set MUST
@@ -67289,13 +68841,22 @@ proc issueCertificate*(pre: IssuancePreconditions;
     if argv.len > 0:
       result.commands.add(TestCertificateCommand(argv: argv))
 
-proc defaultCertificatePath*(workspaceRoot, commit, platform: string): string =
-  ## Default ``--certificate-out`` location: one file per (commit, platform)
-  ## under the workspace's ``.repro`` tree so re-certify finds the prior cert.
-  let safePlatform = platform.replace('/', '-')
-  let safeCommit = if commit.len >= 12: commit[0 ..< 12] else: commit
-  workspaceRoot / ".repro" / "workspace" / "certificates" /
-    (safeCommit & "-" & safePlatform & ".toml")
+proc certificateOutIsTracked*(path: string): string =
+  ## Why ``--certificate-out`` may not name ``path``: "" when it may. A path
+  ## git tracks would put the certificate into the content it attests.
+  let absolute = absolutePath(path)
+  var dir = absolute.parentDir
+  while dir.len > 0 and not dirExists(dir) and dir != dir.parentDir:
+    dir = dir.parentDir
+  if dir.len == 0 or not dirExists(dir):
+    return ""
+  let res = execCmdEx(quoteShellCommand(["git", "-C", dir, "ls-files",
+    "--error-unmatch", "--", absolute]), options = {poUsePath})
+  if res.exitCode == 0:
+    return "git tracks '" & path & "', and a certificate never belongs in " &
+      "the content it attests; the certificate is written to the local " &
+      "certificate store regardless — name a path outside the working tree"
+  ""
 
 # ============================================================================
 # TC-4 — CI fast-track: skip targets covered by a valid certificate per platform.
@@ -67351,115 +68912,110 @@ type
     ## execute. ``advisoryNote`` carries the human-readable trust framing
     ## (e.g. "valid cert present but ci_trust=advisory — re-running").
     platform*: string
+    verdict*: VerificationOutcome
+      ## TC-8c: covered / not-covered / UNVERIFIABLE, reported apart. Under
+      ## unverifiable the targets no evaluated certificate covers are run,
+      ## and ``unevaluated`` says why the rest could not be judged.
     skip*: seq[string]
     run*: seq[string]
-    matchingCerts*: int          ## valid certs matching framework/commit/platform.
+    matchingCerts*: int          ## certificates counted into coverage.
     untrustedCerts*: seq[string] ## why a present-but-untrusted cert was dropped.
+    unevaluated*: seq[string]    ## what could not be evaluated, and why.
     advisoryNote*: string
 
   CiPlan* = object
     ## The whole-project CI fast-track plan: one ``CiPlatformPlan`` per platform
     ## requested (or per required platform when ``--platform`` is omitted),
     ## plus the binding the decision was made against.
+    content*: string
+      ## TC-8c: the content id of the CHECKED-OUT tracked files — what a
+      ## certificate must name to count. "" when the checkout has none (then
+      ## every target runs). A modified checkout binds its own content.
     commit*: string
-    lockRecordsDir*: string
-      ## TC-7: the per-repo lock subtree the lock is resolved IN at the
-      ## attested commit — not a digest, which the record no longer carries.
+      ## HEAD, for information only; never compared with a certificate.
     requiredTargets*: seq[string]
     ciTrust*: CertificateCiTrust
     platforms*: seq[CiPlatformPlan]
+    problems*: seq[string]
+      ## What the certificate search reported (a misattached note, an
+      ## unreadable store root, a record filed under other content).
 
-proc computeCiPlatformPlan*(certs: openArray[TestCertificate];
+proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
                             state: CertificateState;
                             lockSource: ReprobuildLockSource;
                             platform: string;
                             requiredTargets: seq[string];
                             ciTrust: CertificateCiTrust;
-                            keyStore: RegisteredKeyStore): CiPlatformPlan =
-  ## The CORE per-platform decision. Given the certs found for the state under
-  ## evaluation (the commit CI is building) and the project's required
-  ## targets, returns which targets CI can SKIP (covered by a VALID cert for
-  ## ``platform``) and which it must RUN.
+                            keys: RegisteredKeyStoreLoad;
+                            couldNotLook: openArray[string] = []):
+    CiPlatformPlan =
+  ## The CORE per-platform decision. Given the certificates found for the
+  ## state under evaluation (the content CI checked out) and the project's
+  ## required targets, returns which targets CI can SKIP (covered by a VALID
+  ## cert for ``platform``) and which it must RUN.
   ##
   ## SECURITY-CRITICAL: a cert counts ONLY when it is THIS framework's, when
-  ## ``verifyCertificateSignature`` says ``svValid``, when reprobuild's lock
-  ## is valid in the state's content (``lockSource``), and when its content
-  ## matches the state (``certificateMatches`` inside ``verifyCoverage``). A
-  ## forged / unsigned / wrong-key / revoked / other-content / wrong-platform
-  ## / foreign-framework cert is dropped, so it CANNOT move a target into
-  ## ``skip``. The filter is the push gate's, not a second opinion about it.
+  ## its registered signature verifies, when its content matches the state,
+  ## and when reprobuild's lock step passes for the state — the same
+  ## evaluator, with the same three-valued outcome, as the push gate and the
+  ## gateway (``evaluateReprobuildCoverage``). A forged / unsigned / wrong-key
+  ## / revoked / other-content / wrong-platform / foreign-framework cert
+  ## CANNOT move a target into ``skip``.
   result.platform = platform
-  # 1. Filter to TRUSTED certs (this framework's, registered-signed, unrevoked,
-  #    signature verifies), then apply the lock step for the state.
-  var trusted: seq[TestCertificate]
-  for cert in certs:
-    if cert.framework != reprobuildFrameworkId:
-      continue
-    let verdict = verifyCertificateSignature(cert, keyStore)
-    if verdict != svValid:
-      result.untrustedCerts.add(cert.platform & ": " &
-        signatureVerdictReason(verdict, cert.keyId))
-      continue
-    trusted.add(cert)
-  if trusted.len > 0:
-    let lockVerdict = reprobuildLockVerdict(lockSource, state)
-    if lockVerdict.verdict != fvValid:
-      for cert in trusted:
-        result.untrustedCerts.add(cert.platform & ": " & lockVerdict.detail)
-      trusted.setLen(0)
-  # 2. Coverage for THIS platform — the same ``verifyCoverage`` union the gate
-  #    runs (it also enforces the framework/content/platform binding via
-  #    ``certificateMatches``).
-  let req = CoverageRequirement(
-    framework: reprobuildFrameworkId,
-    state: state, platform: platform,
-    requiredTargets: requiredTargets)
-  let cov = verifyCoverage(trusted, req)
-  result.matchingCerts = cov.matchingCerts
-  # 3. Apply the EXPLICIT trust decision. Under ``cctSkip`` a covered required
-  #    target is skipped; under ``cctAdvisory`` nothing is skipped (re-run all)
-  #    but a valid covering cert is surfaced as advisory. ``coveredTargets`` is
-  #    already the union restricted to matching certs, so intersecting with the
-  #    required set yields exactly the skippable targets.
-  let covered = cov.coveredTargets.toHashSet()
+  let verdict = evaluateReprobuildCoverage(found, state, @[platform],
+    requiredTargets, keys, lockSource, couldNotLook)
+  result.verdict = verdict.outcome
+  result.matchingCerts = verdict.contributing
+  result.untrustedCerts = verdict.untrusted
+  result.unevaluated = verdict.unevaluated
+  # Coverage is monotonic (Verification §7.1): what records evaluated end to
+  # end cover is covered, whatever another record left undecided.
+  var covered: seq[string]
+  for c in verdict.coveredByPlatform:
+    for t in c.targets:
+      if t notin covered: covered.add(t)
   for t in requiredTargets:
     if ciTrust == cctSkip and t in covered:
       result.skip.add(t)
     else:
       result.run.add(t)
-  if ciTrust == cctAdvisory and result.matchingCerts > 0:
+  if ciTrust == cctAdvisory and covered.len > 0:
     # A valid cert exists but the project chose advisory: re-run everything,
     # surface the cert as a signal (NOT a skip).
-    let coveredReq = requiredTargets.filterIt(it in covered)
-    if coveredReq.len > 0:
-      result.advisoryNote = "valid certificate covers [" &
-        coveredReq.join(", ") & "] for " & platform &
-        " but ci_trust=advisory — re-running authoritatively (cert is a signal)"
+    result.advisoryNote = "valid certificate covers [" &
+      covered.join(", ") & "] for " & platform &
+      " but ci_trust=advisory — re-running authoritatively (cert is a signal)"
 
 proc renderCiPlanJson*(plan: CiPlan): JsonNode =
-  ## Machine-readable plan a CI job consumes: per platform, the ``skip`` and
-  ## ``run`` target sets plus the binding and trust mode. A CI job runs the
-  ## ``run`` set, skips the ``skip`` set, and (on green) issues a cert for the
-  ## platform covering the run set (see DEFER-TC4-CI-YAML).
+  ## Machine-readable plan a CI job consumes (``reprobuild.ci-plan.v2``): the
+  ## CONTENT the decision is bound to (``commit`` is information only), and
+  ## per platform the verdict and the ``skip`` and ``run`` target sets. A CI
+  ## job runs the ``run`` set, skips the ``skip`` set, and (on green) issues
+  ## a cert for the platform covering the run set (see DEFER-TC4-CI-YAML).
   result = newJObject()
-  result["schema"] = %"reprobuild.ci-plan.v1"
+  result["schema"] = %"reprobuild.ci-plan.v2"
+  result["content"] = %plan.content
   result["commit"] = %plan.commit
-  result["lock_records_dir"] = %plan.lockRecordsDir
   result["ci_trust"] = %($plan.ciTrust)
   result["required_targets"] = %plan.requiredTargets
   var platforms = newJArray()
   for pp in plan.platforms:
     var o = newJObject()
     o["platform"] = %pp.platform
+    o["verdict"] = %($pp.verdict)
     o["skip"] = %pp.skip
     o["run"] = %pp.run
     o["matching_certs"] = %pp.matchingCerts
     if pp.untrustedCerts.len > 0:
       o["untrusted_certs"] = %pp.untrustedCerts
+    if pp.unevaluated.len > 0:
+      o["unevaluated"] = %pp.unevaluated
     if pp.advisoryNote.len > 0:
       o["advisory_note"] = %pp.advisoryNote
     platforms.add(o)
   result["platforms"] = platforms
+  if plan.problems.len > 0:
+    result["problems"] = %plan.problems
 
 type
   TestRunOutcome* = object
@@ -67777,10 +69333,15 @@ proc runFixtureCmd(cmd: seq[string]; cwd: string): tuple[code: int; output: stri
     $epochTime() & "-" & $getCurrentProcessId() & ".log")
   # Build an argv that pipes the original command through ``sh -c`` with
   # explicit stdout/stderr redirection.  When the caller already wraps
-  # in ``sh -c``, we append the redirection to the existing -c body.
+  # in ``sh -c``, the existing -c body is redirected AS A GROUP. Appending
+  # the redirection to the body text attached it to the body's LAST command
+  # only, where it overrode that command's own redirection (a test step
+  # `echo x >> tracked.txt` wrote to the log, not to the file) and where a
+  # trailing `# comment` swallowed it. The newline before `}` ends any such
+  # comment.
   var argv: seq[string] = @[]
   if cmd.len >= 3 and cmd[0] == "sh" and cmd[1] == "-c":
-    let body = cmd[2] & " >'" & logPath & "' 2>&1"
+    let body = "{ " & cmd[2] & "\n} >'" & logPath & "' 2>&1"
     argv = @["sh", "-c", body]
   else:
     var quoted: seq[string] = @[]
@@ -68628,9 +70189,11 @@ proc runReproTestCommand*(args: openArray[string];
     #   1. Evaluate the issuance preconditions by REUSING the RA-21 gate.
     #   2. If a re-certify with NO relevant change → NO-OP (keep the existing
     #      cert, do NOT re-run the tests).
-    #   3. Otherwise run the tests; on a real pass in a clean state, issue a
-    #      certificate; on dirty/unpushed/off-lock, run but withhold the cert
-    #      and print the ambient remedy.
+    #   3. Otherwise run the tests; on a real pass, when the tested state was
+    #      one state (TC-8d: same content before and after, siblings
+    #      unmoved, untracked inputs allowed), issue a certificate naming that
+    #      content; otherwise, or on a dirty/unpushed/off-lock sibling, run
+    #      but withhold the cert and print the ambient remedy.
     if not opts.certify:
       # ``--no-certify``: just run, no issuance.
       var outcome: TestRunOutcome
@@ -68643,28 +70206,38 @@ proc runReproTestCommand*(args: openArray[string];
       stderr.writeLine("repro test: no certificate — pass --workspace-root " &
         "(and --current-repo) so the run can be bound to a committed lock")
       return code
+    # TC-8c: ``--certificate-out`` is an explicit EXTRA copy; the certificate
+    # itself always goes to the standard local store. A copy inside the
+    # working tree would change the content it attests, so a path git tracks
+    # is refused before anything runs.
+    if opts.certificateOut.len > 0:
+      let tracked = certificateOutIsTracked(opts.certificateOut)
+      if tracked.len > 0:
+        stderr.writeLine("repro test: refusing --certificate-out=" &
+          opts.certificateOut & ": " & tracked)
+        return 1
     let pre = evaluateIssuancePreconditions(
       opts.certWorkspaceRoot, opts.certCurrentRepo, opts.toolProvisioning)
-    let certOut =
-      if opts.certificateOut.len > 0: opts.certificateOut
-      elif pre.kind == ipOk:
-        defaultCertificatePath(opts.certWorkspaceRoot, pre.commit, pre.platform)
-      else: ""
     # Requested targets = the selectors the fixture will run (the covered set
     # a re-certify must already cover for the no-op to hold).
     let requestedTargets = fixtureSelectors(opts)
-    # No-op check BEFORE running: only meaningful when issuable + a prior cert.
-    if pre.kind == ipOk and certOut.len > 0:
+    # No-op check BEFORE running: only meaningful when issuable. The existing
+    # certificates are the ones the local store holds for the content about
+    # to be tested (both roots).
+    if pre.kind == ipOk:
       let projectRoot =
         if opts.certCurrentRepo.len > 0: opts.certCurrentRepo
         else: opts.certWorkspaceRoot
       let cachePath = defaultCachePath(projectRoot)
-      if certificateNoOpDecision(certOut, pre, requestedTargets,
-          opts.certTraceDir, projectRoot, cachePath):
-        stderr.writeLine("repro test: re-certify is a no-op — the existing " &
-          "certificate at " & certOut & " already covers " &
-          $pre.commit & " on " & pre.platform & " (no relevant change; " &
-          "tests not re-run)")
+      let algorithmName = parseContentId(pre.content).algorithmName
+      let existing = findCertificatesInLocalStore(stateWithKnownContent(
+        [KnownContentId(algorithm: algorithmName, id: pre.content)]))
+      if certificateNoOpDecision(existing.certificates, pre,
+          requestedTargets, opts.certTraceDir, projectRoot, cachePath):
+        stderr.writeLine("repro test: re-certify is a no-op — a certificate " &
+          "in the local store (" & existing.searched.join(", ") & ") " &
+          "already covers content " & pre.content & " on " & pre.platform &
+          " (no relevant change; tests not re-run)")
         return 0
     # Run the tests (real result captured in ``outcome``).
     var outcome: TestRunOutcome
@@ -68673,11 +70246,12 @@ proc runReproTestCommand*(args: openArray[string];
     if pre.kind != ipOk:
       let label =
         case pre.kind
-        of ipDirty: "working tree dirty"
+        of ipDirty: "a develop-mode sibling's working tree is dirty"
         of ipUnpublished: "dependency has unpushed commits"
         of ipOffLock: "repo not at the locked revision"
         of ipNoWorkspace: "not a workspace"
         of ipNoContentId: "the tested state has no content id"
+        of ipNoLockInContent: "the tested content carries no usable lock"
         of ipGateError: "workspace gate error"
         of ipOk: ""
       stderr.writeLine("repro test: no certificate — " & label &
@@ -68687,10 +70261,23 @@ proc runReproTestCommand*(args: openArray[string];
       stderr.writeLine("repro test: no certificate — the run did not pass " &
         "(result is not 'passed'); fix the failing targets and re-run")
     else:
+      # TC-8d: one tested state. The content id, the siblings and the
+      # untracked files are measured again now that the last command ran;
+      # the certificate names ``pre.content`` only if it is still the state.
+      # This path captures no read set (see ``noReadSetOnFixturePath``).
+      let tested = confirmTestedState(pre, noReadSetOnFixturePath)
+      if tested.reason != tswNone:
+        stderr.writeLine("repro test: no certificate — " & $tested.reason &
+          ": " & tested.message & " — " & tested.remedy)
+        return code
+      if tested.note.len > 0:
+        stderr.writeLine("repro test: " & tested.note)
+      var confirmed = pre
+      confirmed.untracked = tested.untracked
       # The attested commands are the argument vectors this run ACTUALLY
       # executed, in execution order — captured by the runner, never
       # reconstructed from the flags.
-      var cert = issueCertificate(pre, outcome.passedTargets,
+      var cert = issueCertificate(confirmed, outcome.passedTargets,
         outcome.commands, "repro-test@" & issuerHostTag())
       if cert.commands.len == 0:
         # A certificate recording no command asserts nothing, and the standard
@@ -68712,11 +70299,30 @@ proc runReproTestCommand*(args: openArray[string];
         stderr.writeLine("repro test: no certificate — the daemon could not " &
           "sign it (" & err.msg & "); the attestation is withheld")
         return code
-      writeCertificateFile(cert, certOut)
+      # TC-8c (D1, D1a): DELIVER it to the standard local store's USER root.
+      # This process runs as the user; nothing here writes the system root.
+      # Signing is in-process today (DEFER-TC5-PRIV-DAEMON); a privileged
+      # signer will return the certificate to this same client code.
+      let delivered = publishCertificateToLocalStore(cert, pre.repository)
+      if delivered.error.len > 0:
+        stderr.writeLine("repro test: no certificate — it was issued but " &
+          "could not be written to the local certificate store: " &
+          delivered.error)
+        return code
+      if delivered.retentionProblem.len > 0:
+        stderr.writeLine("repro test: " & delivered.retentionProblem)
+      for problem in delivered.pruned.errors:
+        stderr.writeLine("repro test: local certificate store prune: " &
+          problem)
+      if opts.certificateOut.len > 0:
+        writeCertificateFile(cert, opts.certificateOut)
       stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
         " covering [" & outcome.passedTargets.join(", ") & "] for " &
-        cert.platform & " for content " & cert.vcs.content & " (base " &
-        cert.vcs.base & ") → " & certOut &
+        cert.platform & " for content " & cert.vcs.content &
+        (if cert.vcs.base.len > 0: " (base " & cert.vcs.base & ")"
+         else: " (unborn branch: no base)") & " → " & delivered.path &
+        (if opts.certificateOut.len > 0: " (copy: " & opts.certificateOut &
+           ")" else: "") &
         " (signed " & certificateSignatureAlgorithm & ", key_id=" &
         cert.keyId & ")")
     return code
@@ -68749,15 +70355,20 @@ proc runCertifyCheckSet*(args: openArray[string];
   ##
   ## Runs the repository's pre-commit check set as ONE certifiable target
   ## (``pre-commit``) through the ordinary issuance path, so every TC rule
-  ## holds unchanged: a clean tree, published siblings at their locked
-  ## revisions, a real passing run, a daemon signature, and the idempotent
-  ## no-op when a covering certificate already exists. The current repo's own
-  ## HEAD need not be published (§4.1). On success the certificate is in the
-  ## workspace store (which a local gateway reads, §4.3) and is attached to
-  ## ``refs/notes/reprobuild/certificates`` so a forward carries it upstream.
+  ## holds unchanged: clean, published siblings at their locked revisions, a
+  ## real passing run, one tested state, a daemon signature, and the
+  ## idempotent no-op when a covering certificate already exists. The current
+  ## repository need be neither published (§4.1) nor committed (TC-8d): its
+  ## working tree is certified by content, and a check set that rewrites a
+  ## tracked file mid-run (an autofix) changes that content, so nothing is
+  ## issued. On success the certificate is in the
+  ## standard local certificate store (TC-8c) and is attached, keyed by the
+  ## tree it names, to ``certificateNotesRef`` so a push carries it to the
+  ## gateway and a forward carries it upstream.
   ##
-  ## Exit: 0 = a covering certificate exists for HEAD; 2 = the check set
-  ## failed or the state is not certifiable (the reason is printed);
+  ## Exit: 0 = a covering certificate exists for the working tree; 2 = the
+  ## check set failed or the state is not certifiable (the reason is
+  ## printed);
   ## 1 = usage or tooling error.
   var currentRepo, workspaceRoot, commandOverride: string
   var passThrough: seq[string]
@@ -68803,8 +70414,8 @@ proc runCertifyCheckSet*(args: openArray[string];
       "nor pre-commit is on PATH); pass --check-set-command=SHELL")
     return 1
   # The run's working files (fixture, test-logs/) go to a scratch directory,
-  # never the repository: a check set that dirtied the tree it certifies
-  # would make its own push fail the clean-tree gate.
+  # never the repository: files the run itself wrote there would be
+  # untracked files beside the content being certified.
   let scratch = createTempDir("repro-certify-check-set-", "")
   defer: removeDir(scratch)
   var edge = newJObject()
@@ -68830,40 +70441,54 @@ proc runCertifyCheckSet*(args: openArray[string];
   let code =
     try: runReproTestCommand(testArgs, publicCliPath)
     finally: setCurrentDir(previousDir)
-  let head = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(currentRepo) &
-    " rev-parse HEAD")
-  if head.exitCode != 0:
-    stderr.writeLine("repro certify --check-set: cannot read HEAD of " &
-      currentRepo)
-    return 1
-  let commit = head.output.strip()
-  let certPath = defaultCertificatePath(workspaceRoot, commit,
-    currentPlatformTag())
-  if code != 0 or not fileExists(certPath):
-    stderr.writeLine("repro certify --check-set: NO certificate for " &
-      commit & " — " &
+  # TC-8d: the working tree is what was certified, modified or not. The
+  # issued certificate is in the local store under the content id of the
+  # tracked files as they are now — the tested state, when issuance found it
+  # unchanged after the run. A check set that rewrote a tracked file (an
+  # autofix) changed that content, so issuance withheld and nothing is found.
+  let evaluated = workingTreeUnderEvaluation(currentRepo)
+  let lookup = findCertificatesInLocalStore(evaluated)
+  var cert: TestCertificate
+  var certPath = ""
+  for f in lookup.found:
+    if f.read.status != crsOk: continue
+    let c = f.read.cert
+    if c.framework == reprobuildFrameworkId and
+        c.platform == currentPlatformTag() and checkSetTarget in c.targets and
+        c.isSigned:
+      cert = c
+      certPath = f.name
+      break
+  if code != 0 or certPath.len == 0:
+    stderr.writeLine("repro certify --check-set: NO certificate for the " &
+      "working tree of " & currentRepo & " — " &
       (if code != 0: "the check set failed (output above)"
        else: "the state is not certifiable (reason above)"))
+    for problem in lookup.problems:
+      stderr.writeLine("repro certify --check-set: " & problem)
     return 2
-  let cert = readCertificateFile(certPath)
-  if checkSetTarget notin cert.targets:
-    stderr.writeLine("repro certify --check-set: the certificate at " &
-      certPath & " does not cover '" & checkSetTarget & "'")
-    return 2
-  # Attach once: a re-certify that was a no-op must not append a duplicate.
+  # Attach once, keyed by the tree its content names on the shared notes ref
+  # (D10, D12): a re-certify that was a no-op must not append a duplicate.
+  let noteKey = certificateNoteKey(cert.vcs.content)
+  if not noteKey.ok:
+    stderr.writeLine("repro certify --check-set: certificate issued at " &
+      certPath & " but its content id names no tree to note it on: " &
+      noteKey.problem)
+    return 1
   var alreadyAttached = false
-  for existing in readAttachedCertificates(gitBin, currentRepo, commit):
+  for existing in readAttachedCertificates(gitBin, currentRepo, noteKey.oid):
     if existing.signature.value == cert.signature.value:
       alreadyAttached = true
   if not alreadyAttached:
-    let att = attachCertificate(gitBin, currentRepo, commit, cert)
+    let att = attachCertificate(gitBin, currentRepo, cert)
     if not att.ok:
       stderr.writeLine("repro certify --check-set: certificate issued at " &
         certPath & " but attaching it as a git note failed: " &
         att.diagnostic)
       return 1
-  stderr.writeLine("repro certify --check-set: " & commit[0 ..< 12] &
-    " is certified for '" & checkSetTarget & "' on " & cert.platform &
+  stderr.writeLine("repro certify --check-set: content " &
+    cert.vcs.content & " is certified for '" & checkSetTarget & "' on " &
+    cert.platform &
     " (" & certPath & ")")
   0
 
@@ -68872,13 +70497,16 @@ proc runCertifyCheckSet*(args: openArray[string];
 # --------------------------------------------------------------------
 #
 # `repro ci plan [--platform=P ...] [--json]` resolves the project's certificate
-# policy + the (commit, lock) binding the certs must match, reads the certs
-# attached to HEAD (TC-2 git-notes carrier), and emits the per-platform SKIP/RUN
-# plan a CI job consumes. The decision REUSES the TC-5 signature verifier + the
-# TC-1 coverage union (via ``computeCiPlatformPlan``) so the CI trust boundary is
-# byte-for-byte the push gate's: only a registered-signed, unrevoked,
-# commit+lock+platform-matching cert can move a target into SKIP, and only when
-# the project explicitly set ``ci_trust = "skip"``.
+# policy and the CONTENT the certs must name (TC-8c: the checked-out tracked
+# files, modified or not), reads the certs noted on that content's tree (after
+# the job fetched the notes ref) and those in the local certificate store, and
+# emits the per-platform SKIP/RUN plan (``reprobuild.ci-plan.v2``) a CI job
+# consumes. The decision REUSES the push gate's evaluator
+# (``evaluateReprobuildCoverage``) so the CI trust boundary is the push gate's:
+# only a registered-signed, unrevoked, content+lock+platform-matching cert can
+# move a target into SKIP, and only when the project explicitly set
+# ``ci_trust = "skip"``. A synthesized PR merge commit has a different tree
+# from the developer's commit, so it is not covered.
 #
 # HOW A CI JOB CONSUMES THE PLAN (the external-YAML deferral, DEFER-TC4-CI-YAML):
 # a CI workflow runs `repro ci plan --platform=$RUNNER_PLATFORM --json`, runs the
@@ -68940,68 +70568,119 @@ proc runCiPlanCommand(args: openArray[string]): int =
   if policy.requiredTargets.len == 0:
     stderr.writeLine("repro ci plan: project declares no required_targets — " &
       "nothing to plan (CI runs its own targets normally)")
-  # Resolve the binding the certs must match. We REUSE the issuance-precondition
-  # evaluator so the binding is IDENTICAL to what issuance and the push gate
-  # bind to (the HEAD commit, plus the per-repo lock subtree the lock is
-  # resolved IN at that commit). When the state is not issuable (dirty /
-  # off-lock / no lock), there is no trustworthy binding, so NOTHING is
-  # skipped — CI runs everything (fail-safe).
-  let pre = evaluateIssuancePreconditions(
-    parsed.workspaceRoot, parsed.currentRepo, parsed.toolProvisioning)
-  var commit = pre.commit
-  var lockRecordsDir = pre.lockRecordsDir
-  var bindingNote = ""
-  if pre.kind != ipOk:
-    commit = ""
-    lockRecordsDir = ""
-    bindingNote = "no trustworthy commit binding (" &
-      (if pre.remedy.len > 0: pre.remedy else: "state not issuable") &
-      ") — running every target"
-  # Read the certs attached to HEAD (TC-2). With no binding we have nothing to
-  # match against, so the trusted-cert set is empty and every target runs.
-  var attached: seq[TestCertificate]
+  # TC-8c: the binding is the CONTENT CI checked out, not a commit. A
+  # certificate issued before the commit — or in another clone — covers it
+  # when it names that content; a modified checkout binds its own content, so
+  # "dirty" is no longer a reason to run everything. The issuance-precondition
+  # evaluator is consulted only for the project's lock source: a project that
+  # opted into a lock record store has its lock resolved at the checked-out
+  # commit (record-store lock subtree); otherwise the committed repro.lock is
+  # read from the content itself.
   let certRepoPath =
     if parsed.currentRepo.len > 0: parsed.currentRepo
     else: parsed.workspaceRoot
-  # TC-8b: certificates are matched against the CONTENT of the commit CI is
-  # building; the lock step reads the committed ``repro.lock`` from that
-  # content unless the project opted into a lock record store.
-  let evaluated = commitUnderEvaluation(certRepoPath, commit)
+  let pre = evaluateIssuancePreconditions(
+    parsed.workspaceRoot, parsed.currentRepo, parsed.toolProvisioning)
   let lockSource =
-    if lockRecordsDir.len > 0: recordStoreLockSource(lockRecordsDir)
+    if pre.lockRecordsDir.len > 0: recordStoreLockSource(pre.lockRecordsDir)
     else: committedLockSource()
-  if commit.len > 0:
-    let identity = ensureGitToolResolvable(
-      if parsed.toolProvisioning == tpmUnspecified: tpmPathOnly
-      else: parsed.toolProvisioning, getEnv("PATH"))
-    attached = readAttachedCertificates(identity.binaryPath, certRepoPath, commit)
-  let keyStore = readRegisteredKeyStore(
-    registeredKeyStorePath(parsed.workspaceRoot))
-  var plan = CiPlan(
-    commit: commit, lockRecordsDir: lockRecordsDir,
-    requiredTargets: policy.requiredTargets,
+  let identity = ensureGitToolResolvable(
+    if parsed.toolProvisioning == tpmUnspecified: tpmPathOnly
+    else: parsed.toolProvisioning, getEnv("PATH"))
+  var plan = CiPlan(requiredTargets: policy.requiredTargets,
     ciTrust: policy.ciTrust)
+  let headRes = queryGitState(headShaQuery(certRepoPath), identity)
+  if headRes.status == gqsOk:
+    plan.commit = headRes.headSha
+  var bindingNote = ""
+  var evaluated: CertificateState = nil
+  let format = repositoryContentAlgorithm(certRepoPath)
+  if not format.ok:
+    bindingNote = "no content binding (" & format.failure &
+      ") — running every target"
+  else:
+    let worktree = workingTreeUnderEvaluation(certRepoPath)
+    let content = stateContentId(worktree, $format.algorithm, [])
+    case content.outcome
+    of cioComputed:
+      plan.content = content.id
+      evaluated = worktree
+      # An unmodified checkout IS its commit: evaluate it as the commit, so a
+      # record-store project's lock resolves at that commit (D8 evaluates it
+      # only at a commit). The content id is the same either way.
+      if plan.commit.len > 0:
+        let atHead = commitUnderEvaluation(certRepoPath, plan.commit)
+        let headId = stateContentId(atHead, $format.algorithm, [])
+        if headId.outcome == cioComputed and headId.id == content.id:
+          evaluated = atHead
+    of cioNoContentId:
+      bindingNote = "the checkout has no content id (" &
+        describe(content.findings) & ") — running every target"
+    of cioCannotCompute, cioFailed:
+      bindingNote = "no content binding (" & content.reason &
+        ") — running every target"
+  # Find the candidates: the notes on the content's tree (after the job
+  # fetched the notes ref) and the local certificate store.
+  var found: seq[FoundCertificate]
+  var couldNotLook: seq[string]
+  if evaluated != nil:
+    var seen: seq[string]
+    proc addFound(f: FoundCertificate) =
+      let key =
+        if f.read.status == crsOk: serializeCertificateToToml(f.read.cert)
+        else: f.name & "\0" & f.read.detail
+      if key notin seen:
+        seen.add(key)
+        found.add(f)
+    let key = certificateNoteKey(plan.content)
+    if key.ok:
+      let noted = readNotedCertificates(identity.binaryPath, certRepoPath,
+        key.oid, certificateNotesRef)
+      if noted.status == gorUnreadable:
+        couldNotLook.add("certificate-note-unreadable: " & noted.diagnostic)
+        plan.problems.add(noted.diagnostic)
+      for fault in noted.framingFaults & noted.misattached:
+        plan.problems.add("carrier fault: " & fault)
+      for f in noted.found:
+        addFound(f)
+    let stored = findCertificatesInLocalStore(evaluated)
+    for problem in stored.problems:
+      plan.problems.add(problem)
+    if stored.searchFailed:
+      for problem in stored.problems:
+        couldNotLook.add(problem)
+    for f in stored.found:
+      addFound(f)
+  let keys = readRegisteredKeyStoreChecked(
+    registeredKeyStorePath(parsed.workspaceRoot))
   for platform in planPlatforms:
     var pp =
-      if commit.len == 0:
+      if evaluated == nil:
         # No binding ⇒ run the full required set on this platform.
-        CiPlatformPlan(platform: platform, run: policy.requiredTargets)
+        CiPlatformPlan(platform: platform, verdict: voNotCovered,
+          run: policy.requiredTargets)
       else:
-        computeCiPlatformPlan(attached, evaluated, lockSource, platform,
-          policy.requiredTargets, policy.ciTrust, keyStore)
+        computeCiPlatformPlan(found, evaluated, lockSource, platform,
+          policy.requiredTargets, policy.ciTrust, keys, couldNotLook)
     if bindingNote.len > 0 and pp.advisoryNote.len == 0:
       pp.advisoryNote = bindingNote
     plan.platforms.add(pp)
   if parsed.json:
     echo renderCiPlanJson(plan).pretty()
   else:
-    echo "ci plan @ " & (if commit.len >= 12: commit[0 ..< 12]
-                         else: "<no-binding>") &
+    echo "ci plan @ " &
+      (if plan.content.len > 0: plan.content else: "<no-binding>") &
+      (if plan.commit.len >= 12: " (HEAD " & plan.commit[0 ..< 12] & ")"
+       else: "") &
       "  ci_trust=" & $policy.ciTrust
     for pp in plan.platforms:
-      echo "  " & pp.platform & ":  skip=[" & pp.skip.join(", ") &
-        "]  run=[" & pp.run.join(", ") & "]" &
-        (if pp.advisoryNote.len > 0: "  (" & pp.advisoryNote & ")" else: "")
+      echo "  " & pp.platform & ":  " & $pp.verdict & "  skip=[" &
+        pp.skip.join(", ") & "]  run=[" & pp.run.join(", ") & "]" &
+        (if pp.advisoryNote.len > 0: "  (" & pp.advisoryNote & ")" else: "") &
+        (if pp.unevaluated.len > 0: "  (could not be evaluated: " &
+           pp.unevaluated.join("; ") & ")" else: "")
+    for problem in plan.problems:
+      echo "  note: " & problem
   return 0
 
 proc runCiCommand(args: openArray[string]): int =
@@ -69684,10 +71363,20 @@ proc tryLoadDurableSolverProviderArtifacts(
       providerArtifactPath, modulePath, providerBinaryPath,
       interfaceArtifact.interfaceFingerprint, compileWorkDir)
     if provider.isNone:
-      let providerAction = providerCompileBuildAction(plan,
-        modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
-        outDir / "provider-work")
+      # The edge the build ran: recipe-relative where it could be
+      # (`runProviderCompileEdge`), whose record is keyed by the recipe-relative
+      # plan, not by the caller's.
+      let helperCliPath = internalReproHelperCliPath(publicCliPath)
+      let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
+        helperCliPath, compileWorkDir, projectRootForModule(modulePath))
+      let providerAction =
+        if relocated.active:
+          recipeRelativeProviderCompileAction(relocated, modulePath,
+            helperCliPath, compileWorkDir)
+        else:
+          providerCompileBuildAction(plan,
+            modulePath, interfacePath, providerArtifactPath,
+            helperCliPath, compileWorkDir, outDir / "provider-work")
       let validation = runBuild(graph([providerAction]), BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
@@ -69854,10 +71543,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
         let plan = providerCompilePlan(modulePath, providerBinaryPath,
           artifact.interfaceFingerprint, compileWorkDir, scratchDir)
         invalidateStaleProviderCompileArtifact(plan, providerArtifactPath)
-        let compileAction = providerCompileBuildAction(plan,
+        # The provider runs below with its cwd at the project directory.
+        let providerRoot =
+          if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
+        let compiled = runProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
-          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir)
-        let compiled = runBuild(graph([compileAction]), BuildEngineConfig(
+          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir,
+          providerRoot, BuildEngineConfig(
           cacheRoot: cacheRoot,
           actionCacheRoot: currentActionCacheRoot(),
           runQuotaCliPath: publicCliPath,
@@ -78678,6 +80370,10 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro test: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len > 0 and args[0] == "certificates":
+    # TC-9a: list the project's named certificates, or the
+    # certificate-producing nodes a plan materializes.
+    return runCertificatesCommand(args[1 .. ^1], publicCliPath)
   if programName == "repro" and args.len > 0 and args[0] == "certify":
     # TC-1: ``repro certify`` is the explicit "run the full required set to
     # obtain a certificate" form — an alias for ``repro test --certify``

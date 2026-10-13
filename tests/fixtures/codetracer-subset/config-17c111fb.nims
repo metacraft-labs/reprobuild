@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# f8781d4b5514ee9bbcdee0de701dc4bd8090a061, config.nims.
-# Source: https://github.com/metacraft-labs/codetracer/blob/f8781d4b5514ee9bbcdee0de701dc4bd8090a061/config.nims
+# 17c111fb280214f6d331f1bafd560989b6bd509b, config.nims.
+# Source: https://github.com/metacraft-labs/codetracer/blob/17c111fb280214f6d331f1bafd560989b6bd509b/config.nims
 #
 # Keep every byte after this provenance header identical to the public source.
 import std/[os, strutils]
@@ -54,6 +54,7 @@ addPathIfDir(getEnv("ISONIM_TUI_SRC"))
 addPathIfDir(workspaceRoot / "isonim-gpui/src")
 addPathIfDir(getEnv("ISONIM_GPUI_SRC"))
 addPathIfDir(workspaceRoot / "nim-termctl/src")
+addPathIfDir(getEnv("NIM_TERMCTL_SRC"))
 addPathIfDir(workspaceRoot / "nim-pty/src")
 addPathIfDir(workspaceRoot / "nim-everywhere/src")
 addPathIfDir(workspaceRoot / "nim-acp/src")

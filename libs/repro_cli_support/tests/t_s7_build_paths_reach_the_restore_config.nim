@@ -105,6 +105,14 @@ proc configSites(source: string): seq[ConfigSite] =
 #
 # If a future change makes one of them a build path, deleting its name here
 # is the reviewable one-line statement of that.
+#
+# The interface-extract edge has since answered the restore question for
+# itself, unconditionally and for its recipe-relative arm only: its outputs
+# live in one directory shared by records that differ in their observed
+# environment, so a record that cannot restore its own bytes there re-runs
+# on every switch between them (reprobuild-specs issues/2026-10-12-interface-
+# extraction-variants-of-one-recipe-overwrite-each-others-outputs.md). That is
+# not the build-path opt-in this file audits, and it stays listed here.
 const NonBuildPathConfigVariables = [
   "edgeConfig",                 # __repro_interface_extract
   "cmakeRegenerationConfig",    # CMake regeneration edge

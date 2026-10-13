@@ -1292,7 +1292,7 @@ type
       ## for its own" contribution). Derived attribution from a peer, not an
       ## observation this engine made.
 
-  ObservedPathChannel* = distinct seq[string]
+  ObservedPathChannel* = object
     ## DA-1f — one of the FIVE OBSERVED channels of `PathSetEvidence`, which
     ## are exactly the five terms of the zero-evidence guard in
     ## `applyMonitorEvidenceStatus`.
@@ -1331,12 +1331,13 @@ type
     ## report's own mark. That is fixed where it was caused, in
     ## `addPathSet`; see `evcEmptyToolDepfileReport`.
     ##
-    ## `distinct` is what closes that. The only append is `observe` (and its
-    ## bulk form `observeAll`), which REQUIRES an `EvidenceContributor` and
-    ## `incl`s it into the evidence's `evidenceProvenance` before it appends
-    ## anything. There is no unmarked append to write, so the zero-evidence
-    ## guard's question — "did anything LOOK at this action" — can no longer
-    ## be answered accidentally by a writer that never looked.
+    ## AN OBJECT WITH AN UNEXPORTED FIELD is what closes that. The only
+    ## append is `observe` (and its bulk form `observeAll`), which REQUIRES
+    ## an `EvidenceContributor` and `incl`s it into the evidence's
+    ## `evidenceProvenance` before it appends anything. There is no unmarked
+    ## append to write, so the zero-evidence guard's question — "did anything
+    ## LOOK at this action" — can no longer be answered accidentally by a
+    ## writer that never looked.
     ##
     ## A COMPILE ERROR, NOT A TEST, for the same reason
     ## `DepfileObservingContributors` is an exhaustive `case` and not a set
@@ -1344,31 +1345,91 @@ type
     ## test, and the construction catches the ones nobody has written yet.
     ##
     ## WHAT THAT COMPILE ERROR SAYS, because an error nobody can act on is
-    ## half a guard. The `distinct` alone refuses `channel.add(p)` with a type
+    ## half a guard. The type alone refuses `channel.add(p)` with a type
     ## mismatch that names the field and its type but NOT the right spelling —
     ## `observe` is not an `add` overload, so it never enters the candidate
     ## list and the compiler cannot suggest it. The `{.error.}` `add` overload
     ## beside `observe` supplies the name. It covers the likeliest wrong
     ## spelling only; the remaining ones are listed in the next paragraph.
     ##
-    ## WHAT IS STILL EXPRESSIBLE, recorded rather than claimed away: Nim
-    ## allows the explicit conversion `ObservedPathChannel(@[p])` from
-    ## anywhere, so a determined writer can still replace a channel wholesale.
-    ## That is a deliberate, greppable act rather than an ordinary `.add`, and
-    ## the tree contains no instance of it outside this module — measured,
-    ## `git grep 'ObservedPathChannel('` is four hits, three of them these
-    ## doc comments and the fourth `dropObserved`'s own
-    ## `ObservedPathChannel(kept)` a few hundred lines below. Closing it
-    ## completely wants an object with a private field.
+    ## WHAT IS NO LONGER EXPRESSIBLE, and why this type is an object rather
+    ## than the `distinct seq[string]` it was until `d448ab99`. A `distinct`
+    ## closes `.add` and whole-channel assignment, but Nim permits the
+    ## explicit conversion `ObservedPathChannel(@[p])` from ANY module, so a
+    ## determined writer could still replace a channel wholesale and buy the
+    ## publish that way. An object closes it: there is no conversion from
+    ## `seq[string]` to an object type at all, and the field-initializer
+    ## spelling `ObservedPathChannel(entries: @[p])` is refused outside this
+    ## module because `entries` is unexported. Both refusals measured from a
+    ## probe module outside this one, in a tree branched from `d448ab99`,
+    ## under the dev shell's Nim 2.3.1 codetracer fork:
     ##
-    ## WHAT THAT WOULD COST IS SMALLER THAN IT LOOKS, and the next reader
-    ## should not accept this residual on the strength of a cost nobody
-    ## measured. Seven of the ten read-surface members below are already
-    ## hand-written bodies an object would keep verbatim; only `len`, `==`
-    ## and `$` are `{.borrow.}`, and each becomes a one-line body over the
-    ## private field. On that reading no reader moves and no file outside
-    ## this one is touched. NOT COMPILED — a hypothesis, not a measurement,
-    ## and recorded as one.
+    ##   ObservedPathChannel(@[p])
+    ##     Error: type mismatch: got 'seq[string]' for '@[p]' but expected
+    ##     'ObservedPathChannel = object'
+    ##
+    ##   ObservedPathChannel(entries: @[p])
+    ##     Error: the field 'entries' is not accessible.
+    ##     (then two cascades: "undeclared field: 'entries' for type
+    ##     repro_build_engine.ObservedPathChannel" and "expression '' has no
+    ##     type (or is ambiguous)")
+    ##
+    ## AND THE SEALING IS WHAT REFUSES THEM, not an incidental type error.
+    ## Exporting the field — `entries*` — and re-running the same two probes
+    ## makes the field-initializer compile (rc 0) while the conversion stays
+    ## refused with the identical message, because an object is not
+    ## convertible from a `seq` at any visibility. Against the `distinct`
+    ## form at `d448ab99` the conversion compiled, which is the hole this
+    ## closes.
+    ##
+    ## What stays expressible, and is harmless: `ObservedPathChannel()`, the
+    ## no-field object constructor, which yields an EMPTY channel.
+    ##
+    ## It is harmless on the GUARD'S POLARITY, which is the only thing that
+    ## matters here. The five terms in `applyMonitorEvidenceStatus` are
+    ## joined by `and`, and the conjunction being TRUE is the REFUSAL — it
+    ## adds `zeroEvidenceDiagnostic`, sets `disableCacheHits` and
+    ## `cirEmptyEvidence`. An empty channel makes its term TRUE, i.e. pushes
+    ## toward refusing the publish; a FILLED one makes its term FALSE and
+    ## short-circuits the refusal. No term anywhere reads emptiness as
+    ## success. That asymmetry is the whole of it: the B1 defect was a
+    ## writer FILLING a channel to make a term false and buy the publish,
+    ## and filling is what the unexported field now seals. Constructing an
+    ## empty one buys nothing, because the direction it moves the guard in
+    ## is the fail-closed one.
+    ##
+    ## Nor is it new surface. An empty channel was already constructible
+    ## from any module at `d448ab99` — `var empty: ObservedPathChannel`
+    ## default-initializes a `distinct seq[string]` to the empty seq and
+    ## assigning it over a populated channel compiled rc 0 there, measured.
+    ## `ObservedPathChannel()` is a second SPELLING of a capability the
+    ## `distinct` form already had, not a capability the object added.
+    ##
+    ## WHAT THE CONVERSION COST, measured rather than estimated — the earlier
+    ## pass recorded the object as expensive on the belief that it would lose
+    ## a `{.borrow.}` read surface and move ~15 files that compile unchanged.
+    ## Of the ELEVEN read-surface members below only `len`, `==`(a, b) and
+    ## `$` were `{.borrow.}`; each became a one-line body over `entries`, and
+    ## the other eight were already hand-written bodies that only changed
+    ## `seq[string](channel)` to `channel.entries`.
+    ##
+    ## Re-`nim check`ed in a tree branched from `d448ab99`, under the dev
+    ## shell's Nim 2.3.1 codetracer fork, over a set chosen by GREP rather
+    ## than by hand so the next reader can rebuild it mechanically:
+    ##
+    ##   git grep -l -E 'depfileInputs|monitorReads|monitorWrites|
+    ##   monitorProbes|monitorDirectoryEnumerations' -- '*.nim'
+    ##   (one alternation, wrapped here only to fit the margin)
+    ##
+    ## That is 43 files, plus `t_hermetic_action_env.nim` for its partial
+    ## `PathSetEvidence(…)` construction: 44 of 44 compile UNEDITED, this
+    ## module being the only one changed. The 43 include all 13 files
+    ## besides this one that the `distinct` conversion at `83719fe6` had to
+    ## edit, so the read surface really did survive. No reader moved and no
+    ## file outside this one was touched, and
+    ## `t_zero_evidence_edge_is_not_cacheable` — the suite that grades this
+    ## guard — runs 32 OK / 0 FAILED on both sides of the change, from a
+    ## source file that is byte-identical across them.
     ##
     ## READS ARE UNRESTRICTED. Everything a `seq[string]` reader did —
     ## `len`, `[]`, `for … in`, `==`, `$`, `join`, `find`, `in`, the `…It`
@@ -1376,6 +1437,13 @@ type
     ## `seq[string]` for an `openArray` parameter. Nothing about what a
     ## correct writer publishes changes: this is a refactor of HOW a channel
     ## is appended to, not of what evidence means.
+
+    entries: seq[string]
+      ## THE UNEXPORTED FIELD IS THE CONSTRUCTION. Exporting it — or going
+      ## back to `distinct seq[string]` — restores a legal whole-channel
+      ## replacement from any module and undoes everything above. The
+      ## accessor for readers outside this module is `paths`, which hands
+      ## back a COPY.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -4085,39 +4153,53 @@ proc envNameKey*(name: string): string =
 # appending to it, and which therefore has no contributor to name.
 # ---------------------------------------------------------------------------
 
-proc len*(channel: ObservedPathChannel): int {.borrow.}
-proc `==`*(a, b: ObservedPathChannel): bool {.borrow.}
-proc `$`*(channel: ObservedPathChannel): string {.borrow.}
+proc len*(channel: ObservedPathChannel): int =
+  channel.entries.len
+
+proc `==`*(a, b: ObservedPathChannel): bool =
+  a.entries == b.entries
+
+proc `$`*(channel: ObservedPathChannel): string =
+  ## The SAME rendering a `seq[string]` gives (`@["a", "b"]`), because the
+  ## checkpoint lines and fixture comparisons that print a channel were
+  ## written against that spelling and compare text across arms.
+  $channel.entries
 
 proc `[]`*(channel: ObservedPathChannel; index: int): string =
-  seq[string](channel)[index]
+  channel.entries[index]
 
 iterator items*(channel: ObservedPathChannel): string =
   ## Also what makes `anyIt` / `allIt` / `mapIt` / `toSeq` keep working:
   ## every one of those templates expands to `for it in items(s)`.
-  for path in seq[string](channel):
+  for path in channel.entries:
     yield path
 
 proc `==`*(a: ObservedPathChannel; b: openArray[string]): bool =
-  seq[string](a) == @b
+  a.entries == @b
 
 proc `==`*(a: openArray[string]; b: ObservedPathChannel): bool =
-  @a == seq[string](b)
+  @a == b.entries
 
 proc paths*(channel: ObservedPathChannel): seq[string] =
   ## The channel as a plain `seq[string]`, for an `openArray[string]`
   ## parameter or a JSON encoder. A COPY of the entries and not a handle on
   ## the channel, so it cannot be appended to behind the contributor.
-  seq[string](channel)
+  ##
+  ## Returning the field by value is what makes that true: Nim's assignment
+  ## of a `seq` copies, so the caller's seq and `entries` are two objects
+  ## from the first statement onwards. It is the IDENTITY on contents — the
+  ## same strings in the same order — and a benchmark arm comparison
+  ## (`hm6_acceptance`) depends on exactly that.
+  channel.entries
 
 proc join*(channel: ObservedPathChannel; sep = ""): string =
-  seq[string](channel).join(sep)
+  channel.entries.join(sep)
 
 proc find*(channel: ObservedPathChannel; value: string): int =
-  seq[string](channel).find(value)
+  channel.entries.find(value)
 
 proc contains*(channel: ObservedPathChannel; value: string): bool =
-  seq[string](channel).contains(value)
+  channel.entries.contains(value)
 
 proc observe*(channel: var ObservedPathChannel;
               provenance: var set[EvidenceContributor];
@@ -4144,7 +4226,7 @@ proc observe*(channel: var ObservedPathChannel;
   provenance.incl contributor
   if seen.containsOrIncl(value):
     return
-  seq[string](channel).add(value)
+  channel.entries.add(value)
 
 proc observeAll*(channel: var ObservedPathChannel;
                  provenance: var set[EvidenceContributor];
@@ -4153,7 +4235,7 @@ proc observeAll*(channel: var ObservedPathChannel;
   ## `observe` for a whole path set at once, de-duplicated against whatever
   ## the channel already holds. For the callers — chiefly suites building a
   ## fixture evidence object — that have no long-lived `seen` set to thread.
-  var seen = seq[string](channel).toHashSet()
+  var seen = channel.entries.toHashSet()
   for value in values:
     channel.observe(provenance, contributor, seen, value)
 
@@ -4165,7 +4247,7 @@ proc add*(channel: var ObservedPathChannel; value: string) {.error:
   ## NOT an append, and the body is never reached: `{.error.}` makes any CALL
   ## a compile error carrying the message above.
   ##
-  ## IT EXISTS FOR THE MESSAGE AND NOTHING ELSE. Without it, the `distinct`
+  ## IT EXISTS FOR THE MESSAGE AND NOTHING ELSE. Without it, the type
   ## already refuses `channel.add(p)` — but with a type mismatch whose
   ## candidate list is `JsonNode`, `Table`, `string` and `seq[T]`, and which
   ## never mentions `observe`: the compiler cannot suggest `observe` for an
@@ -4176,19 +4258,20 @@ proc add*(channel: var ObservedPathChannel; value: string) {.error:
   ## reader to find the right spelling themselves. This names it.
   ##
   ## It covers the most likely wrong spelling, not every one. A whole-channel
-  ## assignment (`= @[p]`) and the explicit conversion
-  ## (`ObservedPathChannel(@[p])`) are discussed in `ObservedPathChannel`'s
-  ## own docstring; the first is refused by the `distinct` with a clear
-  ## message already, the second is deliberately still legal.
+  ## assignment (`= @[p]`), the explicit conversion
+  ## (`ObservedPathChannel(@[p])`) and the field-initializer construction
+  ## (`ObservedPathChannel(entries: @[p])`) are discussed in
+  ## `ObservedPathChannel`'s own docstring; all three are refused, the first
+  ## two on the type and the third on the unexported field.
 
 proc dropObserved*(channel: var ObservedPathChannel; drop: HashSet[string]) =
   ## Remove every entry in `drop`. Subtractive only — it names no contributor
   ## because it introduces no evidence.
   var kept: seq[string] = @[]
-  for path in seq[string](channel):
+  for path in channel.entries:
     if path notin drop:
       kept.add(path)
-  channel = ObservedPathChannel(kept)
+  channel.entries = kept
 
 proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
   result = path.replace('\\', '/').strip()
@@ -8329,6 +8412,42 @@ proc removeTreeNoFollow(path: string) =
   else:
     removeDir(path)
 
+proc ensureOutputParents*(action: BuildAction) =
+  ## Creates the parent directory of each of the action's outputs and
+  ## declared outputs before it runs (ninja and BuildXL do the same). What
+  ## the action observes then does not depend on whether an earlier build,
+  ## or another action, happened to create them: MSYS `mkdir -p` probes
+  ## `<dir>.lnk` only while `<dir>` is missing, so gemini-cli's bundle step
+  ## saw `.repro/build/node.lnk` on a cold first run and never again, and
+  ## its determinism probe could not verify on the second run. The graph
+  ## view (`graphDirView`) counts these parents as present for the same
+  ## reason. A parent at or inside another of its outputs (a file declared
+  ## inside its declared output directory) is left alone: the outputs are
+  ## the action's own to create. Best effort: a parent that cannot be made
+  ## is the action's to report.
+  var outputKeys: seq[string] = @[]
+  for output in action.outputs & action.declaredOutputs:
+    if output.len > 0:
+      outputKeys.add(scratchKey(materialPath(action.cwd, output)))
+  for output in action.outputs & action.declaredOutputs:
+    if output.len == 0:
+      continue
+    let parent = materialPath(action.cwd, output).parentDir
+    if parent.len == 0:
+      continue
+    let parentKey = scratchKey(parent)
+    var insideOutput = false
+    for key in outputKeys:
+      if parentKey == key or parentKey.startsWith(key & "/"):
+        insideOutput = true
+        break
+    if insideOutput:
+      continue
+    try:
+      createDir(extendedPath(parent))
+    except CatchableError:
+      discard
+
 proc resetScratchDirs*(action: BuildAction): string =
   ## Empties the action's scratch directories before it runs; returns why it
   ## could not, or "".
@@ -8998,6 +9117,165 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
     except CatchableError:
       discard
 
+proc declaredWriteRootPrefixes(action: BuildAction): seq[string] =
+  ## The self-written prefix set, DERIVED from the action's own write-root
+  ## declaration rather than listed a second time beside it.
+  ##
+  ## Spec: `Filesystem-Policy-And-Observed-Inputs.md` §"The self-written set
+  ## is derived, never listed". An action's own writes are not its inputs,
+  ## and the set of directories it writes is ALREADY declared — it is
+  ## `declaredOutputs`, the M9.R.75 write roots. An author who states that
+  ## fact and then re-states it as an `ignoredInputPrefixes` entry has said
+  ## the same thing twice, and the second statement is the one that gets
+  ## forgotten. Counted at this revision: NINE prefix entries across the
+  ## tree name a path their own action also declares as a write root —
+  ## `runtime_contract`'s library edge (five lines apart),
+  ## `cmake_package`'s configure, build and install edges,
+  ## `meson_package`'s setup and compile edges, `cargo_package`'s compile
+  ## edge, `go_package`'s build edge, and `autotools_package`'s configure
+  ## edge on the branch where it adds one at all — while interface
+  ## extraction lists its scratch root and omits the directory it
+  ## publishes into.
+  ##
+  ## MATERIALIZED against `action.cwd`, unlike the explicit prefixes in
+  ## `ignoredInputRoots`, which compare raw. The asymmetry is deliberate and
+  ## it is the same argument `honouredDerivedPrefixes` makes for its side: an
+  ## explicit prefix is an author's spelling, and changing how it is read
+  ## would move keys that exist today, whereas a DERIVED root comes from a
+  ## declaration the engine already materializes everywhere else
+  ## (`portablePhysicalOutputsOf`, `isOwnOutput`, the R7 pass), so reading it
+  ## the same way here is the only consistent choice. A relative write root
+  ## therefore works, where a relative explicit prefix is inert.
+  ##
+  ## The symlinked spelling is added for the same reason, and with the same
+  ## measurement behind it, as in `ignoredInputRoots`: on macOS every path
+  ## the monitor reports comes back resolved (`/private/tmp/...`), so a root
+  ## derived from a `/tmp/...` declaration would never fire.
+  for root in action.declaredOutputs:
+    let expanded = normalizeWriteRoot(
+      materialPath(action.cwd, action.expandPolicyPath(root)))
+    if expanded.len == 0:
+      continue
+    result.add(expanded)
+    if not expanded.isAbsolute:
+      continue
+    try:
+      let resolved = normalizeWriteRoot(expandFilename(expanded))
+      if resolved.len > 0 and resolved != expanded:
+        result.add(resolved)
+    except CatchableError:
+      discard
+
+proc enumerationIgnoredRoots*(action: BuildAction): seq[string] =
+  ## The ignored-prefix set the ENUMERATION channel is filtered against: the
+  ## author's explicit `ignoredInputPrefixes` UNION the roots derived from the
+  ## action's own write-root declaration.
+  ##
+  ## Spec: `Filesystem-Policy-And-Observed-Inputs.md` §"Enumerations And
+  ## Probes Under Writable Areas" / §"The self-written set is derived, never
+  ## listed". Its testable consequence — "for any action, the set of ignored
+  ## input prefixes contains every declared output write-root" — is asserted
+  ## against THIS set, without running a build.
+  ##
+  ## WHY ENUMERATIONS AND NOT ALSO READS AND PROBES. The derivation is sound
+  ## for a directory's MEMBERSHIP and is not sound for its contents, and the
+  ## difference is not a matter of taste: it is a shipped recipe.
+  ## `autotools_package`'s configure edge declares the build tree as a write
+  ## root UNCONDITIONALLY, but adds it to `ignoredInputPrefixes` only when
+  ## there are no source patches and no bootstrap — because in those branches
+  ## the action runs BEFORE the cleanup and genuinely reads the previous
+  ## build tree (`test ! -f build/input || cp build/input src/settings`).
+  ## `tests/unit/t_configure_build_tree_cleanup.nim`'s "Autotools pre-cleanup
+  ## patches and bootstrap retain observed inputs" pins exactly that. Deriving
+  ## the ignore for the READ channel from the declaration would drop those
+  ## reads out of the key and hand that edge a hit on a build tree it had
+  ## consumed — a false hit, which is strictly worse than the miss being
+  ## fixed.
+  ##
+  ## Membership carries no such dependency. An entry LIST changes because
+  ## somebody added or removed a name, and when the action under consideration
+  ## is the one adding the name, the fact is derived from its own output. A
+  ## read or a probe can still witness prior content, so both keep the
+  ## explicit set — see `cacheInputPaths`. Dropping a directory from this
+  ## channel does NOT drop the directory from the key: it stays recorded as
+  ## `ffkDirectory` with `mtimeNs = 0`, which `membershipTrackedDirectory`
+  ## reads as "existence only", so "the directory was deleted" is still
+  ## detected. Only the self-inflicted part of the comparison goes away.
+  ##
+  ## And note which reading of `ignoredInputPrefixes` this is NOT.
+  ## `honouredDerivedPrefixes` — the S7 restore gate — keeps reading the
+  ## EXPLICIT `ignoredInputRoots`, so a declared write root does not become a
+  ## statement that the bytes under it are not product. Feeding the derived
+  ## set in there would be unsound by construction: the gate disqualifies a
+  ## prefix by comparing it against `declaredOutputs` in their declared
+  ## spelling, so the symlink-resolved derived spelling would slip past the
+  ## disqualification and exempt the product.
+  ##
+  ## AND WHY THE NINE DUPLICATE ENTRIES STAY. Because of the channel split,
+  ## none of them is merely redundant. Eight are genuinely read back —
+  ## `cmake --build` and `cmake --install` say so in their own comments, and
+  ## `cargo build`, `meson setup`/`compile`, `patchelf` and `configure` all
+  ## consume state a previous run left under the same root — so deleting the
+  ## entry would drop those reads from the key and hand the edge a hit on a
+  ## tree it had consumed. The ninth, `go_package`'s `effectiveDestdir`, is
+  ## write-only, and it is still not deletable: that recipe guards its
+  ## `setRegisteredActionDeclaredOutputs` on `projectRoot.len > 0` while the
+  ## prefix is unconditional, so with no project root the explicit entry is
+  ## the only ignore there is and the derivation has nothing to derive from.
+  ## The derivation therefore ADDS a floor; it does not license a sweep of
+  ## the recipes.
+  result = action.ignoredInputRoots()
+  for root in action.declaredWriteRootPrefixes():
+    if root notin result:
+      result.add(root)
+
+proc selfWrittenDirectoryKeys(action: BuildAction): HashSet[string] =
+  ## The directories this action writes INTO, derived from its own output
+  ## declaration: every declared write root, and the parent directory of
+  ## every declared output file.
+  ##
+  ## Same spec rule as `declaredWriteRootPrefixes`, applied to the one
+  ## channel a write-root prefix cannot reach: an action that declares
+  ## output FILES and no write root still writes a directory, and that
+  ## directory's MEMBERSHIP changes because of its own write. Interface
+  ## extraction is exactly that shape — it declares four files under
+  ## `build/repro/` and no write root — so the membership digest of a
+  ## directory it publishes into landed in its own key and the edge missed
+  ## its cache on every build of every project
+  ## (`issues/2026-10-08-interface-extraction-edge-is-keyed-on-directories-
+  ## it-writes-itself.md`).
+  ##
+  ## Deriving a PREFIX from an output file would be wrong: that would drop
+  ## every real input that merely lives next to an output, which is the
+  ## over-broad filter `selfWrittenOutputKeys` refuses for the same reason.
+  ## What is derived here is narrower and is the exact fact the declaration
+  ## supports — "I add an entry to this directory", so its entry LIST is
+  ## derived state — and it drops nothing else: file reads, probes and
+  ## enumerations of OTHER directories under the same parent are untouched,
+  ## and the files this action reads out of its own output directory stay in
+  ## the key by path.
+  ##
+  ## A directory the author DECLARED as an input is not filtered; the callers
+  ## consult `declaredInputs` first, as everywhere else in this family.
+  ##
+  ## The write-root loop below is SUBSUMED at the one caller that exists
+  ## today and is kept so the set is complete on its own terms. In
+  ## `cacheEnumeratedDirectories` a write root is already matched by
+  ## `isUnderAnyRoot(ignoredRoots)` — `enumerationIgnoredRoots` puts the
+  ## derived roots there and `isUnderAnyRoot` matches equality as well as
+  ## containment — and that test runs first, so deleting the loop changes
+  ## nothing a test can observe. Said here rather than left to be
+  ## rediscovered: "this restates something stated elsewhere" is the exact
+  ## defect this whole family is about, and an unremarked redundancy in the
+  ## fix for it is the same defect wearing the fix's clothes.
+  result = initHashSet[string]()
+  for output in action.outputs:
+    let dir = normalizeWriteRoot(parentDir(materialPath(action.cwd, output)))
+    if dir.len > 0:
+      result.incl(dir)
+  for root in action.declaredWriteRootPrefixes():
+    result.incl(root)
+
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
   for root in roots:
@@ -9136,6 +9414,10 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   declared-input carve-out that keeps the two filters from
   ##   colliding. Declared inputs are never dropped by either filter.
   let toolRoots = action.toolInputRoots()
+  # The EXPLICIT prefix set, deliberately not the derived one. The derived
+  # self-written set applies to the ENUMERATION channel only — see
+  # `enumerationIgnoredRoots` for the whole argument, and for the shipped
+  # recipe that makes the difference load-bearing.
   let ignoredRoots = action.ignoredInputRoots()
   let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
@@ -9477,8 +9759,8 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
       continue
     result.addUnique(seen, path)
 
-proc cacheEnumeratedDirectories(action: BuildAction;
-                                evidence: PathSetEvidence): seq[string] =
+proc cacheEnumeratedDirectories*(action: BuildAction;
+                                 evidence: PathSetEvidence): seq[string] =
   ## The subset of this action's recorded inputs that it ENUMERATED, in the
   ## same materialised form `cacheInputPaths` produces, so the record side
   ## can match them by path.
@@ -9488,7 +9770,8 @@ proc cacheEnumeratedDirectories(action: BuildAction;
   ## one either, or the record would carry membership for something it does
   ## not record at all.
   let toolRoots = action.toolInputRoots()
-  let ignoredRoots = action.ignoredInputRoots()
+  let ignoredRoots = action.enumerationIgnoredRoots()
+  let selfWrittenDirs = action.selfWrittenDirectoryKeys()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     declaredMaterialized.incl(
@@ -9496,8 +9779,19 @@ proc cacheEnumeratedDirectories(action: BuildAction;
   var seen = initHashSet[string]()
   for dir in evidence.monitorDirectoryEnumerations:
     let path = materialPath(action.cwd, dir)
-    if not declaredMaterialized.contains(path.replace('\\', '/')) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+    if declaredMaterialized.contains(path.replace('\\', '/')):
+      result.addUnique(seen, path)
+      continue
+    if path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots):
+      continue
+    # The action's OWN output directory: its entry list changed because this
+    # action added an entry to it, so the membership digest is derived state
+    # and not an input. Derived from the output declaration — see
+    # `selfWrittenDirectoryKeys`. The directory is still dropped only from
+    # the MEMBERSHIP channel; reads and probes of paths inside it are
+    # unaffected, and the exact declared outputs stay excluded by
+    # `selfWrittenOutputKeys` as before.
+    if selfWrittenDirs.contains(normalizeWriteRoot(path)):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -9975,6 +10269,26 @@ proc monitorInterest*(action: BuildAction): set[EventCategory] =
   ## granularity and a switch that can never be honoured is worse than no
   ## switch. See `MonitorCaptureBreadth` in `repro_core/dependency_gathering`.
   declaredMonitorInterest(action.dependencyPolicy.captureBreadth)
+
+proc readsAreKeyed*(action: BuildAction): bool =
+  ## Whether everything ``action`` can read outside its own command line
+  ## reaches its cache key through the files it reads, rather than only
+  ## through its weak fingerprint.
+  ##
+  ## True for a process run under a monitor policy — its observed reads AND
+  ## probes (an absent module on a ``--path`` is a probe) are recorded and
+  ## revalidated on every lookup; ``monitorInterest`` cannot drop either
+  ## category (only ``ecAmbientReads`` is narrowable, see above) — and for a
+  ## built-in action, which reads nothing but its declared inputs. False for a
+  ## process whose dependencies come from a recognised format or a converter
+  ## alone: those name what the tool chose to report, not what it read.
+  ##
+  ## Cross-Repo-Source-Consumption §4.3 reads this to decide whether a
+  ## producer's SOURCE identity has to be folded into the action's weak
+  ## fingerprint (no: its reads already key it) or stands in for reads nothing
+  ## observed (yes).
+  action.kind != bakProcess or
+    action.dependencyPolicy.kind in MonitorPolicyKinds
 
 proc monitorEvidenceScope(config: BuildEngineConfig): EvidenceScope =
   ## The evidence scope `config` asks io-mon for — ONE definition, read by BOTH
@@ -15788,6 +16102,277 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         root = root.toLowerAscii()
       if root.len > 0 and (key == root or key.startsWith(root & "/")):
         return true
+      when defined(windows):
+        # MSYS/Cygwin resolve a path that is missing by trying `<path>.exe`
+        # and `<path>.lnk`: gemini-cli's bundle step, `rm -rf dist`, probed
+        # `dist.exe` only on a cold run, when its own `dist` was not there
+        # yet. While such a sibling does not exist, probing it is resolving
+        # the action's own output. One that exists stays an input: the
+        # runtime would have used it.
+        if root.len > 0 and (key == root & ".exe" or key == root & ".lnk") and
+            not fileExists(extendedPath(path)) and
+            not dirExists(extendedPath(path)):
+          return true
+
+  # The graph view of a directory above build outputs (BuildXL's graph
+  # file-system view). Such a directory's listing on disk says which OTHER
+  # actions have run in this checkout: gemini-cli's bundle step lists
+  # `.repro/build/node`, which holds its own `dist/` and, once the
+  # downstream install step has run, that step's `out/`. Keyed by the disk,
+  # a record made where the install had run named an entry no fresh host
+  # can reproduce, and the determinism probe's key moved between a cold
+  # first run and every later one. The recorder, the determinism probe and
+  # the pre-pass resolver therefore identify such a directory by ONE rule,
+  # computed from the graph:
+  #
+  # - an entry no graph action declares (nor lies above anything one
+  #   declares) is listed as it is on disk;
+  # - an entry that is an output is listed only when one of the action's
+  #   ancestors produces it -- never the action's own outputs (they are not
+  #   inputs) nor a downstream or unrelated action's;
+  # - an entry that is a scratch directory is listed only when it is the
+  #   action's own (the engine creates it before the action runs);
+  # - an entry that lies above declared paths is listed when an ancestor's
+  #   output or the action's own output or scratch directory lies beneath it
+  #   (the engine creates the parents of an action's outputs before it runs,
+  #   `ensureOutputParents`), or when it holds, on disk, anything no graph
+  #   action declares.
+  #
+  # The directory itself exists by the same rule. A directory that holds no
+  # declared path keeps its plain on-disk identity.
+  type
+    GraphPathEntry = object
+      key: string        ## `scratchKey` form: compared, never shown.
+      spelling: string   ## `/`-separated, as declared.
+      physical: string   ## As materialized against the action's cwd.
+      owner: string      ## The declaring action's id.
+      scratch: bool      ## A scratch directory rather than an output.
+    AncestorOutputState = enum
+      aosAbsent, aosFile, aosDirectory, aosUnresolved
+    AncestorOutputProbe = proc (entry: GraphPathEntry):
+      AncestorOutputState {.closure.}
+    GraphDirView = object
+      applies: bool      ## The directory lies above declared graph paths.
+      unresolved: bool   ## An ancestor output it depends on has no record.
+      exists: bool
+      names: seq[string] ## Membership names, `/`-suffixed for directories.
+
+  var actionsById = initTable[string, BuildAction]()
+    ## Every scheduled action by id, with its dynamically added deps and
+    ## outputs. Filled before the pre-pass; declared here so the recorders
+    ## below can read the graph.
+  var graphPathEntries: seq[GraphPathEntry] = @[]
+  var graphPathsAt = initTable[string, seq[int]]()
+  var graphPathsBeneath = initTable[string, seq[int]]()
+  var graphPathIndexStale = true
+    ## Set again whenever a dynamic record adds an action or an output.
+
+  proc graphParentKey(key: string): string =
+    let slash = key.rfind('/')
+    if slash > 0: key[0 ..< slash]
+    elif slash == 0 and key.len > 1: "/"
+    else: ""
+
+  proc graphChildPrefix(key: string): string =
+    if key.endsWith("/"): key else: key & "/"
+
+  proc refreshGraphPathIndex() =
+    if not graphPathIndexStale:
+      return
+    graphPathIndexStale = false
+    graphPathEntries.setLen(0)
+    graphPathsAt.clear()
+    graphPathsBeneath.clear()
+    proc add(owner, physical: string; scratch: bool) =
+      let key = scratchKey(physical)
+      if key.len == 0:
+        return
+      var spelling = withoutExtendedLengthPrefix(physical).replace('\\', '/')
+      while spelling.len > 1 and spelling.endsWith("/"):
+        spelling.setLen(spelling.len - 1)
+      if spelling.len != key.len:
+        return   # not a spelling `key` was folded from; cannot slice by it
+      let i = graphPathEntries.len
+      graphPathEntries.add(GraphPathEntry(key: key, spelling: spelling,
+        physical: physical, owner: owner, scratch: scratch))
+      graphPathsAt.mgetOrPut(key, @[]).add(i)
+      var up = graphParentKey(key)
+      while up.len > 0:
+        graphPathsBeneath.mgetOrPut(up, @[]).add(i)
+        up = graphParentKey(up)
+    for declared in buildGraph.actions:
+      let action = actionsById.getOrDefault(declared.id, declared)
+      for output in action.outputs & action.declaredOutputs:
+        if output.len > 0:
+          add(action.id, materialPath(action.cwd, output), false)
+      for dir in action.scratchDirs:
+        if dir.len > 0:
+          add(action.id, materialPath(action.cwd, dir), true)
+
+  proc graphAncestorsOf(id: string): HashSet[string] =
+    ## Every action `id` transitively depends on. Engine deps are ordering
+    ## edges, so an action may read any ancestor's output (the pre-pass
+    ## walks the same closure).
+    var stack: seq[string] = @[]
+    if id in actionsById:
+      stack.add(actionsById[id].deps)
+    else:
+      for declared in buildGraph.actions:
+        if declared.id == id:
+          stack.add(declared.deps)
+    while stack.len > 0:
+      let dep = stack.pop()
+      if dep in result:
+        continue
+      result.incl(dep)
+      if dep in actionsById:
+        for above in actionsById[dep].deps:
+          stack.add(above)
+
+  proc holdsNonGraphContent(physical, key: string): bool =
+    ## Whether the directory holds, at any depth that is not itself a
+    ## declared path, an entry no graph action declares.
+    let diskDir = extendedPath(physical)
+    if not dirExists(diskDir):
+      return false
+    let prefix = graphChildPrefix(key)
+    for kind, child in walkDir(diskDir, relative = true):
+      var childKey = prefix & child.replace('\\', '/')
+      when defined(windows):
+        childKey = childKey.toLowerAscii()
+      if childKey in graphPathsAt:
+        continue
+      if childKey in graphPathsBeneath and kind == pcDir:
+        if holdsNonGraphContent(physical / child, childKey):
+          return true
+        continue
+      return true
+    false
+
+  proc graphDirView(dir, selfId: string; ancestors: HashSet[string];
+                    ancestorOutput: AncestorOutputProbe): GraphDirView =
+    ## `dir` as the rule above sees it, for action `selfId`. `applies` is
+    ## false -- keep the disk's identity -- for a directory with no declared
+    ## path beneath it, and for one at or inside a declared path (an
+    ## output's own contents are its record's business).
+    refreshGraphPathIndex()
+    let key = scratchKey(dir)
+    if key notin graphPathsBeneath:
+      return
+    var up = key
+    while up.len > 0:
+      if up in graphPathsAt:
+        return
+      up = graphParentKey(up)
+    result.applies = true
+    let prefix = graphChildPrefix(key)
+    var children: seq[string] = @[]
+    var spellingOf = initTable[string, string]()
+    var atChild = initTable[string, seq[int]]()
+    var belowChild = initTable[string, seq[int]]()
+    for i in graphPathsBeneath[key]:
+      let entry = graphPathEntries[i]
+      if not entry.key.startsWith(prefix):
+        continue
+      let rest = entry.key[prefix.len .. ^1]
+      let slash = rest.find('/')
+      let segment = if slash < 0: rest.len else: slash
+      let childKey = prefix & rest[0 ..< segment]
+      let spelling = entry.spelling[prefix.len ..< prefix.len + segment]
+      if childKey notin spellingOf:
+        children.add(childKey)
+        spellingOf[childKey] = spelling
+      elif spelling < spellingOf[childKey]:
+        spellingOf[childKey] = spelling   # one spelling, whatever the order
+      if slash < 0:
+        atChild.mgetOrPut(childKey, @[]).add(i)
+      else:
+        belowChild.mgetOrPut(childKey, @[]).add(i)
+    var selfBeneath = false
+    for childKey in children:
+      var present = false
+      var directory = true
+      let at = atChild.getOrDefault(childKey)
+      if at.len > 0:
+        for i in at:
+          let entry = graphPathEntries[i]
+          if entry.owner == selfId:
+            selfBeneath = true
+            if entry.scratch:
+              present = true
+          elif not entry.scratch and entry.owner in ancestors:
+            case ancestorOutput(entry)
+            of aosUnresolved:
+              result.unresolved = true
+              return
+            of aosAbsent: discard
+            of aosFile:
+              present = true
+              directory = false
+            of aosDirectory:
+              present = true
+      else:
+        for i in belowChild.getOrDefault(childKey):
+          let entry = graphPathEntries[i]
+          if entry.owner == selfId:
+            present = true
+            selfBeneath = true
+          elif not entry.scratch and entry.owner in ancestors:
+            case ancestorOutput(entry)
+            of aosUnresolved:
+              result.unresolved = true
+              return
+            of aosAbsent: discard
+            of aosFile, aosDirectory:
+              present = true
+        if not present and
+            holdsNonGraphContent(dir / spellingOf[childKey], childKey):
+          present = true
+      if present:
+        result.names.add(spellingOf[childKey] & (if directory: "/" else: ""))
+    let diskDir = extendedPath(dir)
+    if dirExists(diskDir):
+      for kind, child in walkDir(diskDir, relative = true):
+        let name = child.replace('\\', '/')
+        var childKey = prefix & name
+        when defined(windows):
+          childKey = childKey.toLowerAscii()
+        if childKey in spellingOf:
+          continue
+        result.names.add(name &
+          (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
+    result.exists = selfBeneath or result.names.len > 0
+
+  proc onDiskAncestorOutput(entry: GraphPathEntry): AncestorOutputState =
+    ## At record time an ancestor has run (or was restored): its outputs are
+    ## on disk.
+    let path = extendedPath(entry.physical)
+    if fileExists(path): aosFile
+    elif dirExists(path): aosDirectory
+    else: aosAbsent
+
+  proc graphViewIdentity(view: GraphDirView;
+                         kind: PortableInputKind): string =
+    ## The identity an access of each kind gets from the graph view; the
+    ## same strings `computePortableFingerprint` reads from disk.
+    case kind
+    of pikRead: (if view.exists: ReadOfDirectory else: ReadOfAbsent)
+    of pikProbe: (if view.exists: ProbePresent else: ProbeAbsent)
+    of pikEnumeration: membershipHexOfNames(view.names)
+    of pikEnvironment: ""
+
+  proc graphViewIdentifier(action: BuildAction): PhysicalIdentity =
+    ## The recorder's side of the rule, for `computePortableFingerprint`.
+    let ancestors = graphAncestorsOf(action.id)
+    let selfId = action.id
+    result = proc (physical: string; kind: PortableInputKind): Option[string] =
+      if kind == pikEnvironment:
+        return none(string)
+      let view = graphDirView(physical, selfId, ancestors,
+        onDiskAncestorOutput)
+      if not view.applies:
+        return none(string)
+      some(graphViewIdentity(view, kind))
 
   proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
     ## Paths the action itself WROTE that no longer exist once it finished:
@@ -15844,6 +16429,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var cwdKey = action.cwd.replace('\\', '/')
     when defined(windows):
       cwdKey = cwdKey.toLowerAscii()
+    # A directory above graph outputs is identified by the graph view, as
+    # the portable recorder and the pre-pass identify it: its listing on
+    # disk names whichever downstream outputs a previous build left there,
+    # so a cold first run and every later one keyed it differently.
+    let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
       if isLaunchMachinery(path) or path.replace('\\', '/') in transient or
           isOwnOutput(action, path):
@@ -15857,8 +16447,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if isDir and cwdKey.len > pathKey.len and cwdKey.startsWith(pathKey) and
           (pathKey.endsWith("/") or cwdKey[pathKey.len] == '/'):
         continue
+      let view = graphDirView(path, action.id, ancestors,
+        onDiskAncestorOutput)
       let identity =
-        if fileExists(extendedPath(path)): "f" & fileContentHex(path)
+        if view.applies:
+          (if view.exists: "d" & membershipHexOfNames(view.names)
+           else: "absent")
+        elif fileExists(extendedPath(path)): "f" & fileContentHex(path)
         elif isDir: "d" & membershipHex(path)
         else: "absent"
       key.add(path & "\0" & identity & "\0")
@@ -15979,7 +16574,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var fp = computePortableFingerprint(portableRecordRoots(), action.argv,
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
       reads, probes, enumerations, portableStaticFieldsOf(action),
-      observedEnv)
+      observedEnv, graphViewIdentifier(action))
     if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
       let outs = portableOutputs(config.portableRoots,
@@ -16610,7 +17205,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var poolCapacity = initTable[string, uint32]()
   var poolRunning = initTable[string, uint32]()
   var ready: seq[string] = @[]
-  var actionsById = initTable[string, BuildAction]()
   var dynamicDepsLoaded = initHashSet[string]()
   # `fileMetadataCache` used to be allocated HERE, empty, immediately after the
   # whole-graph prefix had warmed and discarded one of its own. It is declared
@@ -16792,6 +17386,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   for i, action in buildGraph.actions:
     idToIndex[action.id] = i
     actionsById[action.id] = action
+    graphPathIndexStale = true
     remaining[action.id] = action.deps.len
     statuses[action.id] = asPending
     if action.deps.len == 0:
@@ -17248,6 +17843,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     buildGraph.actions.add(newAction)
     idToIndex[newAction.id] = newIndex
     actionsById[newAction.id] = newAction
+    graphPathIndexStale = true
     statuses[newAction.id] = asPending
     runResult.results.add(ActionResult(
       id: newAction.id,
@@ -17332,11 +17928,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         emitProgress(bpkActionCompleted, id)
         blockClosure(id, dep)
         actionsById[id] = action
+        graphPathIndexStale = true
         dynamicDepsLoaded.incl(id)
         return false
       else:
         inc addedWaiting
     actionsById[id] = action
+    graphPathIndexStale = true
     dynamicDepsLoaded.incl(id)
     if addedWaiting > 0:
       remaining[id] = remaining.getOrDefault(id, 0) + addedWaiting
@@ -17382,21 +17980,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if slash > colon: key[0 ..< slash]
       elif colon >= 0 and colon < key.high: key[0 .. colon]
       else: ""
-    # Which graph action produces each logical path, and every directory
-    # above one — an enumeration there, or a read below a produced
-    # directory, depends on bytes no record states file by file.
+    # Which graph action produces each logical path: a read below a
+    # produced directory depends on bytes no record states file by file.
+    # A directory ABOVE produced paths is the graph view's (`graphDirView`).
     var producer = initTable[string, string]()
-    var aboveProduced = initHashSet[string]()
     for action in buildGraph.actions:
       for physical in portablePhysicalOutputsOf(action):
         let key = logicalKey(physical)
         if key.len == 0:
           continue
         producer[key] = action.id
-        var up = parentKey(key)
-        while up.len > 0 and up notin aboveProduced:
-          aboveProduced.incl(up)
-          up = parentKey(up)
     var order: seq[string] = @[]
     block topo:
       var indegree = initTable[string, int]()
@@ -17436,9 +18029,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       ## Inputs another graph action produces are identified from that
       ## action's resolved RECORD: a produced file by its digest, a path
       ## inside a produced directory by the directory's manifest, a directory
-      ## above produced paths by its listing here plus what this action's
-      ## ancestors produce (on the producing host, nothing else had been
-      ## produced yet when this action ran). Everything else is on disk.
+      ## above declared paths by the graph view (`graphDirView`: what no
+      ## graph action declares, as it is here, plus what this action's
+      ## ancestors produce). Everything else is on disk.
       let launchEnv = action.actionEnvResolver(unsafeAddr config)
       result = proc (entry: PathSetEntry): Option[string] =
         if entry.kind == pikEnvironment:
@@ -17492,36 +18085,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             of pikEnvironment:
               return some(Unresolved)   # answered above
           up = parentKey(up)
-        if path in aboveProduced:
-          case entry.kind
-          of pikProbe:
-            return some("present")
-          of pikRead, pikEnvironment:
-            return some(Unresolved)
-          of pikEnumeration:
-            var names = initHashSet[string]()
-            let physical = toPhysicalPath(roots, path)
-            if physical.isSome and dirExists(physical.get()):
-              for kind, child in walkDir(physical.get(), relative = true):
-                names.incl(child.replace('\\', '/') &
-                  (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
-            let prefix = if path.endsWith(":"): path else: path & "/"
-            for key, producerId in producer:
-              if not key.startsWith(prefix) or producerId notin ancestors:
-                continue
-              if key notin producedOutputs:
-                return some(Unresolved)
-              let rest = key[prefix.len .. ^1]
-              let slash = rest.find('/')
-              if slash >= 0:
-                names.incl(rest[0 ..< slash] & "/")
-              else:
-                names.incl(rest &
-                  (if producedOutputs[key].directory: "/" else: ""))
-            var listing: seq[string] = @[]
-            for name in names:
-              listing.add(name)
-            return some(membershipHexOfNames(listing))
+        # Above produced paths: the rule the recorder and the determinism
+        # probe apply -- this host's undeclared entries plus what this
+        # action's ancestors produce, from their records.
+        let physical = toPhysicalPath(roots, path)
+        if physical.isSome:
+          let view = graphDirView(physical.get(), action.id, ancestors,
+            proc (output: GraphPathEntry): AncestorOutputState =
+              let key = logicalKey(output.physical)
+              if key.len == 0 or key notin producedOutputs: aosUnresolved
+              elif producedOutputs[key].directory: aosDirectory
+              else: aosFile)
+          if view.applies:
+            if view.unresolved:
+              return some(Unresolved)
+            return some(graphViewIdentity(view, entry.kind))
         none(string)
 
     for id in order:
@@ -18299,6 +18877,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           monitorHostingRequested(config.monitorHosting, launchPath) and
           not config.hermeticEnv
 
+        action.ensureOutputParents()
         if action.scratchDirs.len > 0:
           let scratchProblem = action.resetScratchDirs()
           if scratchProblem.len > 0:

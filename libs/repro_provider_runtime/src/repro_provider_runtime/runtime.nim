@@ -325,13 +325,61 @@ proc validateFragment(fragment: GraphFragment; request: ProviderGraphRequest;
     if descriptors[child.entryPointId].bodyHash != child.entryPointBodyHash:
       raiseRuntime("child entry point body hash does not match manifest")
 
+proc resolvedResponsePath(path, base: string): string =
+  if path.len == 0 or path.isAbsolute or base.len == 0:
+    path
+  else:
+    os.normalizedPath(absolutePath(base) / path)
+
+proc resolveResponseInputs(inputs: var seq[GraphEvaluationInput];
+                           base: string): bool =
+  for input in inputs.mitems:
+    if input.kind in {gevFileRead, gevDirectoryEnumeration}:
+      let resolved = resolvedResponsePath(input.identity, base)
+      if resolved != input.identity:
+        input.identity = resolved
+        result = true
+
+proc resolveRelativeResponsePaths*(response: var ProviderGraphResponse;
+                                   workingDir: string) =
+  ## Provider-Runtime-Protocol-v1.md, "Paths in responses": a provider names
+  ## the recipe's own files RELATIVE to the recipe it was compiled from — a
+  ## recipe-relative provider compile is served to every copy of the recipe,
+  ## and the binary cannot know where it runs (`recipeSourceName`). The
+  ## engine launched it with `workingDir` = that copy's project root, so this
+  ## is where those names resolve. Applied when a response is received, so
+  ## every reader of a fragment or dev-env result — a snapshot's freshness
+  ## check above all — sees the absolute file of THIS copy. A fragment's
+  ## digest is recomputed after its validation against the provider's own.
+  if workingDir.len == 0:
+    return
+  case response.kind
+  of pskGraphResult:
+    if resolveResponseInputs(response.fragment.evaluationInputs, workingDir) and
+        response.fragment.fragmentDigest.len > 0:
+      response.fragment.fragmentDigest =
+        computeGraphFragmentDigest(response.fragment)
+  of pskDevEnvResult:
+    discard resolveResponseInputs(response.devEnv.evaluationInputs, workingDir)
+    for fingerprint in response.devEnv.sourceFingerprints.mitems:
+      if fingerprint.kind == "provider-source":
+        fingerprint.identity =
+          resolvedResponsePath(fingerprint.identity, workingDir)
+    for diagnostic in response.devEnv.diagnostics.mitems:
+      diagnostic.sourceFile =
+        resolvedResponsePath(diagnostic.sourceFile, workingDir)
+  of pskManifest:
+    discard
+
 proc invokeProviderEntryPoint*(config: ProviderExecutionConfig;
                                request: ProviderGraphRequest): ProviderGraphResponse =
-  let response = runProviderProtocol(config, request)
+  var response = runProviderProtocol(config, request)
   if response.kind != pskGraphResult:
     raiseRuntime("provider graph request returned a manifest response")
   validateManifest(response.manifest, request.providerArtifactId)
   validateFragment(response.fragment, request, response.manifest)
+  response.resolveRelativeResponsePaths(
+    if config.workingDir.len > 0: config.workingDir else: getCurrentDir())
   response
 
 proc splitActivities(activity: string): seq[string] =
@@ -400,11 +448,13 @@ proc invokeProviderDevEnvIntrospection*(config: ProviderExecutionConfig;
     arguments: projectRoot,
     lockSliceId: lockSliceId,
     activity: selectedActivity)
-  let response = runProviderProtocol(config, request)
+  var response = runProviderProtocol(config, request)
   if response.kind != pskDevEnvResult:
     raiseRuntime("provider dev-env request did not return a dev-env result")
   validateManifest(response.manifest, providerArtifactId)
   validateDevEnvResult(response.devEnv, request, response.manifest)
+  response.resolveRelativeResponsePaths(
+    if config.workingDir.len > 0: config.workingDir else: getCurrentDir())
   let expectedActivities = splitActivities(selectedActivity)
   if response.devEnv.selectedActivities != expectedActivities:
     raiseRuntime("provider dev-env activity selection mismatch")
@@ -808,7 +858,24 @@ proc runRootAndChildren(config: RefreshConfig; provider: ProviderExecutionConfig
                         reason: GraphInvocationReason) =
   let root = currentDescriptor(manifest, config.rootEntryPointId)
   if not root.found:
-    raiseRuntime("root entry point is missing from provider manifest")
+    # The root entry point is named from the project INTERFACE; the provider
+    # declares its own. They disagree when the two compiles saw different
+    # declarations - most plausibly a recipe `config.nims` / `nim.cfg`, which
+    # the provider compile reads and the interface (computed as an importer
+    # sees the package) does not (Hermetic-Builds-And-Path-Independence.md
+    # §"Engine-internal recipe compiles"). Name both sides.
+    var offered: seq[string] = @[]
+    for descriptor in manifest.entryPoints:
+      if descriptor.kind == gpkProjectRoot:
+        offered.add(descriptor.id)
+    raiseRuntime("root entry point is missing from provider manifest: the " &
+      "project interface names '" & config.rootEntryPointId &
+      "', the provider declares " &
+      (if offered.len > 0: "'" & offered.join("', '") & "'" else: "none") &
+      ". The interface and the provider were compiled from different " &
+      "declarations; a recipe configuration file (config.nims, nim.cfg) " &
+      "applies to the provider compile only, and must not change what the " &
+      "recipe declares")
   let rootStored = executePlan(config, provider, binaryInput, manifest, snapshot, report,
     InvocationPlan(
       entryPointId: root.descriptor.id,

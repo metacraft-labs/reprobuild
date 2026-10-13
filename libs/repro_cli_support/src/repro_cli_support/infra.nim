@@ -80,7 +80,10 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
     publicCliPath: getAppFilename(),
-    repoRoot: getEnv(RepoRootEnvVar),
+    # Empty: `compileProfileToRbpi` resolves the sources through
+    # `reprobuildRepoRoot()`, which honours `$REPROBUILD_REPO_ROOT` and the
+    # installed package's `$REPROBUILD_SOURCE_ROOT` alike.
+    repoRoot: "",
     workDir: profilePath.parentDir,
     verbose: false,
     forceRebuild: false)

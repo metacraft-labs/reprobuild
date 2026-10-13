@@ -7,7 +7,7 @@ Reprobuild project and builds it through the public `repro build` command with
 The macOS gate does not invoke `tup`. Homebrew marks `tup` Linux-only and
 nixpkgs marks it broken on this host. Instead, the test parses and fingerprints
 the command-semantics fixture pinned from CodeTracer commit
-`f8781d4b5514ee9bbcdee0de701dc4bd8090a061`, the revision this repository's
+`17c111fb280214f6d331f1bafd560989b6bd509b`, the revision this repository's
 `flake.lock` pins for `codetracer-src`; using a Reprobuild-owned fixture keeps
 the oracle independent of an adjacent CodeTracer checkout's branch or
 uncommitted state. The fixture covers the exact
@@ -34,14 +34,14 @@ that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
 payloads pinned from reviewed CodeTracer commit
-`f8781d4b5514ee9bbcdee0de701dc4bd8090a061`. The files retain CodeTracer's
+`17c111fb280214f6d331f1bafd560989b6bd509b`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/f8781d4b5514ee9bbcdee0de701dc4bd8090a061/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/f8781d4b5514ee9bbcdee0de701dc4bd8090a061/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/17c111fb280214f6d331f1bafd560989b6bd509b/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/17c111fb280214f6d331f1bafd560989b6bd509b/config.nims`
 
-`f8781d4b` is not an arbitrary newer commit. It is the revision this
+`17c111fb` is not an arbitrary newer commit. It is the revision this
 repository's `flake.lock` pins for its `codetracer-src` input, so the vendored
 project contract, the Tup command-semantics extract and the flake-pinned
 CodeTracer source all name one reviewed commit instead of three. The previous
@@ -52,6 +52,15 @@ adding the build-graph gate edges and the development-environment
 activation), `config.nims` (sibling-then-override search-path order) and the
 `NIM_REPO_PATH_FLAGS` feeding `!nim_js` (the runquota library paths). The
 remedy is to refresh the fixtures, not to relax the comparison.
+
+The `17c111fb` refresh followed the next `codetracer-src` pin. Between
+f8781d4b and 17c111fb2 `repro.nim` and `src/Tuprules.tup` are unchanged, so
+the project payload digest stays and the Tup extract changes only in its
+provenance header; `config.nims` gains `addPathIfDir(getEnv("NIM_TERMCTL_SRC"))`.
+CodeTracer `dev` (17c111fb2 is not yet in it when this pin moved) carries the
+same `repro.nim` and `src/Tuprules.tup` but not that `config.nims` line, so
+the fail-closed in-place comparison against CI's `codetracer=dev` sibling
+holds only once CodeTracer promotes `agents` to `dev`.
 
 The `f8781d4b` refresh followed the next `codetracer-src` pin. CodeTracer's
 `repro.nim` adds `ct-test` to `codetracerActions` (CTC-3i), `config.nims`

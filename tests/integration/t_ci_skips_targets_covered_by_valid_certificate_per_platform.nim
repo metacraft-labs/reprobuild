@@ -2,13 +2,15 @@
 ## for a platform, and RUNS everything else.
 ##
 ## ``repro ci plan --platform=P --json`` resolves the project's certificate
-## policy (required targets/platforms + ci_trust) and the (commit, lock) binding
-## the certs must match, reads the certs ATTACHED to HEAD (the TC-2 git-notes
-## carrier), and emits the per-platform SKIP/RUN plan a CI job consumes. The
-## decision REUSES the TC-5 signature verifier + the TC-1 coverage union, so the
-## CI trust boundary is identical to the push gate's: only a registered-signed,
-## unrevoked, commit+lock+platform-matching cert can move a target into SKIP,
-## and only when the project explicitly set ``ci_trust = "skip"``.
+## policy (required targets/platforms + ci_trust) and the CONTENT the certs
+## must name (TC-8c: the checked-out tracked files), reads the certs noted on
+## that content's tree (the TC-2 git-notes carrier) and those in the local
+## certificate store, and emits the per-platform SKIP/RUN plan
+## (``reprobuild.ci-plan.v2``) a CI job consumes. The decision REUSES the push
+## gate's evaluator, so the CI trust boundary is identical to the push gate's:
+## only a registered-signed, unrevoked, content+lock+platform-matching cert can
+## move a target into SKIP, and only when the project explicitly set
+## ``ci_trust = "skip"``.
 ##
 ## Assertions (each falsifiable — see the inline FALSIFY notes):
 ##   1. Platform A with a VALID signed cert covering target ``t-unit`` attached
@@ -147,6 +149,7 @@ proc policyTable(targets: seq[string]; ciTrust: string): string =
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-tc4-ci-", "")
+  discard isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -263,7 +266,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
         let certA = issueRealCert(fx, keyA.priv, keyIdA, @["t-unit"])
         check certA.isSigned
         check certA.platform == platformA
-        let attA = attachCertificate(gitBin, fx.libAPath, fx.libASha, certA)
+        let attA = attachCertificate(gitBin, fx.libAPath, certA)
         check attA.ok
 
         # ---- 1 + 3. Platform A: t-unit SKIP (covered), t-int RUN (uncovered).
@@ -301,7 +304,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
             status: rksActive)])
         let forged = issueRealCert(fx, keyF.priv, keyIdF, @["t-unit"])
         check forged.isSigned
-        let attF = attachCertificate(gitBin, fx.libAPath, fx.libASha, forged)
+        let attF = attachCertificate(gitBin, fx.libAPath, forged)
         check attF.ok
 
         let planF = planJson(fx, platformA)
@@ -324,7 +327,7 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
           @[RegisteredKey(keyId: keyIdA, publicKey: keyA.pub,
             status: rksActive)])
         let certA = issueRealCert(fx, keyA.priv, keyIdA, @["t-unit"])
-        let attA = attachCertificate(gitBin, fx.libAPath, fx.libASha, certA)
+        let attA = attachCertificate(gitBin, fx.libAPath, certA)
         check attA.ok
 
         let planAdv = planJson(fx, platformA)

@@ -11,7 +11,7 @@
 ## produced by driving the real ``repro test`` issuance path, which calls
 ## ``signCertificateOnIssuance`` (ssh-keygen ed25519) internally.
 
-import std/[os, osproc, strutils]
+import std/[algorithm, os, osproc, strutils]
 import repro_cli_support
 
 proc sshKeygenExe(): string = findExe("ssh-keygen")
@@ -84,3 +84,68 @@ proc seedManifestLockStore*(gitBin, workspaceRoot: string;
       @[reproBin, "hooks", "ensure", "--vcs", lockStore]))
     doAssert res.exitCode == 0,
       "repro hooks ensure on the lock store failed: " & res.output
+
+# ---- TC-8c: the standard local certificate store ---------------------------
+
+proc isolateCertificateStore*(scratch: string): string =
+  ## Point this test process — and every child it starts (``repro test``, a
+  ## hook run by ``git push``) — at a scratch local certificate store, so a
+  ## test never reads or writes the user's own (Transport §2.1). Returns the
+  ## user root. Each test case runs as its own process, so the setting does
+  ## not leak into another case.
+  result = scratch / "certificate-store"
+  putEnv("TEST_CERTIFICATES_DIR", result)
+  putEnv("TEST_CERTIFICATES_SYSTEM_DIR", scratch / "certificate-system-store")
+
+proc treeContentId*(gitBin, repo, rev: string): string =
+  ## ``git-tree-sha1:<rev^{tree}>``, computed by git rather than by the library.
+  let res = execCmdEx(quoteShellCommand(
+    @[gitBin, "-C", repo, "rev-parse", rev & "^{tree}"]))
+  doAssert res.exitCode == 0, "rev-parse " & rev & "^{tree}: " & res.output
+  "git-tree-sha1:" & res.output.strip()
+
+proc workingTreeContentIdOf*(gitBin, repo, scratchIndex: string): string =
+  ## TC-8d: the content id of ``repo``'s tracked files as they are in its
+  ## working tree, computed with git rather than by the library (Content-Id
+  ## §4.1): a COPY of the index at ``scratchIndex``, ``add --update`` in the
+  ## copy, ``write-tree``. The repository's own index is never written.
+  let located = execCmdEx(quoteShellCommand(@[gitBin, "-C", repo,
+    "rev-parse", "--path-format=absolute", "--git-path", "index"]))
+  doAssert located.exitCode == 0, "rev-parse --git-path index: " &
+    located.output
+  copyFile(located.output.strip(), scratchIndex)
+  defer: removeFile(scratchIndex)
+  let env = "GIT_INDEX_FILE=" & quoteShell(scratchIndex) & " "
+  let updated = execCmdEx(env & quoteShellCommand(
+    @[gitBin, "-C", repo, "add", "--update"]))
+  doAssert updated.exitCode == 0, "add --update: " & updated.output
+  let written = execCmdEx(env & quoteShellCommand(
+    @[gitBin, "-C", repo, "write-tree"]))
+  doAssert written.exitCode == 0, "write-tree: " & written.output
+  "git-tree-sha1:" & written.output.strip()
+
+proc storedCertificateFiles*(userRoot, contentId: string): seq[string] =
+  ## The record files under ``<userRoot>/v1/<algorithm>/<digest>/``, sorted.
+  let colon = contentId.find(':')
+  doAssert colon > 0, "not a content id: " & contentId
+  let dir = userRoot / "v1" / contentId[0 ..< colon] / contentId[colon + 1 .. ^1]
+  if not dirExists(dir):
+    return
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.endsWith(".toml") and
+        not path.extractFilename.startsWith("."):
+      result.add(path)
+  result.sort()
+
+proc issuedCertificate*(userRoot, contentId, platform: string):
+    tuple[path: string; cert: TestCertificate] =
+  ## The one certificate the local store holds for ``contentId`` on
+  ## ``platform``; asserts there is exactly one.
+  var hits: seq[tuple[path: string; cert: TestCertificate]]
+  for path in storedCertificateFiles(userRoot, contentId):
+    let cert = readCertificateFile(path)
+    if cert.platform == platform:
+      hits.add((path, cert))
+  doAssert hits.len == 1, "expected exactly one certificate for " & contentId &
+    " on " & platform & " in " & userRoot & ", found " & $hits.len
+  hits[0]

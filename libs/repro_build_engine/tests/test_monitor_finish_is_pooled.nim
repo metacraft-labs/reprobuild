@@ -397,8 +397,10 @@ else:
         for entry in value:
           entries.add normalisePath(entry, workDir)
       elif value is ObservedPathChannel:
-        # DA-1f. The five OBSERVED channels became a distinct type so that
-        # nothing can append to one without naming an `EvidenceContributor`.
+        # DA-1f. The five OBSERVED channels became a type of their own (an
+        # object with an unexported field) so that nothing can append to one
+        # — or replace one wholesale — without naming an
+        # `EvidenceContributor`.
         # They are rendered EXACTLY as the `seq[string]` arm above renders
         # them -- same normalisation, same sort, same spelling -- so this
         # suite's arm-to-arm comparison is byte-for-byte what it was. A

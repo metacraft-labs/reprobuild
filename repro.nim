@@ -198,6 +198,19 @@ const
     ## The edge ids are `reprobuild.test_fixtures.rp3_provider_<name>` with
     ## `-` folded to `_`.
 
+  codeTracerToolSourceRoot* = "tests/fixtures/codetracer-tools"
+  codeTracerToolFixtureRoot* = "build/test-fixtures/codetracer-tools"
+    ## The tool directories `t_e2e_codetracer_in_place_project_file` puts on
+    ## PATH. The checked-in scripts (version-answering stand-ins, the `nim`
+    ## and `node` wrappers) are used from the source root; the two compiled
+    ## tools (the monitor-visible `gcc` proxy, also built as `clang`, and the
+    ## `stylus` stand-in) are built once by
+    ## `reprobuild.test_fixtures.codetracer_tool_{gcc,clang,stylus}` into the
+    ## fixture root. Both are stable paths, which is the point: interface
+    ## extraction keys on the compiler paths and on PATH itself, so a per-case
+    ## tool directory made every case's extraction of the same recipe a
+    ## (correct) cache miss.
+
   M4ConsolidationVerificationTest* =
     "tests/integration/t_m4_pure_unit_consolidation.nim"
     ## Suite-Modernization M4. The one test whose execute edge takes EVERY
@@ -270,7 +283,18 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/test-bin/repro_catalog_harvester",
         actionId: "reprobuild.test_helpers.repro_catalog_harvester")]),
-  ]
+  ] & (when defined(linux) or defined(macosx): @[
+    TestGraphArtifacts(
+      source: "tests/e2e/codetracer-subset/" &
+        "t_e2e_codetracer_in_place_project_file.nim",
+      artifacts: @[
+        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/bin/gcc",
+          actionId: "reprobuild.test_fixtures.codetracer_tool_gcc"),
+        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/bin/stylus",
+          actionId: "reprobuild.test_fixtures.codetracer_tool_stylus"),
+        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/clang-bin/clang",
+          actionId: "reprobuild.test_fixtures.codetracer_tool_clang")])]
+    else: @[])
 
 # Project-DSL-Composition M6: the generated test-edge table.
 # ``repro_tests.nim`` exports ``reprobuildTestSpecs*: seq[TestSpec]``;
@@ -627,11 +651,12 @@ package reprobuild:
     # shipped interface, takes the ``library``'s ``exportedPath`` (convention
     # default ``src``) as an importable root, and threads it onto THIS repo's
     # ``nim c --path:`` through ``ProducerAuxPaths.nimPathDirs``. The
-    # producer's revision + integrity then fold into every consuming action's
-    # fingerprint (SC-4), which is the whole point: before this, these three
-    # trees were inputs of every compile in this repository and appeared in no
-    # dependency graph, so no lock recorded them and nothing invalidated on
-    # their change. Same shape as ``io-mon/repro.nim``'s
+    # producer is then part of the dependency graph and of its lock, and a
+    # change to it rebuilds the compiles that READ the changed files (SC-4,
+    # scoped to observed reads since 2026-10-12), which is the whole point:
+    # before this, these three trees were inputs of every compile in this
+    # repository and appeared in no dependency graph, so no lock recorded them
+    # and nothing invalidated on their change. Same shape as ``io-mon/repro.nim``'s
     # ``"nim-stackable-hooks"`` / ``"nim-shm-queue"``,
     # ``nim-agents/repro.nim``'s ``"nim-acp"`` / ``"nim-agent-harbor"``, and
     # ``isonim-tui/repro.nim``'s four.
@@ -1867,7 +1892,16 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/reprobuild",
-      defines = @["release", "reproVendoredHash", "ssl"],
+      # `ReprobuildSourceRevision` (repro_core) names the commit the engine
+      # is built from; `repro home export` records it as provenance. It is
+      # taken from $REPROBUILD_SOURCE_REVISION, which the release workflow
+      # sets; unset, the engine reports the revision as unknown.
+      # `scripts/build_apps.sh` makes the same choice (plus a git fallback).
+      defines = @["release", "reproVendoredHash", "ssl"] &
+        (if getEnv("REPROBUILD_SOURCE_REVISION").len > 0:
+           @["ReprobuildSourceRevision=" &
+             getEnv("REPROBUILD_SOURCE_REVISION")]
+         else: @[]),
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto`` AND the ``-L``
       # that resolves them (M8). Nothing OpenSSL-shaped belongs in this list:
@@ -2539,6 +2573,41 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/rp3_provider_plain",
       actionId = "reprobuild.test_fixtures.rp3_provider_plain"))
+
+    # The compiled half of the CodeTracer project-file test's PATH tools
+    # (``codeTracerToolFixtureRoot``). Every case used to compile its own
+    # copies into ``<tempRoot>/codetracer-tool-bin`` and put that directory on
+    # PATH. Interface extraction records the PATH value it observes and the
+    # compiler files it runs from that directory, so twelve cases extracting
+    # the same CodeTracer recipe were twelve correct misses (six extractions,
+    # ~20 min, per case). Built once here, at one path, the extraction of the
+    # first case serves the rest. The proxy finds the real compiler on PATH at run
+    # time (the next one after its own directory), so its bytes carry no host
+    # path. ``clang`` is the same proxy under the name the native cases call.
+    when defined(linux) or defined(macosx):
+      let codeTracerToolBinDir = dslfs.ensureDir(
+        codeTracerToolFixtureRoot & "/bin",
+        actionId = "reprobuild.test_fixtures.codetracer_tool_bin_dir")
+      let codeTracerToolClangDir = dslfs.ensureDir(
+        codeTracerToolFixtureRoot & "/clang-bin",
+        actionId = "reprobuild.test_fixtures.codetracer_tool_clang_dir")
+      reprobuildTestFixturesActions.add(codeTracerToolBinDir)
+      reprobuildTestFixturesActions.add(codeTracerToolClangDir)
+      reprobuildTestFixturesActions.add(gcc(
+        source = codeTracerToolSourceRoot & "/gcc-proxy.c",
+        output = codeTracerToolFixtureRoot & "/bin/gcc",
+        after = @[codeTracerToolBinDir],
+        actionId = "reprobuild.test_fixtures.codetracer_tool_gcc"))
+      reprobuildTestFixturesActions.add(gcc(
+        source = codeTracerToolSourceRoot & "/gcc-proxy.c",
+        output = codeTracerToolFixtureRoot & "/clang-bin/clang",
+        after = @[codeTracerToolClangDir],
+        actionId = "reprobuild.test_fixtures.codetracer_tool_clang"))
+      reprobuildTestFixturesActions.add(gcc(
+        source = codeTracerToolSourceRoot & "/stylus.c",
+        output = codeTracerToolFixtureRoot & "/bin/stylus",
+        after = @[codeTracerToolBinDir],
+        actionId = "reprobuild.test_fixtures.codetracer_tool_stylus"))
 
     # Graph-Owned-Test-Artifacts M3: the ct_test_unittest_parallel protocol
     # fixtures.

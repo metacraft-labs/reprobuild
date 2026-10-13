@@ -12,8 +12,10 @@
 ##   TC-8b: the certificate names the tested CONTENT (the content id of the
 ##   tracked files, the committed lock included), which is a precise
 ##   fingerprint of the tested state. When it is unchanged AND a covering
-##   certificate already exists, nothing relevant changed → no-op. A new
-##   commit that changes tracked files changes the content → re-run. (When a
+##   certificate already exists, nothing relevant changed → no-op. A change
+##   to tracked files changes the content → re-run, before it is committed
+##   (TC-8d); committing that tested content, and then amending only the
+##   commit message, re-runs nothing. (When a
 ##   ct-incremental trace dir is supplied, the canonical adapter's
 ##   per-function change signal is also consulted; this hermetic test drives
 ##   the decision from the content signal, which the milestone note records
@@ -119,9 +121,11 @@ type
     libASeed: string
     libASha: string
     daemonKey: string   ## ed25519 private key issuance signs the cert with
+    certStore: string   ## the scratch local certificate store (user root)
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1n-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   # TC-5: issuance signs the certificate with the daemon key; provide a
   # real ed25519 key (and register it via the env overlay below) so the
@@ -208,16 +212,19 @@ suite "TC-1 — re-certify is a no-op when no executed function changed":
       let fixtureJson = fx.scratch / "fixture.json"
       writeCountingFixture(fixtureJson, "t-unit", counterFile)
 
-      let certOut = defaultCertificatePath(
-        fx.workspaceRoot, fx.libASha, currentPlatformTag())
+      # TC-8c: the certificate lives in the local store, under the content.
+      let libA = fx.workspaceRoot / "lib-a"
+      let content1 = treeContentId(gitBin, libA, fx.libASha)
 
       # --- 1. initial certify: runs the target, issues the cert -----------
       let r1 = runCertify(fx, fixtureJson)
       if r1.code != 0:
         checkpoint("certify #1 output: " & r1.output)
       check r1.code == 0
-      check fileExists(certOut)
+      let files1 = storedCertificateFiles(fx.certStore, content1)
+      check files1.len == 1
       check runCount(counterFile) == 1
+      let certOut = files1[0]
       let certBytes1 = readFile(certOut)
 
       # --- 2. re-certify with NO relevant change: NO-OP -------------------
@@ -228,36 +235,48 @@ suite "TC-1 — re-certify is a no-op when no executed function changed":
       check r2.output.contains("no-op")
       # The existing certificate still stands, byte-identical.
       check readFile(certOut) == certBytes1
+      check storedCertificateFiles(fx.certStore, content1) == files1
 
       # --- 3. a RELEVANT change → re-run + re-issue ------------------------
-      # A new commit changes the tracked CONTENT, so the content binding
-      # differs: the tested state is no longer the one the existing cert
-      # attests, so the re-certify must re-run the target and issue a fresh
-      # certificate.
-      writeFile(fx.workspaceRoot / "lib-a" / "feature.nim",
-        "proc f() = discard\n")
-      discard requireGit(q(gitBin) & " -C " &
-        q(fx.workspaceRoot / "lib-a") & " add feature.nim")
-      discard requireGit(q(gitBin) & " -C " &
-        q(fx.workspaceRoot / "lib-a") & " commit -m feature")
-      discard requireGit(q(gitBin) & " -C " &
-        q(fx.workspaceRoot / "lib-a") & " push origin main")
-      let newSha = requireGit(q(gitBin) & " -C " &
-        q(fx.workspaceRoot / "lib-a") & " rev-parse HEAD").strip()
-
+      # TC-8d: the change is certified BEFORE it is committed. It changes the
+      # tracked CONTENT, so the existing certificate does not cover it and the
+      # target runs again.
+      let libA2 = fx.workspaceRoot / "lib-a"
+      writeFile(libA2 / "feature.nim", "proc f() = discard\n")
+      discard requireGit(q(gitBin) & " -C " & q(libA2) & " add feature.nim")
+      let content2 = workingTreeContentIdOf(gitBin, libA2,
+        fx.scratch / "expected-index")
+      check content2 != content1
       let r3 = runCertify(fx, fixtureJson)
       if r3.code != 0:
         checkpoint("certify #3 output: " & r3.output)
       check r3.code == 0
-      # The target DID run again (the change forced a re-run).
       check runCount(counterFile) == 2
-      # A fresh certificate bound to the NEW commit was issued.
-      let newCertOut = defaultCertificatePath(
-        fx.workspaceRoot, newSha, currentPlatformTag())
-      check fileExists(newCertOut)
-      let newCert = readCertificateFile(newCertOut)
-      check newCert.vcs.base == newSha
-      check newCert.vcs.content == "git-tree-sha1:" & requireGit(q(gitBin) &
-        " -C " & q(fx.workspaceRoot / "lib-a") & " rev-parse " & newSha &
-        "^{tree}").strip()
-      check "t-unit" in newCert.targets
+      let newFiles = storedCertificateFiles(fx.certStore, content2)
+      check newFiles.len == 1
+      if newFiles.len == 1:
+        let newCert = readCertificateFile(newFiles[0])
+        check newCert.vcs.content == content2
+        check newCert.vcs.base == fx.libASha
+        check "t-unit" in newCert.targets
+
+      # --- 4. committing the tested content re-runs nothing ----------------
+      discard requireGit(q(gitBin) & " -C " & q(libA2) & " commit -m feature")
+      let newSha = requireGit(q(gitBin) & " -C " & q(libA2) &
+        " rev-parse HEAD").strip()
+      check treeContentId(gitBin, libA2, newSha) == content2
+      let r4 = runCertify(fx, fixtureJson)
+      checkpoint("certify #4 output: " & r4.output)
+      check r4.code == 0
+      check r4.output.contains("no-op")
+      check runCount(counterFile) == 2
+
+      # --- 5. a message-only amend re-runs nothing either ------------------
+      discard requireGit(q(gitBin) & " -C " & q(libA2) &
+        " commit --amend -m reworded")
+      let r5 = runCertify(fx, fixtureJson)
+      checkpoint("certify #5 output: " & r5.output)
+      check r5.code == 0
+      check r5.output.contains("no-op")
+      check runCount(counterFile) == 2
+      check storedCertificateFiles(fx.certStore, content2) == newFiles

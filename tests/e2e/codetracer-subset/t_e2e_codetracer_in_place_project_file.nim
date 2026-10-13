@@ -7,16 +7,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "f8781d4b5514ee9bbcdee0de701dc4bd8090a061"
+    "17c111fb280214f6d331f1bafd560989b6bd509b"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-f8781d4b.nim"
+    "tests/fixtures/codetracer-subset/repro-17c111fb.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-f8781d4b.nims"
+    "tests/fixtures/codetracer-subset/config-17c111fb.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
     "ccf12e902fdd57ae789434591256683a46b3d35e19ba81df0d7b28cc0c0f6582"
   PinnedCodeTracerConfigPayloadSha256 =
-    "8826b81b19fbd6eaf385ff18d9f065213756ed42f42eb7a284b16a407feff94b"
+    "5a619728256fbebfaa8fffde8280293e93a2600daac684375193a4413b69c3dd"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by
@@ -61,131 +61,6 @@ const
       module: "nimcrypto.nim"
     )
   ]
-
-const GccProxySource = r"""
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-static const char *default_real_gcc = "@REAL_GCC_PATH@";
-
-static void read_for_monitor(const char *path) {
-  int fd = open(path, O_RDONLY);
-  if (fd < 0) return;
-  char buffer[4096];
-  while (read(fd, buffer, sizeof(buffer)) > 0) {}
-  close(fd);
-}
-
-int main(int argc, char **argv) {
-  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
-    puts("gcc proxy 1.0.0");
-    return 0;
-  }
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-include") == 0 && i + 1 < argc) {
-      read_for_monitor(argv[i + 1]);
-      i++;
-    } else if (argv[i][0] != '-' && strstr(argv[i], ".c") != NULL) {
-      read_for_monitor(argv[i]);
-    }
-  }
-  char **next_argv = calloc((size_t)argc + 1, sizeof(char *));
-  if (next_argv == NULL) return 126;
-  next_argv[0] = (char *)default_real_gcc;
-  for (int i = 1; i < argc; i++) next_argv[i] = argv[i];
-
-#if defined(__APPLE__)
-  /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose
-     SDK bin lacks gcc and falls back to PATH — re-finding this proxy
-     and looping until kern.maxprocperuid is exhausted. Strip the SDK
-     pointers and proxy directory while retaining monitor injection. */
-  unsetenv("DEVELOPER_DIR");
-  unsetenv("SDKROOT");
-  setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
-#endif
-  execv(default_real_gcc, next_argv);
-  perror("execv real gcc");
-  return 127;
-}
-"""
-
-const StylusFixtureSource = r"""
-#include <errno.h>
-#include <libgen.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-
-static int mkdir_p(const char *path) {
-  char *copy = strdup(path);
-  if (copy == NULL) return 126;
-  for (char *p = copy + 1; *p != '\0'; p++) {
-    if (*p == '/') {
-      *p = '\0';
-      if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
-        free(copy);
-        return 1;
-      }
-      *p = '/';
-    }
-  }
-  if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
-    free(copy);
-    return 1;
-  }
-  free(copy);
-  return 0;
-}
-
-static int ensure_parent(const char *path) {
-  char *copy = strdup(path);
-  if (copy == NULL) return 126;
-  char *dir = dirname(copy);
-  int code = mkdir_p(dir);
-  free(copy);
-  return code;
-}
-
-int main(int argc, char **argv) {
-  if (argc == 2 && strcmp(argv[1], "--version") == 0) {
-    puts("stylus 1.0.0");
-    return 0;
-  }
-  const char *output = "";
-  const char *source = "";
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
-    else if (argv[i][0] == '-') return 64;
-    else source = argv[i];
-  }
-  if (output[0] == '\0' || source[0] == '\0') return 65;
-  if (ensure_parent(output) != 0) return 1;
-  FILE *in = fopen(source, "r");
-  if (in == NULL) return 2;
-  FILE *out = fopen(output, "w");
-  if (out == NULL) {
-    fclose(in);
-    return 3;
-  }
-  fprintf(out, "/* %s */\n", source);
-  char buffer[4096];
-  size_t n = 0;
-  while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
-    if (fwrite(buffer, 1, n, out) != n) {
-      fclose(in);
-      fclose(out);
-      return 4;
-    }
-  }
-  fclose(in);
-  fclose(out);
-  return 0;
-}
-"""
 
 const CodeTracerCommonDevToolExecutables: seq[string] = @[
   "attic-client",
@@ -307,9 +182,6 @@ proc installLiveReloadTransport*(url, bundleUrl: cstring): LiveReloadTransport =
 proc disconnect*(transport: LiveReloadTransport) =
   discard
 """
-
-proc q(value: string): string =
-  quoteShell(value)
 
 proc shellCommand(args: openArray[string];
                   env: openArray[(string, string)] = []):
@@ -607,12 +479,6 @@ proc pathExists(path: string): bool =
 proc compilePublicReproTestBin(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
-
-proc writeExecutable(path, content: string) =
-  createDir(path.splitPath.head)
-  writeFile(path, content)
-  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
-    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 when defined(macosx) or defined(linux):
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
@@ -1196,63 +1062,70 @@ proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
   finishCodeTracerProject(codeTracerRoot, projectRoot)
 
-proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
-  let binDir = tempRoot / "codetracer-tool-bin"
-  createDir(binDir)
-  let sourcePath = binDir / "gcc-proxy.c"
-  let gccPath = binDir / "gcc"
-  let clangPath = binDir / "clang"
-  # Apple's signed /usr/bin/gcc tool shim strips DYLD interposition across
-  # exec, which makes an otherwise successful compile report an unmonitored
-  # subtree and prevents a sound action-cache publish. The dev-shell clang is
-  # unsigned, injectable, and already carries the pinned SDK/toolchain paths.
-  let realGcc = findExe(
+# The PATH tools every case runs under, as STABLE directories shared by all
+# cases: the checked-in scripts under ``tests/fixtures/codetracer-tools`` and
+# the compiled ``gcc``/``clang`` proxy and ``stylus`` stand-in that edges
+# ``reprobuild.test_fixtures.codetracer_tool_*`` build into
+# ``build/test-fixtures/codetracer-tools`` (``testFixtureArtifacts``).
+#
+# Each case used to compile and write its own copies into
+# ``<tempRoot>/codetracer-tool-bin``. Interface extraction records the PATH it
+# observes and the compilers it runs from it, so a per-case directory made every
+# case re-extract the same CodeTracer recipe and its packages — a correct miss,
+# most of each case's time. Nothing here writes to these directories;
+# a case that needs a different tool gets a different DIRECTORY ahead of the
+# shared ones, never a different file in them.
+proc codeTracerToolDir(relative: string): string =
+  result = graphArtifactPath("tests/fixtures/codetracer-tools/" & relative)
+  check dirExists(result)
+
+proc codeTracerToolBinary(relative, edge: string): string =
+  # Read-only outputs of the fixture edges, never written by a case.
+  requireBinary(graphArtifactPath("build/test-fixtures/codetracer-tools/" &
+    relative), edge)
+
+proc codeTracerPathDirs(includeClang = false): seq[string] =
+  # The real compiler the proxy forwards to is the next one on PATH after its
+  # own directory: the test's own ``gcc`` (``clang`` on macOS — Apple's
+  # signed /usr/bin/gcc shim strips DYLD interposition across exec, which
+  # makes a successful compile report an unmonitored subtree; the dev-shell
+  # clang is unsigned and injectable). The ``nim`` script likewise forwards
+  # to the test's own Nim (see its header for why not CodeTracer's bundled
+  # one). Both must exist, as they had to when they were baked in per case.
+  check findExe(
     when defined(macosx): "clang"
-    else: "gcc")
-  check realGcc.len > 0
-  writeFile(sourcePath, GccProxySource.replace("@REAL_GCC_PATH@", realGcc))
-  discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+    else: "gcc").len > 0
+  check findExe("nim").len > 0
+  let gcc = codeTracerToolBinary("bin/gcc",
+    "reprobuild.test_fixtures.codetracer_tool_gcc")
+  discard codeTracerToolBinary("bin/stylus",
+    "reprobuild.test_fixtures.codetracer_tool_stylus")
+  # ``clang`` is either the proxy (native cases) or a version-answering
+  # stand-in, and it must come BEFORE the proxy's directory: on macOS the
+  # proxy looks for the real ``clang`` after its own directory.
   if includeClang:
-    discard requireSuccess(shellCommand(["ln", "-s", gccPath, clangPath]))
-  let stylusSourcePath = binDir / "stylus-fixture.c"
-  let stylusPath = binDir / "stylus"
-  writeFile(stylusSourcePath, StylusFixtureSource)
-  discard requireSuccess(shellCommand(["cc", stylusSourcePath, "-o", stylusPath]))
-  writeExecutable(binDir / "node",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "case \"${1:-}\" in\n" &
-    "  --version|-v) echo 'v20.0.0'; exit 0 ;;\n" &
-    "  node_modules/stylus/bin/stylus|*/node_modules/stylus/bin/stylus)\n" &
-    "    shift; exec " & q(stylusPath) & " \"$@\" ;;\n" &
-    "  tests/ipc_registry_test.js|*/tests/ipc_registry_test.js)\n" &
-    "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
-    "  *) exit 0 ;;\n" &
-    "esac\n")
-  # Pin `nim` to the nix-shell Nim (2.2.4) rather than CodeTracer's bundled
-  # Nim 2.2.8. Under fork/resource pressure (parallel compiles spawning gcc
-  # children), the bundled Nim's interaction with the host clang-wrapper has
-  # been observed to report `[SuccessX]` while leaving no binary on disk — a
-  # SuccessX-but-no-output failure mode that surfaces in
-  # compileExtractRunner. The nix-shell Nim does not exhibit this on the
-  # affected macOS hosts, so forwarding through a shim keeps every subtest
-  # on a known-good toolchain.
-  let nimBinary = findExe("nim")
-  check nimBinary.len > 0
-  writeExecutable(binDir / "nim",
-    "#!/bin/sh\n" &
-    "exec " & q(nimBinary) & " \"$@\"\n")
+    result.add(codeTracerToolBinary("clang-bin/clang",
+      "reprobuild.test_fixtures.codetracer_tool_clang").parentDir)
+  else:
+    result.add(codeTracerToolDir("clang-stub"))
+  result.add(gcc.parentDir)
+  result.add(codeTracerToolDir("tools"))
+  when defined(linux):
+    result.add(codeTracerToolDir("tools-linux"))
+  elif defined(macosx):
+    result.add(codeTracerToolDir("tools-macos"))
+  # Every dev tool CodeTracer's project declares resolves to a fixture,
+  # except the shells and nix, which come from the host as before.
+  let dirs = result
   for tool in CodeTracerDevToolExecutables:
-    if tool notin ["bash", "nim", "node", "gcc", "nix", "sh", "stylus"] and
-        not fileExists(binDir / tool):
-      writeExecutable(binDir / tool,
-        "#!/bin/sh\n" &
-        "set -eu\n" &
-        "case \"${1:-}\" in\n" &
-        "  --version|-v) echo '" & tool & " fixture 1.0.0'; exit 0 ;;\n" &
-        "  *) exit 0 ;;\n" &
-        "esac\n")
-  binDir & $PathSep & getEnv("PATH")
+    if tool notin ["bash", "nix", "sh"]:
+      let provided = dirs.anyIt(fileExists(it / tool))
+      if not provided:
+        checkpoint("no fixture directory provides " & tool)
+      check provided
+
+proc codeTracerPathValue(includeClang = false): string =
+  (codeTracerPathDirs(includeClang) & @[getEnv("PATH")]).join($PathSep)
 
 proc codeTracerNimPath(codeTracerRoot: string): string =
   let localNim = codeTracerRoot / "non-nix-build" / "deps" / "nim" /
@@ -1274,25 +1147,20 @@ proc codeTracerNimPath(codeTracerRoot: string): string =
     return canonicalHostNim
   hostNim
 
-proc codeTracerNativePathValue(codeTracerRoot, tempRoot: string): string =
+proc codeTracerNativePathValue(codeTracerRoot: string): string =
   let nimPath = codeTracerNimPath(codeTracerRoot)
-  nimPath.splitPath.head & $PathSep & codeTracerPathValue(tempRoot,
-    includeClang = true)
+  nimPath.splitPath.head & $PathSep & codeTracerPathValue(includeClang = true)
 
-proc codeTracerHybridNimPathValue(codeTracerRoot, tempRoot: string): string =
-  let basePath = codeTracerPathValue(tempRoot, includeClang = true)
-  let binDir = tempRoot / "codetracer-tool-bin"
+proc codeTracerHybridNimPathValue(codeTracerRoot: string): string =
+  # JavaScript targets compile with the test's Nim, native ones with
+  # CodeTracer's (``hybrid-nim/nim``). CodeTracer's Nim directory is
+  # APPENDED, so it shadows no other tool; the script takes the last ``nim``
+  # on PATH for native targets.
   let localNim = codeTracerNimPath(codeTracerRoot)
-  let hostNim = findExe("nim")
-  check hostNim.len > 0
-  writeExecutable(binDir / "nim",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "if [ \"${1:-}\" = \"js\" ]; then\n" &
-    "  exec " & q(hostNim) & " \"$@\"\n" &
-    "fi\n" &
-    "exec " & q(localNim) & " \"$@\"\n")
-  basePath
+  check findExe("nim").len > 0
+  (@[codeTracerToolDir("hybrid-nim")] &
+    codeTracerPathDirs(includeClang = true) &
+    @[getEnv("PATH"), localNim.parentDir]).join($PathSep)
 
 proc nixStorePaths(output: string): seq[string] =
   for line in output.splitLines:
@@ -1683,7 +1551,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#c-sudoku-object-with-generated-header"
       let selected = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -1760,7 +1628,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-public-ui-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -1880,7 +1748,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-src-subwindow-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -1988,7 +1856,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-src-index-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -2113,7 +1981,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerNativePathValue(codeTracerRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerNimPath(codeTracerRoot)
@@ -2213,7 +2081,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerNativePathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerNativePathValue(codeTracerRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip() ==
         codeTracerNimPath(codeTracerRoot)
@@ -2352,7 +2220,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerHybridNimPathValue(codeTracerRoot, tempRoot)
+      let pathValue = codeTracerHybridNimPathValue(codeTracerRoot)
       check requireSuccess(shellCommand(["sh", "-c", "command -v nim"],
         [("PATH", pathValue)]), repoRoot).strip().len > 0
       var nativeEnv: seq[(string, string)] = @[]
@@ -2548,7 +2416,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-server-index-js"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -2635,7 +2503,7 @@ when defined(macosx) or defined(linux):
       check not readFile(projectRoot / "repro.nim").
         contains("writeProject")
 
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend-public-resources"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue)
       check first.contains("selectedTarget: frontend-public-resources")
@@ -2767,7 +2635,7 @@ when defined(macosx) or defined(linux):
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
       check readFile(projectRoot / "repro.nim") == projectText
 
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let first = build(reproBin, projectRoot & "#frontend-public-resources",
         repoRoot, pathValue)
       check first.contains("selectedTarget: frontend-public-resources")
@@ -2813,7 +2681,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let selectedTarget = projectRoot & "#frontend"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
@@ -3023,7 +2891,7 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue(tempRoot)
+      let pathValue = codeTracerPathValue()
       let first = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")

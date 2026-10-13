@@ -105,17 +105,22 @@ require_contains flake.nix "devShells.default"
 require_contains flake.nix "packages.default"
 require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
-# The dev shell must still run git-hooks.nix's installer. It is no longer the
-# WHOLE shellHook: Reprobuild's own hook reconciliation runs after it, and the
-# pre-commit hook handoff runs on both sides of it, so the requirement is that
-# the installer is composed in — not that nothing else is.
-require_contains flake.nix "+ pre-commit-check.shellHook"
+# The dev shell must install the committed .pre-commit-config.yaml as the
+# pre-commit hook, run by the flake's pre-commit. git-hooks.nix's own installer
+# refuses to replace a committed config and installs nothing, so it must not be
+# what the shell runs. Reprobuild's own hook reconciliation runs after the
+# installer; the requirement is that the installer is composed in, not that
+# nothing else is.
+require_contains flake.nix "\${./scripts/install-git-hooks.sh} \${pkgs.lib.getExe pre-commit-check.config.package}"
+if grep -Fq "+ pre-commit-check.shellHook" flake.nix; then
+  fail "flake.nix must not compose git-hooks.nix's installer into the dev shell; it refuses the committed .pre-commit-config.yaml"
+fi
 
 # CodeTracer's canonical native target imports span_stream. The trace-format
 # pin and every Nix execution surface must therefore agree on one immutable
 # source root. Exact counts make removal of any one surface fail this quick
 # repository check instead of surfacing after a minute-long CodeTracer compile.
-trace_format_rev="7b8b587c72ec31f6825ae124ab89ad7954f6dca7"
+trace_format_rev="808ffdb4507634c3aba0661d96cbc353420ed856"
 require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${trace_format_rev}"
 # The bootstrap modules follow this Repro flake, so its former nested Repro
 # release (and duplicate trace-format node) is absent. The remaining node
@@ -138,7 +143,7 @@ require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_f
   '"CODETRACER_TRACE_FORMAT_NIM_SRC",'
 require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
   'let pinnedSource = getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")'
-require_contains tests/fixtures/codetracer-subset/config-f8781d4b.nims \
+require_contains tests/fixtures/codetracer-subset/config-17c111fb.nims \
   'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
 
 # The incremental-test seam (``ct_incremental_adapter.nim``), for the same

@@ -15,7 +15,7 @@
 ## and re-encode through `encodeRbpi` (Phase B). The JSON ->
 ## ProfileIntent -> RBPI round-trip is lossless by construction.
 
-import std/[os, osproc, parseutils, streams, strtabs, strutils]
+import std/[os, osproc, streams, strtabs, strutils]
 from repro_core/paths import extendedPath
 from repro_core/process_streams import drainStream
 
@@ -32,17 +32,87 @@ type
   CompileFailure* = object of CatchableError
     stderrText*: string
 
-proc requireNimOnPath*(): string =
-  ## Locate the `nim` binary. Fails closed with a diagnostic pointing at
-  ## the vendored-Nim follow-up phase if Nim is absent.
+const ProfileNimCompilerEnvVar* = "REPRO_NIM_COMPILER"
+  ## The compiler an installed `repro` was built with. The Nix package's
+  ## wrapper sets it to the fork (`package.nix`), and the provider compile
+  ## already honours it (`repro_interface_artifacts.nimCompilerPath`).
+
+proc resolveProfileNimCompiler*(): string =
+  ## The `nim` that compiles a profile: `$REPRO_NIM_COMPILER` when set, the
+  ## first `nim` on `PATH` otherwise — the provider compile's order, so one
+  ## installed `repro` compiles its recipes and its profiles with the same
+  ## compiler (the profile imports the very libs that compiler built the
+  ## binary from).
+  ##
+  ## An explicit `$REPRO_NIM_COMPILER` that names no file is refused rather
+  ## than quietly replaced by whatever `PATH` offers: the variable is the
+  ## caller's stated choice, and silently compiling with a different
+  ## compiler is the failure it exists to prevent.
+  let explicit = getEnv(ProfileNimCompilerEnvVar)
+  if explicit.len > 0:
+    # A bare command name (no directory part) is looked up on PATH, as the
+    # provider compile's launcher (`poUsePath`) would; it still has to
+    # resolve, so a typo is refused here rather than at spawn time.
+    if explicit.extractFilename == explicit:
+      let resolved = findExe(explicit)
+      if resolved.len > 0:
+        return resolved
+    if not fileExists(extendedPath(explicit)):
+      raise newException(CompileFailure,
+        "repro profile compile: $" & ProfileNimCompilerEnvVar & "=" & explicit &
+        " does not name an existing file. Point it at a Nim compiler, or " &
+        "unset it to use the `nim` on PATH.")
+    return explicit
   let nimExe = findExe("nim")
   if nimExe.len == 0:
     raise newException(CompileFailure,
-      "repro profile compile: `nim` not found on PATH. The current " &
-      "release requires Nim from PATH; vendored-Nim auto-bootstrap is " &
-      "deferred to a later phase. Install Nim >= 2.0 " &
-      "(https://nim-lang.org/install.html) and retry.")
+      "repro profile compile: no Nim compiler. Set $" & ProfileNimCompilerEnvVar &
+      " (an installed `repro` package sets it), or put Nim >= 2.0 " &
+      "(https://nim-lang.org/install.html) on PATH, and retry.")
   nimExe
+
+proc requireReprobuildSources*(repoRoot: string) =
+  ## Refuse a source root that holds no reprobuild libs, naming the
+  ## variables that select one. Without this the failure surfaced as
+  ## `setCurrentDir` on a path nobody chose — the build sandbox baked into
+  ## `CompiledRepoRoot`.
+  if not dirExists(extendedPath(repoRoot / LibsDirName / "repro_profile" /
+      "src")):
+    raise newException(CompileFailure,
+      "repro profile compile: no reprobuild sources at " & repoRoot &
+      " (expected " & LibsDirName & "/repro_profile/src). An installed " &
+      "package names them in $REPROBUILD_SOURCE_ROOT; a checkout can be " &
+      "selected with $REPROBUILD_REPO_ROOT.")
+
+const ProfileCompileDefines*: seq[string] = @[]
+  ## The `-d:` symbols the profile compile passes to `nim c` beyond the ones
+  ## Nim sets for the target platform. `profileCompileArgv` emits exactly
+  ## these, and `repro home export` reports them as the compile-time
+  ## definitions the intent was evaluated under -- one list, so the record
+  ## cannot disagree with the command. Empty today: a profile sees the
+  ## target's platform symbols (`linux`, `macosx`, `windows`, `amd64`, …)
+  ## plus whatever its own `config.nims` defines.
+
+proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
+                         repoRoot: string): seq[string] =
+  ## The `nim c` command line for a profile compile, as an argv sequence.
+  ##
+  ## Built as a sequence and handed to the process launcher unchanged. It
+  ## used to be one string assembled with `quoteShell` and split again with
+  ## `parseCmdLine`; on POSIX `quoteShell` quotes with single quotes, which
+  ## `parseCmdLine` does not honour, so any path with a space came apart —
+  ## and the macOS default state directory (`~/Library/Application
+  ## Support/repro/home`) puts one in the nimcache path of every apply:
+  ## `Error: arguments can only be given if the '--run' option is selected`.
+  ## Each element below is one argument whatever characters it holds.
+  result = @[nimExe, "c", "--hints:off", "--warnings:off",
+    "--nimcache:" & nimcacheDir,
+    "--out:" & outBinary]
+  for define in ProfileCompileDefines:
+    result.add "-d:" & define
+  for path in profileNimPaths(repoRoot):
+    result.add "--path:" & path
+  result.add profileRoot
 
 # ---------------------------------------------------------------------------
 # Direct Nim invocation (two-phase: `nim c` then run the binary).
@@ -53,11 +123,12 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
                            verbose: bool = false): tuple[
     jsonOutput: string; stderrText: string] =
   ## Two-phase invocation: `nim c` (no `-r`) emits the binary, then we
-  ## run it directly via `execCmdEx`. The split keeps Nim's diagnostic
+  ## run it directly. The split keeps Nim's diagnostic
   ## chatter on stderr and the profile binary's stdout JSON on stdout.
   ## Raises `CompileFailure` if either step exits non-zero.
-  let nimExe = requireNimOnPath()
+  let nimExe = resolveProfileNimCompiler()
   let repoRootAbs = absolutePath(repoRoot)
+  requireReprobuildSources(repoRootAbs)
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
 
@@ -77,14 +148,10 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
       "include \"" & upstreamConfig.replace('\\', '/') & "\"\n")
     didStageConfig = true
 
-  var compileCmd = quoteShell(nimExe) & " c --hints:off --warnings:off" &
-    " --nimcache:" & quoteShell(nimcacheDir) &
-    " --out:" & quoteShell(outBinary)
-  for path in profileNimPaths(repoRootAbs):
-    compileCmd.add " --path:" & quoteShell(path)
-  compileCmd.add " " & quoteShell(profileRoot)
+  let nimArgv = profileCompileArgv(nimExe, profileRoot, nimcacheDir,
+    outBinary, repoRootAbs)
   if verbose:
-    stderr.writeLine("repro profile compile: " & compileCmd)
+    stderr.writeLine("repro profile compile: " & nimArgv.join(" "))
 
   try:
     # NimScript's relative path resolution from a config.nims runs in
@@ -176,7 +243,6 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
       if getEnv("REPRO_TEST_ADAPTERS_SRC").len == 0:
         childEnv["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"
 
-    let nimArgv = parseCmdLine(compileCmd)
     var p = startProcess(nimArgv[0], workingDir = repoRootAbs,
                          args = nimArgv[1 .. ^1],
                          env = childEnv,
@@ -196,7 +262,17 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
       err.stderrText = compileRes.output
       raise err
 
-    let runRes = execCmdEx(quoteShell(outBinary))
+    # Run the profile binary directly, not through a shell, for the same
+    # reason the compile is an argv: the binary sits under the nimcache, so
+    # its path carries any space the state directory has. stderr is merged
+    # into the captured output as `execCmdEx` did before, so a profile that
+    # fails keeps reporting its diagnostics.
+    var runProc = startProcess(outBinary, args = [],
+                               options = {poStdErrToStdOut})
+    let runOutput = drainStream(runProc.outputStream)
+    let runExit = runProc.waitForExit()
+    runProc.close()
+    let runRes = (output: runOutput, exitCode: runExit)
     if runRes.exitCode != 0:
       var err = new CompileFailure
       err.msg = "compiled profile binary exited " & $runRes.exitCode &
@@ -258,10 +334,18 @@ proc readBytes*(path: string): seq[byte] =
   for i, ch in s:
     result[i] = byte(ord(ch))
 
-proc cachedArtifactIsValid*(path: string): bool =
-  ## Cheap structural sanity-check: read the file and confirm it parses
-  ## as an RBPI envelope. Avoids returning a half-written or corrupted
-  ## artifact on cache lookup.
+proc rbpiEnvelopeIsValid*(path: string): bool =
+  ## Structural sanity-check of a published envelope: the file exists and
+  ## parses as an RBPI envelope of the current schema. Used AFTER the
+  ## profile-compile edge has run, to refuse a half-written or corrupt
+  ## artifact.
+  ##
+  ## NOT A CACHE LOOKUP. This proc used to be `cachedArtifactIsValid`, and it
+  ## answered "may I skip the compile?" for an envelope named after an
+  ## import-scan digest — which served the previous intent whenever a profile
+  ## read something no `import` mentions. Validity of the bytes says nothing
+  ## about whether they describe the profile as it stands now; only the
+  ## action cache's monitored evidence does.
   if not fileExists(extendedPath(path)):
     return false
   try:

@@ -623,10 +623,10 @@ template exerciseFormat(gitBin, objectFormat: string) =
     check fx.git(["push", "origin", "refs/tags/published-tag"],
       required = false).code == 0
     check fx.git(["push", "origin", ":scratch"], required = false).code == 0
-    discard fx.git(["notes", "--ref=refs/notes/reprobuild/certificates",
+    discard fx.git(["notes", "--ref=refs/notes/test-certificates/certificates",
       "add", "-m", "certificate", "HEAD"])
     check fx.git(["push", "origin",
-      "refs/notes/reprobuild/certificates"], required = false).code == 0
+      "refs/notes/test-certificates/certificates"], required = false).code == 0
 
     # Already-published HEAD keeps the existing allow policy for valid force
     # and multi-ref updates; outgoing-current is not needed in this state.
