@@ -323,10 +323,18 @@ proc readBytes*(path: string): seq[byte] =
   for i, ch in s:
     result[i] = byte(ord(ch))
 
-proc cachedArtifactIsValid*(path: string): bool =
-  ## Cheap structural sanity-check: read the file and confirm it parses
-  ## as an RBPI envelope. Avoids returning a half-written or corrupted
-  ## artifact on cache lookup.
+proc rbpiEnvelopeIsValid*(path: string): bool =
+  ## Structural sanity-check of a published envelope: the file exists and
+  ## parses as an RBPI envelope of the current schema. Used AFTER the
+  ## profile-compile edge has run, to refuse a half-written or corrupt
+  ## artifact.
+  ##
+  ## NOT A CACHE LOOKUP. This proc used to be `cachedArtifactIsValid`, and it
+  ## answered "may I skip the compile?" for an envelope named after an
+  ## import-scan digest — which served the previous intent whenever a profile
+  ## read something no `import` mentions. Validity of the bytes says nothing
+  ## about whether they describe the profile as it stands now; only the
+  ## action cache's monitored evidence does.
   if not fileExists(extendedPath(path)):
     return false
   try:

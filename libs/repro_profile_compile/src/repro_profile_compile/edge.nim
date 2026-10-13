@@ -1,30 +1,42 @@
-## M83 Phase C profile-compile build-graph edge.
+## Profile-compile build-graph edge.
 ##
-## The public entry point `compileProfileToRbpi` mirrors the shape of
-## `compileProviderBinary` from `libs/repro_interface_artifacts/`:
+## `compileProfileToRbpi` turns a `home.nim` / `system.nim` profile into the
+## RBPI envelope the apply pipelines consume. It does exactly one thing: it
+## schedules ONE monitored `bakProcess` edge through `runBuild` and returns
+## what that edge published. Nothing in front of the edge, inside the child
+## it spawns, or behind it decides whether a previous result is still good —
+## the engine's action cache decides, from what io-mon observed the edge read.
 ##
-##   1. Discover sources + compute the profile fingerprint.
-##   2. Look up the cached `.rbpi` envelope; fast-path return on a
-##      structural cache hit.
-##   3. On miss: build a `BuildAction` of kind `bakProcess` whose argv
-##      invokes the public CLI's internal `__repro-compile-profile`
-##      helper. The action is submitted to `runBuild(graph([action]),
-##      config)` so the existing action-cache + CAS pipeline kicks in
-##      automatically.
-##   4. Read the resulting `.rbpi` bytes back and return a
-##      `ProfileCompileArtifact` to the caller.
+## WHY NOTHING ELSE MAY DECIDE FRESHNESS. This edge used to be fronted by a
+## structural fast path: an `import ./…` text walk (`discoverProfileSources`)
+## was hashed into a digest, the `.rbpi` was named after that digest, and a
+## valid envelope at that name was returned before `runBuild` was ever called.
+## The walk cannot see what Nim actually reads — `staticRead`, `include`,
+## `when`, macros, `config.nims`, and anything the profile binary reads when it
+## RUNS — so a profile whose helper read `casks.txt` through `staticRead` kept
+## planning the first payload after the file changed. The same defect, in the
+## same shape, was removed from the interface-extraction and provider compiles
+## earlier ("Compiles-Are-Normal-Edges"); the profile compile had not followed.
 ##
-## Profile compilation is therefore a normal build-graph edge: the
-## scheduler, action cache, output CAS, and dependency-policy machinery
-## all apply unchanged. There is no user-facing `repro profile build`
-## command — apply (Phase D) calls this proc automatically.
+## The edge covers BOTH phases of the helper: `nim c` (so compile-time reads
+## are evidence) AND the run of the produced binary whose stdout is the
+## `ProfileIntent` (so run-time reads are evidence too — the envelope is the
+## binary's BEHAVIOUR, not the binary). Splitting the run out of the edge, or
+## running it where the monitor cannot see it, reintroduces a stale intent;
+## `t_e2e_profile_compile_runtime_read_tracked` pins that.
+##
+## The only declared identity the edge carries is what monitoring cannot
+## supply (see `profileCompileWeakFingerprint`): which compiler and helper are
+## doing the work, and where the declared output lands.
 
 import std/[os, strutils]
 from repro_core/paths import extendedPath
 
+import blake3
 import repro_core
 import repro_hash
 import repro_build_engine
+import repro_profile_intent/envelope as profile_envelope
 
 import ./sources
 import ./compile
@@ -35,14 +47,35 @@ import ./compile
 
 type
   ProfileCompileArtifact* = object
-    ## Result of a successful profile compile. The bytes are the RBPI
-    ## envelope ready to feed into the apply pipeline; the path is where
-    ## the action-cache CAS published them.
+    ## Result of a successful profile compile.
+    ##
+    ## `rbpiBytes` is the RBPI envelope ready to feed into the apply pipeline;
+    ## `rbpiPath` is where the edge published it. `digestHex` is the BLAKE3
+    ## of those bytes — the identity of the produced INTENT, not of any
+    ## source set (no source set is enumerated any more).
+    ##
+    ## The remaining fields report the engine's own decision about the edge,
+    ## so a caller (and a test) can tell a cache answer from an execution
+    ## without inferring it from timestamps:
+    ##
+    ## * `edgeLaunched` — the helper process was spawned this call (so `nim`
+    ##   ran). False on an action-cache hit.
+    ## * `cacheDecision` / `cacheMissReason` / `cachePublishSkipReason` —
+    ##   copied verbatim from the engine's `ActionResult`.
+    ## * `observedInputs` — the files io-mon observed the edge READ, when the
+    ##   edge executed this call (empty on a cache hit, whose evidence the
+    ##   engine is configured not to reconstruct). This is the dependency
+    ##   record the action cache keys on; it is exposed so callers can see
+    ##   what a profile actually depends on.
     profileRoot*: string
-    inputSources*: seq[string]
     rbpiPath*: string
     rbpiBytes*: seq[byte]
     digestHex*: string
+    edgeLaunched*: bool
+    cacheDecision*: CacheDecision
+    cacheMissReason*: string
+    cachePublishSkipReason*: string
+    observedInputs*: seq[string]
 
   ProfileCompileOptions* = object
     ## Caller-tunable knobs. `stateDir` is the per-user state directory
@@ -53,7 +86,8 @@ type
     ## `--repo-root`; empty resolves it through `reprobuildRepoRoot()`.
     ## `workDir` is the cwd to run the helper in (defaults to the
     ## profile's parent directory). `verbose` and `forceRebuild` are
-    ## debug knobs.
+    ## debug knobs; `forceRebuild` removes the published envelope so the
+    ## engine must re-execute the edge rather than answer from its cache.
     stateDir*: string
     publicCliPath*: string
     repoRoot*: string
@@ -86,19 +120,64 @@ proc actionFailureDiagnostic(run: BuildRunResult): string =
       return parts.join("\n")
   "profile compile failed"
 
+const ProfileCompileActionId* = "__repro_profile_compile"
+
+proc profileCompileActionResult(run: BuildRunResult): ActionResult =
+  for item in run.results:
+    if item.id == ProfileCompileActionId:
+      return item
+  ActionResult(id: ProfileCompileActionId)
+
+proc profileCompileKey*(absProfile: string): string =
+  ## The stable name of one profile's compile outputs under
+  ## `<state-dir>/profile-cache/`: the BLAKE3 of the profile root's absolute
+  ## path.
+  ##
+  ## DECLARED OUTPUT IDENTITY, NOT A FRESHNESS KEY. It names WHERE the edge
+  ## publishes, and it deliberately does not move when the profile's content
+  ## changes: an output path that moved with the content would be a second,
+  ## hand-written cache key in front of the action cache — the defect this
+  ## module exists not to have. Content changes are the action cache's
+  ## business. The path is hashed rather than embedded so it stays a single
+  ## short component on every filesystem.
+  blake3.toHex(blake3.digest(absolutePath(absProfile).replace('\\', '/')))
+
+proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
+                                    rbpiPath: string): ContentDigest =
+  ## The weak fingerprint — the one part of the action key that is DECLARED
+  ## rather than observed — reduced to what monitoring cannot supply:
+  ##
+  ## * compiler identity: the `nim` the helper will resolve, and the helper
+  ##   binary itself (whose embedded encoder decides the envelope bytes);
+  ## * declared output identity: the published envelope's path and the RBPI
+  ##   schema version it is written in.
+  ##
+  ## It carries NO source digest. What the profile reads — its modules, data
+  ## files pulled in with `staticRead`, `config.nims`, reprobuild's libraries,
+  ## files the profile binary opens at run time — is recorded by the monitor
+  ## and revalidated by the action cache on every lookup. Adding a source
+  ## enumeration here would re-create the import-scan key that served stale
+  ## intents.
+  weakFingerprintFromText(
+    "repro.profile.compile.v2\n" &
+    "compiler=" & nimExe & "\n" &
+    "helper=" & publicCliPath & "\n" &
+    "output=" & rbpiPath & "\n" &
+    "rbpi-schema=" & $profile_envelope.RbpiSchemaVersion & "\n")
+
 # ---------------------------------------------------------------------------
-# BuildAction construction (mirror of providerCompileBuildAction).
+# BuildAction construction.
 #
-# The mirror is of the action's SHAPE, and it deliberately stops short of the
-# provider-compile edge's determinism claim. Do not finish the symmetry:
+# The edge mirrors the provider-compile edge's SHAPE (a monitored `bakProcess`
+# running the public CLI's internal helper) and deliberately stops short of
+# that edge's determinism claim. Do not finish the symmetry:
 #
-#   * The provider edge may state that the compiler's randomness cannot reach
-#     its output because that helper only ever compiles. THIS helper does not
-#     stop at compiling -- `compileProfileBinary` runs the binary it just
-#     built and re-encodes that run's stdout into the published envelope, so
-#     the produced program's behaviour IS the output. The provider's
-#     justification is exactly the property this edge lacks, and repeating it
-#     here would assert something untrue.
+#   * The provider edge blesses compiler entropy because that helper only
+#     ever compiles. THIS helper does not stop at compiling — it runs the
+#     binary it just built and re-encodes that run's stdout into the published
+#     envelope, so the produced program's behaviour IS the output. A blessing
+#     here would cover the profile binary too, and that is exactly the
+#     property this edge lacks.
 #   * The provider edge's environment passthrough names the compiler and C
 #     toolchain it is handed (`REPRO_NIM_COMPILER`, `REPRO_BOOTSTRAP_CC`, the
 #     provider nimcache session). This edge reads only the first: the helper
@@ -108,60 +187,58 @@ proc actionFailureDiagnostic(run: BuildRunResult): string =
 #     environment, so PASSTHROUGH by the classification rule in
 #     `repro_cli_support` -- and declaring the rest would name variables the
 #     edge never consumes.
-#
-# Nor is anything waiting to be fixed by them. The provider edge had to answer
-# from the action cache because that was its only warm path;
-# `compileProfileToRbpi` short-circuits on the source-set digest before the
-# build engine is reached at all, which is what
-# `t_e2e_repro_profile_compile_via_action` pins as "second call hits the
-# structural cache without spawning nim".
 # ---------------------------------------------------------------------------
 
-proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
-                                nimcacheDir, publicCliPath, workDir,
-                                repoRoot: string;
-                                inputSources: openArray[string];
+proc profileCompileBuildAction*(profileRoot, rbpiPath, nimcacheDir,
+                                publicCliPath, workDir, repoRoot: string;
                                 weak: ContentDigest;
                                 verbose = false): BuildAction =
-  ## Build the `BuildAction` that drives one cache-miss profile compile
-  ## via the internal `__repro-compile-profile` helper.
+  ## Build the `BuildAction` that drives one profile compile via the internal
+  ## `__repro-compile-profile` helper.
   ##
-  ## Inputs: the discovered source set. Outputs: the published RBPI
-  ## envelope + the source-manifest sidecar.
-  var inputs: seq[string] = @[]
-  for path in inputSources:
-    inputs.add path
+  ## Declared inputs: none. The dependency record is whatever io-mon observes
+  ## the helper, `nim`, the C toolchain and the profile binary read
+  ## (`automaticMonitorGatheringPolicy`). There is no hand-written depfile:
+  ## everything such a file could list, the monitor observes, and a list
+  ## somebody maintains is only correct until a profile reads something its
+  ## author did not anticipate. Do NOT pass `depfile =` to `action()` here
+  ## either: it rewrites a depfile next to an automatic-monitor policy into
+  ## the UNMONITORED `dgRecognizedFormat` policy, which is how this edge used
+  ## to be unmonitored while every comment said otherwise.
+  ##
+  ## Declared output: the published RBPI envelope.
+  ##
+  ## Ignored input prefix: the per-profile nimcache. It is derived state the
+  ## compile writes and reads back (Nim's incremental C/object cache and the
+  ## profile binary itself); recording it would key the edge on its own
+  ## scratch. The real inputs — profile sources, payloads, reprobuild's
+  ## libraries, the toolchain — live elsewhere and stay recorded. Mirrors
+  ## `providerCompileIgnoredInputPrefixes`.
   var argv = @[
     publicCliPath,
     "__repro-compile-profile",
     "--profile", profileRoot,
     "--rbpi", rbpiPath,
-    "--manifest", manifestPath,
     "--nimcache", nimcacheDir,
     "--repo-root", repoRoot
   ]
   if verbose:
     argv.add("--verbose")
-  let depfilePath = manifestPath & ".d"
-  argv.add("--depfile")
-  argv.add(depfilePath)
   let cwd =
     if workDir.len > 0: workDir
     else: profileRoot.parentDir
-  action("__repro_profile_compile", argv,
-    # Named-Lock-Files §7.2. A profile compile's inputs are the discovered
-    # repo-local source set; no solved package instance reaches this edge.
+  action(ProfileCompileActionId, argv,
+    # Named-Lock-Files §7.2. No solved package instance reaches this edge.
     # See `lockIdentityOutsideSolvedGraph`.
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = cwd,
-    inputs = inputs,
-    outputs = @[rbpiPath, manifestPath],
+    outputs = @[rbpiPath],
     commandStatsId = "repro profile compile edge",
     cacheable = true,
     weakFingerprint = weak,
-    depfile = depfilePath,
     envPassthrough = @[ProfileNimCompilerEnvVar],
-    dependencyPolicy = automaticMonitorGatheringPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      @[absolutePath(nimcacheDir)]))
 
 # ---------------------------------------------------------------------------
 # BuildEngineConfig defaults appropriate for a single profile compile.
@@ -216,11 +293,12 @@ proc profileCompileEngineConfig*(stateDir, publicCliPath: string):
 proc compileProfileToRbpi*(profileRoot: string;
                            opts: ProfileCompileOptions):
     ProfileCompileArtifact =
-  ## Compile `profileRoot` (a `home.nim` / `system.nim` path) to the
-  ## RBPI binary envelope and return both the published path and the
-  ## bytes. The first call for a given source-set is a cache miss and
-  ## drives a `BuildAction` through `runBuild`; subsequent calls
-  ## fast-path on the structural envelope check.
+  ## Compile `profileRoot` (a `home.nim` / `system.nim` path) to the RBPI
+  ## binary envelope and return both the published path and the bytes.
+  ##
+  ## Every call schedules the edge through `runBuild`; the engine's action
+  ## cache answers a call whose observed inputs are unchanged without
+  ## spawning the helper (and therefore without spawning `nim`).
   ##
   ## Required `opts` fields: `stateDir`, `publicCliPath`. `repoRoot`
   ## defaults to `reprobuildRepoRoot()` when empty.
@@ -240,67 +318,61 @@ proc compileProfileToRbpi*(profileRoot: string;
 
   createDir(extendedPath(profileCacheDir(opts.stateDir)))
 
-  # Sweep stale-schema-version cache entries from any previous
-  # reprobuild build. The sweep is bounded by the per-profile cache
-  # footprint (typically 1-3 files); on a clean dir it's a no-op.
-  # Without this, a reprobuild upgrade that bumps RbpiSchemaVersion
-  # would leave the previous version's `.rbpi` files lying around;
-  # they'd be cache-missed (because the digest now includes the
-  # schema version, and the strict reader rejects the old version),
-  # but they'd accumulate on disk over many upgrades.
+  # Remove envelopes written in a previous RBPI schema version. This is
+  # disk hygiene, not a freshness decision: a schema bump also changes the
+  # weak fingerprint, so the action cache would never serve such a file.
   discard pruneStaleProfileCache(opts.stateDir)
 
-  let inputSources = discoverProfileSources(absProfile)
-  let anchorDir = absProfile.parentDir
-  let digest = computeProfileDigest(inputSources, anchorDir)
-  let rbpiPath = cachedRbpiPath(opts.stateDir, digest.digestHex)
-  let manifestPath = cachedSourcesPath(opts.stateDir, digest.digestHex)
-  let nimcacheDir = cachedNimcacheDir(opts.stateDir, digest.digestHex)
+  let key = profileCompileKey(absProfile)
+  let rbpiPath = cachedRbpiPath(opts.stateDir, key)
+  let nimcacheDir = cachedNimcacheDir(opts.stateDir, key)
 
-  # Structural cache hit: return without invoking the build engine.
-  if not opts.forceRebuild and cachedArtifactIsValid(rbpiPath):
-    return ProfileCompileArtifact(
-      profileRoot: absProfile,
-      inputSources: inputSources,
-      rbpiPath: rbpiPath,
-      rbpiBytes: readBytes(rbpiPath),
-      digestHex: digest.digestHex)
+  # The compiler identity the weak fingerprint names. Resolved here with the
+  # helper's own resolver (`$REPRO_NIM_COMPILER`, then `PATH`), in the same
+  # environment the helper inherits, so a missing or mis-named compiler is
+  # reported before an edge is scheduled at all.
+  let nimExe =
+    try:
+      resolveProfileNimCompiler()
+    except CompileFailure as err:
+      raiseProfileCompile(err.msg)
 
-  # On force-rebuild remove the previous artifact + manifest so the
-  # downstream helper sees a clean slate. (The action cache will
-  # short-circuit anyway on an unchanged source set; the user asked
-  # for forced execution, honour it.)
-  if opts.forceRebuild:
-    if fileExists(extendedPath(rbpiPath)):
-      removeFile(extendedPath(rbpiPath))
-    if fileExists(extendedPath(manifestPath)):
-      removeFile(extendedPath(manifestPath))
+  # On force-rebuild remove the published envelope. The engine configuration
+  # sets `rebuildMissingOutputsOnCacheHit`, so a record whose declared output
+  # is missing is re-executed rather than restored — which is what the
+  # caller asked for.
+  if opts.forceRebuild and fileExists(extendedPath(rbpiPath)):
+    removeFile(extendedPath(rbpiPath))
 
-  # Submit through the build engine. The weak fingerprint binds the
-  # action-cache record to the source-set digest; the action's
-  # declared inputs cover live-file invalidation. Nim-version drift
-  # is covered indirectly via the published `.rbpi` bytes (a different
-  # Nim might emit different macro expansions; the action cache then
-  # repopulates because the output payload differs).
-  let weak = weakFingerprintFromText(
-    "repro.profile.compile.v1\n" & digest.digestHex)
-
+  let weak = profileCompileWeakFingerprint(nimExe, opts.publicCliPath,
+    rbpiPath)
   let buildAction = profileCompileBuildAction(absProfile, rbpiPath,
-    manifestPath, nimcacheDir, opts.publicCliPath, opts.workDir, repoRoot,
-    inputSources, weak, opts.verbose)
+    nimcacheDir, opts.publicCliPath, opts.workDir, repoRoot, weak,
+    opts.verbose)
   var config = profileCompileEngineConfig(opts.stateDir, opts.publicCliPath)
   let runResult = runBuild(graph(@[buildAction]), config)
   if runResult.hasFailedActions():
     raiseProfileCompile(actionFailureDiagnostic(runResult))
+  # Self-consistency of what the edge produced, NOT a freshness re-check: the
+  # envelope must exist and decode. Nothing here compares the result against
+  # the profile's sources — that question was answered by the action cache,
+  # and asking it a second time with a weaker key is the gate this module
+  # removed.
   if not fileExists(extendedPath(rbpiPath)):
     raiseProfileCompile("profile compile edge did not write artifact: " &
       rbpiPath)
-  if not cachedArtifactIsValid(rbpiPath):
+  if not rbpiEnvelopeIsValid(rbpiPath):
     raiseProfileCompile("profile compile edge wrote a structurally " &
       "invalid RBPI envelope: " & rbpiPath)
+  let edge = runResult.profileCompileActionResult()
+  let bytes = readBytes(rbpiPath)
   result = ProfileCompileArtifact(
     profileRoot: absProfile,
-    inputSources: inputSources,
     rbpiPath: rbpiPath,
-    rbpiBytes: readBytes(rbpiPath),
-    digestHex: digest.digestHex)
+    rbpiBytes: bytes,
+    digestHex: blake3.toHex(blake3.digest(bytes)),
+    edgeLaunched: edge.launched,
+    cacheDecision: edge.cacheDecision,
+    cacheMissReason: edge.cacheMissReason,
+    cachePublishSkipReason: edge.cachePublishSkipReason,
+    observedInputs: edge.evidence.monitorReads.paths())

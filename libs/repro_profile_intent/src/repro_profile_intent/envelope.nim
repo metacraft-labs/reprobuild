@@ -41,14 +41,12 @@ const
     ##                     package name doesn't match the binary name
     ##                     (e.g. `ripgrep` -> `rg`); present only when
     ##                     non-empty.
-    ##     The version bump matters for the on-disk cache: profile
-    ##     compile artifacts at `<state-dir>/profile-cache/<digest>.rbpi`
-    ##     mix the schema version into the digest input (see
-    ##     `computeProfileDigest`), so a v1 cache entry's digest never
-    ##     collides with a v2 entry for the same source set; v1 files
-    ##     are also rejected by the strict reader at read time
-    ##     (`unsupported RBPI schema version`), which the cache validity
-    ##     check (`cachedArtifactIsValid`) catches as "miss → recompile".
+    ##     The version bump matters for the on-disk cache: the profile
+    ##     compile edge's weak fingerprint names the schema version
+    ##     (`profileCompileWeakFingerprint`), so an action-cache record
+    ##     written for v1 is never served for v2; v1 files are also
+    ##     rejected by the strict reader at read time
+    ##     (`unsupported RBPI schema version`).
     ##   3 (Windows-System-Resources Phase G): ProfileIntent gains a
     ##     new top-level CBOR key ``"buildActions"`` carrying the list
     ##     of profile-scope action-edge intents (typed-tool

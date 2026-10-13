@@ -2,15 +2,25 @@
 ##
 ## Covers the pure, fast-to-test surface of the new library:
 ##
-##   - Source-discovery (regex walk of `import ./...`).
-##   - Source-digest determinism + sensitivity to one-byte changes.
+##   - Profile-root resolution.
 ##   - JSON->RBPI round-trip from a known `ProfileIntent`.
 ##   - Cache-layout helpers (paths nest under
-##     `<state-dir>/profile-cache/`).
-##   - `compileProfileToRbpi` returns the cached artifact on the
-##     fast-path when a valid `.rbpi` is already present.
-##   - `profileCompileBuildAction` shape: argv, inputs, outputs,
-##     fingerprint binding.
+##     `<state-dir>/profile-cache/`, named by profile path, not content).
+##   - `compileProfileToRbpi` does NOT serve a valid `.rbpi` that is
+##     already present without scheduling the edge (the retired
+##     structural fast path).
+##   - `profileCompileBuildAction` shape: argv, declared inputs/outputs,
+##     dependency policy, fingerprint binding.
+##
+## The source-discovery and source-digest cases that used to open this file
+## were removed with the procs they tested (`parseSiblingImports`,
+## `discoverProfileSources`, `computeProfileDigest`). Those were the profile
+## compile's freshness key, and an `import` text scan cannot see `staticRead`,
+## `include`, macros or run-time reads. The property they stood for — editing
+## any file the profile depends on recompiles it — is now asserted against
+## the monitored edge itself, in `tests/e2e/m83/t_e2e_profile_modules.nim`
+## (sibling modules), `t_e2e_profile_compile_staticread_payload_change.nim`
+## and `t_e2e_profile_compile_runtime_read_tracked.nim`.
 ##
 ## The fingerprint-binding case asserted `act.weakFingerprint == weak` until
 ## reprobuild `dev` `6e1173440` (NLF-M7, #91) made Named-Lock-Files §7's keying
@@ -28,6 +38,7 @@
 import std/[os, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
+import repro_core
 import repro_build_engine
 import repro_profile
 import repro_profile_intent
@@ -64,92 +75,10 @@ template extraResources*(targetResources: var seq[ResourceIntent]) =
 """
 
 # ---------------------------------------------------------------------------
-# Source-discovery + digest.
+# Profile-root resolution.
 # ---------------------------------------------------------------------------
 
-suite "M83 Phase C: source-discovery + digest":
-
-  test "parseSiblingImports finds `import ./sibling` lines":
-    let body = "import std/os\n" &
-      "import repro_profile\n" &
-      "import ./sibling_helpers\n" &
-      "import \"./other_helper\"\n" &
-      "  import ./deep/nested/util  \n"
-    let imports = parseSiblingImports(body)
-    check imports.len == 3
-    check "./sibling_helpers" in imports
-    check "./other_helper" in imports
-    check "./deep/nested/util" in imports
-
-  test "parseSiblingImports ignores non-relative imports":
-    let body = "import std/os\n" &
-      "import repro_profile\n" &
-      "import repro_profile/types\n" &
-      "import some_other_pkg\n"
-    let imports = parseSiblingImports(body)
-    check imports.len == 0
-
-  test "discoverProfileSources walks transitive ./ imports":
-    let dir = createTempDir("repro-profile-discover-", "")
-    defer: removeDir(dir)
-    discard writeProfileFile(dir, "home.nim", RootProfileBody)
-    discard writeProfileFile(dir, "sibling_helpers.nim", SiblingBody)
-    let sources = discoverProfileSources(dir / "home.nim")
-    check sources.len == 2
-    var rels: seq[string]
-    for s in sources:
-      rels.add s.relativePath(dir).replace('\\', '/')
-    check "home.nim" in rels
-    check "sibling_helpers.nim" in rels
-
-  test "computeProfileDigest is deterministic for the same inputs":
-    let dir = createTempDir("repro-profile-digest-", "")
-    defer: removeDir(dir)
-    discard writeProfileFile(dir, "home.nim", RootProfileBody)
-    discard writeProfileFile(dir, "sibling_helpers.nim", SiblingBody)
-    let sources = discoverProfileSources(dir / "home.nim")
-    let d1 = computeProfileDigest(sources, dir)
-    let d2 = computeProfileDigest(sources, dir)
-    check d1.digestHex == d2.digestHex
-    check d1.manifest == d2.manifest
-    check d1.digestHex.len == 64  # 32-byte BLAKE3 hex.
-
-  test "computeProfileDigest changes when one byte changes":
-    let dir = createTempDir("repro-profile-digest-change-", "")
-    defer: removeDir(dir)
-    discard writeProfileFile(dir, "home.nim", RootProfileBody)
-    discard writeProfileFile(dir, "sibling_helpers.nim", SiblingBody)
-    let sources = discoverProfileSources(dir / "home.nim")
-    let before = computeProfileDigest(sources, dir)
-    let mutatedSibling = SiblingBody.replace("FOO", "FoO")
-    writeFile(extendedPath(dir / "sibling_helpers.nim"), mutatedSibling)
-    let after = computeProfileDigest(sources, dir)
-    check before.digestHex != after.digestHex
-
-  test "computeProfileDigest manifest tracks paths + per-file digests":
-    let dir = createTempDir("repro-profile-digest-manifest-", "")
-    defer: removeDir(dir)
-    discard writeProfileFile(dir, "home.nim", RootProfileBody)
-    discard writeProfileFile(dir, "sibling_helpers.nim", SiblingBody)
-    let sources = discoverProfileSources(dir / "home.nim")
-    let digest = computeProfileDigest(sources, dir)
-    let lines = digest.manifest.strip().splitLines()
-    # Schema-version prefix line + one line per discovered source file.
-    check lines.len == 3
-    var paths: seq[string]
-    for line in lines:
-      let parts = line.split('\t')
-      check parts.len == 2
-      paths.add parts[0]
-      # Schema-version line carries the version literal; file lines
-      # carry the 64-char BLAKE3 hex digest.
-      if parts[0] == "schema-version":
-        check parts[1].len > 0
-      else:
-        check parts[1].len == 64
-    check "schema-version" in paths
-    check "home.nim" in paths
-    check "sibling_helpers.nim" in paths
+suite "M83 Phase C: profile-root resolution":
 
   test "resolveProfileRoot prefers explicit path over directory probes":
     let dir = createTempDir("repro-profile-resolve-", "")
@@ -206,16 +135,28 @@ suite "M83 Phase C: cache layout":
 
   test "cache paths nest under <state-dir>/profile-cache":
     let stateDir = "/tmp/repro-fake-state".replace('/', DirSep)
-    let digest = "abcdef1234"
-    let rbpi = cachedRbpiPath(stateDir, digest)
-    let sources = cachedSourcesPath(stateDir, digest)
-    let nimcache = cachedNimcacheDir(stateDir, digest)
-    check rbpi.endsWith(digest & ".rbpi")
-    check sources.endsWith(digest & ".source.txt")
-    check nimcache.endsWith(digest)
+    let key = "abcdef1234"
+    let rbpi = cachedRbpiPath(stateDir, key)
+    let nimcache = cachedNimcacheDir(stateDir, key)
+    check rbpi.endsWith(key & ".rbpi")
+    check nimcache.endsWith(key)
     check "profile-cache" in rbpi
-    check "profile-cache" in sources
     check "profile-cache" in nimcache
+
+  test "the output name follows the profile path, never its content":
+    # The declared output must not move when the profile's content does: an
+    # output name keyed on content is a hand-written cache key in front of
+    # the action cache, which is the defect the edge was rebuilt to remove.
+    let dir = createTempDir("repro-profile-key-", "")
+    defer: removeDir(dir)
+    let root = writeProfileFile(dir, "home.nim", RootProfileBody)
+    let before = profileCompileKey(root)
+    writeFile(extendedPath(root), RootProfileBody & "\n# edited\n")
+    check profileCompileKey(root) == before
+    check before.len == 64
+    # Two different profiles never share an output.
+    let other = writeProfileFile(dir / "other", "home.nim", RootProfileBody)
+    check profileCompileKey(other) != before
 
 # ---------------------------------------------------------------------------
 # BuildAction shape.
@@ -228,15 +169,14 @@ suite "M83 Phase C: profileCompileBuildAction":
     let act = profileCompileBuildAction(
       profileRoot = "/profile/home.nim",
       rbpiPath = "/cache/abc.rbpi",
-      manifestPath = "/cache/abc.source.txt",
       nimcacheDir = "/cache/nimcache/abc",
       publicCliPath = "/bin/repro",
       workDir = "/profile",
       repoRoot = "/repo",
-      inputSources = @["/profile/home.nim", "/profile/modules/foo.nim"],
       weak = weak,
       verbose = false)
     check act.id == "__repro_profile_compile"
+    check act.id == ProfileCompileActionId
     check act.kind == bakProcess
     check act.cacheable
     # The caller's `weak` is the SEED of the edge's fingerprint, not the
@@ -276,42 +216,65 @@ suite "M83 Phase C: profileCompileBuildAction":
     check act.argv[1] == "__repro-compile-profile"
     check "--profile" in act.argv
     check "--rbpi" in act.argv
-    check "--manifest" in act.argv
     check "--nimcache" in act.argv
     check "--repo-root" in act.argv
-    check "--depfile" in act.argv
     check "/profile/home.nim" in act.argv
     check "/cache/abc.rbpi" in act.argv
-    check "/cache/abc.source.txt.d" in act.argv
-    check act.depfile == "/cache/abc.source.txt.d"
-    check act.outputs == @["/cache/abc.rbpi", "/cache/abc.source.txt"]
-    check act.inputs.len == 2
+    # The dependency record is the monitor's, and only the monitor's: no
+    # hand-written depfile, no source manifest, no declared source list.
+    check "--depfile" notin act.argv
+    check "--manifest" notin act.argv
+    check act.depfile.len == 0
+    check act.inputs.len == 0
+    check act.outputs == @["/cache/abc.rbpi"]
+    check act.dependencyPolicy.kind == dgAutomaticMonitor
+    check act.dependencyPolicy.recognizedReports.len == 0
+    # The nimcache is derived state the compile reads back; it must not key
+    # the edge.
+    check act.dependencyPolicy.ignoredInputPrefixes ==
+      @[absolutePath("/cache/nimcache/abc")]
+
+  test "weak fingerprint names compiler and output identity, not sources":
+    # Reduced to what monitoring cannot supply. Each of the four identities
+    # moves it; nothing about a profile's sources is an argument at all, so
+    # no source edit can (or needs to) reach it.
+    let base = profileCompileWeakFingerprint("/nix/a/bin/nim", "/bin/repro",
+      "/s/profile-cache/k.rbpi")
+    check base == profileCompileWeakFingerprint("/nix/a/bin/nim",
+      "/bin/repro", "/s/profile-cache/k.rbpi")
+    check base != profileCompileWeakFingerprint("/nix/b/bin/nim",
+      "/bin/repro", "/s/profile-cache/k.rbpi")
+    check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
+      "/opt/repro", "/s/profile-cache/k.rbpi")
+    check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
+      "/bin/repro", "/s/profile-cache/other.rbpi")
 
   test "verbose=true adds --verbose argv element":
     let weak = weakFingerprintFromText("smoke.weak.v")
     let act = profileCompileBuildAction(
       profileRoot = "/p/home.nim",
       rbpiPath = "/c/a.rbpi",
-      manifestPath = "/c/a.source.txt",
       nimcacheDir = "/c/nc",
       publicCliPath = "/bin/repro",
       workDir = "",
       repoRoot = "/repo",
-      inputSources = @["/p/home.nim"],
       weak = weak,
       verbose = true)
     check "--verbose" in act.argv
 
 # ---------------------------------------------------------------------------
-# Library-API fast-path: pre-populating the cache with a hand-rolled
-# `.rbpi` makes compileProfileToRbpi return without invoking the build
-# engine. The slow (cache-miss) path exercises `runBuild` which needs
-# the public `repro` binary; that lives in the e2e gate.
+# The retired structural fast path. A valid `.rbpi` already sitting at the
+# edge's output path used to be returned without the build engine ever being
+# consulted; that is how a profile kept planning a stale intent. Here the
+# helper binary does not exist, so the ONLY way to get the hand-rolled bytes
+# back is a short-circuit in front of the edge. The e2e gates
+# (`t_e2e_profile_compile_staticread_payload_change`) cover the same property
+# against a real edge; this is the cheap tripwire.
 # ---------------------------------------------------------------------------
 
-suite "M83 Phase C: compileProfileToRbpi cache fast-path":
+suite "M83 Phase C: compileProfileToRbpi has no structural fast path":
 
-  test "structural cache hit short-circuits without invoking nim":
+  test "a valid envelope at the output path is not served without the edge":
     let stateDir = createTempDir("repro-profile-state-", "")
     defer: removeDir(stateDir)
     let profileSrcDir = createTempDir("repro-profile-src-", "")
@@ -321,24 +284,34 @@ suite "M83 Phase C: compileProfileToRbpi cache fast-path":
       SiblingBody)
     let root = profileSrcDir / "home.nim"
 
-    # Hand-roll an RBPI envelope and place it where the digest will look.
-    let sources = discoverProfileSources(root)
-    let digest = computeProfileDigest(sources, profileSrcDir)
+    # Hand-roll an RBPI envelope exactly where the edge publishes.
     var p: ProfileIntent
     p.name = "smokeFastPath"
     let bytes = encodeRbpi(p)
     createDir(extendedPath(profileCacheDir(stateDir)))
-    writeBytesAtomic(cachedRbpiPath(stateDir, digest.digestHex), bytes)
+    let rbpiPath = cachedRbpiPath(stateDir, profileCompileKey(root))
+    writeBytesAtomic(rbpiPath, bytes)
+    check rbpiEnvelopeIsValid(rbpiPath)
 
     let opts = ProfileCompileOptions(
       stateDir: stateDir,
-      publicCliPath: "/nonexistent/repro",  # Not invoked on fast-path.
+      publicCliPath: "/nonexistent/repro",  # The edge cannot succeed.
       repoRoot: reprobuildRepoRoot())
-    let artifact = compileProfileToRbpi(root, opts)
-    check artifact.digestHex == digest.digestHex
-    check artifact.rbpiBytes == bytes
-    let recovered = decodeRbpi(artifact.rbpiBytes)
-    check recovered.name == "smokeFastPath"
+    # Precondition: `nim` resolves, so the raise below comes from the edge
+    # (whose helper does not exist), not from the missing-compiler check that
+    # runs before any edge is scheduled.
+    require findExe("nim").len > 0
+    var served = false
+    var raisedMsg = ""
+    try:
+      let artifact = compileProfileToRbpi(root, opts)
+      served = artifact.rbpiBytes == bytes
+    except ProfileCompileError as err:
+      raisedMsg = err.msg
+    checkpoint("raised: " & raisedMsg)
+    check not served
+    check raisedMsg.len > 0
+    check "__repro_profile_compile" in raisedMsg
 
   test "compileProfileToRbpi rejects missing profile root":
     let stateDir = createTempDir("repro-profile-state-missing-", "")

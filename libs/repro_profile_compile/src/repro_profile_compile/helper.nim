@@ -10,22 +10,29 @@
 ##   repro __repro-compile-profile
 ##     --profile <profile-root.nim>
 ##     --rbpi <output-rbpi-path>
-##     --manifest <output-source-manifest-path>
 ##     --nimcache <nimcache-dir>
 ##     --repo-root <reprobuild-repo-root>
-##     [--depfile <output-make-depfile-path>]
 ##     [--verbose]
 ##
 ## All paths must be absolute. The helper exits 0 on success and 1
 ## on any failure; Nim diagnostics are forwarded to stderr inside a
 ## bordered banner.
+##
+## THE HELPER ALWAYS COMPILES AND ALWAYS RUNS. It has no freshness check of
+## its own: when the engine spawns it, the action cache has already decided
+## the previous result is not good enough, and a short-circuit in here would
+## re-publish exactly the result the edge was re-run to replace (the provider
+## compile's child carried such a copy of its parent's gate; see
+## Compiles-Are-Normal-Edges). It also writes no depfile and no source
+## manifest — the edge's dependency record is what io-mon observes this
+## process and its children (`nim`, the C toolchain, the profile binary)
+## read.
 
 import std/[os, strutils]
 from repro_core/paths import extendedPath
 
 import repro_profile_intent
 
-import ./sources
 import ./compile
 
 proc valueAfterFlag(args: openArray[string]; flag: string): string =
@@ -42,48 +49,17 @@ proc hasFlag(args: openArray[string]; flag: string): bool =
       return true
   false
 
-proc makeDepPath(path: string): string =
-  ## Escape just the separators the local make-depfile parser treats as
-  ## token delimiters. Paths produced here are absolute and may contain spaces
-  ## in user profiles, so keep this writer conservative.
-  for ch in path:
-    case ch
-    of ' ', '\t', ':', '\\', '#', '$':
-      result.add('\\')
-      result.add(ch)
-    else:
-      result.add(ch)
-
-proc writeProfileCompileDepfile(path: string; outputs, inputs: openArray[string]) =
-  if path.len == 0:
-    return
-  createDir(extendedPath(path.parentDir))
-  var text = ""
-  for i, output in outputs:
-    if i > 0:
-      text.add(' ')
-    text.add(makeDepPath(output))
-  text.add(":")
-  for input in inputs:
-    text.add(' ')
-    text.add(makeDepPath(input))
-  text.add('\n')
-  writeFile(extendedPath(path), text)
-
 proc runProfileCompileHelper*(args: openArray[string]): int =
   ## Implementation of `repro __repro-compile-profile`. See module docs.
   let profileRoot = valueAfterFlag(args, "--profile")
   let rbpiPath = valueAfterFlag(args, "--rbpi")
-  let manifestPath = valueAfterFlag(args, "--manifest")
   let nimcacheDir = valueAfterFlag(args, "--nimcache")
   let repoRoot = valueAfterFlag(args, "--repo-root")
-  let depfilePath = valueAfterFlag(args, "--depfile")
   let verbose = hasFlag(args, "--verbose")
 
   for (name, value) in [
     ("--profile", profileRoot),
     ("--rbpi", rbpiPath),
-    ("--manifest", manifestPath),
     ("--nimcache", nimcacheDir),
     ("--repo-root", repoRoot)
   ]:
@@ -95,10 +71,6 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
     stderr.writeLine("repro __repro-compile-profile: profile root does " &
       "not exist: " & profileRoot)
     return 1
-
-  let sources = discoverProfileSources(profileRoot)
-  let anchorDir = profileRoot.parentDir
-  let digest = computeProfileDigest(sources, anchorDir)
 
   let exeName =
     when defined(windows): "profile-build.exe"
@@ -139,13 +111,4 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
     return 1
 
   writeBytesAtomic(rbpiPath, rbpiBytes)
-  writeFile(extendedPath(manifestPath), digest.manifest)
-  var depInputs = sources
-  let repoConfig = repoRoot / "config.nims"
-  if fileExists(extendedPath(repoConfig)):
-    depInputs.add(repoConfig)
-  for path in profileNimPaths(repoRoot):
-    if fileExists(extendedPath(path)) or dirExists(extendedPath(path)):
-      depInputs.add(path)
-  writeProfileCompileDepfile(depfilePath, [rbpiPath, manifestPath], depInputs)
   return 0

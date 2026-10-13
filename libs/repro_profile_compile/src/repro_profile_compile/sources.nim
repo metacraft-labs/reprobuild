@@ -1,15 +1,24 @@
-## Source discovery, sibling-import walk, and source-digest computation for
-## the M83 profile-compile build-graph edge.
+## Repo-root and Nim-path discovery, profile-root resolution, and the
+## `<state-dir>/profile-cache/` layout for the profile-compile edge.
 ##
 ## These helpers are pure (no Nim invocation, no build engine) so they can
-## be reused by tests, the apply pipeline (Phase D), and the internal
+## be reused by tests, the apply pipeline, and the internal
 ## `__repro-compile-profile` helper subcommand.
+##
+## RETIRED HERE, DELIBERATELY: the `import ./…` text walk
+## (`discoverProfileSources`) and the digest computed over it
+## (`computeProfileDigest`). They were the freshness key of the profile
+## compile, and a text scan cannot see what Nim reads — `staticRead`,
+## `include`, `when`, macros, `config.nims`, or anything the profile binary
+## opens when it runs — so the key served a stale intent whenever a profile
+## depended on one of those. The edge's dependency record now comes from
+## io-mon (`edge.nim`). Do not reintroduce a source enumeration as a cache
+## key, a depfile or an output name: see Compiles-Are-Normal-Edges.
 
 import std/[algorithm, os, strutils]
 from repro_core/paths import extendedPath
 from repro_core/source_root import resolveReprobuildSourceRoot
 
-import blake3
 import repro_profile_intent/envelope as profile_envelope
 
 # ---------------------------------------------------------------------------
@@ -140,150 +149,7 @@ proc resolveProfileRoot*(profileDir: string;
   ""
 
 # ---------------------------------------------------------------------------
-# Sibling-import discovery (lightweight manual parser).
-# ---------------------------------------------------------------------------
-
-proc isRelativeImport(spec: string): bool =
-  ## True for `./...` or `../...` — the sibling-import family the
-  ## walker follows. Absolute paths, package names (`repro_profile`),
-  ## and stdlib (`std/os`) are all rejected.
-  spec.startsWith("./") or spec.startsWith("../")
-
-proc trimComment(line: string): string =
-  let hashIdx = line.find('#')
-  if hashIdx < 0:
-    line
-  else:
-    line[0 ..< hashIdx]
-
-proc parseSiblingImports*(source: string): seq[string] =
-  ## Return the relative module paths (without `.nim` suffix) imported
-  ## from `source` via `import ./...` / `import "./..."`. Only the
-  ## FIRST module on the line is captured (the walker treats
-  ## comma-separated import lists as out-of-scope; a later phase will
-  ## upgrade to a proper Nim AST walk).
-  ##
-  ## Quoted form (`import "./foo"`) is supported because the Phase A
-  ## profile DSL examples show it occasionally.
-  for rawLine in source.splitLines:
-    var line = trimComment(rawLine).strip()
-    if not line.startsWith("import"):
-      continue
-    if line.len < 7 or line[6] notin {' ', '\t'}:
-      continue
-    var rest = line[6 .. ^1].strip()
-    var spec: string
-    if rest.startsWith("\""):
-      let closeIdx = rest.find('"', 1)
-      if closeIdx <= 0:
-        continue
-      spec = rest[1 ..< closeIdx]
-    else:
-      var endIdx = 0
-      while endIdx < rest.len and rest[endIdx] notin {' ', '\t', ','}:
-        inc endIdx
-      spec = rest[0 ..< endIdx]
-    if not isRelativeImport(spec):
-      continue
-    if spec.endsWith(".nim"):
-      spec = spec[0 ..< spec.len - 4]
-    result.add spec
-
-proc resolveImportedFile(importerDir, importSpec: string): string =
-  ## Resolve a sibling-import spec like `./modules/foo` against the
-  ## importer's directory, returning the absolute path to the `.nim`
-  ## file (or empty string if it does not exist).
-  let combined = importerDir / importSpec
-  let candidate = if combined.endsWith(".nim"): combined
-                  else: combined & ".nim"
-  let abs = absolutePath(candidate)
-  if fileExists(extendedPath(abs)):
-    return abs
-  ""
-
-proc discoverProfileSources*(profileRoot: string): seq[string] =
-  ## BFS-walk transitive `import ./...` siblings from `profileRoot`.
-  ## Returns absolute paths in lex-sorted order.
-  var seen: seq[string] = @[absolutePath(profileRoot)]
-  var pending = @[absolutePath(profileRoot)]
-  while pending.len > 0:
-    let cur = pending[0]
-    pending.delete(0)
-    let body =
-      try:
-        readFile(extendedPath(cur))
-      except IOError:
-        ""
-    let curDir = cur.parentDir
-    for spec in parseSiblingImports(body):
-      let resolved = resolveImportedFile(curDir, spec)
-      if resolved.len == 0:
-        continue
-      if resolved notin seen:
-        seen.add resolved
-        pending.add resolved
-  result = seen
-  result.sort()
-
-# ---------------------------------------------------------------------------
-# Digest computation.
-# ---------------------------------------------------------------------------
-
-type
-  ProfileDigest* = object
-    digestHex*: string
-    manifest*: string  ## human-readable "<rel-path>\t<file-blake3-hex>\n" lines
-
-proc computeProfileDigest*(sources: seq[string]; anchorDir: string):
-    ProfileDigest =
-  ## Compute the BLAKE3-256 cache key over the concatenation of
-  ## `(rel-path, blake3(content))` for each source file, prefixed with
-  ## a stable schema-identity tag. `anchorDir` is the directory the
-  ## relative paths are computed against — the profile root's parent.
-  ## Using a stable anchor makes the digest reproducible across machines.
-  ##
-  ## Schema-identity prefix (2026-06-09): the digest input starts with
-  ## a fixed `"rbpi-schema-v<N>\n"` line, where `<N>` is the current
-  ## `RbpiSchemaVersion`. Bumping the envelope schema therefore
-  ## changes the digest for the SAME source content — every cache
-  ## entry under `<state-dir>/profile-cache/<digest>.rbpi` from the
-  ## previous schema is automatically a cache miss (the cache key
-  ## doesn't collide with any v<N> entry). Combined with the strict
-  ## envelope reader (which rejects unsupported versions outright),
-  ## this gives two-layer cache safety: the lookup misses BEFORE we
-  ## try to read a stale file, and even if we did read one, the
-  ## reader would reject it.
-  ##
-  ## What this does NOT cover: behaviour changes within a single
-  ## schema version (e.g. a bug-fix to the planner that doesn't
-  ## change the envelope shape). Those need a manual
-  ## `--force-rebuild` or a wider-scoped invalidation mechanism. The
-  ## schema version is the right granularity for *interpretation*
-  ## changes only.
-  var hasher = initHasher()
-  hasher.update("rbpi-schema-v" & $profile_envelope.RbpiSchemaVersion & "\n")
-  var manifestParts: seq[string]
-  manifestParts.add "schema-version\t" &
-    $profile_envelope.RbpiSchemaVersion & "\n"
-  for absPath in sources:
-    let relPath = relativePath(absPath, anchorDir).replace('\\', '/')
-    let content =
-      try:
-        readFile(extendedPath(absPath))
-      except IOError:
-        ""
-    let fileDigest = blake3.digest(content)
-    let fileDigestHex = toHex(fileDigest)
-    hasher.update(relPath)
-    hasher.update(fileDigest)
-    manifestParts.add relPath & "\t" & fileDigestHex & "\n"
-  let overall = hasher.finalize()
-  hasher.close()
-  result.digestHex = toHex(overall)
-  result.manifest = manifestParts.join("")
-
-# ---------------------------------------------------------------------------
-# Cache-layout helpers (state-dir/profile-cache/<digest>.{rbpi,source.txt}).
+# Cache-layout helpers (state-dir/profile-cache/<profile-key>.rbpi, nimcache/<profile-key>).
 # ---------------------------------------------------------------------------
 
 const ProfileCacheDirName* = "profile-cache"
@@ -291,20 +157,23 @@ const ProfileCacheDirName* = "profile-cache"
 proc profileCacheDir*(stateDir: string): string =
   stateDir / ProfileCacheDirName
 
-proc cachedRbpiPath*(stateDir, digestHex: string): string =
-  profileCacheDir(stateDir) / (digestHex & ".rbpi")
+proc cachedRbpiPath*(stateDir, profileKey: string): string =
+  ## Where the edge publishes the envelope of the profile `profileKey`
+  ## (`edge.profileCompileKey`) names. A stable per-profile location: the
+  ## content behind it is the action cache's to decide.
+  profileCacheDir(stateDir) / (profileKey & ".rbpi")
 
-proc cachedSourcesPath*(stateDir, digestHex: string): string =
-  profileCacheDir(stateDir) / (digestHex & ".source.txt")
-
-proc cachedNimcacheDir*(stateDir, digestHex: string): string =
-  profileCacheDir(stateDir) / "nimcache" / digestHex
+proc cachedNimcacheDir*(stateDir, profileKey: string): string =
+  ## The per-profile Nim cache: derived state, excluded from the edge's
+  ## recorded inputs.
+  profileCacheDir(stateDir) / "nimcache" / profileKey
 
 proc pruneStaleProfileCache*(stateDir: string): int =
   ## Walk `<stateDir>/profile-cache/` and delete every `.rbpi` file
   ## whose envelope header does NOT match the current
   ## `RbpiSchemaVersion`. Also removes any sibling `.source.txt`
-  ## manifest. Returns the number of `.rbpi` files deleted.
+  ## manifest (written by releases whose edge still published one).
+  ## Returns the number of `.rbpi` files deleted.
   ##
   ## The `readRbpiHeader` envelope reader raises on version mismatch,
   ## corrupt magic, or truncated input — we treat all of those the
