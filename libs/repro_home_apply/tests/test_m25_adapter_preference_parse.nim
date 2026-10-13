@@ -8,18 +8,21 @@
 ##
 ##   * a profile WITHOUT an `adapterPreference:` block parses to an
 ##     empty per-OS table on the AST (`Profile.adapterPreference.len ==
-##     0`), signaling "use the M65 platform default at resolve time".
+##     0`), signaling "use the default selection policy at resolve time"
+##     (GM4b: `adapterPreference:` is the profile's selection policy).
 ##   * a profile WITH a block carrying all three recognized OS keys
 ##     populates a 3-entry table; chain order is preserved verbatim
 ##     (the parser does NOT canonicalize chain order).
 ##   * a profile with a partial block (e.g. only `windows:`) populates
-##     just that key; the resolve-time fallback to the M65 platform
-##     default for the other OSes is asserted in the plumbing gate
+##     just that key; the resolve-time fallback to the default policy for
+##     the other OSes is asserted in the plumbing gate
 ##     (`test_m25_adapter_preference_plumbed.nim`).
 ##   * `macos` is parsed and canonicalized to `darwin` so a single
 ##     resolve-time lookup suffices.
 ##   * an unknown OS key (e.g. `freebsd:`) raises `EUnstructured` with
 ##     the offending token + the closed-set in the diagnostic.
+##   * GM4b: `tarball` is accepted (and `builtin`, its former spelling,
+##     still is); the parser keeps the spelling the author wrote.
 ##   * an unknown adapter name (e.g. `[scoop, nonsense]`) raises
 ##     `EUnstructured` with the offending token + the closed-set in the
 ##     diagnostic.
@@ -179,7 +182,7 @@ suite "M2.5 adapterPreference DSL — text-parser parse paths":
 
   test "test_m25_adapter_preference_parse_empty_chain_accepted":
     # The parser accepts `windows: []` as a present-but-empty chain.
-    # The resolve-time path (`resolveAdapterChainFor`) treats an empty
+    # The resolve-time path (`selectionPolicyFor`) treats an empty
     # seq the same as a missing key: fall back to the M65 platform
     # default. The AST still records the key so a future "why is this
     # the default chain?" introspection can distinguish "operator
@@ -223,11 +226,29 @@ suite "M2.5 adapterPreference DSL — text-parser parse paths":
       check "nonsense" in e.seen
       # The diagnostic must enumerate the closed adapter set so the
       # operator can spot a typo.
+      check "tarball" in e.expected
       check "builtin" in e.expected
       check "scoop" in e.expected
       check "nix" in e.expected
       check "path" in e.expected
     check caught
+
+  test "test_m25_adapter_preference_parse_tarball_kind_accepted":
+    let dir = createTempDir("m25-pref-tarball-", "")
+    defer: removeDir(dir)
+    let p = writeAndParse(dir, "home.nim", """
+import repro/profile
+
+profile "with-tarball":
+  adapterPreference:
+    darwin: [tarball, nix, path]
+    windows: [builtin, scoop]
+
+  activity default:
+    just
+""")
+    check p.adapterPreference["darwin"] == @["tarball", "nix", "path"]
+    check p.adapterPreference["windows"] == @["builtin", "scoop"]
 
   test "test_m25_adapter_preference_parse_duplicate_os_fails_closed":
     let dir = createTempDir("m25-pref-dup-", "")

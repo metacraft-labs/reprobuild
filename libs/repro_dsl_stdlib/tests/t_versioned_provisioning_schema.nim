@@ -2,9 +2,11 @@
 ##
 ## Exercises:
 ##   * positive construction + record-shape round-trip;
-##   * ``jdkCatalog``'s JDK 21.0.5 entry carries every expected field
-##     (URL, SHA-256, archive_format, extract_path, bin_relpath,
-##     install_method, env);
+##   * the JDK 21.0.5 reference realization carries every expected field
+##     (URL, SHA-256, archive format, extract path, executables, install
+##     method, env). GM4b: it is a ``tarball`` realization of ``package
+##     jdk`` (the retired ``jdkCatalog`` record), so it is read through the
+##     projection a recipe and a home profile select from;
 ##   * ``validateVersionedProvisioning`` rejects entries without any
 ##     SHA (and accepts entries with exactly one);
 ##   * ``validateVersionedProvisioning`` rejects entries with BOTH
@@ -12,12 +14,13 @@
 ##   * ``selectPlatformBinary`` resolves per-(cpu, os) tuples and
 ##     falls back to ``pcAny`` / ``poAny`` slots;
 ##   * ``selectDefault`` returns the LAST entry in declaration order;
-##   * ``serializeAsCode`` round-trips the JDK reference entry (proxy
-##     for the M66 harvester's "byte-identical re-runs" requirement).
+##   * ``serializeAsCode`` emits a Nim fragment (the harvester's parse model
+##     is still ``VersionedProvisioning``; only its emitted artifact changed).
 
 import std/[strutils, tables, unittest]
 import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/packages/jdk
+import repro_interface_artifacts
+import repro_home_apply/package_catalog
 
 suite "M63 — VersionedProvisioning schema":
 
@@ -450,56 +453,59 @@ suite "M63 — VersionedProvisioning schema":
     check "X_HOME" in src
     check "${prefix}" in src
 
-suite "M63 — jdkCatalog reference entry":
+suite "M63 — jdk reference realization":
+  let records = profileToolUse("jdk").useDef.tarballProvisioning
+  let windowsX64 = realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
 
-  test "jdkCatalog has exactly one entry (M63 scope: only 21.0.5)":
-    check jdkCatalog.len == 1
+  proc pick(version = ""): KindChoice =
+    selectTarballRecord(records, windowsX64, version)
 
-  test "jdkCatalog passes validateCatalog":
-    let errors = validateCatalog(jdkCatalog)
-    if errors.len > 0:
-      checkpoint "errors: " & errors.join(" | ")
-    check errors.len == 0
+  test "jdk carries the 21.0.5 archives (M63 scope: only 21.0.5)":
+    check records.len == 2
+    for r in records:
+      check r.detail.version == "21.0.5"
 
-  test "jdkCatalog[0] is JDK 21.0.5":
-    let e = jdkCatalog[0]
-    check e.version == "21.0.5"
-    check e.archive_format == afZip
-    check e.install_method == imExtract
+  test "the Windows realization is JDK 21.0.5, a zip, extracted":
+    let c = pick()
+    check c.status == kcSelected
+    let e = records[c.index]
+    check e.detail.version == "21.0.5"
+    check e.archiveType == "zip"
+    check e.detail.installMethod == ""
+    check parseInstallMethodToken(e.detail.installMethod) ==
+      (true, imExtract)
 
-  test "jdkCatalog[0] bin_relpath includes javac.exe + java.exe":
-    let e = jdkCatalog[0]
-    check "bin/javac.exe" in e.bin_relpath
-    check "bin/java.exe" in e.bin_relpath
-    check "bin/jar.exe" in e.bin_relpath
-    check "bin/jlink.exe" in e.bin_relpath
+  test "executables include javac.exe + java.exe + jar.exe + jlink.exe":
+    let e = records[pick().index]
+    let exes = @[e.executablePath] & e.detail.extraExecutables
+    check "bin/javac.exe" in exes
+    check "bin/java.exe" in exes
+    check "bin/jar.exe" in exes
+    check "bin/jlink.exe" in exes
 
-  test "jdkCatalog[0] env carries JAVA_HOME = ${prefix}":
-    let e = jdkCatalog[0]
-    check e.env.hasKey("JAVA_HOME")
-    check e.env["JAVA_HOME"] == "${prefix}"
+  test "env carries JAVA_HOME = ${prefix}, substituted at realization":
+    let e = records[pick().index]
+    check "JAVA_HOME=${prefix}" in e.detail.env
+    let archive = archiveRealizationOf("jdk", e)
+    check archive.envSubstitutions == @[(name: "JAVA_HOME",
+      value: "${prefix}")]
 
-  test "jdkCatalog[0] Windows x86_64 platform: URL + SHA-256 + extract_path":
-    let r = selectPlatformBinary(jdkCatalog[0], pcX86_64, poWindows)
-    check r.found
-    check r.binary.url == "https://github.com/adoptium/temurin21-binaries/" &
+  test "Windows x86_64 realization: URL + SHA-256 + extract path":
+    let e = records[pick().index]
+    check e.url == "https://github.com/adoptium/temurin21-binaries/" &
       "releases/download/jdk-21.0.5%2B11/" &
       "OpenJDK21U-jdk_x64_windows_hotspot_21.0.5_11.zip"
-    check r.binary.sha256 ==
+    check e.sha256 ==
       "6f09d4a3598542313cca1540106d537c7092a54e415d569f7b928160a90d3128"
-    check r.binary.extract_path == "jdk-21.0.5+11"
-    check r.binary.sha512 == ""
+    check e.detail.extractPath == "jdk-21.0.5+11"
+    check e.detail.sha512 == ""
 
-  test "jdkCatalog[0] selectDefault returns the 21.0.5 entry":
-    let d = selectDefault(jdkCatalog)
-    check d.found
-    check d.entry.version == "21.0.5"
+  test "a pin of '21.0.5' selects it":
+    let c = pick("21.0.5")
+    check c.status == kcSelected
+    check records[c.index].detail.version == "21.0.5"
 
-  test "jdkCatalog[0] selectVersion('21.0.5') is found":
-    let r = selectVersion(jdkCatalog, "21.0.5")
-    check r.found
-    check r.entry.version == "21.0.5"
-
-  test "jdkCatalog[0] selectVersion('99.0.0') is not found":
-    let r = selectVersion(jdkCatalog, "99.0.0")
-    check not r.found
+  test "a pin of '99.0.0' is not offered, naming what is":
+    let c = pick("99.0.0")
+    check c.status == kcVersionNotOffered
+    check "21.0.5" in c.detail

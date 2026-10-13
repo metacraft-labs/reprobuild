@@ -31,26 +31,33 @@
 ##   6. the wording is pinned in one place (``describeFeatureShortfall`` /
 ##      ``describeCapabilityShortfall``) rather than asserted loosely against a
 ##      substring of a longer sentence;
-##   7. the shortfall survives the adapter chain into the
-##      ``EAdapterChainExhausted`` message a user actually reads — a refusal
+##   7. the shortfall survives the selection into the
+##      ``EMissingRealization`` message a user actually reads — a refusal
 ##      that is correct at the frame that computes it and lost one frame later
-##      has closed nothing;
+##      has closed nothing — and supplying a host feature set changes nothing
+##      for a stdlib package whose records declare none;
 ##   8. among several unreachable arms the NEAREST is named — the smallest gap
 ##      the reader could actually close, which is PMC-2's "lowest floor" rule
 ##      generalised.
 ##
 ## Falsifiable: make ``describeFeatureShortfall`` return "" and (1)(3)(4)(6)
 ## fail. Make it list ``requiredFeatures`` instead of ``missingFeatures`` and
-## (2) fails. Change ``selectPlatformBinaryEx`` to keep the LAST refused arm
-## rather than the nearest and (8) fails.
+## (2) fails. Change ``selectArm`` to keep the LAST refused arm rather than
+## the nearest and (8) fails.
 ##
-## Hermetic: synthetic catalog, synthetic host through the defaulted
-## parameters. No AVX-512 hardware.
+## GM4b: the user-facing half runs over ``tarball`` records through
+## ``realization_selection`` (``selectRealization``), the selection recipes and
+## profiles share; the arm-level half still pins ``selectPlatformBinaryEx``,
+## which delegates to the same ``selectArm``.
+##
+## Hermetic: synthetic catalog and records, explicit synthetic targets. No
+## AVX-512 hardware.
 
 import std/[options, strutils, unittest]
 
 import repro_dsl_stdlib/packages_schema
 import repro_home_apply/package_catalog
+import ./pmc_selection_support
 
 const Sha =
   "6666666666666666666666666666666666666666666666666666666666666666"
@@ -74,6 +81,24 @@ proc fixture(arms: seq[PlatformBinary]): seq[VersionedProvisioning] =
 proc host(level = mlNone; features: set[CpuFeature] = {}): PlatformTarget =
   initPlatformTarget(pcX86_64, level, features)
 
+proc record(tag: string; level = mlNone;
+            features: set[CpuFeature] = {}): InterfaceTarballProvisioning =
+  tarballRecord("https://example.invalid/" & tag & ".tar.gz", Sha,
+    level = (if level == mlNone: "" else: describeMicroarchLevel(level)),
+    features = renderCpuFeatureTokens(features), version = "3.1.0")
+
+proc refusal(records: seq[InterfaceTarballProvisioning];
+             target: RealizationTarget): string =
+  ## The message a user reads when no kind selects.
+  try:
+    discard resolveDemo(records, target)
+  except EMissingRealization as err:
+    check err.steps.len == 1
+    check err.steps[0].capabilityShortfall
+    return err.msg
+  check false
+  ""
+
 suite "PMC-3 — missing features are named in the diagnostic":
 
   test "t_missing_features_are_named_in_the_diagnostic":
@@ -86,11 +111,9 @@ suite "PMC-3 — missing features are named in the diagnostic":
     block pureFeatureShortfall:
       let cat = fixture(@[arm("avx512", mlX86_64_v3,
         {cfAvx512f, cfAvx512vl, cfAvx512Vnni})])
-      let r = resolveBuiltinPackage("demo", cat, "", pcX86_64, poLinux,
-        mlX86_64_v3, {cfAvx512f})
-
-      check not r.found
-      check r.error == breMicroarchFloorNotSatisfied
+      let detail = refusal(@[record("avx512", mlX86_64_v3,
+        {cfAvx512f, cfAvx512vl, cfAvx512Vnni})],
+        targetOf(pcX86_64, poLinux, mlX86_64_v3, {cfAvx512f}))
 
       # (6) the wording lives in one place.
       let sel = selectPlatformBinaryEx(cat[0],
@@ -109,9 +132,9 @@ suite "PMC-3 — missing features are named in the diagnostic":
         "missing cpu features: avx512vl, avx512vnni"
 
       # (1) each missing feature, by name, in what the user reads.
-      check r.errorDetail.contains(describeCapabilityShortfall(sel))
-      check r.errorDetail.contains("avx512vl")
-      check r.errorDetail.contains("avx512vnni")
+      check detail.contains(describeCapabilityShortfall(sel))
+      check detail.contains("avx512vl")
+      check detail.contains("avx512vnni")
       # (2) and NOT the one the host already provides. No other feature
       # name has "avx512f" as a prefix except "avx512fp16", which this
       # fixture does not mention, so the substring test is exact here.
@@ -120,13 +143,14 @@ suite "PMC-3 — missing features are named in the diagnostic":
       # (5) not the pre-PMC-2 phrasing. There IS a slice for this (cpu, os);
       # saying there is not sends the reader to look for a build that is
       # sitting in the catalog they are reading.
-      check not r.errorDetail.contains("no platform slice for cpu=")
-      check not r.errorDetail.contains("host provides x86-64-v3")
+      check not detail.contains("no tarball realization for")
+      check not detail.contains("host provides x86-64-v3")
 
-      # The package and version are still named — a shortfall with no
-      # subject is not actionable in a build resolving dozens of packages.
-      check r.errorDetail.contains("'demo'")
-      check r.errorDetail.contains("'3.1.0'")
+      # The package, version and target are still named — a shortfall with no
+      # subject is not actionable in a profile resolving dozens of packages.
+      check detail.contains("'demo'")
+      check detail.contains("x86_64-linux")
+      check detail.contains("(version 3.1.0)")
 
     # ---- (4) a shortfall with a level names BOTH halves -------------------
     block levelAndFeaturesTogether:
@@ -152,41 +176,31 @@ suite "PMC-3 — missing features are named in the diagnostic":
         "(missing cpu features: avx, avx2, bmi1, bmi2, f16c, fma, lzcnt, " &
         "movbe, osxsave, avx512f)")
 
-    # ---- (7) the chain carries the new axis without changing flow --------
+    # ---- (7) the selection carries the new axis without changing flow ----
     #
-    # ``hostFeatures`` is a fourth DEFAULTED parameter on
-    # ``chainResolvePackage``, and the thing worth pinning about it is that
-    # supplying one changes NOTHING for the standard library — every stdlib
-    # arm requires ``{}``, and ``{} ⊆ anything``, so a host declaring an
-    # exotic feature set must resolve exactly as a host declaring none. If it
-    # did not, PMC-3 would have moved every existing package by adding a
-    # field nobody uses.
-    #
-    # (The shortfall text's own trip through ``ChainStep.reason`` into
-    # ``EAdapterChainExhausted`` is PMC-2's plumbing and is pinned by
-    # ``t_platform_refusal_surfaces_through_realize_and_plan``; PMC-3 changed
-    # only what that string SAYS, which the blocks above assert directly.)
-    block chainCarriesTheAxisWithoutChangingFlow:
-      var prod = openProductionCatalog()
-      let plain = chainResolvePackage(prod, "gh", chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poLinux, hostLevel = mlX86_64_v3)
-      let withFeatures = chainResolvePackage(prod, "gh",
-        chain = @[cakBuiltin], hostCpu = pcX86_64, hostOs = poLinux,
-        hostLevel = mlX86_64_v3,
-        hostFeatures = {cfAvx512f, cfAvx512vl, cfAvx512Vnni, cfSha})
-      check plain.adapter == cakBuiltin
-      check plain.urlUsed.len > 0
-      check withFeatures.urlUsed == plain.urlUsed
-      check withFeatures.digestValue == plain.digestValue
-      check withFeatures.resolvedVersion == plain.resolvedVersion
-      check withFeatures.builtinCpuLevel == mlNone
-      check withFeatures.builtinCpuFeatures == {}
-      # And a host that declares nothing at all reaches the same arm, which
-      # is the levelless/featureless guarantee stated on the entry point.
-      let bare = chainResolvePackage(prod, "gh", chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poLinux, hostLevel = mlNone,
-        hostFeatures = {})
-      check bare.urlUsed == plain.urlUsed
+    # A target feature set is part of every selection, and supplying one
+    # changes NOTHING for the standard library — every stdlib record requires
+    # ``{}``, and ``{} ⊆ anything`` — so a target declaring an exotic feature
+    # set must select exactly what a target declaring none selects. If it did
+    # not, PMC-3 would have moved every existing package by adding a field
+    # nobody uses. Driven through the real `gh` definition.
+    block selectionCarriesTheAxisWithoutChangingFlow:
+      let plain = resolveProfilePackage("gh",
+        targetOf(pcX86_64, poLinux, mlX86_64_v3), @[rkTarball])
+      let withFeatures = resolveProfilePackage("gh",
+        targetOf(pcX86_64, poLinux, mlX86_64_v3,
+          {cfAvx512f, cfAvx512vl, cfAvx512Vnni, cfSha}), @[rkTarball])
+      check plain.selection.kind == rkTarball
+      check plain.selection.tarball.url.len > 0
+      check withFeatures.selection.tarball.url == plain.selection.tarball.url
+      check withFeatures.selection.lockIdentity == plain.selection.lockIdentity
+      check withFeatures.selection.version == plain.selection.version
+      check withFeatures.selection.tarball.detail.cpuLevel == ""
+      check withFeatures.selection.tarball.detail.cpuFeatures == ""
+      # And a target that declares nothing at all reaches the same record.
+      let bare = resolveProfilePackage("gh", targetOf(pcX86_64, poLinux),
+        @[rkTarball])
+      check bare.selection.tarball.url == plain.selection.tarball.url
 
     # ---- (8) among several out of reach, the NEAREST is named -------------
     block nearestUnreachableArmIsNamed:
@@ -209,12 +223,14 @@ suite "PMC-3 — missing features are named in the diagnostic":
       check describeCapabilityShortfall(sel) ==
         "missing cpu features: avx512f"
 
-      let r = resolveBuiltinPackage("demo", cat, "", pcX86_64, poLinux,
-        mlX86_64_v3)
-      check not r.found
-      check r.errorDetail.contains("missing cpu features: avx512f.")
-      check not r.errorDetail.contains("avx512bf16")
-      check not r.errorDetail.contains("avx512fp16")
+      let detail = refusal(@[
+        record("far", mlX86_64_v4, {cfAvx512Vnni, cfAvx512Bf16, cfAvx512Fp16}),
+        record("near", mlX86_64_v3, {cfAvx512f}),
+        record("middle", mlX86_64_v4)],
+        targetOf(pcX86_64, poLinux, mlX86_64_v3))
+      check detail.contains("missing cpu features: avx512f")
+      check not detail.contains("avx512bf16")
+      check not detail.contains("avx512fp16")
 
       # PMC-2's level-only case is the same rule: nested floors against a
       # fixed host give nested missing-sets, so "fewest missing" IS "lowest

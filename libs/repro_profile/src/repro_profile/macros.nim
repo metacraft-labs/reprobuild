@@ -762,15 +762,17 @@ proc parseResourcesSection(body: NimNode; profileVar: NimNode): NimNode =
   result = rewriteResourcesBody(body, profileVar)
 
 proc parseAdapterPreferenceSection(body: NimNode; profileVar: NimNode): NimNode =
-  ## M2.5: `adapterPreference:` body is a list of `<os>: [adapter, ...]`
+  ## M2.5: `adapterPreference:` body is a list of `<os>: [kind, ...]`
   ## entries — same syntactic shape as `hosts:`. Per-OS keys are drawn
-  ## from `{windows, linux, darwin, macos}`; chain entries are drawn
-  ## from `{builtin, scoop, nix, path}`. Unknown OS or adapter names
-  ## raise a compile-time error naming the offending token. `macos` is
-  ## an alias for `darwin` and is canonicalized to `"darwin"` so a
-  ## single resolve-time lookup suffices.
+  ## from `{windows, linux, darwin, macos}`; entries are realization kinds
+  ## drawn from `{tarball, builtin, scoop, nix, path}` (GM4b: the block is
+  ## the profile's selection policy, Provisioning-Contributions.md
+  ## §"Selection policy"; `builtin` is the former spelling of `tarball`).
+  ## Unknown OS or kind names raise a compile-time error naming the
+  ## offending token. `macos` is an alias for `darwin` and is canonicalized
+  ## to `"darwin"` so a single resolve-time lookup suffices.
   const KnownOsKeys = ["windows", "linux", "darwin", "macos"]
-  const KnownAdapters = ["builtin", "scoop", "nix", "path"]
+  const KnownAdapters = ["tarball", "builtin", "scoop", "nix", "path"]
   result = newNimNode(nnkStmtList)
   if body.kind != nnkStmtList:
     error("adapterPreference: expects an indented block of " &

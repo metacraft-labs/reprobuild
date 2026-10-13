@@ -43,10 +43,13 @@ const
     ## is canonicalized to `"darwin"` at parse time so resolve-time
     ## lookups use a single canonical key.
 
-  KnownAdapterPreferenceAdapters* = ["builtin", "scoop", "nix", "path"]
-    ## M2.5: the closed set of adapter names recognized inside an
-    ## `adapterPreference:` chain list. Any entry outside this set
-    ## raises a structured parse error.
+  KnownAdapterPreferenceAdapters* = ["tarball", "builtin", "scoop", "nix",
+    "path"]
+    ## The closed set of realization kinds recognized inside an
+    ## `adapterPreference:` list — the profile's selection policy (GM4b,
+    ## Provisioning-Contributions.md §"Selection policy"). `builtin` is the
+    ## former spelling of `tarball`. Any entry outside this set raises a
+    ## structured parse error.
 
   KnownResourceKinds* = ["env.userPath", "fs.managedBlock",
     "shell.integration", "env.userVariable", "windows.registryValue",
@@ -1011,16 +1014,16 @@ proc parseResourcesBlock(ctx: ParseCtx; idx, parentIndent,
 # Surface syntax:
 #
 #   adapterPreference:
-#     windows: [scoop, builtin, path]
-#     linux:   [nix, builtin, path]
+#     windows: [scoop, tarball, path]
+#     linux:   [nix, tarball, path]
 #     darwin:  [nix, path]
 #
-# Per-OS keys with chain-list values. The OS keys are the closed set
-# `KnownAdapterPreferenceOs`; chain entries are the closed set
-# `KnownAdapterPreferenceAdapters`. Unknown OS keys or unknown adapter
-# names raise EUnstructured. An empty list (e.g. `windows: []`) is
-# accepted; resolve-time falls back to the M65 platform default for
-# that OS when the seq is empty.
+# Per-OS keys with realization-kind lists: the profile's selection policy
+# (GM4b). The OS keys are the closed set `KnownAdapterPreferenceOs`; entries
+# are the closed set `KnownAdapterPreferenceAdapters`. Unknown OS keys or
+# unknown kinds raise EUnstructured. An empty list (e.g. `windows: []`) is
+# accepted; resolution uses the default selection policy for that OS when
+# the seq is empty.
 
 proc canonicalizeOsKey(rawOsKey: string): string =
   ## `macos` is an alias for `darwin`. Both canonicalize to `"darwin"`

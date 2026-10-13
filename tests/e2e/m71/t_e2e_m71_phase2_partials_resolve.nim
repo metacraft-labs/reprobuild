@@ -13,20 +13,22 @@
 ##
 ##   1. Every Phase-2-CLEAN package (ghc / cabal / crystal / php) and
 ##      every Phase-1 graduate package (jdk / maven / gradle /
-##      dotnet-sdk / zig) resolves via cakBuiltin against the
-##      production catalog. No cakScoop fallback fires.
+##      dotnet-sdk / zig) resolves, for an x86_64-windows target under
+##      the `[tarball]` selection policy, to its `tarball` realization
+##      (GM4b: the former catalog records are `tarball` realizations of
+##      each package; resolution is `resolveProfilePackage`). Nothing
+##      falls through to another kind.
 ##   2. The M71 reference home.nim under
 ##      ``reprobuild-examples/m71-home-profile-walkthrough/home.nim``
 ##      parses cleanly and the planner picks up every package
 ##      reference with the right (id, version) tuple.
-##   3. The Phase-2 BLOCKED packages (gnat / fpc / alire / ocaml /
-##      dune) raise ``EUnknownPackageId`` — their absence from the
-##      registry is the documented blocker the harness reports as
-##      BLOCKED-NO-CATALOG.
+##   3. The Phase-2 BLOCKED packages (gnat / dune) have no definition
+##      at all: resolution fails as an UNKNOWN package (not a missing
+##      realization of a known one) — the documented blocker the
+##      harness reports as BLOCKED-NO-CATALOG.
 ##   4. The M69-DEFERRED packages (swift / composer / erlang / ruby /
-##      git / meson / python3 / gcc) DO resolve via cakBuiltin (the
-##      catalog entry exists); the realize-time gap is downstream of
-##      this gate.
+##      git / meson / python3 / gcc) DO resolve to a tarball
+##      realization; the realize-time gap is downstream of this gate.
 ##
 ## If a future catalog harvest adds gnat/fpc/etc., test (3) will start
 ## failing and the harness's BLOCKED-NO-CATALOG rows graduate. That's
@@ -35,9 +37,7 @@
 import std/[options, os, strutils, unittest]
 import repro_test_support
 
-import repro_dsl_stdlib/catalog_registry
-import repro_dsl_stdlib/packages_schema
-import repro_home_apply/catalog_lookup
+import repro_dsl_stdlib/package_registry
 import repro_home_apply/package_catalog
 
 let
@@ -51,16 +51,16 @@ let
 # scripts/verify-m71-home-profile-fixtures.ps1.
 const
   Phase2Clean = ["ghc", "cabal", "crystal", "php"]
-    ## Catalog entries present + cakBuiltin realize path verified
+    ## Catalog entries present + the archive-realizer path verified
     ## clean. These graduate Phase-2 PARTIALs to GRADUATED-PASS in
     ## LIVE mode.
 
   Phase2Deferred = ["composer"]
     ## Catalog entry present BUT M69 deferred-8 realize-time gap.
-    ## Resolves via cakBuiltin at this gate; the harness reports the
+    ## Resolves via the archive realizer at this gate; the harness reports the
     ## fixture as STILL-SKIPPED because the bundled-binary install
     ## method (.phar wrapping for composer; gem install for ruby; etc.)
-    ## isn't a cakBuiltin install_method yet.
+    ## isn't an archive-realizer install method yet.
 
   Phase2NoCatalog = ["gnat", "dune"]
     ## No packages/<tool>.nim entry yet. The harness reports these as
@@ -70,7 +70,7 @@ const
     ##
     ## M1 (Realize-Closure spec) graduated ``fpc`` out of this list:
     ## the sha1 schema extension + the harvested ``packages/fpc.nim``
-    ## landed in M1, so fpc now resolves via cakBuiltin. The realize-
+    ## landed in M1, so fpc now resolves via the archive realizer. The realize-
     ## time gap (innosetup-style .exe installer with no installer
     ## block) is M3 / M11 territory; for the resolver-level contract
     ## fpc has graduated to M69DeferredButResolves below.
@@ -78,7 +78,7 @@ const
     ## M6 (Realize-Closure spec) graduated ``ocaml`` out of this list:
     ## the MSYS2 pacman harvester + ``afTarZst`` extractor + the
     ## ``imMsys2Pacman`` realize hook landed in M6, so ocaml now both
-    ## RESOLVES and REALIZES via cakBuiltin end-to-end (the M6 LIVE
+    ## RESOLVES and REALIZES via the archive realizer end-to-end (the M6 LIVE
     ## smoke materialized ``ocaml --version`` from a real MSYS2
     ## .pkg.tar.zst). ocaml is in ``Phase2GraduatedToBuiltin`` below.
     ##
@@ -86,7 +86,7 @@ const
     ## the GitHub Releases harvester source landed in M7, the
     ## alire-project/alire windows-x86_64 asset (a plain ``afZip``
     ## carrying ``bin/alr.exe`` at the archive root) was harvested into
-    ## ``packages/alire.nim``, and the existing cakBuiltin
+    ## ``packages/alire.nim``, and the existing the archive realizer
     ## ``afZip + imExtract`` baseline materializes it without any
     ## new dispatch surface. alire is in ``Phase2GraduatedToBuiltin``
     ## below.
@@ -106,11 +106,11 @@ const
   M69DeferredButResolves = ["swift", "ruby", "erlang", "git", "meson",
                             "python3", "gcc", "fpc"]
     ## M69 deferred-8 list (minus composer, covered above). Catalog
-    ## entry exists; resolver picks the cakBuiltin slice; realize
+    ## entry exists; resolver picks the the archive realizer slice; realize
     ## raises a structured "not yet implemented" diagnostic at
     ## apply time. M71 doesn't close these — separate milestone.
     ##
-    ## M1 (Realize-Closure spec) added ``fpc`` here: cakBuiltin
+    ## M1 (Realize-Closure spec) added ``fpc`` here: the archive realizer
     ## resolution works (sha1 schema extension landed), but the
     ## upstream Scoop manifest is an innosetup ``.exe`` installer
     ## with no ``installer:`` block. The realize-time installer
@@ -118,7 +118,7 @@ const
     ##
     ## M8 (Realize-Closure-And-Catalog-Expansion spec) erlang status
     ## shift: the M8 sevenzip MSI re-harvest unblocked the prerequisite
-    ## (full 7-Zip 26.01 is now realized via cakBuiltin and DOES
+    ## (full 7-Zip 26.01 is now realized via the archive realizer and DOES
     ## extract the OTP installer cleanly — LIVE-validated manually).
     ## However, erlang STAYS in this list because the catalog's
     ## ``install_method = imInstallerNsisBundle`` dispatches through
@@ -133,74 +133,83 @@ const
 
   Phase2GraduatedToBuiltin = ["ocaml", "alire"]
     ## Phase-2 packages that this campaign (Realize-Closure-And-
-    ## Catalog-Expansion) added to cakBuiltin end-to-end (both
+    ## Catalog-Expansion) added to the archive realizer end-to-end (both
     ## resolver and realize hook). Unlike ``M69DeferredButResolves``
     ## these tools have a working realize path:
-    ##   * ``ocaml`` (M6) — cakBuiltin ``imMsys2Pacman`` hook
+    ##   * ``ocaml`` (M6) — the archive realizer ``imMsys2Pacman`` hook
     ##     materializes a runnable prefix from the upstream
     ##     .pkg.tar.zst. M6 LIVE-validated end-to-end.
-    ##   * ``alire`` (M7) — cakBuiltin ``afZip + imExtract`` baseline
+    ##   * ``alire`` (M7) — the archive realizer ``afZip + imExtract`` baseline
     ##     materializes ``bin/alr.exe`` from the harvested GitHub
     ##     Releases asset. M7 LIVE-validated end-to-end.
 
-suite "M71 e2e: Phase-2 partials resolve via the production catalog":
+proc resolveWin(pkg: string): ProfilePackageResolution =
+  ## The selection a home profile makes for ``pkg`` on x86_64-windows when
+  ## its policy is ``[tarball]``. The target is stated, not the runner's.
+  resolveProfilePackage(pkg,
+    realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1), @[rkTarball])
 
-  test "every Phase-2 CLEAN package has a registered catalog":
+proc checkArchive(res: ProfilePackageResolution) =
+  checkpoint res.packageId
+  check res.selection.kind == rkTarball
+  check res.selection.version.len > 0
+  check res.selection.tarball.url.len > 0
+  check res.selection.tarball.executablePath.len > 0
+  let lock = tarballRealizationLockIdentity(res.selection.tarball)
+  check lock.startsWith("sha256:") or lock.startsWith("sha512:") or
+    lock.startsWith("sha1:") or lock.startsWith("tarball:")
+
+suite "M71/GM4b e2e: Phase-2 partials resolve to their archive realizations":
+
+  test "every Phase-2 CLEAN package has a definition with a Windows archive":
     for pkg in Phase2Clean:
-      check isRegistered(pkg)
-      let cat = getCatalog(pkg)
-      check cat.isSome
-      check cat.get.len > 0
+      checkpoint pkg
+      check isLinkedPackage(pkg)
+      var windowsArchives = 0
+      for r in profileToolUse(pkg).useDef.tarballProvisioning:
+        if r.os == "windows":
+          inc windowsArchives
+      check windowsArchives > 0
 
-  test "every Phase-2 CLEAN package resolves via cakBuiltin (default version)":
-    # Pin the host facts so the test asserts the catalog contract
-    # (the slices the project ships are Windows + Linux today; the
-    # runner's actual OS — e.g. macOS — is incidental to the contract).
-    var prodCat = openProductionCatalog()
+  test "every Phase-2 CLEAN package resolves to its archive (default version)":
+    check Phase2Clean.len > 0
+    var resolved = 0
     for pkg in Phase2Clean:
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poWindows)
-      check res.adapter == cakBuiltin
-      check res.builtinVersion.len > 0
-      check res.urlUsed.len > 0
-      check res.digestAlgorithm in ["sha256", "sha512"]
-      check res.digestValue.len > 0
-      check res.binRelpath.len > 0
+      let res = resolveWin(pkg)
+      checkArchive(res)
+      check res.selection.kind == rkTarball
+      inc resolved
+    check resolved == Phase2Clean.len
 
-  test "Phase-2 NO-CATALOG packages raise EUnknownPackageId":
+  test "Phase-2 NO-CATALOG packages are unknown packages":
     for pkg in Phase2NoCatalog:
+      checkpoint pkg
       var raised = false
-      var registered = false
       try:
-        discard lookupCatalogSlice(pkg)
-      except EUnknownPackageId as err:
+        discard resolveWin(pkg)
+      except EMissingRealization as err:
         raised = true
-        check err.packageId == pkg
-        check err.registered.len > 0
-        registered = true
+        check err.packageName == pkg
+        check not err.definitionKnown
       check raised
-      check registered
-      # Defensive: the registry itself should agree.
-      check not isRegistered(pkg)
+      check not isLinkedPackage(pkg)
 
-  test "Phase-1 CLEAN regression set still resolves via cakBuiltin":
-    var prodCat = openProductionCatalog()
+  test "Phase-1 CLEAN regression set still resolves to its archives":
+    check Phase1Clean.len > 0
+    var resolved = 0
     for pkg in Phase1Clean:
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poWindows)
-      check res.adapter == cakBuiltin
-      check res.builtinVersion.len > 0
+      let res = resolveWin(pkg)
+      checkArchive(res)
+      check res.selection.kind == rkTarball
+      inc resolved
+    check resolved == Phase1Clean.len
 
-  test "M69-deferred packages STILL resolve via cakBuiltin (realize-gap is downstream)":
-    var prodCat = openProductionCatalog()
+  test "M69-deferred packages STILL resolve (realize-gap is downstream)":
     for pkg in M69DeferredButResolves:
-      check isRegistered(pkg)
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poWindows)
-      check res.adapter == cakBuiltin
-      # The realize-time gap manifests at builtin_adapter.realizeBuiltinPackage,
-      # not at the resolver level — this gate proves the resolver
-      # contract still holds for the deferred set.
+      check isLinkedPackage(pkg)
+      checkArchive(resolveWin(pkg))
+      # The realize-time gap manifests in the realizer, not at the
+      # resolver level — this gate proves the resolver contract holds.
 
   test "M71 reference home.nim exists at the documented path":
     check fileExists(M71ReferenceHome)
@@ -219,9 +228,8 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
       check referenced(pkg)
 
   test "M71 reference home.nim does NOT list any NO-CATALOG package":
-    # Listing gnat / fpc / alire / ocaml / dune as a package() call
-    # would cause `repro home apply` to fail closed with
-    # EUnknownPackageId before any work happens. The reference profile
+    # Listing gnat / dune as a package() call would cause `repro home
+    # apply` to fail closed (an unknown package) before any work happens. The reference profile
     # explicitly omits them so a user copying the file can run
     # `repro home apply` without modification.
     let content = readFile(M71ReferenceHome)
@@ -234,22 +242,23 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
 
   test "Phase-2 graduated-to-builtin packages resolve AND have realize hooks":
     # M6 (Realize-Closure-And-Catalog-Expansion spec) added the
-    # MSYS2-pacman harvester source + the cakBuiltin imMsys2Pacman
+    # MSYS2-pacman harvester source + the the archive realizer imMsys2Pacman
     # realize hook + the ocaml catalog entry. Unlike the
     # M69DeferredButResolves set, these tools have a working realize
     # path — the M6 hermetic + LIVE smokes proved end-to-end
     # extraction + bin_relpath resolution.
-    var prodCat = openProductionCatalog()
     for pkg in Phase2GraduatedToBuiltin:
-      check isRegistered(pkg)
-      let res = chainResolvePackage(prodCat, pkg, chain = @[cakBuiltin],
-        hostCpu = pcX86_64, hostOs = poWindows)
-      check res.adapter == cakBuiltin
-      check res.builtinVersion.len > 0
-      check res.urlUsed.len > 0
-      check res.digestAlgorithm in ["sha256", "sha512"]
-      check res.digestValue.len > 0
-      check res.binRelpath.len > 0
+      check isLinkedPackage(pkg)
+      let res = resolveWin(pkg)
+      checkArchive(res)
+      # Each is routed to the realizer that performs its whole recipe:
+      # ocaml's MSYS2 package to the home archive realizer, alire's plain
+      # zip to the `uses:` provisioning edge.
+      if pkg == "ocaml":
+        check res.archiveRoute == arInstaller
+        check res.archive.installMethod == imMsys2Pacman
+      else:
+        check res.archiveRoute == arExtract
 
   test "graduation table covers exactly the five Phase-2 partial languages":
     # Sanity: the campaign's Phase-2 partial list is haskell / php /
@@ -270,7 +279,7 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
     check "fpc" in M69DeferredButResolves
     check "crystal" in Phase2Clean
     # M6 graduation: ocaml is now GRADUATED-TO-BUILTIN (realize works
-    # end-to-end via cakBuiltin imMsys2Pacman + afTarZst). dune
+    # end-to-end via the archive realizer imMsys2Pacman + afTarZst). dune
     # remains NO-CATALOG (not in MSYS2; opam-bootstrap deferred to
     # a future milestone).
     check "ocaml" in Phase2GraduatedToBuiltin
@@ -281,7 +290,7 @@ suite "M71 e2e: Phase-2 partials resolve via the production catalog":
     # a clean afZip with bin/alr.exe at the archive root). gnat stays
     # NO-CATALOG because the GNAT compiler proper ships AS an alire
     # crate (operators install alire and then `alr toolchain --select gnat`)
-    # — that's an alire-driven flow that doesn't fit cakBuiltin's
+    # — that's an alire-driven flow that doesn't fit the archive realizer's
     # single-tool catalog shape.
     check "alire" in Phase2GraduatedToBuiltin
     check "alire" notin Phase2NoCatalog

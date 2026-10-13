@@ -89,12 +89,13 @@ type
       ## common case — profiles that don't declare action edges leave
       ## the apply driver's build-graph path inactive.
     adapterPreference*: OrderedTable[string, seq[string]]
-      ## M2.5: per-OS adapter preference parsed from the macro form
+      ## The profile's selection policy (GM4b), parsed from the macro form
       ## `adapterPreference:` block. Keys are canonical OS tags
       ## (`"windows"`, `"linux"`, `"darwin"`); values are the ordered
-      ## adapter chain (each entry drawn from the closed set
-      ## `{"builtin", "scoop", "nix", "path"}`). Empty table when the
-      ## block is absent. `macos` aliases canonicalize to `"darwin"`.
+      ## realization kinds (each drawn from the closed set
+      ## `{"tarball", "builtin", "scoop", "nix", "path"}`; `builtin` is the
+      ## former spelling of `tarball`). Empty table when the block is
+      ## absent. `macos` aliases canonicalize to `"darwin"`.
       ## Mirrors the text-form `Profile.adapterPreference` field so
       ## both parsers produce the same AST shape for the same input.
 

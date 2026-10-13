@@ -29,6 +29,7 @@ import repro_home_apply/home_producer_consumer_map
 import repro_home_apply/plan
 import repro_home_apply/package_catalog
 import repro_home_apply/realize
+import repro_home_apply/home_lock
 import repro_home_apply/materialize_files
 import repro_home_apply/materialize_managed_blocks
 import repro_home_apply/materialize_launchers
@@ -47,6 +48,7 @@ export home_producer_consumer_map
 export plan
 export package_catalog
 export realize
+export home_lock
 export materialize_files
 export materialize_managed_blocks
 export materialize_launchers

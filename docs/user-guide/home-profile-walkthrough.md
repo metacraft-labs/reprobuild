@@ -5,7 +5,8 @@ provisioning flow. By the end of it you will have:
 
 - a `home.nim` profile declaring every toolchain your projects need;
 - a single `repro home apply` invocation that realizes those toolchains
-  through the built-in catalog (no Scoop, no manual installer hunting);
+  from the packages' own realizations (no Scoop, no manual installer
+  hunting);
 - a Windows PATH that picks up the realized binaries automatically
   whenever you open a new shell.
 
@@ -19,14 +20,15 @@ run yourself.
 
 - A working `repro.exe` on PATH (`bash scripts/build_apps.sh` from the
   reprobuild repo root produces it under `build/bin/`).
-- Windows 10 or later. Linux home-profile validation is deferred per
-  the M71 outstanding-tasks list; macOS continues to use `cakNix`.
+- Windows 10 or later for this walkthrough. Linux and macOS resolve the
+  same profile through the same selection; on them a package's `nix`
+  realization is eligible as well.
 - ~4 GB of free disk under your chosen home-state directory if you
   realize every activity in the reference profile.
 
 You do NOT need any pre-existing toolchain install. The whole point of
 the home profile is that `repro home apply` realizes everything from
-upstream URLs through the M64 built-in adapter.
+upstream URLs pinned in the packages' `tarball` realizations.
 
 ## Step 1 — author your `home.nim`
 
@@ -49,11 +51,12 @@ Open the copied `home.nim` in your editor and:
    activity is independent — keeping only `dev` skips the 350 MB JDK,
    the 1.2 GB GHC + cabal stack, the 600 MB Swift toolchain, etc.
 
-3. Optionally pin newer versions. The reference profile pins the M67/M68
-   catalog HEAD; if you want a specific version, edit the version string
-   in the `package(<id>, "<version>")` call. The catalog's currently-
-   shipping versions live in `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/<tool>.nim`
-   — each module's header comment lists the available versions.
+3. Optionally pin versions. If you want a specific version, edit the
+   version string in the `package(<id>, "<version>")` call; it selects the
+   realization of that version. The versions a package offers are the
+   `version = "..."` fields of its `tarball` realizations in
+   `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/<tool>.nim`;
+   an unpinned reference takes the first one listed for your platform.
 
 ## Step 2 — run `repro home apply`
 
@@ -66,38 +69,45 @@ That single command:
 1. Parses `home.nim` via the M83 Phase-A `repro/profile` macro library.
 2. Resolves the host-activity map (`hosts:`) against `$env:REPRO_HOST`
    to produce the active activity set.
-3. For each `package(<id>, "<version>")`, asks the M65 adapter chain
-   to pick a realization strategy. On Windows the default chain is
-   `[cakBuiltin, cakScoop, cakPath]` — every package in the reference
-   profile resolves to `cakBuiltin` because the M67/M68 catalogs
-   contain a slice for the requested `(cpu, os)` tuple.
-4. Downloads the catalog URL (cached in the M56 content-addressed
+3. For each `package(<id>, "<version>")`, selects a realization of the
+   package's canonical definition exactly as a recipe's `uses:` would
+   (see Provisioning-Contributions.md, "Profile Package References"):
+   the selection policy is your profile's `adapterPreference:` entry for
+   the platform, else `tarball, nix, scoop, path` on every platform. Every
+   package in the reference profile has a `tarball` realization for
+   Windows x86_64, so each one selects it; a version pin selects the
+   realization of that version.
+4. Downloads the realization's URL (cached in the M56 content-addressed
    store; a second `repro home apply` cache-hits without re-fetching).
 5. Verifies the recorded SHA-256/SHA-512 against the downloaded bytes
    BEFORE any extraction — a mismatch fails closed with
    `EBuiltinDigestMismatch`.
 6. Extracts (or runs the silent installer) into a stable prefix under
    the M56 store.
-7. Writes one launcher shim per declared `bin_relpath` into the
+7. Writes one launcher shim per package into the
    activation generation's `bin/` dir AND into the Windows stable
    `bin` dir at `$env:REPRO_HOME_STATE_DIR\bin`.
 8. Updates the M82 activation manifest, contributing the per-package
    bin dirs to the user PATH via the M68 `env.userPath` driver and
    the per-tool `env:` entries (e.g. `JAVA_HOME`) via
    `env.userVariable`.
+9. Records what it selected — kind, contributor, version and lock
+   identity, plus the selection policy — in `home.lock` beside
+   `home.nim`. The next apply keeps those selections until you change
+   the policy or pass `--relock`.
 
 Expected output (abridged):
 
 ```
 ==> applying generation a3f7c2e9...
-    realized: jdk@21.0.5 (cakBuiltin, 348 MB; from https://github.com/adoptium/...)
-    realized: maven@3.9.16 (cakBuiltin, 9 MB; from https://archive.apache.org/...)
-    realized: gradle@9.5.1 (cakBuiltin, 92 MB; from https://services.gradle.org/...)
-    realized: cmake@4.3.3 (cakBuiltin, 38 MB; from https://github.com/Kitware/...)
-    realized: ghc@9.12.1 (cakBuiltin, 1180 MB; from https://downloads.haskell.org/...)
-    realized: cabal@3.16.1.0 (cakBuiltin, 18 MB; from https://downloads.haskell.org/...)
-    realized: crystal@1.20.2 (cakBuiltin, 117 MB; from https://github.com/crystal-lang/...)
-    realized: php@8.5.6 (cakBuiltin, 32 MB; from https://downloads.php.net/...)
+    realized: jdk@21.0.5 (tarball, 348 MB; from https://github.com/adoptium/...)
+    realized: maven@3.9.16 (tarball, 9 MB; from https://archive.apache.org/...)
+    realized: gradle@9.5.1 (tarball, 92 MB; from https://services.gradle.org/...)
+    realized: cmake@4.3.3 (tarball, 38 MB; from https://github.com/Kitware/...)
+    realized: ghc@9.12.1 (tarball, 1180 MB; from https://downloads.haskell.org/...)
+    realized: cabal@3.16.1.0 (tarball, 18 MB; from https://downloads.haskell.org/...)
+    realized: crystal@1.20.2 (tarball, 117 MB; from https://github.com/crystal-lang/...)
+    realized: php@8.5.6 (tarball, 32 MB; from https://downloads.php.net/...)
     [...]
     apply: eager gc reclaimed 0 prefixes (ranAt 2026-05-31T...)
 applied generation a3f7c2e9... in 8m 12s
@@ -185,20 +195,25 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
 
 ## Troubleshooting
 
-- **`repro home apply` exits with "unknown package <id>"**: the package
-  isn't in the M65 registry. Check
-  `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/catalog_registry.nim`'s
-  `RegisteredTools` array for the canonical name (some tools rename
-  for Nim-identifier reasons — e.g. `python3` not `python`,
-  `dotnet-sdk` not `dotnet`).
-- **`repro home apply` exits with "version X not in catalog"**: edit
-  your `home.nim` and either drop the version pin (uses the catalog's
-  default) or update it to a version that exists in
-  `packages/<tool>.nim`.
-- **`repro home apply` exits with "cakBuiltin realize not yet
-  implemented for <tool>"**: you've hit one of the M69-deferred-8
-  tools. Fall back to env.ps1's `Ensure-<Tool>` for now; the realize-
-  time hooks land in a follow-up milestone.
+- **`repro home apply --plan` reports "unknown package '<id>'"**: no
+  package definition the engine links has that name, and nothing on the
+  host realizes it. Check `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/`
+  for the canonical name (some tools are spelled differently for
+  Nim-identifier reasons — e.g. `python3` not `python`, `sevenzip` not
+  `7zip`, `dotnet-sdk` not `dotnet`).
+- **`--plan` reports "missing-realization: no realization of package
+  '<id>' for <target>"**: the package is defined but offers nothing for
+  your platform under your selection policy; the message lists each
+  kind's reason. A pinned version that no realization offers names the
+  versions that are offered — drop or change the pin.
+- **The plan names a different realization than you expected**: check
+  `adapterPreference:` (the selection policy) and `home.lock` (a recorded
+  selection is kept until the policy changes or you pass `--relock`).
+  `repro home apply --plan --target-platform macos --target-arch arm64`
+  shows what another platform would select.
+- **`repro home apply` fails realizing one of the M69-deferred-8 tools**:
+  their archive realizations need realize-time hooks that have not
+  landed. Fall back to env.ps1's `Ensure-<Tool>` for now.
 - **The realized binary is on PATH but a fixture FAILs**: the M9
   per-fixture validate scripts probe via `Get-Command`. If your shell
   has stale PATH from before the apply, open a fresh shell.

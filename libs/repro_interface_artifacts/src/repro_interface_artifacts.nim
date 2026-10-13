@@ -420,6 +420,12 @@ type
       ## unpacks into the prefix. See
       ## ``TarballProvisioningDef.closureManifest``: an entry point with
       ## runtime dependencies is not one tarball.
+    detail*: TarballArchiveDetail
+      ## GM4b (v21): the archive-realization metadata — version, alternative
+      ## digests, install method, installer/pacman/bootstrap arguments, env
+      ## bindings, launcher and pre-install specs, microarchitecture floor.
+      ## See ``TarballProvisioningDef.detail``. v20 payloads decode with an
+      ## empty detail, which is a plain archive extracted as-is.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -652,8 +658,13 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 20'u16
-    ## v20 (current): retains ``closureManifest`` on tarball provisioning —
+  EnvelopeVersion = 21'u16
+    ## v21 (current): retains ``detail`` (``TarballArchiveDetail``) on
+    ##                tarball provisioning — the archive-realization metadata
+    ##                the retired ``VersionedProvisioning`` catalog records
+    ##                held (GM4b). Encoded after ``os``, before ``location``.
+    ##                v20 payloads decode with an empty detail.
+    ## v20: retains ``closureManifest`` on tarball provisioning —
     ##                the committed list of additional archives realize
     ##                unpacks into the prefix. v19 payloads decode with it
     ##                empty, which is the prior behaviour of a prefix being
@@ -1067,6 +1078,48 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeTarballArchiveDetail(outp: var seq[byte];
+                               detail: TarballArchiveDetail) =
+  ## GM4b (v21). Field order is the declaration order of
+  ## ``TarballArchiveDetail``; ``readTarballArchiveDetail`` mirrors it.
+  outp.writeString(detail.version)
+  outp.writeString(detail.sha512)
+  outp.writeString(detail.sha1)
+  outp.writeString(detail.installMethod)
+  outp.writeString(detail.extractPath)
+  outp.writeStringSeq(detail.extraExecutables)
+  outp.writeStringSeq(detail.installerArgs)
+  outp.writeStringSeq(detail.pacmanPackages)
+  outp.writeStringSeq(detail.bootstrapArgv)
+  outp.writeStringSeq(detail.env)
+  outp.writeByte(if detail.nested7z: 1'u8 else: 0'u8)
+  outp.writeByte(if detail.msiAdminInstall: 1'u8 else: 0'u8)
+  outp.writeStringSeq(detail.preInstall)
+  outp.writeStringSeq(detail.preInstallUnrecognized)
+  outp.writeStringSeq(detail.launcherEmit)
+  outp.writeString(detail.cpuLevel)
+  outp.writeString(detail.cpuFeatures)
+
+proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int):
+    TarballArchiveDetail =
+  result.version = readString(bytes, pos)
+  result.sha512 = readString(bytes, pos)
+  result.sha1 = readString(bytes, pos)
+  result.installMethod = readString(bytes, pos)
+  result.extractPath = readString(bytes, pos)
+  result.extraExecutables = readStringSeq(bytes, pos)
+  result.installerArgs = readStringSeq(bytes, pos)
+  result.pacmanPackages = readStringSeq(bytes, pos)
+  result.bootstrapArgv = readStringSeq(bytes, pos)
+  result.env = readStringSeq(bytes, pos)
+  result.nested7z = readByte(bytes, pos) != 0'u8
+  result.msiAdminInstall = readByte(bytes, pos) != 0'u8
+  result.preInstall = readStringSeq(bytes, pos)
+  result.preInstallUnrecognized = readStringSeq(bytes, pos)
+  result.launcherEmit = readStringSeq(bytes, pos)
+  result.cpuLevel = readString(bytes, pos)
+  result.cpuFeatures = readString(bytes, pos)
+
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
                               version = EnvelopeVersion;
@@ -1094,6 +1147,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.lockIdentity)
   outp.writeString(provisioning.cpu)
   outp.writeString(provisioning.os)
+  if version >= 21'u16:
+    outp.writeTarballArchiveDetail(provisioning.detail)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -1125,6 +1180,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     # any-host behaviour the single-platform v9 schema implied.
     result.cpu = readString(bytes, pos)
     result.os = readString(bytes, pos)
+  if version >= 21'u16:
+    result.detail = readTarballArchiveDetail(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -1710,6 +1767,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     nonRedistributable: provisioning.nonRedistributable,
     launcher: provisioning.launcher,
     closureManifest: provisioning.closureManifest,
+    detail: provisioning.detail,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
@@ -2426,6 +2484,36 @@ proc emitLiftedExtensionTypes(code: var string;
   # into a freshly-cleared registry (e.g. per-test isolation).
   code.add("\nregisterLiftedExtensions()\n\n")
 
+proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
+  ## GM4b: the ``TarballArchiveDetail(...)`` literal for a RUNTIME detail
+  ## (values, not expression source), for the thin-interface stub. A field
+  ## left out here would silently reconstruct a different realization than
+  ## the contributor declared — the hazard the comment below describes for
+  ## the other tarball fields.
+  proc listLit(items: openArray[string]): string =
+    result = "@["
+    for i, item in items:
+      if i > 0: result.add(", ")
+      result.add(escForCode(item))
+    result.add("]")
+  "TarballArchiveDetail(version: " & escForCode(detail.version) &
+    ", sha512: " & escForCode(detail.sha512) &
+    ", sha1: " & escForCode(detail.sha1) &
+    ", installMethod: " & escForCode(detail.installMethod) &
+    ", extractPath: " & escForCode(detail.extractPath) &
+    ", extraExecutables: " & listLit(detail.extraExecutables) &
+    ", installerArgs: " & listLit(detail.installerArgs) &
+    ", pacmanPackages: " & listLit(detail.pacmanPackages) &
+    ", bootstrapArgv: " & listLit(detail.bootstrapArgv) &
+    ", env: " & listLit(detail.env) &
+    ", nested7z: " & $detail.nested7z &
+    ", msiAdminInstall: " & $detail.msiAdminInstall &
+    ", preInstall: " & listLit(detail.preInstall) &
+    ", preInstallUnrecognized: " & listLit(detail.preInstallUnrecognized) &
+    ", launcherEmit: " & listLit(detail.launcherEmit) &
+    ", cpuLevel: " & escForCode(detail.cpuLevel) &
+    ", cpuFeatures: " & escForCode(detail.cpuFeatures) & ")"
+
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =
   for contribution in contributions:
@@ -2484,6 +2572,7 @@ proc emitProvisioningContributionRegistrations(code: var string;
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
         ", executableAlias: " & escForCode(provisioning.executableAlias) &
+        ", detail: " & tarballArchiveDetailValueLiteral(provisioning.detail) &
         ", stripComponents: " & $provisioning.stripComponents &
         ", packageId: " & escForCode(provisioning.packageId) &
         ", lockIdentity: " & escForCode(provisioning.lockIdentity) &

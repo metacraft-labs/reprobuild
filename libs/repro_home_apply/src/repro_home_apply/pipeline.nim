@@ -34,6 +34,8 @@ import ./env_binding
 import ./errors
 import ./plan
 import ./realize
+import ./home_lock
+import ./package_catalog
 import ./materialize_files
 import ./materialize_managed_blocks
 import ./materialize_launchers
@@ -216,6 +218,11 @@ type
                                         ## so downstream snapshot
                                         ## hashing reads the source
                                         ## file as intent input.
+    relock*: bool                       ## GM4b: ignore the home-profile
+                                        ## lock's pins and re-select every
+                                        ## package under the current
+                                        ## policy (`--relock`); the lock
+                                        ## is rewritten from the result.
     recordOnlyGeneratedFiles*: bool     ## M71 Phase E: source-side
                                         ## remote-bundle evaluation.
                                         ## Package-owned generated files
@@ -1396,7 +1403,8 @@ proc resolveProfileFromOpts(opts: ApplyOptions): Profile =
 
 proc deriveGenerationId(plan: ApplyPlan;
                         intentSnapshotDigest: Digest256;
-                        resourcesSeed: string = ""): GenerationId =
+                        resourcesSeed: string = "";
+                        selectionSeed: string = ""): GenerationId =
   ## Per the spec ("Generation Identity") the generation id is
   ## content-addressed over the resolved plan + intent snapshot +
   ## host identity. It explicitly does NOT include the activation
@@ -1416,6 +1424,15 @@ proc deriveGenerationId(plan: ApplyPlan;
   for b in intentSnapshotDigest: buf.add(b)
   for ch in plan.hostIdentity: buf.add(byte(ord(ch)))
   for ch in resourcesSeed: buf.add(byte(ord(ch)))
+  # GM4b: what each package reference SELECTED (kind + lock identity) is
+  # part of the resolved plan. Without it a generation whose profile text is
+  # unchanged would be a no-op even when the selection moved — a new
+  # realization offered, a PATH executable replaced, a lock re-derived —
+  # and the moved selection would never be realized. Appended only when
+  # non-empty, so a package-less profile keeps the id it had.
+  if selectionSeed.len > 0:
+    for ch in "\x00selections:": buf.add(byte(ord(ch)))
+    for ch in selectionSeed: buf.add(byte(ord(ch)))
   let full = blake3.digest(buf)
   for i in 0 ..< GenerationIdSize:
     result[i] = full[i]
@@ -1721,6 +1738,103 @@ proc previewStowItem(profileDir, homeDir: string;
     result.action = piaConflictDrift
     result.detail = "a directory occupies the stow file's target path"
 
+# ---------------------------------------------------------------------------
+# GM4b: package resolution context, selection seed, home-profile lock
+# ---------------------------------------------------------------------------
+
+proc targetIsThisHost(opts: ApplyOptions): bool =
+  ## Whether the apply's target is the machine running it — the condition
+  ## for consulting the host inventory (PATH, Scoop). A profile evaluated
+  ## for another host (``--host`` remote apply, a bundle built for a
+  ## different platform) must not resolve against this machine's PATH.
+  let here = currentHostContext()
+  opts.host == currentHost() and
+    opts.targetContext.platform == here.platform and
+    opts.targetContext.arch == here.arch
+
+proc packageResolutionContext(opts: ApplyOptions; plan: ApplyPlan):
+    ProfileResolutionContext =
+  ## The one resolution context of an apply: target and policy from the
+  ## options and the profile, the lock from beside the profile. ``--plan``
+  ## and apply build it the same way, so they select the same realizations.
+  let lock = readHomeProfileLock(homeProfileLockPath(opts.profileDir))
+  profileResolutionContext(plan.adapterPreference,
+    opts.targetContext.platform, opts.targetContext.arch,
+    targetIsThisHost(opts), lock, opts.relock)
+
+proc selectionSeedOf(previews: seq[PackagePreview]): string =
+  ## Canonical bytes of what every reference selected, for the generation
+  ## id (``deriveGenerationId``). Test-seam bindings contribute their
+  ## detail text; an unresolved reference its failure.
+  for pv in previews:
+    result.add(pv.packageId & "\x1f")
+    if pv.resolved:
+      let selection = pv.resolution.selection
+      result.add($selection.kind & "\x1f" & selection.lockIdentity)
+    else:
+      result.add($pv.kind & "\x1f" & pv.detail)
+    result.add("\n")
+
+proc lockRecordOf(ctx: ProfileResolutionContext;
+                  previews: seq[PackagePreview]): HomeLockTarget =
+  result = HomeLockTarget(target: describeTarget(ctx.target),
+    policy: ctx.policy, policySource: ctx.policySource)
+  for pv in previews:
+    if not pv.resolved:
+      continue
+    let selection = pv.resolution.selection
+    result.packages.add(HomeLockSelection(package: pv.packageId,
+      kind: selection.kind, contributor: selection.contributor,
+      version: selection.version, lockIdentity: selection.lockIdentity,
+      ambient: selection.ambient))
+
+proc recordSelectionsInLock(opts: ApplyOptions;
+                            ctx: ProfileResolutionContext;
+                            previews: seq[PackagePreview]) =
+  ## Serialise this apply's selections into ``home.lock`` beside the
+  ## profile (Provisioning-Contributions.md §"The home-profile lock"): the
+  ## record of this target is replaced, every other target's record is
+  ## carried forward. Written only when it changes, so an unchanged apply
+  ## does not touch the profile directory.
+  let path = homeProfileLockPath(opts.profileDir)
+  let existing = readHomeProfileLock(path)
+  let base =
+    if existing.isSome: existing.get
+    else: HomeProfileLock(schema: HomeProfileLockSchemaV1)
+  let updated = base.withTarget(lockRecordOf(ctx, previews))
+  if existing.isSome and serializeHomeProfileLock(existing.get) ==
+      serializeHomeProfileLock(updated):
+    return
+  writeHomeProfileLock(path, updated)
+
+type
+  ProfileSelections* = object
+    ## Every package reference of a profile, resolved for one target —
+    ## what ``--plan`` prints and what an apply realizes and locks.
+    target*: string
+      ## ``describeTarget`` spelling, e.g. ``aarch64-macos``.
+    policy*: SelectionPolicy
+    policySource*: string
+    previews*: seq[PackagePreview]
+
+proc resolveProfileSelections*(rawOpts: ApplyOptions): ProfileSelections =
+  ## Resolve every package reference of the profile ``rawOpts`` names, for
+  ## its target, exactly as ``--plan`` and apply do — load intent, build the
+  ## plan, build the resolution context (lock included), select. Mutates
+  ## nothing. The library entry point for callers that need the selections
+  ## themselves (kind, contributor, lock identity) rather than plan text.
+  let opts = resolveOptions(rawOpts)
+  if not fileExists(extendedPath(opts.profilePath)):
+    raiseIntentLoad(opts.profilePath,
+      "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
+  let profile = resolveProfileFromOpts(opts)
+  let applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
+  let ctx = packageResolutionContext(opts, applyPlan)
+  result.target = describeTarget(ctx.target)
+  result.policy = ctx.policy
+  result.policySource = ctx.policySource
+  result.previews = previewPackageResolutions(applyPlan.packages, ctx)
+
 proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   ## M72 Deliverable 2: `repro home apply --plan`. A NON-MUTATING
   ## preview of the FULL apply. Runs the planning half of the pipeline
@@ -1733,9 +1847,10 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   ##
   ## Mutates NOTHING: no store writes, no generation written, no
   ## `current` rotation, no file/registry writes, no `scoop install`.
-  ## The package-catalog query (`scoop list`, bucket-manifest reads)
-  ## is a READ and is allowed; `scoop install` is not — the planner
-  ## calls `resolvePackage` (a pure query), never `realizeScoopAdapter`.
+  ## Package resolution (PATH probes, `scoop list`, bucket-manifest reads)
+  ## is a READ and is allowed; `scoop install` is not — the planner calls
+  ## `previewPackageResolutions` (a pure query), never a realizer, and
+  ## reads the home-profile lock without writing it.
   ##
   ## The apply lock is intentionally NOT acquired: a read-only plan
   ## must never block a concurrent real apply.
@@ -1777,24 +1892,23 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # so a change to a profile-declared resource produces a distinct id.
   let resourcesSeed = resourceSeedString(
     composeDesiredResources(profile, opts.homeDir, opts.targetContext))
-  let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed)
+  # GM4b: resolve every package reference first — the selections are part
+  # of the generation id. Resolution is static metadata plus host-inventory
+  # READS (PATH, `scoop list`, bucket manifests); nothing is realized and the
+  # home-profile lock is read, never written.
+  let resolutionCtx = packageResolutionContext(opts, applyPlan)
+  let packagePreviews = previewPackageResolutions(applyPlan.packages,
+    resolutionCtx)
+  let candidateId = deriveGenerationId(applyPlan, snapshotDig, resourcesSeed,
+    selectionSeedOf(packagePreviews))
   result.generationIdHex = generationIdHex(candidateId)
   let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
 
-  # ---- Package preview: production catalog resolution (READ ONLY) -------
-  # The catalog query (scoop list / bucket manifests) is a read; the
-  # preview never calls `realizeScoopAdapter`, so no `scoop install`
-  # runs. `previewPackageResolutions` lives in `realize.nim` so the
-  # preview and the real dispatch share one resolution path.
-  #
-  # M2.5: resolve the per-host adapter chain from the parsed profile's
-  # `adapterPreference:` block (empty -> M65 platform default). Threaded
-  # into both the preview and the realize call sites so PLAN and apply
-  # report the same per-adapter verdict.
-  let previewAdapterChain = resolveAdapterChainFor(
-    applyPlan.adapterPreference, currentHostOsKey())
-  for pp in previewPackageResolutions(applyPlan.packages,
-      chain = previewAdapterChain):
+  # ---- Package preview (READ ONLY) --------------------------------------
+  # The selections computed above, one plan line each. The same context
+  # resolves the real apply's packages, so the plan and the apply cannot
+  # select differently.
+  for pp in packagePreviews:
     var item = PlanItem(category: "package", name: pp.packageId,
       detail: pp.detail)
     case pp.kind
@@ -2089,8 +2203,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         for a in opts.adoptAddresses:
           resourcesSeed.add(a)
           resourcesSeed.add(",")
+      # GM4b: resolve every package reference before the no-op check — the
+      # selections are part of the generation id — with the same context
+      # `--plan` uses. Step 7 realizes these packages in the same context.
+      let resolutionCtx = packageResolutionContext(opts, applyPlan)
+      let packagePreviews = previewPackageResolutions(applyPlan.packages,
+        resolutionCtx)
       let candidateId = deriveGenerationId(applyPlan, snapshotDig,
-        resourcesSeed)
+        resourcesSeed, selectionSeedOf(packagePreviews))
       # No-op detection (spec §"No-Op Detection"): a re-apply is a
       # no-op iff the planner's content id matches the active
       # generation's recorded id AND all of the active generation's
@@ -2118,6 +2238,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           result.generationIdHex = activeGenIdHex
           result.verifiedDigestCount = verifyCount
           stdout.writeLine(NoOpLogPrefix & $verifyCount & " recorded digests")
+          # The selections equal the active generation's (they are in its
+          # id); recording them creates a missing lock and is otherwise a
+          # byte-identical no-op.
+          if not opts.recordOnlyGeneratedFiles:
+            recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
           return
 
       if shouldKillAfter(6):
@@ -2137,13 +2262,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       createDir(extendedPath(earlyGenDir))
 
       # ---- Step 7: realize packages -------------------------------------
-      # M2.5: same per-host chain selection the preview path uses, so
-      # `repro home apply --plan` and `repro home apply` cannot diverge
-      # on which adapter resolves a given package.
-      let realizeAdapterChain = resolveAdapterChainFor(
-        applyPlan.adapterPreference, currentHostOsKey())
+      # GM4b: the resolution context `--plan` uses, so the plan and the
+      # apply cannot select differently.
       let realized = realizePlannedPackages(store, applyPlan.packages,
-        chain = realizeAdapterChain)
+        resolutionCtx)
       if shouldKillAfter(7):
         raiseKilledByTestHook(7)
 
@@ -2933,6 +3055,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
 
       # Clear the partial-apply marker — success.
       clearMarker(opts.stateDir)
+
+      # GM4b: the generation is committed and current; serialise what it
+      # selected into the home-profile lock. A remote bundle built here is
+      # applied elsewhere and records nothing beside this profile.
+      if not opts.recordOnlyGeneratedFiles:
+        recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
 
       result.kind = aokFreshApplied
       result.generationIdHex = generationIdHex(candidateId)

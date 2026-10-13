@@ -4,7 +4,7 @@
 ##
 ## Hermetic by design: every fixture is materialized on disk and served
 ## via a ``file://`` URL. The non-hermetic dependencies are:
-##   * a host ``7z.exe`` (or pre-seeded catalog ``7zip`` prefix) for
+##   * a host ``7z.exe`` (or pre-seeded catalog ``sevenzip`` prefix) for
 ##     the NSIS-bundle outer-shell unwrap;
 ##   * a host ``dark.exe`` (or pre-seeded catalog ``wix3`` prefix) for
 ##     the MSI extraction (synthesized MSI fixtures via WiX's
@@ -26,6 +26,7 @@ from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
@@ -137,7 +138,8 @@ proc seedInnounpExePrefix(store: var Store; hostInnounp: string): string =
 
 proc seedSevenZipExePrefix(store: var Store; hostSeven: string): string =
   ## 7-Zip needs the sibling 7z.dll to extract.
-  seedCatalogPrefix(store, "7zip", "test-seed", hostSeven, "bin/7z.exe",
+  ## GM4b: the stdlib 7-Zip package is ``sevenzip``.
+  seedCatalogPrefix(store, "sevenzip", "test-seed", hostSeven, "bin/7z.exe",
     extraFiles = @{
       "bin/7z.dll": "<sibling>"
     })
@@ -239,7 +241,61 @@ proc buildMinimalMsi(workDir, msiName: string;
   if not fileExists(extendedPath(msiPath)): return ""
   absolutePath(msiPath)
 
-suite "M4 — cakBuiltin installer family realize":
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
+
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+suite "M4 — archive realizer installer family realize":
 
   test "test_m4_discover_dark_finds_catalog_prefix":
     ## M4 ``discoverDarkExe`` Step (i): a store-resident wix3 prefix is
@@ -397,24 +453,13 @@ suite "M4 — cakBuiltin installer family realize":
       var store = openStore(storeDir)
       defer: store.close()
       discard seedLessmsiExePrefix(store, hostLessmsi)
-      let vp = initVersionedProvisioning(
-        version = "test-1.0",
-        archive_format = afInstallerMsi,
-        install_method = imInstallerMsi,
-        bin_relpath = @["meson.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(msiPath),
-            sha256 = sha,
-            # lessmsi writes under SourceDir/<MSI install hierarchy>;
-            # our minimal MSI's hierarchy puts the file under TestMsi/.
-            extract_path = "SourceDir/TestMsi")
-        ])
-      let res = resolveBuiltinPackage("meson-msi", @[vp])
-      check res.found
-      check res.resolution.installMethod == imInstallerMsi
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      # lessmsi writes under SourceDir/<MSI install hierarchy>; our
+      # minimal MSI's hierarchy puts the file under TestMsi/.
+      let res = selectArchive("meson-msi", [hostRecord(fileToUrl(msiPath),
+        "installer-msi", "meson.exe", sha256 = sha, version = "test-1.0",
+        installMethod = "installer-msi", extractPath = "SourceDir/TestMsi")])
+      check res.installMethod == imInstallerMsi
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       let realizedMeson = outR.prefixAbsolutePath / "meson.exe"
       check fileExists(extendedPath(realizedMeson))
@@ -531,26 +576,16 @@ suite "M4 — cakBuiltin installer family realize":
         delEnv("CAKBUILTIN_PREFER_MSIEXEC")
       var store = openStore(storeDir)
       defer: store.close()
-      let vp = initVersionedProvisioning(
-        version = "msiexec-1.0",
-        archive_format = afInstallerMsi,
-        install_method = imInstallerMsi,
-        bin_relpath = @["hello.txt"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(msiPath),
-            sha256 = sha,
-            # msiexec /a lays files under <TARGETDIR>/<MSI's directory
-            # table> — for our minimal MSI with TestMsi as the inner
-            # dir, the file lives at <prefix>/TestMsi/hello.txt.
-            extract_path = "TestMsi")
-        ])
-      let res = resolveBuiltinPackage("msi-msiexec-tool", @[vp])
-      check res.found
+      # msiexec /a lays files under <TARGETDIR>/<MSI's directory
+      # table> — for our minimal MSI with TestMsi as the inner dir, the
+      # file lives at <prefix>/TestMsi/hello.txt.
+      let res = selectArchive("msi-msiexec-tool", [hostRecord(
+        fileToUrl(msiPath), "installer-msi", "hello.txt", sha256 = sha,
+        version = "msiexec-1.0", installMethod = "installer-msi",
+        extractPath = "TestMsi")])
       var raisedLessmsi = false
       try:
-        let outR = realizeBuiltinPackage(store, res.resolution)
+        let outR = realizeBuiltinPackage(store, res)
         check fileExists(extendedPath(outR.prefixAbsolutePath / "hello.txt"))
       except EBuiltinLessmsiUnavailable:
         raisedLessmsi = true

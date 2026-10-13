@@ -41,7 +41,6 @@ import blake3
 import repro_home_intent
 import repro_home_generations
 import repro_home_apply
-import repro_home_apply/catalog_lookup
 import repro_home_resources
 import repro_home_rollback
 import repro_launch_plan
@@ -318,7 +317,8 @@ proc renderRecovered(rec: AbortedGenerationRecord): string =
 proc runApplyInline*(commandName: string;
                      mode: ApplyMode = amFull;
                      setOverrideKey: string = "";
-                     adoptAddresses: seq[string] = @[]): int =
+                     adoptAddresses: seq[string] = @[];
+                     relock = false): int =
   ## Shared apply-pipeline runner used by `repro home apply` and by
   ## the inline path of `add`/`remove`/`enable`/`disable`/`set`.
   ## Reports the new generation id on stdout and any diagnostics on
@@ -334,6 +334,7 @@ proc runApplyInline*(commandName: string;
     opts.applyMode = mode
     opts.setOverrideKey = setOverrideKey
     opts.adoptAddresses = adoptAddresses
+    opts.relock = relock
     # M83 Phase F3: the compile-then-adapt path is the ONLY apply path.
     # A profile compilation failure is a HARD ERROR — the legacy text
     # parser no longer auto-fills the gap.
@@ -532,14 +533,21 @@ proc runHomeAdd(args: openArray[string]): int =
       "`<tool>@<concrete-version>`")
     return 2
   if version == "latest":
-    let latest = latestCatalogVersion(pkg)
-    if not latest.found:
+    # GM4b: `@latest` materializes the version an unpinned reference
+    # resolves to on this host, so pinning it does not change the
+    # selection (Provisioning-Contributions.md §"Profile Package
+    # References").
+    let latest = unpinnedHostVersion(pkg)
+    if latest.isNone:
       stderr.writeLine("repro home add: cannot resolve `" & pkg &
-        "@latest`: no built-in catalog registered for '" & pkg & "'")
-      stderr.writeLine("  hint: registered tools: " &
-        registeredToolNames().join(", "))
+        "@latest`: no definition of '" & pkg & "' offers a versioned " &
+        "(tarball or scoop) realization for this host")
+      let offered = offeredVersions(pkg)
+      if offered.len > 0:
+        stderr.writeLine("  hint: versions offered for other platforms: " &
+          offered.join(", "))
       return 1
-    version = latest.version
+    version = latest.get
   try:
     let profilePath = loadProfilePath()
     if not packageInCatalog(pkg):
@@ -1118,7 +1126,9 @@ proc runHomeHistory(args: openArray[string]): int =
 # `repro home apply` (M63).
 # ---------------------------------------------------------------------------
 
-proc runHomeApplyPlan(allowDrift, reconcileDrift: bool): int =
+proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
+                      relock = false; targetPlatform = "";
+                      targetArch = ""): int =
   ## M72 Deliverable 2: `repro home apply --plan` — a non-mutating
   ## preview of the FULL apply (packages, stow, generated files,
   ## managed blocks, launchers, resources). Runs the planning half of
@@ -1129,6 +1139,18 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool): int =
   try:
     var opts: ApplyOptions
     opts.reconcileStowDrift = reconcileDrift
+    opts.relock = relock
+    if targetPlatform.len > 0 or targetArch.len > 0:
+      # GM4b: plan for another platform. Package references resolve for
+      # the named target (Provisioning-Contributions.md §"Profile Package
+      # References"); the host inventory is not consulted for it.
+      var ctx = currentHostContext()
+      if targetPlatform.len > 0:
+        ctx.platform = normalizeTargetPlatform(targetPlatform)
+      if targetArch.len > 0:
+        ctx.arch = normalizeTargetArch(targetArch)
+      opts.targetContext = ctx
+      opts.hasTargetContext = true
     # M83 Phase F3: same hard-error compile path as the real apply.
     let profilePath =
       if opts.profilePath.len > 0: opts.profilePath
@@ -1175,10 +1197,16 @@ proc runHomeApply(args: openArray[string]): int =
   var planMode = false
   var allowDrift = false
   var reconcileDrift = false
-  for a in args:
+  var relock = false
+  var targetPlatform = ""
+  var targetArch = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
     if a == "--help" or a == "-h":
       echo "usage: repro home apply [--plan] [--allow-drift] " &
-        "[--reconcile-drift | --accept-overwrite]"
+        "[--reconcile-drift | --accept-overwrite] [--relock] " &
+        "[--target-platform linux|macos|windows] [--target-arch x86_64|arm64]"
       echo ""
       echo "Run the home-profile apply pipeline against the current"
       echo "intent (`home.nim`), producing a new generation and"
@@ -1194,6 +1222,13 @@ proc runHomeApply(args: openArray[string]): int =
       echo "  --accept-overwrite (alias of --reconcile-drift) instead of"
       echo "                     failing closed; records the prior"
       echo "                     content so rollback can restore it."
+      echo "  --relock           Ignore the selections pinned in home.lock"
+      echo "                     and re-select every package under the"
+      echo "                     current selection policy (with --plan:"
+      echo "                     show what that would select)."
+      echo "  --target-platform  With --plan: resolve packages for another"
+      echo "  --target-arch      platform / architecture (the host's PATH"
+      echo "                     and Scoop are not consulted for it)."
       return 0
     if a == "--no-apply":
       stderr.writeLine("repro home apply: --no-apply is meaningless on " &
@@ -1206,19 +1241,32 @@ proc runHomeApply(args: openArray[string]): int =
       allowDrift = true
     elif a == "--reconcile-drift" or a == "--accept-overwrite":
       reconcileDrift = true
+    elif a == "--relock":
+      relock = true
+    elif a == "--target-platform" or a.startsWith("--target-platform="):
+      targetPlatform = parseFlagValue(args, i, "--target-platform")
+    elif a == "--target-arch" or a.startsWith("--target-arch="):
+      targetArch = parseFlagValue(args, i, "--target-arch")
     elif a.startsWith("--"):
       stderr.writeLine("repro home apply: unknown flag: " & a)
       return 2
     else:
       stderr.writeLine("repro home apply: unexpected positional: " & a)
       return 2
+    inc i
+  if (targetPlatform.len > 0 or targetArch.len > 0) and not planMode:
+    stderr.writeLine("repro home apply: --target-platform / --target-arch " &
+      "plan for another platform and need --plan; a real apply for another " &
+      "host goes through `repro home enable <activity> --host NAME --now`")
+    return 2
   if planMode:
-    return runHomeApplyPlan(allowDrift, reconcileDrift)
+    return runHomeApplyPlan(allowDrift, reconcileDrift, relock,
+      targetPlatform, targetArch)
   # A real apply with --reconcile-drift threads the policy through the
   # apply pipeline so a drifted stow target can be replaced.
   if reconcileDrift:
     putEnv("REPRO_HOME_APPLY_RECONCILE_DRIFT", "1")
-  return runApplyInline("apply")
+  return runApplyInline("apply", relock = relock)
 
 # ---------------------------------------------------------------------------
 # `repro home __build-bundle` (M71 Phase A, internal).

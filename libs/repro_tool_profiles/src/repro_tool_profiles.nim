@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, times, net]
+import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, times, net]
 
 import blake3
 import cbor
@@ -21,6 +21,10 @@ import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
 import repro_interface_artifacts
+# GM4b: realization selection — the one implementation shared by a recipe's
+# `uses:` and a home profile's `package` reference.
+import repro_tool_profiles/realization_selection
+export realization_selection
 import repro_local_store
 # Binary-cache substitution for realized tool prefixes. Adding these imports
 # is what closes the gap where a package realized by URL+digest never
@@ -1051,62 +1055,54 @@ proc pathOnlyResolutionSignatures*(uses: openArray[InterfaceToolUse];
   for useDef in uses:
     result.add(pathOnlyResolutionSignature(useDef, pathValue, lookup))
 
-proc lockedNixpkgsRef(baseRef, narHash: string): string =
-  result = baseRef
-  if narHash.len > 0 and not result.contains("narHash="):
-    if result.contains("?"):
-      result.add("&narHash=")
-    else:
-      result.add("?narHash=")
-    result.add(narHash)
-
-proc effectiveNixSelector(selected: InterfaceNixProvisioning): string =
-  if selected.nixpkgsRef.len > 0 and selected.selector.startsWith("nixpkgs#"):
-    return lockedNixpkgsRef(selected.nixpkgsRef,
-      selected.nixpkgsNarHash) & "#" & selected.selector["nixpkgs#".len .. ^1]
-  selected.selector
-
 proc requestedProvisioningContributor(): string =
   getEnv("REPRO_PROVISIONING_CONTRIBUTOR").strip()
 
-proc contributorLabel(value: string): string =
-  if value.len > 0: value else: "canonical-package"
+proc requestedContributorPin(honor = true): Option[string] =
+  ## ``REPRO_PROVISIONING_CONTRIBUTOR`` as a selection pin. Unset (or not
+  ## honoured, for reprobuild's own bootstrap pins) lets a unique contributor
+  ## select.
+  let requested = if honor: requestedProvisioningContributor() else: ""
+  if requested.len > 0: some(requested) else: none(string)
 
-proc contributorLockIdentity(contributor, realizationIdentity: string): string =
-  if contributor.len == 0:
-    realizationIdentity
-  else:
-    "contributor:" & contributor & "\n" & realizationIdentity
-
-proc selectNixProvisioning(useDef: InterfaceToolUse):
-    InterfaceNixProvisioning =
-  let requested = requestedProvisioningContributor()
-  var contributors: seq[string] = @[]
-  # ``result.selector`` is NOT a usable "nothing chosen yet" sentinel: an entry
-  # whose selector is empty is still an ELIGIBLE entry with incomplete
-  # metadata, and treating it as unchosen reported "no nix realization" for a
-  # package that declares one. ``nixAcquisitionPlan`` owns the completeness
-  # diagnostic; selection only decides WHICH entry.
-  var chosen = false
-  for candidate in useDef.nixProvisioning:
-    if requested.len > 0 and candidate.contributor != requested:
-      continue
-    if candidate.contributor notin contributors:
-      contributors.add(candidate.contributor)
-    if not chosen:
-      result = candidate
-      chosen = true
-  if not chosen:
-    raise newException(ValueError,
-      "tool-resolution failed: provisioning contributor \"" & requested &
-      "\" has no nix realization for package \"" &
-      useDef.packageSelector & "\"")
-  if requested.len == 0 and contributors.len > 1:
-    raise newException(ValueError,
-      "tool-resolution failed: ambiguous nix provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
+proc selectionFailure(useDef: InterfaceToolUse; kind: RealizationKind;
+                      choice: KindChoice; pin: Option[string];
+                      target: RealizationTarget): ref ValueError =
+  ## The ``uses:`` wording of a per-kind selection failure. The decision is
+  ## ``realization_selection``'s; only the sentence is the recipe path's, and
+  ## it keeps the text recipes and their tests have always seen.
+  case choice.status
+  of kcAmbiguous:
+    newException(ValueError,
+      "tool-resolution failed: ambiguous " & $kind &
+      " provisioning for package \"" & useDef.packageSelector &
+      "\"; eligible contributors: " &
+      choice.contributors.mapIt(contributorLabel(it)).join(", ") &
       "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+  of kcContributorNotOffered:
+    newException(ValueError,
+      "tool-resolution failed: provisioning contributor \"" &
+      pin.get("") & "\" has no " & $kind & " realization for package \"" &
+      useDef.packageSelector & "\"")
+  else:
+    newException(ValueError,
+      "tool-resolution failed: package \"" & useDef.packageSelector &
+      "\" has no " & $kind & " realization for " & describeTarget(target) &
+      ": " & choice.detail)
+
+proc selectNixProvisioning*(useDef: InterfaceToolUse;
+                            target = hostRealizationTarget()):
+    InterfaceNixProvisioning =
+  ## The ``uses:`` nix selection — ``realization_selection.selectNixRecord``
+  ## (Provisioning-Contributions.md §"Profile Package References"), so a
+  ## recipe and a home profile select the same record. An entry whose
+  ## selector is empty is still an ELIGIBLE entry with incomplete metadata;
+  ## ``nixAcquisitionPlan`` owns the completeness diagnostic.
+  let pin = requestedContributorPin()
+  let choice = selectNixRecord(useDef.nixProvisioning, target, "", pin)
+  if choice.status != kcSelected:
+    raise selectionFailure(useDef, rkNix, choice, pin, target)
+  useDef.nixProvisioning[choice.index]
 
 proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
   ## Appended to a "does not declare provisioning" error when the tool use
@@ -1125,14 +1121,16 @@ proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
     " recipe was compiled without a reachable catalog.\n" &
     reprobuildPackagesRemedy()
 
-proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
+proc nixAcquisitionPlan*(useDef: InterfaceToolUse;
+                         target = hostRealizationTarget()):
+    NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: nixPackage metadata" &
       noProvisioningAtAllHint(useDef))
-  let selected = selectNixProvisioning(useDef)
+  let selected = selectNixProvisioning(useDef, target)
   if selected.selector.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: incomplete nixPackage metadata for package \"" &
@@ -1143,13 +1141,7 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
     else:
       selected.selector
   let resolvedSelector = effectiveNixSelector(selected)
-  let lockIdentity =
-    if selected.lockIdentity.len > 0:
-      selected.lockIdentity
-    elif selected.nixpkgsRef.len > 0:
-      resolvedSelector
-    else:
-      selected.selector
+  let lockIdentity = nixRealizationLockIdentity(selected)
   NixAcquisitionPlan(
     packageSelector: useDef.packageSelector,
     packageId: packageId,
@@ -1806,26 +1798,19 @@ proc hostOsToken(): string =
   elif defined(linux): "linux"
   else: hostOS.toLowerAscii()
 
-proc matchesHostPlatform(provisioning: InterfaceTarballProvisioning): bool =
-  ## Empty cpu / os fields mean "any host", matching everything. A
-  ## non-empty value must match the host. ``darwin`` and ``macos`` are
-  ## aliases (the DSL parser accepts both spellings).
-  let cpuOk = provisioning.cpu.len == 0 or
-    provisioning.cpu.toLowerAscii() == "any" or
-    provisioning.cpu.toLowerAscii() == hostCpuToken()
-  let osNorm = provisioning.os.toLowerAscii()
-  let hostOsNorm = hostOsToken()
-  let osOk = osNorm.len == 0 or osNorm == "any" or
-    osNorm == hostOsNorm or
-    (hostOsNorm == "macos" and osNorm == "darwin") or
-    (hostOsNorm == "darwin" and osNorm == "macos")
-  cpuOk and osOk
+proc hasTargetTarballProvisioning(useDef: InterfaceToolUse;
+                                  target: RealizationTarget): bool =
+  ## Whether some tarball record's (cpu, os) coordinate applies to
+  ## ``target`` — whatever contributor or floor it carries. Coordinate
+  ## applicability is ``realization_selection``'s rule (the arm tiers of
+  ## ``packages_schema.selectArm``), so the path-mode fallback below and the
+  ## selection that follows it cannot disagree about "is there an archive for
+  ## this host".
+  selectTarballRecord(useDef.tarballProvisioning, target).status notin
+    {kcNoRecords, kcNoneForTarget}
 
 proc hasHostTarballProvisioning(useDef: InterfaceToolUse): bool =
-  for provisioning in useDef.tarballProvisioning:
-    if matchesHostPlatform(provisioning):
-      return true
-  false
+  hasTargetTarballProvisioning(useDef, hostRealizationTarget())
 
 proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
   ## Whether the path-mode resolver has anything to realize `useDef` from
@@ -1836,42 +1821,55 @@ proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
   hasHostTarballProvisioning(useDef) or
     ((defined(linux) or defined(macosx)) and useDef.nixProvisioning.len > 0)
 
-proc selectTarballProvisioning(useDef: InterfaceToolUse;
-                               honorRequestedContributor = true):
+proc selectTarballProvisioning*(useDef: InterfaceToolUse;
+                                honorRequestedContributor = true;
+                                target = hostRealizationTarget()):
     InterfaceTarballProvisioning =
-  ## Pick the first ``tarballProvisioning`` entry that matches the host
-  ## platform. ``cpu = ""`` / ``os = ""`` entries match every host and
-  ## act as a catch-all when no per-platform slice is supplied. Entries
-  ## are walked in declaration order so author intent is preserved
-  ## (early entries beat later catch-alls).
-  let requested =
-    if honorRequestedContributor: requestedProvisioningContributor() else: ""
-  var contributors: seq[string] = @[]
-  var candidates: seq[InterfaceTarballProvisioning] = @[]
-  for provisioning in useDef.tarballProvisioning:
-    if not matchesHostPlatform(provisioning):
-      continue
-    if requested.len > 0 and provisioning.contributor != requested:
-      continue
-    candidates.add(provisioning)
-    if provisioning.contributor notin contributors:
-      contributors.add(provisioning.contributor)
-  if requested.len == 0 and contributors.len > 1:
+  ## The ``uses:`` tarball selection — ``realization_selection.
+  ## selectTarballRecord``, the selection a home profile makes too
+  ## (Provisioning-Contributions.md §"Profile Package References"): the most
+  ## specific (cpu, os) coordinate wins, then the highest satisfied
+  ## microarchitecture floor, then declaration order — so an early entry
+  ## still beats a later catch-all of the same specificity, as before.
+  let pin = requestedContributorPin(honorRequestedContributor)
+  let choice = selectTarballRecord(useDef.tarballProvisioning, target, "",
+    pin)
+  case choice.status
+  of kcSelected:
+    useDef.tarballProvisioning[choice.index]
+  of kcNoneForTarget:
     raise newException(ValueError,
-      "tool-resolution failed: ambiguous tarball provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
-  if candidates.len > 0:
-    return candidates[0]
-  raise newException(ValueError,
-    "tool-resolution failed: no tarball provisioning entry for package \"" &
-    useDef.packageSelector & "\" matches host cpu=" & hostCpuToken() &
-    " os=" & hostOsToken() & " (" & $useDef.tarballProvisioning.len &
-    " entries; see the package's `provisioning:` block)")
+      "tool-resolution failed: no tarball provisioning entry for package \"" &
+      useDef.packageSelector & "\" matches host cpu=" &
+      $target.platform.family & " os=" & $target.os & " (" &
+      $useDef.tarballProvisioning.len &
+      " entries; see the package's `provisioning:` block)")
+  else:
+    raise selectionFailure(useDef, rkTarball, choice, pin, target)
+
+proc refuseUnrealizableTarball(useDef: InterfaceToolUse;
+                               selected: InterfaceTarballProvisioning) =
+  ## GM4b: the ``uses:`` provisioning edge extracts an archive and nothing
+  ## else. A record that needs an installer run, an MSYS2 package merge, a
+  ## pre-install script or launcher emission — the archive realizations that
+  ## moved here from the retired ``VersionedProvisioning`` catalog — is
+  ## realized only by the home archive realizer (``repro_home_apply``'s
+  ## ``builtin_adapter``). Extracting such a record as a plain archive would
+  ## yield a prefix that looks realized and is not, so it is refused by name.
+  ## That two realizers consume tarball records is recorded as an open gap in
+  ## Provisioning-Contributions.md §"Profile Package References".
+  let unsupported = archiveInstallerFeatures(selected)
+  if unsupported.len > 0:
+    raise newException(ValueError,
+      "tool-resolution failed: the tarball realization of package \"" &
+      useDef.packageSelector & "\" selected for this host (" & selected.url &
+      ") needs " & unsupported.join(", ") & ", which the `uses:` " &
+      "provisioning edge does not perform; it is realized by `repro home " &
+      "apply` only")
 
 proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
-                             honorRequestedContributor = true):
+                             honorRequestedContributor = true;
+                             target = hostRealizationTarget()):
     TarballAcquisitionPlan =
   if useDef.tarballProvisioning.len == 0:
     raise newException(ValueError,
@@ -1879,7 +1877,9 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: tarball metadata" &
       noProvisioningAtAllHint(useDef))
-  let selected = selectTarballProvisioning(useDef, honorRequestedContributor)
+  let selected = selectTarballProvisioning(useDef, honorRequestedContributor,
+    target)
+  refuseUnrealizableTarball(useDef, selected)
   let sha256 = normalizedSha256(selected.sha256)
   if selected.url.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -1909,10 +1909,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       else: "",
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
-      if selected.lockIdentity.len > 0:
-        selected.lockIdentity
-      else:
-        "sha256:" & sha256))
+      tarballRealizationLockIdentity(selected)))
 
 proc systemToolEnv(): StringTableRef =
   ## A copy of the current environment with the dynamic-linker override
@@ -5277,7 +5274,8 @@ proc installedVersionSatisfies*(installedVersions: openArray[string];
   ##
   ## This is the SINGLE decision both the apply-time adapter
   ## (`resolveScoopTool`, M77) and the plan-time package classifier
-  ## (`repro_home_apply/package_catalog.resolvePackage`, M80) consult,
+  ## (`repro_home_apply/package_catalog.resolveProfilePackage`, M80/GM4b)
+  ## consult,
   ## so the dry-run plan and the real apply can never disagree on
   ## whether an installed package is a cache-hit.
   ##
@@ -5333,34 +5331,28 @@ proc resolveScoopExecutable(scoopOverride: string): string =
       return resolved
   ""
 
-proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
+proc selectScoopProvisioning*(useDef: InterfaceToolUse;
+                              target = hostRealizationTarget()):
+    InterfaceScoopProvisioning =
+  ## The ``uses:`` scoop selection — ``realization_selection.
+  ## selectScoopRecord``, the selection a home profile makes for the same
+  ## package (Provisioning-Contributions.md §"Profile Package References").
+  let pin = requestedContributorPin()
+  let choice = selectScoopRecord(useDef.scoopProvisioning, target, "", pin)
+  if choice.status != kcSelected:
+    raise selectionFailure(useDef, rkScoop, choice, pin, target)
+  useDef.scoopProvisioning[choice.index]
+
+proc scoopAcquisitionPlan*(useDef: InterfaceToolUse;
+                           target = hostRealizationTarget()):
+    ScoopAcquisitionPlan =
   if useDef.scoopProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: scoopApp metadata" &
       noProvisioningAtAllHint(useDef))
-  let requested = requestedProvisioningContributor()
-  var contributors: seq[string] = @[]
-  var candidates: seq[InterfaceScoopProvisioning] = @[]
-  for candidate in useDef.scoopProvisioning:
-    if requested.len > 0 and candidate.contributor != requested:
-      continue
-    candidates.add(candidate)
-    if candidate.contributor notin contributors:
-      contributors.add(candidate.contributor)
-  if candidates.len == 0:
-    raise newException(ValueError,
-      "tool-resolution failed: provisioning contributor \"" & requested &
-      "\" has no scoop realization for package \"" &
-      useDef.packageSelector & "\"")
-  if requested.len == 0 and contributors.len > 1:
-    raise newException(ValueError,
-      "tool-resolution failed: ambiguous scoop provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
-  let selected = candidates[0]
+  let selected = selectScoopProvisioning(useDef, target)
   if selected.bucket.len == 0 or selected.app.len == 0 or
       selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -5375,11 +5367,7 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
       selected.packageId
     else:
       selected.bucket & "/" & selected.app
-  let lockIdentity =
-    if selected.lockIdentity.len > 0:
-      selected.lockIdentity
-    else:
-      "scoop:" & selected.bucket & "/" & selected.app
+  let lockIdentity = scoopRealizationLockIdentity(selected)
   ScoopAcquisitionPlan(
     packageSelector: useDef.packageSelector,
     packageId: packageId,
@@ -5951,7 +5939,7 @@ proc realizeScoopTool(useDef: InterfaceToolUse; storeRoot: string;
   # M80: the installed-version cache-hit decision is the shared
   # `installedVersionSatisfies` predicate — the SAME predicate the
   # plan-time package classifier (`repro_home_apply/package_catalog.
-  # resolvePackage`) consults, so a `repro home apply --plan` dry run
+  # resolveProfilePackage`) consults, so a `repro home apply --plan` dry run
   # and the real `repro home apply` can never disagree on whether an
   # installed-but-bucket-drifted package is a cache-hit.
   let installedHit = installedVersionSatisfies(installedScoopVersions(),

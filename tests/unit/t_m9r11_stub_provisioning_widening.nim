@@ -48,6 +48,8 @@ const
     "gperf", "libtool", "libtoolize", "m4", "make", "mpc", "mpfr",
     "rsync", "texinfo",
   ]
+  FormerMsys2CatalogPackages = ["autoconf", "automake", "libtool",
+    "libtoolize"]
   StubsWithScoop = [
     "perl", "m4", "bison", "bc", "file", "swig",
   ]
@@ -142,6 +144,18 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
         check pkg.nixProvisioning.len >= 1
         if name == "make":
           check pkg.tarballProvisioning.len == 1
+        elif name in FormerMsys2CatalogPackages:
+          # GM4b moved the MSYS2 catalog record of these four into the
+          # package as its one Windows `tarball` realization. It is a
+          # prebuilt MSYS2 package merged by the home archive realizer —
+          # binaries, not a source archive — so it is the only tarball
+          # record these packages may carry.
+          require pkg.tarballProvisioning.len == 1
+          let channel = pkg.tarballProvisioning[0]
+          check channel.detail.installMethod == "msys2-pacman"
+          check channel.os == "windows"
+          check channel.url.startsWith("https://repo.msys2.org/")
+          check channel.executablePath.startsWith("bin/")
         else:
           check pkg.tarballProvisioning.len == 0
         for channel in pkg.tarballProvisioning:

@@ -17,7 +17,7 @@
 ##     PATH.
 ##   * ``home.package.<id>.env.<VAR>`` — one ``env.userVariable``
 ##     resource per ``env:`` entry the catalog declared (with
-##     ``${prefix}`` already substituted by the cakBuiltin realizer).
+##     ``${prefix}`` already substituted by the realizer).
 ##
 ## The address namespace is reserved for M69 synthesis; profile-author-
 ## written addresses do NOT collide because every M69 address begins
