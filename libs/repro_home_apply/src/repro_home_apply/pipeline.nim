@@ -332,11 +332,12 @@ proc resolveConfigurablePlaceholders(content: string;
     if dot > 0:
       let pkg = key[0 ..< dot]
       let cfgKey = key[dot + 1 .. ^1]
+      # Last write wins, as in `effectiveConfigAssignments`: `overrides`
+      # are in declaration order, so the last match is the effective one.
       for c in overrides:
         if c.packageName == pkg and c.configKey == cfgKey:
           resolved = unquoteValueSource(c.configValue)
           found = true
-          break
     if found:
       rewritten.add(resolved)
     else:

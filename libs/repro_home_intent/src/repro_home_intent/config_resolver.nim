@@ -64,6 +64,17 @@ proc applicableResourceEntries*(nodes: seq[IntentNode]; ctx: HostContext;
   ## inside an `nkCondBlock` is included only when the guard holds.
   collectApplicable(nodes, nkResourceEntry, ctx, userEval, result)
 
+proc applicableConfigPackages*(cfg: IntentNode; ctx: HostContext;
+                               userEval: UserPredicateEvaluator = nil):
+    seq[IntentNode] =
+  ## The `nkConfigPackage` blocks of a `config:` block that apply on `ctx`,
+  ## in declaration order: a package block inside a guard chain around
+  ## package blocks is included only when the guard holds. Walk each
+  ## result's entries with `applicableConfigEntries`.
+  doAssert cfg.kind == nkConfigBlock
+  collectApplicable(cfg.configPackages, nkConfigPackage, ctx, userEval,
+    result)
+
 proc applicableConfigEntries*(pkg: IntentNode; ctx: HostContext;
                               userEval: UserPredicateEvaluator = nil):
     seq[IntentNode] =
@@ -72,6 +83,41 @@ proc applicableConfigEntries*(pkg: IntentNode; ctx: HostContext;
   ## holds).
   doAssert pkg.kind == nkConfigPackage
   collectApplicable(pkg.configEntries, nkConfigEntry, ctx, userEval, result)
+
+type
+  ConfigAssignment* = object
+    ## The resolved assignment of one `<pkg>.<key>` on a host.
+    entry*: IntentNode
+      ## The `nkConfigEntry` that wins: the LAST applicable assignment.
+    overridden*: seq[IntentNode]
+      ## Earlier applicable assignments of the same key, in declaration
+      ## order, which `entry` overrides on this host.
+
+proc effectiveConfigAssignments*(profile: Profile; ctx: HostContext;
+                                 userEval: UserPredicateEvaluator = nil):
+    OrderedTable[string, OrderedTable[string, ConfigAssignment]] =
+  ## `<package> -> (<configurable> -> assignment)` for every `config:`
+  ## assignment that applies on `ctx`. THE resolution rule for a profile's
+  ## config overrides, shared by `resolveEffectiveConfig` and
+  ## `repro home get` so they cannot disagree: equal-priority scalar
+  ## contributions resolve last-write-wins, per key, across every package
+  ## block of the package (Configurable-System.md §Priorities And
+  ## Contributions), which is also the order the compiled profile's
+  ## `configOverrides` carry. `overridden` lists the shadowed sites, for the
+  ## diagnostic the same section asks for.
+  for ch in profile.root.children:
+    if ch.kind != nkConfigBlock:
+      continue
+    for pkg in applicableConfigPackages(ch, ctx, userEval):
+      let name = pkg.configPackageName
+      if name notin result:
+        result[name] = initOrderedTable[string, ConfigAssignment]()
+      for entry in applicableConfigEntries(pkg, ctx, userEval):
+        var assignment = ConfigAssignment(entry: entry)
+        if entry.configKey in result[name]:
+          let previous = result[name][entry.configKey]
+          assignment.overridden = previous.overridden & @[previous.entry]
+        result[name][entry.configKey] = assignment
 
 proc walkBody(children: seq[IntentNode]; ctx: HostContext;
               userEval: UserPredicateEvaluator;
@@ -123,14 +169,14 @@ proc resolveEffectiveConfig*(profile: Profile;
   for ch in profile.root.children:
     if ch.kind == nkActivity and ch.activityName in activeNames:
       collectActivityPackages(ch, ctx, userEval, result.enabledPackages)
-  # 3. Bucket config overrides.
-  for ch in profile.root.children:
-    if ch.kind == nkConfigBlock:
-      for pkg in ch.configPackages:
-        var table = initOrderedTable[string, string]()
-        for entry in applicableConfigEntries(pkg, ctx, userEval):
-          table[entry.configKey] = entry.configValueSource
-        if pkg.configPackageName in result.enabledPackages:
-          result.overrides[pkg.configPackageName] = table
-        else:
-          result.inertOverrides[pkg.configPackageName] = table
+  # 3. Bucket config overrides (last-write-wins per key, see
+  #    `effectiveConfigAssignments`).
+  for pkgName, assignments in effectiveConfigAssignments(profile, ctx,
+      userEval):
+    var table = initOrderedTable[string, string]()
+    for key, assignment in assignments:
+      table[key] = assignment.entry.configValueSource
+    if pkgName in result.enabledPackages:
+      result.overrides[pkgName] = table
+    else:
+      result.inertOverrides[pkgName] = table

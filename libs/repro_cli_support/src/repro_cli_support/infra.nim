@@ -44,7 +44,7 @@ import repro_cli_support/infra_install_root
 
 proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
     tuple[compiled: bool; text: string; cached: bool; compileError: string;
-          buildActions: seq[ProfileBuildAction]] =
+          adaptError: string; buildActions: seq[ProfileBuildAction]] =
   ## Run the Phase C build-engine edge against `profilePath`, decode
   ## the RBPI artifact, and render the adapted `SystemProfile` back
   ## into the canonical declarative text the M69 lib's APIs consume.
@@ -77,6 +77,12 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
   ## ``runBuild`` + the elevation broker hook. Profiles that declare no
   ## action edges leave this seq empty — the apply driver skips the
   ## dispatcher entirely when empty (see ``dispatchBuildActions``).
+  ##
+  ## A profile that compiles but that the system adapter refuses (e.g. a
+  ## runtime guard on a system-scope resource, which system scope cannot
+  ## evaluate) sets `result.adaptError` instead of `result.compileError`:
+  ## the operator is told the profile cannot be used as a system profile,
+  ## not that it failed to compile.
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
     publicCliPath: getAppFilename(),
@@ -87,17 +93,24 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
     workDir: profilePath.parentDir,
     verbose: false,
     forceRebuild: false)
+  var intent: ProfileIntent
   try:
     let artifact = compileProfileToRbpi(profilePath, opts)
-    let intent = decodeRbpi(artifact.rbpiBytes)
-    let sp = profileIntentToSystemProfile(intent)
-    result.text = renderSystemProfileToText(sp)
-    result.buildActions = intent.buildActions
-    result.compiled = true
+    intent = decodeRbpi(artifact.rbpiBytes)
   except ProfileCompileError as err:
     result.compileError = err.msg
+    return
   except CatchableError as err:
     result.compileError = err.msg
+    return
+  try:
+    let sp = profileIntentToSystemProfile(intent)
+    result.text = renderSystemProfileToText(sp)
+  except CatchableError as err:
+    result.adaptError = err.msg
+    return
+  result.buildActions = intent.buildActions
+  result.compiled = true
 
 proc resolveSystemProfileText*(profilePath: string;
                                originalText, stateDir,
@@ -139,6 +152,12 @@ proc resolveSystemProfileText*(profilePath: string;
     if outBuildActions != nil:
       outBuildActions[] = outcome.buildActions
     return true
+  if outcome.adaptError.len > 0:
+    stderr.writeLine(commandName & ": " & profilePath & " compiled, but " &
+      "cannot be used as a system profile\n" &
+      "  diagnostic:\n" &
+      "    " & outcome.adaptError.strip().replace("\n", "\n    "))
+    return false
   # A compile failure with nothing to say is still a compile failure,
   # but the operator must not be handed a diagnostic-shaped blank. Say
   # so explicitly rather than printing an empty `diagnostic:` block.

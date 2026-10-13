@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1938,
+    "nimTestBinaries": 1941,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 610,
     "staticallyDetectedRuntimeCompilerFlowTests": 111,
-    "testEntries": 1955
+    "testEntries": 1958
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1135,8 +1135,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 1056,
-      "platform/destructive": 120,
+      "integration": 1058,
+      "platform/destructive": 121,
       "pure unit": 610,
       "unclassified": 157
     },
@@ -1316,9 +1316,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1938,
+    "nimTestBinaryCount": 1941,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1955
+    "testEntryCount": 1958
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8860,7 +8860,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22470,6 +22470,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_integration_intent_layer_guarded_edits",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_intent",
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/home-intent/t_integration_intent_layer_guarded_edits.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_integration_intent_layer_round_trip",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -22629,6 +22647,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_get_returns_the_effective_value",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-set-get/t_e2e_home_get_returns_the_effective_value.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -23964,6 +23999,25 @@
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_set_writes_guarded_config",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_profile",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,

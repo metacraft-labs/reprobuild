@@ -19,7 +19,7 @@
 ## No mocks: the real adapter, planner and codecs; nothing is applied, and
 ## `homeDir` is a temporary directory used only to expand `~` in paths.
 
-import std/[sets, tables, tempfiles, os, unittest]
+import std/[sets, strutils, tables, tempfiles, os, unittest]
 
 import repro_home_apply
 import repro_home_resources
@@ -145,5 +145,14 @@ suite "guarded resources and config entries are planned per host":
     guarded(intent.resources, linux()):
       fsSystemFile(intent.resources, path = "/etc/gm3.conf",
         content = "x", address = "sysFile")
-    expect ValueError:
+    # The refusal is the diagnostic an operator sees (`repro infra plan` /
+    # `apply` print it verbatim), so it must name the resource, the guard
+    # and why it is refused, and point at the form that works.
+    try:
       discard profileIntentToSystemProfile(intent)
+      check false
+    except ValueError as e:
+      check "fs.systemFile `sysFile`" in e.msg
+      check "runtime predicate `linux`" in e.msg
+      check "system scope has no host selection" in e.msg
+      check "compile-time `when defined(...)`" in e.msg

@@ -2496,8 +2496,10 @@ proc printUnknownConfigurable(pkg, key, profilePath: string) =
     "$REPRO_HOME_CONFIGURABLE_SCHEMA for the gate seam).")
 
 proc runHomeSet(args: openArray[string]): int =
-  ## `repro home set <pkg>.<key> <value> [--no-apply]` — write the
-  ## given configurable into the profile's `config:` section through
+  ## `repro home set <pkg>.<key> <value> [--when PRED] [--no-apply]` —
+  ## write the given configurable into the profile's `config:` section
+  ## (under a `when PRED:` guard inside the package block when `--when` is
+  ## given) through
   ## the M60 structural editor, then run the M63 apply pipeline
   ## inline with the M58 incremental refinalize fast path
   ## (`applyMode = amSet`). Pre-validates that the package is enabled
@@ -2508,13 +2510,30 @@ proc runHomeSet(args: openArray[string]): int =
   var pkgDotKey = ""
   var value = ""
   var noApply = false
+  var whenPredicate = ""
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--no-apply":
       noApply = true
+    elif a == "--when" or a.startsWith("--when="):
+      try:
+        whenPredicate = parseFlagValue(args, i, "--when")
+      except ValueError as e:
+        stderr.writeLine("repro home set: " & e.msg)
+        return 2
+      if whenPredicate.strip().len == 0:
+        stderr.writeLine("repro home set: --when needs a predicate " &
+          "expression (e.g. `--when windows`)")
+        return 2
+    elif a == "--if" or a.startsWith("--if="):
+      # `config:` guards are `when` chains only: the profile macro rejects
+      # an `if` there, so the editor must not write one.
+      stderr.writeLine("repro home set: `--if` is not accepted; a " &
+        "`config:` entry is guarded with `--when <predicate>`")
+      return 2
     elif a == "--help" or a == "-h":
-      echo "usage: repro home set <pkg>.<key> <value> [--no-apply]"
+      echo "usage: repro home set <pkg>.<key> <value> [--when PRED] [--no-apply]"
       echo ""
       echo "Update a managed configurable in the profile's `config:`"
       echo "section. Runs apply inline by default; --no-apply skips"
@@ -2522,6 +2541,12 @@ proc runHomeSet(args: openArray[string]): int =
       echo "active activity and the key must be declared by the"
       echo "package's configurable schema; the edit is committed only"
       echo "AFTER both pre-validations succeed."
+      echo ""
+      echo "--when PRED guards the value with a runtime predicate (e.g."
+      echo "`windows`, `linux and arm64`): it is written into the package"
+      echo "block's `when PRED:` block (matched by normalized predicate,"
+      echo "created if absent). A new value that would overlap an"
+      echo "assignment of the same key under a different guard is refused."
       return 0
     elif a.startsWith("--"):
       stderr.writeLine("repro home set: unknown flag: " & a)
@@ -2535,8 +2560,20 @@ proc runHomeSet(args: openArray[string]): int =
       return 2
     inc i
   if pkgDotKey.len == 0 or value.len == 0:
-    stderr.writeLine("usage: repro home set <pkg>.<key> <value> [--no-apply]")
+    stderr.writeLine("usage: repro home set <pkg>.<key> <value> " &
+      "[--when PRED] [--no-apply]")
     return 2
+  # The guard's predicate is validated (repro_home_intent's predicate
+  # grammar) before the profile is read, so a malformed one is a usage
+  # error naming the flag rather than a profile diagnostic.
+  var guardAst: PredNode = nil
+  if whenPredicate.len > 0:
+    try:
+      guardAst = parsePredicate("--when", whenPredicate, 0)
+    except EUnstructured as e:
+      stderr.writeLine("repro home set: invalid --when predicate '" &
+        whenPredicate & "': saw " & e.seen & "; expected " & e.expected)
+      return 2
   let parts = splitPkgDotKey(pkgDotKey)
   if not parts.ok:
     stderr.writeLine("repro home set: invalid form: '" & pkgDotKey &
@@ -2551,9 +2588,20 @@ proc runHomeSet(args: openArray[string]): int =
     # override is "silently inert" in the apply pipeline — for `set`,
     # the CLI converts that into a structured diagnostic so the user
     # learns the override would have no effect BEFORE the edit lands.
+    #
+    # A guarded value (`--when`) is for the hosts its guard selects; when
+    # the guard does not hold here (or names a predicate this host cannot
+    # evaluate), the current host's package set says nothing about those
+    # hosts, so the check is skipped rather than refusing a valid edit.
     let ctx = currentHostContext()
+    var checkEnabledHere = true
+    if not guardAst.isNil:
+      try:
+        checkEnabledHere = predicateHolds(guardAst, ctx)
+      except ValueError:
+        checkEnabledHere = false
     let effective = resolveEffectiveConfig(prof, ctx.host, ctx)
-    if parts.pkg notin effective.enabledPackages:
+    if checkEnabledHere and parts.pkg notin effective.enabledPackages:
       printConfigurableInactive(parts.pkg, parts.key, profilePath)
       return 1
     # Pre-validation 2: the key must be declared by the package's
@@ -2571,13 +2619,17 @@ proc runHomeSet(args: openArray[string]): int =
     # schema would require `gcsafe` plumbing around the module-level
     # configured-schema set — and would duplicate the diagnostic we
     # already emitted.
-    setConfigurable(profilePath, pkgDotKey, value, nil)
+    setConfigurable(profilePath, pkgDotKey, value, nil,
+      predicate = whenPredicate)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnknownPredicate as e:
     printUnknownPredicate(e); return 1
   except EUnstructured as e:
     printUnstructured(e); return 1
+  except EOverlappingAssignment as e:
+    stderr.writeLine("repro home set: " & e.msg)
+    return 1
   except EUnknownConfigurable as e:
     printUnknownConfigurable(e.package, e.configurable, e.profilePath)
     return 1
@@ -2605,19 +2657,28 @@ proc lookupConfigurableInProfile(prof: Profile; pkg, key: string):
   ## resolved value under FULL evaluation of the `config:` overrides.
   ## Since fixture packages do not declare defaults at M65 (the
   ## defaults seam is M68), the override IS the resolved value.
-  let cfgOpt = findConfigBlock(prof)
-  if cfgOpt.isNone:
+  ##
+  ## Which assignment is "the" value is decided by
+  ## `effectiveConfigAssignments`, the effective-config resolver's rule:
+  ## guarded overrides (GM3) count only where their guard holds, and of
+  ## several applicable assignments the LAST wins. Those it overrides are
+  ## named on stderr (Configurable-System.md §Priorities And Contributions:
+  ## "last write wins (with a structured diagnostic listing both sites)").
+  let resolved = effectiveConfigAssignments(prof, currentHostContext())
+  if pkg notin resolved or key notin resolved[pkg]:
     return (false, "")
-  # A guarded override (GM3) is this host's value only where its guard
-  # holds; the planner's own walker decides that.
-  let ctx = currentHostContext()
-  for pkgNode in cfgOpt.get.configPackages:
-    if pkgNode.configPackageName != pkg:
-      continue
-    for entry in applicableConfigEntries(pkgNode, ctx):
-      if entry.configKey == key:
-        return (true, entry.configValueSource)
-  (false, "")
+  let assignment = resolved[pkg][key]
+  if assignment.overridden.len > 0:
+    let file = extractFilename(prof.path)
+    var sites: seq[string]
+    for entry in assignment.overridden:
+      sites.add file & ":" & $entry.configEntryLine
+    stderr.writeLine("repro home get: note: " & pkg & "." & key &
+      " is assigned " & $(assignment.overridden.len + 1) &
+      " times on this host; the last assignment (" & file & ":" &
+      $assignment.entry.configEntryLine & ") wins over " &
+      sites.join(", "))
+  (true, assignment.entry.configValueSource)
 
 proc unquoteValueDisplay(raw: string): string =
   ## Mirror of the pipeline's `unquoteValueSource`: strip a single

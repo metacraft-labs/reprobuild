@@ -7965,6 +7965,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/home-intent/t_integration_intent_layer_guarded_edits.nim",
+    binary: "build/test-bin/t_integration_intent_layer_guarded_edits",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/home-intent/t_integration_intent_layer_round_trip.nim",
     binary: "build/test-bin/t_integration_intent_layer_round_trip",
     defines: @[],
@@ -8039,6 +8048,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim",
     binary: "build/test-bin/t_e2e_repro_home_rollback_user_edit_protection",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/home-set-get/t_e2e_home_get_returns_the_effective_value.nim",
+    binary: "build/test-bin/t_e2e_home_get_returns_the_effective_value",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -8687,6 +8705,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim",
     binary: "build/test-bin/t_e2e_home_export_matches_compiled_intent",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim",
+    binary: "build/test-bin/t_e2e_home_set_writes_guarded_config",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

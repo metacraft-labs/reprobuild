@@ -135,7 +135,7 @@ libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
 libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim	nim	4
 libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim	nim	1
-libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	3
+libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	4
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
@@ -891,6 +891,7 @@ tests/e2e/home-generations/t_integration_apply_lock_serializes.nim	nim	2
 tests/e2e/home-generations/t_integration_pointer_envelope_and_history_enumeration.nim	nim	6
 tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim	nim	18
 tests/e2e/home-intent/t_integration_intent_layer_config_section.nim	nim	7
+tests/e2e/home-intent/t_integration_intent_layer_guarded_edits.nim	nim	9
 tests/e2e/home-intent/t_integration_intent_layer_round_trip.nim	nim	7
 tests/e2e/home-resources/t_e2e_home_registry_typed_value_kinds.nim	nim	2
 tests/e2e/home-resources/t_e2e_home_resource_lifecycle.nim	nim	2
@@ -900,6 +901,7 @@ tests/e2e/home-resources/t_integration_prevent_destroy.nim	nim	3
 tests/e2e/home-resources/t_integration_resource_move.nim	nim	3
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim	nim	1
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim	nim	1
+tests/e2e/home-set-get/t_e2e_home_get_returns_the_effective_value.nim	nim	1
 tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim	nim	1
 tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim	nim	0
 tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim	nim	0
@@ -972,6 +974,7 @@ tests/e2e/m83/t_e2e_export_describes_other_platform_resources.nim	nim	2
 tests/e2e/m83/t_e2e_export_refuses_compile_time_dependent_intent.nim	nim	8
 tests/e2e/m83/t_e2e_home_export_check_detects_stale_snapshot.nim	nim	2
 tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim	nim	2
+tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim	nim	2
 tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim	nim	3
 tests/e2e/m83/t_e2e_phase_g_action_edges.nim	nim	4
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5

@@ -358,9 +358,7 @@ proc collectConfigContributions(profile: Profile; ctx: HostContext):
   for ch in profile.root.children:
     if ch.kind != nkConfigBlock:
       continue
-    for pkgNode in ch.configPackages:
-      if pkgNode.kind != nkConfigPackage:
-        continue
+    for pkgNode in applicableConfigPackages(ch, ctx):
       for entry in applicableConfigEntries(pkgNode, ctx):
         result.add(ConfigContribution(
           packageName: pkgNode.configPackageName,

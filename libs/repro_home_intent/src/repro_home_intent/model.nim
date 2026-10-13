@@ -25,6 +25,11 @@ type
 
   CondKeyword* = enum
     ckWhen, ckIf
+    ckElif   ## an `elif <pred>:` branch of a `when` chain in `config:` /
+             ## `resources:`; its `predicateAst` is the branch predicate
+             ## conjoined with the negation of every earlier branch's
+    ckElse   ## the `else:` branch of such a chain; its `predicateAst` is
+             ## the conjunction of the negated earlier predicates
 
   IntentNode* = ref object
     ## Each node describes one structural item the parser recognized.
@@ -47,8 +52,14 @@ type
       keyword*: CondKeyword
       predicateSource*: string       ## the raw text between the
                                      ## keyword and the trailing `:`
-      predicateAst*: PredNode
-      canonicalPredicate*: string    ## normalized canonical form
+                                     ## (empty for `else:`)
+      predicateAst*: PredNode        ## the guard the block applies: for
+                                     ## `when` / `if` the parsed predicate,
+                                     ## for `elif` / `else` the effective
+                                     ## guard of that branch (see
+                                     ## `CondKeyword`)
+      canonicalPredicate*: string    ## normalized canonical form of
+                                     ## `predicateAst`
       condHeaderLine*: int
       condChildren*: seq[IntentNode]
     of nkPackageRef:
@@ -72,15 +83,22 @@ type
     of nkConfigBlock:
       configHeaderLine*: int
       configPackages*: seq[IntentNode]
+        ## `nkConfigPackage` blocks, and -- for a `when <pred>:` chain
+        ## around package blocks (GM3) -- `nkCondBlock`s whose
+        ## `condChildren` are further package blocks / guarded blocks.
+        ## Walk it with `applicableConfigPackages`, which evaluates the
+        ## guards; never read the packages directly.
     of nkConfigPackage:
       configPackageName*: string
       configPackageHeaderLine*: int
       configEntries*: seq[IntentNode]
-        ## `nkConfigEntry` lines, and -- in a profile adapted from a
-        ## compiled `ProfileIntent` (GM3) -- `nkCondBlock`s whose
-        ## `condChildren` are the `nkConfigEntry`s a runtime guard
-        ## selects. Walk it with `applicableConfigEntries`, which
-        ## evaluates the guards; never read the entries directly.
+        ## `nkConfigEntry` lines, and `nkCondBlock`s whose
+        ## `condChildren` are the `nkConfigEntry`s (or nested guarded
+        ## blocks) a runtime guard selects (GM3: a `when <pred>:` chain
+        ## inside the package block, parsed from source or adapted from a
+        ## compiled `ProfileIntent`). Walk it with
+        ## `applicableConfigEntries`, which evaluates the guards; never
+        ## read the entries directly.
     of nkConfigEntry:
       configKey*: string
       configValueSource*: string     ## raw RHS bytes, no leading `=`

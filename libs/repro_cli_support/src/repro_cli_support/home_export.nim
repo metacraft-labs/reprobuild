@@ -575,7 +575,7 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
   var ordinals: seq[int]
   let configBlock = findConfigBlock(profile)
   if configBlock.isSome:
-    for pkg in configBlock.get.configPackages:
+    for pkg in applicableConfigPackages(configBlock.get, ctx):
       for entry in applicableConfigEntries(pkg, ctx):
         ordinals.add entry.configIntentOrdinal
   ordinals.sort()
