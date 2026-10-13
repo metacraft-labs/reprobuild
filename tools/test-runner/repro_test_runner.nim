@@ -1846,11 +1846,31 @@ when defined(posix):
     CleanupTraceEnv = "REPRO_TEST_RUNNER_CLEANUP_TRACE"
 
   type
-    ActiveProcessGroup = ref object
+    ActiveProcessGroup = object
+      ## One registered case. A plain value, never a shared ref: cleanup runs
+      ## OUTSIDE ``activeProcessGroupsLock`` (see ``claimProcessGroup``) on a
+      ## private copy, and ORC reference counts are not atomic, so a ref held
+      ## by two threads at once would be a data race of its own.
       processGroup: int
       anchorPid: int
       ownerToken: string
+        ## Unique per spawn, and therefore the registry KEY. The PGID is not:
+        ## once a cleanup has reaped its anchor the kernel may hand the same
+        ## number to another worker's supervisor while the first entry is
+        ## still registered (claimed, or kept after a leak refusal).
+      anchorStartTicks: int64
+        ## ``/proc/<anchor>/stat`` starttime, read while the anchor was an
+        ## unreaped child of this runner (so the PID could not have been
+        ## reused). Every token-bearing descendant starts at or after it; the
+        ## owner scan skips reading the environment of processes that started
+        ## earlier. ``0`` (unknown, or not Linux) disables the filter.
       anchorReaped: bool
+      claimed: bool
+        ## A cleanup (a worker, the interrupt waiter, or a spawner's
+        ## post-registration check) currently owns this entry and works on a
+        ## copy of it outside the registry lock. Only the claimant may signal
+        ## the group or reap its anchor; it writes the copy back (or removes
+        ## the entry) when it settles.
 
   var
     activeProcessGroupsLock: Lock
@@ -1888,7 +1908,8 @@ when defined(posix):
       return
     try:
       let trace = open(cleanupTracePath, fmAppend)
-      trace.writeLine(event)
+      # One write per event: workers now append concurrently.
+      trace.write(event & "\n")
       trace.close()
     except CatchableError:
       discard
@@ -2006,24 +2027,73 @@ when defined(posix):
       sleep(GroupSupervisorPollIntervalMs)
     exitCode
 
-  proc removeActiveProcessGroupUnlocked(processGroup: int) =
+  proc findActiveProcessGroupUnlocked(ownerToken: string): int =
+    ## Index of the entry registered under ``ownerToken``, or ``-1``.
     for i, current in activeProcessGroups:
-      if current.processGroup == processGroup:
-        activeProcessGroups.delete(i)
-        return
+      if current.ownerToken == ownerToken:
+        return i
+    -1
 
-  proc findActiveProcessGroupUnlocked(processGroup: int):
-      tuple[found: bool; group: ActiveProcessGroup] =
-    for current in activeProcessGroups:
-      if current.processGroup == processGroup:
-        return (true, current)
-
-  proc registerActiveProcessGroup(processGroup: int; ownerToken: string) =
+  proc registerActiveProcessGroup(processGroup: int; ownerToken: string;
+                                  anchorStartTicks: int64) =
     acquire(activeProcessGroupsLock)
     activeProcessGroups.add(ActiveProcessGroup(
       processGroup: processGroup,
       anchorPid: processGroup,
-      ownerToken: ownerToken))
+      ownerToken: ownerToken,
+      anchorStartTicks: anchorStartTicks))
+    release(activeProcessGroupsLock)
+
+  proc claimProcessGroup(ownerToken: string):
+      tuple[found: bool; group: ActiveProcessGroup] =
+    ## Take exclusive ownership of one registered group and return a private
+    ## copy to clean up WITHOUT holding ``activeProcessGroupsLock``.
+    ##
+    ## The registry lock used to be held for the whole TERM -> grace -> KILL
+    ## -> reap -> verify sequence, which serialized every worker's completion
+    ## cleanup (several full ``/proc`` environment scans) behind one mutex and
+    ## stalled spawns behind it too (``spawnGroupSupervisor`` registers under
+    ## the same lock). The lock now guards only the registry; the claim is
+    ## what keeps a group's identity exclusive while it is cleaned:
+    ##
+    ## * only the claimant signals the group or ``waitpid``s its anchor, so
+    ##   no other thread can observe ``anchorReaped == false`` while the
+    ##   claimant reaps it and then signal a recycled PGID;
+    ## * the claimant reaps the anchor itself, so up to that reap the anchor
+    ##   is an unreaped child of this runner and its PID/PGID cannot be
+    ##   reused by anyone;
+    ## * the entry stays registered (claimed) until the claimant settles it,
+    ##   so the interrupt waiter and the final reaper cannot lose track of it.
+    ##
+    ## A claimed entry is waited for, not skipped: every cleanup is bounded
+    ## (grace + post-KILL verification), so the wait is too.
+    while true:
+      acquire(activeProcessGroupsLock)
+      let index = findActiveProcessGroupUnlocked(ownerToken)
+      if index < 0:
+        release(activeProcessGroupsLock)
+        return
+      if not activeProcessGroups[index].claimed:
+        activeProcessGroups[index].claimed = true
+        result = (true, activeProcessGroups[index])
+        release(activeProcessGroupsLock)
+        return
+      release(activeProcessGroupsLock)
+      sleep(GroupSupervisorPollIntervalMs)
+
+  proc settleClaimedProcessGroup(group: ActiveProcessGroup; unregister: bool) =
+    ## Release a claim. ``unregister`` removes the entry (cleanup verified no
+    ## exact owner remains); otherwise the copy — including a now-permanent
+    ## ``anchorReaped`` — is written back and the entry stays registered for
+    ## the interrupt waiter / final reaper (fail-closed).
+    acquire(activeProcessGroupsLock)
+    let index = findActiveProcessGroupUnlocked(group.ownerToken)
+    if index >= 0:
+      if unregister:
+        activeProcessGroups.delete(index)
+      else:
+        activeProcessGroups[index] = group
+        activeProcessGroups[index].claimed = false
     release(activeProcessGroupsLock)
 
   proc signalProcessGroup(active: ActiveProcessGroup; sig: cint) =
@@ -2031,12 +2101,14 @@ when defined(posix):
     ## immediately before using a negative-PID signal; a dead/reused PID must
     ## never redirect cleanup to an unrelated group.
     ##
-    ## ``anchorReaped`` is monotonic state on the registered group object, not
-    ## per-cleanup-call state. A bounded owner-token verification can fail
-    ## after this invocation has already reaped the supervisor; a later final
-    ## reaper/interrupt retry must then remain token-only even if the kernel
-    ## has reused the old PID/PGID.
-    if active.isNil or active.anchorReaped:
+    ## ``anchorReaped`` is monotonic state of the registered group, written
+    ## back to the registry when a claim settles, not per-cleanup-call state.
+    ## A bounded owner-token verification can fail after this invocation has
+    ## already reaped the supervisor; a later final reaper/interrupt retry
+    ## must then remain token-only even if the kernel has reused the old
+    ## PID/PGID. Callers hold the group's claim, so nothing else can reap the
+    ## anchor between the check below and the ``kill``.
+    if active.anchorReaped:
       return
     appendCleanupTrace(
       "group-signal-attempt group=" & $active.processGroup &
@@ -2046,32 +2118,123 @@ when defined(posix):
       discard kill(Pid(-active.processGroup), sig)
 
   when defined(linux):
+    proc environHasExactEntry(environment, expected: string): bool =
+      ## ``expected`` occurs as one complete NUL-delimited entry. Equivalent to
+      ## ``expected in environment.split('\0')`` without materializing every
+      ## entry of every scanned process.
+      if expected.len == 0:
+        return false
+      var start = 0
+      while true:
+        let at = environment.find(expected, start)
+        if at < 0:
+          return false
+        let after = at + expected.len
+        if (at == 0 or environment[at - 1] == '\0') and
+            (after == environment.len or environment[after] == '\0'):
+          return true
+        start = at + 1
+
+    proc procStartTicks(pid: int): int64 =
+      ## Field 22 (``starttime``) of ``/proc/<pid>/stat``: when the process
+      ## was created, in clock ticks since boot. ``-1`` if unreadable. Parsed
+      ## from after the LAST ``)`` because ``comm`` may contain spaces and
+      ## parentheses.
+      result = -1
+      let fd = posix.open(cstring("/proc/" & $pid & "/stat"), O_RDONLY)
+      if fd < 0:
+        return
+      var buffer: array[1024, char]
+      let count = posix.read(fd, addr buffer[0], buffer.len)
+      discard posix.close(fd)
+      if count <= 0:
+        return
+      var closeParen = -1
+      for i in countdown(count - 1, 0):
+        if buffer[i] == ')':
+          closeParen = i
+          break
+      if closeParen < 0:
+        return
+      # After ") " come fields 3, 4, ...; starttime is field 22.
+      var field = 2
+      var i = closeParen + 1
+      while i < count:
+        while i < count and buffer[i] == ' ':
+          inc i
+        if i >= count:
+          return
+        inc field
+        if field == 22:
+          var value = 0'i64
+          var digits = 0
+          while i < count and buffer[i] in {'0' .. '9'}:
+            value = value * 10 + int64(ord(buffer[i]) - ord('0'))
+            inc digits
+            inc i
+          if digits > 0:
+            result = value
+          return
+        while i < count and buffer[i] != ' ':
+          inc i
+
     proc processHasOwnerToken(pid: int; ownerToken: string): bool =
       if pid <= 0 or ownerToken.len == 0:
         return false
       try:
         let environment = readFile("/proc" / $pid / "environ")
-        let expected = TestOwnerEnv & "=" & ownerToken
-        for entry in environment.split('\0'):
-          if entry == expected:
-            return true
+        result = environHasExactEntry(environment,
+          TestOwnerEnv & "=" & ownerToken)
       except CatchableError:
         discard
 
-    proc ownedProcessIds(ownerToken: string): seq[int] =
+    proc ownedProcessIds(ownerToken: string; notBeforeTicks = 0'i64;
+                         exceptPid = 0; firstOnly = false): seq[int] =
+      ## Every process whose initial environment carries the exact owner
+      ## entry, in one ``/proc`` walk.
+      ##
+      ## ``notBeforeTicks`` (the anchor's own starttime) skips reading the
+      ## environment of processes created BEFORE the case's supervisor.
+      ## Those cannot be the case's descendants, and the token did not exist
+      ## when they were created: it is generated under ``spawnLock`` right
+      ## before the supervisor is forked and is handed only to that fork's
+      ## environment. (A pre-existing process could still exec ITSELF with
+      ## a token it was later told about; nothing in the suite does that, and
+      ## such a process — a shared daemon serving the test — is exactly the
+      ## kind this cleanup must not kill.) On a busy host this turns ~1600
+      ## environment reads (~85 MB, ~0.5 s per walk) into ~1600 tiny
+      ## ``stat`` reads plus environments of only the recently started
+      ## processes. An unreadable starttime does NOT skip: fail-closed.
       if ownerToken.len == 0 or not dirExists("/proc"):
         return
+      let expected = TestOwnerEnv & "=" & ownerToken
+      let self = getCurrentProcessId()
       for kind, path in walkDir("/proc"):
         if kind != pcDir:
           continue
+        let base = path.lastPathPart
+        if base.len == 0 or base[0] notin {'0' .. '9'}:
+          continue
         var pid = 0
         try:
-          pid = parseInt(path.lastPathPart)
+          pid = parseInt(base)
         except ValueError:
           continue
-        if pid != getCurrentProcessId() and
-            processHasOwnerToken(pid, ownerToken):
+        if pid == self or pid == exceptPid:
+          continue
+        if notBeforeTicks > 0:
+          let started = procStartTicks(pid)
+          if started >= 0 and started < notBeforeTicks:
+            continue
+        var environment = ""
+        try:
+          environment = readFile(path / "environ")
+        except CatchableError:
+          continue
+        if environHasExactEntry(environment, expected):
           result.add(pid)
+          if firstOnly:
+            return
 
   elif defined(macosx):
     const
@@ -2173,7 +2336,10 @@ when defined(posix):
       let expected = TestOwnerEnv & "=" & ownerToken
       macProcessHasExactEnvEntry(cint(pid), expected.cstring) != 0
 
-    proc ownedProcessIds(ownerToken: string): seq[int] =
+    proc ownedProcessIds(ownerToken: string; notBeforeTicks = 0'i64;
+                         exceptPid = 0; firstOnly = false): seq[int] =
+      ## No starttime pre-filter here: every listed process is checked.
+      discard notBeforeTicks
       if ownerToken.len == 0:
         return
       let queriedBytes = procListPids(ProcAllPids, 0'u32, nil, 0.cint)
@@ -2193,8 +2359,11 @@ when defined(posix):
           for i in 0 ..< returnedCount:
             let pid = int(pids[i])
             if pid > 0 and pid != getCurrentProcessId() and
+                pid != exceptPid and
                 processHasOwnerToken(pid, ownerToken):
               result.add(pid)
+              if firstOnly:
+                return
           return
         capacity *= 2
 
@@ -2204,35 +2373,50 @@ when defined(posix):
       discard ownerToken
       false
 
-    proc ownedProcessIds(ownerToken: string): seq[int] =
+    proc ownedProcessIds(ownerToken: string; notBeforeTicks = 0'i64;
+                         exceptPid = 0; firstOnly = false): seq[int] =
       discard ownerToken
+      discard notBeforeTicks
+      discard exceptPid
+      discard firstOnly
       @[]
 
   proc signalOwnedProcesses(active: ActiveProcessGroup; sig: cint;
-                            exceptPid = 0) =
+                            exceptPid = 0): int =
     ## The exact per-test environment token survives fork/exec and setsid.
     ## Revalidate every enumerated PID immediately before signalling it. The
     ## enumeration-to-kill window can contain PID reuse; an unrelated
-    ## replacement PID cannot carry the private token.
-    let ownerPids = ownedProcessIds(active.ownerToken)
+    ## replacement PID cannot carry the private token. Returns the snapshot
+    ## size, so the caller can skip a grace wait nobody needs.
+    let ownerPids = ownedProcessIds(active.ownerToken,
+      notBeforeTicks = active.anchorStartTicks, exceptPid = exceptPid)
     appendCleanupTrace(
       "owner-snapshot group=" & $active.processGroup &
       " signal=" & $sig & " count=" & $ownerPids.len)
     for pid in ownerPids:
-      if pid != exceptPid and
-          processHasOwnerToken(pid, active.ownerToken):
+      if processHasOwnerToken(pid, active.ownerToken):
         appendCleanupTrace(
           "owner-signal-attempt group=" & $active.processGroup &
           " pid=" & $pid & " signal=" & $sig)
         discard kill(Pid(pid), sig)
+    ownerPids.len
 
-  proc ownedProcessesRemain(ownerToken: string; exceptPid = 0): bool =
-    for pid in ownedProcessIds(ownerToken):
-      if pid != exceptPid:
-        return true
+  proc anchorExemptPid(active: ActiveProcessGroup): int =
+    ## The supervisor carries the token too, and must survive until the
+    ## group KILL, so owner scans skip it — but only while it is unreaped.
+    ## After the reap its PID is free for reuse, possibly by a token-bearing
+    ## descendant, which the verification must then see.
+    if active.anchorReaped: 0 else: active.anchorPid
+
+  proc ownedProcessesRemain(active: ActiveProcessGroup): bool =
+    ## Any exact-token owner other than the unreaped supervisor anchor.
+    ## Stops the ``/proc`` walk at the first match.
+    ownedProcessIds(active.ownerToken,
+      notBeforeTicks = active.anchorStartTicks,
+      exceptPid = anchorExemptPid(active), firstOnly = true).len > 0
 
   proc killAndVerifyOwnedProcesses(
-      activeGroups: openArray[ActiveProcessGroup]): bool =
+      activeGroups: var openArray[ActiveProcessGroup]): bool =
     ## SIGKILL closes the graceful phase, but a single process snapshot is not
     ## a cleanup barrier: a detached token-bearing descendant can fork between
     ## enumeration and signal delivery. Re-enumerate, revalidate, and retry for
@@ -2244,6 +2428,9 @@ when defined(posix):
     ## still reserves the PGID. Only after every supervisor has been reaped do
     ## we enter the retryable token-owner phase. It is therefore structurally
     ## impossible for a later retry to target a reused anchor PID/PGID.
+    ##
+    ## The caller holds the claim on every group in ``activeGroups``, so it is
+    ## the only thread that can reap these anchors.
     let deadline = epochTime() + PostKillVerificationSec.float
     # This is the only process-group signal in the function. No control-flow
     # edge from the token-owner retry phase below returns here.
@@ -2255,15 +2442,15 @@ when defined(posix):
     # remain alive here; it cannot reserve or authenticate the recorded PGID.
     while true:
       var anchorsRemain = false
-      for active in activeGroups:
+      for active in activeGroups.mitems:
         if not active.anchorReaped:
           var status: cint
           while true:
             let reaped = waitpid(Pid(active.anchorPid), status, WNOHANG)
             if reaped == Pid(active.anchorPid):
-              # Persist retirement on the exact registry object before any
-              # retry can release/reacquire the registry lock. From this point
-              # onward no group-signal entry point may target this PID/PGID.
+              # Retirement is recorded on the claimant's copy, which is
+              # written back to the registry when the claim settles; no other
+              # thread can signal this group before then.
               active.anchorReaped = true
               appendCleanupTrace(
                 "anchor-reaped group=" & $active.processGroup)
@@ -2285,7 +2472,9 @@ when defined(posix):
         break
       if epochTime() >= deadline:
         return false
-      sleep(GroupSupervisorPollIntervalMs)
+      # A SIGKILLed supervisor is normally reapable within a millisecond or
+      # two; a 10 ms poll here was a fixed tax on every case.
+      sleep(1)
 
     # Detached exact-token descendants are killed and verified only after all
     # anchors are reaped. Every retry is PID-safe: enumeration and immediate
@@ -2293,70 +2482,113 @@ when defined(posix):
     while true:
       var ownersRemain = false
       for active in activeGroups:
-        if ownedProcessesRemain(active.ownerToken,
-                                exceptPid = active.anchorPid):
+        if ownedProcessesRemain(active):
           ownersRemain = true
           break
       if not ownersRemain:
         return true
       for active in activeGroups:
-        signalOwnedProcesses(active, SIGKILL,
-          exceptPid = active.anchorPid)
+        discard signalOwnedProcesses(active, SIGKILL,
+          exceptPid = anchorExemptPid(active))
       if epochTime() >= deadline:
         return false
       sleep(TimeoutPollIntervalMs)
 
-  proc terminateProcessGroupLocked(active: ActiveProcessGroup): bool =
-    ## Caller holds activeProcessGroupsLock, which keeps this registered group
-    ## anchored until escalation completes and prevents concurrent normal
-    ## release from making the PGID available for reuse. The environment-token
-    ## pass also reaches test-owned grandchildren that deliberately escaped the
-    ## group with setsid/poDaemon.
+  proc terminateClaimedProcessGroup(active: var ActiveProcessGroup): bool =
+    ## TERM -> grace -> KILL -> reap -> verify for one group whose claim the
+    ## caller holds. Runs WITHOUT ``activeProcessGroupsLock``: the claim, not
+    ## the registry lock, keeps the anchor (and so the PGID) exclusively ours
+    ## until this proc reaps it. The environment-token pass also reaches
+    ## test-owned grandchildren that deliberately escaped the group with
+    ## setsid/poDaemon.
+    ##
+    ## Normal completion (the direct test already exited, nothing escaped)
+    ## costs two ``/proc`` walks: the TERM-phase owner snapshot, and the
+    ## post-KILL verification. The grace loop is entered only when the
+    ## snapshot found an owner to wait for.
     signalProcessGroup(active, SIGTERM)
-    signalOwnedProcesses(active, SIGTERM,
-      exceptPid = active.anchorPid)
+    var ownersRemain = signalOwnedProcesses(active, SIGTERM,
+      exceptPid = anchorExemptPid(active)) > 0
     let killDeadline = epochTime() + TimeoutKillGraceSec.float
-    while ownedProcessesRemain(active.ownerToken,
-                               exceptPid = active.anchorPid) and
-        epochTime() < killDeadline:
+    while ownersRemain and epochTime() < killDeadline:
       sleep(TimeoutPollIntervalMs)
-    killAndVerifyOwnedProcesses([active])
+      ownersRemain = ownedProcessesRemain(active)
+    var groups = [active]
+    result = killAndVerifyOwnedProcesses(groups)
+    active = groups[0]
 
-  proc terminateOwnedProcessGroup(processGroup: int): bool =
-    acquire(activeProcessGroupsLock)
-    let active = findActiveProcessGroupUnlocked(processGroup)
-    if active.found:
-      result = terminateProcessGroupLocked(active.group)
-    else:
-      result = true
-    release(activeProcessGroupsLock)
+  proc cleanupAndUnregisterProcessGroup(ownerToken: string): bool =
+    ## The completion/timeout cleanup a worker runs for its own case. The
+    ## registry lock is held only to claim and to settle; the scans and the
+    ## TERM/KILL/verify run concurrently with other workers' spawns and
+    ## cleanups. The entry is removed only after an exact post-KILL
+    ## enumeration found no owner; otherwise it stays registered with its
+    ## anchor marked reaped, and the caller refuses the verdict.
+    let claim = claimProcessGroup(ownerToken)
+    if not claim.found:
+      return true
+    var group = claim.group
+    result = terminateClaimedProcessGroup(group)
+    settleClaimedProcessGroup(group, unregister = result)
+
+  proc terminateOwnedProcessGroup(ownerToken: string): bool =
+    ## Clean up a group but keep it registered (the spawner's
+    ## interrupt-race path; the worker unregisters it afterwards through
+    ## ``finishInterruptedTestProcess``).
+    let claim = claimProcessGroup(ownerToken)
+    if not claim.found:
+      return true
+    var group = claim.group
+    result = terminateClaimedProcessGroup(group)
+    settleClaimedProcessGroup(group, unregister = false)
 
   proc terminateAllActiveProcessGroups(): bool =
-    ## Holding the registry serializes cleanup against concurrent release.
-    ## Unreaped entries retain a live or reserved supervisor anchor through
-    ## process-group signalling and reap; retired entries are token-only, and
-    ## signalProcessGroup is a no-op for them.
-    acquire(activeProcessGroupsLock)
-    if activeProcessGroups.len == 0:
+    ## Claim every registered group (waiting for any a worker is cleaning
+    ## right now; those cleanups are bounded), then run ONE graceful phase
+    ## for all of them. Unreaped entries retain a live or reserved supervisor
+    ## anchor through process-group signalling and reap; retired entries are
+    ## token-only, and signalProcessGroup is a no-op for them. Entries stay
+    ## registered; the worker's ``finishInterruptedTestProcess`` or the final
+    ## reaper removes them.
+    var groups: seq[ActiveProcessGroup] = @[]
+    while true:
+      var waiting = false
+      acquire(activeProcessGroupsLock)
+      for entry in activeProcessGroups.mitems:
+        if not entry.claimed:
+          entry.claimed = true
+          groups.add(entry)
+        else:
+          var ours = false
+          for group in groups:
+            if group.ownerToken == entry.ownerToken:
+              ours = true
+              break
+          if not ours:
+            waiting = true
       release(activeProcessGroupsLock)
+      if not waiting:
+        break
+      sleep(GroupSupervisorPollIntervalMs)
+    if groups.len == 0:
       return true
-    for active in activeProcessGroups:
+    for active in groups:
       signalProcessGroup(active, SIGTERM)
-      signalOwnedProcesses(active, SIGTERM,
-        exceptPid = active.anchorPid)
+      discard signalOwnedProcesses(active, SIGTERM,
+        exceptPid = anchorExemptPid(active))
     let killDeadline = epochTime() + TimeoutKillGraceSec.float
     var descendantsRemain = true
     while descendantsRemain and epochTime() < killDeadline:
       descendantsRemain = false
-      for active in activeProcessGroups:
-        if ownedProcessesRemain(active.ownerToken,
-                                exceptPid = active.anchorPid):
+      for active in groups:
+        if ownedProcessesRemain(active):
           descendantsRemain = true
           break
       if descendantsRemain:
         sleep(TimeoutPollIntervalMs)
-    result = killAndVerifyOwnedProcesses(activeProcessGroups)
-    release(activeProcessGroupsLock)
+    result = killAndVerifyOwnedProcesses(groups)
+    for group in groups:
+      settleClaimedProcessGroup(group, unregister = false)
 
   proc reapResidualActiveProcessGroups(): bool =
     ## Worker joins are the normal reap barrier. This final invariant is a
@@ -2428,19 +2660,27 @@ when defined(posix):
 
   proc finishInterruptedTestProcess(testProcess: TestProcess;
                                     output: var string): bool =
-    ## The sigwait thread has already completed group-wide TERM/KILL and
-    ## synchronously reaped the supervisor before it releases
-    ## activeProcessGroupsLock. Remove the registry entry only after the same
-    ## exact-owner check succeeds.
-    acquire(activeProcessGroupsLock)
-    try:
-      if findActiveProcessGroupUnlocked(testProcess.processGroup).found:
-        if not ownedProcessesRemain(testProcess.ownerToken,
-                                    exceptPid = testProcess.processGroup):
-          removeActiveProcessGroupUnlocked(testProcess.processGroup)
-          result = true
-    finally:
-      release(activeProcessGroupsLock)
+    ## The sigwait thread claims every registered group, runs the group-wide
+    ## TERM/KILL and synchronously reaps each supervisor before it settles
+    ## its claims. Wait (bounded) until this case's supervisor is reaped,
+    ## then remove the registry entry only after the same exact-owner check
+    ## succeeds. This worker never signals the group itself, so the interrupt
+    ## keeps one graceful phase for every group.
+    let deadline = epochTime() +
+      2.0 * (TimeoutKillGraceSec + PostKillVerificationSec).float + 5.0
+    while true:
+      let claim = claimProcessGroup(testProcess.ownerToken)
+      if not claim.found:
+        break
+      if claim.group.anchorReaped:
+        let remain = ownedProcessesRemain(claim.group)
+        settleClaimedProcessGroup(claim.group, unregister = not remain)
+        result = not remain
+        break
+      settleClaimedProcessGroup(claim.group, unregister = false)
+      if epochTime() >= deadline:
+        break
+      sleep(GroupSupervisorPollIntervalMs)
     if result:
       finalDrainNonBlocking(testProcess.process, output)
       closeProcessOnce(testProcess.process)
@@ -2645,7 +2885,15 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
         processGroup: processGroup,
         ownerToken: paths.ownerToken,
         statusPath: paths.statusPath)
-      registerActiveProcessGroup(processGroup, paths.ownerToken)
+      # The supervisor is an unreaped child here, so its PID names exactly
+      # it and its starttime is the floor for every token-bearing process.
+      let anchorStartTicks =
+        when defined(linux):
+          max(procStartTicks(processGroup), 0'i64)
+        else:
+          0'i64
+      registerActiveProcessGroup(processGroup, paths.ownerToken,
+        anchorStartTicks)
     else:
       result.process = startProcess(
         binary, args = args, env = env,
@@ -2657,7 +2905,7 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
     # Close the registration race with an interrupt that acquired the active
     # registry while this spawn was establishing its child-side group.
     if interruptedSignal.load(moAcquire) != 0:
-      discard terminateOwnedProcessGroup(result.processGroup)
+      discard terminateOwnedProcessGroup(result.ownerToken)
 
 proc spawnedProcess(binary: string; args: openArray[string];
                     env: StringTableRef): TestProcess =
@@ -2869,19 +3117,11 @@ proc drainAndWait(testProcess: TestProcess):
     let groupExitCode = parseInt(readFile(testProcess.statusPath).strip())
     finalDrainNonBlocking(p, groupOutput)
 
-    acquire(activeProcessGroupsLock)
-    var cleanupComplete = true
-    try:
-      let active = findActiveProcessGroupUnlocked(testProcess.processGroup)
-      if active.found:
-        # The direct test is complete, but any group member or setsid/poDaemon
-        # sidecar carrying this test's private token is still runner-owned.
-        # Tear those down before reporting completion to the next test.
-        cleanupComplete = terminateProcessGroupLocked(active.group)
-      if cleanupComplete:
-        removeActiveProcessGroupUnlocked(testProcess.processGroup)
-    finally:
-      release(activeProcessGroupsLock)
+    # The direct test is complete, but any group member or setsid/poDaemon
+    # sidecar carrying this test's private token is still runner-owned.
+    # Tear those down before reporting completion to the next test.
+    let cleanupComplete =
+      cleanupAndUnregisterProcessGroup(testProcess.ownerToken)
     if not cleanupComplete:
       groupOutput.add(
         "\nrepro_test_runner: exact owner-token processes survived " &
@@ -3231,17 +3471,8 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
       # keep the pipe open until that ownership cleanup runs.
       when defined(posix):
         finalDrainNonBlocking(p, output)
-        acquire(activeProcessGroupsLock)
-        var cleanupComplete = true
-        try:
-          let active =
-            findActiveProcessGroupUnlocked(testProcess.processGroup)
-          if active.found:
-            cleanupComplete = terminateProcessGroupLocked(active.group)
-          if cleanupComplete:
-            removeActiveProcessGroupUnlocked(testProcess.processGroup)
-        finally:
-          release(activeProcessGroupsLock)
+        let cleanupComplete =
+          cleanupAndUnregisterProcessGroup(testProcess.ownerToken)
         if not cleanupComplete:
           output.add(
             "\nrepro_test_runner: exact owner-token processes survived " &
@@ -3343,16 +3574,8 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   # Deadline expired. POSIX keeps the supervisor anchor registered and alive
   # through TERM -> grace -> KILL; other platforms retain leader cleanup.
   when defined(posix):
-    acquire(activeProcessGroupsLock)
-    var cleanupComplete = true
-    try:
-      let active = findActiveProcessGroupUnlocked(testProcess.processGroup)
-      if active.found:
-        cleanupComplete = terminateProcessGroupLocked(active.group)
-      if cleanupComplete:
-        removeActiveProcessGroupUnlocked(testProcess.processGroup)
-    finally:
-      release(activeProcessGroupsLock)
+    let cleanupComplete =
+      cleanupAndUnregisterProcessGroup(testProcess.ownerToken)
     if not cleanupComplete:
       output.add(
         "\nrepro_test_runner: exact owner-token processes survived " &
