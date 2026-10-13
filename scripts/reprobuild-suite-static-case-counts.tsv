@@ -960,12 +960,14 @@ tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim	nim	1
 tests/e2e/m80/t_integration_plan_classifier_bucket_drift_is_cache_hit.nim	nim	0
 tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim	nim	0
 tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim	nim	6
+tests/e2e/m83/t_e2e_home_export_check_detects_stale_snapshot.nim	nim	2
+tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim	nim	2
 tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim	nim	3
 tests/e2e/m83/t_e2e_phase_g_action_edges.nim	nim	4
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5
 tests/e2e/m83/t_e2e_profile_compile_path_with_spaces.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim	nim	2
-tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim	nim	4
+tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim	nim	6
 tests/e2e/m83/t_e2e_profile_modules.nim	nim	7
 tests/e2e/m83/t_e2e_repro_profile_compile.nim	nim	14
 tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	nim	6

@@ -1892,7 +1892,16 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/reprobuild",
-      defines = @["release", "reproVendoredHash", "ssl"],
+      # `ReprobuildSourceRevision` (repro_core) names the commit the engine
+      # is built from; `repro home export` records it as provenance. It is
+      # taken from $REPROBUILD_SOURCE_REVISION, which the release workflow
+      # sets; unset, the engine reports the revision as unknown.
+      # `scripts/build_apps.sh` makes the same choice (plus a git fallback).
+      defines = @["release", "reproVendoredHash", "ssl"] &
+        (if getEnv("REPROBUILD_SOURCE_REVISION").len > 0:
+           @["ReprobuildSourceRevision=" &
+             getEnv("REPROBUILD_SOURCE_REVISION")]
+         else: @[]),
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto`` AND the ``-L``
       # that resolves them (M8). Nothing OpenSSL-shaped belongs in this list:

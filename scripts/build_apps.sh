@@ -151,6 +151,25 @@ bearssl_src="$(resolve_bearssl_src)"
 export BEARSSL_SRC="${bearssl_src}"
 
 nim_mode_flags=()
+
+# The source revision the images are built from, embedded as
+# `ReprobuildSourceRevision` (libs/repro_core/src/repro_core.nim) so a binary
+# can say which commit it is -- the version string alone does not identify a
+# build. An explicit $REPROBUILD_SOURCE_REVISION wins (the Nix package sets it
+# from the flake, whose sandbox has no .git); otherwise ask git about THIS
+# tree, and mark it `-dirty` when tracked files differ from HEAD. Outside a git
+# checkout the define is omitted and the binary reports the revision unknown.
+source_revision="${REPROBUILD_SOURCE_REVISION:-}"
+if [ -z "${source_revision}" ] && command -v git >/dev/null 2>&1 &&
+   source_revision="$(git rev-parse HEAD 2>/dev/null)"; then
+  if ! git diff --quiet HEAD -- 2>/dev/null; then
+    source_revision="${source_revision}-dirty"
+  fi
+fi
+if [ -n "${source_revision}" ]; then
+  nim_mode_flags+=("-d:ReprobuildSourceRevision=${source_revision}")
+fi
+
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
     ;;

@@ -205,6 +205,8 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
 
 ## See also
 
+- [`home-export.md`](./home-export.md) — `repro home export`: the evaluated
+  profile as JSON for other tools, and `--check` for committed snapshots.
 - [`migrating-from-env-ps1.md`](./migrating-from-env-ps1.md) — operator
   guide for replacing `D:/metacraft/env.ps1` with a home profile,
   including the `repro home migrate-from-env-scripts` synthesizer.

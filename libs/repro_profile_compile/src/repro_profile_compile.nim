@@ -50,6 +50,7 @@ export compile.ProfileNimCompilerEnvVar
 export compile.resolveProfileNimCompiler
 export compile.requireReprobuildSources
 export compile.profileCompileArgv
+export compile.ProfileCompileDefines
 export compile.compileProfileBinary
 export compile.rbpiBytesFromJson
 export compile.writeBytesAtomic
@@ -64,6 +65,8 @@ export edge.ProfileCompileActionId
 export edge.profileCompileKey
 export edge.profileCompileWeakFingerprint
 export edge.profileCompileBuildAction
+export edge.ProfileCompileScratchEnvNames
+export edge.ProfileCompileEnvPassthrough
 export edge.profileCompileEngineConfig
 export edge.compileProfileToRbpi
 

@@ -127,8 +127,13 @@ type
 # Activity expansion
 # ---------------------------------------------------------------------------
 
-proc enabledActivitiesFor(profile: Profile; host: string): HashSet[string] =
+proc enabledActivitiesFor*(profile: Profile; host: string): HashSet[string] =
   ## `default` is always active; `hosts:` adds host-specific ones.
+  ##
+  ## THE host-selection rule. `buildPlan` applies it, and every other caller
+  ## that needs to know which activities a host runs — `repro home list` /
+  ## `why`, `repro home export` — calls this proc rather than keeping its own
+  ## copy, so what they report is what the planner does.
   result = initHashSet[string]()
   result.incl "default"
   let hostsOpt = findHostsBlock(profile)

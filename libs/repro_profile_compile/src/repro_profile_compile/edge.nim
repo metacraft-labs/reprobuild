@@ -62,11 +62,14 @@ type
     ##   ran). False on an action-cache hit.
     ## * `cacheDecision` / `cacheMissReason` / `cachePublishSkipReason` —
     ##   copied verbatim from the engine's `ActionResult`.
-    ## * `observedInputs` — the files io-mon observed the edge READ, when the
-    ##   edge executed this call (empty on a cache hit, whose evidence the
-    ##   engine is configured not to reconstruct). This is the dependency
-    ##   record the action cache keys on; it is exposed so callers can see
-    ##   what a profile actually depends on.
+    ## * `observedInputs` — the files io-mon observed the edge READ. When the
+    ##   edge executed this call, the reads of that execution; on a cache hit
+    ##   they are reconstructed from the action-cache record only when the
+    ##   caller set `ProfileCompileOptions.reportObservedInputs` (otherwise
+    ##   empty: the engine is configured not to reconstruct them, which keeps
+    ##   the apply path's warm hit cheap). This is the dependency record the
+    ##   action cache keys on; it is exposed so callers can see what a profile
+    ##   actually depends on.
     profileRoot*: string
     rbpiPath*: string
     rbpiBytes*: seq[byte]
@@ -88,12 +91,18 @@ type
     ## profile's parent directory). `verbose` and `forceRebuild` are
     ## debug knobs; `forceRebuild` removes the published envelope so the
     ## engine must re-execute the edge rather than answer from its cache.
+    ## `reportObservedInputs` asks for `ProfileCompileArtifact.observedInputs`
+    ## on a cache hit too (reconstructed from the record the hit was served
+    ## from). It does not change the cache decision or the action's identity;
+    ## `repro home export` sets it to report the profile files its intent was
+    ## compiled from.
     stateDir*: string
     publicCliPath*: string
     repoRoot*: string
     workDir*: string
     verbose*: bool
     forceRebuild*: bool
+    reportObservedInputs*: bool
 
   ProfileCompileError* = object of CatchableError
 
@@ -180,14 +189,36 @@ proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
 #     property this edge lacks.
 #   * The provider edge's environment passthrough names the compiler and C
 #     toolchain it is handed (`REPRO_NIM_COMPILER`, `REPRO_BOOTSTRAP_CC`, the
-#     provider nimcache session). This edge reads only the first: the helper
-#     picks its Nim with `resolveProfileNimCompiler` (`$REPRO_NIM_COMPILER`,
-#     then `PATH`) and takes its scratch location from argv. It therefore
-#     names `REPRO_NIM_COMPILER` alone -- a value read from the ambient
-#     environment, so PASSTHROUGH by the classification rule in
-#     `repro_cli_support` -- and declaring the rest would name variables the
-#     edge never consumes.
+#     provider nimcache session) and the temp-directory variables. This edge
+#     names the compiler variable and the temp-directory variables only
+#     (`ProfileCompileEnvPassthrough`): the helper picks its Nim with
+#     `resolveProfileNimCompiler` (`$REPRO_NIM_COMPILER`, then `PATH`) and
+#     takes its nimcache from argv, and it is handed no C toolchain variable.
 # ---------------------------------------------------------------------------
+
+const ProfileCompileScratchEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+  ## Variables that only choose where the compile's disposable files go.
+  ## `nim` and the C toolchain read them (io-mon records the reads), and an
+  ## observed read is keyed on its VALUE. `nix develop` gives every shell a
+  ## fresh `/tmp/nix-shell.XXXXXX`, so keyed by value they made the first
+  ## profile compile in every new shell a miss ("input metadata changed:
+  ## TEMP") on an unchanged profile -- a full ~7 s recompile. As passthrough
+  ## they are keyed by name only (`actionEnvironmentKeyText`) and dropped from
+  ## the observed-environment key (`cacheEnvInputs`), exactly as the provider
+  ## compile treats them (`ProviderCompileEnvironmentPassthrough`).
+  ##
+  ## The cost of the rule: a profile whose INTENT embeds its temp directory
+  ## (`getTempDir()` in a resource's content) would be served the intent of
+  ## the run that published the record. Nothing that describes a home should
+  ## depend on a per-shell scratch path, and the alternative is a recompile
+  ## in every shell for every profile.
+
+const ProfileCompileEnvPassthrough* =
+  @[ProfileNimCompilerEnvVar] & @ProfileCompileScratchEnvNames
+  ## The edge's `envPassthrough`: the compiler override the helper reads
+  ## (a value from the ambient environment, so PASSTHROUGH by the
+  ## classification rule in `repro_cli_support`) and the scratch-location
+  ## variables above.
 
 proc profileCompileBuildAction*(profileRoot, rbpiPath, nimcacheDir,
                                 publicCliPath, workDir, repoRoot: string;
@@ -236,7 +267,7 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, nimcacheDir,
     commandStatsId = "repro profile compile edge",
     cacheable = true,
     weakFingerprint = weak,
-    envPassthrough = @[ProfileNimCompilerEnvVar],
+    envPassthrough = ProfileCompileEnvPassthrough,
     dependencyPolicy = automaticMonitorGatheringPolicy(
       @[absolutePath(nimcacheDir)]))
 
@@ -350,6 +381,10 @@ proc compileProfileToRbpi*(profileRoot: string;
     nimcacheDir, opts.publicCliPath, opts.workDir, repoRoot, weak,
     opts.verbose)
   var config = profileCompileEngineConfig(opts.stateDir, opts.publicCliPath)
+  if opts.reportObservedInputs:
+    # Reconstruct a hit's evidence from its record. Serving consequences are
+    # none: the same record is loaded and revalidated either way.
+    config.skipCacheHitEvidence = false
   let runResult = runBuild(graph(@[buildAction]), config)
   if runResult.hasFailedActions():
     raiseProfileCompile(actionFailureDiagnostic(runResult))

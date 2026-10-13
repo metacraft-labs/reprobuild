@@ -84,6 +84,15 @@ proc requireReprobuildSources*(repoRoot: string) =
       "package names them in $REPROBUILD_SOURCE_ROOT; a checkout can be " &
       "selected with $REPROBUILD_REPO_ROOT.")
 
+const ProfileCompileDefines*: seq[string] = @[]
+  ## The `-d:` symbols the profile compile passes to `nim c` beyond the ones
+  ## Nim sets for the target platform. `profileCompileArgv` emits exactly
+  ## these, and `repro home export` reports them as the compile-time
+  ## definitions the intent was evaluated under -- one list, so the record
+  ## cannot disagree with the command. Empty today: a profile sees the
+  ## target's platform symbols (`linux`, `macosx`, `windows`, `amd64`, …)
+  ## plus whatever its own `config.nims` defines.
+
 proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
                          repoRoot: string): seq[string] =
   ## The `nim c` command line for a profile compile, as an argv sequence.
@@ -99,6 +108,8 @@ proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
   result = @[nimExe, "c", "--hints:off", "--warnings:off",
     "--nimcache:" & nimcacheDir,
     "--out:" & outBinary]
+  for define in ProfileCompileDefines:
+    result.add "-d:" & define
   for path in profileNimPaths(repoRoot):
     result.add "--path:" & path
   result.add profileRoot

@@ -202,15 +202,18 @@ suite "M83 Phase C: profileCompileBuildAction":
     # The inequality below keeps this from passing vacuously against a
     # constructor that went back to passing the seed through.
     #
-    # The edge also names `REPRO_NIM_COMPILER` as an environment passthrough
-    # (the helper compiles with it when set, GM1), and `action()` mixes the
-    # declared environment in INSIDE the lock mix -- so the expectation
-    # composes the two in that order.
+    # The edge also names `REPRO_NIM_COMPILER` (the helper compiles with it
+    # when set, GM1) and the temp-directory variables (scratch placement
+    # only; keyed by value they missed in every new `nix develop` shell) as
+    # environment passthrough, and `action()` mixes the declared environment
+    # in INSIDE the lock mix -- so the expectation composes the two in that
+    # order.
     check act.weakFingerprint ==
       keyedOnGoverningLock(
-        keyedOnActionEnvironment(weak, [], [ProfileNimCompilerEnvVar]),
+        keyedOnActionEnvironment(weak, [], ProfileCompileEnvPassthrough),
         lockIdentityOutsideSolvedGraph())
-    check act.envPassthrough == @[ProfileNimCompilerEnvVar]
+    check act.envPassthrough == @[ProfileNimCompilerEnvVar, "TMPDIR", "TMP",
+      "TEMP", "TEMPDIR"]
     check act.weakFingerprint != weak
     check act.argv[0] == "/bin/repro"
     check act.argv[1] == "__repro-compile-profile"

@@ -47,6 +47,8 @@ when not defined(linux):
       skip(PlatformSkipReason)
     test "library edge answers an unchanged payload from the action cache":
       skip(PlatformSkipReason)
+    test "a new shell's temp directory does not invalidate the compile":
+      skip(PlatformSkipReason)
 else:
   import std/[os, strutils, tables, unittest]
 
@@ -174,3 +176,64 @@ profile "gm0StaticReadPayload":
       check third.edgeLaunched
       check sb.nimSpawnCount() > spawnsBefore
       checkSinglePayloadResource(decodeRbpi(third.rbpiBytes), "bravo")
+
+    test "a new shell's temp directory does not invalidate the compile":
+      # `nix develop` gives every shell its own `TMPDIR` / `TMP` / `TEMP` /
+      # `TEMPDIR` (`/tmp/nix-shell.XXXXXX`). Nim and the C toolchain read
+      # them, io-mon records the reads, and keyed by VALUE they made the first
+      # compile in every new shell a full recompile of an unchanged profile
+      # (measured: "input metadata changed: TEMP", ~7 s). The edge names them
+      # as passthrough (`ProfileCompileScratchEnvNames`), like the provider
+      # compile does.
+      #
+      # Positive control: a variable the edge does NOT name, `HOME`, still
+      # invalidates when it changes -- so the hit below is the passthrough
+      # rule, not observed-environment keying having been switched off.
+      #
+      # Falsifying mutation (performed when this case was written): drop the
+      # temp-directory names from the edge's passthrough. The second compile
+      # misses with "input metadata changed: TEMP".
+      let sb = newProfileSandbox("staticread-tmpdir", PayloadProfile)
+      defer: sb.dispose()
+      sb.writeProfileFile("payload.txt", "alpha")
+      let opts = ProfileCompileOptions(stateDir: sb.stateDir,
+        publicCliPath: reproBinary(), repoRoot: ProjectRoot)
+
+      const Names = ["TMPDIR", "TMP", "TEMP", "TEMPDIR", "HOME"]
+      var saved: seq[(string, bool, string)]
+      for name in Names:
+        saved.add((name, existsEnv(name), getEnv(name)))
+      defer:
+        for (name, present, value) in saved:
+          if present: putEnv(name, value) else: delEnv(name)
+
+      proc enterShell(label: string) =
+        let tmp = sb.root / ("shell-tmp-" & label)
+        createDir(tmp)
+        for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
+          putEnv(name, tmp)
+
+      putEnv("HOME", sb.homeDir)
+      enterShell("one")
+      let first = compileProfileToRbpi(sb.profilePath, opts)
+      check first.edgeLaunched
+      check first.cachePublishSkipReason.len == 0
+      checkSinglePayloadResource(decodeRbpi(first.rbpiBytes), "alpha")
+
+      enterShell("two")
+      let second = compileProfileToRbpi(sb.profilePath, opts)
+      checkpoint("second: decision=" & $second.cacheDecision &
+        " miss=" & second.cacheMissReason)
+      check second.cacheDecision == cdHit
+      check not second.edgeLaunched
+      checkSinglePayloadResource(decodeRbpi(second.rbpiBytes), "alpha")
+
+      # Positive control: an observed variable outside the passthrough set.
+      let otherHome = sb.root / "other-home"
+      createDir(otherHome)
+      putEnv("HOME", otherHome)
+      let third = compileProfileToRbpi(sb.profilePath, opts)
+      checkpoint("third: decision=" & $third.cacheDecision &
+        " miss=" & third.cacheMissReason)
+      check third.edgeLaunched
+      check third.cacheMissReason.contains("HOME")

@@ -29,7 +29,7 @@
 ## action-cache key (an unchanged profile behind the spy is a hit). It is a
 ## POSIX shell script, which is why these gates run on POSIX hosts only.
 
-import std/[os, osproc, streams, strtabs, strutils, tempfiles]
+import std/[algorithm, hashes, os, osproc, streams, strtabs, strutils, tempfiles, times]
 from repro_core/paths import extendedPath
 
 import repro_profile
@@ -120,7 +120,14 @@ proc profileBinaryPath*(sb: ProfileSandbox): string =
   cachedNimcacheDir(sb.stateDir, profileCompileKey(sb.profilePath)) /
     addFileExt("profile-build", ExeExt)
 
-proc sandboxEnv(sb: ProfileSandbox): StringTableRef =
+const DefaultSandboxHost* = "gm0-profile-compile-host"
+  ## The `$REPRO_HOST` every run gets unless the caller names another.
+
+proc sandboxEnv*(sb: ProfileSandbox; host = DefaultSandboxHost):
+    StringTableRef =
+  ## The isolated environment every run gets. `host` is exported as
+  ## `$REPRO_HOST`; an empty `host` removes the variable, so a run selects its
+  ## host with `--host` (or falls back to the OS hostname).
   result = newStringTable(modeCaseSensitive)
   for k, v in envPairs():
     result[k] = v
@@ -133,14 +140,17 @@ proc sandboxEnv(sb: ProfileSandbox): StringTableRef =
   result["REPRO_HOME_PROFILE_DIR"] = sb.profileDir
   result["REPRO_HOME_STATE_DIR"] = sb.stateDir
   result["REPRO_STORE_ROOT"] = sb.storeRoot
-  result["REPRO_HOST"] = "gm0-profile-compile-host"
+  if host.len > 0:
+    result["REPRO_HOST"] = host
+  elif result.hasKey("REPRO_HOST"):
+    result.del("REPRO_HOST")
   result["REPROBUILD_REPO_ROOT"] = ProjectRoot
 
-proc runHomePlan*(sb: ProfileSandbox): PlanRun =
+proc runHomePlan*(sb: ProfileSandbox; host = DefaultSandboxHost): PlanRun =
   ## One `repro home plan` against the sandbox.
   let before = sb.nimSpawnCount()
   let p = startProcess(reproBinary(), args = ["home", "plan"],
-    workingDir = sb.root, env = sb.sandboxEnv(),
+    workingDir = sb.root, env = sb.sandboxEnv(host),
     options = {poStdErrToStdOut})
   var output = ""
   let stream = p.outputStream()
@@ -168,3 +178,69 @@ proc runProfileBinaryDirectly*(sb: ProfileSandbox): string =
     options = {poUsePath})
   doAssert res.exitCode == 0, "profile binary failed: " & res.output
   res.output
+
+type
+  ReproRun* = object
+    exitCode*: int
+    stdout*: string
+    stderr*: string
+    nimSpawns*: int
+      ## How many `nim` invocations the spy logged during THIS run.
+
+proc runRepro*(sb: ProfileSandbox; args: openArray[string];
+               host = DefaultSandboxHost): ReproRun =
+  ## One `repro <args>` against the sandbox with stdout and stderr captured
+  ## SEPARATELY (a command whose stdout is a document must not have
+  ## diagnostics mixed into it). stderr goes to a file through `/bin/sh`
+  ## rather than a second pipe, so a chatty stderr cannot fill its pipe while
+  ## the parent is still draining stdout. POSIX only, like the spy.
+  let before = sb.nimSpawnCount()
+  let errFile = sb.root / "last-stderr.txt"
+  var env = sb.sandboxEnv(host)
+  env["GM_HARNESS_STDERR"] = errFile
+  let p = startProcess("/bin/sh",
+    args = @["-c", "exec \"$0\" \"$@\" 2>\"$GM_HARNESS_STDERR\"",
+             reproBinary()] & @args,
+    workingDir = sb.root, env = env, options = {})
+  var output = ""
+  let stream = p.outputStream()
+  while not stream.atEnd():
+    let chunk = stream.readAll()
+    if chunk.len == 0:
+      break
+    output.add(chunk)
+  result.exitCode = p.waitForExit()
+  p.close()
+  result.stdout = output
+  result.stderr =
+    if fileExists(errFile): readFile(errFile) else: ""
+  result.nimSpawns = sb.nimSpawnCount() - before
+
+proc treeFingerprint*(root: string; excludePrefixes: openArray[string] = []):
+    seq[string] =
+  ## One line per entry under `root` — relative path, kind, and for files the
+  ## size, modification time and a hash of the bytes — sorted. Two equal
+  ## fingerprints mean nothing under `root` was created, removed, rewritten
+  ## or touched. `excludePrefixes` are absolute paths whose subtrees are
+  ## skipped (state a command is ALLOWED to write, e.g. the compile cache).
+  if not dirExists(extendedPath(root)):
+    return @["<absent>"]
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+                                             pcLinkToDir}, relative = false):
+    var skip = false
+    for prefix in excludePrefixes:
+      if path == prefix or path.startsWith(prefix & DirSep):
+        skip = true
+        break
+    if skip:
+      continue
+    let rel = path.relativePath(root)
+    if symlinkExists(path):
+      result.add rel & "\tlink\t" & expandSymlink(path)
+    elif dirExists(path):
+      result.add rel & "\tdir"
+    else:
+      result.add rel & "\tfile\t" & $getFileSize(path) & "\t" &
+        $getLastModificationTime(path).toUnixFloat & "\t" &
+        $hash(readFile(path))
+  result.sort()

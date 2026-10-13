@@ -169,6 +169,11 @@ jobs:
       # names every action in full and times it, which turns "the leg timed out"
       # into "this action took N minutes" or "this action never finished".
       REPROBUILD_PROGRESS: simple-lines
+      # The commit the release images are built from (the checkout below is
+      # `github.sha`). The `.#release` engine edge embeds it as
+      # `ReprobuildSourceRevision`, so a shipped `repro` can name its source
+      # revision (e.g. in `repro home export` provenance).
+      REPROBUILD_SOURCE_REVISION: ${{ github.sha }}
     strategy:
       # fail-fast stays false so ONE broken leg still lets the others report.
       # That is a diagnostics choice only -- it no longer affects what gets
