@@ -92,10 +92,13 @@ list-standalone-gates:
     bash ./scripts/list_standalone_shell_gates.sh
 
 # The dev shell installs the committed .pre-commit-config.yaml as the
-# pre-commit hook here, and writes nothing into any other repository.
-# Enters the dev shell three times, so it is not part of `just test`.
+# pre-commit hook here, and writes nothing into any other repository; a
+# commit runs `just lint` in the dev shell and is refused when it fails.
+# Enters the dev shell repeatedly and lints twice, so it is not part of
+# `just test`.
 dev-shell-hooks:
     bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
+    bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
 
 dev-env-full-regression:
     mkdir -p test-logs

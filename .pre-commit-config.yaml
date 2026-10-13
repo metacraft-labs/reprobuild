@@ -88,3 +88,24 @@ repos:
     rev: 6ba34072850f7348e1669a6daf8a0acb79669434
     hooks:
       - id: ban-added-ct-recordings
+
+  # `just lint`, the repository's own gate, on every commit and inside the dev
+  # shell. flake.nix's `just-lint` git-hooks entry runs the same recipe under
+  # `nix flake check`, and CI runs it, but neither answers before a commit
+  # lands, so the lint drifted red on a branch without anyone seeing it.
+  #
+  # Never on the ambient PATH: the lint's verdict depends on its tools, so
+  # scripts/pre_commit_lint.sh enters the dev shell flake.nix pins and runs the
+  # recipe there. It lints the whole tree rather than the staged files: most of
+  # its checks (the `nim check` sweep, the suite inventory, the ratchets over
+  # their baselines) judge the tree, and no subset of them can be chosen from
+  # a file list without changing the verdict.
+  - repo: local
+    hooks:
+      - id: just-lint
+        name: just lint (in the dev shell)
+        entry: scripts/pre_commit_lint.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
