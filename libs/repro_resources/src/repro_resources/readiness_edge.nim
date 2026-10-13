@@ -147,6 +147,19 @@ const
     ## not exist until the instance has registered the application
     ## against a running issuer".
 
+  RegistrarInstalledEventKind* = "registrar.installed"
+    ## §7.2: "Which registrar is installed must appear in the session's
+    ## event log, so `the login failed` and `this workspace never talked
+    ## to an issuer` are one question rather than two." This is that
+    ## event's kind, named once here so the writer and every reader
+    ## (including the tests) cannot spell it two ways.
+
+  DevelopmentRegistrarName* = "reprobuild.development-digest-registrar.v1"
+    ## The name the CLI's own offline registrar announces itself under.
+    ## A VERSIONED, NAMESPACED name rather than a prose label, because it
+    ## is matched by readers: §7.2's event log is the surface on which
+    ## "this workspace never talked to an issuer" is answered.
+
 type
   ServiceReadinessProbe* = object
     ## What a `service` block declared about its readiness, in the shape
@@ -202,6 +215,70 @@ type
       seq[tuple[member, mintedId: string]] {.closure.}
       ## Performs the registration against the LIVE instance and reports
       ## what it minted per member. INJECTED for the same reason.
+      ##
+      ## It reports no provenance and must not: the PROVENANCE OF WHAT A
+      ## REGISTRAR PRODUCES IS A PROPERTY OF THE REGISTRAR, declared at
+      ## its install site (`ServiceRegistrarIdentity`) and applied by
+      ## `recordComputedResourceAttribute` to every value recorded while
+      ## it is installed. A registrar that stamped its own rows could
+      ## stamp them `issuer` while being the offline digest one, which is
+      ## the substitution §7.2 exists to make impossible.
+
+  RegistrarProvenance* = enum
+    ## Shared-Development-Services §7.2 — WHERE A MINTED IDENTIFIER CAME
+    ## FROM, carried with the value rather than inferred from its shape.
+    ##
+    ## §7.2's defect: the CLI's development registrar derives an id from
+    ## `blake3DomainDigest(...)[0 ..< 24]`, and the result is
+    ## "indistinguishable, at the point of use, from an id a real issuer
+    ## minted. A consumer receives a well-formed identifier that no
+    ## issuer has ever heard of, and the failure arrives later, somewhere
+    ## else, as an authentication error." A naming convention would not
+    ## fix it -- an id is an opaque token and a consumer must not parse
+    ## one -- so the fact travels BESIDE the value, like §4.3's
+    ## provenance precondition.
+    rprUnstamped = "unstamped"
+      ## No registrar claimed this value. Either it was recorded with no
+      ## registrar installed, or it was read back from a record written
+      ## by a build that predates this field. NEVER read as either of the
+      ## other two: `readIssuerMintedResourceAttribute` refuses it, and
+      ## so does the `@issuer-minted:` argv token.
+    rprDevelopment = "development"
+      ## Produced offline, without an issuer. Legitimate -- it is the
+      ## default and §7.2 keeps it ("It is the SILENCE that is wrong, not
+      ## the fallback") -- and refusable by a consumer that needs the
+      ## real thing.
+    rprIssuer = "issuer"
+      ## The issuer minted it. Reprobuild cannot VERIFY this and does not
+      ## pretend to: it is the claim of the project-supplied registrar
+      ## that was installed, and it is the claim this library refuses to
+      ## let its OWN development registrar make.
+
+  ServiceRegistrarIdentity* = object
+    ## WHICH registrar is installed, and what everything it produces is
+    ## stamped with. §7.2 asks for both: the name is what reaches the
+    ## session event log, the provenance is what reaches the value.
+    ##
+    ## ONE PROVENANCE PER REGISTRAR, not one per row. A registrar that
+    ## could mix would have to answer "why is this member's id from the
+    ## issuer and that one's not", and the honest answer for the member
+    ## it could not register is a refusal, not a downgrade.
+    name*: string
+    provenance*: RegistrarProvenance
+
+  ComputedResourceAttribute* = object
+    ## A computed resource attribute AND its provenance, in one value.
+    ##
+    ## One object rather than two parallel tables, because the two must
+    ## not be separable: a reader holding the value without the stamp is
+    ## back in §7.2's position of being unable to tell a digest from a
+    ## client id.
+    value*: string
+    provenance*: RegistrarProvenance
+    registrar*: string
+      ## The `name` of the registrar that was installed when this value
+      ## was recorded. In a refusal this is the half that says WHO,
+      ## which is what turns "the login failed" into one question.
 
   ReadinessEdgeEventSink* =
     proc (kind, service, detail: string) {.closure.}
@@ -218,31 +295,120 @@ type
 # reconcile.
 # ---------------------------------------------------------------------------
 
+const
+  unstampedRegistrarIdentity* = ServiceRegistrarIdentity(
+    name: "(unnamed registrar)", provenance: rprUnstamped)
+    ## What the one-argument `setServiceRegistrar` installs: a registrar
+    ## whose install site made NO claim. Everything it produces is
+    ## `rprUnstamped`, so a consumer that requires an issuer-minted id
+    ## refuses it. Representable on purpose -- it is the shape a forgetful
+    ## install site has, and a mutation that reintroduces it must redden a
+    ## control rather than silently pass for the issuer's.
+  developmentRegistrarIdentity* = ServiceRegistrarIdentity(
+    name: DevelopmentRegistrarName, provenance: rprDevelopment)
+    ## §7.2's default: offline, deterministic, no issuer -- and MARKED.
+
 var
   installedProber: ServiceReadinessProber = nil
   installedRegistrar: ServiceRegistrar = nil
+  installedRegistrarIdentity: ServiceRegistrarIdentity =
+    unstampedRegistrarIdentity
+  registrarAnnounced = false
   installedSink: ReadinessEdgeEventSink = nil
-  computedAttributes: Table[string, Table[string, string]]
+  computedAttributes: Table[string, Table[string, ComputedResourceAttribute]]
 
 proc setServiceReadinessProber*(prober: ServiceReadinessProber) =
   ## Install the `httpGet` prober. Idempotent, last writer wins.
   installedProber = prober
 
-proc setServiceRegistrar*(registrar: ServiceRegistrar) =
-  ## Install the thing that registers members against the live instance.
+proc publish(kind, service, detail: string)
+
+proc announceInstalledRegistrar*() =
+  ## §7.2: put WHICH REGISTRAR IS INSTALLED into the session event log.
+  ##
+  ## Called from both `setServiceRegistrar` and
+  ## `setReadinessEdgeEventSink`, and that pair is the point. The two
+  ## installs happen in whichever order the caller wrote them, and an
+  ## announcement made only at registrar-install time is DROPPED
+  ## whenever the sink is installed second -- a near-miss of exactly the
+  ## shape this campaign keeps finding: a fact that is computed,
+  ## correct, and reaches no reader. Announcing from both sides, once,
+  ## makes the event order-independent.
+  if registrarAnnounced or installedRegistrar.isNil or installedSink.isNil:
+    return
+  registrarAnnounced = true
+  publish(RegistrarInstalledEventKind, "",
+    "registrar=" & installedRegistrarIdentity.name & " provenance=" &
+    $installedRegistrarIdentity.provenance)
+
+proc setServiceRegistrar*(registrar: ServiceRegistrar;
+                          identity: ServiceRegistrarIdentity) =
+  ## Install the thing that registers members against the live instance,
+  ## AND say which registrar it is.
+  ##
+  ## The identity is a required parameter, not a field with a default,
+  ## for the reason `DevSessionProducerOpsResolver` is a parameter rather
+  ## than a config field: a defaulted claim is a claim nobody wrote, and
+  ## §7.2's whole subject is a value nobody wrote reaching a consumer.
+  if identity.name.len == 0:
+    raise newException(ReadinessEdgeError,
+      "`setServiceRegistrar` was given an identity with an EMPTY name. " &
+      "Shared-Development-Services.md §7.2 requires that \"which " &
+      "registrar is installed must appear in the session's event log\", " &
+      "and a nameless registrar makes that line say nothing -- which is " &
+      "the silence the clause exists to remove. Name it (see " &
+      "`developmentRegistrarIdentity` for the shape), or install it " &
+      "through the one-argument overload, which names it " &
+      "`(unnamed registrar)` and stamps everything it produces " &
+      "`unstamped`.")
+  if identity.name == DevelopmentRegistrarName and
+     identity.provenance != rprDevelopment:
+    raise newException(ReadinessEdgeError,
+      "`setServiceRegistrar` was asked to install the registrar named `" &
+      DevelopmentRegistrarName & "` with provenance `" &
+      $identity.provenance & "`. That is REFUSED: the development " &
+      "registrar derives its identifiers from a local digest and speaks " &
+      "to no issuer, so letting it claim any other provenance is " &
+      "precisely the substitution Shared-Development-Services.md §7.2 " &
+      "forbids -- \"a well-formed identifier that no issuer has ever " &
+      "heard of\", with the failure arriving later as an authentication " &
+      "error somewhere else. A registrar that really does talk to an " &
+      "issuer is a DIFFERENT registrar and announces a different name.")
   installedRegistrar = registrar
+  installedRegistrarIdentity = identity
+  registrarAnnounced = false
+  announceInstalledRegistrar()
+
+proc setServiceRegistrar*(registrar: ServiceRegistrar) =
+  ## Install a registrar whose install site makes NO provenance claim.
+  ##
+  ## Kept as an overload rather than removed, because it is honest about
+  ## a caller that did not say: every value produced under it is
+  ## `rprUnstamped`, which `readIssuerMintedResourceAttribute` and the
+  ## `@issuer-minted:` token both refuse BY NAME. What it must never do
+  ## is read as the issuer's.
+  setServiceRegistrar(registrar, unstampedRegistrarIdentity)
+
+proc installedServiceRegistrarIdentity*(): ServiceRegistrarIdentity =
+  ## Which registrar is installed right now. A reader for the CLI's
+  ## report and for tests; the enforcement is at the write, not here.
+  installedRegistrarIdentity
 
 proc setReadinessEdgeEventSink*(sink: ReadinessEdgeEventSink) =
   ## Install the event sink. With none installed the providers run and
   ## publish nothing; the ORDERING is still enforced, because it is
   ## `topoOrder`'s and not the sink's.
   installedSink = sink
+  announceInstalledRegistrar()
 
 proc clearReadinessEdgeCollaborators*() =
-  ## Test isolation: drop the prober, the registrar, the sink and every
-  ## computed attribute. Named so a test cannot drop them by accident.
+  ## Test isolation: drop the prober, the registrar, its identity, the
+  ## sink and every computed attribute. Named so a test cannot drop them
+  ## by accident.
   installedProber = nil
   installedRegistrar = nil
+  installedRegistrarIdentity = unstampedRegistrarIdentity
+  registrarAnnounced = false
   installedSink = nil
   computedAttributes.clear()
 
@@ -391,8 +557,21 @@ proc recordComputedResourceAttribute*(resourceAddress, attribute,
       "empty string is indistinguishable from a legitimately empty " &
       "value. A provider that has no value must fail, not report one.")
   if not computedAttributes.hasKey(resourceAddress):
-    computedAttributes[resourceAddress] = initTable[string, string]()
-  computedAttributes[resourceAddress][attribute] = value
+    computedAttributes[resourceAddress] =
+      initTable[string, ComputedResourceAttribute]()
+  # §7.2 -- THE STAMP IS APPLIED HERE, AND THE CALLER DOES NOT SUPPLY IT.
+  #
+  # The provenance of a value is a property of WHO PRODUCED IT, and the
+  # only thing that produces one is the registrar installed at this
+  # moment. Taking the stamp from a parameter would let a provider
+  # record a value with a provenance its install site never declared --
+  # which is the substitution itself, written as an argument. With no
+  # registrar installed the stamp is `rprUnstamped`, which is the truth
+  # and is refused by the issuer-requiring read rather than guessed at.
+  computedAttributes[resourceAddress][attribute] = ComputedResourceAttribute(
+    value: value,
+    provenance: installedRegistrarIdentity.provenance,
+    registrar: installedRegistrarIdentity.name)
 
 proc computedResourceAttributeIsAvailable*(resourceAddress,
                                            attribute: string): bool =
@@ -412,7 +591,7 @@ proc readComputedResourceAttribute*(resourceAddress, attribute,
   ## that nothing satisfies." All three are named below, and the one thing
   ## this proc will not do is return `""`.
   if computedResourceAttributeIsAvailable(resourceAddress, attribute):
-    return computedAttributes[resourceAddress][attribute]
+    return computedAttributes[resourceAddress][attribute].value
   var computedHere: seq[string] = @[]
   if computedAttributes.hasKey(resourceAddress):
     for name in computedAttributes[resourceAddress].keys:
@@ -435,6 +614,65 @@ proc readComputedResourceAttribute*(resourceAddress, attribute,
     "forbids: an empty string is indistinguishable from a legitimately " &
     "empty value, which is how a silent misconfiguration becomes a " &
     "confusing failure somewhere else.")
+
+# ---------------------------------------------------------------------------
+# §7.2: ASKING WHERE A VALUE CAME FROM, AND REFUSING A DEVELOPMENT ONE.
+# ---------------------------------------------------------------------------
+
+proc computedResourceAttributeStamp*(resourceAddress, attribute,
+                                     instanceAddress: string):
+    ComputedResourceAttribute =
+  ## The value AND its provenance, or the same refusal the plain read
+  ## raises. Routed through `readComputedResourceAttribute` rather than
+  ## reaching into the table, so an uncomputed attribute cannot refuse on
+  ## one surface and answer on the other.
+  discard readComputedResourceAttribute(resourceAddress, attribute,
+    instanceAddress)
+  computedAttributes[resourceAddress][attribute]
+
+proc readIssuerMintedResourceAttribute*(resourceAddress, attribute,
+                                        instanceAddress: string): string =
+  ## Read a computed attribute THAT MUST HAVE COME FROM THE ISSUER, or
+  ## refuse by name.
+  ##
+  ## §7.2: "A development registrar must mark what it produced, and a
+  ## consumer that requires an issuer-minted id must be able to REFUSE a
+  ## development one by asking." This is the asking. The question is
+  ## about the stamp, never about the text of the identifier -- an
+  ## issuer's client id is an opaque token and a consumer that pattern-
+  ## matched one would be wrong the first time the issuer changed its
+  ## format.
+  let stamp = computedResourceAttributeStamp(resourceAddress, attribute,
+    instanceAddress)
+  if stamp.provenance == rprIssuer:
+    return stamp.value
+  raise newException(ReadinessEdgeError,
+    "the resource attribute `" & attribute & "` of resource `" &
+    resourceAddress & "` WAS NOT MINTED BY AN ISSUER: it carries " &
+    "provenance `" & $stamp.provenance & "`, produced by the registrar `" &
+    stamp.registrar & "`, and this read requires `" & $rprIssuer & "`. " &
+    (case stamp.provenance
+     of rprDevelopment:
+       "That value is a locally derived DEVELOPMENT identifier. It is " &
+       "well-formed and no issuer has ever heard of it, so handing it " &
+       "to something that authenticates would fail later, at the " &
+       "issuer, as an authentication error with nothing pointing back " &
+       "here (Shared-Development-Services.md §7.2). "
+     of rprUnstamped:
+       "NOTHING CLAIMED that value: it was recorded with no registrar " &
+       "installed, or read back from a record written before " &
+       "provenance was carried. Unstamped is refused rather than " &
+       "assumed either way -- assuming `issuer` is the substitution " &
+       "§7.2 forbids, and assuming `development` would hide a real " &
+       "registration. "
+     of rprIssuer:
+       "") &
+    "To obtain an issuer-minted id, install the registrar supplied by " &
+    "the project that OWNS this service (`setServiceRegistrar`); " &
+    "reprobuild ships no product registrar, because registering a " &
+    "relying party means an issuer's management API, its client types " &
+    "and its grant types. To use the offline value deliberately, read " &
+    "it with `readComputedResourceAttribute`, which does not ask.")
 
 # ---------------------------------------------------------------------------
 # The service node's provider: completion IS the declared readiness.
@@ -587,8 +825,15 @@ proc registrationApply(inst: ResourceInstance; action: ResourceActionKind;
     recordComputedResourceAttribute(
       registrationResourceAddress(a.instanceAddress) & ":" & row.member,
       ClientIdAttributeName, row.mintedId)
+  # The registrar and the provenance are named HERE TOO, beside the
+  # counts, and that is not a duplicate of `registrar.installed`. That
+  # event answers "what was installed in this session"; this one answers
+  # "what produced THESE ids", and a session that reconciles two shared
+  # services can have a different answer per service.
   publish("registration.reconciled", a.serviceName,
-    "members=" & $a.members.len & " computed=" & $minted.len)
+    "members=" & $a.members.len & " computed=" & $minted.len &
+    " registrar=" & installedRegistrarIdentity.name &
+    " provenance=" & $installedRegistrarIdentity.provenance)
   ResourceBinding(address: inst.address, typeId: inst.typeId,
     resourceId: registrationIdentity(inst),
     postWriteDigest: registrationDigest(inst), present: true)

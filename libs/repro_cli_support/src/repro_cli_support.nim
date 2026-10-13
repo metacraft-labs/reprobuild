@@ -117,6 +117,7 @@ import repro_daemon_core
 # the registrations after the daemon has answered, so it needs that same
 # root; re-deriving it here is how a reconcile ends up writing into a
 # store the reaper does not sweep.
+import repro_cli_support/service_registrar  # §7.2: the declared registrar program
 from repro_daemon_core/instance_registry import serviceInstanceStoreRoot
 import repro_resources/service_registry
   # Shared-Development-Services L7 (§4.5): the instance registry's key
@@ -16145,7 +16146,8 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   # `liftedServiceDeclaration` cannot be pointed at two different files.
   let interfacePathForGeneration = edge.interfacePath
   var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
-  var minted: seq[tuple[serviceName, member, mintedId: string]] = @[]
+  var minted: seq[tuple[serviceName, member, mintedId: string;
+                        provenance: RegistrarProvenance]] = @[]
   var refused = 0
   for item in declarations:
     let lifted = liftedServiceDeclaration(edge.interfacePath,
@@ -16362,20 +16364,97 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
       setReadinessEdgeEventSink(
         proc (kind, service, detail: string) {.closure.} =
           appendSessionEvent(parsed.selection.outDir, kind, service, detail))
+      # Shared-Development-Services §7.2 -- WHICH REGISTRAR, AND WHY THE
+      # DEVELOPMENT ONE IS STILL THE DEFAULT.
+      #
+      # "The development registrar stays the default for `repro up` in a
+      # workspace with no issuer, because requiring one to bring a stack
+      # up would make the offline path impossible. It is the SILENCE
+      # that is wrong, not the fallback." So the fallback is kept and
+      # the silence is removed: whichever registrar is installed
+      # announces itself into the session's `events.jsonl` (the
+      # `registrar.installed` event, published by
+      # `announceInstalledRegistrar`), and everything it produces is
+      # STAMPED with its provenance all the way to the supervisor
+      # child's argv.
+      #
+      # Reprobuild ships no product registrar (§7.2 settles that), so
+      # the issuer's one arrives as a declared program --
+      # `REPRO_SERVICE_REGISTRAR`, see `service_registrar.nim` for why
+      # that spelling and what the protocol is.
+      let registrarProgram = resolveExternalServiceRegistrarProgram()
+      let registrarIdentity =
+        if registrarProgram.len > 0:
+          externalServiceRegistrarIdentity(registrarProgram)
+        else:
+          developmentRegistrarIdentity
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: registrar " &
+        registrarIdentity.name & " (provenance " &
+        $registrarIdentity.provenance & ")")
+      # What the declared program answered, captured so the reconcile's
+      # REUSED rows can be checked against it below.
+      var issuerAnswers = initTable[string, string]()
+      # The service's name as a plain local. `item` is a `lent` loop
+      # variable, so a closure that reached into it would not compile
+      # ("cannot be captured as it would violate memory safety") -- and
+      # the refusal below needs the name.
+      let convergingServiceName = item.declaration.serviceName
       setServiceRegistrar(
         proc (attrs: ServiceRegistrationAttrs):
             seq[tuple[member, mintedId: string]] {.closure.} =
+          if registrarProgram.len > 0:
+            # Run ONCE for the whole folded member set, before the
+            # reconcile, rather than per missing member. The issuer is
+            # the authority on what a member's client id is, so a run
+            # that asked only about the members this workspace happens
+            # not to have recorded could not notice that a recorded one
+            # has since changed at the issuer.
+            for row in runExternalServiceRegistrar(registrarProgram,
+                parsed.selection.outDir.sessionDir / "registrar", attrs):
+              issuerAnswers[row.member] = row.mintedId
           reconciled = reconcileServiceRegistrations(storeRoot, key,
             attrs.members, attrs.contributors,
             proc (member, contributor: string): string {.closure.} =
-              digestHex(blake3DomainDigest(
-                ("repro-dev-registration.v1\x00" & response.address &
-                 "\x00" & member).bytesOf(),
-                hdMetadataEnvelope))[0 ..< 24])
+              if registrarProgram.len > 0:
+                # `""` is impossible here: `decodeServiceRegistrarAnswer`
+                # refuses an answer that omits a requested member, and
+                # `reconcileServiceRegistrations` refuses an empty
+                # minted id anyway. Spelled as a lookup with no default
+                # so a future change cannot turn it into one.
+                issuerAnswers[member]
+              else:
+                digestHex(blake3DomainDigest(
+                  ("repro-dev-registration.v1\x00" & response.address &
+                   "\x00" & member).bytesOf(),
+                  hdMetadataEnvelope))[0 ..< 24],
+            registrar = registrarIdentity.name)
           registrarRan = true
           result = @[]
           for reg in reconciled.set.registrations:
-            result.add((member: reg.member, mintedId: reg.mintedId)))
+            if issuerAnswers.hasKey(reg.member) and
+               issuerAnswers[reg.member] != reg.mintedId:
+              # The store and the issuer disagree about a member this
+              # workspace already had. REFUSED rather than resolved
+              # either way: preferring the store would hand a consumer a
+              # client id the issuer has replaced, and silently
+              # preferring the issuer would rewrite a record L8 makes
+              # byte-stable on purpose.
+              raise newException(ValueError,
+                "member `" & reg.member & "` of service `" &
+                convergingServiceName & "` is recorded as `" &
+                reg.mintedId & "` by registrar `" &
+                registrarIdentity.name & "`, but that registrar now " &
+                "answers `" & issuerAnswers[reg.member] & "`. The " &
+                "issuer's registration changed after this workspace " &
+                "recorded it. Refused rather than guessed: clear this " &
+                "instance's registration record (`repro down` for this " &
+                "activity, then remove the `registrations` state " &
+                "record under " & storeRoot & ") and converge again, " &
+                "which re-registers every member against the issuer " &
+                "as it is now.")
+            result.add((member: reg.member, mintedId: reg.mintedId)),
+        registrarIdentity)
       try:
         let plan = planRegistrationEdge(item.declaration.serviceName,
           response.address,
@@ -16405,8 +16484,20 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         refused.inc
         continue
       for reg in reconciled.set.registrations:
+        # THE STAMP IS READ BACK FROM WHERE THE PROVIDER RECORDED IT,
+        # not re-derived from `registrarIdentity` here. Two independent
+        # derivations of one fact are two things that can disagree, and
+        # the one that matters is the provider's: it is what
+        # `registrationApply` actually attached to the value. Reading it
+        # also means an attribute the provider did not record REFUSES
+        # here, by name, instead of being written to the session file
+        # with a confident provenance.
+        let stamp = computedResourceAttributeStamp(
+          computedClientIdAddress(response.address, reg.member),
+          ClientIdAttributeName, response.address)
         minted.add((serviceName: item.declaration.serviceName,
-          member: reg.member, mintedId: reg.mintedId))
+          member: reg.member, mintedId: stamp.value,
+          provenance: stamp.provenance))
       var mintedCount = 0
       var reusedCount = 0
       var withdrawnCount = 0

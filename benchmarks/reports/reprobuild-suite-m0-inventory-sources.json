@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1957,
-    "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 623,
+    "nimTestBinaries": 1962,
+    "pureUnitConsolidationGroups": 54,
+    "pureUnitTests": 626,
     "staticallyDetectedRuntimeCompilerFlowTests": 111,
-    "testEntries": 1974
+    "testEntries": 1979
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -67,6 +67,21 @@
         "libs/repro_cas_store/tests/t_cas_materialize_link.nim",
         "libs/repro_cas_store/tests/t_link_capability_probe.nim",
         "libs/repro_cas_store/tests/t_repro_cas_store_basic.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_cli_support",
+        "repro_dev_env_artifacts",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_cli_support",
+      "sources": [
+        "libs/repro_cli_support/tests/t_dss10_early_attribute_read_refuses_by_name.nim",
+        "libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim"
       ],
       "targetOs": "soAny"
     },
@@ -474,7 +489,20 @@
       "targetOs": "soAny"
     },
     {
-      "count": 7,
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "sources": [
+        "libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim",
+        "libs/repro_resources/tests/t_dss72_registrar_provenance_is_marked_and_refusable.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 8,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl",
@@ -483,6 +511,7 @@
       "owner": "libs/repro_resources",
       "sources": [
         "libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim",
+        "libs/repro_resources/tests/t_dss72_reuse_is_keyed_on_the_registrar.nim",
         "libs/repro_resources/tests/t_l1_state_store.nim",
         "libs/repro_resources/tests/t_l2_lease_edge.nim",
         "libs/repro_resources/tests/t_l3_reaper.nim",
@@ -1149,10 +1178,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 13,
-      "integration": 1040,
+      "integration": 1041,
       "platform/destructive": 120,
-      "pure unit": 623,
-      "unclassified": 178
+      "pure unit": 626,
+      "unclassified": 179
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1330,9 +1359,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1957,
+    "nimTestBinaryCount": 1962,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1974
+    "testEntryCount": 1979
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8813,6 +8842,43 @@
       "source": "libs/repro_cli_support/tests/t_dss10_early_attribute_read_refuses_by_name.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dss72_external_registrar_protocol",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_dss72_external_registrar_protocol.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dss72_provenance_reaches_the_point_of_use",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dev_env_artifacts",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16438,6 +16504,41 @@
       "source": "libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dss72_registrar_provenance_is_marked_and_refusable",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_dss72_registrar_provenance_is_marked_and_refusable.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dss72_reuse_is_keyed_on_the_registrar",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_dss72_reuse_is_keyed_on_the_registrar.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28322,6 +28423,25 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_dss11_cross_process_contribution_reaches_the_instance.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dss72_the_registrar_reaches_a_services_argv",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_resources",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_dss72_the_registrar_reaches_a_services_argv.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,

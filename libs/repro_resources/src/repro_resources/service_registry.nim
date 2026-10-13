@@ -1421,8 +1421,20 @@ type
       ## The package that contributed the member (§5's attribution).
     mintedId*: string
       ## The value the instance minted. Never regenerated for a member
-      ## that already has one.
+      ## that already has one AND whose `registrar` still matches.
     mintedAtUnix*: int64
+    registrar*: string
+      ## WHICH REGISTRAR minted it — Shared-Development-Services §7.2.
+      ##
+      ## It is part of the reuse key, not decoration, and that is the
+      ## point. Without it, a row minted offline by the development
+      ## registrar is REUSED BYTE FOR BYTE on the next run even when a
+      ## real issuer's registrar is now installed, and the consumer then
+      ## receives a locally derived digest carrying the issuer's
+      ## provenance stamp: §7.2's substitution, reconstructed inside the
+      ## fix for it. A row written before this field exists decodes as
+      ## `""`, which matches no named registrar and is therefore
+      ## re-minted once, by whoever is installed.
 
   ServiceRegistrationSet* = object
     address*: string
@@ -1454,7 +1466,8 @@ proc encodeServiceRegistrations*(value: ServiceRegistrationSet): string =
       "member": reg.member,
       "contributor": reg.contributor,
       "mintedId": reg.mintedId,
-      "mintedAtUnix": reg.mintedAtUnix})
+      "mintedAtUnix": reg.mintedAtUnix,
+      "registrar": reg.registrar})
   let node = %*{"attrsTypeId": ServiceRegistrationsAttrsTypeId}
   node["registrations"] = rows
   $node
@@ -1503,7 +1516,8 @@ proc decodeServiceRegistrations*(address, attrsTypeId, attrsJson: string):
       member: member,
       contributor: row{"contributor"}.getStr(""),
       mintedId: row{"mintedId"}.getStr(""),
-      mintedAtUnix: row{"mintedAtUnix"}.getBiggestInt(0)))
+      mintedAtUnix: row{"mintedAtUnix"}.getBiggestInt(0),
+      registrar: row{"registrar"}.getStr("")))
 
 proc readServiceRegistrations*(storeRoot: string;
                                key: ServiceInstanceKey):
@@ -1541,7 +1555,8 @@ proc reconcileServiceRegistrations*(
     members: openArray[string];
     contributors: openArray[string];
     mint: ServiceRegistrationMinter;
-    now: Time = getTime()):
+    now: Time = getTime();
+    registrar = ""):
     tuple[set: ServiceRegistrationSet;
           outcomes: seq[tuple[member: string;
                               outcome: ServiceRegistrationOutcome]]] =
@@ -1552,6 +1567,14 @@ proc reconcileServiceRegistrations*(
   ## registration keeps its `mintedId` and its `mintedAtUnix`
   ## BYTE-IDENTICAL. `mint` is not called for it. A second consumer
   ## arriving adds its own members and touches nothing else.
+  ##
+  ## `registrar` NAMES WHO IS MINTING, AND IT IS PART OF THE REUSE KEY
+  ## (Shared-Development-Services §7.2). Reuse means "this member was
+  ## already registered BY THIS REGISTRAR"; a row minted by a different
+  ## one is re-minted rather than reused, because reusing it would hand
+  ## the new registrar's provenance to the old registrar's value. The
+  ## default `""` preserves the pre-§7.2 behaviour exactly for a caller
+  ## that names nobody: `""` matches `""`, so reuse is unchanged.
   ##
   ## A MEMBER NO LONGER CONTRIBUTED IS REMOVED, and nothing else is --
   ## §5's withdrawal property, at this layer. It is removed rather than
@@ -1583,7 +1606,7 @@ proc reconcileServiceRegistrations*(
   for i in 0 ..< members.len:
     var found = false
     for reg in existing.registrations:
-      if reg.member != members[i]:
+      if reg.member != members[i] or reg.registrar != registrar:
         continue
       kept.add(reg)
       outcomes.add((member: members[i], outcome: sroReused))
@@ -1603,7 +1626,8 @@ proc reconcileServiceRegistrations*(
       member: members[i],
       contributor: contributors[i],
       mintedId: minted,
-      mintedAtUnix: now.toUnix()))
+      mintedAtUnix: now.toUnix(),
+      registrar: registrar))
     outcomes.add((member: members[i], outcome: sroMinted))
   for reg in existing.registrations:
     var stillAsked = false
