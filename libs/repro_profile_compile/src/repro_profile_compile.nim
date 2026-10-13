@@ -37,6 +37,7 @@ export sources.HomeProfileAnchor
 export sources.SystemProfileAnchor
 export sources.ProfileCacheDirName
 export sources.reprobuildRepoRoot
+export sources.missingReprobuildSourcesMessage
 export sources.profileNimPaths
 export sources.resolveProfileRoot
 export sources.profileCacheDir
@@ -49,6 +50,7 @@ export compile.CompileFailure
 export compile.ProfileNimCompilerEnvVar
 export compile.resolveProfileNimCompiler
 export compile.requireReprobuildSources
+export compile.profileCompileChildEnv
 export compile.profileCompileArgv
 export compile.ProfileCompileDefines
 export compile.compileProfileBinary

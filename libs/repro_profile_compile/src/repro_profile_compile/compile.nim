@@ -18,6 +18,8 @@
 import std/[os, osproc, streams, strtabs, strutils]
 from repro_core/paths import extendedPath
 from repro_core/process_streams import drainStream
+from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
+  installedLayoutPackageTrees
 
 import repro_profile
 import repro_profile_intent
@@ -83,6 +85,18 @@ proc requireReprobuildSources*(repoRoot: string) =
       " (expected " & LibsDirName & "/repro_profile/src). An installed " &
       "package names them in $REPROBUILD_SOURCE_ROOT; a checkout can be " &
       "selected with $REPROBUILD_REPO_ROOT.")
+  # The compile resolves every source-only input (nimcrypto, bearssl,
+  # io-mon, ...) through this file, which `compileProfileBinary` includes
+  # from a wrapper beside the profile. A tree without it -- a release
+  # archive staged before it shipped one -- would otherwise fail many
+  # modules later with `cannot open file: nimcrypto/sha2`.
+  if not fileExists(extendedPath(repoRoot / "config.nims")):
+    raise newException(CompileFailure,
+      "repro profile compile: the reprobuild sources at " & repoRoot &
+      " have no config.nims, which the profile compile includes to resolve " &
+      "reprobuild's source-only inputs. Reinstall repro from a release " &
+      "that ships share/repro/source/config.nims, or point " &
+      "$REPROBUILD_SOURCE_ROOT at a reprobuild source tree.")
 
 const ProfileCompileDefines*: seq[string] = @[]
   ## The `-d:` symbols the profile compile passes to `nim c` beyond the ones
@@ -113,6 +127,124 @@ proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
   for path in profileNimPaths(repoRoot):
     result.add "--path:" & path
   result.add profileRoot
+
+proc profileCompileChildEnv*(repoRoot: string): StringTableRef =
+  ## The environment the profile compile hands `nim c`: this process's own,
+  ## plus the `*_SRC` source roots reprobuild's config.nims resolves its
+  ## source-only inputs from, filled in only where unset. Pure apart from
+  ## existence checks, so the probing is testable on a fixture tree.
+  let repoRootAbs = absolutePath(repoRoot)
+  # NimScript's relative path resolution from a config.nims runs in
+  # the PROJECT (profile) directory's CWD — not nim's process CWD.
+  # So even with ``workingDir = repoRoot`` (which sets the OS
+  # cwd), the upstream config.nims's ``addPackagePath`` calls like
+  #
+  #   addPackagePath("NIMCRYPTO_SRC", [
+  #     "libs" / "nimcrypto",
+  #     ".." / "codetracer" / "libs" / "nimcrypto",
+  #     ".." / "nimcrypto"], "nimcrypto" / "hash.nim")
+  #
+  # check ``fileExists(candidate / marker)`` relative to the profile
+  # dir — where none of the candidates exist — and the package path
+  # never gets added. The transitive ``import nimcrypto/sha2`` from
+  # ``repro_project_dsl`` then fails.
+  #
+  # Pass the env-var-keyed paths the upstream config.nims expects
+  # so its FIRST lookup (``getEnv(envName)``) hits before the
+  # relative-path candidates run.
+  # A local, not `result`: the probing helpers below are closures, and a
+  # closure cannot capture `result`.
+  var env = newStringTable(modeStyleInsensitive)
+  for k, v in envPairs():
+    env[k] = v
+  # A value already in the child's environment -- the caller's, or one a
+  # line below has filled -- is never replaced.
+  proc unsetInChild(envName: string): bool =
+    not env.hasKey(envName) or env[envName].len == 0
+
+  # An INSTALLED layout first: when the source root is
+  # `<prefix>/share/repro/source` (a release archive, a .deb/.rpm), the
+  # source-only inputs ship beside it under `<prefix>/share/repro/src/<rel>`,
+  # named by the one table both this compile and the interface/provider
+  # compiles use (`repro_core/source_root.InstalledSourcePackageTrees`).
+  # They are derived from the root this compile was handed, not from where
+  # the running image lives, so the libs and their inputs always come from
+  # the same tree. Without them a Windows release bundle's profile compile
+  # had no `$BEARSSL_SRC`, `$IO_MON_SRC`, ... for config.nims to resolve
+  # (Gradual-Nix-To-Reprobuild-Migration GM1w).
+  let installedPrefix = installedLayoutPrefixOfSourceRoot(repoRootAbs)
+  for (envName, dir) in installedLayoutPackageTrees(installedPrefix):
+    if unsetInChild(envName):
+      env[envName] = dir
+
+  # Then mirror the addPackagePath calls in reprobuild's config.nims —
+  # absolute paths pointing at the operator's existing sibling
+  # checkouts under <repoRoot>'s parent. (install-reprobuild.ps1
+  # clones every sibling under <LOCALAPPDATA>/dev-deps/reprobuild/,
+  # so they are siblings of ``src/``.)
+  proc setPackageEnv(envName: string; candidates: openArray[string];
+                     marker: string) =
+    if not unsetInChild(envName):
+      return
+    for candidate in candidates:
+      if fileExists(candidate / marker):
+        env[envName] = candidate
+        return
+
+  let dd = repoRootAbs.parentDir  # <dev-deps>/reprobuild
+  setPackageEnv("NIMCRYPTO_SRC", [
+    repoRootAbs / "libs" / "nimcrypto",
+    dd / "codetracer" / "libs" / "nimcrypto",
+    dd / "nimcrypto",
+  ], "nimcrypto" / "hash.nim")
+  setPackageEnv("BEARSSL_SRC", [
+    dd / "nim-bearssl",
+    repoRootAbs / "libs" / "nim-bearssl",
+  ], "bearssl.nim")
+  # ``repro_local_store`` imports ``shm_gset`` from the ``nim-shm-gset``
+  # sibling (the action cache's Tier-2 index), and io-mon pulls
+  # ``shm_queue/...`` from ``nim-shm-queue``. Neither package lives under
+  # ``libs/*/src``, so ``profileNimPaths`` cannot supply them.
+  # config.nims resolves both through ``$SHM_QUEUE_SRC`` / ``$SHM_GSET_SRC``
+  # first, then a relative sibling probe, then a nix-devshell fallback —
+  # but the relative probe runs from the PROFILE directory (see the
+  # NimScript note above), and the devshell fallback is compiled out on
+  # Windows (``when defined(windows): ""``). Without the env pin the
+  # profile compile therefore fails on Windows with
+  # ``cannot open file: shm_queue/segment``; on Linux the devshell
+  # fallback happens to mask it. Pin the env vars like every other
+  # sibling package.
+  setPackageEnv("SHM_QUEUE_SRC", [
+    dd / "nim-shm-queue" / "src",
+  ], "shm_queue.nim")
+  setPackageEnv("SHM_GSET_SRC", [
+    dd / "nim-shm-gset" / "src",
+  ], "shm_gset.nim")
+  if dirExists(dd / "io-mon" / "src"):
+    if unsetInChild("IO_MON_SRC"):
+      env["IO_MON_SRC"] = dd / "io-mon" / "src"
+  if dirExists(dd / "runquota"):
+    if unsetInChild("RUNQUOTA_SRC"):
+      env["RUNQUOTA_SRC"] = dd / "runquota"
+  if dirExists(dd / "nim-stackable-hooks" / "src"):
+    if unsetInChild("STACKABLE_HOOKS_SRC"):
+      env["STACKABLE_HOOKS_SRC"] = dd / "nim-stackable-hooks" / "src"
+  if dirExists(dd / "codetracer" / "src" / "ct_test"):
+    if unsetInChild("CODETRACER_CT_TEST_SRC"):
+      env["CODETRACER_CT_TEST_SRC"] = dd / "codetracer" / "src" / "ct_test"
+  if dirExists(dd / "codetracer" / "src"):
+    if unsetInChild("CODETRACER_SRC"):
+      env["CODETRACER_SRC"] = dd / "codetracer" / "src"
+  if dirExists(dd / "codetracer-trace-format-nim" / "src"):
+    if unsetInChild("CODETRACER_TRACE_FORMAT_NIM_SRC"):
+      env["CODETRACER_TRACE_FORMAT_NIM_SRC"] = dd / "codetracer-trace-format-nim" / "src"
+  if dirExists(dd / "reprobuild-ct-test-runner"):
+    if unsetInChild("REPRO_CT_TEST_RUNNER_SRC"):
+      env["REPRO_CT_TEST_RUNNER_SRC"] = dd / "reprobuild-ct-test-runner"
+  if dirExists(dd / "reprobuild-test-adapters" / "src"):
+    if unsetInChild("REPRO_TEST_ADAPTERS_SRC"):
+      env["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"
+  env
 
 # ---------------------------------------------------------------------------
 # Direct Nim invocation (two-phase: `nim c` then run the binary).
@@ -154,95 +286,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     stderr.writeLine("repro profile compile: " & nimArgv.join(" "))
 
   try:
-    # NimScript's relative path resolution from a config.nims runs in
-    # the PROJECT (profile) directory's CWD — not nim's process CWD.
-    # So even with ``workingDir = repoRoot`` (which sets the OS
-    # cwd), the upstream config.nims's ``addPackagePath`` calls like
-    #
-    #   addPackagePath("NIMCRYPTO_SRC", [
-    #     "libs" / "nimcrypto",
-    #     ".." / "codetracer" / "libs" / "nimcrypto",
-    #     ".." / "nimcrypto"], "nimcrypto" / "hash.nim")
-    #
-    # check ``fileExists(candidate / marker)`` relative to the profile
-    # dir — where none of the candidates exist — and the package path
-    # never gets added. The transitive ``import nimcrypto/sha2`` from
-    # ``repro_project_dsl`` then fails.
-    #
-    # Pass the env-var-keyed paths the upstream config.nims expects
-    # so its FIRST lookup (``getEnv(envName)``) hits before the
-    # relative-path candidates run.
-    var childEnv = newStringTable(modeStyleInsensitive)
-    for k, v in envPairs():
-      childEnv[k] = v
-    # Mirrors the addPackagePath calls in reprobuild's config.nims —
-    # absolute paths pointing at the operator's existing sibling
-    # checkouts under <repoRoot>'s parent. (install-reprobuild.ps1
-    # clones every sibling under <LOCALAPPDATA>/dev-deps/reprobuild/,
-    # so they are siblings of ``src/``.)
-    proc setPackageEnv(envName: string; candidates: openArray[string];
-                       marker: string) =
-      if getEnv(envName).len > 0:
-        return
-      for candidate in candidates:
-        if fileExists(candidate / marker):
-          childEnv[envName] = candidate
-          return
-
-    let dd = repoRootAbs.parentDir  # <dev-deps>/reprobuild
-    setPackageEnv("NIMCRYPTO_SRC", [
-      repoRootAbs / "libs" / "nimcrypto",
-      dd / "codetracer" / "libs" / "nimcrypto",
-      dd / "nimcrypto",
-    ], "nimcrypto" / "hash.nim")
-    setPackageEnv("BEARSSL_SRC", [
-      dd / "nim-bearssl",
-      repoRootAbs / "libs" / "nim-bearssl",
-    ], "bearssl.nim")
-    # ``repro_local_store`` imports ``shm_gset`` from the ``nim-shm-gset``
-    # sibling (the action cache's Tier-2 index), and io-mon pulls
-    # ``shm_queue/...`` from ``nim-shm-queue``. Neither package lives under
-    # ``libs/*/src``, so ``profileNimPaths`` cannot supply them.
-    # config.nims resolves both through ``$SHM_QUEUE_SRC`` / ``$SHM_GSET_SRC``
-    # first, then a relative sibling probe, then a nix-devshell fallback —
-    # but the relative probe runs from the PROFILE directory (see the
-    # NimScript note above), and the devshell fallback is compiled out on
-    # Windows (``when defined(windows): ""``). Without the env pin the
-    # profile compile therefore fails on Windows with
-    # ``cannot open file: shm_queue/segment``; on Linux the devshell
-    # fallback happens to mask it. Pin the env vars like every other
-    # sibling package.
-    setPackageEnv("SHM_QUEUE_SRC", [
-      dd / "nim-shm-queue" / "src",
-    ], "shm_queue.nim")
-    setPackageEnv("SHM_GSET_SRC", [
-      dd / "nim-shm-gset" / "src",
-    ], "shm_gset.nim")
-    if dirExists(dd / "io-mon" / "src"):
-      if getEnv("IO_MON_SRC").len == 0:
-        childEnv["IO_MON_SRC"] = dd / "io-mon" / "src"
-    if dirExists(dd / "runquota"):
-      if getEnv("RUNQUOTA_SRC").len == 0:
-        childEnv["RUNQUOTA_SRC"] = dd / "runquota"
-    if dirExists(dd / "nim-stackable-hooks" / "src"):
-      if getEnv("STACKABLE_HOOKS_SRC").len == 0:
-        childEnv["STACKABLE_HOOKS_SRC"] = dd / "nim-stackable-hooks" / "src"
-    if dirExists(dd / "codetracer" / "src" / "ct_test"):
-      if getEnv("CODETRACER_CT_TEST_SRC").len == 0:
-        childEnv["CODETRACER_CT_TEST_SRC"] = dd / "codetracer" / "src" / "ct_test"
-    if dirExists(dd / "codetracer" / "src"):
-      if getEnv("CODETRACER_SRC").len == 0:
-        childEnv["CODETRACER_SRC"] = dd / "codetracer" / "src"
-    if dirExists(dd / "codetracer-trace-format-nim" / "src"):
-      if getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC").len == 0:
-        childEnv["CODETRACER_TRACE_FORMAT_NIM_SRC"] = dd / "codetracer-trace-format-nim" / "src"
-    if dirExists(dd / "reprobuild-ct-test-runner"):
-      if getEnv("REPRO_CT_TEST_RUNNER_SRC").len == 0:
-        childEnv["REPRO_CT_TEST_RUNNER_SRC"] = dd / "reprobuild-ct-test-runner"
-    if dirExists(dd / "reprobuild-test-adapters" / "src"):
-      if getEnv("REPRO_TEST_ADAPTERS_SRC").len == 0:
-        childEnv["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"
-
+    let childEnv = profileCompileChildEnv(repoRootAbs)
     var p = startProcess(nimArgv[0], workingDir = repoRootAbs,
                          args = nimArgv[1 .. ^1],
                          env = childEnv,

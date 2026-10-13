@@ -34,6 +34,7 @@ from repro_core/paths import extendedPath
 
 import blake3
 import repro_core
+from repro_core/source_root import resolveReprobuildSourceRoot
 import repro_hash
 import repro_build_engine
 import repro_profile_intent/envelope as profile_envelope
@@ -86,7 +87,9 @@ type
     ## is the absolute path to the `repro` binary that hosts the
     ## `__repro-compile-profile` internal helper subcommand.
     ## `repoRoot` is the reprobuild source tree, passed to the helper as
-    ## `--repo-root`; empty resolves it through `reprobuildRepoRoot()`.
+    ## `--repo-root`; empty resolves it through `resolveReprobuildSourceRoot()`
+    ## and refuses with `missingReprobuildSourcesMessage()` when none holds
+    ## reprobuild's libs.
     ## `workDir` is the cwd to run the helper in (defaults to the
     ## profile's parent directory). `verbose` and `forceRebuild` are
     ## debug knobs; `forceRebuild` removes the published envelope so the
@@ -331,8 +334,9 @@ proc compileProfileToRbpi*(profileRoot: string;
   ## cache answers a call whose observed inputs are unchanged without
   ## spawning the helper (and therefore without spawning `nim`).
   ##
-  ## Required `opts` fields: `stateDir`, `publicCliPath`. `repoRoot`
-  ## defaults to `reprobuildRepoRoot()` when empty.
+  ## Required `opts` fields: `stateDir`, `publicCliPath`. An empty `repoRoot`
+  ## is resolved through `resolveReprobuildSourceRoot()`, and the call is
+  ## refused with `missingReprobuildSourcesMessage()` when nothing resolves.
   if opts.stateDir.len == 0:
     raiseProfileCompile("compileProfileToRbpi: stateDir is required")
   if opts.publicCliPath.len == 0:
@@ -343,9 +347,18 @@ proc compileProfileToRbpi*(profileRoot: string;
     raiseProfileCompile("compileProfileToRbpi: profile root does not " &
       "exist: " & absProfile)
 
+  # No explicit root: resolve one, and refuse HERE when nothing holds
+  # reprobuild's libs, with the list of every place that was looked at. The
+  # alternative -- handing the helper a root nobody chose -- surfaced as a
+  # nim `cannot open file` (or a `setCurrentDir` failure) deep inside the
+  # monitored edge, naming neither the missing tree nor its remedy.
   let repoRoot =
     if opts.repoRoot.len > 0: opts.repoRoot
-    else: reprobuildRepoRoot()
+    else:
+      let resolved = resolveReprobuildSourceRoot()
+      if resolved.len == 0:
+        raiseProfileCompile(missingReprobuildSourcesMessage())
+      resolved
 
   createDir(extendedPath(profileCacheDir(opts.stateDir)))
 

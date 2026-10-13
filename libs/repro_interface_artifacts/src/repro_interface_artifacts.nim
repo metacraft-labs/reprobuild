@@ -89,6 +89,7 @@ import repro_core
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
+import repro_core/source_root
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
@@ -233,75 +234,14 @@ proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
         previous & (if previous.len > 0: "\n" else: "") &
         envName & "=" & toHex(root))
 
-const
-  InstalledSourceRootSubdir* = "share/repro/source"
-    ## Prefix-relative home of reprobuild's OWN ``libs/`` tree in an installed
-    ## layout (release archive, .deb/.rpm, MSI). The same spelling as
-    ## ``repro_dsl_stdlib/packaging/reprobuild_dist.ReprobuildSourceRootSubdir``;
-    ## ``t_packaging_reprobuild_dist`` pins the two together.
-  InstalledSourceTreesSubdir* = "share/repro/src"
-    ## Prefix-relative parent of the per-input source-only trees
-    ## (``reprobuild_dist.ReprobuildSourceSubdir``).
-  InstalledSourcePackageTrees* = [
-    ## ``(envName, path under InstalledSourceTreesSubdir)`` for every
-    ## source-only input an installed layout may carry. The names and paths
-    ## are the ``share/repro/src`` entries of the native-package wrapper
-    ## contract (``reprobuild_dist.reprobuildToolWrapperValues``), so an
-    ## archive and a package that ship the same tree seed the same variable.
-    ("NIMCRYPTO_SRC", "nimcrypto"),
-    ("BEARSSL_SRC", "bearssl"),
-    ("STACKABLE_HOOKS_SRC", "nim-stackable-hooks/src"),
-    ("CODETRACER_TRACE_FORMAT_NIM_SRC", "codetracer-trace-format-nim"),
-    ("IO_MON_SRC", "io-mon/src"),
-    ("SHM_GSET_SRC", "nim-shm-gset/src"),
-    ("SHM_QUEUE_SRC", "nim-shm-queue/src"),
-    ("CODETRACER_PINNED_SRC", "codetracer/src"),
-    ("REPRO_CT_TEST_RUNNER_SRC", "reprobuild-ct-test-runner"),
-    ("REPRO_TEST_ADAPTERS_SRC", "reprobuild-test-adapters/src"),
-    ("RUNQUOTA_SRC", "runquota"),
-  ]
-
-proc installedLayoutSourceRoot*(prefix: string): string =
-  ## ``<prefix>/share/repro/source`` when it holds reprobuild's libs, else "".
-  ## The marker is the one ``reprobuildLibraryWorkDir`` requires of any
-  ## ``REPROBUILD_SOURCE_ROOT``.
-  if prefix.len == 0:
-    return ""
-  let root = prefix / InstalledSourceRootSubdir
-  if fileExists(extendedPath(root / "libs" / "repro_project_dsl" / "src" /
-      "repro_project_dsl.nim")):
-    return root
-  ""
-
-proc installedLayoutSourceRoots*(prefix: string): seq[(string, string)] =
-  ## The source roots an installed layout rooted at ``prefix`` actually
-  ## carries, as ``(envName, absolute dir)``. Empty unless the prefix holds
-  ## reprobuild's own libs: the per-input trees are only meaningful beside
-  ## them. Pure apart from existence checks, so it is testable on a fixture.
-  let sourceRoot = installedLayoutSourceRoot(prefix)
-  if sourceRoot.len == 0:
-    return
-  result.add(("REPROBUILD_SOURCE_ROOT", sourceRoot))
-  for (envName, rel) in InstalledSourcePackageTrees:
-    let dir = prefix / InstalledSourceTreesSubdir / rel
-    if dirExists(extendedPath(dir)):
-      result.add((envName, dir))
-
-proc installedLayoutPrefixCandidates*(appFilename, publicCliPath: string):
-    seq[string] =
-  ## Install prefixes to probe, derived from where the running image lives.
-  ## ``<prefix>/bin/<exe>`` gives ``<prefix>``. The public CLI path is a
-  ## second anchor because the portable Linux archive runs its images through
-  ## the bundled loader, where ``getAppFilename()`` names
-  ## ``<prefix>/lib/ld-linux-*.so.2`` rather than the executable (the loader's
-  ## grandparent is the same prefix, but the launcher-set path says so
-  ## explicitly).
-  for anchor in [appFilename, publicCliPath]:
-    if anchor.len == 0:
-      continue
-    let prefix = anchor.parentDir.parentDir
-    if prefix.len > 0 and prefix notin result:
-      result.add(prefix)
+# The installed layout (``share/repro/{source,src}`` beside ``bin/``) is defined
+# ONCE, in ``repro_core/source_root``, because the profile compile needs it too
+# and sits below this module (Gradual-Nix-To-Reprobuild-Migration GM1w). These
+# names are re-exported so existing importers keep resolving them here.
+export InstalledSourceRootSubdir, InstalledSourceTreesSubdir,
+  InstalledSourcePackageTrees, installedLayoutSourceRoot,
+  installedLayoutPackageTrees, installedLayoutSourceRoots,
+  installedLayoutPrefixCandidates
 
 proc ensureInstalledSourcePackageEnvironment*() =
   ## Make an unpacked release archive self-contained.
@@ -320,13 +260,12 @@ proc ensureInstalledSourcePackageEnvironment*() =
   ## captures the user's environment. Runs BEFORE the build-time roots are
   ## seeded, so the archive's own copy outranks paths that only exist on the
   ## machine that built it.
-  var appFilename = ""
-  try:
-    appFilename = getAppFilename()
-  except CatchableError:
-    discard
-  for prefix in installedLayoutPrefixCandidates(appFilename,
-      getEnv("REPRO_PUBLIC_CLI_PATH")):
+  ##
+  ## The prefixes probed are ``repro_core/source_root``'s
+  ## ``runningImagePrefixCandidates``, the same ones its resolver's
+  ## installed-layout arm consults, so the root seeded here and the root
+  ## ``resolveReprobuildSourceRoot`` returns cannot disagree.
+  for prefix in runningImagePrefixCandidates():
     let roots = installedLayoutSourceRoots(prefix)
     if roots.len > 0:
       seedSourcePackageEnvironment(roots)

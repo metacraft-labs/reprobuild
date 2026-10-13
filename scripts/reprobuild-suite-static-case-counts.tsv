@@ -177,6 +177,7 @@ libs/repro_core/tests/t_process_close_once.nim	nim	4
 libs/repro_core/tests/t_project_file_alias.nim	nim	9
 libs/repro_core/tests/t_python_dep_scanner.nim	nim	16
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
+libs/repro_core/tests/t_source_root_installed_layout.nim	nim	9
 libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	19
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
@@ -420,7 +421,7 @@ libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_module_imports.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	nim	11
 libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	88
-libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	16
+libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	21
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	31
@@ -971,6 +972,7 @@ tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim	nim	6
 tests/e2e/m83/t_e2e_profile_modules.nim	nim	7
 tests/e2e/m83/t_e2e_repro_profile_compile.nim	nim	14
 tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	nim	6
+tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim	nim	3
 tests/e2e/m9/t_e2e_m9_linux_phase2_partials_resolve.nim	nim	8
 tests/e2e/m9_5/t_e2e_m9_5_linux_url_harvest.nim	nim	5
 tests/e2e/m9_5/t_e2e_m9_5_smoke_chain_resolve_gh_linux.nim	nim	5

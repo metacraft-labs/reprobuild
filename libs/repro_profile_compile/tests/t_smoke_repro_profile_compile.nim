@@ -35,8 +35,10 @@
 ## the helper subprocess) lives at
 ## `tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim`.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
+from repro_core/source_root import InstalledSourceRootSubdir,
+  InstalledSourceTreesSubdir
 
 import repro_core
 import repro_build_engine
@@ -405,3 +407,89 @@ suite "installed repro: profile compile source root and compiler":
     withEnv(ProfileNimCompilerEnvVar, dir / "no-such-nim"):
       expect CompileFailure:
         discard resolveProfileNimCompiler()
+
+# ---------------------------------------------------------------------------
+# An installed layout's source-only inputs (Gradual-Nix-To-Reprobuild-Migration
+# GM1w).
+#
+# A release archive ships reprobuild's libs under `<prefix>/share/repro/source`
+# and the inputs config.nims resolves through `*_SRC` under
+# `<prefix>/share/repro/src/<rel>`. The compile derives them from the source
+# root it was handed. The end-to-end proof against a real extracted Windows
+# bundle is `tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim`.
+# ---------------------------------------------------------------------------
+
+proc fakeInstalledPrefix(prefix: string; trees: openArray[string]) =
+  let root = prefix / InstalledSourceRootSubdir
+  fakeReprobuildTree(root)
+  writeFile(extendedPath(root / "libs" / "repro_project_dsl" / "src" /
+    "repro_project_dsl.nim"), "")
+  writeFile(extendedPath(root / "config.nims"), "")
+  for rel in trees:
+    createDir(extendedPath(prefix / InstalledSourceTreesSubdir / rel))
+
+suite "installed repro: the profile compile's source-only inputs":
+
+  test "an installed source root brings the input trees shipped beside it":
+    let prefix = createTempDir("repro installed prefix ", "")
+    defer: removeDir(prefix)
+    fakeInstalledPrefix(prefix, ["io-mon/src", "bearssl",
+      "reprobuild-test-adapters/src"])
+    let root = prefix / InstalledSourceRootSubdir
+    withEnv("IO_MON_SRC", ""):
+      withEnv("BEARSSL_SRC", ""):
+        withEnv("REPRO_TEST_ADAPTERS_SRC", ""):
+          withEnv("SHM_GSET_SRC", ""):
+            let env = profileCompileChildEnv(root)
+            check env["IO_MON_SRC"] ==
+              prefix / InstalledSourceTreesSubdir / "io-mon/src"
+            check env["BEARSSL_SRC"] ==
+              prefix / InstalledSourceTreesSubdir / "bearssl"
+            check env["REPRO_TEST_ADAPTERS_SRC"] ==
+              prefix / InstalledSourceTreesSubdir /
+                "reprobuild-test-adapters/src"
+            # Not shipped in this prefix, so not invented.
+            check not env.hasKey("SHM_GSET_SRC") or
+              env["SHM_GSET_SRC"].len == 0
+
+  test "an explicit caller value outranks the installed tree":
+    let prefix = createTempDir("repro-installed-explicit-", "")
+    defer: removeDir(prefix)
+    fakeInstalledPrefix(prefix, ["io-mon/src"])
+    withEnv("IO_MON_SRC", "/caller/io-mon/src"):
+      let env = profileCompileChildEnv(prefix / InstalledSourceRootSubdir)
+      check env["IO_MON_SRC"] == "/caller/io-mon/src"
+
+  test "a source root that is not an installed layout takes nothing from " &
+      "the table":
+    # A checkout-shaped tree whose PARENT happens to hold a share/repro/src
+    # must not be mistaken for an installed layout.
+    let base = createTempDir("repro-not-installed-", "")
+    defer: removeDir(base)
+    let checkout = base / "reprobuild"
+    fakeReprobuildTree(checkout)
+    createDir(extendedPath(base / InstalledSourceTreesSubdir / "io-mon/src"))
+    withEnv("IO_MON_SRC", ""):
+      let env = profileCompileChildEnv(checkout)
+      check not env.hasKey("IO_MON_SRC") or
+        InstalledSourceTreesSubdir notin env["IO_MON_SRC"].replace("\\", "/")
+
+  test "a source root without config.nims is refused by name":
+    let prefix = createTempDir("repro-installed-no-config-", "")
+    defer: removeDir(prefix)
+    fakeInstalledPrefix(prefix, [])
+    let root = prefix / InstalledSourceRootSubdir
+    removeFile(extendedPath(root / "config.nims"))
+    try:
+      requireReprobuildSources(root)
+      check false
+    except CompileFailure as err:
+      check "config.nims" in err.msg
+      check root in err.msg
+
+  test "the missing-sources diagnostic names the installed layout and the " &
+      "variables":
+    let msg = missingReprobuildSourcesMessage()
+    check InstalledSourceRootSubdir in msg
+    check "$REPROBUILD_SOURCE_ROOT" in msg
+    check "$REPROBUILD_REPO_ROOT" in msg

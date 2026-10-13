@@ -1539,6 +1539,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_core/tests/t_source_root_installed_layout.nim",
+    binary: "build/test-bin/t_source_root_installed_layout",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
     binary: "build/test-bin/t_daemon_active_session_tally",
     defines: @[],
@@ -8678,6 +8687,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
     binary: "build/test-bin/t_e2e_repro_profile_compile_via_action",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim",
+    binary: "build/test-bin/t_e2e_windows_bundle_compiles_profile",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
