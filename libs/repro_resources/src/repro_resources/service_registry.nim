@@ -1409,6 +1409,71 @@ const
   ServiceRegistrationsTypeId* = "reprobuild.service-registrations"
   ServiceRegistrationsAttrsTypeId* = "reprobuild.service-registrations.v1"
   ServiceRegistrationsAddressSuffix* = "/registrations"
+  MintedProvenanceField* = "provenance"
+    ## The per-row provenance key, in BOTH documents that carry a minted
+    ## identifier: this record's attrs JSON and the dev session's
+    ## `shared-instance-registrations.json`. One spelling, bound here,
+    ## for `RegistrationAddressSuffix`'s reason -- an invariant
+    ## maintained by a sentence is not an invariant.
+
+type
+  RegistrarProvenance* = enum
+    ## Shared-Development-Services §7.2 — WHERE A MINTED IDENTIFIER CAME
+    ## FROM, carried with the value rather than inferred from its shape.
+    ##
+    ## §7.2's defect: the CLI's development registrar derives an id from
+    ## `blake3DomainDigest(...)[0 ..< 24]`, and the result is
+    ## "indistinguishable, at the point of use, from an id a real issuer
+    ## minted. A consumer receives a well-formed identifier that no
+    ## issuer has ever heard of, and the failure arrives later, somewhere
+    ## else, as an authentication error." A naming convention would not
+    ## fix it -- an id is an opaque token and a consumer must not parse
+    ## one -- so the fact travels BESIDE the value, like §4.3's
+    ## provenance precondition.
+    ##
+    ## DECLARED HERE, IN THE MODULE THAT OWNS THE DURABLE ROW, and
+    ## re-exported by `readiness_edge.nim` where it used to live. The
+    ## move is L9 F5's: a stamp that exists only in the process that
+    ## minted the value cannot survive a crossing into another project's
+    ## session, so `ServiceRegistration` has to carry it -- and
+    ## `readiness_edge` already imports this module, so the enum could
+    ## not stay there without a cycle. Every existing `import
+    ## repro_resources/readiness_edge` still sees the three words,
+    ## because that module exports them.
+    rprUnstamped = "unstamped"
+      ## No registrar claimed this value. Either it was recorded with no
+      ## registrar installed, or it was read back from a record written
+      ## by a build that predates this field. NEVER read as either of the
+      ## other two: `readIssuerMintedResourceAttribute` refuses it, and
+      ## so does the `@issuer-minted:` argv token.
+    rprDevelopment = "development"
+      ## Produced offline, without an issuer. Legitimate -- it is the
+      ## default and §7.2 keeps it ("It is the SILENCE that is wrong, not
+      ## the fallback") -- and refusable by a consumer that needs the
+      ## real thing.
+    rprIssuer = "issuer"
+      ## The issuer minted it. Reprobuild cannot VERIFY this and does not
+      ## pretend to: it is the claim of the project-supplied registrar
+      ## that was installed, and it is the claim this library refuses to
+      ## let its OWN development registrar make.
+
+proc parseRegistrarProvenance*(word: string): RegistrarProvenance =
+  ## The ONE decode of a provenance word, for every document that
+  ## carries one.
+  ##
+  ## AN UNKNOWN WORD IS `unstamped`, NOT A GUESS AND NOT A PARSE
+  ## FAILURE. A word this build cannot read is a claim it cannot
+  ## evaluate, and the one answer it must not reach for is `issuer`;
+  ## `readinessOk` and `serviceCompletionRule` take the same side for the
+  ## same reason. The row still resolves through `@minted:`, so a newer
+  ## writer cannot break an older reader's offline path.
+  ##
+  ## AN ABSENT KEY ARRIVES HERE AS `""`, which is also `unstamped` --
+  ## the truth about a row written by a build that predates the field.
+  result = rprUnstamped
+  for candidate in RegistrarProvenance:
+    if $candidate == word:
+      return candidate
 
 type
   ServiceRegistration* = object
@@ -1435,6 +1500,32 @@ type
       ## fix for it. A row written before this field exists decodes as
       ## `""`, which matches no named registrar and is therefore
       ## re-minted once, by whoever is installed.
+    provenance*: RegistrarProvenance
+      ## WHAT THE REGISTRAR THAT MINTED IT CLAIMED — §7.2, made DURABLE
+      ## by L9 F5.
+      ##
+      ## NOT DERIVABLE FROM `registrar`, and that is the whole reason it
+      ## is a second field. `registrar` is a NAME (`development`, or
+      ## `external:/path/to/script`); a reader that decided provenance
+      ## from it would be saying "anything that is not the development
+      ## one is the issuer" — which is §7.2's substitution written as an
+      ## inference, and it would promote the `(unnamed registrar)`
+      ## install site to `issuer` as well.
+      ##
+      ## WHY IT HAS TO BE DURABLE AND NOT ONLY IN-PROCESS.
+      ## `recordComputedResourceAttribute` stamps a value from the
+      ## registrar installed AT THAT MOMENT, and that table lives in the
+      ## process that converged the instance. L9 F5 is a consumer in
+      ## ANOTHER project's session reading what this instance minted, and
+      ## that process has no registrar installed and never will — it
+      ## attaches, it does not mint. A crossing that lost the stamp would
+      ## hand it an identifier it cannot ask about, which is strictly
+      ## worse than the refusal it replaces.
+      ##
+      ## A ROW WRITTEN BEFORE THIS FIELD DECODES AS `rprUnstamped`,
+      ## which is the truth about it: nothing claimed it. `@minted:`
+      ## still resolves it and `@issuer-minted:` refuses it, so the
+      ## fail-closed direction is the one an older record takes.
 
   ServiceRegistrationSet* = object
     address*: string
@@ -1467,7 +1558,8 @@ proc encodeServiceRegistrations*(value: ServiceRegistrationSet): string =
       "contributor": reg.contributor,
       "mintedId": reg.mintedId,
       "mintedAtUnix": reg.mintedAtUnix,
-      "registrar": reg.registrar})
+      "registrar": reg.registrar,
+      MintedProvenanceField: $reg.provenance})
   let node = %*{"attrsTypeId": ServiceRegistrationsAttrsTypeId}
   node["registrations"] = rows
   $node
@@ -1517,7 +1609,17 @@ proc decodeServiceRegistrations*(address, attrsTypeId, attrsJson: string):
       contributor: row{"contributor"}.getStr(""),
       mintedId: row{"mintedId"}.getStr(""),
       mintedAtUnix: row{"mintedAtUnix"}.getBiggestInt(0),
-      registrar: row{"registrar"}.getStr("")))
+      registrar: row{"registrar"}.getStr(""),
+      # ADDED WITHOUT BUMPING `ServiceRegistrationsAttrsTypeId`,
+      # deliberately, and for the reason the decode's own refusal gives
+      # two screens up: this codec REFUSES an attrs type it does not
+      # know, and "reading it anyway would re-mint every identifier in
+      # it, which is the one failure this record exists to prevent". A
+      # bump would turn every pre-§7.2 record into exactly that
+      # refusal. An absent key reads as `unstamped`, which is what the
+      # row actually is.
+      provenance: parseRegistrarProvenance(
+        row{MintedProvenanceField}.getStr(""))))
 
 proc readServiceRegistrations*(storeRoot: string;
                                key: ServiceInstanceKey):
@@ -1556,7 +1658,8 @@ proc reconcileServiceRegistrations*(
     contributors: openArray[string];
     mint: ServiceRegistrationMinter;
     now: Time = getTime();
-    registrar = ""):
+    registrar = "";
+    provenance = rprUnstamped):
     tuple[set: ServiceRegistrationSet;
           outcomes: seq[tuple[member: string;
                               outcome: ServiceRegistrationOutcome]]] =
@@ -1575,6 +1678,20 @@ proc reconcileServiceRegistrations*(
   ## the new registrar's provenance to the old registrar's value. The
   ## default `""` preserves the pre-§7.2 behaviour exactly for a caller
   ## that names nobody: `""` matches `""`, so reuse is unchanged.
+  ##
+  ## `provenance` IS WHAT THAT REGISTRAR CLAIMS, and it is recorded on
+  ## the rows this call MINTS and on no others. A REUSED row keeps the
+  ## stamp it was minted under, which is sound precisely because
+  ## `registrar` is part of the reuse key: a row can only be reused by
+  ## the registrar that minted it, and one registrar has one provenance
+  ## (`ServiceRegistrarIdentity`: "ONE PROVENANCE PER REGISTRAR, not one
+  ## per row"). Re-stamping a reused row from the CURRENT caller would
+  ## be the same move with the same name, and `t_dss72`'s no-re-stamp
+  ## control exists because it was written that way first.
+  ##
+  ## IT DEFAULTS TO `rprUnstamped` AND NOT TO THE CALLER'S WORD. A
+  ## caller that names a registrar but no provenance has made no claim,
+  ## and `unstamped` is the only answer that is not a guess.
   ##
   ## A MEMBER NO LONGER CONTRIBUTED IS REMOVED, and nothing else is --
   ## §5's withdrawal property, at this layer. It is removed rather than
@@ -1627,7 +1744,8 @@ proc reconcileServiceRegistrations*(
       contributor: contributors[i],
       mintedId: minted,
       mintedAtUnix: now.toUnix(),
-      registrar: registrar))
+      registrar: registrar,
+      provenance: provenance))
     outcomes.add((member: members[i], outcome: sroMinted))
   for reg in existing.registrations:
     var stillAsked = false

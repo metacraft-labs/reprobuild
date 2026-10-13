@@ -15891,6 +15891,10 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ##   4. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
   ##      instance declares. Refused, never dropped (§4.6), including
   ##      under version skew.
+  ##   5. READ BACK WHAT THE INSTANCE MINTED, from the instance's own
+  ##      durable registration record, into THIS session's minted file --
+  ##      L9's **F5**. See the step's own comment at the foot of the
+  ##      loop for the design and for the four alternatives it rejects.
   ##
   ## Returns 0 when every resolution attached and deposited, and 1 when
   ## any refused. Called BEFORE the supervisor is launched, for
@@ -15909,6 +15913,14 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   let holderId = serviceLeaseHolderId(projectRoot)
   let storeRoot = serviceInstanceStoreRoot(dlsUser)
   var refused = 0
+  # L9 F5: what every instance this session resolved has minted,
+  # accumulated across the resolutions and merged into the session's
+  # minted record ONCE, below the loop. Accumulated rather than merged
+  # per resolution because the merge is a read-modify-write of one file:
+  # doing it inside the loop would read back rows it had just written,
+  # which is the shape in which a merge rule becomes order-dependent.
+  var crossSessionMinted: seq[tuple[serviceName, member, mintedId: string;
+                                    provenance: RegistrarProvenance]] = @[]
   for resolution in artifact.sharedResolutions:
     let site =
       if resolution.sourceFile.len == 0: "<unknown site>"
@@ -16082,6 +16094,123 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
       " for `" & resolution.consumerPackage & "`, replacing " &
       $deposited.replaced & ", of " &
       $deposited.set.contributions.len & " on the instance")
+
+    # ── STEP 5 — L9's F5: READ WHAT THE INSTANCE MINTED, FROM THE
+    # INSTANCE, IN A SESSION THAT DID NOT CONVERGE IT ────────────────
+    #
+    # THE DEFECT, as L9 F4 measured it at `f927919fa`: the minted table
+    # lived ONLY in the session directory of the process that converged
+    # the instance. `substituteMintedAttributes` resolves
+    # `@minted:<member>@` out of
+    # `readSharedInstanceMintedAttributes(config.outDir)`, the one
+    # writer of that file is `convergeSharedServiceInstances` in the
+    # SAME `repro up`, and a second project's session directory has no
+    # such file. So a consuming service declared in another product's
+    # recipe, asking for a member the shared instance had already
+    # minted, was REFUSED -- and F5 (delete the hand-written wrapper),
+    # the product recipe migration and §9's "declared once" were all
+    # blocked behind that one reader.
+    #
+    # THE READER IS KEYED ON THE INSTANCE, NOT ON THE SESSION, and that
+    # is the whole decision. §4.4 already settled where a shared
+    # instance's state lives -- "addressed by its identity" -- and L8
+    # put the registrations there for its own reason ("KEYED BY THE
+    # INSTANCE, SO THE IDENTIFIERS SURVIVE A RESTART"). A value keyed by
+    # `(identity, scope, environment)` is by construction "one place per
+    # instance, not per session", so the crossing needs no new store, no
+    # new file format and no new protocol verb: it needs the read that
+    # was missing. `readServiceRegistrations` is the same proc the
+    # owner's `reconcileServiceRegistrations` reads through, so the two
+    # sessions cannot disagree about what the instance minted.
+    #
+    # WHAT WAS REJECTED, AND WHY:
+    #
+    #   * COPY THE OWNER'S SESSION FILE. Keyed on the session, which is
+    #     the defect; needs the owner's project path, which this process
+    #     has no business knowing; and survives the owner's `repro down`
+    #     as last run's answer, which is the exposure L9's review
+    #     measured in `dev-server.sh`'s descriptor.
+    #   * SERVE THE TABLE FROM THE DAEMON. The registration record is
+    #     deliberately NOT the daemon's: "The instance record is the
+    #     DAEMON's ... The registrations are the CONSUMER's reconcile,
+    #     run from the CLI after the daemon has answered. Two writers on
+    #     one record is a race." A verb that served a record the daemon
+    #     never writes would put it in front of state it does not own,
+    #     and would need protocol negotiation to deliver bytes both
+    #     sides can already read from one agreed root -- the root the
+    #     cross-process CONTRIBUTION lane above already crosses on.
+    #   * A DESCRIPTOR FILE OR AN ENVIRONMENT VARIABLE between the two
+    #     projects. That is the construct §7.2 exists to replace: it
+    #     carries no stamp, so the consumer cannot ask where the value
+    #     came from, and it outlives the issuer it describes.
+    #   * RE-RUN THE REGISTRAR IN THE CONSUMER'S SESSION. It would mint
+    #     in a SECOND identifier space -- L9 F4's measured defect, the
+    #     one §7.2 closed -- and would require every consumer to hold
+    #     the issuer's credentials.
+    #   * LET THE CONSUMER RESOLVE THE KEY ITSELF, without the lift.
+    #     §4.6 puts the machinery here for §4.3's reason: a consumer
+    #     that invented an identity would attach to a DIFFERENT instance
+    #     and see contributions that never appear. That is `key`'s
+    #     `degradationReport()` above, reported rather than swallowed.
+    #
+    # THE INSTANCE NOT RUNNING, AND THE READER NOT BEING A HOLDER, ARE
+    # BOTH UNREPRESENTABLE HERE, STRUCTURALLY AND NOT BY ASSERTION.
+    # This statement is reachable only below step 3's `continue`s: the
+    # daemon's command-less converge refuses by name when no instance is
+    # present (a resolver attaches, it cannot materialise), and the same
+    # request is what TOOK this project's lease with `holderId`. So a
+    # reader that gets here has an instance and is one of its holders,
+    # and a reader that is neither never reads -- `repro up` returns
+    # non-zero with the daemon's own refusal and the supervisor is never
+    # launched.
+    #
+    # AN EMPTY RECORD IS NOT A REFUSAL HERE. A consumer may resolve a
+    # service only to attach and contribute, with no token to
+    # concretize, and an instance with no `converge` point mints
+    # nothing. The refusal for a token that cannot be resolved belongs
+    # at the POINT OF USE, where `substituteMintedAttributes` already
+    # names the attribute, the resource and the ordering edge. Refusing
+    # here would break every consumer that reads nothing by design.
+    let instanceMinted =
+      try:
+        readServiceRegistrations(storeRoot, key)
+      except CatchableError as err:
+        refuse("reading what this instance has minted failed: " &
+          err.msg & " The registration record is where a consumer in " &
+          "another session reads an identifier this instance minted " &
+          "(Shared-Development-Services.md §4.4), so this is refused " &
+          "rather than read as `nothing minted`: reading it as empty " &
+          "would turn a corrupt record into an unresolvable token and " &
+          "report the wrong cause.")
+        inc refused
+        continue
+    for reg in instanceMinted.registrations:
+      # THE STAMP CROSSES WITH THE VALUE, verbatim from the durable row.
+      # §7.2's refusal has to stay reachable from the second session --
+      # "a cross-session reader that loses the stamp would be strictly
+      # worse than the refusal it replaces" -- so nothing here derives,
+      # defaults or upgrades a provenance. A row minted before the field
+      # existed arrives as `unstamped` and `@issuer-minted:` refuses it,
+      # which is the fail-closed direction.
+      crossSessionMinted.add((serviceName: resolution.serviceName,
+        member: reg.member, mintedId: reg.mintedId,
+        provenance: reg.provenance))
+    # SAID OUT LOUD, including when it is zero. A read that silently
+    # found nothing is this campaign's own defect class, and the number
+    # is the one fact that distinguishes "the instance minted nothing"
+    # from "this session never read it".
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()`: read " &
+      $instanceMinted.registrations.len & " minted attribute" &
+      (if instanceMinted.registrations.len == 1: "" else: "s") &
+      " from instance " & serviceInstanceAddress(key))
+  if crossSessionMinted.len > 0:
+    # MERGED, not written: `convergeSharedServiceInstances` has already
+    # written this session's OWN declarations' rows at this point in
+    # `runUpOrDevCommand`, and a project may both declare one shared
+    # service and resolve another. A plain write here would discard the
+    # rows it converged a moment ago.
+    mergeSharedInstanceMinted(parsed.selection.outDir, crossSessionMinted)
   if refused > 0: 1 else: 0
 
 proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
@@ -16428,7 +16557,17 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
                   ("repro-dev-registration.v1\x00" & response.address &
                    "\x00" & member).bytesOf(),
                   hdMetadataEnvelope))[0 ..< 24],
-            registrar = registrarIdentity.name)
+            registrar = registrarIdentity.name,
+            # §7.2's stamp, now RECORDED IN THE DURABLE ROW and not only
+            # in this session's file. L9 F5: a consumer in another
+            # project's session reads this record, and that process has
+            # no registrar installed -- it attaches, it does not mint --
+            # so a stamp that lived only in `computedAttributes` would
+            # not survive the crossing. Taken from the SAME
+            # `registrarIdentity` that `setServiceRegistrar` installed,
+            # so the durable stamp and the in-process one cannot
+            # disagree about a value minted in this run.
+            provenance = registrarIdentity.provenance)
           registrarRan = true
           result = @[]
           for reg in reconciled.set.registrations:
@@ -16540,6 +16679,34 @@ proc releaseSharedServiceInstances(outDir: string): int =
   ## L7 (§4.5): drop this project's holder on every instance the ledger
   ## records. Returns 0 when every release was decided, 1 when any
   ## refused or failed.
+  # L9 F5 -- THE MINTED RECORD GOES FIRST, AND BEFORE THE EARLY RETURN.
+  #
+  # A NEAR-MISS FOUND BY PROBING THE CROSS-SESSION READER, in the same class
+  # as the one L9's review found in `infra`'s `dev-server.sh` (`cleanup()`
+  # removed the readiness marker and not the descriptor, so a product read a
+  # dead issuer's client ids after `repro down`). This file is the same shape:
+  # it names identifiers of an instance this session has just stopped holding,
+  # and nothing removed it.
+  #
+  # A HAZARD RATHER THAN A LIVE DEFECT, stated precisely because the
+  # difference matters: every `repro up` rewrites it before the supervisor
+  # starts -- a project with declarations writes it at the foot of
+  # `convergeSharedServiceInstances`, and a PURE CONSUMER has it REMOVED by
+  # that proc's `declarations.len == 0` arm and then re-merged by the
+  # resolver -- so no run reads a stale table. What the removal closes is the
+  # window between a `down` and the next `up`, in which the file on disk
+  # names an instance that may already be gone. The descriptor case says what
+  # that window costs when someone reads it.
+  #
+  # BEFORE the `ledger.entries.len == 0` early return, and that placement is
+  # the whole point: a PURE CONSUMER -- the F5 case, a project that resolves
+  # another's service and declares none of its own -- takes no holder and so
+  # has NO LEDGER. A removal placed after that return would be dead code for
+  # exactly the sessions this reader was built for.
+  try:
+    removeFile(extendedPath(outDir.sharedInstanceMintedPath))
+  except OSError, IOError:
+    discard
   let ledger =
     try:
       readSharedInstanceLedger(outDir)

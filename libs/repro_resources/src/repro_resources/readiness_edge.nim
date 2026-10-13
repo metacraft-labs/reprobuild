@@ -104,6 +104,24 @@ from repro_home_resources/types import ObservedState, ResourceActionKind,
 import repro_project_dsl                  # registerExtension / TypedExtensionBox
 import repro_resources/instance
 import repro_resources/service_registry  # the ONE registrations-suffix definition
+# Shared-Development-Services §7.2's provenance vocabulary, RE-EXPORTED
+# rather than declared here.
+#
+# It moved into `service_registry.nim` for L9 F5: the DURABLE
+# registration row has to carry the stamp, or a consumer in another
+# project's session reads an identifier it cannot ask about. This module
+# already imports that one (the `/registrations` suffix), so the enum
+# could not stay here without a cycle.
+#
+# RE-EXPORTED AND NOT ALIASED, so there is exactly one definition and
+# every `import repro_resources/readiness_edge` in the tree -- the CLI's
+# `dev_session.nim`, `service_registrar.nim`, the §7.2 and D-SS10 test
+# files -- keeps compiling unchanged. `RegistrationAddressSuffix`'s own
+# comment two screens down is this decision's precedent: binding to the
+# other module's constant is what makes "ONE definition" structural
+# rather than a sentence.
+export RegistrarProvenance,   # the three words come with the type
+  parseRegistrarProvenance, MintedProvenanceField
 
 type
   ReadinessEdgeError* = object of CatchableError
@@ -223,36 +241,6 @@ type
       ## it is installed. A registrar that stamped its own rows could
       ## stamp them `issuer` while being the offline digest one, which is
       ## the substitution §7.2 exists to make impossible.
-
-  RegistrarProvenance* = enum
-    ## Shared-Development-Services §7.2 — WHERE A MINTED IDENTIFIER CAME
-    ## FROM, carried with the value rather than inferred from its shape.
-    ##
-    ## §7.2's defect: the CLI's development registrar derives an id from
-    ## `blake3DomainDigest(...)[0 ..< 24]`, and the result is
-    ## "indistinguishable, at the point of use, from an id a real issuer
-    ## minted. A consumer receives a well-formed identifier that no
-    ## issuer has ever heard of, and the failure arrives later, somewhere
-    ## else, as an authentication error." A naming convention would not
-    ## fix it -- an id is an opaque token and a consumer must not parse
-    ## one -- so the fact travels BESIDE the value, like §4.3's
-    ## provenance precondition.
-    rprUnstamped = "unstamped"
-      ## No registrar claimed this value. Either it was recorded with no
-      ## registrar installed, or it was read back from a record written
-      ## by a build that predates this field. NEVER read as either of the
-      ## other two: `readIssuerMintedResourceAttribute` refuses it, and
-      ## so does the `@issuer-minted:` argv token.
-    rprDevelopment = "development"
-      ## Produced offline, without an issuer. Legitimate -- it is the
-      ## default and §7.2 keeps it ("It is the SILENCE that is wrong, not
-      ## the fallback") -- and refusable by a consumer that needs the
-      ## real thing.
-    rprIssuer = "issuer"
-      ## The issuer minted it. Reprobuild cannot VERIFY this and does not
-      ## pretend to: it is the claim of the project-supplied registrar
-      ## that was installed, and it is the claim this library refuses to
-      ## let its OWN development registrar make.
 
   ServiceRegistrarIdentity* = object
     ## WHICH registrar is installed, and what everything it produces is

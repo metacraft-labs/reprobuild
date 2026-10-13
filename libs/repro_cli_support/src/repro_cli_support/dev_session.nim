@@ -762,17 +762,6 @@ const
     ## future rename to `@minted-by-issuer:` would silently make every
     ## such token look like an embedded `@minted:` and be refused for
     ## the wrong reason.
-  MintedProvenanceField* = "provenance"
-    ## The per-row provenance key in `SharedInstanceMintedFile`.
-    ##
-    ## ADDED WITHOUT BUMPING THE SCHEMA ID, deliberately. A row written
-    ## by a build that predates it has no such key and is read as
-    ## `rprUnstamped` -- which is the truth about it, and which
-    ## `@issuer-minted:` refuses while `@minted:` still resolves. Bumping
-    ## the id instead would make a session file left by a previous
-    ## `repro up` unreadable mid-session, turning a read that should
-    ## fail CLOSED on the one token that cares into a hard failure of
-    ## every token.
   SharedInstanceMintedFile* = "shared-instance-registrations.json"
   SharedInstanceMintedSchemaId* =
     "reprobuild.dev-session.shared-instance-registrations.v1"
@@ -836,17 +825,27 @@ type
     value*: string
     provenance*: RegistrarProvenance
 
-proc readSharedInstanceMintedAttributes*(outDir: string):
-    Table[string, MintedAttribute] =
-  ## The minted table WITH provenance, keyed `<serviceName>:<member>` and
-  ## also by the bare `<member>`.
+proc readSharedInstanceMintedRows*(outDir: string):
+    seq[tuple[serviceName, member, mintedId: string;
+              provenance: RegistrarProvenance]] =
+  ## The file's rows AS WRITTEN, in file order, with the stamp decoded.
   ##
-  ## THE ONE READER of this file. `readSharedInstanceMinted` is derived
-  ## from it rather than parsing the file a second time: two readings of
-  ## one document are two things that can disagree, and the disagreement
-  ## that matters here -- one reader seeing a stamp and the other not --
-  ## is the whole defect.
-  result = initTable[string, MintedAttribute]()
+  ## THE ONE PARSE of this document.
+  ## `readSharedInstanceMintedAttributes` folds these rows into the
+  ## lookup table and `readSharedInstanceMinted` drops the stamp from
+  ## that; neither parses the file a second time, because two readings
+  ## of one document are two things that can disagree, and the
+  ## disagreement that matters here -- one reader seeing a stamp and the
+  ## other not -- is the whole defect.
+  ##
+  ## IT EXISTS AS A SEPARATE SURFACE BECAUSE THE TABLE IS LOSSY. The
+  ## table keys on `<serviceName>:<member>` and on the bare `<member>`,
+  ## and drops the bare key when two services disagree -- so a caller
+  ## that has to REWRITE the file (L9 F5's resolver, merging what
+  ## another project's instance minted into this session's rows) cannot
+  ## reconstruct the rows from it. A merge built on the table would
+  ## quietly re-attribute every row to whichever service sorted first.
+  result = @[]
   let path = outDir.sharedInstanceMintedPath
   if not fileExists(extendedPath(path)):
     return
@@ -863,7 +862,6 @@ proc readSharedInstanceMintedAttributes*(outDir: string):
   let rows = doc{"registrations"}
   if rows.isNil or rows.kind != JArray:
     return
-  var ambiguous: seq[string] = @[]
   for row in rows:
     if row.kind != JObject:
       continue
@@ -873,25 +871,67 @@ proc readSharedInstanceMintedAttributes*(outDir: string):
     if member.len == 0 or mintedId.len == 0:
       continue
     # AN UNKNOWN PROVENANCE WORD IS `unstamped`, NOT A GUESS AND NOT A
-    # PARSE FAILURE. A word this build cannot read is a claim it cannot
-    # evaluate, and the one answer it must not reach for is `issuer`;
-    # `readinessOk` and `serviceCompletionRule` take the same side for
-    # the same reason. The row still resolves through `@minted:`, so a
-    # newer writer cannot break an older reader's offline path.
-    var provenance = rprUnstamped
-    let word = row{MintedProvenanceField}.getStr("")
-    for candidate in RegistrarProvenance:
-      if $candidate == word:
-        provenance = candidate
-        break
-    let attr = MintedAttribute(value: mintedId, provenance: provenance)
-    result[serviceName & ":" & member] = attr
-    if member in result and result[member] != attr:
-      ambiguous.add(member)
+    # PARSE FAILURE -- `parseRegistrarProvenance`, the ONE decode, which
+    # the durable registration record shares. See its own comment for
+    # why `issuer` is the one answer it must not reach for.
+    result.add((serviceName: serviceName, member: member,
+      mintedId: mintedId,
+      provenance: parseRegistrarProvenance(
+        row{MintedProvenanceField}.getStr(""))))
+
+proc readSharedInstanceMintedAttributes*(outDir: string):
+    Table[string, MintedAttribute] =
+  ## The minted table WITH provenance, keyed `<serviceName>:<member>` and
+  ## also by the bare `<member>`. Folded from
+  ## `readSharedInstanceMintedRows`, which is the one parse.
+  result = initTable[string, MintedAttribute]()
+  var ambiguous: seq[string] = @[]
+  for row in readSharedInstanceMintedRows(outDir):
+    let attr = MintedAttribute(value: row.mintedId,
+      provenance: row.provenance)
+    result[row.serviceName & ":" & row.member] = attr
+    if row.member in result and result[row.member] != attr:
+      ambiguous.add(row.member)
     else:
-      result[member] = attr
+      result[row.member] = attr
   for member in ambiguous:
     result.del(member)
+
+proc mergeSharedInstanceMinted*(outDir: string;
+    entries: openArray[tuple[serviceName, member, mintedId: string;
+                             provenance: RegistrarProvenance]]) =
+  ## Add rows to this session's minted record, keeping what is already
+  ## there and REPLACING a row with the same `(serviceName, member)`.
+  ##
+  ## WHY A MERGE AND NOT A SECOND FILE (L9 F5). A project may both
+  ## DECLARE a shared service and RESOLVE another project's — `repro up`
+  ## converges its own declarations first and writes their rows, then
+  ## the resolver runs. A second file would mean two readers at the
+  ## point of use, and `substituteMintedAttributes` takes ONE table; the
+  ## one that happened to be read first would silently win a member both
+  ## held. One document, one reader, one ambiguity rule — and the
+  ## ambiguity rule is already `readSharedInstanceMintedAttributes`',
+  ## which drops a bare member two services disagree about rather than
+  ## picking one.
+  ##
+  ## REPLACE RATHER THAN APPEND on a repeated key, because the caller
+  ## that repeats one is reading the SAME instance again in the same
+  ## process and the later read is the current one. Appending would
+  ## leave two rows whose values the fold then has to choose between,
+  ## and the fold's rule would delete the bare key — turning a
+  ## re-resolution into a refusal.
+  var rows = readSharedInstanceMintedRows(outDir)
+  for entry in entries:
+    var replaced = false
+    for i in 0 ..< rows.len:
+      if rows[i].serviceName == entry.serviceName and
+         rows[i].member == entry.member:
+        rows[i] = entry
+        replaced = true
+        break
+    if not replaced:
+      rows.add(entry)
+  writeSharedInstanceMinted(outDir, rows)
 
 proc readSharedInstanceMinted*(outDir: string): Table[string, string] =
   ## The minted table, keyed `<serviceName>:<member>` and also by the

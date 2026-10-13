@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1962,
+    "nimTestBinaries": 1965,
     "pureUnitConsolidationGroups": 54,
-    "pureUnitTests": 626,
+    "pureUnitTests": 628,
     "staticallyDetectedRuntimeCompilerFlowTests": 111,
-    "testEntries": 1979
+    "testEntries": 1982
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -502,7 +502,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 8,
+      "count": 9,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl",
@@ -512,6 +512,7 @@
       "sources": [
         "libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim",
         "libs/repro_resources/tests/t_dss72_reuse_is_keyed_on_the_registrar.nim",
+        "libs/repro_resources/tests/t_f5_the_durable_row_carries_its_provenance.nim",
         "libs/repro_resources/tests/t_l1_state_store.nim",
         "libs/repro_resources/tests/t_l2_lease_edge.nim",
         "libs/repro_resources/tests/t_l3_reaper.nim",
@@ -1178,9 +1179,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 13,
-      "integration": 1041,
+      "integration": 1042,
       "platform/destructive": 120,
-      "pure unit": 626,
+      "pure unit": 628,
       "unclassified": 179
     },
     "graphOwnedTestArtifacts": [
@@ -1359,9 +1360,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1962,
+    "nimTestBinaryCount": 1965,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1979
+    "testEntryCount": 1982
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8896,6 +8897,24 @@
       "source": "libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_f5_the_session_minted_record_merges_without_losing_rows",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_f5_the_session_minted_record_merges_without_losing_rows.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16537,6 +16556,24 @@
       "owner": "libs/repro_resources",
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_dss72_reuse_is_keyed_on_the_registrar.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_f5_the_durable_row_carries_its_provenance",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_f5_the_durable_row_carries_its_provenance.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -28989,6 +29026,25 @@
       "source": "tests/integration/t_external_cli_store_contract_writes_and_reads.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_f5_two_sessions_read_one_instances_minted_id",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_resources",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_f5_two_sessions_read_one_instances_minted_id.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
