@@ -51,7 +51,10 @@ export sources.pruneStaleProfileCache
 
 # Direct nim invocation + JSON->RBPI bridge.
 export compile.CompileFailure
-export compile.requireNimOnPath
+export compile.ProfileNimCompilerEnvVar
+export compile.resolveProfileNimCompiler
+export compile.requireReprobuildSources
+export compile.profileCompileArgv
 export compile.compileProfileBinary
 export compile.rbpiBytesFromJson
 export compile.writeBytesAtomic

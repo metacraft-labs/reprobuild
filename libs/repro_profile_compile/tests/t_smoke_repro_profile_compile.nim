@@ -261,8 +261,16 @@ suite "M83 Phase C: profileCompileBuildAction":
     #
     # The inequality below keeps this from passing vacuously against a
     # constructor that went back to passing the seed through.
+    #
+    # The edge also names `REPRO_NIM_COMPILER` as an environment passthrough
+    # (the helper compiles with it when set, GM1), and `action()` mixes the
+    # declared environment in INSIDE the lock mix -- so the expectation
+    # composes the two in that order.
     check act.weakFingerprint ==
-      keyedOnGoverningLock(weak, lockIdentityOutsideSolvedGraph())
+      keyedOnGoverningLock(
+        keyedOnActionEnvironment(weak, [], [ProfileNimCompilerEnvVar]),
+        lockIdentityOutsideSolvedGraph())
+    check act.envPassthrough == @[ProfileNimCompilerEnvVar]
     check act.weakFingerprint != weak
     check act.argv[0] == "/bin/repro"
     check act.argv[1] == "__repro-compile-profile"
@@ -348,3 +356,76 @@ suite "M83 Phase C: compileProfileToRbpi cache fast-path":
     opts = ProfileCompileOptions(stateDir: "/state")
     expect ProfileCompileError:
       discard compileProfileToRbpi("/p/home.nim", opts)
+
+# ---------------------------------------------------------------------------
+# Source-root and compiler resolution for an installed `repro`.
+#
+# These pin the precedence `reprobuildRepoRoot()` shares with the provider
+# compile (`repro_core/source_root`) and the `$REPRO_NIM_COMPILER` contract,
+# without a process launch. The end-to-end proof against a real installed
+# package is `tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim`.
+# ---------------------------------------------------------------------------
+
+proc fakeReprobuildTree(root: string) =
+  ## The two markers the resolver and the compile check for.
+  createDir(extendedPath(root / "libs" / "repro_project_dsl" / "src"))
+  createDir(extendedPath(root / "libs" / "repro_profile" / "src"))
+
+template withEnv(name, value: string; body: untyped) =
+  let hadOld = existsEnv(name)
+  let old = getEnv(name)
+  if value.len > 0: putEnv(name, value) else: delEnv(name)
+  try:
+    body
+  finally:
+    if hadOld: putEnv(name, old) else: delEnv(name)
+
+suite "installed repro: profile compile source root and compiler":
+
+  test "REPROBUILD_SOURCE_ROOT is honoured when no override is set":
+    let tree = createTempDir("repro-src-root-", "")
+    defer: removeDir(tree)
+    fakeReprobuildTree(tree)
+    withEnv("REPROBUILD_LIBS_DIR", ""):
+      withEnv("REPROBUILD_REPO_ROOT", ""):
+        withEnv("REPROBUILD_SOURCE_ROOT", tree):
+          check reprobuildRepoRoot() == tree
+
+  test "REPROBUILD_REPO_ROOT outranks REPROBUILD_SOURCE_ROOT, and a stale " &
+      "one falls through":
+    let a = createTempDir("repro-src-root-a-", "")
+    let b = createTempDir("repro-src-root-b-", "")
+    defer:
+      removeDir(a)
+      removeDir(b)
+    fakeReprobuildTree(a)
+    fakeReprobuildTree(b)
+    withEnv("REPROBUILD_LIBS_DIR", ""):
+      withEnv("REPROBUILD_SOURCE_ROOT", b):
+        withEnv("REPROBUILD_REPO_ROOT", a):
+          check reprobuildRepoRoot() == a
+        # An override naming a directory without reprobuild's libs is
+        # skipped, not obeyed.
+        withEnv("REPROBUILD_REPO_ROOT", a / "missing"):
+          check reprobuildRepoRoot() == b
+
+  test "a source root without reprobuild's libs is refused by name":
+    let empty = createTempDir("repro-src-root-empty-", "")
+    defer: removeDir(empty)
+    try:
+      requireReprobuildSources(empty)
+      check false
+    except CompileFailure as err:
+      check empty in err.msg
+      check "REPROBUILD_SOURCE_ROOT" in err.msg
+
+  test "REPRO_NIM_COMPILER is used when set and refused when it names no file":
+    let dir = createTempDir("repro-nim-compiler-", "")
+    defer: removeDir(dir)
+    let fakeNim = dir / addFileExt("my nim", ExeExt)
+    writeFile(extendedPath(fakeNim), "")
+    withEnv(ProfileNimCompilerEnvVar, fakeNim):
+      check resolveProfileNimCompiler() == fakeNim
+    withEnv(ProfileNimCompilerEnvVar, dir / "no-such-nim"):
+      expect CompileFailure:
+        discard resolveProfileNimCompiler()

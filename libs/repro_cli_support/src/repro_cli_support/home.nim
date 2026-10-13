@@ -236,7 +236,10 @@ proc defaultProfileCompileOptionsFor(profileRoot: string;
   result = ProfileCompileOptions(
     stateDir: stateDir,
     publicCliPath: getAppFilename(),
-    repoRoot: getEnv(RepoRootEnvVar),
+    # Empty: `compileProfileToRbpi` resolves the sources through
+    # `reprobuildRepoRoot()`, which honours `$REPROBUILD_REPO_ROOT` and the
+    # installed package's `$REPROBUILD_SOURCE_ROOT` alike.
+    repoRoot: "",
     workDir: profileRoot.parentDir,
     verbose: false,
     forceRebuild: false)

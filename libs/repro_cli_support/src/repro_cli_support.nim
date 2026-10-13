@@ -23,6 +23,7 @@ import repro_core/relocation
 # lint at every probe site.
 import repro_core/ambient_execution
 import repro_core/cli_images
+import repro_core/source_root
 import repro_build_engine
 import repro_cmake_trycompile
 import repro_dev_env_activation
@@ -1921,27 +1922,16 @@ proc reprobuildLibraryWorkDir*(): string =
   ## its OWN checkout while resolving the monitor shim, or else the checkout
   ## the engine was compiled from. So a dev environment compiled every
   ## recipe against the engine's libs whatever the override said.
-  proc hasReprobuildLibs(root: string): bool =
-    dirExists(extendedPath(root / "libs" / "repro_project_dsl" / "src"))
-
-  let libsDir = getEnv("REPROBUILD_LIBS_DIR")
-  if libsDir.len > 0 and hasReprobuildLibs(libsDir.parentDir):
-    return libsDir.parentDir
-  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
-  if repoRoot.len > 0 and hasReprobuildLibs(repoRoot):
-    return repoRoot
-  let envRoot = getEnv("REPROBUILD_SOURCE_ROOT")
-  if envRoot.len > 0 and hasReprobuildLibs(envRoot):
-    return envRoot
-  let cwd = getCurrentDir()
-  if hasReprobuildLibs(cwd):
-    return cwd
-  var sourceRoot = parentDir(currentSourcePath())
-  for _ in 0 ..< 3:
-    sourceRoot = parentDir(sourceRoot)
-  if hasReprobuildLibs(sourceRoot):
-    return sourceRoot
-  cwd
+  ##
+  ## The resolution itself is `repro_core/source_root`'s
+  ## `resolveReprobuildSourceRoot`, shared with the profile compile so the two
+  ## cannot answer differently (Gradual-Nix-To-Reprobuild-Migration GM1). This
+  ## proc keeps its historical last resort, the current directory, for
+  ## callers that use the answer only as a working directory.
+  let resolved = resolveReprobuildSourceRoot()
+  if resolved.len > 0:
+    return resolved
+  getCurrentDir()
 
 proc resolveMonitorShimLibPath(): string =
   ## Develop-mode improvement: locate ``librepro_monitor_shim.{dll,so,dylib}``

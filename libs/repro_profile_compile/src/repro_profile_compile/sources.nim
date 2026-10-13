@@ -7,6 +7,7 @@
 
 import std/[algorithm, os, strutils]
 from repro_core/paths import extendedPath
+from repro_core/source_root import resolveReprobuildSourceRoot
 
 import blake3
 import repro_profile_intent/envelope as profile_envelope
@@ -37,18 +38,28 @@ const LibsDirName* = "libs"
   ## (`<repoRoot>/libs/<name>/src`). `profileNimPaths` enumerates it.
 
 proc reprobuildRepoRoot*(): string =
-  ## Locate the reprobuild repo root. Precedence:
+  ## Locate the reprobuild source tree a profile compiles against.
   ##
-  ## 1. `$REPROBUILD_REPO_ROOT` (operator override).
-  ## 2. The compile-time root computed from this file's location.
+  ## Resolved exactly as the provider compile resolves it
+  ## (`repro_core/source_root.resolveReprobuildSourceRoot`, which
+  ## `repro_cli_support.reprobuildLibraryWorkDir` also delegates to):
+  ## `$REPROBUILD_LIBS_DIR` / `$REPROBUILD_REPO_ROOT`, then the installed
+  ## package's `$REPROBUILD_SOURCE_ROOT`, then the current directory, then the
+  ## checkout this binary was built in. Each arm counts only when it really
+  ## holds reprobuild's libs.
   ##
-  ## The returned path is NOT guaranteed to exist on installed deployments.
-  ## A future phase will ship the libs alongside the binary and make the
-  ## override unnecessary.
-  let envRoot = getEnv(RepoRootEnvVar)
-  if envRoot.len > 0:
-    return envRoot
-  CompiledRepoRoot
+  ## This used to read `$REPROBUILD_REPO_ROOT` alone and otherwise return
+  ## `CompiledRepoRoot` — under Nix the build sandbox path, which does not
+  ## exist after the build — so the Nix package could not compile a profile
+  ## although its wrapper names the sources in `$REPROBUILD_SOURCE_ROOT`
+  ## (Gradual-Nix-To-Reprobuild-Migration GM1).
+  ##
+  ## When nothing resolves, `CompiledRepoRoot` is still returned so callers
+  ## see a concrete path; `compileProfileBinary` then refuses it with a
+  ## diagnostic naming the variables above.
+  result = resolveReprobuildSourceRoot()
+  if result.len == 0:
+    result = CompiledRepoRoot
 
 proc profileNimPaths*(repoRoot: string): seq[string] =
   ## Every `<repoRoot>/libs/<name>/src` directory that exists, lex-sorted by

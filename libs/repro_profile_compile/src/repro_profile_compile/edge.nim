@@ -49,7 +49,8 @@ type
     ## that hosts the `<state-dir>/profile-cache/` tree. `publicCliPath`
     ## is the absolute path to the `repro` binary that hosts the
     ## `__repro-compile-profile` internal helper subcommand.
-    ## `repoRoot` is forwarded to the helper as `$REPROBUILD_REPO_ROOT`.
+    ## `repoRoot` is the reprobuild source tree, passed to the helper as
+    ## `--repo-root`; empty resolves it through `reprobuildRepoRoot()`.
     ## `workDir` is the cwd to run the helper in (defaults to the
     ## profile's parent directory). `verbose` and `forceRebuild` are
     ## debug knobs.
@@ -100,9 +101,13 @@ proc actionFailureDiagnostic(run: BuildRunResult): string =
 #     here would assert something untrue.
 #   * The provider edge's environment passthrough names the compiler and C
 #     toolchain it is handed (`REPRO_NIM_COMPILER`, `REPRO_BOOTSTRAP_CC`, the
-#     provider nimcache session). This edge reads none of them: it finds Nim
-#     with `findExe` and takes its scratch location from argv, so declaring
-#     that list would name variables the edge never consumes.
+#     provider nimcache session). This edge reads only the first: the helper
+#     picks its Nim with `resolveProfileNimCompiler` (`$REPRO_NIM_COMPILER`,
+#     then `PATH`) and takes its scratch location from argv. It therefore
+#     names `REPRO_NIM_COMPILER` alone -- a value read from the ambient
+#     environment, so PASSTHROUGH by the classification rule in
+#     `repro_cli_support` -- and declaring the rest would name variables the
+#     edge never consumes.
 #
 # Nor is anything waiting to be fixed by them. The provider edge had to answer
 # from the action cache because that was its only warm path;
@@ -155,6 +160,7 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
     cacheable = true,
     weakFingerprint = weak,
     depfile = depfilePath,
+    envPassthrough = @[ProfileNimCompilerEnvVar],
     dependencyPolicy = automaticMonitorGatheringPolicy())
 
 # ---------------------------------------------------------------------------
