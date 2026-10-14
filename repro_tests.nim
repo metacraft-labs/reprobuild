@@ -1881,6 +1881,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim",
+    binary: "build/test-bin/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim",
     binary: "build/test-bin/t_m68_baseline_catalog",
     defines: @[],
@@ -12458,6 +12467,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim",
     binary: "build/test-bin/t_lock_refresh_records_the_catalog_a_package_resolved_from",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim",
+    binary: "build/test-bin/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

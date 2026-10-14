@@ -56581,6 +56581,28 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
+proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string] =
+  ## The enclosing workspace's resolved membership and the name it gives the
+  ## repo at ``repoRoot``: the lookup ``manifestDevelopSiblings`` and the lock
+  ## writer's ``declaredDevelopSet`` share. ``resolved`` is false under the
+  ## same conditions ``manifestDevelopSiblings`` documents (no workspace, a
+  ## workspace that is the repo itself, a membership that fails to resolve or
+  ## does not contain this repo).
+  result = (false, "", @[], "")
+  let root = committedLockPathBase(repoRoot)
+  let ws = enclosingWorkspaceRoot(root)
+  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+    return
+  var repos: seq[ResolvedRepo]
+  try:
+    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
+  except CatchableError:
+    return
+  for r in repos:
+    if cmpPaths(absolutePath(ws / r.path), root) == 0:
+      return (true, absolutePath(ws), repos, r.name)
+
 proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
     workspaceRoot: string; siblings: seq[ResolvedRepo]] =
   ## The develop-set siblings of the repo at ``repoRoot`` as the enclosing
@@ -56606,46 +56628,22 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## (see ``committedLockPathBase``) in the membership dimension rather than
   ## the path dimension.
   result = (false, "", @[])
-  let root = committedLockPathBase(repoRoot)
-  let ws = enclosingWorkspaceRoot(root)
-  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+  let membership = manifestMembershipOf(repoRoot)
+  if not membership.resolved:
     return
-  var repos: seq[ResolvedRepo]
-  try:
-    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
-  except CatchableError:
-    return
-  var selfName = ""
-  for r in repos:
-    if cmpPaths(absolutePath(ws / r.path), root) == 0:
-      selfName = r.name
-      break
-  if selfName.len == 0:
-    return
-  let closure = developSetClosure(repos, selfName)
+  let closure = developSetClosure(membership.repos, membership.selfName)
   var siblings: seq[ResolvedRepo] = @[]
-  for r in repos:
-    if r.name != selfName and r.name in closure:
+  for r in membership.repos:
+    if r.name != membership.selfName and r.name in closure:
       siblings.add(r)
   siblings.sort(proc(a, b: ResolvedRepo): int = cmp(a.name, b.name))
-  result = (true, absolutePath(ws), siblings)
+  result = (true, membership.workspaceRoot, siblings)
 
-proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
-    pushedRepoName: string): seq[string] =
-  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
-  ## repo the workspace declares, in first-seen order and de-duplicated.
-  ##
-  ## Such an edge used to be dropped in silence. The effect was that the gate
-  ## verified a SMALLER set than the manifests declare while still reporting
-  ## success: one typo in a ``depends`` list removed a real dependency from the
-  ## cleanliness / publication / lock stages, and nothing said so. That is the
-  ## same shape as a check that passes having verified nothing, just at the
-  ## granularity of one edge — so the gate refuses on it and names the edge.
-  ##
-  ## The resolver already refuses a fragment that references an undeclared
-  ## remote for exactly this reason ("turning a typo into a silent success is a
-  ## worse failure mode than the transitional convenience is worth"); this is
-  ## the same rule applied to the other cross-reference a fragment can make.
+proc undeclaredDependEdges(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[tuple[owner, dep: string]] =
+  ## The edges behind ``undeclaredDependsInClosure``: each ``depends`` entry
+  ## reachable from ``pushedRepoName`` that names no repo in ``repos``, with
+  ## the repo that declares it, in first-seen order and de-duplicated by name.
   if pushedRepoName.len == 0:
     return
   var byName = initHashSet[string]()
@@ -56672,10 +56670,29 @@ proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
       if dep notin byName:
         if dep notin reported:
           reported.incl(dep)
-          result.add(name & " -> " & dep)
+          result.add((owner: name, dep: dep))
         continue
       if dep notin seen:
         pending.add(dep)
+
+proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[string] =
+  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
+  ## repo the workspace declares, in first-seen order and de-duplicated.
+  ##
+  ## Such an edge used to be dropped in silence. The effect was that the gate
+  ## verified a SMALLER set than the manifests declare while still reporting
+  ## success: one typo in a ``depends`` list removed a real dependency from the
+  ## cleanliness / publication / lock stages, and nothing said so. That is the
+  ## same shape as a check that passes having verified nothing, just at the
+  ## granularity of one edge — so the gate refuses on it and names the edge.
+  ##
+  ## The resolver already refuses a fragment that references an undeclared
+  ## remote for exactly this reason ("turning a typo into a silent success is a
+  ## worse failure mode than the transitional convenience is worth"); this is
+  ## the same rule applied to the other cross-reference a fragment can make.
+  for edge in undeclaredDependEdges(repos, pushedRepoName):
+    result.add(edge.owner & " -> " & edge.dep)
 
 proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
     newTip, oldTip: string): string =
@@ -72667,6 +72684,21 @@ const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
   ## emit the solved inputs.
 
+type UnreachedUsesSelector = object
+  ## A ``uses:`` selector the transitive solver-input walk
+  ## (``foldProviderSolverInputs``) could not resolve to a recipe directory:
+  ## no develop override, no on-disk sibling, no source-catalog recipe. Most
+  ## are plain tools (``cargo``, ``nim``) and are fine to leave unresolved;
+  ## one that names a develop-set sibling means that sibling's recipe — and
+  ## every range it declares — is missing from the solve. See
+  ## ``unreachedDevelopSiblings``.
+  selector: string
+    ## The bare package selector, as ``discoverProducerSourceRoot`` was
+    ## asked for it.
+  owner: string
+    ## The recipe DIRECTORY whose ``uses:`` named it (the project root for a
+    ## direct use, a sibling's directory for a transitive one).
+
 type CompiledProviderSolverInputs = object
   variants: seq[variant_encoder.VariantDecl]
   packages: seq[PackageDecl]
@@ -72679,6 +72711,10 @@ type CompiledProviderSolverInputs = object
     ## The `reprobuild-packages` catalog checkouts the solved tool uses'
     ## definitions were read from (`catalogRootsOfToolUses`). A lock records
     ## each one (Provisioning-Contributions.md, "Locks And Snapshots").
+  unreachedSelectors: seq[UnreachedUsesSelector]
+    ## Every ``uses:`` selector the transitive walk could not reach, with the
+    ## recipe that named it. Filled by ``foldProviderSolverInputs``; the lock
+    ## writer refuses when one names a develop-set sibling.
 
 type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
@@ -73204,6 +73240,11 @@ proc foldProviderSolverInputs(projectDir: string;
   for useDef in aggregate.toolUses:
     pending.add((root, useDef))
   var seenRecipeDirs = @[root]
+  # Which selectors resolved to a recipe from SOME owner. Discovery walks up
+  # from the naming recipe's directory, so the same selector can miss from one
+  # owner and hit from another; only a selector no owner reached is reported.
+  var reachedSelectors: seq[string] = @[]
+  var unreached: seq[UnreachedUsesSelector] = @[]
   var cursor = 0
   while cursor < pending.len:
     let (owner, useDef) = pending[cursor]
@@ -73213,7 +73254,21 @@ proc foldProviderSolverInputs(projectDir: string;
       let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
       recipeDir = sourceProviderRecipeDirForSolverFold(outcome)
     if recipeDir.len == 0:
+      # Not silently: this used to be a bare `continue`, and a develop-set
+      # sibling that was not checked out vanished from the solve with its
+      # ranges, so the lock fell to the floors of the recipes that remained
+      # (reprobuild-pm issue 2026-10-12, "lock refresh grounds a package at
+      # the root floor"). Most selectors land here legitimately — a plain tool
+      # such as `cargo` has no recipe to fold — so the walk only RECORDS the
+      # miss; deciding whether it names a develop-set sibling is the lock
+      # writer's job (`unreachedDevelopSiblings`), which knows the develop set.
+      let miss = UnreachedUsesSelector(selector: useDef.packageSelector,
+        owner: owner)
+      if miss notin unreached:
+        unreached.add(miss)
       continue
+    if useDef.packageSelector notin reachedSelectors:
+      reachedSelectors.add(useDef.packageSelector)
     recipeDir = absolutePath(recipeDir)
     if recipeDir in seenRecipeDirs:
       continue
@@ -73227,6 +73282,10 @@ proc foldProviderSolverInputs(projectDir: string;
       pending.add((recipeDir, transitiveUse))
     aggregate.mergeProviderSolverInputs(producerInputs)
   aggregate.sourceRecipeRoots = seenRecipeDirs[1 .. ^1]
+  aggregate.unreachedSelectors = @[]
+  for miss in unreached:
+    if miss.selector notin reachedSelectors:
+      aggregate.unreachedSelectors.add(miss)
   aggregate.catalogRoots = catalogRootsOfToolUses(aggregate.toolUses)
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
@@ -73239,11 +73298,16 @@ proc unreadableRecipeLockRefusal(recipe, failure: string): string =
     "uses resolve from; refusing to write one (the committed lock is " &
     "left as it is): " & failure
 
-proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
+type RefreshSolverInputs = tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-    catalogRoots: seq[string]] =
+    catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector]]
+  ## What ``resolveRefreshSolverInputs`` answers. Named once because
+  ## ``repro lock validate`` declares a variable of it.
+
+proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
+    RefreshSolverInputs =
   ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
   ## PREFERRING the compiled project provider (the real recipe's solve) and
   ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
@@ -73253,6 +73317,10 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
   ## FUP-M — ``usesSelectors`` carries the recipe's declared ``uses:`` producer
   ## selectors (provider path only; the sidecar has none) so ``lock refresh``
   ## folds each sibling PRODUCER edge into the committed lock's ``deps``.
+  ##
+  ## ``unreachedSelectors`` carries every ``uses:`` selector the transitive
+  ## fold could not resolve to a recipe (provider path only), so the lock
+  ## writer can refuse a solve that is missing a develop-set sibling's recipe.
   var probeFailure = ""
   if inputsOverride.len == 0:
     let fromProvider = solverInputsFromCompiledProvider(projectDir,
@@ -73272,16 +73340,18 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
         # records. Spelled exactly as the recipe-without-solve answer below,
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
-          p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
+          p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
+          p.unreachedSelectors)
       return (true, p.variants, p.packages, p.text, "provider",
-        p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
+        p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
+        p.unreachedSelectors)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[])
+      @[], @[], @[], @[])
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -73301,19 +73371,25 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
         # to PATH. A recipe this refresh cannot read is a failed refresh.
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
-      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[])
+      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[])
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
-  return (false, @[], @[], "", "", @[], @[], @[])
+  return (false, @[], @[], "", "", @[], @[], @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
                                 gen: LockVerbOptions;
                                 entryPoint: LockGenerationEntryPoint;
                                 verb: string;
-                                request: var LockGenerationRequest): int =
+                                request: var LockGenerationRequest;
+                                unreached: var seq[UnreachedUsesSelector]):
+                                int =
   ## Assemble the generation request the four CLI doors share.
+  ##
+  ## ``unreached`` receives the ``uses:`` selectors the solver-input fold could
+  ## not resolve to a recipe; each door decides, through
+  ## ``unreachedDevelopSiblings``, whether that makes the solve incomplete.
   ##
   ## MO-12 — the solver inputs come from the COMPILED PROJECT PROVIDER (the
   ## real recipe's solve) when available, falling back to the ``repro.solver``
@@ -73349,7 +73425,159 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
       resolved.sourceRecipeRoots, resolved.catalogRoots),
     entryPoint: entryPoint)
+  unreached = resolved.unreachedSelectors
   return 0
+
+const IncompleteSolveExitCode = 5
+  ## ``repro lock refresh`` / ``repro lock solve --write``: the solve could not
+  ## reach a develop-set sibling's recipe, so nothing was written. Distinct
+  ## from 1 (generic failure), 2 (usage / invalid lock), 3 (UNSAT) and 4 (a
+  ## sibling pin would move backward), so a caller can tell "check out the
+  ## sibling" apart from every other refusal.
+
+type UnreachedDevelopSibling = object
+  ## A develop-set sibling whose recipe a ``uses:`` names but the solve did
+  ## not read. The solve is then INCOMPLETE: every range that recipe declares
+  ## is missing, so a lock written from it pins the floors of fewer recipes
+  ## than the next build in a complete workspace checks against.
+  sibling: string     ## the develop-set repo name the selector matched
+  ownerRecipe: string ## the recipe whose ``uses:`` names it
+  expectedAt: string  ## the sibling's checkout path, absolute
+  checkedOut: bool
+    ## False: no checkout at ``expectedAt``. True: a checkout carrying a
+    ## recipe that ``uses:`` discovery did not find (it looks for
+    ## ``<ancestor>/<selector>/repro.nim`` above the naming recipe, or a
+    ## develop override), so the recipe exists and was still not read.
+  siblingRecipe: string ## that recipe's path when ``checkedOut``
+
+proc declaredDevelopSet(projectDir, lockPath: string):
+    seq[tuple[name, checkout: string]] =
+  ## The develop set a lock written for ``projectDir`` is answerable to, as
+  ## (repo name, absolute checkout path) pairs, each name once. It is the
+  ## UNION of every place that set is declared, because each one alone can
+  ## understate it — and an understated set is exactly how a partial solve
+  ## goes unnoticed:
+  ##
+  ##   * The workspace MANIFEST's ``depends`` closure over the resolved
+  ##     membership (``developSetClosure``), at the paths the manifest gives.
+  ##   * Every ``depends`` name in that closure the resolved membership does
+  ##     NOT contain (``undeclaredDependEdges``), at the workspace-sibling path
+  ##     ``<workspace>/<name>``. The membership is the ENABLED projects, not
+  ##     every repo the manifest knows: a workspace that enables a project
+  ##     containing ``codetracer`` but not the one containing ``isonim-tui``
+  ##     resolves no ``isonim-tui`` at all, though ``codetracer`` depends on
+  ##     it. Relying on the resolved closure alone missed precisely the
+  ##     sibling that is not checked out — the case this check exists for.
+  ##   * The committed lock at ``lockPath``: its non-root VCS ``deps``, at the
+  ##     paths it records. Outside a workspace (a standalone clone, CI) it is
+  ##     the only record; inside one it still names siblings a narrower
+  ##     membership cannot see. An unreadable or absent lock adds nothing.
+  ##
+  ## A manifest path wins over a lock path for the same name.
+  proc addMember(members: var seq[tuple[name, checkout: string]];
+                 name, checkout: string) =
+    for member in members:
+      if member.name == name: return
+    members.add((name, os.normalizedPath(absolutePath(checkout))))
+  let membership = manifestMembershipOf(projectDir)
+  if membership.resolved:
+    let closure = developSetClosure(membership.repos, membership.selfName)
+    for r in membership.repos:
+      if r.name != membership.selfName and r.name in closure:
+        result.addMember(r.name, membership.workspaceRoot / r.path)
+    for edge in undeclaredDependEdges(membership.repos, membership.selfName):
+      result.addMember(edge.dep, membership.workspaceRoot / edge.dep)
+  if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
+  var existing: seq[LockedDep]
+  try:
+    existing = parseWorkspaceLockedDeps(readFile(extendedPath(lockPath)),
+      lockPath).deps
+  except CatchableError:
+    return
+  let pathBase = committedLockPathBase(absolutePath(projectDir))
+  for d in existing:
+    if d.path == "." or d.path.len == 0 or d.coordinates.kind != ckVcs:
+      continue
+    result.addMember(d.name, pathBase / d.path)
+
+proc unreachedDevelopSiblings(projectDir, lockPath: string;
+    unreached: seq[UnreachedUsesSelector]): seq[UnreachedDevelopSibling] =
+  ## Which of the ``uses:`` selectors the solver-input fold could not reach
+  ## name a develop-set sibling whose recipe is therefore missing from the
+  ## solve.
+  ##
+  ## WHY. A lock written from a solve that never read a sibling's recipe pins
+  ## the floors of a strict SUBSET of the recipes a later build checks it
+  ## against; the build then refuses it (``ELockConflict``), and nothing at
+  ## write time said the solve was partial. That is reprobuild-pm issue
+  ## 2026-10-12 ("lock refresh grounds a package at the root floor"): every
+  ## refresh in a tree missing ``isonim-gpui`` wrote ``cargo = 1.0.0`` and
+  ## every build in a complete tree refused it.
+  ##
+  ## WHAT IS NOT A FINDING, deliberately:
+  ##   * a selector naming no develop-set sibling — a plain tool such as
+  ##     ``cargo`` or ``nim`` has no sibling recipe to miss;
+  ##   * a sibling checked out WITHOUT a recipe — it declares no constraints,
+  ##     so a solve without it loses nothing.
+  ## A sibling that is not checked out, or is checked out with a recipe that
+  ## discovery could not reach, is one: in both cases a recipe that exists is
+  ## absent from the solve.
+  if unreached.len == 0: return
+  let developSet = declaredDevelopSet(projectDir, lockPath)
+  if developSet.len == 0: return
+  var reported: seq[string] = @[]
+  for miss in unreached:
+    if miss.selector in reported: continue
+    var checkout = ""
+    for member in developSet:
+      if member.name == miss.selector:
+        checkout = member.checkout
+        break
+    if checkout.len == 0: continue
+    let ownerRecipe =
+      try:
+        let match = resolveProjectFile(miss.owner).path
+        if match.len > 0: match else: miss.owner
+      except CatchableError: miss.owner
+    var finding = UnreachedDevelopSibling(sibling: miss.selector,
+      ownerRecipe: ownerRecipe, expectedAt: checkout)
+    if dirExists(extendedPath(checkout)):
+      let siblingRecipe =
+        try: resolveProjectFile(checkout).path
+        except CatchableError:
+          # Both `repro.nim` and `reprobuild.nim`: a recipe exists, it is just
+          # ambiguous. It is still a recipe the solve did not read.
+          checkout / CanonicalProjectFileName
+      if siblingRecipe.len == 0:
+        continue  # a checkout without a recipe declares no constraints
+      finding.checkedOut = true
+      finding.siblingRecipe = siblingRecipe
+    reported.add(miss.selector)
+    result.add(finding)
+
+proc renderUnreachedDevelopSibling(f: UnreachedDevelopSibling): string =
+  ## One finding, as a self-contained sentence: the sibling, the recipe whose
+  ## `uses:` names it, where it was expected, why that matters, and the
+  ## remedy. The same text is a refusal for a writing door and a warning for
+  ## a non-writing one.
+  let consequence = "its recipe's constraints would be missing from the " &
+    "solve, so the lock would pin versions the next build in a complete " &
+    "workspace refuses"
+  if not f.checkedOut:
+    "develop-set sibling '" & f.sibling & "' is not checked out at " &
+      f.expectedAt & ", but " & f.ownerRecipe & " declares `uses: \"" &
+      f.sibling & "\"`; " & consequence & ". Check it out (`repro sync`, " &
+      "or `repro ws enable` the project that declares it) and run the " &
+      "command again"
+  else:
+    "develop-set sibling '" & f.sibling & "' is checked out at " &
+      f.expectedAt & " with a recipe (" & f.siblingRecipe & "), but the " &
+      "`uses: \"" & f.sibling & "\"` in " & f.ownerRecipe & " could not " &
+      "reach it (discovery looks for `<ancestor>/" & f.sibling &
+      "/repro.nim` above that recipe, or a develop override); " &
+      consequence & ". Check it out where the workspace declares it " &
+      "(`repro sync`, or `repro ws enable` the project that declares it) " &
+      "and run the command again"
 
 type
   RefreshPinGate = object
@@ -73496,10 +73724,30 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
   var request: LockGenerationRequest
+  var unreached: seq[UnreachedUsesSelector]
   let prc = buildLockGenerationRequest(projectDir, inputsOverride,
-    platformOverride, gen, entryPoint, verb, request)
+    platformOverride, gen, entryPoint, verb, request, unreached)
   if prc != 0: return prc
   let writeTo = if writeByDefault or gen.write: lockP else: ""
+  # A solve that could not read a develop-set sibling's recipe is a PARTIAL
+  # solve: a lock written from it is one the next build in a complete
+  # workspace refuses. A writing door refuses before anything is written (and
+  # before the pin gate, whose remedies would be moot); a non-writing one says
+  # the same thing as a warning, since its answer is still worth seeing.
+  let incomplete = unreachedDevelopSiblings(projectDir, lockP, unreached)
+  if incomplete.len > 0:
+    if writeTo.len > 0:
+      for f in incomplete:
+        stderr.writeLine("repro lock " & verb & ": " &
+          renderUnreachedDevelopSibling(f))
+      stderr.writeLine("repro lock " & verb & ": refusing to write a lock " &
+        "from a solve that could not read " & $incomplete.len &
+        " develop-set sibling recipe(s); the committed lock " & writeTo &
+        " is left as it is")
+      return IncompleteSolveExitCode
+    for f in incomplete:
+      stderr.writeLine("repro lock " & verb & ": warning: " &
+        renderUnreachedDevelopSibling(f))
   if entryPoint == lgeLockRefresh and writeTo.len > 0:
     let envAllowance = parsePinRegressionAllowance(
       getEnv(PinRegressionAllowEnv))
@@ -73558,7 +73806,9 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## produced; only the lock file is written. Exits 4, writing nothing, when
   ## a sibling pin would move backward or onto another line of history and
   ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` does not
-  ## name it.
+  ## name it. Exits 5 (``IncompleteSolveExitCode``), writing nothing, when a
+  ## ``uses:`` names a develop-set sibling whose recipe the solve could not
+  ## read (``unreachedDevelopSiblings``).
   runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
@@ -73580,9 +73830,16 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
   ## nothing is the shape this campaign keeps finding."
   var gen = LockVerbOptions(strategy: strategy, registries: @[], write: false)
   var request: LockGenerationRequest
+  var unreached: seq[UnreachedUsesSelector]
   let prc = buildLockGenerationRequest(projectDir, "", "", gen,
-    lgeStrategyHiddenLock, "build --strategy", request)
+    lgeStrategyHiddenLock, "build --strategy", request, unreached)
   if prc != 0: return prc
+  # The hidden lock is never committed, so an incomplete solve is a warning
+  # here rather than a refusal — but it is said: a build pinned from a solve
+  # missing a sibling's ranges may resolve versions that sibling forbids.
+  for f in unreachedDevelopSiblings(projectDir, committedLock, unreached):
+    stderr.writeLine("repro build: --strategy " & $strategy & ": warning: " &
+      renderUnreachedDevelopSibling(f))
   # NLF-M3 — a strategy invocation must SOLVE, not re-affirm. Any pins an
   # enclosing context left in the environment would make the hidden lock a
   # copy of the committed one and the whole experiment vacuous.
@@ -73732,11 +73989,7 @@ proc runReproLockValidate(rest: openArray[string]): int =
   # preferred, sidecar fallback) so a provider-sourced lock validates against
   # the provider's solve rather than mis-comparing it to a stale sidecar.
   block staleCheck:
-    var resolved: tuple[found: bool;
-      variants: seq[variant_encoder.VariantDecl];
-      packages: seq[PackageDecl]; text: string; source: string;
-      usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-      catalogRoots: seq[string]]
+    var resolved: RefreshSolverInputs
     try:
       resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
