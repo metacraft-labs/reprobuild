@@ -9,7 +9,9 @@
 ## dependency-first; exact source refs and exact remote lock paths are present;
 ## an already-published closure with no records fails twice without synthesizing
 ## locks; and a later lib receive failure retains/reports the already-published
-## core prefix before a retry completes. The manifest's preserved hooks observe
+## core prefix before a retry completes. A shared backend's preflight accepts
+## untracked output under its ``.repro/build/`` and nothing else uncommitted.
+## The manifest's preserved hooks observe
 ## no capability/context, while successful nested pushes and empty capability
 ## storage prove one-use authorization was exercised. Nothing is mocked: only
 ## local Git processes, filesystem hooks, worktrees, and bare remotes are used.
@@ -22,6 +24,7 @@ import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles,
 
 import repro_cli_support/push_hook_protocol
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -1147,11 +1150,64 @@ suite "protocol v2 real-hook repro push closure":
       check bareHasLock(gitBin, fx.teamLocksBare, "app", stoppedAppSha)
       check not bareHasLock(gitBin, fx.personalLocksBare, "lib", stoppedLibSha)
 
+  test "shared backend preflight tolerates only untracked disposable build output":
+    ## The backend preflight refuses uncommitted state before any source ref
+    ## is transmitted, with one carve-out: an UNTRACKED file under the
+    ## backend's ``.repro/build/`` is disposable derived output (a hook report
+    ## or log) that publication, which stages explicit record paths only, can
+    ## never sweep into its commit. Counting it as dirt let a hook's own trace
+    ## block every push routed to that backend. Falsifiable: without the
+    ## carve-out this push stops at ``lock-backend-preflight`` naming the
+    ## report. The refusing side of the line — an untracked file anywhere else,
+    ## including the retired ``.repro/workspace/`` spelling — is pinned by the
+    ## ``dirty`` and ``retired-report`` variants of the next case.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repos, real hooks " &
+        "and real bare remotes")
+    else:
+      var fx = setup(gitBin, "backend-disposable-output")
+      defer: removeDir(fx.scratch)
+      let routingEnvironment = isolateRoutingConfig(fx)
+      defer: restoreRoutingConfig(routingEnvironment)
+      enableRoutedBackends(gitBin, fx)
+      # Both routes shared, so a preflight refusal would stop the push rather
+      # than degrade to a personal-tier warning.
+      let routing = fx.routedConfig()
+      writeFile(routing, readFile(routing).replace(
+        "visibility = \"personal\"", "visibility = \"team\""))
+      let reports = fx.personalLocks / ".repro" / "build" / "reports"
+      createDir(reports)
+      writeFile(reports / "post-commit-report.json",
+        "{\"outcome\": \"skipped-no-workspace\"}\n")
+      writeFile(reports / "post-commit-lock.log", "trace\n")
+      installHooks(fx)
+      let coreSha = commit(fx, gitBin, fx.core, "core-disposable")
+      let libSha = commit(fx, gitBin, fx.lib, "lib-disposable")
+      let appSha = commit(fx, gitBin, fx.app, "app-disposable")
+      let pushed = invokePush(fx)
+      if pushed.code != 0: checkpoint(pushed.output)
+      check pushed.code == 0
+      check report(fx)["stoppedStage"].getStr() == ""
+      check remoteHead(gitBin, fx.coreBare) == coreSha
+      check remoteHead(gitBin, fx.libBare) == libSha
+      check remoteHead(gitBin, fx.appBare) == appSha
+      check bareHasLock(gitBin, fx.personalLocksBare, "lib", libSha)
+      # The derived output was neither published nor touched.
+      let published = require(q(gitBin) & " -C " & q(fx.personalLocksBare) &
+        " ls-tree -r --name-only refs/heads/main")
+      check ".repro/" notin published
+      let status = require(q(gitBin) & " -C " & q(fx.personalLocks) &
+        " status --porcelain --untracked-files=all")
+      check "?? .repro/build/reports/post-commit-report.json" in status
+      check "?? .repro/build/reports/post-commit-lock.log" in status
+
   test "every later shared backend failure is discovered before source mutation":
     let gitBin = findExe("git")
     if gitBin.len == 0: skip()
     else:
-      for failure in ["dirty", "auth", "divergent", "unverified-ahead"]:
+      for failure in ["dirty", "retired-report", "auth", "divergent",
+                      "unverified-ahead"]:
         var fx = setup(gitBin, "backend-preflight-" & failure)
         defer: removeDir(fx.scratch)
         let routingEnvironment = isolateRoutingConfig(fx)
@@ -1167,6 +1223,12 @@ suite "protocol v2 real-hook repro push closure":
         case failure
         of "dirty":
           writeFile(fx.personalLocks / "operator-dirty.txt", "preserve\n")
+        of "retired-report":
+          # The retired report location is not disposable output: nothing
+          # current writes there, so a file under it still refuses.
+          createDir(fx.personalLocks / ".repro" / "workspace")
+          writeFile(fx.personalLocks / ".repro" / "workspace" /
+            "post-commit-report.json", "{}\n")
         of "auth":
           discard require(q(gitBin) & " -C " & q(fx.personalLocks) &
             " remote set-url origin " & q(fx.scratch / "missing-auth.git"))

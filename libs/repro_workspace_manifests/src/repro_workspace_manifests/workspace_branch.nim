@@ -413,12 +413,20 @@ proc standaloneMembershipManifestCheckout*(workspaceRoot: string): string =
   ## verdict on ``hasResolvedManifestCheckout`` being TRUE says it of real
   ## workspaces, and the migrated-workspace fixtures are exactly those.
   ##
-  ## DISCLOSED LIMIT: a record store that has acquired a ``.repro/`` directory
-  ## -- from a tool that wrote state into it -- reads as the metadata-less
-  ## workspace and gets the generic diagnostic back. That is the same
-  ## ambiguity ``hasResolvedManifestCheckout`` accepts, and the managed hooks
-  ## are what keep it theoretical: RA-10 Part 4 asserts that no hook ever
-  ## manufactures a ``.repro/`` inside the store.
+  ## DISCLOSED LIMIT, NOW NARROWER THAN IT WAS. A record store that has
+  ## acquired a ``.repro/`` directory -- the field state: an older engine
+  ## filed ``.repro/workspace/post-commit-*`` into it, and deleting those
+  ## files leaves the directory -- is no longer CLASSIFIED as a workspace:
+  ## ``hasResolvedManifestCheckout`` treats membership beside a top-level
+  ## ``locks/``, with no settings or state file in the root, as the store
+  ## (Workspace-Manifests.md: metadata and records are never one repository),
+  ## so the hooks and the gate stand down there and file nothing. What
+  ## remains is only THIS diagnostic's wording: it states that no ``.repro/``
+  ## shell sits beside the manifests, so for a store carrying a stray one it
+  ## returns "" and the caller gives the generic sentence instead of a false
+  ## one. RA-10's stray-shell case asserts the classification half; nothing
+  ## reaches this message from a hook any more, only from a verb an operator
+  ## runs by hand inside the store.
   if workspaceRoot.len == 0:
     return ""
   if dirExists(workspaceRoot / ".repro"):
@@ -451,8 +459,11 @@ proc isInitializedWorkspace*(workspaceRoot: string): bool =
   ##
   ## Neither is the LOCK RECORD STORE — the manifests repo, which carries
   ## ``projects/``, ``repos/`` and ``locks/`` at its top level and neither
-  ## marker above. It describes a workspace; it is not one. See
-  ## ``hasResolvedManifestCheckout`` for what that misclassification cost.
+  ## marker above — and that holds even after the store has acquired a stray
+  ## ``.repro/`` directory, because ``hasResolvedManifestCheckout`` reads
+  ## membership beside a top-level ``locks/`` as the store. It describes a
+  ## workspace; it is not one. See ``hasResolvedManifestCheckout`` for what
+  ## that misclassification cost.
   if workspaceRoot.len == 0:
     return false
   if fileExists(workspaceTomlPath(workspaceRoot)):

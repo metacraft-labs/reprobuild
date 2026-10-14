@@ -45771,7 +45771,16 @@ proc writeWorkspaceLockReport(report: WorkspaceLockReport;
 #   - REFUSE if the manifest repo is dirty OUTSIDE ``locks/`` — a publish
 #     commit must touch only locks, never sweep up unrelated edits. When
 #     refusing, unstage what we just staged so the index is left as we
-#     found it; the dirty file itself is never touched.
+#     found it; the dirty file itself is never touched. UNTRACKED files
+#     under ``.repro/build/`` are not dirt: that tree is disposable derived
+#     output (hook reports and logs), and since publication stages only
+#     explicit ``locks/`` paths such a file can neither enter the commit nor
+#     make the committed tree inconsistent. Tracked changes there, and
+#     anything under the retired ``.repro/workspace/``, still refuse. The
+#     verified-recovery check and ``repro push``'s backend preflight carry
+#     the same carve-out; without it the recovery check, which runs after
+#     the publish commit, refused over the trace that commit's own
+#     post-commit hook had just written.
 #   - Reject empty / zero-byte staged lock files before committing.
 #   - Commit with a focused message (``Publish N workspace lock entr…``).
 #   - Push to the manifest repo's upstream (``git push <remote>
@@ -45833,6 +45842,29 @@ proc pathIsUnderLocks(path: string): bool =
   ## lives under the top-level ``locks/`` directory.
   let normalized = path.replace('\\', '/')
   normalized == "locks" or normalized.startsWith("locks/")
+
+proc isUntrackedDisposableBuildOutput(code, path: string): bool =
+  ## A status entry the dirty-outside-``locks/`` guard does NOT count as dirt:
+  ## an UNTRACKED file (porcelain ``??``) under the root's ``.repro/build/``.
+  ##
+  ## That tree is disposable derived output by definition — Retired-Names.md
+  ## moved every ``<verb>-report.json`` there BECAUSE "a report is derived
+  ## output", and CLI/README.md forbids any command from reading one back to
+  ## decide anything. And neither harm the guard exists to prevent can come
+  ## from such a file: publication stages only explicit canonical ``locks/``
+  ## paths, so it cannot be swept into the commit, and an untracked file is
+  ## not part of the tree being committed, so it cannot make that tree
+  ## inconsistent. Refusing on it is what turned a hook's trace into a
+  ## permanent publication wedge: the publisher's own commit fires the hook
+  ## that writes the trace.
+  ##
+  ## Deliberately narrow. A TRACKED or staged change under ``.repro/build/``
+  ## is somebody's committed content changing, which is real dirt and still
+  ## refuses. The RETIRED ``.repro/workspace/`` spelling is not tolerated
+  ## either: nothing current writes there, so a file under it is either an
+  ## old engine still running or something an operator put there, and both
+  ## are worth a refusal that names it.
+  code == "??" and path.replace('\\', '/').startsWith(".repro/build/")
 
 proc pushOutputIsNonFastForward*(output: string): bool =
   ## A push rejected because a COMPETING WRITER moved the remote ref (or held
@@ -46583,6 +46615,16 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     # split: a record THIS operation is supposed to publish must not still be
     # untracked by the time we verify it. That is checked against
     # ``expected``, which is exactly the set the publisher was told to stage.
+    #
+    # And the same reachability argument covers UNTRACKED disposable output
+    # under ``.repro/build/`` (``isUntrackedDisposableBuildOutput``): nothing
+    # stages it, so nothing can sweep it into a resumed publication. This
+    # check runs AFTER the publication commit, and that commit fires the
+    # store's post-commit hook — whose trace is exactly such a file — so a
+    # guard that counted it would refuse a publish over output its own commit
+    # produced.
+    if isUntrackedDisposableBuildOutput(entry.code, entry.path):
+      continue
     if entry.code == "??" and pathIsUnderLocks(entry.path):
       let parsed = parseLockRecordRelPath(entry.path)
       if not parsed.ok:
@@ -47044,9 +47086,20 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   # ``locks/`` means the publish commit would either sweep up unrelated
   # work (staged) or run against an inconsistent tree. Refuse, and unstage
   # what we just staged so the operator's index is left untouched.
+  #
+  # One carve-out, and only one: an UNTRACKED file under ``.repro/build/`` is
+  # disposable derived output (a hook report, a log), which can neither be
+  # swept into a commit that stages explicit ``locks/`` paths nor make the
+  # committed tree inconsistent — see ``isUntrackedDisposableBuildOutput``.
+  # Counting it as dirt made the refusal self-sustaining: the commit made
+  # below fires the post-commit hook, whose trace is exactly such a file, so
+  # every publish into a store that misclassified itself regenerated its own
+  # refusal (measured in the field with the trace at the retired
+  # ``.repro/workspace/`` path, which stays refused).
   var dirtyOutside: seq[string]
   for entry in gitPorcelainEntries(identity, manifestRepoRoot):
-    if not pathIsUnderLocks(entry.path):
+    if not pathIsUnderLocks(entry.path) and
+        not isUntrackedDisposableBuildOutput(entry.code, entry.path):
       dirtyOutside.add(entry.path)
   if dirtyOutside.len > 0:
     # Reset only the locks subtree we staged; leave any pre-existing
@@ -60154,7 +60207,12 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
     result.diagnostic = hook.diagnostic
     return
   let dirty = gitPorcelainEntries(identity, plan.root)
-  let unexpectedDirty = dirty.filterIt(not plan.pendingFileIsCanonicalLock(it))
+  # Untracked disposable output under ``.repro/build/`` is not backend dirt
+  # here either, for the reason ``publishWorkspaceLock``'s dirty guard gives:
+  # nothing this publication does can stage it.
+  let unexpectedDirty = dirty.filterIt(
+    not plan.pendingFileIsCanonicalLock(it) and
+      not isUntrackedDisposableBuildOutput(it.code, it.path))
   if unexpectedDirty.len > 0:
     result.diagnostic = "lock backend is not clean before source publication: " &
       unexpectedDirty.mapIt(it.code & " " & it.path).join(", ")
