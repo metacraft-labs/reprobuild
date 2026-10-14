@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1994,
+    "nimTestBinaries": 1995,
     "pureUnitConsolidationGroups": 54,
     "pureUnitTests": 617,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 2012
+    "testEntries": 2013
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1164,7 +1164,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 15,
-      "integration": 1095,
+      "integration": 1096,
       "platform/destructive": 126,
       "pure unit": 617,
       "unclassified": 159
@@ -1357,9 +1357,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1994,
+    "nimTestBinaryCount": 1995,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2012
+    "testEntryCount": 2013
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32910,6 +32910,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_tool_realizations_are_gc_rooted.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_no_project_set_errors_name_the_remedy",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_no_project_set_errors_name_the_remedy.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
