@@ -221,31 +221,12 @@
       # config.nims reads SHM_GSET_SRC (then falls back to a ``../nim-shm-gset``
       # sibling); the sandboxed package build + override-free CI jobs have no
       # sibling, so seed it from here — exactly like nim-shm-queue-src.
-      # reprobuild does not import shm_gset directly; it flows in transitively
-      # through io_mon (fs_snoop / writer), so config.nims still adds it to Nim's
-      # --path for the io-mon compile to resolve.
-      #
-      # Pinned to c646982b -- the revision that DEFINES ``AttachFailure``, which
-      # repro_local_store/action_index.nim re-exports (added there by e42ef05b).
-      #
-      # This URL used to name 360bfc15, and that was the single source of the
-      # "cannot export: shm_gset.AttachFailure" bootstrap failure in six apps.
-      # afd408f1 moved the *lock* onto c646982b (and .github/sibling-repos with
-      # it) but left this URL behind, so flake.nix and flake.lock disagreed about
-      # the same input: the lock entry carried ``locked.rev = c646982b`` under
-      # ``original.rev = 360bfc15``, with lastModified and narHash dropped --
-      # a shape nix never emits, and one that survives only because
-      # ``!originalInput.getNarHash() || ...`` (flake.cc) short-circuits on a
-      # MISSING hash. Anything that re-resolved the input from this URL -- a
-      # `nix flake update`, a fresh lock, or the sibling-checkout override arm
-      # pointed at a `../nim-shm-gset` sitting on the URL's rev -- snapped the
-      # source back to 360bfc15, which predates AttachFailure by three weeks.
-      #
-      # Keep this rev, .github/sibling-repos' nim-shm-gset row, and the lock in
-      # step; they are three spellings of one decision. 360bfc15 is also what
-      # ``origin/stable`` (the repository's default HEAD) still resolves to, so
-      # a rev is mandatory here -- a branch-less URL would reintroduce the bug.
-      url = "github:metacraft-labs/nim-shm-gset/c646982b354cb5b1fa8734f94b951a660419d75c";
+      # Pin c9048e9: it retains AttachFailure and uses a boot-stable Darwin
+      # identity instead of a wall-clock second. Writer liveness requires this
+      # stability; its authoritative probe additionally rejects OS errors
+      # because shard warm-up tolerates uncertainty but live-writer reclamation
+      # does not. Keep this URL, flake.lock, and .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-shm-gset/c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27";
       flake = false;
     };
     nim-shm-queue-src = {

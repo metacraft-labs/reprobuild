@@ -186,7 +186,7 @@ io-mon=e75019940be4722fcaf11f1b239de37adae54f41
 nim-stackable-hooks=72f578249e9d8bbca8e3705c8a41ed5085c05bf9
 runquota=dev
 nim-shm-queue=5a8e43b52fa202859658692c9f8432967f3971ea
-nim-shm-gset=c646982b354cb5b1fa8734f94b951a660419d75c
+nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27
 
 # nim-shm-lease: runquota's published stats table imports its anchor on
 # WINDOWS now, not only on Linux/macOS, and the Windows release leg builds
