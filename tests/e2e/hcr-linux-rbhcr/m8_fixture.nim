@@ -30,7 +30,7 @@
 ## assertion from a vacuous one; that is the specific lesson NH-M2 recorded,
 ## where four gates passed under BOTH the correct and the incorrect ordering.
 
-import std/[json, monotimes, os, osproc, streams, strtabs, strutils, times]
+import std/[exitprocs, json, monotimes, os, osproc, streams, strtabs, strutils, tempfiles, times]
 
 import repro_hcr_agent
 import repro_project_dsl
@@ -72,6 +72,26 @@ proc m8WorkDir*(repoRoot: string): string =
   # object while another was executing or parsing it.
   result = repoRoot / "build" / "hcr-linux-m8" / testScratchSlug()
   createDir(result)
+
+var m8SocketRoot = ""
+
+proc m8SocketDir*(): string =
+  ## Where the agent socket goes, which is NOT under ``m8WorkDir``.
+  ##
+  ## ``sun_path`` is 108 bytes. The checkout prefix plus
+  ## ``build/hcr-linux-m8/<per-case slug>`` exhausts it before the socket name
+  ## is appended -- on the CI runner the prefix alone is 57 -- and the gates
+  ## then die on "socket path too long" having asserted nothing. Build
+  ## artifacts stay in the work directory; only the socket moves here.
+  ##
+  ## One directory per process, for the reason ``m8WorkDir`` gives: several
+  ## binaries import this helper and the suite runs them concurrently.
+  if m8SocketRoot.len == 0:
+    m8SocketRoot = createTempDir("hlx-m8-", "", "/tmp")
+    let root = m8SocketRoot
+    addExitProc(proc () =
+      try: removeDir(root) except CatchableError: discard)
+  m8SocketRoot
 
 proc m8CaseDir*(repoRoot: string): string =
   repoRoot / "tests" / "e2e" / "hcr-linux-rbhcr"
@@ -156,8 +176,10 @@ proc runReload*(repoRoot, targetBin, socketName: string;
                 managedTypes: openArray[string] = [];
                 schemaId = "reprobuild.hcr.hlx-m8.linux-rb-hcr-target-result.v1"):
                 M8Run =
-  let workDir = m8WorkDir(repoRoot)
-  let socketPath = workDir / socketName
+  # m8WorkDir still runs, for its directory-creation side effect; the socket
+  # itself must not live there (see m8SocketDir).
+  discard m8WorkDir(repoRoot)
+  let socketPath = m8SocketDir() / socketName
   removeFile(socketPath)
   var listener = listenHcrAgentUnixSocket(socketPath)
   defer: listener.close()
@@ -213,8 +235,10 @@ proc runReloadTimed*(repoRoot, targetBin, socketName: string;
                      argv: openArray[string] = [];
                      schemaId = "reprobuild.hcr.hlx-m8.linux-threaded-sync-target-result.v1"):
                      M8TimedRun =
-  let workDir = m8WorkDir(repoRoot)
-  let socketPath = workDir / socketName
+  # m8WorkDir still runs, for its directory-creation side effect; the socket
+  # itself must not live there (see m8SocketDir).
+  discard m8WorkDir(repoRoot)
+  let socketPath = m8SocketDir() / socketName
   removeFile(socketPath)
   var listener = listenHcrAgentUnixSocket(socketPath)
   defer: listener.close()

@@ -1972,7 +1972,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 89,
+          "line": 97,
           "path": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim",
           "patterns": [
             "gcc"
@@ -1994,7 +1994,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 97,
+          "line": 105,
           "path": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim",
           "patterns": [
             "gcc"
@@ -2178,7 +2178,7 @@
             "result",
             "targetBin"
           ],
-          "line": 98,
+          "line": 105,
           "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
           "patterns": [
             "gcc"
@@ -2203,7 +2203,7 @@
             "result",
             "targetBin"
           ],
-          "line": 117,
+          "line": 124,
           "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
           "patterns": [
             "gcc"
@@ -2228,7 +2228,7 @@
             "result",
             "targetBin"
           ],
-          "line": 132,
+          "line": 139,
           "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
           "patterns": [
             "gcc"
@@ -2253,7 +2253,7 @@
             "result",
             "targetBin"
           ],
-          "line": 152,
+          "line": 159,
           "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
           "patterns": [
             "gcc"
