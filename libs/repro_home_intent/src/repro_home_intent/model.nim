@@ -168,6 +168,23 @@ type
       ## time. `darwin` and `macos` are
       ## aliased at parse time to the canonical `"darwin"` key so a
       ## single lookup at resolve time suffices.
+    dataFileRefs*: seq[string]
+      ## GM4: the plan-time data files the profile's `data:` section
+      ## names, relative to the profile directory. Parsed from source by
+      ## the text inspector (`repro home add --data` refuses a file not
+      ## listed here); empty for a profile adapted from a compiled intent,
+      ## whose rows are already expanded (see `loadedDataFiles`).
+    loadedDataFiles*: seq[LoadedDataFile]
+      ## GM4: the data files the planner read for this profile, with the
+      ## exact bytes it expanded. Set by the compile-then-adapt path; the
+      ## apply pipeline records them in the generation's intent snapshot so
+      ## the generation keeps the data it was planned from (rollback and
+      ## `repro home history` never re-read the live file).
+
+  LoadedDataFile* = object
+    ## One plan-time data file as read: its reference and its bytes.
+    path*: string
+    content*: string
 
 proc lineCount*(p: Profile): int = p.lines.len
 

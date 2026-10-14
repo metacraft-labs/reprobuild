@@ -12,6 +12,7 @@ import repro_home_intent/model
 import repro_home_intent/parser
 import repro_home_intent/editor
 import repro_home_intent/config_resolver
+import repro_home_intent/data_file
 
 export errors
 export host_identity
@@ -20,3 +21,4 @@ export model
 export parser
 export editor
 export config_resolver
+export data_file

@@ -687,6 +687,15 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
   ## Mapping:
   ##   ProfileIntent.resources filtered to system-scope kinds ->
   ##     seq[SystemResource] with SystemResourceKind tags + per-kind fields.
+  # GM4: data-file rows expand into ACTIVITIES, which system scope does not
+  # have. Ignoring the `data:` section would leave its rows declared but
+  # never applied while the run reports success (Core-Invariants.md
+  # §Unrecognised Input Is Rejected, Not Skipped); refuse instead.
+  if p.dataFiles.len > 0:
+    raise newException(ValueError,
+      "system profiles do not read plan-time data files (`data:` declares " &
+      p.dataFiles.join(", ") & "); data rows expand into activities, " &
+      "which only home profiles have")
   for r in p.resources:
     if not isSystemScopeResource(r.kind):
       continue

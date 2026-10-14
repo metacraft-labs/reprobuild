@@ -233,7 +233,12 @@ const
                  "t_e2e_home_export_check_detects_stale_snapshot",
                  "t_e2e_export_describes_other_platform_resources",
                  "t_e2e_export_refuses_compile_time_dependent_intent",
-                 "t_e2e_home_set_writes_guarded_config"]:
+                 "t_e2e_home_set_writes_guarded_config",
+                 "t_e2e_data_file_edit_does_not_recompile",
+                 "t_e2e_data_file_rollback_restores_rows",
+                 "t_e2e_data_file_validation",
+                 "t_e2e_home_add_appends_data_row",
+                 "t_e2e_home_export_expands_data_files"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
     rows

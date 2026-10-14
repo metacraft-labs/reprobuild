@@ -71,6 +71,16 @@ type
     target*: string
     sites*: seq[string]
 
+  EDataFile* = object of EHomeIntent
+    ## GM4: a plan-time data file (declared in the profile's `data:`
+    ## section) is missing, unreadable, not TOML, or holds something its
+    ## fixed row schema does not define. Never skipped: a row that cannot
+    ## be read is a row that would silently not apply
+    ## (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped).
+    dataPath*: string   ## the reference as declared (profile-relative)
+    row*: int           ## 1-based `[[package]]` row, 0 for file-level
+    key*: string        ## the offending key, "" when not key-specific
+
   EProfileWriteError* = object of EHomeIntent
     ## A write to the profile file failed at the filesystem level.
 
@@ -145,4 +155,19 @@ proc raiseGuardedTarget*(profilePath, target, reason: string;
   e.profilePath = profilePath
   e.target = target
   e.sites = sites
+  raise e
+
+proc raiseDataFile*(profilePath, dataPath: string; row: int; key,
+                    reason: string) {.noreturn.} =
+  var msg = "data file " & dataPath
+  if row > 0:
+    msg.add " row " & $row
+  if key.len > 0:
+    msg.add " key `" & key & "`"
+  msg.add ": " & reason
+  var e = newException(EDataFile, msg)
+  e.profilePath = profilePath
+  e.dataPath = dataPath
+  e.row = row
+  e.key = key
   raise e

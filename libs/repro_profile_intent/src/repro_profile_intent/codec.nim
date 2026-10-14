@@ -49,6 +49,11 @@ const
     ## (cached before this codec extension) has no entry and decodes
     ## with an empty ``buildActions`` seq, so existing profile-compile
     ## fixtures survive the codec bump without a re-encode.
+  KeyDataFiles    = "dataFiles"
+    ## GM4: the plan-time data-file references a profile's `data:` section
+    ## declares (`ProfileIntent.dataFiles`). Optional; omitted when empty,
+    ## so a profile without data files encodes exactly as before. Envelope
+    ## schema 5.
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -274,14 +279,17 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var bas: seq[DynamicValue] = @[]
   for b in p.buildActions:
     bas.add encodeBuildAction(b)
-  cborMap(@[entry(KeyName, cborText(p.name)),
+  var entries = @[entry(KeyName, cborText(p.name)),
             entry(KeyActivities, cborArray(acts)),
             entry(KeyConfigOverrides, cborArray(cfgs)),
             entry(KeyHosts, encodeHosts(p.hosts)),
             entry(KeyResources, cborArray(ress)),
             entry(KeyBuildActions, cborArray(bas)),
             entry(KeyAdapterPreference,
-              encodeAdapterPreference(p.adapterPreference))])
+              encodeAdapterPreference(p.adapterPreference))]
+  if p.dataFiles.len > 0:
+    entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
+  cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
   ## CBOR-encode the `ProfileIntent`. Deterministic: same input bytes
@@ -541,6 +549,13 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
     result.adapterPreference = decodeAdapterPreference(apNode)
   else:
     result.adapterPreference = initOrderedTable[string, seq[string]]()
+  # GM4: data-file references are OPTIONAL on the wire (absent when the
+  # profile declares none).
+  var dfFound = false
+  let dfNode = lookupOpt(entries, KeyDataFiles, dfFound)
+  if dfFound:
+    for it in expectArray(dfNode, KeyDataFiles):
+      result.dataFiles.add expectText(it, KeyDataFiles)
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

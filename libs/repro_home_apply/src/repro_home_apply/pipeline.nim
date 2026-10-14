@@ -1400,7 +1400,34 @@ proc resolveProfileFromOpts(opts: ApplyOptions): Profile =
     if p.path.len == 0:
       p.path = opts.profilePath
     return p
-  loadProfileOrRaise(opts.profilePath)
+  result = loadProfileOrRaise(opts.profilePath)
+  # GM4: this fallback reads `home.nim` as TEXT; it does not run the
+  # compile-then-adapt step that reads and expands plan-time data files
+  # (`expandedHomeProfile`). Planning without the rows would apply a
+  # profile with part of its declaration silently missing, so refuse
+  # (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped).
+  if result.dataFileRefs.len > 0:
+    raiseIntentLoad(opts.profilePath, "the profile declares plan-time data " &
+      "files (" & result.dataFileRefs.join(", ") & "), which this apply " &
+      "path cannot expand: it reads home.nim as text instead of compiling " &
+      "it. Use `repro home apply` on the host itself")
+
+proc profileIntentSnapshot*(profileDir: string; profile: Profile):
+    IntentSnapshot =
+  ## The generation's intent snapshot: the profile's source files plus
+  ## (GM4) the plan-time data files the planner expanded for `profile`, with
+  ## the exact bytes it read (`Profile.loadedDataFiles`). Recording the data
+  ## here puts it in the generation id and keeps it with the generation, so
+  ## rollback and `repro home history` never consult the live file. The
+  ## one constructor for both the plan preview and the apply.
+  result.files = defaultWalkProfileFiles(profileDir)
+  for f in profile.loadedDataFiles:
+    var bytes = newSeq[byte](f.content.len)
+    for i, ch in f.content:
+      bytes[i] = byte(ord(ch))
+    result.files.add IntentFileEntry(path: f.path, content: bytes,
+      role: ifrData)
+  result.schemaVersion = encodedVersion(result)
 
 proc deriveGenerationId(plan: ApplyPlan;
                         intentSnapshotDigest: Digest256;
@@ -1884,8 +1911,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   applyPlan.generatedFiles = suppressed.files
 
   # ---- Step 6: derive generation id + no-op detection -------------------
-  let intentSnapshot = IntentSnapshot(schemaVersion: 1'u16,
-    files: defaultWalkProfileFiles(opts.profileDir))
+  let intentSnapshot = profileIntentSnapshot(opts.profileDir, profile)
   let snapshotBytes = encodeSnapshot(intentSnapshot)
   let snapshotDig = digestOf(snapshotBytes)
   # M78: the generation-id resource seed is the composed desired set
@@ -2187,8 +2213,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     var storeClosed = false
     try:
       # ---- Step 6: no-op short-circuit ----------------------------------
-      let intentSnapshot = IntentSnapshot(schemaVersion: 1'u16,
-        files: defaultWalkProfileFiles(opts.profileDir))
+      let intentSnapshot = profileIntentSnapshot(opts.profileDir, profile)
       let snapshotBytes = encodeSnapshot(intentSnapshot)
       let snapshotDig = digestOf(snapshotBytes)
       # M78: the generation-id resource seed is the composed desired

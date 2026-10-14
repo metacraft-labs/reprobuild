@@ -49,6 +49,9 @@
 ##   on the resources / overrides they declare when their conditions are
 ##   predicates (`when linux():`), and stay Nim compile-time branches when
 ##   they are `defined(...)` conditions (`lowerWhenChain`).
+## - `data:` lists plan-time data files (GM4). The macro records the
+##   paths only; the planner reads and expands the files, so a data edit
+##   never recompiles the profile.
 ## - The intent is built by a proc of its own, so the platform probe can
 ##   evaluate it at compile time for other platforms (see the end of the
 ##   `profile` macro).
@@ -62,6 +65,7 @@ import std/[macros, sequtils, strutils, tables]
 import ./types
 import ./predicates
 import ./emit
+import ./data_refs
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -844,6 +848,42 @@ proc parseAdapterPreferenceSection(body: NimNode; profileVar: NimNode): NimNode 
     blk.add inner
     result.add blk
 
+proc parseDataSection(body: NimNode; profileVar: NimNode): NimNode =
+  ## GM4: `data:` body is one string literal per line, each naming a
+  ## plan-time data file relative to the profile directory:
+  ##
+  ##   data:
+  ##     "data/apps.toml"
+  ##
+  ## The macro records REFERENCES only (`ProfileIntent.dataFiles`); it
+  ## never reads the files, and neither does the profile binary, so a data
+  ## edit cannot invalidate the profile compile. `repro home plan` /
+  ## `apply` / `export` read and expand them
+  ## (`repro_profile_compile/data_expansion`).
+  result = newNimNode(nnkStmtList)
+  if body.kind != nnkStmtList:
+    error("data: expects an indented block of data-file paths", body)
+  var seen: seq[string] = @[]
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt:
+      continue
+    of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+      let path = entry.strVal
+      let problem = dataFilePathProblem(path)
+      if problem.len > 0:
+        error("data: \"" & path & "\": " & problem, entry)
+      if path in seen:
+        error("data: \"" & path & "\" is declared twice", entry)
+      seen.add path
+      let pathLit = newStrLitNode(path)
+      result.add quote do:
+        `profileVar`.dataFiles.add `pathLit`
+    else:
+      error("data: entries must be string literals naming a data file " &
+        "relative to the profile directory (e.g. \"data/apps.toml\"); got " &
+        $entry.kind, entry)
+
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an
   ## ActivityIntent into __profileIntent.activities.
@@ -886,6 +926,7 @@ macro profile*(name: static[string]; body: untyped): untyped =
   if body.kind != nnkStmtList:
     error("profile body must be an indented block", body)
 
+  var sawData = false
   for stmt in body:
     case stmt.kind
     of nnkCommand:
@@ -916,6 +957,13 @@ macro profile*(name: static[string]; body: untyped): untyped =
             error("adapterPreference must be `adapterPreference: <body>`",
                   stmt)
           stmts.add parseAdapterPreferenceSection(stmt[1], profSym)
+        of "data":
+          if stmt.len < 2 or stmt[1].kind != nnkStmtList:
+            error("data must be `data: <body>`", stmt)
+          if sawData:
+            error("exactly one `data:` section per profile", stmt)
+          sawData = true
+          stmts.add parseDataSection(stmt[1], profSym)
         else:
           error("unrecognised profile body form: " & $head, stmt)
       else:

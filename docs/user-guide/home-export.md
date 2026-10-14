@@ -157,7 +157,7 @@ A document always describes the platform that compiled it.
       "digest": "…",
       "inputs": [ { "path": "home.nim", "blake3": "…" }, … ]
     },
-    "dataFiles": [],
+    "dataFiles": [ { "path": "data/apps.toml", "blake3": "…", "rows": 12 } ],
     "compile": { "target": "x86_64-linux", "os": "linux", "cpu": "amd64",
                  "defines": [], "probe": {} }
   },
@@ -173,7 +173,7 @@ A document always describes the platform that compiled it.
 | `selection.hostDeclared` | Whether the profile's `hosts:` block has an entry for that host. An undeclared host gets `default` only. |
 | `selection.activities` | The activities `repro home plan` enables on that host, in the order the profile declares them. Computed by the planner's own rule. Platform-independent. |
 | `selection.unknownActivities` | Activities the host's `hosts:` entry names that the profile never declares (they contribute nothing). |
-| `intent` | The whole evaluated profile, exactly as the planner consumes it — every activity, not only the selected ones, and every platform's guarded elements. A `when`/`if` guard inside an activity stays a `whenGuard` element carrying its predicate text. Resources are profile-wide. |
+| `intent` | The whole evaluated profile, exactly as the planner consumes it — every activity, not only the selected ones, and every platform's guarded elements. A `when`/`if` guard inside an activity stays a `whenGuard` element carrying its predicate text. Resources are profile-wide. Rows of the profile's [data files](#data-files) are already expanded into the activities they name, so you never read the data files yourself; `intent` has no `dataFiles` key. |
 | `intent.resources[].guard`, `intent.configOverrides[].guard` | The runtime predicate under which the element applies, as text in the [predicate grammar](#predicates), or `null` for "every host". Nested `when` blocks are conjoined (`arm64 and macos`); an `elif` / `else` branch carries the negation of the earlier conditions. Two resources may share an `address` when their guards never hold together. |
 | `platforms` | For each target platform, whether this document describes it: `same` (the profile evaluated for that platform declares exactly this intent), `differs` (a compile-time `when defined(...)` changed it — refuse the document for that platform), or `unevaluated` (the profile could not be evaluated for that platform — treat as `differs`; the reason is in `provenance.compile.probe`). The compiling platform is always described, whatever its entry says. |
 | `provenance.repro.version` | The `repro` release that produced the document. |
@@ -182,12 +182,51 @@ A document always describes the platform that compiled it.
 | `provenance.profile.root` | The profile's root file. |
 | `provenance.profile.inputs` | Every file under the profile directory the compile was observed to read (modules, `config.nims`, files read with `staticRead` or at run time), with the BLAKE3-256 of its current contents. Paths are relative to the profile directory. |
 | `provenance.profile.digest` | BLAKE3-256 over `<path>\t<blake3>\n` for each input in order; `null` if no reads were observed. |
-| `provenance.dataFiles` | Data files the profile declares for plan-time expansion, with digests. Always empty for now. |
+| `provenance.dataFiles` | The [data files](#data-files) the profile's `data:` section declares, in declaration order: `path` (relative to the profile directory), `blake3` (BLAKE3-256 of the bytes that were expanded into `intent`) and `rows` (how many rows — package and resource — they hold). They are read when the profile is planned, not compiled, so they never appear in `profile.inputs`. Empty for a profile without a `data:` section. |
 | `provenance.compile.target` | The platform that compiled the profile, as a target name (`x86_64-linux`); `<cpu>-<os>` in Nim's names for a platform that is not a target. |
 | `provenance.compile.os`, `.cpu` | The same platform in Nim's names (`linux`, `macosx`, `windows`; `amd64`, `arm64`). A `when defined(...)` in the profile was decided for this platform. |
 | `provenance.compile.defines` | Extra `-d:` symbols the profile compile passes (none today). |
 | `provenance.compile.probe` | For each `unevaluated` platform, why: the end of the compiler's diagnostic. |
 | `evaluation` | Present only with `--target`: `target`, `host`, `activities`, `packages` (`name`, `version`, `binaries`, `activity`), and the `resources` and `configOverrides` from `intent` whose guards hold — what the home planner would use for that host on that platform. Resources the home planner does not handle (system-scope kinds) are not listed. |
+
+### Data files
+
+A profile can keep plain lists — the applications a host runs, say — in TOML
+files beside `home.nim`, read when the profile is planned:
+
+```nim
+profile "me":
+  data:
+    "data/apps.toml"
+```
+
+```toml
+# data/apps.toml
+[[package]]
+name = "ghostty"          # canonical package name
+activity = "desktop_apps" # the activity it joins
+when = "macos"            # optional, built-in predicates only
+```
+
+A data file can also declare resources; a `[[resource]]` row takes the
+parameters of the constructor its `kind` names, exactly as the call would in
+`resources:`:
+
+```toml
+[[resource]]
+kind = "fs.userFile"
+when = "linux"
+hostFile = "~/.config/foo/foo.conf"
+content = "x = 1\n"
+```
+
+Editing a data file does not recompile the profile. In the export each
+package row appears as an ordinary activity element (a `whenGuard` around a
+`packageRef` when it has `when`), each resource row as an entry of
+`intent.resources` with its `when` as `guard`, and `provenance.dataFiles`
+records each file's digest.
+`--check` therefore fails when a row changes and only notes a comment edit
+(`provenance.dataFiles` differs, `intent` does not).
 
 ### Predicates
 
