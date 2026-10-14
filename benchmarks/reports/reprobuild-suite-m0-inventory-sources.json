@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1982,
+    "nimTestBinaries": 1985,
     "pureUnitConsolidationGroups": 54,
-    "pureUnitTests": 615,
+    "pureUnitTests": 616,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 2000
+    "testEntries": 2003
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1163,9 +1163,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 15,
-      "integration": 1086,
+      "integration": 1088,
       "platform/destructive": 126,
-      "pure unit": 615,
+      "pure unit": 616,
       "unclassified": 158
     },
     "graphOwnedTestArtifacts": [
@@ -1356,9 +1356,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1982,
+    "nimTestBinaryCount": 1985,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2000
+    "testEntryCount": 2003
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8155,6 +8155,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_nix_gc_roots_cover_working_tree_outputs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_nlf_stat4_baseline_fingerprints",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -9923,6 +9943,23 @@
       "source": "libs/repro_core/tests/t_nim_dep_scanner.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nix_store_references_scan",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_nix_store_references_scan.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32712,6 +32749,25 @@
       "source": "tests/integration/t_nix_daemon_provisioner.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nix_tool_realizations_are_gc_rooted",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_nix_tool_realizations_are_gc_rooted.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

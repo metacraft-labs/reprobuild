@@ -675,6 +675,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim",
+    binary: "build/test-bin/t_nix_gc_roots_cover_working_tree_outputs",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
     binary: "build/test-bin/t_nlf_stat4_baseline_fingerprints",
     defines: @[],
@@ -1514,6 +1523,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_core/tests/t_nim_dep_scanner.nim",
     binary: "build/test-bin/t_nim_dep_scanner",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_core/tests/t_nix_store_references_scan.nim",
+    binary: "build/test-bin/t_nix_store_references_scan",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -12971,6 +12989,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_nix_daemon_provisioner.nim",
     binary: "build/test-bin/t_nix_daemon_provisioner",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_nix_tool_realizations_are_gc_rooted.nim",
+    binary: "build/test-bin/t_nix_tool_realizations_are_gc_rooted",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

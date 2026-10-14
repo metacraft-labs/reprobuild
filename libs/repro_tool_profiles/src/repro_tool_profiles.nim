@@ -11,6 +11,8 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/host_tar
+# GC roots for the store paths a Nix tool realization is recorded under.
+import repro_core/nix_store_roots
 # The tarball provisioner runs as a built-in executor on the build engine's
 # scheduler thread, possibly while the engine's worker pool is live, so its
 # extraction commands are released without ``osproc.close``'s double close of
@@ -1442,6 +1444,79 @@ proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   writeFile(extendedPath(path),
     toByteString(encodeNixMaterializationProfile(profile)))
 
+proc nixRealizationRootDir*(storeRoot: string; useDef: InterfaceToolUse;
+                            plan: NixAcquisitionPlan): string =
+  ## Where the GC roots of a Nix tool's CURRENT realization live:
+  ## ``<storeRoot>/nix-gc-roots/<package>.<executable>-<slot digest>``.
+  ##
+  ## The directory is keyed by the tool REQUEST — host, package name and
+  ## executable — and deliberately NOT by what realizes it (selector, lock
+  ## identity, nixpkgs pin, version), which is what the materialization
+  ## cache key adds. ``rootStorePaths`` keeps a directory's roots EXACTLY the
+  ## set it was last given, so when a nixpkgs bump (or a version bump)
+  ## re-realizes the tool, the new paths are rooted and the superseded
+  ## realization's roots are dropped from the same directory, new first. A
+  ## directory per materialization key would instead keep every realization
+  ## the project ever used alive for good: nothing retires a key, and the
+  ## store would grow with every bump on exactly the hosts that collect
+  ## because they are short of disk.
+  ##
+  ## The cost of that choice: two uses of the same package and executable
+  ## realized from different pins in one project share a directory, and
+  ## each resolution re-roots its own realization at the other's expense.
+  ## Neither is served stale for it: a recorded path that is collected is
+  ## re-realized on its next use (``nixMaterializationProfileMatches``).
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.nix.gc-root-slot.v1")
+  payload.writeString(hostOS)
+  payload.writeString(hostCPU)
+  let selector = useDef.packageSelector
+  let at = selector.rfind('@')
+  let packageName = if at > 0: selector[0 ..< at] else: selector
+  payload.writeString(packageName)
+  payload.writeString(useDef.executableName)
+  let slot = blake3.toHex(blake3.digest(toByteString(payload)))
+  storeRoot / "nix-gc-roots" /
+    (safeStoreSegment(packageName & "." & useDef.executableName,
+      "nix-tool") & "-" & slot[0 ..< 16])
+
+proc rootNixRealization(storeRoot: string; useDef: InterfaceToolUse;
+                        plan: NixAcquisitionPlan;
+                        storePaths: openArray[string]) =
+  ## Give the store paths of one realization a GC root of their own, under
+  ## ``nixRealizationRootDir`` (``repro_core/nix_store_roots``).
+  ##
+  ## With no ``storeRoot`` there is nothing to protect: no record, no
+  ## ``nix-store-path.txt`` and no materialization cache entry is written,
+  ## so the realization lives only as long as the returned profile, inside
+  ## this process, and any build output it produces is rooted by the build
+  ## engine's own ledger.
+  ##
+  ## A failure is a WARNING, not a provisioning failure. The realization is
+  ## valid right now, and its later loss is caught rather than served:
+  ## ``nixMaterializationProfileMatches`` and the tool-identity readers check
+  ## that a recorded path exists before reusing it, and the next resolution
+  ## retries the root.
+  if storeRoot.len == 0:
+    return
+  let storeDir = nixStoreDir()
+  var paths: seq[string] = @[]
+  for path in storePaths:
+    if path.startsWith(storeDir & "/"):
+      # Only a top-level store object can be a GC root; a path inside one
+      # (`…/lib`) is rooted through the object that contains it.
+      let slash = path.find('/', storeDir.len + 1)
+      paths.add(if slash < 0: path else: path[0 ..< slash])
+  if paths.len == 0:
+    return
+  try:
+    discard rootStorePaths(nixRealizationRootDir(storeRoot, useDef, plan),
+      paths, label = "nix://" & plan.nixSelector, storeDir = storeDir)
+  except CatchableError as err:
+    stderr.writeLine("repro tools: warning: the Nix store paths of " &
+      plan.nixSelector & " are not protected from garbage collection: " &
+      err.msg)
+
 proc addUniquePath*(dst: var seq[string]; value: string)
   ## Forward declaration — defined alongside the from-source populator
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
@@ -1500,6 +1575,11 @@ else:
     let selector = plan.nixSelector
     let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
     if cached.hit:
+      # The record is reusable only because its paths still exist (see
+      # ``nixMaterializationProfileMatches``); re-assert their root so they
+      # keep existing. Warm, this is one directory listing and no process.
+      rootNixRealization(storeRoot, useDef, plan,
+        cached.profile.realizedStorePaths)
       return cached.profile
 
     # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
@@ -1664,6 +1744,12 @@ else:
         nixVersion, "nix", plan.lockIdentity,
         plan.declaredExecutablePath, "nix://" & plan.nixSelector,
         selectedStorePath, realized)
+      # Root BEFORE recording: ``nix build --no-link`` (the helper's and the
+      # direct fallback's) left no root, and the record written next outlives
+      # the process by design. Without its own root the recorded path stays
+      # alive only while some dev-shell profile generation happens to name
+      # the same path (reprobuild-pm issue 2026-10-02, addendum 2026-10-03).
+      rootNixRealization(storeRoot, useDef, plan, realized)
       createDir(extendedPath(unified.absolutePath))
       writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
         selectedStorePath & "\n")
