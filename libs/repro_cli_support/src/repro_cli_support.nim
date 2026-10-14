@@ -314,7 +314,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -2056,7 +2056,8 @@ proc capabilitiesJson*(): JsonNode =
     "runquota-execution",
     "cmake-regeneration-edge",
     "provider-cache-priming",
-    "build-report-json-inspection"])
+    "build-report-json-inspection",
+    "build-action-output"])
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
@@ -7843,6 +7844,18 @@ type
     blmSummary
     blmQuiet
 
+  BuildActionOutputMode* = enum
+    ## ``--action-output``: which actions' captured stdout/stderr a build
+    ## prints. Independent of ``--log``, which governs the status lines: a
+    ## caller that parses compiler output (a CMake try_compile) wants the
+    ## output with no status lines around it.
+    baoFailed
+      ## The default: only a failed action's output, inside its failure
+      ## summary on stderr.
+    baoAll
+      ## Every action that ran and produced output, failed ones included, on
+      ## stdout, the way Ninja and Make pass a command's output through.
+
   BuildDaemonMode = enum
     bdmAuto
     bdmRequire
@@ -8158,6 +8171,16 @@ proc parseBuildLogMode(value: string): BuildLogMode =
   else:
     raise newException(ValueError,
       "unsupported --log=" & value & " (expected actions, summary, or quiet)")
+
+proc parseBuildActionOutputMode*(value: string): BuildActionOutputMode =
+  case value.toLowerAscii()
+  of "failed":
+    baoFailed
+  of "all":
+    baoAll
+  else:
+    raise newException(ValueError,
+      "unsupported --action-output=" & value & " (expected failed or all)")
 
 proc configuredBuildLogMode(): BuildLogMode =
   let configured = getEnv("REPROBUILD_LOG", "")
@@ -8790,21 +8813,57 @@ proc tryRenderDaemonProgress(renderer: var BuildProgressRenderer;
   renderer.renderProgress(event)
   true
 
+proc emitActionOutputs(buildResult: BuildRunResult;
+                       eventSink: BuildCommandEventSink;
+                       renderer: var BuildProgressRenderer) =
+  ## ``--action-output=all``: write each action's captured stdout and then its
+  ## stderr to OUR stdout, in result order, succeeded and failed alike.
+  ##
+  ## One stream, because that is what the build tools this stands in for do:
+  ## Ninja captures a command's stdout and stderr through one pipe and prints
+  ## it on its own stdout, and a CMake try_compile merges both streams of the
+  ## build tool anyway. The consumer that needs this is that try_compile:
+  ## CMake learns a compiler's implicit include and link directories by
+  ## parsing the compiler's ``-v`` output (stderr) out of the build tool's
+  ## output, and a build that prints only status lines leaves them empty.
+  ##
+  ## An action served from cache or found up to date did not run and has no
+  ## output to print, as with Ninja for an up-to-date edge. Nothing is
+  ## printed between actions: a header line would be one more line for
+  ## CMake's link-line regex to consider.
+  for item in buildResult.results:
+    for text in [item.stdout, item.stderr]:
+      if text.len == 0:
+        continue
+      let chunk = if text.endsWith("\n"): text else: text & "\n"
+      if eventSink != nil:
+        eventSink("diagnostic", chunk, "{\"stream\":\"stdout\"}")
+      else:
+        renderer.clearProgressLine()
+        stdout.write(chunk)
+        stdout.flushFile()
+
 proc emitFailedActionSummaries(buildResult: BuildRunResult;
                                eventSink: BuildCommandEventSink;
-                               renderer: var BuildProgressRenderer) =
+                               renderer: var BuildProgressRenderer;
+                               outputAlreadyShown = false) =
   ## Surface each failed action's id, exit code, and stderr to the terminal.
   ## Otherwise the only failure signal is a non-zero exit code (and, over the
   ## daemon protocol, the generic "daemon-hosted build failed" line), which
   ## forces the user to open build-report.json to learn what actually broke.
+  ##
+  ## ``outputAlreadyShown``: ``--action-output=all`` printed every action's
+  ## output already, so the summary keeps only its header and notes rather
+  ## than print the same compiler diagnostics a second time.
   for item in buildResult.results:
     if item.status != asFailed:
       continue
     var summary = "repro build: action failed: " & item.id &
       " (exit code " & $item.exitCode & ")"
     if item.stderr.len > 0:
-      summary.add('\n')
-      summary.add(strip(item.stderr, leading = false))
+      if not outputAlreadyShown:
+        summary.add('\n')
+        summary.add(strip(item.stderr, leading = false))
       # A child that died in the dynamic loader names the two libraries the
       # loader was reconciling, and neither is the one automatic monitoring
       # injected — see `repro_core/injected_libraries`. We are the only party
@@ -8822,7 +8881,7 @@ proc emitFailedActionSummaries(buildResult: BuildRunResult;
     # build-failure-report.json. Surface the TAIL of stdout too: bounded, because
     # a large C compile's stdout is megabytes of ``CC:`` lines and only the final
     # lines carry the error.
-    if item.stdout.len > 0:
+    if item.stdout.len > 0 and not outputAlreadyShown:
       let outLines = strip(item.stdout, leading = false).splitLines()
       let tailStart = max(0, outLines.len - 200)
       summary.add('\n')
@@ -9971,6 +10030,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         measureSet: MeasureSet = DefaultMeasureSet;
                         reportPersistence = BuildReportPersistence();
                         logMode = blmActions;
+                        actionOutput = baoFailed;
                         diagnosticsPath = "";
                         prepareOnly = false;
                         dryRun = false;
@@ -10562,8 +10622,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     buildResult.stats = buildStats
     collectInputEvidence(buildResult)
     recordStatsForBuildRun(buildResult)
+    if actionOutput == baoAll:
+      emitActionOutputs(buildResult, eventSink, progressRenderer)
     if buildResult.hasFailedActions():
-      emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
+      emitFailedActionSummaries(buildResult, eventSink, progressRenderer,
+        outputAlreadyShown = actionOutput == baoAll)
       persistFailureReport(buildResult, lowered.actions)
     let statsRenderStart = statStart(statsEnabled)
     emitMeasurements(buildResult)
@@ -11132,6 +11195,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           measureSet = measureSet,
           reportPersistence = reportPersistence,
           logMode = logMode,
+          actionOutput = actionOutput,
           diagnosticsPath = "",
           # Preparing the requested consumer still has to materialize source
           # tools. Otherwise the parent records the recipe as resolved while
@@ -11433,6 +11497,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             measureSet = measureSet,
             reportPersistence = reportPersistence,
             logMode = logMode,
+            actionOutput = actionOutput,
             diagnosticsPath = "",
             prepareOnly = false,
             dryRun = dryRun,
@@ -12187,8 +12252,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     collectInputEvidence(buildResult)
     result.inputEvidencePaths = collectedInputEvidence
     recordStatsForBuildRun(buildResult)
+    if actionOutput == baoAll:
+      emitActionOutputs(buildResult, eventSink, progressRenderer)
     if buildResult.hasFailedActions():
-      emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
+      emitFailedActionSummaries(buildResult, eventSink, progressRenderer,
+        outputAlreadyShown = actionOutput == baoAll)
       persistFailureReport(buildResult, scheduledActions)
       for item in buildResult.results:
         if item.status == asFailed:
@@ -23749,6 +23817,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var showExplicit = false
   var reportPersistence = BuildReportPersistence()
   var logMode = configuredBuildLogMode()
+  var actionOutput = baoFailed
   var diagnosticsPath = ""
   var benchmarkPath = ""
   var statsCapture = StatsCaptureConfig()
@@ -23934,6 +24003,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     elif arg == "--log" or arg.startsWith("--log="):
       logMode = parseBuildLogMode(valueFromFlag(args, i, "--log"))
       logModeExplicit = true
+    elif arg == "--action-output" or arg.startsWith("--action-output="):
+      actionOutput = parseBuildActionOutputMode(
+        valueFromFlag(args, i, "--action-output"))
     elif arg == "-v" or arg == "--verbose":
       logMode = blmSummary
       logModeExplicit = true
@@ -24338,6 +24410,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         measureSet = measureSet,
         reportPersistence = reportPersistence,
         logMode = logMode,
+        actionOutput = actionOutput,
         diagnosticsPath = diagnosticsPath,
         prepareOnly = prepareOnly,
         dryRun = dryRun,
