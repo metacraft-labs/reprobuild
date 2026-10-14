@@ -12069,6 +12069,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim",
+    binary: "build/test-bin/t_lease_reap_destroys_an_unlinked_type_over_a_session",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim",
     binary: "build/test-bin/t_legacy_manifest_without_team_route_warns_and_scaffolds",
     defines: @[],
@@ -13844,6 +13853,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim",
     binary: "build/test-bin/t_repro_push_sync_integrates_upstream_then_publishes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_repro_reap_verb_is_dispatched.nim",
+    binary: "build/test-bin/t_repro_reap_verb_is_dispatched",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

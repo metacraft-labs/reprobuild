@@ -341,8 +341,10 @@
       # the declared x86 child architecture. Only `windows_entry_park.nim`
       # changes under `src/`.
       #
+      # f51e0ab advances the workspace pin with Windows injection diagnostics;
+      # the Darwin source is unchanged.
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/c6602ce6866b8c5ef6a9201cb7d90b920268e8d0";
+      url = "github:metacraft-labs/nim-stackable-hooks/f51e0ab3bb79b6bdf5fba0cecd57c30cf4edceff";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -437,7 +439,9 @@
       # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
       # ``src/ct_incremental_adapter.nim`` are unchanged and the ``repro.lock``
       # still names trace-format 808ffdb4, so ``ct-trace-format-src`` stays.
-      url = "github:metacraft-labs/codetracer/222a4a0099115066ba331817e94a3ac9f2293290";
+      # 7662d329 carries replay-option forwarding and its regression test;
+      # the incremental adapter and trace-format resolution are unchanged.
+      url = "github:metacraft-labs/codetracer/7662d32921a8981b889f7a0c71a3e2f4824573cc";
       flake = false;
     };
 
