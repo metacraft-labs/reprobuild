@@ -199,6 +199,9 @@ libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
 libs/repro_daemon_core/tests/t_daemon_launchd_label.nim	nim	12
+libs/repro_daemon_core/tests/t_daemon_missing_feature_diagnostic.nim	nim	10
+libs/repro_daemon_core/tests/t_daemon_missing_feature_refusal.nim	nim	2
+libs/repro_daemon_core/tests/t_daemon_status_binary_identity.nim	nim	6
 libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	20
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	13

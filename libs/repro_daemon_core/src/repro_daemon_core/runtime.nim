@@ -3460,6 +3460,46 @@ proc startUserDaemon*(publicCliPath: string;
 proc stopUserDaemon*(endpoint = defaultUserDaemonEndpoint()) =
   requestUserDaemonShutdown(endpoint)
 
+const UserDaemonBinaryVersionNote* =
+  "the version string does not identify the build; two builds with " &
+  "different features can share it. Compare binary-identity and features."
+  ## Printed as `binary-version-note:` directly under `binary-version:` in
+  ## `repro daemon status`. One line, so `field: value` readers of the
+  ## report are unaffected. See `userDaemonBinaryIdentity` for why.
+
+proc userDaemonBinaryIdentity*(status: UserDaemonStatus): string =
+  ## The value `repro daemon status` prints as `binary-identity:` -- the
+  ## field that actually tells two daemon builds apart.
+  ##
+  ## WHY NOT `binary-version` (reprobuild-pm issue 2026-10-13). The version
+  ## is the package version, shared by every build between two bumps. A
+  ## nix-store daemon and a locally built one both reported `0.2.5` while
+  ## advertising different feature sets, and a reader who compared the CLI's
+  ## version with the daemon's concluded the daemon was current. The spec
+  ## (Local-Daemons-And-Control-Plane.md, *Protocol Compatibility*) asks for
+  ## binary IDENTITY as a field distinct from the feature flags.
+  ##
+  ## The preference order is by strength of evidence:
+  ##
+  ## 1. `runningHash`, verbatim -- the content digest of the running image
+  ##    as `imageDigestHex` produced it, algorithm prefix included
+  ##    (`blake3-256:<hex>`), the same value `running-hash:` prints.
+  ## 2. `path:<image>` when no digest could be taken (the image was deleted
+  ##    or replaced under a running daemon): weaker, and labelled so a
+  ##    reader does not compare it with a digest as if they were alike.
+  ##    The running image wins over the source image, which may have been
+  ##    rebuilt since the daemon staged its copy.
+  ## 3. `unknown` -- never empty, because two empty identities compared by
+  ##    eye read as "the same build".
+  if status.runningHash.len > 0:
+    status.runningHash
+  elif status.runningImagePath.len > 0:
+    "path:" & status.runningImagePath
+  elif status.sourceImagePath.len > 0:
+    "path:" & status.sourceImagePath
+  else:
+    "unknown"
+
 proc renderUserDaemonStatus*(status: UserDaemonStatus): string =
   if not status.running:
     return "repro daemon: not-running\nendpoint: " & status.endpoint
@@ -3472,6 +3512,10 @@ proc renderUserDaemonStatus*(status: UserDaemonStatus): string =
     "binary-name: " & status.binary.name & "\n" &
     "binary-path: " & status.binary.path & "\n" &
     "binary-version: " & status.binary.version & "\n" &
+    # Kept verbatim (tools parse it); the two lines after it say why it
+    # must not be read as the build identity.
+    "binary-identity: " & userDaemonBinaryIdentity(status) & "\n" &
+    "binary-version-note: " & UserDaemonBinaryVersionNote & "\n" &
     "features: " & status.featureFlags & "\n" &
     "generation: " & status.generation & "\n" &
     "pid: " & $status.pid & "\n" &

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 2050,
-    "pureUnitConsolidationGroups": 60,
-    "pureUnitTests": 644,
+    "nimTestBinaries": 2053,
+    "pureUnitConsolidationGroups": 61,
+    "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 119,
-    "testEntries": 2068
+    "testEntries": 2071
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -140,6 +140,20 @@
       "sources": [
         "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim",
         "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 3,
+      "defines": [],
+      "dependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "sources": [
+        "libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim",
+        "libs/repro_daemon_core/tests/t_daemon_missing_feature_diagnostic.nim",
+        "libs/repro_daemon_core/tests/t_daemon_status_binary_identity.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1265,8 +1279,8 @@
       "graph-fixture": 17,
       "integration": 1099,
       "platform/destructive": 126,
-      "pure unit": 644,
-      "unclassified": 182
+      "pure unit": 646,
+      "unclassified": 183
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1456,9 +1470,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2050,
+    "nimTestBinaryCount": 2053,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2068
+    "testEntryCount": 2071
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10635,6 +10649,58 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_launchd_label.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_missing_feature_diagnostic",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_missing_feature_diagnostic.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_missing_feature_refusal",
+      "class": "unclassified",
+      "classificationReason": "re-enters its own executable",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_missing_feature_refusal.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_status_binary_identity",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_status_binary_identity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
