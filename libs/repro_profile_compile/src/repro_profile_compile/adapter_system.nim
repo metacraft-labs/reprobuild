@@ -687,9 +687,32 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
   ## Mapping:
   ##   ProfileIntent.resources filtered to system-scope kinds ->
   ##     seq[SystemResource] with SystemResourceKind tags + per-kind fields.
+  # GM4: data-file rows expand into ACTIVITIES, which system scope does not
+  # have. Ignoring the `data:` section would leave its rows declared but
+  # never applied while the run reports success (Core-Invariants.md
+  # §Unrecognised Input Is Rejected, Not Skipped); refuse instead.
+  if p.dataFiles.len > 0:
+    raise newException(ValueError,
+      "system profiles do not read plan-time data files (`data:` declares " &
+      p.dataFiles.join(", ") & "); data rows expand into activities, " &
+      "which only home profiles have")
   for r in p.resources:
     if not isSystemScopeResource(r.kind):
       continue
+    # A runtime guard (`when linux():` around a resource, GM3) is
+    # evaluated by the HOME planner. System scope has no host selection
+    # (no activities, no per-host evaluation of predicates) and whether it
+    # gets one is undecided, so the system path would apply a guarded
+    # system resource on every host; refuse, naming the resource and the
+    # guard, instead of dropping the guard.
+    if r.guard.expr.len > 0:
+      raise newException(ValueError,
+        "system-scope resource " & r.kind &
+        (if r.address.len > 0: " `" & r.address & "`" else: "") &
+        " is under a runtime predicate `" & r.guard.expr & "`; system " &
+        "profiles do not evaluate runtime predicates (system scope has no " &
+        "host selection) -- use a compile-time `when defined(...)` for " &
+        "system-scope resources")
     result.resources.add(buildSystemResource(r))
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,9 @@ rest of the implementation documentation.
   [Workspace Locking](workspace-locking.md) for choosing a public / team /
   personal scheme, restoring a workspace on a new machine, and recovering
   from a refused push.
+- **Feeding your home profile to another tool (Nix, scripts, CI)?** See
+  [Exporting a home profile](home-export.md) for `repro home export`, its
+  JSON schema, and `--check` for committed snapshots.
 - **Need a specific reprobuild version?** See
   [Pinning reprobuild itself](pinning-reprobuild-itself.md). It is an
   ordinary `uses:` dependency plus a committed lock entry — several versions

@@ -7,7 +7,7 @@
 ##   removePackageReference(profilePath, package, activity = "default",
 ##                          predicate = "")
 ##   setConfigurable(profilePath, packageDotConfigurable, value,
-##                   configurableLookup)
+##                   configurableLookup, predicate = "")
 ##   setHostActivities(profilePath, host, activities)
 ##
 ## Round-trip invariant: `add(p, x)` followed by `remove(p, x)` against
@@ -586,24 +586,136 @@ proc createConfigPackage(p: Profile; cfg: IntentNode;
 
 proc findConfigPackage(cfg: IntentNode; pkgName: string):
     Option[IntentNode] =
+  ## The first UNGUARDED `<pkgName>:` block of `config:`; a package block
+  ## inside a guard chain is not a target for an unguarded edit.
   for ch in cfg.configPackages:
-    if ch.configPackageName == pkgName:
+    if ch.kind == nkConfigPackage and ch.configPackageName == pkgName:
       return some(ch)
   none(IntentNode)
 
-proc findConfigEntry(pkg: IntentNode; key: string): int =
-  for i, ch in pkg.configEntries:
-    if ch.configKey == key:
+proc findConfigEntry(entries: seq[IntentNode]; key: string): int =
+  ## Index of the first `<key> = ...` line among `entries` (direct
+  ## children only: an entry inside a nested guard chain is not matched).
+  for i, ch in entries:
+    if ch.kind == nkConfigEntry and ch.configKey == key:
       return i
   -1
 
+type
+  AssignmentSite = object
+    node: IntentNode
+    guards: seq[string]   ## predicate text of every enclosing guard, outer
+                          ## first; empty when unguarded
+
+proc collectAssignments(nodes: seq[IntentNode]; pkgName, key: string;
+                        inPackage: bool; guards: seq[string];
+                        into: var seq[AssignmentSite]) =
+  ## Every assignment of `<pkgName>.<key>` under `nodes` (a `config:` body
+  ## or a package body), with the guards around it.
+  for node in nodes:
+    case node.kind
+    of nkConfigPackage:
+      if node.configPackageName == pkgName:
+        collectAssignments(node.configEntries, pkgName, key, true, guards,
+          into)
+    of nkConfigEntry:
+      if inPackage and node.configKey == key:
+        into.add AssignmentSite(node: node, guards: guards)
+    of nkCondBlock:
+      let text =
+        case node.keyword
+        of ckWhen: "when " & node.predicateSource
+        of ckIf: "if " & node.predicateSource
+        of ckElif: "elif " & node.predicateSource
+        of ckElse: "else"
+      collectAssignments(node.condChildren, pkgName, key, inPackage,
+        guards & @[text], into)
+    else: discard
+
+proc describeSite(p: Profile; site: AssignmentSite): string =
+  result = p.path & ":" & $site.node.configEntryLine
+  if site.guards.len == 0:
+    result.add " (unguarded)"
+  else:
+    result.add " (under `" & site.guards.join(":` / `") & ":`)"
+
+proc refuseOverlappingConfigAssignment(p: Profile; cfg: IntentNode;
+                                       pkgName, key: string;
+                                       added: IntentNode) =
+  ## A NEW assignment `added` may sit only after unguarded assignments of
+  ## the same key. Scalars resolve last-write-wins
+  ## (Configurable-System.md §Priorities And Contributions), so on a host
+  ## where two assignments' guards both hold the later one wins: `added`
+  ## must not be followed by another assignment (it would be shadowed),
+  ## and must not follow a guarded one (it would shadow it -- for an
+  ## unguarded `added`, on every host that guard selects). Guards are not
+  ## compared for satisfiability (Home-Profile-Intent-Layer.md §Predicate
+  ## Normalization), so any such pair is refused.
+  var sites: seq[AssignmentSite]
+  collectAssignments(cfg.configPackages, pkgName, key, false, @[], sites)
+  var conflicting: seq[string]
+  var reason = ""
+  for site in sites:
+    if site.node == added:
+      continue
+    if site.node.configEntryLine > added.configEntryLine:
+      conflicting.add describeSite(p, site)
+      if reason.len == 0:
+        reason = "a later assignment would override it wherever both apply"
+    elif site.guards.len > 0:
+      conflicting.add describeSite(p, site)
+      if reason.len == 0:
+        reason = "it would override a guarded assignment wherever both apply"
+  if conflicting.len > 0:
+    raiseOverlappingAssignment(p.path, pkgName & "." & key, reason &
+      "; name that guard with --when to edit it, or edit the profile by " &
+      "hand", conflicting)
+
+proc growEnclosingEnd(p: Profile; line: int; nodes: varargs[IntentNode]) =
+  for node in nodes:
+    if not node.isNil and node.endLine < line:
+      node.endLine = line
+  if p.root.endLine < line:
+    p.root.endLine = line
+
+proc createConfigGuard(p: Profile; pkg: IntentNode;
+                       predicateSrc: string): IntentNode =
+  ## Append a `when <canonical predicate>:` block at the end of the
+  ## package block `pkg`. Created empty; the caller adds the entry.
+  let predAst = parsePredicate(p.path, predicateSrc, 0)
+  let canon = renderPredicate(normalizeAst(predAst))
+  let guardIndent = pkg.indent + p.indentStep
+  let insertAt = insertionIndex(p, pkg, pkg.configPackageHeaderLine)
+  insertLine(p, insertAt, indentStr(guardIndent) & "when " & canon & ":")
+  result = IntentNode(kind: nkCondBlock,
+    startLine: insertAt + 1, endLine: insertAt + 1,
+    indent: guardIndent, keyword: ckWhen,
+    predicateSource: canon, predicateAst: predAst,
+    canonicalPredicate: canon, condHeaderLine: insertAt + 1,
+    condChildren: @[])
+  pkg.configEntries.add result
+
 proc setConfigurable*(profilePath: string; packageDotConfigurable: string;
                      value: string;
-                     configurableLookup: ConfigurableLookup) =
+                     configurableLookup: ConfigurableLookup;
+                     predicate = "") =
   ## Write or update `<package>.<configurable> = <value>` inside the
   ## profile's `config:` section. Creates the `config:` block and the
   ## `<package>:` sub-block on demand. Subsequent calls into the same
   ## sub-block append the new entry in insertion order.
+  ##
+  ## `predicate` (a runtime predicate expression, e.g. `windows` or
+  ## `linux and arm64`) guards the assignment: it lands in the package
+  ## block's `when <pred>:` block whose normalized predicate matches,
+  ## created (as `when <canonical predicate>:` at the end of the package
+  ## block) when there is none. Without it the unguarded assignment is
+  ## edited. Either way an existing assignment of the key at that target
+  ## is updated in place; a NEW assignment that would overlap an
+  ## assignment of the same key under a different guard is refused
+  ## (`EOverlappingAssignment`, see `refuseOverlappingConfigAssignment`).
+  ## Assignments inside guard chains the edit does not target, and
+  ## package blocks inside guard chains, are left byte-for-byte as they
+  ## are.
   ##
   ## `configurableLookup(package, configurable)` is the seam by which
   ## the caller (CLI / apply pipeline) injects knowledge of which
@@ -613,6 +725,12 @@ proc setConfigurable*(profilePath: string; packageDotConfigurable: string;
   let (pkgName, keyName) = splitPkgDotKey(packageDotConfigurable)
   if configurableLookup != nil and not configurableLookup(pkgName, keyName):
     raiseUnknownConfigurable(profilePath, pkgName, keyName)
+  # Validate the predicate before touching anything (it raises
+  # `EUnstructured` naming the offending token).
+  let canon =
+    if predicate.len > 0:
+      renderPredicate(normalizeAst(parsePredicate(profilePath, predicate, 0)))
+    else: ""
   let prof = loadProfile(profilePath)
   var cfg: IntentNode
   let cfgOpt = findConfigBlock(prof)
@@ -626,29 +744,40 @@ proc setConfigurable*(profilePath: string; packageDotConfigurable: string;
     pkg = pkgOpt.get
   else:
     pkg = createConfigPackage(prof, cfg, pkgName)
-  let entryIndent = pkg.indent + prof.indentStep
+  # The block the assignment belongs in: the package block itself, or its
+  # guard block for `predicate`.
+  var target = pkg
+  var guard: IntentNode = nil
+  if canon.len > 0:
+    let existingGuard = findCondWithCanonical(pkg.configEntries, canon)
+    guard =
+      if existingGuard.isSome: existingGuard.get
+      else: createConfigGuard(prof, pkg, predicate)
+    target = guard
+  let siblings =
+    if guard.isNil: pkg.configEntries else: guard.condChildren
+  let entryIndent = target.indent + prof.indentStep
   let rhs = renderConfigValue(value)
   let newLine = indentStr(entryIndent) & keyName & " = " & rhs
-  let existingIdx = findConfigEntry(pkg, keyName)
+  let existingIdx = findConfigEntry(siblings, keyName)
   if existingIdx >= 0:
     # Update in place. Preserve the line index.
-    let entry = pkg.configEntries[existingIdx]
+    let entry = siblings[existingIdx]
     prof.lines[entry.configEntryLine - 1] = newLine
     entry.configValueSource = rhs
   else:
-    let insertAt = insertionIndex(prof, pkg, pkg.configPackageHeaderLine)
+    let insertAt = insertionIndex(prof, target, headerLineOf(target))
     insertLine(prof, insertAt, newLine)
     let entryNode = IntentNode(kind: nkConfigEntry,
       startLine: insertAt + 1, endLine: insertAt + 1, indent: entryIndent,
       configKey: keyName, configValueSource: rhs,
       configEntryLine: insertAt + 1)
-    pkg.configEntries.add entryNode
-    if pkg.endLine < insertAt + 1:
-      pkg.endLine = insertAt + 1
-    if cfg.endLine < insertAt + 1:
-      cfg.endLine = insertAt + 1
-    if prof.root.endLine < insertAt + 1:
-      prof.root.endLine = insertAt + 1
+    if guard.isNil:
+      pkg.configEntries.add entryNode
+    else:
+      guard.condChildren.add entryNode
+    growEnclosingEnd(prof, insertAt + 1, guard, pkg, cfg)
+    refuseOverlappingConfigAssignment(prof, cfg, pkgName, keyName, entryNode)
   writeProfile(prof)
 
 # ---------------------------------------------------------------------------
@@ -730,7 +859,8 @@ proc setHostActivities*(profilePath, host: string;
 # of the entry in insertion order, and an existing key is updated in
 # place. The editor writes resource entries at the profile top level
 # (not nested under a `when`/`if`); a predicate-guarded resource is
-# hand-authored.
+# hand-authored, and an edit naming an address declared only under a
+# guard is refused (`EGuardedTarget`) rather than duplicated unguarded.
 
 proc createResourcesBlock(p: Profile): IntentNode =
   let parentIndent = p.root.indent + p.indentStep
@@ -763,10 +893,24 @@ proc createResourceEntry(p: Profile; resBlk: IntentNode;
 
 proc findResourceEntry(resBlk: IntentNode; address: string):
     Option[IntentNode] =
+  ## The unguarded `<kind> <address>:` entry directly inside `resources:`.
   for ch in resBlk.resourcesEntries:
     if ch.kind == nkResourceEntry and ch.resourceAddress == address:
       return some(ch)
   none(IntentNode)
+
+proc guardedResourceSites(p: Profile; nodes: seq[IntentNode];
+                          address: string; inGuard: bool;
+                          into: var seq[string]) =
+  ## `file:line` of every declaration of `address` inside a guard chain.
+  for node in nodes:
+    case node.kind
+    of nkResourceEntry:
+      if inGuard and node.resourceAddress == address:
+        into.add p.path & ":" & $node.resourceHeaderLine
+    of nkCondBlock:
+      guardedResourceSites(p, node.condChildren, address, true, into)
+    else: discard
 
 proc findResourceAttr(entry: IntentNode; key: string): int =
   for i, ch in entry.resourceAttrs:
@@ -793,6 +937,17 @@ proc setResource*(profilePath, kind, address, attrKey: string;
   if entryOpt.isSome:
     entry = entryOpt.get
   else:
+    # A resource declared only under a guard is not this edit's target:
+    # adding an unguarded entry would duplicate its address on every host
+    # the guard selects, and editing the guarded one would edit only some
+    # hosts' resource. Refuse; guarded resources are hand-authored.
+    var sites: seq[string]
+    guardedResourceSites(prof, resBlk.resourcesEntries, address, false,
+      sites)
+    if sites.len > 0:
+      raiseGuardedTarget(profilePath, address,
+        "the resource is declared only under a `when <pred>:` guard; " &
+        "edit it in the profile by hand", sites)
     entry = createResourceEntry(prof, resBlk, kind, address)
   let attrIndent = entry.indent + prof.indentStep
   let rhs = renderConfigValue(value)

@@ -145,7 +145,19 @@ suite "provider-compile reporting distinguishes a compile from a reuse":
 
       # --- run 3: the provider binary is deleted, so it must be
       #            re-produced. Everything else is unchanged. -------------
+      #
+      # The project's binary is the CALLER's copy. A recipe-relative provider
+      # compile (Hermetic-Builds-And-Path-Independence.md §"Engine-internal
+      # recipe compiles") writes its own output under the action-cache root,
+      # shared by every copy of the recipe, and the caller's copy is restored
+      # from it without compiling. Removing the edge's output as well is
+      # what makes this run a compile, which is the case under test.
       removeFile(providerBinary)
+      let edgeOutputs = actionCacheRoot / "recipe-compiles" / "provider"
+      if dirExists(edgeOutputs):
+        for path in walkDirRec(edgeOutputs):
+          if extractFilename(path) == "project-provider":
+            removeFile(path)
       let rebuilt = runBuildCli(reproBin, projectRoot, actionCacheRoot)
       if rebuilt.exitCode != 0:
         checkpoint(rebuilt.output)

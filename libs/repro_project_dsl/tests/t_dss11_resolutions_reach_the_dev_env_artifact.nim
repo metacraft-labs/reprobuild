@@ -184,21 +184,23 @@ suite "D-SS11 §4.6 — the points reach the ATTACH-DECISION snapshot":
         named.add(d.name)
     check named == @[Dss11RelyingParties, Dss11FixtureUsers]
 
-  test "a v23 interface envelope decodes to NO points rather than refusing":
+  test "a v25 interface envelope decodes to NO points rather than refusing":
     # The additive-decode rule every retained field in this codec
-    # follows: a pre-v24 row carries no points, and the empty list is
+    # follows: a pre-v26 row carries no points, and the empty list is
     # what such a service really converged. Written by the CURRENT codec
-    # at version 23, as L6's own gating test writes its v22 envelope --
-    # a hand-typed byte string would be a guess about what v23 was.
+    # at version 25, as L6's own gating test writes its v24 envelope --
+    # a hand-typed byte string would be a guess about what v25 was.
+    # (25/26 and not 23/24: the points moved up two when this branch
+    # merged ``agents`` -- see ``EnvelopeVersion``'s note on numbering.)
     let pi = interfaceOf(OwnerPackage)
-    let v23 = decodeInterfacePayload(encodeInterfacePayload(pi, 23'u16),
-      23'u16)
-    check serviceRow(v23, "idp").contributionPoints.len == 0
-    # ... and the SAME payload at v24 carries them, so the assertion
+    let v25 = decodeInterfacePayload(encodeInterfacePayload(pi, 25'u16),
+      25'u16)
+    check serviceRow(v25, "idp").contributionPoints.len == 0
+    # ... and the SAME payload at v26 carries them, so the assertion
     # above is about the version and not about the encoder dropping them.
-    let v24 = decodeInterfacePayload(encodeInterfacePayload(pi, 24'u16),
-      24'u16)
-    check serviceRow(v24, "idp").contributionPoints ==
+    let v26 = decodeInterfacePayload(encodeInterfacePayload(pi, 26'u16),
+      26'u16)
+    check serviceRow(v26, "idp").contributionPoints ==
       @[Dss11RelyingParties, Dss11FixtureUsers]
 
 suite "D-SS11 §4.6 — a resolver call reaches the dev-env result":

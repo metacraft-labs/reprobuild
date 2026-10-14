@@ -30,7 +30,16 @@
 ##   (f) that "once" holds even when the failure's MESSAGE changes on every
 ##       tick — a provider refusing the destroy differently each time — so the
 ##       de-duplication is keyed on the record, not on the sentence.
-##   (g) the same tick reaps a shared service INSTANCE whose last lease has
+##   (g) a ``keep`` renew NAMES its holder in the record (``keepHolders``),
+##       a later dated renew by another consumer does not unpin it, and the
+##       keep holder renewing under a dated policy moves out again. Driven
+##       through ``applyLeaseRenew`` (the handler body) on a real store; the
+##       socket hop in front of it is (a)'s subject, not this one's.
+##   (h) records the sweep could not DECODE — quarantined (corrupt), foreign
+##       (a newer repro's) and unreadable — render as findings keyed on their
+##       PATH, so a second bad record is a new finding; and a renew refuses to
+##       rewrite a foreign record.
+##   (i) the same tick reaps a shared service INSTANCE whose last lease has
 ##       lapsed -- Shared-Development-Services §4.5's "an instance is reaped
 ##       when its last lease lapses", end to end through the DAEMON rather
 ##       than through a direct `reapOnce`. This is the case that measures
@@ -519,7 +528,116 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     # And nothing raised out of the sweep.
     check logText.count("lease reap tick error") == 0
 
-  test "(g) the tick reaps a shared service INSTANCE whose last lease lapsed":
+  test "(g) a keep renew names its holder; a dated renew does not unpin it":
+    let root = scratchRoot("keep-renew")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    defer: removeDir(root)
+    let store = openStateStore(stateRoot)
+    let t0 = fromUnix(1_700_000_000)
+    materialize(store, "cluster", "smoke", delayed(initDuration(minutes = 1)), t0)
+    check readStateRecord(store, "cluster").effectiveDeadline.isSome
+
+    # A keep renew pins the state AND records who pins it.
+    let t1 = t0 + initDuration(seconds = 10)
+    let pin = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "pinner",
+      ttlSeconds: LeaseRenewKeepSentinel), stateRoot, t1)
+    check pin.ok and pin.hadRecord
+    check pin.effectiveDeadlineUnix == LeaseRenewKeepSentinel
+    let pinned = readStateRecord(store, "cluster")
+    check pinned.keepHolders == @["pinner"]
+    check not pinned.holders.hasKey("pinner")
+    check pinned.holders.hasKey("smoke")
+    check pinned.effectiveDeadline.isNone
+
+    # Another consumer renewing under a DATED policy must not unpin it: the
+    # keep holder is still recorded, so the record still answers who pins it.
+    let t2 = t1 + initDuration(seconds = 10)
+    let dated = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "smoke",
+      ttlSeconds: 3600), stateRoot, t2)
+    check dated.ok
+    check dated.effectiveDeadlineUnix == LeaseRenewKeepSentinel
+    let still = readStateRecord(store, "cluster")
+    check still.keepHolders == @["pinner"]
+    check still.holders["smoke"] == t2 + initDuration(seconds = 3600)
+    check still.effectiveDeadline.isNone
+
+    # The keep holder itself renewing under a dated policy releases the pin.
+    let t3 = t2 + initDuration(seconds = 10)
+    let release = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "pinner",
+      ttlSeconds: 60), stateRoot, t3)
+    check release.ok
+    let released = readStateRecord(store, "cluster")
+    check released.keepHolders.len == 0
+    check released.holders["pinner"] == t3 + initDuration(seconds = 60)
+    # MAX over the dated holders: smoke's hour outlives pinner's minute.
+    check released.effectiveDeadline == some(t2 + initDuration(seconds = 3600))
+    check release.effectiveDeadlineUnix == (t2 + initDuration(seconds = 3600)).toUnix
+
+    # The in-place primitive the handler uses names the holder too.
+    var rec = released
+    renewHolder(rec, "anchor", keep(), t3)
+    check rec.keepHolders == @["anchor"]
+    check rec.effectiveDeadline.isNone
+
+  test "(h) undecodable records are findings keyed on PATH; renew refuses a foreign record":
+    ## reprobuild-pm issues/2026-10-01-one-undecodable-state-record-aborts-
+    ## every-lease-reap-sweep-forever.md, item 3: `reportOnce` keys on the
+    ## signature, so a signature that did not name the path would swallow the
+    ## SECOND corrupt record as a repeat of the first.
+    let report = ReapReport(
+      quarantined: @[
+        QuarantinedStateRecord(path: "/s/a.rec",
+          quarantinePath: "/s/quarantine/a.rec.1-2-3", reason: "bad magic"),
+        QuarantinedStateRecord(path: "/s/b.rec",
+          quarantinePath: "/s/quarantine/b.rec.1-2-4", reason: "bad magic")],
+      foreign: @[ForeignStateRecord(path: "/s/f.rec", version: 9)],
+      unreadable: @[UnreadableStateRecord(path: "/s/u.rec",
+        reason: "permission denied")])
+    let findings = leaseReapFindings(report)
+    check findings.len == 4
+    var signatures: seq[string] = @[]
+    for f in findings:
+      check f.signature notin signatures      # all distinct
+      signatures.add(f.signature)
+    for path in ["/s/a.rec", "/s/b.rec", "/s/f.rec", "/s/u.rec"]:
+      var keyed, logged = false
+      for f in findings:
+        if f.signature.contains(path): keyed = true
+        if f.line.contains(path): logged = true
+      check keyed
+      check logged
+    for f in findings:
+      if f.signature.contains("/s/f.rec"):
+        check f.signature.contains("9")
+        check f.line.contains("version=9")
+      if f.signature.contains("/s/a.rec"):
+        check f.line.contains("/s/quarantine/a.rec.1-2-3")
+        check f.line.contains("bad magic")
+
+    # Renew of a record a NEWER repro wrote: refused, file byte-for-byte kept.
+    let root = scratchRoot("foreign-renew")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    defer: removeDir(root)
+    let store = openStateStore(stateRoot)
+    materialize(store, "cluster", "smoke", delayed(initDuration(minutes = 1)),
+                getTime())
+    let path = stateRoot / "cluster.rec"
+    var bytes = readFile(path)
+    bytes[4] = char((StateRecordSszVersion + 1) and 0xFF)
+    writeFile(path, bytes)
+    let resp = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "smoke",
+      ttlSeconds: 3600), overrideRoot = stateRoot)
+    check not resp.ok
+    check resp.reason.contains("newer repro")
+    check readFile(path) == bytes
+
+  test "(i) the tick reaps a shared service INSTANCE whose last lease lapsed":
     ## Shared-Development-Services §4.5: "an instance is reaped when its
     ## last lease lapses." Cases (b) and (c) above measure the tick over a
     ## STUB resource; this one measures it over a real shared service

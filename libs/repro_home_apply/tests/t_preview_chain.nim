@@ -1,60 +1,42 @@
-## M0 (Realize-Closure-And-Catalog-Expansion) hermetic gate for the
-## planner-path wiring fix: ``previewPackageResolutions`` MUST route
-## through M65's ``chainResolvePackage`` so PLAN-mode preview no longer
-## misclassifies every cakBuiltin package as "missing".
+## M0 (Realize-Closure-And-Catalog-Expansion) → GM4b hermetic gate: the
+## PLAN-mode preview (``previewPackageResolutions``) resolves every package the
+## way the real apply does, so ``--plan`` never misclassifies a defined
+## package as "missing".
 ##
-## Pre-M0 bug (caught during M71 review): the PLAN-mode preview path
-## called the legacy ``resolvePackage(cat, packageId)`` signature which
-## only consults the Scoop / PATH adapters. Result: against the M71
-## reference home.nim every one of the 24 built-in catalog packages
-## came back as ``ppkMissing`` even though the real apply (without
-## ``--plan``) realized them fine through M65's chain.
+## Pre-M0 the preview called a narrower resolver than the apply and reported
+## every built-in-catalog package as missing. GM4b removed the adapter chain
+## both used: preview and realize now take the same
+## ``ProfileResolutionContext`` and resolve through
+## ``package_catalog.resolveProfilePackage`` (Provisioning-Contributions.md
+## §"Profile Package References"). The gate, restated:
 ##
-## This gate enforces:
+##   1. ``t_preview_chain_resolves_m71_reference_profile`` — the M71 reference
+##      home.nim's 24 version-pinned references, resolved for an
+##      x86_64-windows target, ALL preview as realizations of the pinned
+##      version through the package's ``tarball`` realization. ZERO missing.
+##   2. ``..._unknown_package_id_fails_closed_with_structured_error`` — an
+##      undefined package previews as missing with the ``unknown-package``
+##      diagnostic naming it and the target.
+##   3. ``..._version_not_in_catalog_fails_closed_with_structured_error`` — a
+##      bogus pin on a defined package previews as a ``missing-realization``
+##      naming the pin and the versions on offer.
+##   4. ``..._m69_deferred_tools_still_resolve`` — the 8 M69-deferred tools
+##      resolve at PLAN time (their realize-time gaps are downstream).
+##   5. ``..._no_regression_on_unregistered_path_only_pkg`` — an undefined
+##      package whose executable is on the host's PATH previews as a
+##      cache-hit through the ``path`` kind (host context only).
 ##
-##   1. ``t_preview_chain_resolves_m71_reference_profile``
-##      Against the M71 reference home.nim's 24 package() entries, EVERY
-##      package previews as either ``ppkRealize`` (chain → cakBuiltin)
-##      or ``ppkCacheHit`` (chain → cakPath when the same tool is on
-##      PATH). ZERO ``ppkMissing`` rows. Each chain-routed preview's
-##      ``chainTrace`` records cakBuiltin's csoResolved as the picked
-##      step (or csoCatalogMiss → cakPath csoResolved when the tool is
-##      already on PATH).
-##
-##   2. ``t_preview_chain_unknown_package_id_fails_closed_with_structured_error``
-##      A bare ``package(definitely-not-registered-foobar)`` previews as
-##      ``ppkMissing`` carrying the structured ``EUnknownPackageId``
-##      diagnostic text in ``detail`` (NOT a silent "scoop searched
-##      catalogs: ..." misclassification — the catalog_lookup pre-validate
-##      path fires first).
-##
-##   3. ``t_preview_chain_version_not_in_catalog_fails_closed_with_structured_error``
-##      A pinned ``package(jdk, "9.9.9-nonexistent")`` previews as
-##      ``ppkMissing`` carrying the structured ``EVersionNotInCatalog``
-##      diagnostic text + the list of available versions.
-##
-##   4. ``t_preview_chain_m69_deferred_tools_still_resolve``
-##      The 8 M69-deferred tools (swift, gcc, git, meson, python3,
-##      composer, erlang, ruby) all resolve at PLAN time via cakBuiltin
-##      — the realize-time gap is downstream and does NOT affect the
-##      planner's verdict.
-##
-##   5. ``t_preview_chain_no_regression_on_unregistered_path_only_pkg``
-##      A bare ``package(<tool-not-in-catalog>)`` whose executable is on
-##      PATH continues to preview cleanly (the M65 chain falls through
-##      to cakPath) — proves the legacy non-catalog flows still work.
-##
-## All tests are hermetic: NO network, NO real Scoop install. The
-## production catalog query is a READ (open the catalog, look up an id,
-## walk the registered slices). The cakPath branch uses a stub
-## executable dropped into the test fixture's bin dir.
+## Hermetic: no network, no Scoop. The Windows cases use a NON-host target,
+## so the host inventory is not consulted at all; the PATH case drops a stub
+## executable into the fixture. No mocks.
 
 import std/[os, strutils, unittest]
 from repro_core/paths import extendedPath
 import repro_test_support
 
-import repro_dsl_stdlib/catalog_registry
-import repro_dsl_stdlib/packages_schema
+import std/tables
+
+import repro_dsl_stdlib/package_registry
 
 import repro_home_apply/plan
 import repro_home_apply/realize
@@ -77,7 +59,7 @@ proc resetDir(path: string) =
   createDir(extendedPath(path))
 
 proc isolateProdCatalog() =
-  ## Point the production catalog at a sandboxed Scoop root so cakScoop
+  ## Point the production catalog at a sandboxed Scoop root so Scoop
   ## probes never hit a real installation. Also clears the test-seam env
   ## vars the realize layer reads so the chain path is exercised.
   let sandboxRoot = FixtureRoot / "fake-scoop-root"
@@ -128,19 +110,17 @@ proc m71PlannedPackages(): seq[PlannedPackage] =
       requestedVersion: ver,
       fromActivity: "m71-reference"))
 
-proc findChainStep(trace: seq[ChainStep];
-                   adapter: CatalogAdapterKind):
-    tuple[found: bool; step: ChainStep] =
-  for s in trace:
-    if s.adapter == adapter:
-      return (true, s)
-  (false, ChainStep())
+proc windowsContext(): ProfileResolutionContext =
+  ## An x86_64-windows target that is not this machine: declared
+  ## realizations only, whatever host runs the test.
+  profileResolutionContext(initOrderedTable[string, seq[string]](),
+    "windows", "x86_64", isHost = false)
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-suite "M0 — previewPackageResolutions routes through chainResolvePackage":
+suite "M0/GM4b — previewPackageResolutions resolves like the apply":
 
   test "t_preview_chain_resolves_m71_reference_profile":
     # Sanity: M71 reference is exactly 24 entries.
@@ -151,127 +131,77 @@ suite "M0 — previewPackageResolutions routes through chainResolvePackage":
     # right gate to enforce that). If a package becomes unregistered
     # in the future this assertion fires before the preview check.
     for (id, ver) in M71Packages:
-      check isRegistered(id)
+      checkpoint id
+      check isLinkedPackage(id)
 
     resetDir(FixtureRoot)
     isolateProdCatalog()
 
-    # Pin host facts to Windows-x64: the M68 builtin catalog ships
-    # Windows-only platform slices for the M71 reference profile, so
-    # this contract test verifies the Windows arm regardless of the
-    # runner's actual OS (cf. commit 9bdf81d for the e2e analog).
-    # We also pin the chain to the Windows M65 default so the chain
-    # selection does not bake in the runner's compile-time default.
     let previews = previewPackageResolutions(m71PlannedPackages(),
-      chain = WindowsDefaultChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
+      windowsContext())
     check previews.len == M71Packages.len
-
     var missing: seq[string]
-    var notViaBuiltinOrPath: seq[string]
-    for pp in previews:
-      case pp.kind
-      of ppkMissing:
+    for i, pp in previews:
+      checkpoint pp.packageId & ": " & pp.detail
+      if pp.kind == ppkMissing:
         missing.add(pp.packageId & " (" & pp.detail & ")")
-      of ppkRealize, ppkCacheHit:
-        # Every chain-routed preview must record a chainTrace whose
-        # final entry is csoResolved. On a host with the tool on PATH
-        # the chain falls through builtin → path; on a clean host it
-        # resolves at cakBuiltin.
-        if pp.chainTrace.len == 0:
-          notViaBuiltinOrPath.add(pp.packageId & " (no chainTrace; detail=" &
-            pp.detail & ")")
-        else:
-          let last = pp.chainTrace[pp.chainTrace.len - 1]
-          if last.outcome != csoResolved:
-            notViaBuiltinOrPath.add(pp.packageId &
-              " (chain did not resolve; last=" & $last.outcome & ")")
-          elif pp.adapter notin {cakBuiltin, cakPath, cakScoop, cakNix}:
-            notViaBuiltinOrPath.add(pp.packageId &
-              " (unexpected adapter " & $pp.adapter & ")")
-
+        continue
+      check pp.kind == ppkRealize
+      check pp.resolved
+      check pp.resolution.selection.kind == rkTarball
+      # The pinned version is the version selected.
+      check pp.resolvedVersion == M71Packages[i][1]
+      check pp.detail.startsWith("tarball ")
+      check pp.steps.len >= 1
+      check pp.steps[^1].selected
     if missing.len > 0:
       echo "  [diag] previews classified as ppkMissing: " & missing.join("; ")
-    if notViaBuiltinOrPath.len > 0:
-      echo "  [diag] previews not via builtin/path/scoop/nix: " &
-        notViaBuiltinOrPath.join("; ")
-
-    # The contract: ZERO missing rows for the catalog-registered set.
     check missing.len == 0
-    check notViaBuiltinOrPath.len == 0
-
-    # Stronger assertion: at least one preview routed through cakBuiltin.
-    # (On a fresh host every preview will; on the dev host where a few
-    # tools are already on PATH the chain falls through to cakPath for
-    # those. Either is honest reporting — the bug we're fixing is that
-    # the legacy path reported "missing" for the same set.)
-    var builtinHits = 0
-    for pp in previews:
-      if pp.adapter == cakBuiltin:
-        inc builtinHits
-    check builtinHits > 0
 
   test "t_preview_chain_unknown_package_id_fails_closed_with_structured_error":
     resetDir(FixtureRoot)
     isolateProdCatalog()
-    # A bare reference (no version pin) to a package that is NOT in the
-    # M65 catalog registry. The pre-M0 code would have either fallen
-    # through to the chain (returning EAdapterChainExhausted with a
-    # giant PATH dump in the detail) or — for the "unknown" branch of
-    # legacy resolvePackage — emitted a generic searched-catalogs
-    # message. The fix preserves the legacy behaviour for unregistered
-    # ids (since they could be pure-Scoop refs) and surfaces the
-    # structured error only when isRegistered() returns true.
-    #
-    # For a versioned reference to an unregistered id, however, the
-    # useChain gate fires (requestedVersion.len > 0) and the pre-
-    # validation raises EUnknownPackageId via lookupCatalogSlice.
+    # A versioned reference to a package no linked definition carries:
+    # the operator must see WHICH package is unknown and for which
+    # target, not a generic "missing".
     let plannedVersioned = @[PlannedPackage(
       packageId: "definitely-not-registered-foobar",
       requestedVersion: "1.0.0",
       fromActivity: "test")]
     let previews = previewPackageResolutions(plannedVersioned,
-      chain = WindowsDefaultChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
+      windowsContext())
     check previews.len == 1
     let p = previews[0]
     check p.kind == ppkMissing
-    # The structured error tag we emit in `detail`. Whichever path the
-    # preview took (lookupCatalogSlice or chainResolvePackage), the
-    # outcome must NOT be a silent generic "missing" — the operator
-    # must see a useful diagnostic.
-    check p.detail.contains("unknown-package-id") or
-      p.detail.contains("definitely-not-registered-foobar")
-    check p.detail.contains("Registered tools") or
-      p.detail.contains("searched catalogs") or
-      p.detail.contains("adapter-chain-exhausted")
+    check not p.resolved
+    check p.detail.startsWith("unknown-package:")
+    check p.detail.contains("definitely-not-registered-foobar")
+    check p.detail.contains("x86_64-windows")
+    check p.steps.len == DefaultSelectionPolicy.len
 
   test "t_preview_chain_version_not_in_catalog_fails_closed_with_structured_error":
     resetDir(FixtureRoot)
     isolateProdCatalog()
-    # jdk IS in the catalog (the M63 reference entry). A clearly-bogus
-    # pin must fail closed at lookupCatalogSlice with EVersionNotInCatalog
-    # — NOT silently fall through to a "missing" preview.
+    # jdk IS defined, with archives at 21.0.5. A bogus pin must fail
+    # closed as a missing realization — NOT silently select 21.0.5.
     let planned = @[PlannedPackage(
       packageId: "jdk",
       requestedVersion: "9.9.9-nonexistent",
       fromActivity: "test")]
-    let previews = previewPackageResolutions(planned,
-      chain = WindowsDefaultChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
+    let previews = previewPackageResolutions(planned, windowsContext())
     check previews.len == 1
     let p = previews[0]
     check p.kind == ppkMissing
-    check p.detail.contains("version-not-in-catalog")
-    # The structured error carries the available-versions list.
+    check p.detail.startsWith("missing-realization:")
     check p.detail.contains("9.9.9-nonexistent")
-    check p.detail.contains("Available versions")
+    # The diagnostic names the version on offer.
+    check p.detail.contains("21.0.5")
 
   test "t_preview_chain_m69_deferred_tools_still_resolve":
-    # The 8 M69-deferred tools: catalog entry present; realize-side
-    # cakBuiltin install_method hook missing. The PLAN-time resolver
-    # does NOT hit the realize-time gap — the planner must classify
-    # them as ppkRealize via cakBuiltin (or cakPath when on PATH).
+    # The 8 M69-deferred tools: archive realizations defined; some of
+    # their realize-time hooks have gaps. The PLAN-time resolver does
+    # NOT hit the realize-time gap — on a Windows target each must
+    # preview as a realization of its Windows archive.
     const M69Deferred = ["swift", "gcc", "git", "meson", "python3",
                          "composer", "erlang", "ruby"]
     resetDir(FixtureRoot)
@@ -281,23 +211,19 @@ suite "M0 — previewPackageResolutions routes through chainResolvePackage":
       planned.add(PlannedPackage(packageId: id,
         requestedVersion: "",
         fromActivity: "test"))
-    let previews = previewPackageResolutions(planned,
-      chain = WindowsDefaultChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
+    let previews = previewPackageResolutions(planned, windowsContext())
     check previews.len == M69Deferred.len
     for pp in previews:
-      check pp.kind != ppkMissing
-      check pp.chainTrace.len > 0
-      let last = pp.chainTrace[pp.chainTrace.len - 1]
-      check last.outcome == csoResolved
-      check pp.adapter in {cakBuiltin, cakPath}
+      checkpoint pp.packageId & ": " & pp.detail
+      check pp.kind == ppkRealize
+      check pp.resolved
+      check pp.resolution.selection.kind == rkTarball
+      check pp.steps[^1].selected
 
   test "t_preview_chain_no_regression_on_unregistered_path_only_pkg":
-    # A package id with no built-in catalog entry. Used to verify that
-    # M0 didn't break the legacy non-catalog fallback (pure-Scoop /
-    # pure-PATH references that were never migrated to the M65 chain).
-    # We drop a stub executable on PATH so the cakPath branch (in the
-    # chain OR the legacy resolvePackage) can pick it up.
+    # A package id no definition carries, whose executable is on the
+    # host's PATH: the host context's `path` kind picks it up (the
+    # profile's escape hatch for tools nobody has defined).
     resetDir(FixtureRoot)
     let toolName = "m0-preview-stub-tool"
     let binDir = FixtureRoot / "stub-bin"
@@ -311,20 +237,23 @@ suite "M0 — previewPackageResolutions routes through chainResolvePackage":
     writeFile(extendedPath(stubExe), body)
     when not defined(windows):
       discard execShellCmd("chmod +x " & quoteShell(stubExe))
-    putEnv("PATH", binDir & PathSep & getEnv("PATH"))
+    let savedPath = getEnv("PATH")
+    defer: putEnv("PATH", savedPath)
+    putEnv("PATH", absolutePath(binDir) & PathSep & getEnv("PATH"))
     isolateProdCatalog()
 
     let planned = @[PlannedPackage(packageId: toolName,
       requestedVersion: "",
       fromActivity: "test")]
-    let previews = previewPackageResolutions(planned)
+    let previews = previewPackageResolutions(planned,
+      hostProfileResolutionContext())
     check previews.len == 1
     let p = previews[0]
-    # Either the new chain path took it (cakPath, ppkCacheHit) or the
-    # legacy fallback did (Scoop on Windows; cakPath elsewhere). Both
-    # are honest "the tool is reachable" outcomes — what we MUST NOT
-    # see is ppkMissing.
-    check p.kind != ppkMissing
+    check p.kind == ppkCacheHit
+    check p.resolved
+    check p.resolution.selection.kind == rkPath
+    check p.resolution.selection.ambient
+    check p.detail.contains(toolName)
 
   test "t_preview_chain_reference_home_nim_exists_and_lists_24_packages":
     # File-parse cross-check so a future M71 reference profile drift

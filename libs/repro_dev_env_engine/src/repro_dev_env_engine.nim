@@ -561,8 +561,12 @@ proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
   ## One foreign acquisition per selector, regardless of dependency multiplicity.
   var seen: seq[string]
   for useDef in toolUses:
+    # GM4b: nix selection is target-filtered (Provisioning-Contributions.md
+    # §"Profile Package References"): a `nixPackage` has no realization on a
+    # host Nix does not run on, so there is no edge to plan there.
     if effectiveProvisioning in {tpmUnspecified, tpmNix} and
-        useDef.nixProvisioning.len > 0:
+        useDef.nixProvisioning.len > 0 and
+        nixServesTarget(hostRealizationTarget()):
       let plan = nixAcquisitionPlan(useDef)
       # Several dependency paths may request the same realization. Key the
       # edge by its acquisition selector, not by the package name: distinct

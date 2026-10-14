@@ -48,10 +48,14 @@
 ## `holders` map through the real `mergeHolderDeadlines`. The rebuild
 ## reads exactly those records. Two consequences are deliberate:
 ##
-##   * the lossiness §4.5 names is REAL here rather than simulated — a
-##     `keep` holder's name is dropped by `mergeHolderDeadlines` and the
-##     rebuild therefore cannot enumerate it, which is what makes rule 1
-##     below load-bearing instead of decorative; and
+##   * the lossiness §4.5 names WAS real here rather than simulated — a
+##     `keep` holder's name was dropped by `mergeHolderDeadlines`, so the
+##     rebuild could not enumerate it, which is what made rule 1 below
+##     load-bearing instead of decorative. State-record v4 closed that by
+##     naming keep holders in the record, so the rebuild now enumerates
+##     them; rule 1 stands on its own terms (an instance must be
+##     registered with the holder that materialised it) rather than on
+##     the loss, and a PRE-v4 record on disk is still lossy; and
 ##   * the daemon-restart clause of L7's gate is answered by a store
 ##     sweep rather than by a second on-disk format, so there is one
 ##     answer on disk to "what instances exist" and the reaper tick
@@ -626,8 +630,16 @@ proc probeLiveness*(registry: ServiceInstanceRegistry;
 
 proc stateRecordFor(record: ServiceInstanceRecord;
                     holders: Table[string, Time];
+                    keepHolders: seq[string];
+                    keepHoldersKnown: bool;
                     effectiveDeadline: Option[Time];
                     now: Time): ResourceStateRecord =
+  ## `keepHolders` / `keepHoldersKnown` are state-record v4's naming of
+  ## the holders that pin with no expiry. They are threaded through from
+  ## `mergeHolderDeadlines` rather than defaulted, because defaulting
+  ## `keepHoldersKnown` to false would write every instance record as a
+  ## pre-v4 one -- "may be pinned by someone whose name was lost" -- when
+  ## this registry knows the complete set.
   ResourceStateRecord(
     address: record.address,
     typeId: ServiceInstanceTypeId,
@@ -638,6 +650,8 @@ proc stateRecordFor(record: ServiceInstanceRecord;
     identity: record.key.identity,
     present: true,
     holders: holders,
+    keepHolders: keepHolders,
+    keepHoldersKnown: keepHoldersKnown,
     effectiveDeadline: effectiveDeadline,
     lastRenewed: now)
 
@@ -807,8 +821,9 @@ proc holderRenewals*(address: string;
   ## `now + (deadline - now)` — the same absolute deadline, including
   ## when it is already in the past. So a round trip through the merge
   ## preserves every dated holder's instant and every `keep` holder's
-  ## pinning, and the one thing it loses is the `keep` holder's NAME,
-  ## which is §4.5's recorded defect and not this proc's.
+  ## pinning. It used to lose the `keep` holder's NAME — §4.5's recorded
+  ## defect, never this proc's — and state-record v4 recovered that too:
+  ## the merge now returns `keepHolders` and `persistEntry` writes it.
   result = @[]
   for holder in holders:
     if holder.deadline.isNone:
@@ -832,21 +847,32 @@ proc persistEntry(registry: var ServiceInstanceRegistry;
   ## Install `holders` as the entry's AUTHORITATIVE holder set and
   ## persist the record.
   ##
-  ## THE TWO HOLDER SETS ARE NOT THE SAME SET, AND THAT IS §4.5's WHOLE
-  ## POINT. The in-memory set is complete while this daemon runs. The
-  ## PERSISTED set is what `mergeHolderDeadlines` can carry, which drops
-  ## a `keep` holder's name — "it pins with no expiry ... rather than
-  ## storing a bogus deadline". Deriving the in-memory set from the
-  ## record would therefore make a `keep` holder invisible the moment it
-  ## was taken, and §4.5's three-holders-one-instance property would be
-  ## unmeasurable under the `keep` default D-SS5 chose. So the record is
-  ## written from the in-memory set and never read back to produce it,
-  ## except by the rebuild — which is exactly where §4.5 says the loss
-  ## happens.
+  ## THE TWO HOLDER SETS ARE THE SAME SET AGAIN, AND THAT IS NEW. This
+  ## comment used to explain that they were not: the persisted set was
+  ## whatever `mergeHolderDeadlines` could carry, which DROPPED a `keep`
+  ## holder's name ("it pins with no expiry ... rather than storing a
+  ## bogus deadline"), so deriving the in-memory set from the record
+  ## would make a `keep` holder invisible the moment it was taken and
+  ## §4.5's three-holders-one-instance property unmeasurable under the
+  ## `keep` default D-SS5 chose.
+  ##
+  ## State-record v4 names keep holders in the record (`keepHolders`,
+  ## with `keepHoldersKnown` saying the list is complete), so the loss is
+  ## gone and both sets now carry every holder. The record is still
+  ## written FROM the in-memory set and never read back to produce it --
+  ## one direction, one authority -- but the rebuild that reads it back
+  ## no longer loses the keep holders §4.5 said it would.
+  ##
+  ## `existing` is `none` deliberately, not the record on disk: this
+  ## registry's in-memory set is authoritative, so the merge starts from
+  ## nothing and folds the whole set in. That is also what makes
+  ## `keepHoldersKnown` true -- with no prior record there is, in the
+  ## merge's own words, "nothing to not know".
   let ordered = sortedHolders(holders)
-  let merged = mergeHolderDeadlines(initTable[string, Time](),
+  let merged = mergeHolderDeadlines(none(ResourceStateRecord),
     holderRenewals(record.address, ordered, now), now)
-  let state = stateRecordFor(record, merged.holders, merged.effective, now)
+  let state = stateRecordFor(record, merged.holders, merged.keepHolders,
+    merged.keepHoldersKnown, merged.effective, now)
   writeStateRecord(registry.registryStore(), state)
   result = ServiceInstanceEntry(
     record: record,
@@ -881,14 +907,18 @@ proc recordMaterialisedInstance*(registry: var ServiceInstanceRegistry;
   ## record. The truth is the opposite and is a stronger reason to
   ## refuse — a holder-less instance would be UNREAPABLE AND PERMANENT.
   ##
-  ## It cannot be made reapable from here either, and that is the filed
-  ## rule-3 gap rather than an omission: `none` means "no dated holder,
-  ## or at least one `keep` holder pinning this with no expiry", the
-  ## record carries nothing that separates the two, and teaching the
-  ## sweep to reap `none` would destroy every `keep`-pinned state in the
-  ## whole lease lane. So the record is refused at the only point where
-  ## the distinction is still known — here, where the caller either has
-  ## a holder or does not.
+  ## It cannot be made reapable from here either. `none` means "no dated
+  ## holder, or at least one `keep` holder pinning this with no expiry",
+  ## and teaching the sweep to reap `none` would destroy every
+  ## `keep`-pinned state in the whole lease lane. State-record v4 did
+  ## narrow the filed rule-3 gap: the record now separates the two cases
+  ## (`keepHolders` names the pinners, `keepHoldersKnown` says the list
+  ## is complete), so a holder-less v4 record is DISTINGUISHABLE from a
+  ## pinned one. Making the sweep act on that is a change to the reaper's
+  ## own gate and the lease lane's contract, not to this proc. So the
+  ## record is still refused here, at the point where the caller either
+  ## has a holder or does not — which is cheaper than any sweep-side
+  ## rule and cannot be wrong.
   if holderId.len == 0:
     raise newException(ServiceRegistryError,
       "an instance must be registered with the holder that materialised " &

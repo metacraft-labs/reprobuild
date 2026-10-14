@@ -2,7 +2,7 @@
 ## realize family hook (the erlang OTP shape). Hermetic: fixtures are
 ## materialized on disk + served via file://. The non-hermetic
 ## dependency is a host ``7z.exe`` on PATH (or in a pre-staged
-## ``7zip`` catalog prefix) — same dependency the M3 7z-SFX tests use.
+## ``sevenzip`` catalog prefix) — same dependency the M3 7z-SFX tests use.
 ##
 ## Closes the long-standing erlang carryover documented in M3, M4, and
 ## M8 retros: OTP's installer is a bona-fide NSIS installer (NOT a Burn
@@ -23,6 +23,7 @@ from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
@@ -71,12 +72,12 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
   ## ``discoverSevenZipExe`` (Step i prefers a catalog-resident 7zip
   ## prefix). The seeded prefix carries ``bin/7z.exe`` + sibling
   ## ``7z.dll`` (codec support).
-  let prefixId = computeRealizationHash("7zip", "test-seed",
+  let prefixId = computeRealizationHash("sevenzip", "test-seed",
     "builtin", "sha256:seed", "bin/7z.exe", "file:///seed",
     "seed", @["fixture"])
   let hint = StoreReceiptHint(
     adapter: "builtin",
-    packageName: "7zip",
+    packageName: "sevenzip",
     version: "test-seed",
     declaredExecutablePath: "bin/7z.exe",
     exportedExecutables: @["bin/7z.exe"],
@@ -101,7 +102,61 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
       mechanism = "copy")
   outcome.absolutePath
 
-suite "M11 — cakBuiltin plain NSIS realize (erlang shape)":
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
+
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+suite "M11 — archive realizer plain NSIS realize (erlang shape)":
 
   test "test_m11_imInstallerNsis_synthetic_otp_shape":
     ## Builds a synthetic .7z fixture mirroring the OTP layout —
@@ -157,29 +212,17 @@ suite "M11 — cakBuiltin plain NSIS realize (erlang shape)":
       defer: store.close()
       discard seedSevenZipPrefix(store, hostSeven)
 
-      let vp = initVersionedProvisioning(
-        version = "stub-28.5",
-        archive_format = afInstallerNsis,
-        install_method = imInstallerNsis,
-        bin_relpath = @[
-          "erts-16.4/bin/erl.exe",
-          "erts-16.4/bin/erlc.exe",
-          "erts-16.4/bin/escript.exe",
-          "erts-16.4/bin/werl.exe",
-        ],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(absolutePath(nsisPath)),
-            sha256 = sha,
-            extract_path = "")
-        ])
-      let res = resolveBuiltinPackage("erlang-nsis", @[vp])
-      check res.found
-      check res.resolution.installMethod == imInstallerNsis
-      check res.resolution.archiveFormat == afInstallerNsis
+      let res = selectArchive("erlang-nsis", [hostRecord(
+        fileToUrl(absolutePath(nsisPath)), "installer-nsis",
+        "erts-16.4/bin/erl.exe",
+        @["erts-16.4/bin/erlc.exe", "erts-16.4/bin/escript.exe",
+          "erts-16.4/bin/werl.exe"],
+        sha256 = sha, version = "stub-28.5",
+        installMethod = "installer-nsis")])
+      check res.installMethod == imInstallerNsis
+      check res.archiveFormat == afInstallerNsis
 
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       let realizedErl = outR.prefixAbsolutePath / "erts-16.4" / "bin" / "erl.exe"
       check fileExists(extendedPath(realizedErl))
@@ -189,17 +232,16 @@ suite "M11 — cakBuiltin plain NSIS realize (erlang shape)":
       check fileExists(extendedPath(outR.prefixAbsolutePath / "erts-16.4" / "bin" / "werl.exe"))
 
   test "test_m11_imInstallerNsis_missing_sevenzip_fails_closed":
-    ## Same fixture realized on a host where 7z.exe is not discoverable
-    ## raises EBuiltinSevenZipUnavailable with the
-    ## ``repro home add 7zip`` remediation hint. Mirrors the M3 SFX
-    ## fail-closed test — needsSevenZip() returns true for
-    ## imInstallerNsis so discovery raises BEFORE the download.
+    ## The REAL stdlib ``erlang`` realization (its Windows ``tarball``
+    ## record, the OTP NSIS installer) realized on a host where 7z.exe is
+    ## not discoverable raises EBuiltinSevenZipUnavailable. Mirrors the M3
+    ## SFX fail-closed test — needsSevenZip() returns true for
+    ## imInstallerNsis so discovery raises BEFORE the download. GM4b: the
+    ## record is selected through ``resolveProfilePackage`` exactly as a
+    ## Windows home profile naming ``erlang`` selects it.
     let fixtureDir = FixtureRoot / "erlang-missing-7z"
     let storeDir = fixtureDir / "store"
     resetDir(fixtureDir); resetDir(storeDir)
-    let stubPath = fixtureDir / "stub.exe"
-    writeFile(extendedPath(stubPath), "stub-nsis-bytes\n")
-    let sha = fileShaHex(stubPath, "sha256")
     let emptyDir = fixtureDir / "empty-path"
     resetDir(emptyDir)
     let savedPath = getEnv("PATH")
@@ -207,35 +249,28 @@ suite "M11 — cakBuiltin plain NSIS realize (erlang shape)":
     defer: putEnv("PATH", savedPath)
     var store = openStore(storeDir)
     defer: store.close()
-    let vp = initVersionedProvisioning(
-      version = "stub-28.5",
-      archive_format = afInstallerNsis,
-      install_method = imInstallerNsis,
-      bin_relpath = @["erts-16.4/bin/erl.exe"],
-      platforms = @[
-        initPlatformBinary(
-          cpu = detectHostCpu(), os = detectHostOs(),
-          url = fileToUrl(absolutePath(stubPath)),
-          sha256 = sha,
-          extract_path = "")
-      ])
-    let res = resolveBuiltinPackage("erlang-missing-7z", @[vp])
-    check res.found
+    let resolution = resolveProfilePackage("erlang",
+      realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1), @[rkTarball])
+    check resolution.archiveRoute == arInstaller
+    let res = resolution.archive
+    check res.installMethod == imInstallerNsis
     var raised = false
     var pkg = ""
     var traceLen = 0
     try:
-      discard realizeBuiltinPackage(store, res.resolution)
+      discard realizeBuiltinPackage(store, res)
     except EBuiltinSevenZipUnavailable as err:
       raised = true
       pkg = err.packageId
       traceLen = err.discoveryTrace.len
     check raised
-    check pkg == "erlang-missing-7z"
+    check pkg == "erlang"
     check traceLen >= 1
 
   test "test_m11_imInstallerNsis_schema_requires_bin_relpath":
-    ## Schema validator: imInstallerNsis joins the imInstallerMsi /
+    ## Schema validator of the harvester's parse model
+    ## (``VersionedProvisioning``; GM4b keeps it as the harvester's
+    ## in-memory record): imInstallerNsis joins the imInstallerMsi /
     ## imInstallerNsisBundle / imInstallerInnoSetup family — every
     ## Windows installer family record needs at least one bin_relpath
     ## entry so the post-extract sanity check has something to verify

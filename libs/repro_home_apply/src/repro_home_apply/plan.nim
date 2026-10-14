@@ -24,14 +24,12 @@ import repro_home_intent
 
 import ./errors
 import ./package_catalog
-import ./catalog_lookup
-import repro_dsl_stdlib/packages_schema
 
 type
   PlannedPackage* = object
     ## One realized-package request. The package id is the raw name
-    ## as it appeared in the profile; resolution to an adapter happens
-    ## in `./realize.nim`.
+    ## as it appeared in the profile; resolution (GM4b:
+    ## `package_catalog.resolveProfilePackage`) happens in `./realize.nim`.
     packageId*: string
     fromActivity*: string
     predicateText*: string             ## "" when the package appeared
@@ -43,8 +41,8 @@ type
                                        ## realize time).
     binaries*: seq[string]             ## 2026-06-09: explicit binary names
                                        ## the package installs, used by
-                                       ## the path-based catalog adapter
-                                       ## (the Linux fallback) when the
+                                       ## the `path` realization kind (the
+                                       ## host's PATH) when the
                                        ## package name doesn't match the
                                        ## binary name. Empty seq preserves
                                        ## pre-2026-06 behavior: the adapter
@@ -111,13 +109,13 @@ type
     configContributions*: seq[ConfigContribution]
     diagnostics*: seq[StowDiagnostic]
     adapterPreference*: OrderedTable[string, seq[string]]
-      ## M2.5: per-OS adapter preference copied through from the parsed
-      ## `Profile.adapterPreference`. Keys are canonical OS tags
+      ## The profile's selection policy (GM4b), copied through from the
+      ## parsed `Profile.adapterPreference`. Keys are canonical OS tags
       ## (`"windows"`, `"linux"`, `"darwin"`); values are the ordered
-      ## adapter chain (each entry drawn from the closed set
-      ## `{"builtin", "scoop", "nix", "path"}`). Empty table when the
-      ## profile carries no `adapterPreference:` block — realize +
-      ## preview then fall back to the M65 platform default chain.
+      ## realization kinds (`tarball` — `builtin` is its former spelling —
+      ## `nix`, `scoop`, `path`). Empty table when the profile carries no
+      ## `adapterPreference:` block — resolution then uses
+      ## `DefaultSelectionPolicy`, the same on every platform.
     ## Order: packages by `packageId`, generated files by
     ## `(absoluteOutputPath, sourceKind, contributingPackage)`, launchers
     ## by `commandName`. The planner enforces this; `compareEqual`
@@ -127,8 +125,13 @@ type
 # Activity expansion
 # ---------------------------------------------------------------------------
 
-proc enabledActivitiesFor(profile: Profile; host: string): HashSet[string] =
+proc enabledActivitiesFor*(profile: Profile; host: string): HashSet[string] =
   ## `default` is always active; `hosts:` adds host-specific ones.
+  ##
+  ## THE host-selection rule. `buildPlan` applies it, and every other caller
+  ## that needs to know which activities a host runs — `repro home list` /
+  ## `why`, `repro home export` — calls this proc rather than keeping its own
+  ## copy, so what they report is what the planner does.
   result = initHashSet[string]()
   result.incl "default"
   let hostsOpt = findHostsBlock(profile)
@@ -143,9 +146,7 @@ proc evaluateHostPredicate*(predicateAst: PredNode; ctx: HostContext): bool =
   ## Evaluate a profile predicate against the host facts selected for
   ## this apply. For normal local applies `ctx` is the current host; for
   ## M71 Phase B local bundle evaluation it is an explicit target host.
-  if predicateAst == nil:
-    return true
-  evaluateBool(predicateAst, ctx)
+  predicateHolds(predicateAst, ctx)
 
 proc evaluateHostPredicate*(predicateAst: PredNode; host: string): bool =
   ## Compatibility wrapper for older call sites that only provide a
@@ -199,8 +200,9 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
 # closed because its extractor's prefix does not yet exist on disk.
 #
 # Concrete example surfaced by the predecessor campaign's M11 LIVE
-# smoke: a profile containing both ``package(7zip)`` and
-# ``package(lessmsi)`` alphabetically sorts ``7zip`` < ``lessmsi``, but
+# smoke: a profile containing both ``package(7zip)`` (``sevenzip`` since
+# GM4b) and ``package(lessmsi)`` alphabetically sorts the 7-Zip package
+# before ``lessmsi``, but
 # ``packages/sevenzip.nim`` uses ``imInstallerMsi`` which needs
 # ``lessmsi.exe`` pre-realized OR on PATH. The smoke side-stepped the
 # bug by using a single-package profile; M0 closes it for real.
@@ -226,39 +228,34 @@ type
     proc (p: PlannedPackage): seq[string] {.closure.}
     ## M0 test seam: callers (production AND the M0 hermetic test gate)
     ## supply a callback computing each package's extractor deps. The
-    ## production callback (``defaultExtractorDeps``) looks the package
-    ## up in the built-in catalog registry; the test gate can inject a
-    ## synthetic dep map to exercise the cycle-detection arm.
+    ## production callback (``profileExtractorDeps``) resolves the package
+    ## as the apply will; the test gate can inject a synthetic dep map to
+    ## exercise the cycle-detection arm.
 
-proc defaultExtractorDeps*(p: PlannedPackage): seq[string] =
-  ## Production extractor-dep resolver: looks ``p`` up in the M65
-  ## catalog registry, reads the resolved slice's
-  ## ``archive_format`` + ``install_method``, and delegates to
-  ## ``extractorDependencies``. Returns ``@[]`` for any package whose
-  ## catalog lookup fails (the M0 topo sort then treats the package as
-  ## edge-free — Scoop / PATH adapters handle their own extraction;
-  ## an unregistered package was already going to fail at realize time
-  ## with a clearer diagnostic than a planner-side error here).
-  try:
-    let slice = lookupCatalogSlice(p.packageId, p.requestedVersion)
-    # Synthesize a minimal CatalogResolution carrying just the fields
-    # ``extractorDependencies`` reads. The full resolution carries the
-    # post-chain adapter; at plan-time we ASSUME cakBuiltin (the M65
-    # Windows / Linux defaults' primary). If the operator overrode
-    # ``adapterPreference:`` to put cakScoop / cakPath first, the
-    # extractor edge is spurious (the consumer realizes via Scoop /
-    # PATH and skips the cakBuiltin extractor path) — but the edge
-    # only matters when BOTH the consumer AND the extractor are in
-    # the plan AND the consumer resolves via cakBuiltin. The
-    # plan-time approximation is safe: a spurious edge enforces an
-    # ordering that is harmless when the consumer no longer needs it.
-    let resolution = CatalogResolution(
-      adapter: cakBuiltin,
-      archiveFormat: slice.slice.archive_format,
-      installMethod: slice.slice.install_method)
-    return extractorDependencies(p.packageId, resolution)
-  except CatchableError:
-    return @[]
+proc profileExtractorDeps*(target: RealizationTarget; policy: SelectionPolicy):
+    ExtractorDepsCallback =
+  ## Production extractor-dep resolver (GM4b): resolve the reference with
+  ## the profile's selection policy for ``target`` — statically, with no
+  ## host inventory — and, when the selection is an archive the home archive
+  ## realizer installs, delegate to ``extractorDependencies``.
+  ##
+  ## Static on purpose. With the inventory, a policy that puts ``path``
+  ## first could select a PATH executable and need no extractor; without
+  ## it the same reference may select the archive and add an edge. A
+  ## spurious edge only enforces an ordering that is harmless when the
+  ## consumer no longer needs it, while a missed edge would let a consumer
+  ## realize before its extractor. A package that does not resolve gets no
+  ## edge: the realize step reports it with the real diagnostic.
+  result = proc (p: PlannedPackage): seq[string] =
+    try:
+      let resolution = resolveProfilePackage(p.packageId, target, policy,
+        requestedVersion = p.requestedVersion, binaries = p.binaries)
+      if resolution.selection.kind == rkTarball and
+          resolution.archiveRoute == arInstaller:
+        return extractorDependencies(p.packageId, resolution.archive)
+    except CatchableError:
+      discard
+    @[]
 
 proc topologicallySortPackages*(packages: seq[PlannedPackage];
                                 depsOf: ExtractorDepsCallback):
@@ -303,7 +300,7 @@ proc topologicallySortPackages*(packages: seq[PlannedPackage];
     for d in deps:
       if d notin byId:
         # External dep — drop the edge silently. The realize loop's
-        # cakBuiltin discovery will pick the extractor up via PATH
+        # archive realizer's discovery will pick the extractor up via PATH
         # (M3 bundling-posture decision: extractors live on PATH when
         # not bundled in the home profile).
         continue
@@ -354,16 +351,15 @@ proc topologicallySortPackages*(packages: seq[PlannedPackage];
     dec remaining
   emitted
 
-proc collectConfigContributions(profile: Profile): seq[ConfigContribution] =
+proc collectConfigContributions(profile: Profile; ctx: HostContext):
+    seq[ConfigContribution] =
+  ## The `config:` overrides that apply on `ctx`: a guarded override (GM3)
+  ## contributes only where its guard holds (`applicableConfigEntries`).
   for ch in profile.root.children:
     if ch.kind != nkConfigBlock:
       continue
-    for pkgNode in ch.configPackages:
-      if pkgNode.kind != nkConfigPackage:
-        continue
-      for entry in pkgNode.configEntries:
-        if entry.kind != nkConfigEntry:
-          continue
+    for pkgNode in applicableConfigPackages(ch, ctx):
+      for entry in applicableConfigEntries(pkgNode, ctx):
         result.add(ConfigContribution(
           packageName: pkgNode.configPackageName,
           configKey: entry.configKey,
@@ -378,11 +374,10 @@ proc buildPlan*(profile: Profile; profileDir: string;
   result.hostIdentity = ctx.host
   result.profilePath = profile.path
   result.profileDir = profileDir
-  # M2.5: copy the per-host adapter preference so the realize + preview
-  # call sites can honour it without re-loading the profile. An empty
-  # `Profile.adapterPreference` (no DSL block) becomes an empty
-  # `ApplyPlan.adapterPreference` — the realize/preview helpers then
-  # fall back to the M65 platform default chain.
+  # GM4b: ``adapterPreference:`` is the profile's selection policy
+  # (Provisioning-Contributions.md §"Selection policy"). Copied so the
+  # realize + preview call sites build their resolution context without
+  # re-loading the profile; an empty table selects the default policy.
   result.adapterPreference = profile.adapterPreference
   let active = enabledActivitiesFor(profile, ctx.host)
   for child in profile.root.children:
@@ -406,7 +401,22 @@ proc buildPlan*(profile: Profile; profileDir: string;
   # edges (the M71 reference profile) is preserved by breaking ties
   # alphabetically inside Kahn's algorithm. See the long comment block
   # above ``topologicallySortPackages`` for the WHY.
-  result.packages = topologicallySortPackages(deduped, defaultExtractorDeps)
+  let extractorTarget =
+    try:
+      some(profileRealizationTarget(ctx.platform, ctx.arch, isHost = false))
+    except ValueError:
+      none(RealizationTarget)
+  result.packages =
+    if extractorTarget.isSome:
+      topologicallySortPackages(deduped, profileExtractorDeps(
+        extractorTarget.get,
+        selectionPolicyFor(profile.adapterPreference,
+          extractorTarget.get.os).policy))
+    else:
+      # A platform the resolver cannot name resolves nothing, so no
+      # extractor edge exists; the realize step reports the platform.
+      topologicallySortPackages(deduped,
+        proc (p: PlannedPackage): seq[string] = @[])
   # Phase A: every package contributes one launcher with the same name.
   for p in result.packages:
     result.launchers.add(PlannedLauncher(commandName: p.packageId,
@@ -414,7 +424,7 @@ proc buildPlan*(profile: Profile; profileDir: string;
   result.launchers.sort(proc(a, b: PlannedLauncher): int =
     cmp(a.commandName, b.commandName))
   # Harvest `config:` block contributions for the suppression layer.
-  result.configContributions = collectConfigContributions(profile)
+  result.configContributions = collectConfigContributions(profile, ctx)
   # `generatedFiles` is empty in Phase A unless a package output
   # synthesizer fills it. The stow synthesizer (Phase B) populates it
   # too; both feed into the same list and the suppression pass

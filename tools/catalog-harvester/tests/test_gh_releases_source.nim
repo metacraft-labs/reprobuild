@@ -316,14 +316,14 @@ suite "M7 — idempotent harvest":
       binRelpath: @["bin/alr.exe"],
       cacheDir: cache1)
     let entry1 = harvestGhRelease(opts)
-    let body1 = emitCatalogFile("alire",
+    let body1 = emitPackageModule("alire",
       "gh-releases:alire-project/alire", @[entry1])
     teardownFixtureEnv()
     let cache2 = setupFixtureEnv("idempotent-2")
     var opts2 = opts
     opts2.cacheDir = cache2
     let entry2 = harvestGhRelease(opts2)
-    let body2 = emitCatalogFile("alire",
+    let body2 = emitPackageModule("alire",
       "gh-releases:alire-project/alire", @[entry2])
     teardownFixtureEnv()
     check body1 == body2

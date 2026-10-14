@@ -120,6 +120,7 @@ when defined(reproProviderMode):
     resetBuildPoolRegistry()
     resetDefaultBuildActionRegistry()
     resetTargetExportRegistry()
+    resetCertificateRegistry()
     resetProviderEvaluationInputRegistry()
     currentProviderProjectRoot = request.arguments
     # Named-Targets M1: stash the current package as the per-edge
@@ -154,7 +155,7 @@ when defined(reproProviderMode):
       rerunServiceDeclarators(pkg.packageName)
     let actions = inferDeclaredActionDeps(
       registeredBuildActions(), request.arguments)
-    let targets = registeredBuildTargets()
+    var targets = registeredBuildTargets()
     let pools = registeredBuildPools()
     let defaultAction = registeredDefaultBuildAction()
     # Named-Targets M1: roll up explicit ``target "name", handle``
@@ -165,6 +166,12 @@ when defined(reproProviderMode):
     # available at fragment-construction time.
     for target in targets:
       registerExplicitTargetExport(target, pkg.packageName)
+    # Test-Certificates TC-9a: resolve the ``certificate "<name>", <handle>``
+    # declarations now that every target and implicit name is registered.
+    # A certificate name is exported into the target-export table here, so
+    # this runs before the table is read below.
+    let certificateExports =
+      resolveCertificateExports(pkg.packageName, targets)
     let exportTable = registeredTargetExports()
     result = GraphFragment(
       entryPointId: request.entryPointId,
@@ -212,6 +219,19 @@ when defined(reproProviderMode):
       kind: gnkMetadata,
       stableName: "reprobuild.target-export-table.v2",
       payload: targetExportTablePayload(exportTable)))
+    # Test-Certificates TC-9a: the certificate-export table (name → node),
+    # beside the target-export table, so the engine can tell which nodes
+    # produce a named certificate from the stored graph without running the
+    # provider. Emitted only when the package has a marking, explicit or the
+    # implicit one on what its ``test`` selector names. Absence means "no
+    # certificate-producing node", so a package with no marking keeps a
+    # byte-identical fragment.
+    if certificateExports.entries.len > 0:
+      result.nodes.add(GraphNode(
+        id: request.namespace & ":metadata:certificate-export-table",
+        kind: gnkMetadata,
+        stableName: "reprobuild.certificate-export-table.v1",
+        payload: certificateExportTablePayload(certificateExports)))
     # Named-Runnable-Edges N2: carry the resource-lane graph (the
     # ``stateGroup`` resource subgraph + membership) that this package's
     # ``buildProc()`` collected to the CLI, so the ``repro run`` leased-

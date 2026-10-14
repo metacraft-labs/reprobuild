@@ -17,6 +17,7 @@ from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
@@ -128,7 +129,61 @@ PrivilegesRequired=lowest
     return absolutePath(produced)
   return ""
 
-suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
+
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+suite "M4 — archive realizer Inno Setup realize (fpc shape)":
 
   test "test_m4_innosetup_realize_synthetic_fpc_shape":
     ## File:// realize of a synthetic Inno Setup installer flattens
@@ -156,22 +211,11 @@ suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
       var store = openStore(storeDir)
       defer: store.close()
       discard seedInnounpPrefix(store, hostInnounp)
-      let vp = initVersionedProvisioning(
-        version = "test-fpc-1.0",
-        archive_format = afRaw,
-        install_method = imInstallerInnoSetup,
-        bin_relpath = @["bin/fpc.exe", "bin/ppcx64.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(exePath),
-            sha256 = sha,
-            extract_path = "")
-        ])
-      let res = resolveBuiltinPackage("fpc-inno", @[vp])
-      check res.found
-      check res.resolution.installMethod == imInstallerInnoSetup
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let res = selectArchive("fpc-inno", [hostRecord(fileToUrl(exePath),
+        "raw", "bin/fpc.exe", @["bin/ppcx64.exe"], sha256 = sha,
+        version = "test-fpc-1.0", installMethod = "installer-inno-setup")])
+      check res.installMethod == imInstallerInnoSetup
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       let realizedFpc = outR.prefixAbsolutePath / "bin" / "fpc.exe"
       check fileExists(extendedPath(realizedFpc))
@@ -180,20 +224,18 @@ suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
       check fileExists(extendedPath(realizedPpc))
 
   test "test_m4_innosetup_missing_extractor_fails_closed":
-    ## Same fixture realized on a host where innounp is not
-    ## discoverable raises EBuiltinInnounpUnavailable with the
-    ## ``repro home add innounp`` remediation hint.
+    ## The REAL stdlib ``fpc`` realization (its Windows ``tarball``
+    ## record: an Inno Setup installer pinned by sha1) realized on a host
+    ## where innounp is not discoverable raises EBuiltinInnounpUnavailable
+    ## with the ``repro home add innounp`` remediation hint. GM4b: the
+    ## record is selected through ``resolveProfilePackage`` exactly as a
+    ## Windows home profile naming ``fpc`` selects it.
     let fixtureDir = FixtureRoot / "fpc-missing-innounp"
     let storeDir = fixtureDir / "store"
     let buildDir = fixtureDir / "build-inno"
     resetDir(fixtureDir); resetDir(storeDir); resetDir(buildDir)
-    # We don't need a real Inno installer for this test — the discovery
-    # raises BEFORE the download (and certainly before extraction)
-    # because needsInnounp() returns true for imInstallerInnoSetup. We
-    # use a stub file just to satisfy the digest sanity check.
-    let stubPath = buildDir / "stub.exe"
-    writeFile(extendedPath(stubPath), "stub-inno-bytes\n")
-    let sha = fileShaHex(stubPath, "sha256")
+    # No installer is downloaded: the discovery raises BEFORE the
+    # download because needsInnounp() is true for imInstallerInnoSetup.
     let emptyDir = fixtureDir / "empty-path"
     resetDir(emptyDir)
     let savedPath = getEnv("PATH")
@@ -201,29 +243,21 @@ suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
     defer: putEnv("PATH", savedPath)
     var store = openStore(storeDir)
     defer: store.close()
-    let vp = initVersionedProvisioning(
-      version = "test-stub-1.0",
-      archive_format = afRaw,
-      install_method = imInstallerInnoSetup,
-      bin_relpath = @["bin/fpc.exe"],
-      platforms = @[
-        initPlatformBinary(
-          cpu = detectHostCpu(), os = detectHostOs(),
-          url = fileToUrl(absolutePath(stubPath)),
-          sha256 = sha,
-          extract_path = "")
-      ])
-    let res = resolveBuiltinPackage("fpc-missing-innounp", @[vp])
-    check res.found
+    let resolution = resolveProfilePackage("fpc",
+      realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1), @[rkTarball])
+    check resolution.archiveRoute == arInstaller
+    let res = resolution.archive
+    check res.installMethod == imInstallerInnoSetup
+    check res.digestAlgorithm == "sha1"
     var raised = false
     var pkg = ""
     var msg = ""
     try:
-      discard realizeBuiltinPackage(store, res.resolution)
+      discard realizeBuiltinPackage(store, res)
     except EBuiltinInnounpUnavailable as err:
       raised = true
       pkg = err.packageId
       msg = err.msg
     check raised
-    check pkg == "fpc-missing-innounp"
+    check pkg == "fpc"
     check "repro home add innounp" in msg

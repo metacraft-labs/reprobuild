@@ -405,7 +405,7 @@ suite "M70 line rendering":
 
   test "renderTodoComment names the env-var and the tool":
     let line = renderTodoComment("SWIFT_VERSION", "swift", "5.10.1",
-      "deferred until cakBuiltin supports swift", indent = 4)
+      "deferred until the archive realizer supports swift", indent = 4)
     check "TODO migrate swift@5.10.1" in line
     check "SWIFT_VERSION" in line
     check "deferred" in line

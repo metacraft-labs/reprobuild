@@ -1,0 +1,11 @@
+{
+  "description": "Guards combine with and/or/not and parentheses, and a guarded row still needs its activity selected.",
+  "hosts": { "m1": ["desktop"], "home-pc": ["desktop"] },
+  "evaluations": [
+    { "host": "m1", "system": "aarch64-darwin", "packages": ["always", "ghidra", "utm"] },
+    { "host": "m1", "system": "x86_64-darwin", "packages": ["always", "ghidra"] },
+    { "host": "home-pc", "system": "x86_64-linux", "packages": ["always", "ghidra", "xclip"] },
+    { "host": "home-pc", "system": "x86_64-windows", "packages": ["always"] },
+    { "host": "server", "system": "x86_64-linux", "packages": [] }
+  ]
+}

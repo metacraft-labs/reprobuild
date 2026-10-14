@@ -193,7 +193,22 @@
         # ancestor.
         # Bumped to 0b0476a (2026-10-11), io-mon's `agents` tip; 1053102 is an
         # ancestor and `git diff 1053102 0b0476a -- src/` is empty.
-      url = "github:metacraft-labs/io-mon/0b0476ad55e97f1f96a77367f205fae5fac47a16";
+        # Bumped to ca28cce (2026-10-13), io-mon's `agents` tip; 0b0476a is an
+        # ancestor. 142f658 carries capture controls into explicit Linux child
+        # environments and hands nested Linux evidence back to the parent; the
+        # macOS and Windows capture paths are unchanged.
+        # Bumped to f72ee0e (2026-10-14), io-mon's `agents` tip; ca28cce is an
+        # ancestor. 41c114f resolves connect forwarding before application
+        # constructors and b364626 keeps capture complete across cooperating
+        # shim images, both in the Linux preload runtime. `fs_snoop` now keeps
+        # a nested child's public evidence scope and carries the enclosing
+        # run's full collection in a separate, host-owned variable.
+        # Bumped to 295a2e5 (2026-10-14), io-mon's `agents` tip; f72ee0e is an
+        # ancestor. The batched fragment writer checks the descriptor's
+        # identity where it touches the descriptor instead of once per record,
+        # and the Linux close hook lets a tracee's close of a replaced
+        # descriptor number reach the kernel.
+      url = "github:metacraft-labs/io-mon/295a2e518325440698de013663dab8deeef1dc19";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -206,31 +221,12 @@
       # config.nims reads SHM_GSET_SRC (then falls back to a ``../nim-shm-gset``
       # sibling); the sandboxed package build + override-free CI jobs have no
       # sibling, so seed it from here — exactly like nim-shm-queue-src.
-      # reprobuild does not import shm_gset directly; it flows in transitively
-      # through io_mon (fs_snoop / writer), so config.nims still adds it to Nim's
-      # --path for the io-mon compile to resolve.
-      #
-      # Pinned to c646982b -- the revision that DEFINES ``AttachFailure``, which
-      # repro_local_store/action_index.nim re-exports (added there by e42ef05b).
-      #
-      # This URL used to name 360bfc15, and that was the single source of the
-      # "cannot export: shm_gset.AttachFailure" bootstrap failure in six apps.
-      # afd408f1 moved the *lock* onto c646982b (and .github/sibling-repos with
-      # it) but left this URL behind, so flake.nix and flake.lock disagreed about
-      # the same input: the lock entry carried ``locked.rev = c646982b`` under
-      # ``original.rev = 360bfc15``, with lastModified and narHash dropped --
-      # a shape nix never emits, and one that survives only because
-      # ``!originalInput.getNarHash() || ...`` (flake.cc) short-circuits on a
-      # MISSING hash. Anything that re-resolved the input from this URL -- a
-      # `nix flake update`, a fresh lock, or the sibling-checkout override arm
-      # pointed at a `../nim-shm-gset` sitting on the URL's rev -- snapped the
-      # source back to 360bfc15, which predates AttachFailure by three weeks.
-      #
-      # Keep this rev, .github/sibling-repos' nim-shm-gset row, and the lock in
-      # step; they are three spellings of one decision. 360bfc15 is also what
-      # ``origin/stable`` (the repository's default HEAD) still resolves to, so
-      # a rev is mandatory here -- a branch-less URL would reintroduce the bug.
-      url = "github:metacraft-labs/nim-shm-gset/c646982b354cb5b1fa8734f94b951a660419d75c";
+      # Pin c9048e9: it retains AttachFailure and uses a boot-stable Darwin
+      # identity instead of a wall-clock second. Writer liveness requires this
+      # stability; its authoritative probe additionally rejects OS errors
+      # because shard warm-up tolerates uncertainty but live-writer reclamation
+      # does not. Keep this URL, flake.lock, and .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-shm-gset/c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -339,8 +335,14 @@
       # Bumped to 4aa8892 (2026-10-11), the published `agents`/`dev` tip;
       # 2a7c5f7 is an ancestor and only `flake.lock` differs.
       #
+      # Bumped to c6602ce (2026-10-14), the published `agents`/`dev` tip;
+      # 4aa8892 is an ancestor. Windows entry parking borrows a parked thread
+      # with a real call, so a CET shadow stack accepts it, and stays within
+      # the declared x86 child architecture. Only `windows_entry_park.nim`
+      # changes under `src/`.
+      #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/4aa8892844a43ac59d4be74a4f992161b09491fe";
+      url = "github:metacraft-labs/nim-stackable-hooks/c6602ce6866b8c5ef6a9201cb7d90b920268e8d0";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -425,7 +427,17 @@
       # At f8781d4b5 (CTC-3i, `ct-test` ships beside `ct`) CodeTracer's
       # ``repro.lock`` builds against trace-format 7b8b587c, so
       # ``ct-trace-format-src`` moves to that revision in the same step.
-      url = "github:metacraft-labs/codetracer/f8781d4b5514ee9bbcdee0de701dc4bd8090a061";
+      #
+      # At 17c111fb2 (2026-10-13, the published `agents` tip; f8781d4b5 is an
+      # ancestor and ``src/ct_incremental_adapter.nim`` is unchanged) the
+      # ``repro.lock`` names trace-format 808ffdb4, so ``ct-trace-format-src``
+      # moves again with it.
+      #
+      # At 222a4a009 (2026-10-14, the published `agents` tip; 17c111fb2 is an
+      # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
+      # ``src/ct_incremental_adapter.nim`` are unchanged and the ``repro.lock``
+      # still names trace-format 808ffdb4, so ``ct-trace-format-src`` stays.
+      url = "github:metacraft-labs/codetracer/222a4a0099115066ba331817e94a3ac9f2293290";
       flake = false;
     };
 
@@ -510,7 +522,11 @@
       # Moved with ``codetracer-src`` to 7b8b587c, the revision CodeTracer
       # f8781d4b5's ``repro.lock`` names (051efd22 is an ancestor; adds the
       # --mm:none/refc build and the GC-safe reader entry points).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/7b8b587c72ec31f6825ae124ab89ad7954f6dca7";
+      # Moved with ``codetracer-src`` to 808ffdb4, the revision CodeTracer
+      # 17c111fb2's ``repro.lock`` names (7b8b587c is an ancestor; adds the ten
+      # exact I/O event kinds of trace format version 7 and a step count that
+      # counts step records only).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/808ffdb4507634c3aba0661d96cbc353420ed856";
       flake = false;
     };
     nim-stew-src = {
@@ -1058,7 +1074,7 @@
               testAdaptersSrc = reprobuild-test-adapters-src;
               runquotaSrc = runquota-src;
             }).overrideAttrs
-              (_: {
+              (old: {
                 # `src` and `version` go through overrideAttrs, not through
                 # callPackage arguments: callPackage fills an argument from the
                 # package set whenever the set has that name, and nixpkgs has a
@@ -1066,6 +1082,13 @@
                 # note at the top of package.nix.
                 inherit version;
                 src = reprobuildSource;
+                # The commit the binaries are built from, embedded by
+                # scripts/build_apps.sh (`ReprobuildSourceRevision`). The
+                # sandbox has no .git, so the flake supplies it; a dirty tree
+                # reports `dirtyRev` (`<sha>-dirty`).
+                env = old.env // {
+                  REPROBUILD_SOURCE_REVISION = inputs.self.rev or inputs.self.dirtyRev or "";
+                };
               });
           # Read back from the package so the dev shell, the pre-commit hooks
           # and the packaged runtime-compile check all use the same library set
@@ -2050,41 +2073,27 @@
               # Its repository checks belong only to a Reprobuild checkout.
               if PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
                   ${./scripts/is_reprobuild_checkout.sh}; then
-              # Lend pre-commit back its own chained shim BEFORE its installer
-              # runs, so the installer never meets a stale copy of its own
-              # output beside the dispatcher. Without this, a shell entry that
-              # re-runs the installer leaves .git/hooks/pre-push holding a
-              # freshly generated shim and pre-push.repro-local holding the
-              # previous one, and `repro hooks ensure` has two foreign files to
-              # reconcile instead of one. See scripts/pre_commit_hook_handoff.sh
-              # for what each half does and why the canonical hook path is
-              # never touched by it.
-              PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
-                ${./scripts/pre_commit_hook_handoff.sh} before --hook pre-push || true
-            ''
-            + pre-commit-check.shellHook
-            + ''
-              # git-hooks.nix's shellHook, immediately above, runs
-              # pre-commit's installer whenever the generated
-              # .pre-commit-config.yaml it wants differs from the one the
-              # symlink points at — so on the first entry after any change to
-              # the hook definitions or the tools they pin. That pass first
-              # uninstalls the hook types pre-commit manages, then installs its
-              # own, and either way .git/hooks/pre-push — the Reprobuild
-              # dispatcher that runs the publication gate — stops being the
-              # dispatcher: it is DELETED when the config declares no pre-push
-              # stage, and OVERWRITTEN when it declares one. The managed body
-              # is left orphaned beside it. Nothing put it back, so pushes
-              # stopped being gated, no workspace lock was published for the
-              # commits that followed, and CI failed much later unable to
-              # resolve siblings. Re-assert the managed hooks here, in the same
-              # shell entry that removed them, so the window is closed rather
-              # than merely repaired at the next commit.
+              # The committed .pre-commit-config.yaml is the pre-commit hook,
+              # run by the flake's pre-commit: the flake provides the tools, the
+              # committed config provides the rules. git-hooks.nix's own
+              # installer cannot be used here: it refuses to replace a
+              # committed config and then installs nothing, so commits would
+              # skip the repository's checks without a word. Under a Reprobuild
+              # dispatcher the script chains the hook as `<hook>.repro-local`
+              # and never touches the dispatcher itself.
               #
               # Never fails the shell: a dev shell that refuses to open
               # because a hook could not be written is worse than the drift.
-              # It does, however, say so loudly, and `repro health` reports
-              # the same gap with a remedy.
+              # It does, however, say so loudly.
+              PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
+                ${./scripts/install-git-hooks.sh} ${pkgs.lib.getExe pre-commit-check.config.package} || \
+                echo "warning: the pre-commit hook was not installed; run 'bash scripts/install-git-hooks.sh <pre-commit>' by hand and read its diagnostic." >&2
+              # Assert the Reprobuild-managed hooks on every entry, so the
+              # pre-push publication gate is in place in a fresh clone too and
+              # a hook another tool displaced (`pre-commit install`, `prek
+              # install`) is put back in the same shell entry rather than at
+              # the next commit. `repro health` reports the same gap with a
+              # remedy.
               _repro_hook_bin=""
               if [ -x "$PWD/build/bin/repro" ]; then
                 _repro_hook_bin="$PWD/build/bin/repro"
@@ -2095,14 +2104,9 @@
                 "$_repro_hook_bin" hooks ensure --vcs "$PWD" >/dev/null || \
                   echo "warning: 'repro hooks ensure --vcs $PWD' failed; the pre-push publication gate may be uninstalled. Run it by hand and read its diagnostic." >&2
               else
-                echo "warning: no 'repro' binary found; the pre-push publication gate cannot be re-asserted after pre-commit's installer. Build it with 'just build' and re-enter the shell." >&2
+                echo "warning: no 'repro' binary found; the pre-push publication gate cannot be asserted. Build it with 'just build' and re-enter the shell." >&2
               fi
               unset _repro_hook_bin
-              # Close the handoff: drop the lent-back shim when `ensure`
-              # chained a freshly generated one, put it back when the installer
-              # never ran.
-              PATH=${pkgs.git}/bin:$PATH ${pkgs.bash}/bin/bash \
-                ${./scripts/pre_commit_hook_handoff.sh} after --hook pre-push || true
               fi
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''

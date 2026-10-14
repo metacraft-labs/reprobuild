@@ -703,3 +703,49 @@ suite "S7 the CAS-restore configuration is reachable and gated":
     # The whole point. A green build, a reported cache hit, and a tree that
     # is missing something the action really produces.
     check not fileExists(fx.undeclaredOutput)
+
+  test "a payload-less record is served in place, and only in place":
+    ## A record with matching inputs but no payloads (here withheld by the
+    ## gate; a record published before its edge stored payloads is the same)
+    ## cannot RESTORE. It used to be refused outright
+    ## (`aclMissNoOutputPayload`), and a monitored action — which never takes
+    ## the outputs-present shortcut — re-ran on EVERY build with its outputs
+    ## untouched. The recipe-relative interface extraction runs in this mode
+    ## (reprobuild-specs issues/2026-10-12-interface-extraction-variants-of-
+    ## one-recipe-overwrite-each-others-outputs.md), so any extraction whose
+    ## record the gate withheld would have re-extracted on every build.
+    ##
+    ## Both halves: outputs the record describes are reused where they are,
+    ## exactly as the metadata-only configuration reuses them, and outputs it
+    ## does not describe make the action run.
+    let tempRoot = createTempDir("repro-s7-payloadless", "")
+    defer: removeDir(tempRoot)
+    let fx = makeFixture(tempRoot, withUndeclared = true)
+
+    let config = restoreConfig(fx.cacheRoot, gate = true)
+    let first = runBuild(graph([fx.action]), config)
+    checkpoint(first.results[0].stderr)
+    check first.results[0].status == asSucceeded
+    let record = readRecord(dependencyEvidencePath(fx.cacheRoot, fx.action.id))
+    check record.outputPayloadKind == opkMetadataOnly
+
+    # In place and unchanged: served where it is, nothing runs or restores.
+    let warm = runBuild(graph([fx.action]), config)
+    checkpoint("warm: " & $warm.results[0].status & " " &
+      warm.results[0].reason & " " & warm.results[0].cacheMissReason)
+    check not warm.results[0].launched
+    check warm.results[0].cacheDecision == cdHit
+    check warm.results[0].status == asCacheHit
+    check warm.results[0].reason == "outputs-present"
+
+    # Rewritten by someone else: the record does not describe these bytes
+    # and has none of its own to put back, so the action runs.
+    writeFile(fx.declaredOutput, "another computation's product\n")
+    let rewritten = runBuild(graph([fx.action]), config)
+    checkpoint("rewritten: " & $rewritten.results[0].status & " " &
+      rewritten.results[0].cacheMissReason)
+    check rewritten.results[0].launched
+    check rewritten.results[0].status == asSucceeded
+    check "does not contain output payloads" in
+      rewritten.results[0].cacheMissReason
+    check readFile(fx.declaredOutput) == "payload\n"

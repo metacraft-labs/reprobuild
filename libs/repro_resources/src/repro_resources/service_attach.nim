@@ -96,15 +96,19 @@
 ## `holdersFromLeasedDeps` / `holdersFromStateRecord` are the two real
 ## sources a caller has. Nothing about a lease is re-implemented.
 ##
-## ONE LIMITATION OF THE ON-DISK RECORD, STATED RATHER THAN PAPERED
-## OVER. `mergeHolderDeadlines` DROPS a `keep` holder from
+## THE ON-DISK RECORD'S FORMER LIMITATION, AND WHAT CLOSED IT. This
+## paragraph used to say that a record alone could never NAME a `keep`
+## holder: `mergeHolderDeadlines` dropped it from
 ## `ResourceStateRecord.holders` (it "pins with no expiry", recorded only
-## as `effectiveDeadline = none`), so a record alone cannot NAME a keep
-## holder -- and D-SS5 expects a `stable`, state-owning service to
-## default to `keep`. `holdersFromStateRecord` therefore reports what the
-## record can carry and says what it cannot; naming a keep holder needs
-## the holder set L7's registry will hold, or a keep-holder list in the
-## record. See `holdersFromStateRecord`'s own comment.
+## as `effectiveDeadline = none`), which mattered because D-SS5 expects a
+## `stable`, state-owning service to default to `keep`. It named two ways
+## out -- the holder set L7's registry holds, or "a keep-holder list in
+## the record". State-record v4 took the second: `keepHolders` names them
+## and `keepHoldersKnown` says whether that list is complete. So
+## `holdersFromStateRecord` now names keep holders from the record, and
+## the "may have an unnamed one" flag narrows to exactly the records that
+## are still ambiguous -- PRE-v4 ones, where `keepHoldersKnown` is false.
+## See `holdersFromStateRecord`'s own comment.
 ##
 ## § TEST-DOUBLE POLICY
 ##
@@ -1096,36 +1100,43 @@ proc holdersFromLeasedDeps*(deps: openArray[LeasedDep]; now: Time):
 proc holdersFromStateRecord*(record: ResourceStateRecord):
     tuple[holders: seq[ServiceInstanceHolder];
           mayHaveUnnamedKeepHolder: bool] =
-  ## The holder set a persisted `ResourceStateRecord` can carry, plus the
-  ## flag for what it cannot.
+  ## The holder set a persisted `ResourceStateRecord` carries, plus the
+  ## flag for what a PRE-v4 record still cannot say.
   ##
-  ## `reconcile.mergeHolderDeadlines` DELIBERATELY `del`s a `keep` holder
-  ## from `holders` -- "it pins with no expiry ... rather than storing a
-  ## bogus deadline" -- and records only `effectiveDeadline = none`. So a
-  ## record whose effective deadline is `none` may be pinned by a holder
-  ## whose NAME was never written down, and a caller that must NAME
-  ## holders (`replaceDecision`'s refusal) has to get them from the
-  ## registry instead. Reported rather than guessed, because inventing a
-  ## name here would make a refusal name the wrong project.
+  ## BOTH KINDS OF HOLDER COME OFF THE RECORD. Dated holders are
+  ## `holders[consumerId] -> deadline`. `keep` holders are
+  ## `keepHolders`, by name, with no deadline -- which is exactly the
+  ## `deadline = none` shape `holdersFromLeasedDeps` produces for
+  ## `keep()`, and which `holderIsLive` reads as "pins with no expiry".
+  ## The two sources therefore agree holder for holder, and a
+  ## `replaceDecision` taken from the record names the same blocking
+  ## holders as one taken from the `LeasedDep` set.
   ##
-  ## THE FLAG IS "MAY HAVE" AND NOT "HAS", AND THE IMPRECISION IS THE
-  ## FINDING. `effectiveDeadline == none` is produced by TWO different
-  ## states -- "at least one `keep` holder pins this" and "no dated
-  ## holder exists at all" -- and the record carries nothing that
-  ## separates them. So this proc cannot answer "is there a keep holder";
-  ## only "could there be one, unnamed". Claiming the stronger answer
-  ## would make a `--replace` refuse an instance nobody holds. L6 hands
-  ## this to **L7**: the registry holds the holder set, so it can answer
-  ## exactly; the alternative is a keep-holder list in the record. It
-  ## matters because D-SS5 expects a `stable`, state-owning service to
-  ## default to `keep`, which is precisely the case the record loses.
+  ## THE FLAG IS STILL "MAY HAVE" AND NOT "HAS", BUT ONLY FOR A PRE-v4
+  ## RECORD. It used to be unavoidable: `effectiveDeadline == none` was
+  ## produced by TWO states -- "at least one `keep` holder pins this" and
+  ## "no dated holder exists at all" -- and nothing in the record
+  ## separated them, so this proc could not answer "is there a keep
+  ## holder", only "could there be one, unnamed". State-record v4 added
+  ## `keepHolders` + `keepHoldersKnown` and that is what separates them:
+  ## a v4 record with `keepHoldersKnown` says exactly who pins it, or
+  ## that nobody does. Only a record written before v4 -- whose keep
+  ## holders' names were genuinely never written down -- keeps the weaker
+  ## answer, so the flag now means precisely "this record is from before
+  ## the names were recorded". Claiming the stronger answer for such a
+  ## record would still make a `--replace` refuse an instance nobody
+  ## holds, which is why the flag is narrowed rather than deleted.
   result.holders = @[]
   for consumerId, deadline in record.holders:
     result.holders.add(ServiceInstanceHolder(consumerId: consumerId,
       deadline: some(deadline)))
+  for consumerId in record.keepHolders:
+    result.holders.add(ServiceInstanceHolder(consumerId: consumerId,
+      deadline: none(Time)))
   result.holders.sort(proc (a, b: ServiceInstanceHolder): int =
     cmp(a.consumerId, b.consumerId))
-  result.mayHaveUnnamedKeepHolder = record.effectiveDeadline.isNone
+  result.mayHaveUnnamedKeepHolder =
+    record.effectiveDeadline.isNone and not record.keepHoldersKnown
 
 proc runningServiceInstance*(key: ServiceInstanceKey;
                              snapshot: ServiceInterfaceSnapshot;

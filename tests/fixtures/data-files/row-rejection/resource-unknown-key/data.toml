@@ -1,0 +1,4 @@
+[[resource]]
+kind = "fs.userFile"
+hostFile = "~/x"
+owner = "root"

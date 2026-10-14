@@ -1,14 +1,14 @@
 ## Shared-Development-Services L6 — the DECLARED MAJOR COMPATIBILITY
-## FIELD crosses the interface boundary with the service, the v23
-## envelope carries it, a v22 artifact still decodes to the UNDECLARED
+## FIELD crosses the interface boundary with the service, the v25
+## envelope carries it, a v24 artifact still decodes to the UNDECLARED
 ## major, and the interface fingerprint moves for a change to the major
 ## and NOT for a change to the implementation.
 ##
 ## MOCK POLICY — NO MOCKS ARE USED IN THIS FILE, AND NONE MAY BE ADDED.
 ## The producers are real ``package`` blocks in ``l6_lift_fixtures.nim``
 ## expanded by the real DSL macro; the fingerprints are the real
-## ``interfaceFingerprint`` over the real codec; the v22 envelope is
-## written by the real encoder at version 22 rather than hand-typed.
+## ``interfaceFingerprint`` over the real codec; the v24 envelope is
+## written by the real encoder at version 24 rather than hand-typed.
 ##
 ## WHICH DISCRIMINATOR IS LOAD-BEARING, PER SUITE.
 ##
@@ -25,7 +25,7 @@
 ##   moves it" and "an absent setter moves it" FAIL there. Those two are
 ##   the gate; the first is the pair's other half and the guard that the
 ##   new field did not start carrying the implementation.
-## * The v22 suite's assertion that a v22 row decodes to major 0 also
+## * The v24 suite's assertion that a v24 row decodes to major 0 also
 ##   cannot be written at the base (no field to read), but its *reason*
 ##   is behavioural and is asserted downstream in
 ##   ``t_l6_attach_decision_has_three_outcomes.nim``: two undeclared
@@ -59,22 +59,27 @@ proc addU32Le(outp: var seq[byte]; value: uint32) =
   outp.add(byte((value shr 16) and 0xff'u32))
   outp.add(byte((value shr 24) and 0xff'u32))
 
-proc encodeV22ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
-  ## A v22 envelope: the service rows carry no major, so the v23 reader
-  ## must default it. Written by the CURRENT codec at version 22, exactly
-  ## as ``encodeV21ProjectInterfaceArtifact`` is in L4's sibling file and
+proc encodeV24ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
+  ## A v24 envelope: the service rows carry no major, so the v25 reader
+  ## must default it. Written by the CURRENT codec at version 24, exactly
+  ## as ``encodeV23ProjectInterfaceArtifact`` is in L4's sibling file and
   ## ``encodeV20…`` in L3's — a hand-typed byte string would be a guess
-  ## about what v22 was.
-  var payload = encodeInterfacePayload(pi, 22'u16)
+  ## about what v24 was.
+  ##
+  ## v24 and NOT v22: the major moved from v23 to v25 when this branch
+  ## merged ``agents``, whose own v22 is the macOS application fields on
+  ## the tarball archive detail -- see ``EnvelopeVersion``'s note on the
+  ## numbering.
+  var payload = encodeInterfacePayload(pi, 24'u16)
   let fingerprint = blake3DomainDigest(
-    encodeInterfacePayload(pi, 22'u16, forFingerprint = true),
+    encodeInterfacePayload(pi, 24'u16, forFingerprint = true),
     hdMetadataEnvelope)
   payload.add(byte(ord(fingerprint.algorithm)))
   payload.add(byte(ord(fingerprint.domain)))
   payload.add(fingerprint.bytes)
   payload.add(if pi.standardBuildEligible: 1'u8 else: 0'u8)
   result.add([byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))])
-  result.addU16Le(22'u16)
+  result.addU16Le(24'u16)
   result.addU16Le(101'u16)
   result.addU32Le(uint32(payload.len))
   result.add(payload)
@@ -130,7 +135,7 @@ suite "L6 — the declared major reaches the DSL's interface record":
       2'u32
 
   test "a body with NO `compatibility` setter carries the undeclared 0":
-    # §4.3's undeclared major, and the value every pre-v23 artifact
+    # §4.3's undeclared major, and the value every pre-v25 artifact
     # decodes to. There is no third "unset" state, deliberately: the DSL
     # refuses `compatibility 0`, so 0 in a record can only mean "the
     # author wrote nothing".
@@ -169,7 +174,7 @@ suite "L6 — and crosses the lift onto `InterfaceService`":
     check serviceNamed(pi, "hostAgent").compatibilityMajor == 7'u32
     check serviceNamed(pi, "maxGen").compatibilityMajor == high(uint32)
 
-  test "and survives the v23 envelope round-trip":
+  test "and survives the v25 envelope round-trip":
     let pi = liftedInterface("l6LiftProducer")
     let decoded = decodeProjectInterfaceArtifact(
       encodeProjectInterfaceArtifact(artifactFor(pi))).projectInterface
@@ -191,13 +196,13 @@ suite "L6 — and crosses the lift onto `InterfaceService`":
       encodeProjectInterfaceArtifact(artifactFor(pi))).projectInterface
     check serviceNamed(decoded, "zitadel").compatibilityMajor == high(uint32)
 
-suite "L6 — a v22 artifact still decodes, to the undeclared major":
+suite "L6 — a v24 artifact still decodes, to the undeclared major":
 
-  test "a v22 envelope's service rows decode with major 0":
+  test "a v24 envelope's service rows decode with major 0":
     let pi = liftedInterface("l6LiftProducer")
     let decoded = decodeProjectInterfaceArtifact(
-      encodeV22ProjectInterfaceArtifact(pi)).projectInterface
-    # Everything v22 DID carry is still there …
+      encodeV24ProjectInterfaceArtifact(pi)).projectInterface
+    # Everything v24 DID carry is still there …
     check serviceNamed(decoded, "zitadel").identityStableId ==
       "com.metacraft-labs.sso"
     check serviceNamed(decoded, "zitadel").scope == issWorkspace
@@ -213,7 +218,9 @@ suite "L6 — a v22 artifact still decodes, to the undeclared major":
     #
     # IT IS NO LONGER A LITERAL, AND THAT IS THE POINT OF THIS EDIT.
     # This probe hard-coded a byte and the pin had to be hand-moved on
-    # every envelope bump: v22 -> v23, -> v24, and again at D-SS11. Each
+    # every envelope bump (and the numbers it was moved through are no
+    # longer even the right ones: this branch's blocks were renumbered up
+    # by two on merging ``agents`` -- see ``EnvelopeVersion``'s note). Each
     # time it was silently wrong first -- pinned AT the current version
     # it measured the opposite property, that the current version
     # decodes correctly (which it does, and must) -- and each time a
@@ -256,7 +263,7 @@ suite "L6 — the fingerprint moves for the major and not for the impl":
     # At the base commit this assertion PASSES and says nothing (no part
     # of the major reached the interface), which is stated in the file
     # header. Its value is as the other half of the pair below: it is
-    # what catches a v23 field that started carrying argv.
+    # what catches a v25 field that started carrying argv.
     check fingerprintHex("l6SigBaseline") == fingerprintHex("l6SigSameImpl")
 
   test "a changed major DOES move it":

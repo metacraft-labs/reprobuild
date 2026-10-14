@@ -265,14 +265,16 @@ proc lapsedInstanceRecordWith(address, attrsTypeId, attrsJson: string;
   ## deadline is in the past, folded by the REAL `mergeHolderDeadlines`
   ## so the record's `holders` map and `effectiveDeadline` are the ones
   ## the registry's own write funnel would have produced.
-  let merged = mergeHolderDeadlines(initTable[string, Time](),
+  let merged = mergeHolderDeadlines(none(ResourceStateRecord),
     holderRenewals(address,
       @[ServiceInstanceHolder(consumerId: "holder:lapsed",
         deadline: some(lapsedAt))], lapsedAt), lapsedAt)
   ResourceStateRecord(address: address, typeId: ServiceInstanceTypeId,
     determinism: rdVolatile, attrsTypeId: attrsTypeId,
     attrsJson: attrsJson, dependsOn: @[], identity: "x", present: true,
-    holders: merged.holders, effectiveDeadline: merged.effective,
+    holders: merged.holders, keepHolders: merged.keepHolders,
+    keepHoldersKnown: merged.keepHoldersKnown,
+    effectiveDeadline: merged.effective,
     lastRenewed: lapsedAt)
 
 # ---------------------------------------------------------------------------

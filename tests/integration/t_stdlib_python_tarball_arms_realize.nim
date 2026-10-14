@@ -37,8 +37,12 @@
 ## different code path.
 ##
 ## Falsifiable: restore ``executablePath = "python/bin/python3"`` on either
-## recipe and ``resolveTarballTool`` raises "extracted tarball lacks
-## executable python/bin/python3" on Linux x86_64 and macOS aarch64.
+## recipe and ``resolveTarballTool`` refuses on Linux x86_64 and macOS
+## aarch64 with "extracted tarball declares executable python/bin/python3,
+## which is present but reached through a symlink (python/bin/python3 ->
+## python3.12)". That refusal used to read "extracted tarball lacks
+## executable python/bin/python3", which is what sent a reader looking for a
+## file the archive contains; the two cases are distinguished now.
 
 import std/[os, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip

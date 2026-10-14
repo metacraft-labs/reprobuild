@@ -17,7 +17,7 @@
 ##     PATH.
 ##   * ``home.package.<id>.env.<VAR>`` — one ``env.userVariable``
 ##     resource per ``env:`` entry the catalog declared (with
-##     ``${prefix}`` already substituted by the cakBuiltin realizer).
+##     ``${prefix}`` already substituted by the realizer).
 ##
 ## The address namespace is reserved for M69 synthesis; profile-author-
 ## written addresses do NOT collide because every M69 address begins
@@ -45,6 +45,12 @@ proc prefixBinDirs*(record: RealizedRecord): seq[string] =
   ## first-occurrence-wins.
   var seen: HashSet[string]
   if record.prefixAbsolutePath.len == 0:
+    return
+  # GM4c: an application bundle's `Contents/MacOS` holds the app and its
+  # helpers, not commands; it contributes no PATH entry (its launchers are
+  # the command-line surface). Store-And-Installation-Layout.md § macOS
+  # Application Bundles, "Command line".
+  if record.appBundle.storeBundlePath.len > 0:
     return
   # The realized record's `resolvedExecutablePath` is the first
   # bin_relpath joined with the prefix. We get every bin dir by

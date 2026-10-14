@@ -79,13 +79,17 @@ suite "M66 — history ordering":
     check entries[1].version == "17.0.13"
     check entries[2].version == "11.0.25"
 
-  test "emitted catalog header lists versions newest-first":
+  test "emitted module lists versions default (newest) first":
     var entries = @[makeEntry("11.0.25"), makeEntry("21.0.5"),
       makeEntry("17.0.13")]
     sortCatalog(entries)
-    let src = emitCatalogFile("jdk", "ScoopInstaller/Java", entries)
-    let line = src.splitLines()[2]  # "## Versions (newest-first): ..."
-    check "21.0.5, 17.0.13, 11.0.25" in line
+    let src = emitPackageModule("jdk", "ScoopInstaller/Java", entries)
+    let line = src.splitLines()[2]  # "## Versions (default first): ..."
+    check line == "## Versions (default first): 21.0.5, 17.0.13, 11.0.25"
+    # Declaration order IS the default: the newest version's tarball
+    # statement comes first.
+    check src.find("version = \"21.0.5\"") < src.find("version = \"17.0.13\"")
+    check src.find("version = \"17.0.13\"") < src.find("version = \"11.0.25\"")
 
   test "non-numeric suffix preserves ordering":
     var entries = @[

@@ -84,6 +84,9 @@ proc registerBuiltinResourceTypes*() =
     of rkHomebrewCask:
       driver = ResourceDriver(digest: digestHomebrewCask,
         observe: observeHomebrewCaskR)
+    of rkMacosAppBundle:
+      driver = ResourceDriver(digest: digestMacosAppBundle,
+        observe: observeMacosAppBundle)
     registerResourceType(ResourceTypeDef(
       typeId: $kind,
       determinism: rdHostBound,

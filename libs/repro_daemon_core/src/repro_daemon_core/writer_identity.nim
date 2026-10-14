@@ -29,15 +29,14 @@
 ## LIVE and never reclaims. A record that lingers costs a deferred restart; a
 ## record reclaimed out from under its writer corrupts a build.
 ##
-## BOOT IDENTITY COMES FROM `shm_gset`, DELIBERATELY. It is the same notion of
+## BOOT ENCODING MATCHES `shm_gset`, DELIBERATELY. It is the same notion of
 ## boot already deciding action-index staleness (`action_index.nim`: "a chain
 ## whose creator boot id does not match the current boot is STALE"), so this
-## introduces no second answer to the question. It does make `shm_gset` a
-## direct dependency of this library rather than a transitive one.
+## introduces no second encoding for the boot. Writer probes verify the
+## authoritative source themselves: the shard fallback is not exact enough
+## to reclaim a writer safely.
 
 import std/[options, strutils]
-
-import shm_gset
 
 when defined(posix):
   import std/posix
@@ -50,9 +49,17 @@ type
     pid*: int
     startStamp*: string
 
+  ProcessStartStatus* = enum
+    pssPresent, pssAbsent, pssUnknown
+
+  ProcessStartProbe* = object
+    ## Absence is an authoritative kernel answer, never a failed read.
+    status*: ProcessStartStatus
+    stamp*: string
+
   WriterLiveness* = enum
     wlLive        ## the recorded writer is running right now
-    wlDead        ## provably not running: same boot, and pid absent or reused
+    wlDead        ## provably gone: different boot, absent pid, or reused pid
     wlUnknown     ## identity could not be established; callers MUST assume live
 
 const WriterIdentityFieldSep = ':'
@@ -79,6 +86,7 @@ static int repro_proc_start_time(int pid, long long *sec, long long *usec) {
   int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
   if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0) return -1;  /* error */
   if (len == 0) return 1;                                  /* no such process */
+  if (len != sizeof(kp)) return -1;
   *sec = (long long)kp.kp_proc.p_starttime.tv_sec;
   *usec = (long long)kp.kp_proc.p_starttime.tv_usec;
   return 0;
@@ -87,55 +95,91 @@ static int repro_proc_start_time(int pid, long long *sec, long long *usec) {
   proc reproProcStartTime(pid: cint; sec, usec: ptr int64): cint
     {.importc: "repro_proc_start_time", nodecl.}
 
-  proc processStartStamp*(pid: int): string =
-    ## "" when the process does not exist or cannot be interrogated.
+  proc probeProcessStart*(pid: int): ProcessStartProbe =
+    if pid <= 0 or pid > int(high(int32)):
+      return ProcessStartProbe(status: pssUnknown)
     var sec, usec: int64
-    if reproProcStartTime(cint(pid), addr sec, addr usec) != 0:
-      return ""
-    $sec & "." & $usec
+    case reproProcStartTime(cint(pid), addr sec, addr usec)
+    of 1: return ProcessStartProbe(status: pssAbsent)
+    of 0:
+      if sec > 0 and usec >= 0 and usec < 1_000_000:
+        return ProcessStartProbe(status: pssPresent, stamp: $sec & "." & $usec)
+    else: discard
+    ProcessStartProbe(status: pssUnknown)
 
 elif defined(linux):
-  proc processStartStamp*(pid: int): string =
-    ## Field 22 of `/proc/<pid>/stat` -- `starttime`, in clock ticks since
-    ## boot. Only meaningful WITHIN a boot, which is exactly why `bootId` is
-    ## part of the identity rather than an extra.
-    ##
-    ## The field is counted from the CLOSE of the comm field rather than by
-    ## splitting the whole line: `comm` is parenthesised and may itself
-    ## contain spaces and parentheses, so a naive split puts every later
-    ## field at the wrong index. This is the standard hazard of reading this
-    ## file and the reason the scan starts at the last ')'.
-    ##
-    ## NOT VERIFIED ON A LINUX HOST. This was written and reviewed on macOS;
-    ## `t_daemon_writer_identity.nim` carries a case for it that `skip()`s
-    ## with that reason on other platforms, so a Linux run reports it as
-    ## unverified rather than passing vacuously.
+  proc probeProcessStart*(pid: int): ProcessStartProbe =
+    if pid <= 0 or pid > int(high(int32)):
+      return ProcessStartProbe(status: pssUnknown)
+    let path = "/proc/" & $pid & "/stat"
     try:
-      let raw = readFile("/proc/" & $pid & "/stat")
+      let raw = readFile(path)
+      # comm can contain spaces and parentheses: field 22 is counted from
+      # its final closing parenthesis, not from whitespace in the whole line.
       let close = raw.rfind(')')
-      if close < 0:
-        return ""
-      # After "(comm)" the next token is `state`, i.e. field 3. `starttime`
-      # is field 22, so it is the 20th token after the parenthesis.
+      if close < 0: return ProcessStartProbe(status: pssUnknown)
       let rest = raw[close + 1 .. ^1].strip().splitWhitespace()
-      if rest.len < 20:
-        return ""
-      rest[19]
+      if rest.len < 20 or rest[19].len == 0 or
+          not rest[19].allCharsInSet({'0' .. '9'}):
+        return ProcessStartProbe(status: pssUnknown)
+      discard parseBiggestUInt(rest[19])
+      ProcessStartProbe(status: pssPresent, stamp: rest[19])
     except CatchableError:
-      return ""
+      # ENOENT is also possible under hidepid=2. Only ESRCH from kill proves
+      # absence; EPERM, malformed data, and failed reads remain uncertainty.
+      if kill(Pid(pid), 0) != 0 and errno == ESRCH:
+        return ProcessStartProbe(status: pssAbsent)
+      ProcessStartProbe(status: pssUnknown)
 
 else:
-  proc processStartStamp*(pid: int): string =
-    ## No start time on this platform, so identity cannot be established and
-    ## every record reads `wlUnknown` -- i.e. live, i.e. never reclaimed.
-    ## Losing the reclamation is the safe direction; guessing is not.
+  proc probeProcessStart*(pid: int): ProcessStartProbe =
     discard pid
-    ""
+    ProcessStartProbe(status: pssUnknown)
+
+proc processStartStamp*(pid: int): string =
+  ## Convenience for recording a stamp. Liveness uses the structured probe
+  ## so an unavailable stamp is never mistaken for confirmed absence.
+  probeProcessStart(pid).stamp
+
+proc exactWriterBootId(): Option[uint64] =
+  ## Match shm_gset's authoritative encoding, but never its wall-clock
+  ## fallback. Shard warm-up tolerates a drifting id; reclaiming a LIVE
+  ## session cannot. Keep this encoding aligned with shm_gset/platform.
+  when defined(macosx):
+    proc sysctlbyname(name: cstring; oldp: pointer; oldlenp: ptr csize_t;
+        newp: pointer; newlen: csize_t): cint
+      {.importc, header: "<sys/sysctl.h>".}
+    var tv: Timeval
+    var size = csize_t(sizeof(tv))
+    if sysctlbyname("kern.boottime", addr tv, addr size, nil, 0) == 0 and
+        size == csize_t(sizeof(tv)) and int64(tv.tv_sec) > 0 and
+        tv.tv_usec >= 0 and tv.tv_usec < 1_000_000:
+      return some((uint64(tv.tv_sec) * 1_000_000'u64 +
+        uint64(tv.tv_usec)) or 1'u64)
+  elif defined(linux):
+    try:
+      let raw = readFile("/proc/sys/kernel/random/boot_id")
+      let uuid = raw.strip()
+      if uuid.len != 36: return none(uint64)
+      for i, ch in uuid:
+        if i in [8, 13, 18, 23]:
+          if ch != '-': return none(uint64)
+        elif ch notin {'0' .. '9', 'a' .. 'f', 'A' .. 'F'}:
+          return none(uint64)
+      var h = 1469598103934665603'u64
+      for ch in raw:
+        if ch != '-' and ch != '\n':
+          h = (h xor uint64(ord(ch))) * 1099511628211'u64
+      return some(h or 1'u64)
+    except CatchableError: discard
+  none(uint64)
 
 proc currentWriterIdentity*(): WriterIdentity =
   ## The identity of THIS process, to be written into a session record.
   let pid = when defined(posix): int(getpid()) else: 0
-  WriterIdentity(bootId: bootId(), pid: pid, startStamp: processStartStamp(pid))
+  let boot = exactWriterBootId()
+  if boot.isNone: return WriterIdentity()
+  WriterIdentity(bootId: boot.get(), pid: pid, startStamp: processStartStamp(pid))
 
 proc encodeWriterIdentity*(identity: WriterIdentity): string =
   ## `<bootId>:<pid>:<startStamp>`; "" when the start stamp is unknown, so an
@@ -165,29 +209,23 @@ proc writerLiveness*(encoded: string): WriterLiveness =
   ## Is the writer named by `encoded` still running?
   ##
   ## Every uncertain answer is `wlUnknown`, which callers treat as live. The
-  ## only `wlDead` is: same boot, and the pid either has no process or has a
-  ## process that started at a different time (i.e. the pid was reused).
+  ## only `wlDead` is a proven different boot, absent pid, or reused pid.
   let parsed = decodeWriterIdentity(encoded)
   if parsed.isNone:
     return wlUnknown
   let identity = parsed.get()
-  let currentBoot = bootId()
-  if identity.bootId != currentBoot:
+  let currentBoot = exactWriterBootId()
+  if currentBoot.isNone: return wlUnknown
+  if identity.bootId != currentBoot.get():
     # A DIFFERENT BOOT. Nothing recorded before this boot can still be
     # running, so this is the one case that needs no process probe at all --
     # and it is the case a pid-only rule gets wrong most often after a
     # reboot recycles every pid from 1.
     return wlDead
-  let liveStamp = processStartStamp(identity.pid)
-  if liveStamp.len == 0:
-    # No such process, or it could not be interrogated. On a platform with no
-    # start time at all this is also the answer for a LIVE process, which is
-    # why that platform's `processStartStamp` is documented as making
-    # everything `wlUnknown`: there, `decodeWriterIdentity` never yields an
-    # identity in the first place, because nothing could encode one.
-    return wlDead
-  if liveStamp == identity.startStamp:
-    wlLive
-  else:
-    # The pid exists but is not the process that wrote this: it was reused.
-    wlDead
+  let probe = probeProcessStart(identity.pid)
+  case probe.status
+  of pssUnknown: wlUnknown
+  of pssAbsent: wlDead
+  of pssPresent:
+    if probe.stamp == identity.startStamp: wlLive
+    else: wlDead  # Successful interrogation proves this pid was reused.

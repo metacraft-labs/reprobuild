@@ -50,3 +50,22 @@ const ReprobuildVersion* {.strdefine.} = "0.2.5"
 
 proc versionString*(): string =
   ReprobuildVersion
+
+const ReprobuildSourceRevision* {.strdefine.} = ""
+  ## The source revision (a git commit id, with a ``-dirty`` suffix when the
+  ## tree carried uncommitted changes to tracked files) this image was built
+  ## from, or ``""`` when the build did not say.
+  ##
+  ## ``ReprobuildVersion`` does not identify a build: two images reporting the
+  ## same version can be hundreds of commits apart. Tools that record what
+  ## produced an artifact (``repro home export``'s provenance) therefore carry
+  ## the revision as well. It is injected at build time, never discovered at
+  ## run time: ``scripts/build_apps.sh`` passes
+  ## ``-d:ReprobuildSourceRevision=…`` from ``$REPROBUILD_SOURCE_REVISION`` or,
+  ## failing that, from ``git rev-parse HEAD`` of the tree it builds; the Nix
+  ## package sets the variable from the flake's revision, and the
+  ## ``repro.nim`` app edges read the same variable.
+
+proc sourceRevisionString*(): string =
+  ## ``ReprobuildSourceRevision``; ``""`` means unknown.
+  ReprobuildSourceRevision

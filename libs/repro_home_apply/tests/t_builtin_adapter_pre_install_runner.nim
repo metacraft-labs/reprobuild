@@ -5,7 +5,8 @@
 ## kinds (``PreInstallActionKind``). Each test exercises ONE allowlist
 ## shape end-to-end against a synthetic staging dir, then validates the
 ## resulting tree. Allowlist-miss handling (``pre_install_unrecognized``
-## landing in the slice with a ``WPreInstallUnrecognized`` warning at
+## landing in the record's ``preInstallUnrecognized`` with a
+## ``WPreInstallUnrecognized`` warning at
 ## realize time) is exercised separately.
 ##
 ## The critical junction-hazard test (per project memory
@@ -28,7 +29,7 @@ proc resetDir(path: string) =
     removeDir(extendedPath(path))
   createDir(extendedPath(path))
 
-suite "M3 — cakBuiltin pre_install runner (allowlist)":
+suite "M3 — archive realizer pre_install runner (allowlist)":
 
   test "test_m3_pre_install_runner_new_item_directory":
     ## ``New-Item -ItemType Directory`` → ``os.createDir``.

@@ -20,12 +20,23 @@
 ##       wrongly destroy), keep dominating;
 ##   (d) additivity: a bare-`dependsOn`, no-store reconcile is unchanged —
 ##       the pre-existing `t_resource_provider_lane.nim` is the companion
-##       non-regression gate (run separately + reported).
+##       non-regression gate (run separately + reported);
+##   (f)-(i) KEEP HOLDERS ARE NAMED: a `keep` consumer is persisted by id in
+##       `keepHolders` (never in the dated map), beside any dated holders; a
+##       later run in which only a dated consumer renews leaves the keep
+##       holder named and the state pinned; the keep holder renewing under a
+##       dated policy moves out of `keepHolders` (and back on a later keep);
+##   (j)-(l) A RUN THAT DOES NOT CONSUME the state carries its lease forward
+##       unchanged: a keep holder stays named and pinning, a dated holder
+##       keeps its deadline (so the state stays reapable) — neither is
+##       rewritten empty just because the state is in the graph unconsumed
+##       — in the in-process reconcile and in the session reconcile (l).
 
 import std/[tables, options, times, os, unittest]
 
 import repro_resources
 import repro_project_dsl          # TypedExtensionBox
+from repro_provider_runtime import ProviderHandle   # the session resolver's type (l)
 
 # ---------------------------------------------------------------------------
 # Stub provider with a MATERIALIZATION WITNESS. `stubMaterializations` is
@@ -278,3 +289,268 @@ suite "L2: per-consume-edge lease policy + renewal + max-deadline":
     for act in second.actions:
       check act.kind == rakNoOp
     check stubMaterializations == matBefore   # nothing re-materialized
+
+  # -------------------------------------------------------------------------
+  # Keep holders are NAMED on disk (reprobuild-pm issue
+  # 2026-10-09-a-keep-holders-identity-is-never-persisted-in-a-lease-record).
+  #
+  # Before the fix a `keep` holder was deleted from the dated `holders` map
+  # and recorded nowhere else, so `effectiveDeadline == none` meant either
+  # "a keep holder pins this" or "no dated holder exists" and no reader could
+  # tell which, or name the pin. Every case below goes through a REAL
+  # `StateStore` on a throwaway directory and reads the record back from
+  # disk, so what is asserted is what a later run (or a restarted daemon)
+  # can reconstruct — not an in-memory value that never reached the record.
+  # -------------------------------------------------------------------------
+
+  test "(f) a keep consumer is named in keepHolders, not in the dated map":
+    let store = scratchStore("keep-named")
+    let t0 = fromUnix(1_700_400_000)
+
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", keep())])
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+
+    let rec = readStateRecord(store, "cluster")
+    check rec.keepHolders == @["pinner"]
+    check not rec.holders.hasKey("pinner")
+    check rec.holders.len == 0
+    check rec.keepHoldersKnown                    # a current-format record
+    # `none` is now unambiguous: it is pinned BY "pinner".
+    check rec.effectiveDeadline.isNone
+    check rec.lastRenewed == t0
+
+  test "(g) mixed keep + delayed consumers: both holders are named":
+    let store = scratchStore("keep-mixed")
+    let t0 = fromUnix(1_700_500_000)
+    let ttl = initDuration(minutes = 30)
+
+    discard stubState("cluster", "up-1")
+    # Two keep holders declared out of order, to pin the canonical
+    # (ascending, de-duplicated) order of the persisted keep-holder list.
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", keep())])
+    discard stubConsumer("anchor", "a",
+      consumes = @[leased("cluster", "anchor", keep())])
+    discard stubConsumer("slow", "s",
+      consumes = @[leased("cluster", "slow", delayed(ttl))])
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+
+    let rec = readStateRecord(store, "cluster")
+    check rec.keepHolders == @["anchor", "pinner"]
+    check rec.holders.len == 1
+    check rec.holders["slow"] == t0 + ttl
+    # A consumer id is in at most one of the two holder sets.
+    for id in rec.keepHolders:
+      check not rec.holders.hasKey(id)
+    check rec.effectiveDeadline.isNone            # keep dominates
+
+  test "(h) a later run renewing ONLY a dated consumer keeps the keep pin":
+    # The behaviour this fix changes on purpose. Before it, run 2 below wrote
+    # `effectiveDeadline = some(t1 + ttl)`: the keep holder from run 1 had
+    # left no trace in the record, so the merge could not know the state was
+    # still pinned and silently re-armed a reap deadline under it.
+    let store = scratchStore("keep-persists")
+    let t0 = fromUnix(1_700_600_000)
+    let ttl = initDuration(minutes = 30)
+
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", keep())])
+    discard stubConsumer("slow", "s",
+      consumes = @[leased("cluster", "slow", delayed(ttl))])
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+    check readStateRecord(store, "cluster").effectiveDeadline.isNone
+
+    # Run 2, a fresh process: only the dated consumer runs.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("slow", "s",
+      consumes = @[leased("cluster", "slow", delayed(ttl))])
+    let t1 = t0 + initDuration(minutes = 5)
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t1)
+
+    let rec = readStateRecord(store, "cluster")
+    check rec.keepHolders == @["pinner"]          # still named
+    check rec.holders["slow"] == t1 + ttl         # the dated holder renewed
+    check rec.effectiveDeadline.isNone            # still pinned
+    check not reapableAt(rec, t1 + ttl + initDuration(days = 365))
+
+  test "(i) a keep holder renewing under a dated policy leaves keepHolders":
+    let store = scratchStore("keep-moves")
+    let t0 = fromUnix(1_700_700_000)
+    let ttl = initDuration(minutes = 30)
+
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", keep())])
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+    check readStateRecord(store, "cluster").keepHolders == @["pinner"]
+
+    # Run 2: the SAME consumer now holds a dated lease. It moves out of
+    # keepHolders into the dated map, and the pin goes with it.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", delayed(ttl))])
+    let t1 = t0 + initDuration(minutes = 5)
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t1)
+
+    let rec2 = readStateRecord(store, "cluster")
+    check rec2.keepHolders.len == 0
+    check rec2.holders["pinner"] == t1 + ttl
+    check rec2.effectiveDeadline == some(t1 + ttl)
+    check reapableAt(rec2, t1 + ttl)              # reapable again
+
+    # Run 3: back to keep — it moves back, and the dated entry goes.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", keep())])
+    let t2 = t1 + initDuration(minutes = 5)
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t2)
+
+    let rec3 = readStateRecord(store, "cluster")
+    check rec3.keepHolders == @["pinner"]
+    check not rec3.holders.hasKey("pinner")
+    check rec3.effectiveDeadline.isNone
+
+  test "(j) an UNCONSUMED run keeps the keep holder named and the pin":
+    let store = scratchStore("unconsumed-keep")
+    let t0 = fromUnix(1_700_800_000)
+
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", keep())])
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+    check readStateRecord(store, "cluster").keepHolders == @["pinner"]
+
+    # Run 2, a fresh process: the state is still in the graph, but nothing
+    # consumes it — so it is reconciled as a plain resource (here it is
+    # re-materialized, since the fresh world no longer has it) and its record
+    # is re-written. The lease on it is untouched by that: only "pinner"
+    # renewing under a dated policy, or an explicit teardown, ends the pin.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    let t1 = t0 + initDuration(minutes = 5)
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t1)
+
+    let rec = readStateRecord(store, "cluster")
+    check rec.keepHolders == @["pinner"]
+    check rec.keepHoldersKnown
+    check rec.effectiveDeadline.isNone
+    check rec.lastRenewed == t0                   # no renewal happened in run 2
+    check not reapableAt(rec, fromUnix(1_900_000_000))
+
+  test "(k) an UNCONSUMED run keeps a dated deadline (the state stays reapable)":
+    let store = scratchStore("unconsumed-dated")
+    let t0 = fromUnix(1_700_900_000)
+    let ttl = initDuration(minutes = 30)
+
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("slow", "s",
+      consumes = @[leased("cluster", "slow", delayed(ttl))])
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    let t1 = t0 + initDuration(minutes = 5)
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t1)
+
+    # Before the carry-forward, run 2 wrote the record with NO holders and a
+    # `none` deadline: a lapsed lease silently became a never-reap state.
+    let rec = readStateRecord(store, "cluster")
+    check rec.holders.len == 1
+    check rec.holders["slow"] == t0 + ttl
+    check rec.effectiveDeadline == some(t0 + ttl)
+    check rec.lastRenewed == t0
+    check not reapableAt(rec, t0 + ttl - initDuration(minutes = 1))
+    check reapableAt(rec, t0 + ttl)
+
+  test "(l) the SESSION reconcile carries an unconsumed lease forward too":
+    # `reconcileResourcesViaSession` has its own copy of the persist step, so
+    # it gets its own case. Its leaf ops go through the `inProcess` hybrid
+    # gate to the stub driver — the store writes under test are the session
+    # path's, and no provider binary is needed to reach them. `resolve` is
+    # never called; it fails loudly if it is.
+    let store = scratchStore("unconsumed-session")
+    let t0 = fromUnix(1_701_000_000)
+    let ttl = initDuration(minutes = 30)
+    let noSession: ResourceSessionResolver = proc (typeId: string): ProviderHandle =
+      raise newException(AssertionDefect, "unexpected session for " & typeId)
+    let linked: ResourceInProcessPredicate = proc (typeId: string): bool = true
+
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("pinner", "p",
+      consumes = @[leased("cluster", "pinner", keep())])
+    discard stubConsumer("slow", "s",
+      consumes = @[leased("cluster", "slow", delayed(ttl))])
+    discard reconcileResourcesViaSession(collectedResources(), noSession,
+      store = some(store), now = t0, inProcess = linked)
+    check readStateRecord(store, "cluster").keepHolders == @["pinner"]
+
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    discard reconcileResourcesViaSession(collectedResources(), noSession,
+      store = some(store), now = t0 + initDuration(minutes = 5),
+      inProcess = linked)
+
+    let rec = readStateRecord(store, "cluster")
+    check rec.keepHolders == @["pinner"]
+    check rec.holders["slow"] == t0 + ttl
+    check rec.effectiveDeadline.isNone
+    check rec.lastRenewed == t0
+
+  test "(m) a reconcile never overwrites (downgrades) a NEWER repro's record":
+    # A record written by a newer repro is foreign to this one (Ephemeral-
+    # State-Leases §4.4): this reader cannot carry its lease forward, so
+    # rewriting it would silently drop whatever lease the newer writer
+    # recorded. Both the consumed and the unconsumed write paths must refuse.
+    let store = scratchStore("foreign-record")
+    let t0 = fromUnix(1_701_000_000)
+    discard stubState("cluster", "up-1")
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+    let path = store.root / "cluster.rec"
+    var bytes = readFile(path)
+    bytes[4] = char((StateRecordSszVersion + 1) and 0xFF)  # u16 LE version
+    bytes[5] = char(((StateRecordSszVersion + 1) shr 8) and 0xFF)
+    writeFile(path, bytes)
+
+    # Unconsumed run.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    expect ForeignStateRecordError:
+      discard reconcileResources(collectedResources(),
+                                 store = some(store), now = t0)
+    check readFile(path) == bytes
+
+    # Consumed (leased) run.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("slow", "s",
+      consumes = @[leased("cluster", "slow", delayed(initDuration(minutes = 5)))])
+    expect ForeignStateRecordError:
+      discard reconcileResources(collectedResources(),
+                                 store = some(store), now = t0)
+    check readFile(path) == bytes

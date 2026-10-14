@@ -55,7 +55,7 @@ package l6LiftProducer:
       service bootstrap:
         ## Declares NO major, so it carries the undeclared 0 — which is
         ## what every service in every recipe written before this setter
-        ## existed carries, and what a v22 artifact decodes to.
+        ## existed carries, and what a v24 artifact decodes to.
         args "--bootstrap", $port
         identity derived
         scope project

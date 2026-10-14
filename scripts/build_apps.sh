@@ -48,9 +48,20 @@ source scripts/lib/preloaded_shim_loader.sh
 #      ``--out`` target on every invocation, so "not older than this run" is a
 #      true statement about a build that did the work — and an artifact left
 #      over from a previous run fails it.
-#   2. An entrypoint that fails to compile or link has its stale binary
-#      REMOVED, so "does the file exist?" stops answering yes for a binary
-#      nobody built.
+#   2. An entrypoint that fails to compile or link — or whose output fails
+#      the check in point 1 — has its previous binary SET ASIDE under the same
+#      name plus ``.stale`` (``build/bin/repro`` -> ``build/bin/repro.stale``).
+#      The canonical name is gone, so "does the file exist?" stops answering
+#      yes for a binary nobody built. The old build is NOT deleted, because
+#      the failure is often not the tree's: a sibling checkout that is a few
+#      commits stale breaks the compile with nothing in this repo changed, and
+#      that must not cost the developer the tool that worked a minute earlier.
+#      It stays runnable, explicitly, under the ``.stale`` name. Only a build
+#      from before this run is set aside; a file the failing step wrote itself
+#      is removed. A newer set-aside replaces an older one, and a successful
+#      build removes it, so a green run leaves no ``.stale`` for
+#      ``cp build/bin/*`` packaging to ship. The DSL runtime library follows
+#      the same rule.
 #   3. The loop runs to the end and reports every failure together, instead of
 #      hiding failures 2..N behind the first one.
 #   4. The last line of output is an explicit verdict, so a log read through a
@@ -132,9 +143,92 @@ resolve_built_binary() {
   return 1
 }
 
-discard_stale_binary() {
-  local name="$1"
-  rm -f "build/bin/${name}" "build/bin/${name}.exe"
+# Move each given artifact that exists off its canonical name to
+# ``<path>.stale`` (point 2 of the rationale above), replacing an older
+# ``.stale``. A path with nothing at it leaves any existing ``.stale`` alone:
+# that one is still the most recent build there was. Prints a phrase saying
+# where the previous build went, for the caller's failure message.
+#
+# Only a PREVIOUS build is set aside. A file strictly newer than the run
+# marker was written by the step that just failed — a link cut short by a full
+# disk, or the empty output verify_fresh_artifact refused — and moving it would
+# replace the last good ``.stale`` with a broken one. Such a file is deleted
+# instead. ``-nt`` (strictly newer) errs toward keeping: on a filesystem with
+# whole-second timestamps a previous build stamped in the marker's tick is
+# still treated as a previous build.
+#
+# If the rename itself fails the artifact is deleted instead, and the phrase
+# says so: losing the old build is the lesser harm next to leaving it at the
+# canonical name, where it would answer for a build that did not happen.
+set_aside_previous_build() {
+  local path
+  local kept=()
+  local discarded=()
+  local removed=()
+  local stuck=()
+  local earlier=()
+  for path in "$@"; do
+    if [ -e "${path}" ] || [ -L "${path}" ]; then
+      if [ "${path}" -nt "${build_run_marker}" ]; then
+        rm -f "${path}" || true
+        if [ -e "${path}" ] || [ -L "${path}" ]; then
+          stuck+=("${path}")
+        else
+          discarded+=("${path}")
+        fi
+        if [ -e "${path}.stale" ]; then
+          earlier+=("${path}.stale")
+        fi
+      elif mv -f "${path}" "${path}.stale"; then
+        kept+=("${path}.stale")
+      else
+        rm -f "${path}" || true
+        if [ -e "${path}" ] || [ -L "${path}" ]; then
+          stuck+=("${path}")
+        else
+          removed+=("${path}")
+        fi
+      fi
+    elif [ -e "${path}.stale" ]; then
+      earlier+=("${path}.stale")
+    fi
+  done
+  local notes=()
+  if [ "${#kept[@]}" -gt 0 ]; then
+    notes+=("kept the previous build as ${kept[*]}")
+  fi
+  if [ "${#discarded[@]}" -gt 0 ]; then
+    notes+=("removed ${discarded[*]}, which the failed step itself wrote")
+  fi
+  if [ "${#removed[@]}" -gt 0 ]; then
+    notes+=("could not set the previous build aside, so removed ${removed[*]}")
+  fi
+  if [ "${#stuck[@]}" -gt 0 ]; then
+    notes+=("could neither set aside nor remove ${stuck[*]}; it is NOT this run's build")
+  fi
+  if [ "${#kept[@]}" -eq 0 ] && [ "${#removed[@]}" -eq 0 ] &&
+     [ "${#stuck[@]}" -eq 0 ]; then
+    if [ "${#earlier[@]}" -gt 0 ]; then
+      notes+=("no previous build was present (an earlier one is still kept as ${earlier[*]})")
+    else
+      notes+=("no previous build was present")
+    fi
+  fi
+  local note separator=""
+  for note in "${notes[@]}"; do
+    printf '%s%s' "${separator}" "${note}"
+    separator="; "
+  done
+}
+
+# The counterpart for a step that succeeded: its ``.stale`` copies describe a
+# build that has now been superseded, and leaving them would let a packaging
+# glob over build/bin ship one.
+clear_set_aside_build() {
+  local path
+  for path in "$@"; do
+    rm -f "${path}.stale"
+  done
 }
 
 # Peer-Cache-BearSSL: resolve nim-bearssl the same way every other sibling
@@ -151,6 +245,25 @@ bearssl_src="$(resolve_bearssl_src)"
 export BEARSSL_SRC="${bearssl_src}"
 
 nim_mode_flags=()
+
+# The source revision the images are built from, embedded as
+# `ReprobuildSourceRevision` (libs/repro_core/src/repro_core.nim) so a binary
+# can say which commit it is -- the version string alone does not identify a
+# build. An explicit $REPROBUILD_SOURCE_REVISION wins (the Nix package sets it
+# from the flake, whose sandbox has no .git); otherwise ask git about THIS
+# tree, and mark it `-dirty` when tracked files differ from HEAD. Outside a git
+# checkout the define is omitted and the binary reports the revision unknown.
+source_revision="${REPROBUILD_SOURCE_REVISION:-}"
+if [ -z "${source_revision}" ] && command -v git >/dev/null 2>&1 &&
+   source_revision="$(git rev-parse HEAD 2>/dev/null)"; then
+  if ! git diff --quiet HEAD -- 2>/dev/null; then
+    source_revision="${source_revision}-dirty"
+  fi
+fi
+if [ -n "${source_revision}" ]; then
+  nim_mode_flags+=("-d:ReprobuildSourceRevision=${source_revision}")
+fi
+
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
     ;;
@@ -599,6 +712,9 @@ while read -r name path extra_flags; do
       runtime_passl=(${repro_runtime_passl[@]+"${repro_runtime_passl[@]}"})
       ;;
   esac
+  # Both spellings, because Nim appends ``.exe`` on Windows (see
+  # resolve_built_binary); the one that does not exist is skipped.
+  artifacts=("build/bin/${name}" "build/bin/${name}.exe")
   entrypoint_status=0
   (
     unset_clingo_searchpath
@@ -613,19 +729,28 @@ while read -r name path extra_flags; do
       "${path}"
   ) || entrypoint_status=$?
   if [ "${entrypoint_status}" -ne 0 ]; then
-    # Delete whatever was there before. ``nim c`` leaves the previous binary
-    # untouched when it fails, and that leftover is the thing that lets a
-    # broken build keep answering yes to "is build/bin/<name> there?".
-    discard_stale_binary "${name}"
-    record_failure "${name}: 'nim c ${path}' exited ${entrypoint_status} (compile or link failure); removed the stale build/bin/${name}"
+    # Move whatever was there before off its canonical name. ``nim c``
+    # leaves the previous binary untouched when it fails, and that leftover
+    # is the thing that lets a broken build keep answering yes to "is
+    # build/bin/<name> there?". It is set aside as ``.stale`` rather than
+    # deleted, so a failure from outside the tree does not destroy the
+    # developer's last working tool.
+    set_aside_note="$(set_aside_previous_build "${artifacts[@]}")"
+    record_failure "${name}: 'nim c ${path}' exited ${entrypoint_status} (compile or link failure); ${set_aside_note}"
     # Keep going. The next entrypoint's failure is worth knowing about in the
     # same run, and every entrypoint that is NOT rebuilt from here on has to be
     # accounted for by the sweep below rather than left silently stale.
     continue
   fi
   if built_binary="$(resolve_built_binary "${name}")"; then
-    verify_fresh_artifact "${built_binary}" "${name}" ||
-      discard_stale_binary "${name}"
+    if verify_fresh_artifact "${built_binary}" "${name}"; then
+      clear_set_aside_build "${artifacts[@]}"
+    else
+      # verify_fresh_artifact has already recorded the failure; this line only
+      # says where the artifact it refused went. Deliberately not a second
+      # ``FAILED:`` line, so each entrypoint is counted once.
+      echo "build_apps: ${name}: $(set_aside_previous_build "${artifacts[@]}")" >&2
+    fi
   else
     record_failure "${name}: 'nim c ${path}' exited 0 but produced no build/bin/${name}"
   fi
@@ -690,17 +815,21 @@ dsl_runtime_status=0
     --out:"build/lib/librepro_project_dsl_runtime.new.${dll_ext}" \
     libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim
 ) || dsl_runtime_status=$?
+dsl_runtime_lib="build/lib/librepro_project_dsl_runtime.${dll_ext}"
 if [ "${dsl_runtime_status}" -ne 0 ]; then
   # Same reasoning as the entrypoints: a provider that links against a DSL
   # runtime left over from an earlier build is a wrong artifact, not a
-  # partial one.
-  rm -f "build/lib/librepro_project_dsl_runtime.${dll_ext}"
-  record_failure "librepro_project_dsl_runtime: 'nim c --app:lib' exited ${dsl_runtime_status}; removed the stale build/lib/librepro_project_dsl_runtime.${dll_ext}"
+  # partial one — so it leaves the canonical name, and is kept as ``.stale``
+  # for the same reason the binaries are.
+  record_failure "librepro_project_dsl_runtime: 'nim c --app:lib' exited ${dsl_runtime_status}; $(set_aside_previous_build "${dsl_runtime_lib}")"
   abort_if_failed
 fi
-verify_fresh_artifact \
+if ! verify_fresh_artifact \
   "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" \
-  "librepro_project_dsl_runtime" || abort_if_failed
+  "librepro_project_dsl_runtime"; then
+  echo "build_apps: librepro_project_dsl_runtime: $(set_aside_previous_build "${dsl_runtime_lib}")" >&2
+  abort_if_failed
+fi
 if [ -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" ]; then
   mv -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" "build/lib/librepro_project_dsl_runtime.${dll_ext}.old" || true
 fi
@@ -708,6 +837,7 @@ mv -f "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" "build/lib/librepr
 verify_fresh_artifact \
   "build/lib/librepro_project_dsl_runtime.${dll_ext}" \
   "librepro_project_dsl_runtime publish" || abort_if_failed
+clear_set_aside_build "${dsl_runtime_lib}"
 
 # Windows runtime-DLL staging: the blocks below copy each dlopen'd library next
 # to the built binaries so LoadLibrary resolves it from the .exe's own

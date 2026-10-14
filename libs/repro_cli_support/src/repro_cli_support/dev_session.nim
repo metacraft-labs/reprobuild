@@ -483,17 +483,20 @@ const
     ## The open decision asked for "reap semantics for a `stable`,
     ## state-owning service" and expected `keep`: "`delayed(ttl)` would
     ## destroy exactly the state `stable` exists to preserve". That is
-    ## the choice taken, and the cost is named rather than hidden: a
-    ## `keep` holder's consumer id is not written into a lease record
-    ## (`mergeHolderDeadlines` drops it), so a daemon restart cannot
-    ## enumerate the holders of an instance held only by `keep` holders,
-    ## and §4.5 rule 1 then REFUSES `--replace` and refuses to decide a
-    ## release. That refusal is the designed behaviour of the default,
-    ## not a surprise: the alternative — a dated default — trades a
-    ## refusal for a reaped database.
+    ## the choice taken. Its cost used to be named here rather than
+    ## hidden: a `keep` holder's consumer id was not written into a lease
+    ## record (`mergeHolderDeadlines` dropped it), so a daemon restart
+    ## could not enumerate the holders of an instance held only by `keep`
+    ## holders, and §4.5 rule 1 then REFUSED `--replace` and refused to
+    ## decide a release.
     ##
-    ## A recipe that wants the other trade declares `"lease": "delayed",
-    ## "ttlSeconds": <n>` and gets a holder the rebuild can name.
+    ## STATE-RECORD v4 REMOVED THAT COST. Keep holders are written by
+    ## name (`ResourceStateRecord.keepHolders`, with `keepHoldersKnown`
+    ## saying the list is complete), so a daemon restart enumerates them
+    ## and `--replace` refuses by NAMING the holder instead of refusing
+    ## because it cannot. The default no longer trades a refusal for
+    ## anything; a dated default would still trade a reaped database for
+    ## one. Only a record written BEFORE v4 keeps the old behaviour.
     ##
     ## Shared-Development-Services L9: the number itself now lives at
     ## `repro_project_dsl`'s `SharedServiceInstanceKeepTtlSeconds`, so
