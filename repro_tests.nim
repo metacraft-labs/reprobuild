@@ -630,6 +630,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_monitor_capture_at_long_path.nim",
+    binary: "build/test-bin/t_monitor_capture_at_long_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim",
     binary: "build/test-bin/t_monitor_scratch_is_not_a_cache_input",
     defines: @[],

@@ -76,6 +76,7 @@ libs/repro_build_engine/tests/t_inherited_environment_cache.nim	nim	6
 libs/repro_build_engine/tests/t_isolated_action_environment.nim	nim	5
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim	nim	4
+libs/repro_build_engine/tests/t_monitor_capture_at_long_path.nim	nim	1
 libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim	nim	3
 libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim	nim	4
 libs/repro_build_engine/tests/t_named_pipe_evidence.nim	nim	3
