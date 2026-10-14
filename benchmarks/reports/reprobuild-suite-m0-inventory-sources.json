@@ -17288,7 +17288,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim",
       "sourceSuiteCount": 11,
-      "staticCaseCount": 34,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
