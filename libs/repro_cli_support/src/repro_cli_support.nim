@@ -77007,13 +77007,98 @@ proc flakeDeclaredInputsAt(flakeRoot: string):
     return
   result.ok = true
 
+type FlakeInputOriginal = object
+  original: JsonNode
+  diagnostic: string
+
+proc flakeInputOriginals(flakeRoot: string;
+    report: var seq[string]): tuple[ok: bool; inputs: Table[string, FlakeInputOriginal]] =
+  ## Input attributes refer to lock nodes by an independent node key. Inspect
+  ## only `original`: `locked` may already describe a substituted local tree.
+  let lockPath = flakeRoot / "flake.lock"
+  result.ok = true
+  if not fileExists(lockPath): return
+  try:
+    let doc = parseJson(readFile(lockPath))
+    if doc.kind != JObject or doc{"nodes"} == nil or doc["nodes"].kind != JObject:
+      raise newException(ValueError, "flake.lock has no nodes object")
+    let nodes = doc["nodes"]
+    if doc.hasKey("root") and doc["root"].kind != JString:
+      raise newException(ValueError, "flake.lock root reference is malformed")
+    let root = doc{"root"}.getStr("root")
+    let rootNode = nodes{root}
+    if rootNode == nil or rootNode.kind != JObject or
+        rootNode{"inputs"} == nil or rootNode["inputs"].kind != JObject:
+      raise newException(ValueError, "flake.lock has no root inputs object")
+    for name, target in rootNode["inputs"].pairs:
+      # A follows path does not own a lock node. Leave it pinned rather than
+      # guessing a sibling from its attribute name.
+      if target.kind != JString:
+        result.inputs[name] = FlakeInputOriginal(diagnostic:
+          if target.kind == JArray: "a follows path has no independent lock node"
+          else: "its root lock reference is malformed")
+        continue
+      let node = nodes{target.getStr()}
+      if node == nil or node.kind != JObject:
+        result.inputs[name] = FlakeInputOriginal(diagnostic: "its lock node is absent or malformed")
+        continue
+      let original = node{"original"}
+      result.inputs[name] =
+        if original == nil or original.kind == JObject:
+          FlakeInputOriginal(original: original)
+        else: FlakeInputOriginal(diagnostic: "its original lock reference is malformed")
+  except CatchableError as err:
+    result.ok = false
+    report.add("could not read original repository coordinates from " &
+      lockPath & " (" & err.msg & "); keeping all inputs on their pins instead of guessing by input name")
+
+proc flakeOriginalRepository(reference: FlakeInputOriginal):
+    tuple[present: bool; identity, diagnostic: string] =
+  ## Having either coordinate forbids guessing by the consumer's attribute
+  ## name, even when the other coordinate or fetcher kind is unsupported.
+  if reference.diagnostic.len > 0:
+    result.present = true
+    result.diagnostic = reference.diagnostic
+    return
+  let original = reference.original
+  if original == nil: return
+  result.present = original.hasKey("repo") or original.hasKey("owner")
+  if not result.present: return
+  let owner = original{"owner"}.getStr()
+  let repo = original{"repo"}.getStr()
+  if owner.len == 0 or repo.len == 0:
+    result.diagnostic = "original owner/repo coordinates are incomplete"
+    return
+  let kind = original{"type"}.getStr()
+  let defaultHost = case kind
+    of "github": "github.com"
+    of "gitlab": "gitlab.com"
+    of "sourcehut": "git.sr.ht"
+    else: ""
+  if defaultHost.len == 0:
+    result.diagnostic = "original owner/repo coordinates use unsupported fetcher '" & kind & "'"
+    return
+  let hostValue = original{"host"}
+  if hostValue != nil and (hostValue.kind != JString or hostValue.getStr().len == 0):
+    result.diagnostic = "original repository host is malformed"
+    return
+  let host = hostValue.getStr(defaultHost)
+  for c in host:
+    if c in {'/', '\\', '@', '?', '#', ' ', '\t', '\r', '\n'}:
+      result.diagnostic = "original repository host is malformed"
+      return
+  result.identity = canonicalRemoteIdentity("https://" & host & "/" & owner & "/" & repo)
+
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     checkoutOf: Table[string, string]; suffixes: openArray[string];
     identity: GitToolIdentity; workspaceRoot: string;
     report: var seq[string]; onlyNames: openArray[string] = [];
-    exceptNames: openArray[string] = []): seq[FlakeOverrideBinding] =
+    exceptNames: openArray[string] = [];
+    flakeRoot: string = ""): seq[FlakeOverrideBinding] =
   ## Bind each declared flake input to the develop-set checkout of the repo its
-  ## (suffix-stripped) name denotes. Every input that is NOT bound and could
+  ## original repository coordinates identify, or its suffix-stripped name
+  ## denotes when no owner/repo coordinates are present. Every input that is
+  ## NOT bound and could
   ## plausibly have been is NAMED in ``report`` rather than dropped, because a
   ## silently skipped override is the shape of §5's inert knob.
   ##
@@ -77074,13 +77159,58 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
   ## still named, with the selection given as one possible reason.
   var unknownToWorkspace: seq[string]
   let wsRoot = if workspaceRoot.len > 0: absolutePath(workspaceRoot) else: ""
+  let originals = flakeInputOriginals(flakeRoot, report)
+  if not originals.ok: return
+  if fileExists(flakeRoot / "flake.lock"):
+    for name in inputNames:
+      if not originals.inputs.hasKey(name):
+        report.add("NOT substituted: flake input '" & name &
+          "' has no root entry in flake.lock; keeping its pin instead of guessing by input name")
+  var candidates: seq[ResolvedRepo]
+  var membershipFailure = ""
+  var needsCoordinates = false
   for name in inputNames:
-    let repo = stripFlakeInputSuffix(name, suffixes)
+    if flakeOriginalRepository(originals.inputs.getOrDefault(name)).present:
+      needsCoordinates = true
+  if needsCoordinates:
+    try:
+      candidates = resolveWorkspaceProjectShared(workspaceRoot, "",
+        "flake repository coordinates").resolved.repos
+    except CatchableError as err:
+      membershipFailure = err.msg
+  for name in inputNames:
+    if fileExists(flakeRoot / "flake.lock") and not originals.inputs.hasKey(name): continue
+    var repo = stripFlakeInputSuffix(name, suffixes)
+    var candidatePath = if wsRoot.len > 0: wsRoot / repo else: ""
+    let coordinate = flakeOriginalRepository(originals.inputs.getOrDefault(name))
+    if coordinate.present:
+      var reason = coordinate.diagnostic
+      var matches: seq[ResolvedRepo]
+      if reason.len == 0 and membershipFailure.len > 0:
+        reason = "workspace repository identities could not be resolved (" & membershipFailure & ")"
+      if reason.len == 0:
+        for candidate in candidates:
+          if candidate.fetchUrl.len > 0 and
+              canonicalRemoteIdentity(candidate.fetchUrl) == coordinate.identity:
+            matches.add(candidate)
+        if matches.len == 0:
+          reason = "no workspace repository matches original coordinates '" & coordinate.identity & "'"
+        elif matches.len > 1:
+          var names: seq[string]
+          for candidate in matches: names.add(candidate.name)
+          names.sort()
+          reason = "original coordinates '" & coordinate.identity & "' match multiple workspace repositories: " & names.join(", ")
+      if reason.len > 0:
+        report.add("NOT substituted: flake input '" & name & "': " & reason &
+          "; it keeps its flake.lock pin (input-name fallback is disabled when original coordinates are present)")
+        continue
+      repo = matches[0].name
+      candidatePath = absolutePath(wsRoot / matches[0].path)
     if repo notin checkoutOf and
         (repo in exceptNames or (onlyNames.len > 0 and repo notin onlyNames)):
       continue
     if repo notin checkoutOf:
-      let sibling = if wsRoot.len > 0: wsRoot / repo else: ""
+      let sibling = candidatePath
       if sibling.len > 0 and dirExists(extendedPath(sibling)):
         report.add("NOT substituted: flake input '" & name & "' names repo '" &
           repo & "', which IS checked out at " & sibling & " but is NOT in " &
@@ -77096,6 +77226,10 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
             else: " NOTE: that checkout has no flake.nix, so a lock record " &
               "alone would not make it substitutable either — nix cannot take " &
               "a non-flake directory as an input."))
+      elif coordinate.present:
+        report.add("NOT substituted: flake input '" & name & "' names repo '" &
+          repo & "', whose original coordinates match the workspace source but whose checkout is absent at " &
+          sibling & "; it keeps its flake.lock pin. Remedy: `repro develop --only=" & repo & "` places it.")
       else:
         unknownToWorkspace.add(name)
       continue
@@ -78271,7 +78405,7 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   # ---- bind inputs to develop-set checkouts ------------------------------
   let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
     identity, selection.workspaceRoot, report, selection.onlyNames,
-    selection.exceptNames)
+    selection.exceptNames, flakeRoot)
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -79157,8 +79291,19 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   result.notices = selection.notices
   let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
     suffixes, identity, selection.workspaceRoot, result.notices,
-    selection.onlyNames, selection.exceptNames)
+    selection.onlyNames, selection.exceptNames, flakeRoot)
   if bound.len == 0:
+    # Unknown lock identity is not proof that no input needs a substitution.
+    # Preserve the refresh's malformed-lock refusal even when binding stopped
+    # before producing a row.
+    var coordinateNotices: seq[string]
+    let originals = flakeInputOriginals(flakeRoot, coordinateNotices)
+    let emptyState = flakeOverrideStateReport(flakeRoot, bound, identity)
+    if not originals.ok or not emptyState.ok:
+      result.tag = "refused-unreadable-lock"
+      result.diagnostic = (coordinateNotices & emptyState.refusals).join("; ")
+      result.exitCode = 2
+      return
     result.tag = "no-overrides"
     result.diagnostic = "no flake input of " & declared.flakePath &
       " is substituted by a workspace checkout, so there is no observed " &
@@ -79680,7 +79825,15 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       return
     let lockText = readFile(lockPath)
     let doc = parseJson(lockText)
-    var candidateMoved = false
+    # The cheap name scan cannot prove an aliased coordinate input unchanged.
+    # Hand coordinate-bearing references to the authoritative shared binder.
+    var coordinateNotices: seq[string]
+    let originals = flakeInputOriginals(flakeRoot, coordinateNotices)
+    var candidateMoved = not originals.ok
+    for name in declared.names:
+      if not originals.inputs.hasKey(name) or
+          flakeOriginalRepository(originals.inputs.getOrDefault(name)).present:
+        candidateMoved = true
     if doc.kind == JObject and doc.hasKey("nodes"):
       let rootKey =
         if doc.hasKey("root") and doc["root"].kind == JString:
@@ -79860,7 +80013,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   for n in selection.notices: skipped.add(n)
   let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
     defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped,
-    selection.onlyNames, selection.exceptNames)
+    selection.onlyNames, selection.exceptNames, flakeRoot)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
   if not state.ok:
     result.examined = true
@@ -80242,7 +80395,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     for n in selection.notices: notices.add(n)
     bindings = flakeBindInputsToCheckouts(declared.names,
       selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
-      notices, selection.onlyNames, selection.exceptNames)
+      notices, selection.onlyNames, selection.exceptNames, flakeRoot)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
