@@ -228,6 +228,32 @@ suite "abandoned sessions are reclaimed, and only provably dead ones":
     check reclaimAbandonedSessions(config) == 0
     check countActiveSessionRecordsFromDisk(config) == 1
 
+  test "a padded live writer stamp never reclaims its running session":
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    var identity = currentWriterIdentity()
+    require writerLiveness(encodeWriterIdentity(identity)) == wlLive
+    identity.startStamp = "0" & identity.startStamp
+    var running = session("padded-writer", "running")
+    running.writer = encodeWriterIdentity(identity)
+    require running.writer.len > 0
+    # Prime before writing so both explicit reclamation and restart priming
+    # encounter the same genuine running record rather than an empty tally.
+    check activeSessionTallyFor(config) == 0
+    writeSessionRecord(config, running)
+    let path = root / "sessions" / "padded-writer.session"
+    let original = readFile(path)
+    check "state=running" in original
+    check reclaimAbandonedSessions(config) == 0
+    check readFile(path) == original
+    check countActiveSessionRecordsFromDisk(config) == 1
+    check activeSessionTallyFor(config) == 1
+    resetTallyAsIfRestarted(config)
+    check activeSessionTallyFor(config) == 1
+    check countActiveSessionRecordsFromDisk(config) == 1
+    check readFile(path) == original
+
   test "a record with no writer is left alone, not reclaimed":
     # Every record written before this field existed. Treating an
     # unestablishable identity as live is the safe direction, and it means

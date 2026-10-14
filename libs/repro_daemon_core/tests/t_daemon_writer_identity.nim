@@ -78,6 +78,51 @@ suite "writer identity recognises a live writer and only a dead one":
     check decoded.get().pid == me.pid
     check decoded.get().startStamp == me.startStamp
 
+  test "noncanonical self stamps cannot prove pid reuse":
+    let me = currentWriterIdentity()
+    let encoded = encodeWriterIdentity(me)
+    require encoded.len > 0
+    require writerLiveness(encoded) == wlLive
+    var stamps = @["0" & me.startStamp, "+" & me.startStamp,
+      " " & me.startStamp, me.startStamp & " ", "not-a-start-time"]
+    when defined(macosx):
+      let parts = me.startStamp.split('.')
+      require parts.len == 2
+      stamps.add(parts[0] & ".0" & parts[1])
+      stamps.add(parts[0] & ".+" & parts[1])
+      stamps.add(@["0.0", "-1.0", "1.-1", "1.1000000",
+        "9223372036854775808.0", "1.9223372036854775808", "1.2.3", "1"])
+    elif defined(linux):
+      stamps.add(@["-1", "1.1", "18446744073709551616"])
+    for stamp in stamps:
+      var altered = me
+      altered.startStamp = stamp
+      let persisted = encodeWriterIdentity(altered)
+      checkpoint("self pid=" & $me.pid & " persisted stamp=" & stamp)
+      check persisted.len > 0
+      check decodeWriterIdentity(persisted).isNone
+      check writerLiveness(persisted) == wlUnknown
+      # Invalid identity remains uncertain even if another field would
+      # otherwise establish death; it never reaches a liveness comparison.
+      altered.bootId = altered.bootId - 1
+      check writerLiveness(encodeWriterIdentity(altered)) == wlUnknown
+
+  test "canonical native range boundaries remain valid identities":
+    var identity = currentWriterIdentity()
+    when defined(macosx):
+      let stamps = ["1.0", "1.999999", "9223372036854775807.0",
+        "9223372036854775807.999999"]
+    elif defined(linux):
+      let stamps = ["0", "1", "18446744073709551615"]
+    else:
+      let stamps: array[0, string] = []
+    for stamp in stamps:
+      identity.startStamp = stamp
+      let decoded = decodeWriterIdentity(encodeWriterIdentity(identity))
+      checkpoint("canonical boundary=" & stamp)
+      require decoded.isSome
+      check decoded.get().startStamp == stamp
+
   test "a pid that cannot exist is dead":
     var absent = currentWriterIdentity()
     absent.pid = 999_999
@@ -88,7 +133,7 @@ suite "writer identity recognises a live writer and only a dead one":
     # process, so "is the pid alive" answers yes; only the start stamp can
     # say it is not the process that wrote the record.
     var reused = currentWriterIdentity()
-    reused.startStamp = "1.1"
+    reused.startStamp = when defined(macosx): "1.1" else: "1"
     check reused.pid == currentWriterIdentity().pid
     checkpoint("same live pid, different start stamp")
     check writerLiveness(encodeWriterIdentity(reused)) == wlDead

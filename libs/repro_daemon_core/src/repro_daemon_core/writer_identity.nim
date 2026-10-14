@@ -190,14 +190,39 @@ proc encodeWriterIdentity*(identity: WriterIdentity): string =
   $identity.bootId & WriterIdentityFieldSep & $identity.pid &
     WriterIdentityFieldSep & identity.startStamp
 
+proc canonicalDecimalInRange(text: string; minimum, maximum: uint64): bool =
+  # Native probes emit unpadded unsigned decimal components. Accepting another
+  # spelling would make string inequality falsely prove that a live pid was
+  # reused. Check the spelling and the native range before any comparison.
+  if text.len == 0 or not text.allCharsInSet({'0' .. '9'}) or
+      (text.len > 1 and text[0] == '0'):
+    return false
+  try:
+    let value = parseBiggestUInt(text)
+    value >= minimum and value <= maximum
+  except ValueError:
+    false
+
+proc canonicalStartStamp(stamp: string): bool =
+  when defined(macosx):
+    let parts = stamp.split('.')
+    parts.len == 2 and
+      canonicalDecimalInRange(parts[0], 1'u64, uint64(high(int64))) and
+      canonicalDecimalInRange(parts[1], 0'u64, 999_999'u64)
+  elif defined(linux):
+    canonicalDecimalInRange(stamp, 0'u64, high(uint64))
+  else:
+    false
+
 proc decodeWriterIdentity*(encoded: string): Option[WriterIdentity] =
-  ## `none` for anything that is not a whole triple. A partially parsable
+  ## `none` for anything that is not a whole triple with a canonical native
+  ## start stamp. A partially parsable
   ## value is NOT repaired into a usable identity: half an identity answers
   ## the liveness question wrongly, and `none` answers it `wlUnknown`.
   if encoded.len == 0:
     return none(WriterIdentity)
   let parts = encoded.split(WriterIdentityFieldSep, maxsplit = 2)
-  if parts.len != 3 or parts[2].len == 0:
+  if parts.len != 3 or not canonicalStartStamp(parts[2]):
     return none(WriterIdentity)
   try:
     some(WriterIdentity(bootId: parseBiggestUInt(parts[0]),
