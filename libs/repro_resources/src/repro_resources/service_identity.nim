@@ -664,6 +664,24 @@ proc serviceStateRoot*(storeRoot: string; key: ServiceInstanceKey): string =
     scopeKeyDigest(key) / environmentPathComponent(key) /
     encodeLockPathSegment(key.identity)
 
+const
+  ServiceInstanceOutputLogName* = "instance-output.log"
+    ## §4.5: the file a materialised instance's stdout and stderr are
+    ## written to, inside its `serviceStateRoot`. Named here, beside the
+    ## state-root layout, so the layout keeps a single definition.
+
+proc serviceInstanceOutputLogPath*(storeRoot: string;
+                                   key: ServiceInstanceKey): string =
+  ## Where the instance at `key` writes its output.
+  ##
+  ## WHY UNDER THE STATE ROOT. The state root is already addressed by
+  ## `(identity, environment)` and is the same directory for every
+  ## consumer of a shared instance (see `serviceStateRoot`), so the
+  ## operator of ANY consuming project finds one log for one instance,
+  ## and it survives a daemon restart exactly as the instance does. A
+  ## daemon-log or temp-dir location would be neither.
+  serviceStateRoot(storeRoot, key) / ServiceInstanceOutputLogName
+
 proc serviceInstanceAddress*(key: ServiceInstanceKey): string =
   ## The key as the resource ADDRESS a lease is taken on. `lease.nim`'s
   ## `leased(address, consumerId, policy)` reference-counts holders per

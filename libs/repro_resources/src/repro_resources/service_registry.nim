@@ -195,6 +195,12 @@ type
     processIdentity*: string
     command*: seq[string]
     workingDir*: string
+    outputLog*: string
+      ## §4.5: the file the instance's stdout and stderr go to
+      ## (`serviceInstanceOutputLogPath`). Persisted so an operator can
+      ## find it from the record alone. EMPTY for a record written before
+      ## the field existed, which decodes as "not known" rather than
+      ## failing — such an instance's output was never captured.
 
   ServiceInstanceRecord* = object
     ## The persisted projection of one running instance.
@@ -524,7 +530,8 @@ proc encodeServiceInstanceAttrs*(record: ServiceInstanceRecord): string =
     "process": {
       "pid": record.process.pid,
       "processIdentity": record.process.processIdentity,
-      "workingDir": record.process.workingDir},
+      "workingDir": record.process.workingDir,
+      "outputLog": record.process.outputLog},
     "startedByHolder": record.startedByHolder,
     "startedAtUnix": record.startedAtUnix}
   node["process"]["command"] = command
@@ -572,6 +579,10 @@ proc decodeServiceInstanceAttrs*(address, attrsTypeId, attrsJson: string):
     result.process.processIdentity =
       processNode{"processIdentity"}.getStr("")
     result.process.workingDir = processNode{"workingDir"}.getStr("")
+    # Absent in a record written before §4.5 captured the output: read as
+    # empty, never as an error, so an older daemon's instances are still
+    # recovered by the rebuild.
+    result.process.outputLog = processNode{"outputLog"}.getStr("")
     let command = processNode{"command"}
     if not command.isNil and command.kind == JArray:
       for part in command:

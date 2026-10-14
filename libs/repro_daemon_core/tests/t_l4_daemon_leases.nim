@@ -563,8 +563,13 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
 
     var registry = openServiceInstanceRegistry(stateRoot,
       serviceInstanceLivenessProbe())
-    let process = materialiseServiceInstanceProcess(
-      @["sh", "-c", "while :; do sleep 1; done"], root)
+    let started = materialiseServiceInstanceProcess(
+      @["sh", "-c", "while :; do sleep 1; done"], root,
+      serviceInstanceOutputLogPath(stateRoot, key))
+    doAssert not started.exitedEarly,
+      "fixture instance died during its start grace window: " &
+      describeEarlyServiceInstanceExit(started, address)
+    let process = started.process
     # A lease that lapsed an hour ago: the holder is dated (`delayed`), so
     # the gate SELECTS the record. A `keep` holder would never be selected,
     # which is D-SS5's default and is asserted in the registry's own suite.

@@ -2455,7 +2455,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "69f22b48afff14d874264cfbd40c98081e22e206",
+        "rev": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24",
         "type": "github"
       },
       "original": {
@@ -2527,7 +2527,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "bf799831a1e7898b83765784ef513e05f75135ea",
+        "rev": "14c0decf5b20c00e788c22498c75baedbad45d95",
         "type": "github"
       },
       "original": {
