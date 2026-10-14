@@ -96,6 +96,13 @@ const
   StateRecordSszTypeId = 1'u16
   RecordSuffix = ".rec"
   TempPrefix = ".tmp-"
+  StaleTempAge = initDuration(hours = 1)
+    ## A temp older than this belongs to a write that died before its rename
+    ## (a crash between create and rename). A live write holds its temp for
+    ## the duration of one small write + sync + rename, i.e. milliseconds, so
+    ## an hour is far outside any live writer's window. Temp names are unique
+    ## per write, so nothing else would ever overwrite such an orphan: without
+    ## this sweep each crashed write would leak one file for good.
   QuarantineDirName* = "quarantine"
     ## Subdirectory of the store root that undecodable records are moved
     ## into. Listing walks only the root's FILES, so it is invisible there.
@@ -937,14 +944,24 @@ proc scanStateRecords*(store: StateStore): StateRecordScan =
   ##   * fails to decode for any other reason: quarantined (moved into
   ##     `quarantine/` as `<filename>.<unix-seconds>-<pid>-<n>`) and listed in
   ##     `quarantined`; if even that fails, `unreadable`.
-  ## Temp files (a write in progress) are never looked at.
+  ## Temp files (a write in progress) are never read; one older than
+  ## `StaleTempAge` is an orphan of a crashed write and is removed.
   if not dirExists(store.root):
     return
   var names: seq[string] = @[]
   for kind, path in walkDir(store.root):
     if kind != pcFile: continue
     let fn = extractFilename(path)
-    if fn.startsWith(TempPrefix): continue
+    if fn.startsWith(TempPrefix):
+      # Never read: a write may be in progress. Only an orphan from a write
+      # that died long ago is removed (see `StaleTempAge`); any failure (it
+      # was renamed or removed meanwhile) is harmless and ignored.
+      try:
+        if getTime() - getLastModificationTime(path) > StaleTempAge:
+          removeFile(path)
+      except CatchableError:
+        discard
+      continue
     if not fn.endsWith(RecordSuffix): continue
     names.add(path)
   names.sort()

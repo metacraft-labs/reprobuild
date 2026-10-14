@@ -518,3 +518,39 @@ suite "L2: per-consume-edge lease policy + renewal + max-deadline":
     check rec.holders["slow"] == t0 + ttl
     check rec.effectiveDeadline.isNone
     check rec.lastRenewed == t0
+
+  test "(m) a reconcile never overwrites (downgrades) a NEWER repro's record":
+    # A record written by a newer repro is foreign to this one (Ephemeral-
+    # State-Leases §4.4): this reader cannot carry its lease forward, so
+    # rewriting it would silently drop whatever lease the newer writer
+    # recorded. Both the consumed and the unconsumed write paths must refuse.
+    let store = scratchStore("foreign-record")
+    let t0 = fromUnix(1_701_000_000)
+    discard stubState("cluster", "up-1")
+    discard reconcileResources(collectedResources(),
+                               store = some(store), now = t0)
+    let path = store.root / "cluster.rec"
+    var bytes = readFile(path)
+    bytes[4] = char((StateRecordSszVersion + 1) and 0xFF)  # u16 LE version
+    bytes[5] = char(((StateRecordSszVersion + 1) shr 8) and 0xFF)
+    writeFile(path, bytes)
+
+    # Unconsumed run.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    expect ForeignStateRecordError:
+      discard reconcileResources(collectedResources(),
+                                 store = some(store), now = t0)
+    check readFile(path) == bytes
+
+    # Consumed (leased) run.
+    stubWorld = initTable[string, string]()
+    resetDesiredResources()
+    discard stubState("cluster", "up-1")
+    discard stubConsumer("slow", "s",
+      consumes = @[leased("cluster", "slow", delayed(initDuration(minutes = 5)))])
+    expect ForeignStateRecordError:
+      discard reconcileResources(collectedResources(),
+                                 store = some(store), now = t0)
+    check readFile(path) == bytes

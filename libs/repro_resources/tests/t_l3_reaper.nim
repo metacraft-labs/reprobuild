@@ -707,3 +707,25 @@ suite "L3: crash-safe reaper":
       check r.contains("out of range")
     check not fileExists(store.root / "determinism.rec")
     check not fileExists(store.root / "timestamp.rec")
+
+  test "(17) a temp orphaned by a crashed write is swept; a live write's temp is not":
+    # Temp names are unique per write, so nothing ever overwrites the temp of
+    # a write that died before its rename: without this sweep each such crash
+    # would leak one file in the store for good.
+    let store = scratchStore("stale-temp")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    materialize(store, "alpha", "ca", delayed(ttl), t0)
+    let orphan = store.root / ".tmp-alpha.rec.1-2-3"
+    let live = store.root / ".tmp-alpha.rec.4-5-6"
+    writeFile(orphan, "half a record")
+    writeFile(live, "half a record")
+    setLastModificationTime(orphan, getTime() - initDuration(hours = 2))
+
+    let report = reapOnce(store, now = t0 + ttl + initDuration(minutes = 1))
+
+    check destroyLog == @["alpha"]
+    check not fileExists(orphan)
+    check fileExists(live)                 # never touched: a write may hold it
+    check report.quarantined.len == 0      # a temp is never judged as a record
+    check report.unreadable.len == 0
