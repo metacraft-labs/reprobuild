@@ -2542,10 +2542,14 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ##
   ## A record the sweep could not reap comes back in ``report.failed`` rather
   ## than as a raise — see ``reapOnce``'s "one unhandleable record must not
-  ## abort the sweep". The ``except`` below therefore now catches only a
-  ## WHOLE-SWEEP failure (an undecodable record aborting ``listStateRecords``,
-  ## an unreadable store root), which is equally unfixable-by-retrying and so
-  ## is deduplicated on the same terms.
+  ## abort the sweep". So does a record the sweep could not even DECODE: the
+  ## listing (``scanStateRecords``) reports a newer repro's record as foreign
+  ## and quarantines a corrupt one instead of raising, and those come back
+  ## through ``leaseReapFindings`` too — logged even on a tick that reaped
+  ## nothing, since the findings loop does not depend on ``reaped``. The
+  ## ``except`` below therefore now catches only a WHOLE-SWEEP failure (an
+  ## unreadable store root), which is equally unfixable-by-retrying and so is
+  ## deduplicated on the same terms.
   try:
     let report = runLeaseReapTick(daemonLeaseScope(config),
       overrideRoot = config.leaseStoreRoot)

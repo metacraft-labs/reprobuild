@@ -22,18 +22,34 @@
 ##     round-tripped here, populated by L2 (reconcile) and L4 (daemon renew),
 ##     read by the L3 reaper.
 ##
-## Writes are ATOMIC: a record is serialized to a temp file in the same
-## directory and `moveFile`-renamed over the destination, so a crash or a
-## concurrent run never observes a half-written record (a partial temp is
-## simply never renamed and is ignored on read). The record body is a
-## small binary envelope built on `repro_core`'s length-prefixed
-## primitives — the same codec vocabulary `protocol.nim` uses — so the
-## `Digest256` array + the attrs payload survive verbatim (no lossy JSON
-## of binary bytes).
+## Writes are ATOMIC and DURABLE: a record is serialized to a temp file
+## (unique per write) in the same directory, the temp is flushed + fsynced,
+## renamed over the destination, and the directory is fsynced. Atomic
+## alone (the rename) protects against a PROCESS crash; it does not protect
+## against a power loss or kernel crash, after which the rename can be
+## durable and the data not — a zero-length or truncated `.rec`, i.e. an
+## undecodable record (Ephemeral-State-Leases.md §4.2–§4.3). The record
+## body is a versioned SSZ envelope (below) so the `Digest256` array + the
+## attrs payload survive verbatim (no lossy JSON of binary bytes).
+##
+## READING NEVER LETS ONE RECORD TAKE THE STORE OFFLINE. `scanStateRecords`
+## guards every record on its own: a record written by a NEWER repro is
+## FOREIGN (left untouched, reported, never reaped — several repro versions
+## share one per-user store), and genuine corruption is QUARANTINED (moved
+## into `quarantine/` under a findable name, bytes kept, reported) so the
+## store returns to a fully decodable state. Before this, one bad `.rec`
+## made the listing raise and every reap sweep reap nothing, forever.
 
-import std/[os, tables, times, options]
+import std/[os, tables, times, options, atomics]
 from std/strutils import toHex, startsWith, endsWith
 from std/algorithm import sort, sortedByIt
+
+when defined(windows):
+  import std/winlean
+else:
+  # Qualified-only: std/posix exports its own `Time`, which would make every
+  # `Time` in this module ambiguous.
+  from std/posix import nil
 
 import blake3
 import ssz_serialization
@@ -52,7 +68,7 @@ const
     ## wrongly destroy. v1 stored a bare u64 and is not read. Track B keeps
     ## the v2 reader (`decodeRecordLegacy`) so on-disk records written
     ## before the SSZ migration still decode — nothing on disk breaks.
-  StateRecordSszVersion = 4'u16
+  StateRecordSszVersion* = 4'u16
     ## Track B (Typed-Extension-Interfaces-And-Provider-Libraries.md,
     ## Incremental-Invalidation.md §"Binary formats from Reprobuild domain
     ## types"): the CURRENT, WRITTEN format. The record body is a versioned
@@ -80,6 +96,9 @@ const
   StateRecordSszTypeId = 1'u16
   RecordSuffix = ".rec"
   TempPrefix = ".tmp-"
+  QuarantineDirName* = "quarantine"
+    ## Subdirectory of the store root that undecodable records are moved
+    ## into. Listing walks only the root's FILES, so it is invisible there.
 
   # SSZ collection bounds. Generous — these records are one-per-resource
   # and small; the bounds only fail a pathological / adversarial record.
@@ -240,6 +259,27 @@ proc pre4KeepHoldersKnown(effectiveDeadline: Option[Time];
   ## the same answer instead of each re-deriving it.
   effectiveDeadline.isSome or lastRenewed == fromUnix(0)
 
+# Checked narrowing of decoded integers. A plain `ResourceDeterminism(x)` or
+# `int64(u64)` conversion of an out-of-range value raises a `RangeDefect`,
+# which is NOT a `CatchableError`: a corrupt record would then escape the
+# per-record guard in `scanStateRecords` and abort the whole sweep again —
+# the exact failure that guard exists to prevent. Every decoder path narrows
+# through these instead, so ANY bad byte surfaces as a catchable error.
+
+proc decodeDeterminism(raw: uint32): ResourceDeterminism =
+  if raw > uint32(ord(high(ResourceDeterminism))):
+    raise newException(IOError,
+      "state record determinism " & $raw & " is out of range")
+  ResourceDeterminism(int(raw))
+
+proc decodeUnixTime(raw: uint64): Time =
+  ## The writer stores `uint64(t.toUnix())`, which only ever succeeds for a
+  ## non-negative `toUnix()`; anything above `high(int64)` is corruption.
+  if raw > uint64(high(int64)):
+    raise newException(IOError,
+      "state record timestamp " & $raw & " is out of range")
+  fromUnix(int64(raw))
+
 # --- Legacy LE reader (read-old). Kept verbatim so `.rec` files written
 #     before the Track B SSZ migration still decode into the SAME record
 #     — a pre-migration cache is a normal read, never a crash. NOTHING
@@ -253,7 +293,7 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
       "unsupported legacy state-record version " & $ver)
   result.address = readString(bytes, pos)
   result.typeId = readString(bytes, pos)
-  result.determinism = ResourceDeterminism(int(readU32Le(bytes, pos)))
+  result.determinism = decodeDeterminism(readU32Le(bytes, pos))
   result.attrsTypeId = readString(bytes, pos)
   result.attrsJson = readString(bytes, pos)
   let deps = int(readU32Le(bytes, pos))
@@ -270,7 +310,7 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
   let holderCount = int(readU32Le(bytes, pos))
   for i in 0 ..< holderCount:
     let consumerId = readString(bytes, pos)
-    let deadline = fromUnix(int64(readU64Le(bytes, pos)))
+    let deadline = decodeUnixTime(readU64Le(bytes, pos))
     result.holders[consumerId] = deadline
   # The legacy framing never recorded keep holders (see `keepHoldersKnown`);
   # whether it can be TRUSTED to have none is decided from the deadline and
@@ -282,10 +322,10 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
   let hasDeadline = bytes[pos] != 0'u8
   inc pos
   if hasDeadline:
-    result.effectiveDeadline = some(fromUnix(int64(readU64Le(bytes, pos))))
+    result.effectiveDeadline = some(decodeUnixTime(readU64Le(bytes, pos)))
   else:
     result.effectiveDeadline = none(Time)
-  result.lastRenewed = fromUnix(int64(readU64Le(bytes, pos)))
+  result.lastRenewed = decodeUnixTime(readU64Le(bytes, pos))
   result.keepHoldersKnown =
     pre4KeepHoldersKnown(result.effectiveDeadline, result.lastRenewed)
 
@@ -306,6 +346,13 @@ const
 
 type
   StateStoreCodecError* = object of CatchableError
+
+  ForeignStateRecordError* = object of CatchableError
+    ## The record was written by a NEWER repro: its envelope version is
+    ## greater than `StateRecordSszVersion`. It is not corrupt, it is not
+    ## this reader's to interpret — so it must be neither reaped, quarantined,
+    ## nor overwritten (a renew that rewrote it would downgrade it).
+    version*: uint16
 
   SszText = List[byte, MaxStateTextBytes]
 
@@ -447,7 +494,7 @@ proc toSszRecord(rec: ResourceStateRecord): ResourceStateRecordSsz =
 proc fromSszRecord(wire: ResourceStateRecordSsz): ResourceStateRecord =
   result.address = fromStateText(wire.address)
   result.typeId = fromStateText(wire.typeId)
-  result.determinism = ResourceDeterminism(int(wire.determinism))
+  result.determinism = decodeDeterminism(wire.determinism)
   result.attrsTypeId = fromStateText(wire.attrsTypeId)
   let attrsBytes = wire.attrsJson.asSeq()
   result.attrsJson = newString(attrsBytes.len)
@@ -462,7 +509,7 @@ proc fromSszRecord(wire: ResourceStateRecordSsz): ResourceStateRecord =
   result.holders = initTable[string, Time]()
   for holder in wire.holders:
     result.holders[fromStateText(holder.consumerId)] =
-      fromUnix(int64(holder.deadlineUnix))
+      decodeUnixTime(holder.deadlineUnix)
   var keepHolders: seq[string] = @[]
   for consumerId in wire.keepHolders:
     keepHolders.add(fromStateText(consumerId))
@@ -472,10 +519,10 @@ proc fromSszRecord(wire: ResourceStateRecordSsz): ResourceStateRecord =
   checkHolderSets(result.holders, result.keepHolders)
   result.keepHoldersKnown = wire.keepHoldersKnown
   if wire.hasEffectiveDeadline:
-    result.effectiveDeadline = some(fromUnix(int64(wire.effectiveDeadlineUnix)))
+    result.effectiveDeadline = some(decodeUnixTime(wire.effectiveDeadlineUnix))
   else:
     result.effectiveDeadline = none(Time)
-  result.lastRenewed = fromUnix(int64(wire.lastRenewedUnix))
+  result.lastRenewed = decodeUnixTime(wire.lastRenewedUnix)
 
 proc fromSszRecordV3(wire: ResourceStateRecordSszV3): ResourceStateRecord =
   ## READ-OLD: lift a v3 payload into the current record. Every v3 field has
@@ -594,6 +641,17 @@ proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
   if versionWord == StateRecordSszVersion or
      versionWord == StateRecordSszVersionV3:
     decodeSszEnvelope(bytes)
+  elif versionWord > StateRecordSszVersion:
+    # A newer writer's record. Checked BEFORE the legacy fallback, which
+    # would otherwise misread it as a malformed legacy record — and a
+    # "corrupt" verdict gets it quarantined out from under the newer repro
+    # that owns it. Nothing past the version word is trusted here.
+    var err = newException(ForeignStateRecordError,
+      "state record written by a newer repro (envelope version " &
+      $versionWord & ", this reader knows up to " & $StateRecordSszVersion &
+      ")")
+    err.version = versionWord
+    raise err
   else:
     decodeRecordLegacy(bytes)
 
@@ -601,21 +659,99 @@ proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
 # Public store operations.
 # ---------------------------------------------------------------------------
 
+var tempCounter: Atomic[int]
+  ## Per-process write counter: with the pid and a nanosecond stamp it makes
+  ## every temp name unique, across processes AND across threads of one.
+
+proc uniqueSuffix(): string =
+  let now = getTime()
+  $getCurrentProcessId() & "-" & $(tempCounter.fetchAdd(1) + 1) & "-" &
+    $now.toUnix() & $now.nanosecond
+
+when not defined(windows):
+  when defined(macosx):
+    # <fcntl.h>: plain fsync(2) on macOS only hands the data to the drive,
+    # whose cache may still lose it on power loss; F_FULLFSYNC asks the
+    # drive to flush too. https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html
+    const F_FULLFSYNC = cint(51)
+
+  proc syncFd(fd: cint): bool =
+    when defined(macosx):
+      # Not every filesystem supports F_FULLFSYNC (e.g. some network
+      # mounts); fall back to fsync rather than failing the write.
+      if posix.fcntl(fd, F_FULLFSYNC) == 0:
+        return true
+    posix.fsync(fd) == 0
+
+  proc syncDirectory(dir: string) =
+    ## Make the rename itself durable: on POSIX a rename is a directory
+    ## entry update, persisted only once the DIRECTORY is fsynced.
+    ## Best-effort — a filesystem that cannot fsync a directory (EINVAL on
+    ## some) still got the atomic rename, which is the pre-existing contract.
+    let fd = posix.open(cstring(dir), posix.O_RDONLY)
+    if fd < 0:
+      return
+    discard syncFd(fd)
+    discard posix.close(fd)
+
+proc writeFileDurable(path: string; bytes: openArray[byte]) =
+  ## Write + flush + sync `path` (a fresh temp). Raises on any failure; the
+  ## caller removes the temp.
+  var f: File
+  if not open(f, path, fmWrite):
+    raise newException(IOError, "cannot open '" & path & "' for writing: " &
+      osErrorMsg(osLastError()))
+  try:
+    if bytes.len > 0 and f.writeBuffer(unsafeAddr bytes[0], bytes.len) != bytes.len:
+      raise newException(IOError, "short write to '" & path & "'")
+    f.flushFile()
+    when defined(windows):
+      if flushFileBuffers(Handle(getOsFileHandle(f))) == 0:
+        raise newException(IOError, "FlushFileBuffers of '" & path &
+          "' failed: " & osErrorMsg(osLastError()))
+    else:
+      if not syncFd(getFileHandle(f)):
+        raise newException(IOError, "fsync of '" & path & "' failed: " &
+          osErrorMsg(osLastError()))
+  finally:
+    f.close()
+
 proc writeStateRecord*(store: StateStore; rec: ResourceStateRecord) =
-  ## Persist `rec` atomically: serialize to a temp file in the store
-  ## directory, then `moveFile` it over the destination. A crash before
-  ## the rename leaves the prior record (or absence) intact — the partial
-  ## temp is never observed as a record and is skipped by `listStateRecords`.
+  ## Persist `rec` atomically AND durably (see the module doc): write a temp
+  ## in the store directory, sync it, rename it over the destination, sync
+  ## the directory. A crash before the rename leaves the prior record (or
+  ## absence) intact — the temp is never observed as a record and is skipped
+  ## by listing (its name starts with `TempPrefix`).
+  ##
+  ## The temp name is UNIQUE per write. A fixed `.tmp-<name>` let two
+  ## concurrent writers of one address share a temp: one could rename the
+  ## other's half-written file into place — a torn record, which a reader
+  ## now (correctly) quarantines.
   createDir(store.root)
   let dest = recordPath(store, rec.address)
-  let tmp = store.root / (TempPrefix & extractFilename(dest))
+  let tmp = store.root /
+    (TempPrefix & extractFilename(dest) & "." & uniqueSuffix())
   let bytes = encodeRecord(rec)
-  var s = newString(bytes.len)
-  if bytes.len > 0:
-    copyMem(addr s[0], unsafeAddr bytes[0], bytes.len)
-  writeFile(tmp, s)
-  # moveFile is a rename within one directory => atomic on POSIX/NTFS.
-  moveFile(tmp, dest)
+  try:
+    writeFileDurable(tmp, bytes)
+    when defined(windows):
+      # MOVEFILE_WRITE_THROUGH: return only once the rename is on disk —
+      # the Windows counterpart of the POSIX directory fsync below (NTFS
+      # offers no fsync of a directory handle from user code).
+      let wsrc = newWideCString(tmp)
+      let wdst = newWideCString(dest)
+      if moveFileExW(wsrc, wdst,
+          MOVEFILE_REPLACE_EXISTING or MOVEFILE_WRITE_THROUGH) == 0:
+        raiseOSError(osLastError(), "rename '" & tmp & "' -> '" & dest & "'")
+    else:
+      # rename(2) within one directory: atomic replace.
+      moveFile(tmp, dest)
+  except CatchableError:
+    try: removeFile(tmp)
+    except CatchableError: discard
+    raise
+  when not defined(windows):
+    syncDirectory(store.root)
 
 proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
                        holders: Table[string, Time] = initTable[string, Time]();
@@ -661,7 +797,9 @@ proc writeStateRecord*(store: StateStore; inst: ResourceInstance;
 
 proc readStateRecord*(store: StateStore; address: string): ResourceStateRecord =
   ## Read the record for `address`. Raises `IOError` if absent (callers
-  ## use `hasStateRecord` to probe).
+  ## use `hasStateRecord` to probe), `ForeignStateRecordError` if a NEWER
+  ## repro wrote it (a caller must then leave it alone — never rewrite it),
+  ## and `IOError`/`StateStoreCodecError` if it is corrupt.
   let p = recordPath(store, address)
   if not fileExists(p):
     raise newException(IOError, "no state record for address '" & address & "'")
@@ -681,11 +819,125 @@ proc removeStateRecord*(store: StateStore; address: string) =
   if fileExists(p):
     removeFile(p)
 
-proc listStateRecords*(store: StateStore): seq[ResourceStateRecord] =
-  ## Every persisted record, in a stable (sorted-by-filename) order.
-  ## Temp files (a partial write) are skipped, so an interrupted write is
-  ## invisible here.
-  result = @[]
+type
+  ForeignStateRecord* = object
+    ## A record a newer repro wrote (see `ForeignStateRecordError`).
+    path*: string
+    version*: uint16
+
+  QuarantinedStateRecord* = object
+    ## A corrupt record this scan moved aside. `quarantinePath` holds its
+    ## bytes exactly as they failed to decode.
+    path*, quarantinePath*, reason*: string
+
+  UnreadableStateRecord* = object
+    ## A record that could neither be decoded nor quarantined (e.g. a
+    ## permission error). It stays where it is and will be met again.
+    path*, reason*: string
+
+  StateRecordScan* = object
+    records*: seq[ResourceStateRecord]   ## every record that decoded
+    foreign*: seq[ForeignStateRecord]
+    quarantined*: seq[QuarantinedStateRecord]
+    unreadable*: seq[UnreadableStateRecord]
+
+proc toBytes(s: string): seq[byte] =
+  result = newSeq[byte](s.len)
+  if s.len > 0:
+    copyMem(addr result[0], unsafeAddr s[0], s.len)
+
+type
+  RestoreOutcome = enum
+    roRestored    ## renamed back into place
+    roSuperseded  ## the destination already exists: a newer write landed
+    roFailed      ## could not tell / could not rename; the source is kept
+
+proc renameNoReplace(src, dst: string): RestoreOutcome =
+  ## Rename `src` to `dst` only if `dst` does not exist, atomically: a
+  ## check-then-rename would let a writer's newer record land in between and
+  ## be overwritten by the older one. POSIX `link(2)` fails with EEXIST rather
+  ## than replacing; `MoveFileExW` without MOVEFILE_REPLACE_EXISTING likewise
+  ## (https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-movefileexw).
+  ## Only an "already exists" failure means superseded: any OTHER failure
+  ## (a filesystem without hard links, an I/O error) must not be read as
+  ## "a newer record is there", or the caller would delete a good record.
+  when defined(windows):
+    const ErrorAlreadyExists = 183'i32   # ERROR_ALREADY_EXISTS
+    if moveFileExW(newWideCString(src), newWideCString(dst), 0) != 0:
+      return roRestored
+    let err = osLastError().int32
+    if err == ErrorAlreadyExists or err == ERROR_FILE_EXISTS:
+      roSuperseded
+    else:
+      roFailed
+  else:
+    if posix.link(cstring(src), cstring(dst)) != 0:
+      return (if osLastError().cint == posix.EEXIST: roSuperseded else: roFailed)
+    discard posix.unlink(cstring(src))
+    roRestored
+
+var quarantineCounter: Atomic[int]
+
+proc quarantineRecord(store: StateStore; path, reason: string;
+                      failed: string; scan: var StateRecordScan) =
+  ## Move the undecodable record at `path` into `quarantine/` and report it.
+  ## `failed` is the content that failed to decode.
+  ##
+  ## Race with a concurrent writer: between our read and our rename, a
+  ## writer may have renamed a fresh, VALID record over `path`, and our
+  ## rename would carry it off. So the moved file is re-read: if it is not
+  ## the bytes that failed, it is someone's good record — put it back
+  ## (unless an even newer one has landed, which supersedes it) and do not
+  ## report a quarantine. The bad bytes were already replaced by the writer.
+  let qdir = store.root / QuarantineDirName
+  let qpath = qdir / (extractFilename(path) & "." & $getTime().toUnix() &
+    "-" & $getCurrentProcessId() & "-" & $(quarantineCounter.fetchAdd(1) + 1))
+  try:
+    createDir(qdir)
+    moveFile(path, qpath)
+  except CatchableError as err:
+    if not fileExists(path):
+      return       # another sweep quarantined (or a remover removed) it first
+    scan.unreadable.add(UnreadableStateRecord(path: path,
+      reason: reason & "; could not quarantine: " & err.msg))
+    return
+  let moved =
+    try: readFile(qpath)
+    except CatchableError: failed    # cannot re-check; trust the rename
+  if moved != failed:
+    case renameNoReplace(qpath, path)
+    of roRestored:
+      discard
+    of roSuperseded:
+      try: removeFile(qpath)          # a newer write already replaced it
+      except CatchableError: discard
+    of roFailed:
+      # A writer's (decodable) record is now in quarantine and could not be
+      # put back. Never delete it: report where it is so it can be restored
+      # by hand. It is reported as quarantined because that is where it is.
+      scan.quarantined.add(QuarantinedStateRecord(path: path,
+        quarantinePath: qpath,
+        reason: reason & "; a concurrent write replaced the record before " &
+          "it was moved aside and it could not be put back"))
+    return
+  scan.quarantined.add(QuarantinedStateRecord(path: path,
+    quarantinePath: qpath, reason: reason))
+
+proc scanStateRecords*(store: StateStore): StateRecordScan =
+  ## Every persisted record that decodes, in a stable (sorted-by-filename)
+  ## order, plus what was NOT returned and why. Never raises for a single
+  ## record — one bad `.rec` must not hide the rest (the reaper sweeps from
+  ## this; a raise here once meant no record on the host was ever reaped).
+  ##
+  ## Per record:
+  ##   * vanished between the walk and the read (a concurrent remove/reap):
+  ##     silently skipped — it is simply not there any more;
+  ##   * written by a newer repro (`ForeignStateRecordError`): `foreign`,
+  ##     file untouched;
+  ##   * fails to decode for any other reason: quarantined (moved into
+  ##     `quarantine/` as `<filename>.<unix-seconds>-<pid>-<n>`) and listed in
+  ##     `quarantined`; if even that fails, `unreadable`.
+  ## Temp files (a write in progress) are never looked at.
   if not dirExists(store.root):
     return
   var names: seq[string] = @[]
@@ -697,11 +949,28 @@ proc listStateRecords*(store: StateStore): seq[ResourceStateRecord] =
     names.add(path)
   names.sort()
   for path in names:
-    let s = readFile(path)
-    var bytes = newSeq[byte](s.len)
-    if s.len > 0:
-      copyMem(addr bytes[0], unsafeAddr s[0], s.len)
-    result.add(decodeRecord(bytes))
+    let content =
+      try: readFile(path)
+      except CatchableError as err:
+        if fileExists(path):
+          # Present but unreadable (permissions, I/O error): we cannot see
+          # the bytes, so we cannot judge it corrupt — leave it in place.
+          result.unreadable.add(UnreadableStateRecord(path: path,
+            reason: err.msg))
+        continue
+    try:
+      result.records.add(decodeRecord(toBytes(content)))
+    except ForeignStateRecordError as err:
+      result.foreign.add(ForeignStateRecord(path: path, version: err.version))
+    except CatchableError as err:
+      quarantineRecord(store, path, err.msg, content, result)
+
+proc listStateRecords*(store: StateStore): seq[ResourceStateRecord] =
+  ## Every record that decodes, in a stable (sorted-by-filename) order.
+  ## NEVER raises for a single record: foreign records are omitted and
+  ## corrupt ones quarantined, silently from this proc's point of view —
+  ## callers that must report those use `scanStateRecords`.
+  scanStateRecords(store).records
 
 proc reconstructInstance*(rec: ResourceStateRecord): ResourceInstance =
   ## Rebuild a `ResourceInstance` from a persisted record WITHOUT the

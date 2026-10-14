@@ -485,3 +485,225 @@ suite "L3: crash-safe reaper":
     check reportedReaped   # ...and that the rest of the sweep still ran
     check not hasStateRecord(store2, "cluster")
     check hasStateRecord(store2, "orphan")
+
+  # -------------------------------------------------------------------------
+  # Undecodable and foreign records (reprobuild-pm issues/
+  # 2026-10-01-one-undecodable-state-record-aborts-every-lease-reap-sweep-
+  # forever.md). Before the fix ONE such `.rec` made `listStateRecords` raise,
+  # so `reapOnce` reaped nothing — on every tick, for the life of the store.
+  # Every file below is a REAL file in a real store; nothing is stubbed to
+  # fail. The owner's decision: genuine corruption is QUARANTINED (moved aside
+  # under a findable name, bytes kept); a record written by a NEWER repro is
+  # FOREIGN (left untouched, never reaped, reported).
+  # -------------------------------------------------------------------------
+
+  test "(12) a garbage record is quarantined and the valid records beside it are reaped":
+    let store = scratchStore("garbage")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+    materialize(store, "alpha", "ca", delayed(ttl), t0)
+    materialize(store, "beta", "cb", delayed(ttl), t0)
+    let garbage = store.root / "garbage.rec"
+    writeFile(garbage, "\x00")
+
+    let report = reapOnce(store, now = later)
+
+    # The sweep ran to the end: both valid expired records are destroyed.
+    check destroyLog.len == 2
+    check "alpha" in destroyLog and "beta" in destroyLog
+    check not hasStateRecord(store, "alpha")
+    check not hasStateRecord(store, "beta")
+    check report.reaped.len == 2
+    # The garbage is gone from where listing looks...
+    check not fileExists(garbage)
+    # ...and kept, bytes intact, under a name that leads back to it.
+    check report.quarantined.len == 1
+    check report.quarantined[0].path == garbage
+    let q = report.quarantined[0].quarantinePath
+    check q.startsWith(store.root / "quarantine" / "garbage.rec.")
+    check fileExists(q)
+    check readFile(q) == "\x00"
+    check report.quarantined[0].reason.len > 0
+    check report.foreign.len == 0
+    check report.unreadable.len == 0
+
+    # The store is fully decodable again: a second sweep has nothing to say.
+    let second = reapOnce(store, now = later)
+    check second.quarantined.len == 0
+    check second.foreign.len == 0
+    check second.unreadable.len == 0
+    check second.reaped.len == 0
+    check fileExists(q)                       # the evidence is not re-moved
+
+  test "(13) a checksum-mismatched or truncated SSZ record is quarantined":
+    let store = scratchStore("corrupt")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+    materialize(store, "alpha", "ca", delayed(ttl), t0)
+    # Real record bytes, damaged two ways: one flipped payload byte (the
+    # BLAKE3 trailer no longer matches) and one lost final byte (a torn
+    # write). Both keep the valid magic + current version, so they reach the
+    # SSZ envelope decoder rather than failing on the magic.
+    let good = readFile(store.root / "alpha.rec")
+    check good.len > 40
+    var flipped = good
+    flipped[20] = char(ord(flipped[20]) xor 0xFF)
+    writeFile(store.root / "flipped.rec", flipped)
+    writeFile(store.root / "truncated.rec", good[0 ..< good.len - 1])
+
+    let report = reapOnce(store, now = later)
+
+    check destroyLog == @["alpha"]
+    check report.quarantined.len == 2
+    var paths: seq[string] = @[]
+    for q in report.quarantined:
+      paths.add(q.path)
+      check fileExists(q.quarantinePath)
+    check store.root / "flipped.rec" in paths
+    check store.root / "truncated.rec" in paths
+    check not fileExists(store.root / "flipped.rec")
+    check not fileExists(store.root / "truncated.rec")
+    for q in report.quarantined:
+      if q.path.endsWith("flipped.rec"):
+        check readFile(q.quarantinePath) == flipped
+        check q.reason.contains("checksum")
+      else:
+        check readFile(q.quarantinePath) == good[0 ..< good.len - 1]
+
+  test "(14) a NEWER-version record is foreign: untouched, never reaped, reported":
+    let store = scratchStore("foreign")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+    materialize(store, "alpha", "ca", delayed(ttl), t0)
+    materialize(store, "future", "cf", delayed(ttl), t0)
+    # The `future` record, as a newer repro would have written it: same
+    # magic, envelope version one past what this reader knows. Its deadline
+    # is past, so a reader that mistook it for its own would reap it.
+    let path = store.root / "future.rec"
+    var bytes = readFile(path)
+    let newer = StateRecordSszVersion + 1
+    bytes[4] = char(newer and 0xFF)
+    bytes[5] = char(newer shr 8)
+    writeFile(path, bytes)
+
+    let report = reapOnce(store, now = later)
+
+    check destroyLog == @["alpha"]                 # the sibling still reaped
+    check "future" notin destroyLog                # never reaped
+    check fileExists(path)
+    check readFile(path) == bytes                  # byte-for-byte untouched
+    check report.quarantined.len == 0              # NOT treated as corrupt
+    check not dirExists(store.root / "quarantine")
+    check report.foreign.len == 1
+    check report.foreign[0].path == path
+    check report.foreign[0].version == newer
+
+    # A point read refuses with a DISTINCT error, so a caller such as the
+    # daemon's renew path can refuse rather than overwrite a newer record.
+    var raisedVersion = 0'u16
+    try:
+      discard readStateRecord(store, "future")
+    except ForeignStateRecordError as err:
+      raisedVersion = err.version
+    check raisedVersion == newer
+
+    # Steady state: the next sweep reports it again (it is still there) and
+    # still does not touch it.
+    let second = reapOnce(store, now = later)
+    check second.foreign.len == 1
+    check readFile(path) == bytes
+
+  test "(15) `repro reap` reports quarantined and foreign records":
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+
+    # Quarantine: exit 1 — the store held damaged state an operator must look
+    # at, and the line says where the evidence went.
+    let store = scratchStore("cli-quarantine")
+    materialize(store, "alpha", "ca", delayed(ttl), t0)
+    writeFile(store.root / "garbage.rec", "\x00")
+    var lines: seq[string] = @[]
+    let capture = proc (line: string) = lines.add(line)
+    var rc = runReapCli(@["--once", "--state-root=" & store.root],
+                        now = later, echoLine = capture)
+    check rc == 1
+    check "reaped: 1" in lines
+    check "quarantined: 1" in lines
+    var namesBoth = false
+    for l in lines:
+      if l.contains("garbage.rec") and l.contains(store.root / "quarantine"):
+        namesBoth = true
+    check namesBoth
+
+    # Foreign alone: exit 0 — a newer repro's record is healthy, just not
+    # ours; reported so nobody wonders why it is never reaped.
+    let store2 = scratchStore("cli-foreign")
+    materialize(store2, "future", "cf", delayed(ttl), t0)
+    let path = store2.root / "future.rec"
+    var bytes = readFile(path)
+    bytes[4] = char((StateRecordSszVersion + 1) and 0xFF)
+    writeFile(path, bytes)
+    lines = @[]
+    rc = runReapCli(@["--once", "--state-root=" & store2.root],
+                    now = later, echoLine = capture)
+    check rc == 0
+    check "foreign: 1" in lines
+    var namesForeign = false
+    for l in lines:
+      if l.contains("future.rec") and l.contains("version " &
+          $(StateRecordSszVersion + 1)):
+        namesForeign = true
+    check namesForeign
+    check readFile(path) == bytes
+
+  test "(16) an out-of-range field in a legacy record is quarantined, not a sweep-ending Defect":
+    # The legacy (pre-SSZ) framing has no checksum, so a corrupt byte reaches
+    # the field decoders. Narrowing an out-of-range value with a plain
+    # conversion raises a `RangeDefect`, which is NOT a `CatchableError`: it
+    # sailed past the per-record guard and ended the sweep exactly as the
+    # issue describes. Both shapes are built byte-by-byte in the documented
+    # legacy layout, so they decode up to the bad field and fail there.
+    proc u32(x: uint32): string =
+      for i in 0 .. 3: result.add(char((x shr (8 * i)) and 0xFF))
+    proc u64(x: uint64): string =
+      for i in 0 .. 7: result.add(char((x shr (8 * i)) and 0xFF))
+    proc str(s: string): string = u32(uint32(s.len)) & s
+    proc legacy(determinism: uint32; lastRenewed: uint64): string =
+      result = "RSST" & u32(2) & str("old") & str("l3.stub") &
+        u32(determinism) & str("") & str("") & u32(0) & str("stub:old")
+      for i in 0 ..< 32: result.add('\x00')          # digest
+      result.add('\x01')                             # present
+      result.add(u32(0))                             # no holders
+      result.add('\x00')                             # no effective deadline
+      result.add(u64(lastRenewed))
+
+    let store = scratchStore("legacy-range")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+    materialize(store, "alpha", "ca", delayed(ttl), t0)
+    # Positive control: the hand-built layout IS a decodable legacy record.
+    writeFile(store.root / "control.rec", legacy(0, 1_700_000_000'u64))
+    writeFile(store.root / "determinism.rec", legacy(99, 1_700_000_000'u64))
+    writeFile(store.root / "timestamp.rec",
+              legacy(0, 0xFFFF_FFFF_FFFF_FFFF'u64))
+
+    let report = reapOnce(store, now = later)
+
+    check destroyLog == @["alpha"]
+    check fileExists(store.root / "control.rec")      # decoded, kept (no deadline)
+    check "old" in report.skipped
+    check report.quarantined.len == 2
+    var reasons: seq[string] = @[]
+    for q in report.quarantined:
+      reasons.add(extractFilename(q.path) & ": " & q.reason)
+      check fileExists(q.quarantinePath)
+    check reasons.len == 2
+    for r in reasons:
+      check r.contains("out of range")
+    check not fileExists(store.root / "determinism.rec")
+    check not fileExists(store.root / "timestamp.rec")

@@ -108,6 +108,15 @@ type
     reaped*: seq[ReapEvent]        ## destroyed (or already-absent) records removed, in order
     skipped*: seq[string]          ## addresses inspected but kept (still leased / never-reap)
     failed*: seq[ReapFailure]      ## selected but NOT reaped — see `ReapFailure`
+    # Records the sweep could not even READ (`scanStateRecords`). They have no
+    # decodable address, so `onlyAddresses` cannot filter them and they are
+    # always reported.
+    foreign*: seq[ForeignStateRecord]
+      ## written by a NEWER repro: left untouched, never reaped
+    quarantined*: seq[QuarantinedStateRecord]
+      ## corrupt: moved into the store's `quarantine/` dir by this sweep
+    unreadable*: seq[UnreadableStateRecord]
+      ## could neither be decoded nor quarantined; still in place
 
 proc inProcessTransport*(): ReapTransport =
   ReapTransport(kind: rtInProcess)
@@ -303,11 +312,20 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   ## HELD as `rfkBlocked` and left alone. Because the iteration order is
   ## reverse-topo, a record's dependencies always come AFTER it, so marking
   ## forward in one pass is sufficient.
+  ##
+  ## …AND ONE UNDECODABLE RECORD MUST NOT ABORT IT EITHER. The listing is
+  ## `scanStateRecords`, which never raises per record: a newer repro's record
+  ## comes back as `foreign` (never reaped — it is not ours to interpret), a
+  ## corrupt one is quarantined, and both are carried into the report.
   result.reaped = @[]
   result.skipped = @[]
   result.failed = @[]
 
-  var all = listStateRecords(store)
+  let scan = scanStateRecords(store)
+  result.foreign = scan.foreign
+  result.quarantined = scan.quarantined
+  result.unreadable = scan.unreadable
+  var all = scan.records
   if onlyAddresses.len > 0:
     var wanted = initHashSet[string]()
     for a in onlyAddresses: wanted.incl(a)
@@ -461,14 +479,34 @@ proc runReapCli*(args: seq[string];
     emit("  - " & ev.address & " (" & ev.typeId & ")" &
          (if ev.wasPresent: "" else: " [already-absent]"))
   emit("kept: " & $report.skipped.len)
+  # A newer repro's record is healthy, just not ours: said so (an operator
+  # would otherwise wonder why it never goes), but it does not fail the verb.
+  if report.foreign.len > 0:
+    emit("foreign: " & $report.foreign.len)
+    for f in report.foreign:
+      emit("  - " & f.path & " (written by a newer repro, version " &
+           $f.version & "; left untouched)")
+  # Corrupt state was found. The sweep moved it aside and carried on, but the
+  # resource that record described may now be leaked with nothing holding its
+  # address, so an operator has to look: exit non-zero, name the evidence.
+  if report.quarantined.len > 0:
+    emit("quarantined: " & $report.quarantined.len)
+    for q in report.quarantined:
+      emit("  - " & q.path & " -> " & q.quarantinePath & ": " & q.reason)
+  if report.unreadable.len > 0:
+    emit("unreadable: " & $report.unreadable.len)
+    for u in report.unreadable:
+      emit("  - " & u.path & ": " & u.reason)
   # A selected record the sweep could NOT reap is reported, never swallowed:
   # dropping it here would reproduce, at the CLI, the same invisibility that
   # let the daemon's tick fail for 60 days unnoticed. It is also why the exit
   # code is non-zero — `repro reap` was asked to destroy this state and did
   # not, and an operator (or CI) scripting the verb has to be able to tell.
-  if report.failed.len == 0:
-    return 0
-  emit("unreapable: " & $report.failed.len)
-  for f in report.failed:
-    emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
-  1
+  if report.failed.len > 0:
+    emit("unreapable: " & $report.failed.len)
+    for f in report.failed:
+      emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
+  if report.failed.len > 0 or report.quarantined.len > 0 or
+      report.unreadable.len > 0:
+    return 1
+  0

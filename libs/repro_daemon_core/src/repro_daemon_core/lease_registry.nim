@@ -249,6 +249,16 @@ proc applyLeaseRenew*(request: DaemonLeaseRenewRequest;
   var rec =
     try:
       readStateRecord(store, request.address)
+    except ForeignStateRecordError as err:
+      # A NEWER repro owns this record. Renewing would mean rewriting it in
+      # OUR format — downgrading it and dropping whatever the newer version
+      # added — so refuse and say why; the newer repro's own renew path (or
+      # daemon) is the one that may touch it.
+      result.ok = false
+      result.reason = "refusing to renew: the record for " & request.address &
+        " was written by a newer repro (state-record version " &
+        $err.version & "); renew it with that version"
+      return
     except CatchableError as err:
       result.ok = false
       result.reason = "failed to read record: " & err.msg
@@ -322,7 +332,28 @@ proc leaseReapFindings*(report: ReapReport):
   ## address + typeId + kind IS the finding: one record, and one reason it is
   ## stuck. A changed message about the same stuck record is the same finding,
   ## and its text is already on the line that was logged.
+  ##
+  ## Records the sweep could not DECODE have no address, so they are keyed on
+  ## their PATH: a second bad record is a new finding, not a repeat of the
+  ## first. A foreign record also keys on its version (a store upgraded again
+  ## is worth saying again). A quarantined record leaves the store, so its
+  ## finding cannot recur for that file — the path key matters for the NEXT
+  ## corrupt record, which must not be swallowed as already reported.
   result = @[]
+  for f in report.foreign:
+    result.add((
+      signature: "foreign\x00" & f.path & "\x00" & $f.version,
+      line: "leaving foreign record path=" & f.path & " version=" &
+        $f.version & ": written by a newer repro; not reaped, not touched"))
+  for q in report.quarantined:
+    result.add((
+      signature: "quarantined\x00" & q.path,
+      line: "quarantined undecodable record path=" & q.path & " -> " &
+        q.quarantinePath & ": " & q.reason))
+  for u in report.unreadable:
+    result.add((
+      signature: "unreadable\x00" & u.path,
+      line: "cannot read record path=" & u.path & ": " & u.reason))
   for f in report.failed:
     let verb =
       case f.kind

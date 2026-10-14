@@ -35,6 +35,10 @@
 ##       keep holder renewing under a dated policy moves out again. Driven
 ##       through ``applyLeaseRenew`` (the handler body) on a real store; the
 ##       socket hop in front of it is (a)'s subject, not this one's.
+##   (h) records the sweep could not DECODE — quarantined (corrupt), foreign
+##       (a newer repro's) and unreadable — render as findings keyed on their
+##       PATH, so a second bad record is a new finding; and a renew refuses to
+##       rewrite a foreign record.
 
 import std/[os, options, times, tables, locks, random, strutils, unittest]
 
@@ -566,3 +570,57 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     renewHolder(rec, "anchor", keep(), t3)
     check rec.keepHolders == @["anchor"]
     check rec.effectiveDeadline.isNone
+
+  test "(h) undecodable records are findings keyed on PATH; renew refuses a foreign record":
+    ## reprobuild-pm issues/2026-10-01-one-undecodable-state-record-aborts-
+    ## every-lease-reap-sweep-forever.md, item 3: `reportOnce` keys on the
+    ## signature, so a signature that did not name the path would swallow the
+    ## SECOND corrupt record as a repeat of the first.
+    let report = ReapReport(
+      quarantined: @[
+        QuarantinedStateRecord(path: "/s/a.rec",
+          quarantinePath: "/s/quarantine/a.rec.1-2-3", reason: "bad magic"),
+        QuarantinedStateRecord(path: "/s/b.rec",
+          quarantinePath: "/s/quarantine/b.rec.1-2-4", reason: "bad magic")],
+      foreign: @[ForeignStateRecord(path: "/s/f.rec", version: 9)],
+      unreadable: @[UnreadableStateRecord(path: "/s/u.rec",
+        reason: "permission denied")])
+    let findings = leaseReapFindings(report)
+    check findings.len == 4
+    var signatures: seq[string] = @[]
+    for f in findings:
+      check f.signature notin signatures      # all distinct
+      signatures.add(f.signature)
+    for path in ["/s/a.rec", "/s/b.rec", "/s/f.rec", "/s/u.rec"]:
+      var keyed, logged = false
+      for f in findings:
+        if f.signature.contains(path): keyed = true
+        if f.line.contains(path): logged = true
+      check keyed
+      check logged
+    for f in findings:
+      if f.signature.contains("/s/f.rec"):
+        check f.signature.contains("9")
+        check f.line.contains("version=9")
+      if f.signature.contains("/s/a.rec"):
+        check f.line.contains("/s/quarantine/a.rec.1-2-3")
+        check f.line.contains("bad magic")
+
+    # Renew of a record a NEWER repro wrote: refused, file byte-for-byte kept.
+    let root = scratchRoot("foreign-renew")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    defer: removeDir(root)
+    let store = openStateStore(stateRoot)
+    materialize(store, "cluster", "smoke", delayed(initDuration(minutes = 1)),
+                getTime())
+    let path = stateRoot / "cluster.rec"
+    var bytes = readFile(path)
+    bytes[4] = char((StateRecordSszVersion + 1) and 0xFF)
+    writeFile(path, bytes)
+    let resp = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "smoke",
+      ttlSeconds: 3600), overrideRoot = stateRoot)
+    check not resp.ok
+    check resp.reason.contains("newer repro")
+    check readFile(path) == bytes
