@@ -268,6 +268,13 @@ proc digestHomebrewCask*(desired: Resource): Digest256 {.nimcall.} =
   return digestOfBytes(canonicalHomebrewCaskBytes(
     desired.caskName, desired.caskVersion))
 
+proc digestMacosAppBundle*(desired: Resource): Digest256 {.nimcall.} =
+  # GM4c: the desired state is the store bundle's identity — identifier,
+  # versions, team and code-directory hash — which `observeAppBundleAt`
+  # reads back from the placed copy. Same signed bundle, same digest; an
+  # application that updated itself has a different code-directory hash.
+  return digestOfBytes(desired.appBundleIdentity)
+
 proc digestOfResource*(desired: Resource): Digest256 =
   ## Canonical content digest for a desired resource. The bytes
   ## fed into the BLAKE3 hash are exactly the bytes the apply

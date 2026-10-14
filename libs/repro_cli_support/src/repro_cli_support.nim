@@ -314,7 +314,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -10439,6 +10439,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     if not usesRunQuotaBypass(runResult):
       return
+    # ONLY WHEN THE BYPASS WAS NOT ASKED FOR. The sentence below asserts a
+    # CAUSE — "runquotad is not reachable" — and names a remedy for it, which
+    # was true while an unreachable daemon was the only way to reach this
+    # bypass. It is not any more: a `--no-runquota` build, and a `--dry-run`
+    # (which implies it), bypass by POLICY, and on a host whose daemon is
+    # answering perfectly this line would blame the daemon and tell the
+    # operator to start one that is already running. A policy bypass is not
+    # unreported either way — the RunQuota authority header
+    # (`runQuotaAuthorityHeaderLine`) states it for the whole invocation,
+    # including the invocations that launch nothing.
+    if bypassRunQuota:
+      return
     warnedRunQuotaBypass = true
     logSummary("repro build: WARNING runquotad is not reachable; using " &
       "RunQuota bypass for " &
@@ -15884,6 +15896,15 @@ const
   # before the commit carrying it."
   VcsHookNames = ["pre-commit", "pre-push", "post-commit", "post-merge",
                   "post-checkout"]
+  PreCommitGatePhaseArg* = "--repro-phase=certificate-gate"
+    ## TC-8g — the argument the `pre-commit` dispatcher hands its managed body
+    ## to ask for the certificate-gate phase rather than the lock refresh. Git
+    ## passes `pre-commit` no arguments, so a leading argument cannot collide
+    ## with one of git's.
+  PreCommitDisplacedArg* = "--repro-dispatcher-displaced"
+    ## TC-8g — follows ``PreCommitGatePhaseArg`` as ``=1`` when the dispatcher
+    ## is running as ``pre-commit.legacy`` under another hook manager, ``=0``
+    ## otherwise.
 
 type
   HookActionKind = enum
@@ -17017,6 +17038,23 @@ proc vcsDispatcherContent(hookName: string): string =
       "export " & InternalHookContextEnv &
       "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\"; " &
       "exec \"$MANAGED_HOOK\" \"$@\") || exit $?; fi\n")
+    if hookName == "pre-commit":
+      # TC-8g — the THIRD phase: the certificate gate. It runs after every
+      # step of the commit that can change the index — the chained user hook
+      # and the managed lock refresh above — because the content it judges is
+      # the index the commit will record (test-certificates Standard §5.1: a
+      # pre-commit gate "MUST run after every step of the commit that changes
+      # the index"). It is the same managed body, asked for a different phase
+      # by a leading argument git never passes to `pre-commit` (the hook takes
+      # none). Whether this dispatcher was displaced travels with it: running
+      # as `<hook>.legacy`, the framework that displaced it runs its own hooks
+      # AFTER this one, so the gate cannot know it is last and only reports.
+      result.add("if [ -x \"$MANAGED_HOOK\" ]; then " &
+        "(unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
+        "export " & InternalHookContextEnv &
+        "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\"; " &
+        "exec \"$MANAGED_HOOK\" " & PreCommitGatePhaseArg & " " &
+        PreCommitDisplacedArg & "=$RUNNING_AS_LEGACY) || exit $?; fi\n")
   result.add("exit 0\n")
 
 const ManagedHookRefusalRecordSchemaId* =
@@ -17520,6 +17558,23 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("  *) REPROBUILD_CAPTURED_GIT_INDEX_FILE=" &
       "\"$REPO_ROOT/$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" ;;\n")
     result.add("esac\n")
+    # TC-8g — which phase the dispatcher asked for. Without a leading phase
+    # argument this is the lock refresh, exactly as before; the dispatcher's
+    # third phase asks for the certificate gate and says whether it was
+    # displaced. Both are forwarded to `repro` as dispatch FLAGS (before the
+    # `--`), never as hook arguments, so the hook's own argv stays git's.
+    result.add("REPRO_HOOK_PHASE=refresh\n")
+    result.add("REPRO_HOOK_DISPLACED=0\n")
+    result.add("if [ \"${1:-}\" = " & quoteShellPosix(PreCommitGatePhaseArg) &
+      " ]; then\n")
+    result.add("  REPRO_HOOK_PHASE=certificate-gate\n")
+    result.add("  shift\n")
+    result.add("  case \"${1:-}\" in\n")
+    result.add("    " & PreCommitDisplacedArg & "=1) REPRO_HOOK_DISPLACED=1; " &
+      "shift ;;\n")
+    result.add("    " & PreCommitDisplacedArg & "=*) shift ;;\n")
+    result.add("  esac\n")
+    result.add("fi\n")
   # Resolve the invoking checkout first: Git's hook environment is the source
   # of truth for a linked worktree's root. Only the managed child boundary is
   # scrubbed; the dispatcher has already invoked a preserved user hook with
@@ -17586,6 +17641,10 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       "--require=2 --hook-contract=" & hookContract & " 2>&1) || " &
       "REPRO_PROBE_STATUS=$?\n")
     result.add("  if [ \"$REPRO_PROBE_STATUS\" -ne 0 ]; then\n")
+    if hookName == "pre-commit":
+      # The refresh phase of this same commit has already printed (and
+      # recorded) the refusal; saying it twice per commit adds nothing.
+      result.add("    [ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
     result.add("    repro_contract_refusal\n")
     result.add("    exit 0\n")
     result.add("  fi\n")
@@ -17601,8 +17660,14 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       if hookName == "pre-commit":
         HookGitIndexFileEnv & "=\"$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" "
       else: ""
+    let phaseFlags =
+      if hookName == "pre-commit":
+        " --phase=\"$REPRO_HOOK_PHASE\" " &
+          "--dispatcher-displaced=\"$REPRO_HOOK_DISPLACED\""
+      else: ""
     result.add("  " & indexHandover & "\"$REPRO_CMD\" hooks dispatch " &
-      hookName & " --repo-root \"$REPO_ROOT\" -- \"$@\" || REPRO_STATUS=$?\n")
+      hookName & " --repo-root \"$REPO_ROOT\"" & phaseFlags &
+      " -- \"$@\" || REPRO_STATUS=$?\n")
   if hookName == "pre-push":
     # The gate's verdict is attributed whichever way it went. A PASS names its
     # build too: "repro check: OK" from an interpreter nobody can identify is
@@ -17619,6 +17684,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("echo \"repro hooks: hook protocol mismatch; run 'repro hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
     result.add("exit 1\n")
   else:
+    if hookName == "pre-commit":
+      # Said once per commit, by the refresh phase.
+      result.add("[ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
     result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
       hookName & "\" >&2\n")
     result.add("exit 0\n")
@@ -19258,6 +19326,10 @@ proc runPostCommitLockCommand*(args: openArray[string]): int
 # beside `runPostCommitLockCommand` because it shares that path's argv parser,
 # workspace resolution and stand-down gate.
 proc runPreCommitLockCommand*(args: openArray[string]): int
+# TC-8g: the `pre-commit` certificate-gate phase. Declared here for the
+# dispatcher; the body sits after the client pre-push `certificateGate`, whose
+# store lookup and coverage evaluation it shares.
+proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 
@@ -19311,6 +19383,8 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
   var repoRoot = ""
   var refsFile = ""
   var protocol = 0
+  var phase = "refresh"
+  var displaced = false
   var hookArgs: seq[string]
   var i = 1
   while i < args.len:
@@ -19329,6 +19403,13 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
         raise newException(ValueError,
           "unsupported managed-hook protocol " & raw & " (required: 2)")
       protocol = 2
+    elif arg == "--phase" or arg.startsWith("--phase="):
+      # TC-8g — `pre-commit` only: `refresh` (the lock refresh, the default)
+      # or `certificate-gate` (the dispatcher's third phase).
+      phase = valueFromFlag(args, i, "--phase")
+    elif arg == "--dispatcher-displaced" or
+        arg.startsWith("--dispatcher-displaced="):
+      displaced = valueFromFlag(args, i, "--dispatcher-displaced") == "1"
     inc i
   case hookName
   of "pre-commit":
@@ -19352,6 +19433,18 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # same commit moments later and already re-asserts the hook set; doing it
     # twice would put a second full hook reconciliation on the blocking half of
     # every commit for no additional coverage.
+    case phase
+    of "refresh": discard
+    of "certificate-gate":
+      # TC-8g — the third dispatcher phase, after the chained user hook and
+      # the refresh above have both had their chance to change the index.
+      return runPreCommitCertificateGate(
+        if repoRoot.len > 0: absolutePath(repoRoot) else: getCurrentDir(),
+        displaced)
+    else:
+      raise newException(ValueError,
+        "unsupported pre-commit phase: " & phase &
+          " (expected: refresh, certificate-gate)")
     var preArgs: seq[string]
     if repoRoot.len > 0:
       preArgs.add("--current-repo=" & repoRoot)
@@ -23978,6 +24071,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
+  # Whether `--runquota` was passed, as opposed to the default simply leaving
+  # RunQuota on. Only the explicit request outranks the bypass a `--dry-run`
+  # implies; see the derivation after the flag loop.
+  var runQuotaRequestedExplicitly = false
   # In-Process-Monitor-Hosting P1(b): the operator surface for
   # ``BuildEngineConfig.monitorHosting``. Same shape as ``--daemon`` above —
   # an environment default (``REPROBUILD_MONITOR_HOSTING``) that the flag
@@ -24173,8 +24270,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       restoreCachedOutputs = false
     elif arg == "--no-runquota":
       bypassRunQuota = true
+      runQuotaRequestedExplicitly = false
     elif arg == "--runquota":
       bypassRunQuota = false
+      # Recorded as a REQUEST, not only as its effect on `bypassRunQuota`,
+      # because a dry run's implied bypass is applied after this loop and
+      # has to be able to tell "the default left it on" from "the operator
+      # asked for the handshake". See the derivation below the loop.
+      runQuotaRequestedExplicitly = true
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       monitorHosting = parseMonitorHostingMode(
         valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
@@ -24286,6 +24389,64 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       "--soft-rebuild, --rebuild-host-bound or --hard-rebuild")
     return 2
   setRebuildSelection(rebuildClass, rebuildOnly)
+
+  # A DRY RUN IMPLIES `--no-runquota` (`reprobuild-pm/spec/CLI/build.md`
+  # §"Dry Run").
+  #
+  # The scheduler completes every action it reaches as `asWouldRun` without a
+  # lease, a process or an output, so a dry run has nothing to admit against
+  # a machine budget. Requiring the daemon anyway ended the one command whose
+  # entire output is a plan with `runquotad did not become reachable`, on
+  # precisely the host `--dry-run` is most wanted on: one whose environment is
+  # not working yet. `--no-runquota` was then the only way through, which is
+  # a workaround an operator has to be told about, in a command that exists
+  # to be the thing you try first.
+  #
+  # DERIVED HERE, after the flag loop, rather than inside
+  # `startAutoRunQuotaIfNeeded`: `bypassRunQuota` decides three separate
+  # things — whether that spawn happens, whether the PROVIDER COMPILE takes a
+  # lease (`effectiveProviderCompileRunQuotaBypass`, reached through
+  # `bypassRunQuotaExplicit`, and planning DOES reach the provider compile),
+  # and what a `--list-targets` pass is handed. One derivation above all
+  # three keeps them from disagreeing about what a dry run needs.
+  #
+  # An explicit `--runquota` still wins: it is the flag whose only job is to
+  # ask for the handshake. That is why this is not spelled `bypassRunQuota =
+  # bypassRunQuota or dryRun`, and why the flag loop records the request and
+  # not only its effect on `bypassRunQuota`.
+  #
+  # AND THE DECISION HAS TO REACH THE STEPS THAT READ ONLY THE ENVIRONMENT.
+  # `REPROBUILD_NO_RUNQUOTA` is the documented full-bypass switch every
+  # internal build step honours (`runQuotaBypassedByEnv`, and the engine's own
+  # `launchChildEnv`), and planning reaches two of them through code paths
+  # that take no flag: the hidden lock's solve under `--strategy`
+  # (`solverInputsFromCompiledProvider`, which starts a daemon of its own) and
+  # the `--list-targets` inspection's provider compile (which reads the
+  # variable to decide whether to open an inline session). Without exporting
+  # the decision, `repro build --dry-run --strategy lowest` still died with
+  # `runquotad did not become reachable` from inside that solve — and the
+  # sentence this change puts in the spec would be false.
+  #
+  # RESTORED ON THE WAY OUT, because callers keep running in the same process
+  # after this returns. `repro test --dry-run` forwards the flag here and then
+  # EXECUTES the tests in that same process; `bench`, `lint`, `run` and the
+  # top-level dispatch are the same shape. A dry run must not leave the rest
+  # of such a session bypassed. (A daemon-hosted build runs in a FORKED worker
+  # whose environment is its own, so the daemon and its sibling workers are
+  # unaffected either way.)
+  let inheritedNoRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA")
+  let hadInheritedNoRunQuota = existsEnv("REPROBUILD_NO_RUNQUOTA")
+  var exportedDryRunRunQuotaBypass = false
+  defer:
+    if exportedDryRunRunQuotaBypass:
+      if hadInheritedNoRunQuota:
+        putEnv("REPROBUILD_NO_RUNQUOTA", inheritedNoRunQuota)
+      else:
+        delEnv("REPROBUILD_NO_RUNQUOTA")
+  if dryRun and not runQuotaRequestedExplicitly:
+    bypassRunQuota = true
+    exportedDryRunRunQuotaBypass = true
+    putEnv("REPROBUILD_NO_RUNQUOTA", "1")
 
   # ----------------------------------------------------------------
   # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE
@@ -34363,7 +34524,8 @@ proc reflogActionSuggestsOperation*(subject: string): bool =
   firstWord in InFlightGitReflogActions
 
 proc probeGitOperationInProgress*(identity: GitToolIdentity;
-                                  repoPath: string): GitOperationProbe =
+                                  repoPath: string;
+                                  consultReflog = true): GitOperationProbe =
   ## Is git in the middle of a multi-step operation in this checkout?
   ##
   ## Every path is resolved with ``git rev-parse --git-path`` rather than
@@ -34426,6 +34588,17 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       result.marker = name
       return
 
+  # TC-8g — ``consultReflog = false`` is for a caller that runs only while a
+  # commit is being FORMED (the pre-commit certificate gate). Git creates the
+  # state paths above before it replays anything, so every replayed commit
+  # finds them; the reflog tail below would instead keep saying "rebase" on
+  # the first ordinary commit after a rebase FINISHED (its last entry is
+  # `rebase (finish)`), and a gate that stood down there would let that
+  # commit through unjudged.
+  if not consultReflog:
+    result.state = gosIdle
+    return
+
   # No state directory — which does NOT yet mean idle. See
   # ``InFlightGitReflogActions``: the am-backend rebase's rewind fires this
   # hook before its state directory exists.
@@ -34453,7 +34626,8 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       return
   result.state = gosIdle
 
-proc managedHookStandDown*(hookName, repoPath: string):
+proc managedHookStandDown*(hookName, repoPath: string;
+                           consultReflog = true):
     tuple[standDown: bool; report: string; loud: bool] =
   ## The gate every managed ``post-*`` hook passes through before it touches
   ## anything.
@@ -34482,7 +34656,7 @@ proc managedHookStandDown*(hookName, repoPath: string):
       "operation is in progress in " & repoPath & " — git is not " &
       "resolvable (" & err.msg & "); nothing was inspected or modified",
       true)
-  let probe = probeGitOperationInProgress(identity, repoPath)
+  let probe = probeGitOperationInProgress(identity, repoPath, consultReflog)
   case probe.state
   of gosIdle:
     (false, "", false)
@@ -48227,6 +48401,42 @@ proc appendPreCommitLog(workspaceRoot, line: string) =
   except CatchableError:
     discard
 
+proc preCommitRepinMarkerPath(workspaceRoot, repoRoot: string): string =
+  ## TC-8g — where the `pre-commit` refresh phase notes a lock it re-pinned
+  ## and staged, for the certificate-gate phase of the same commit to read.
+  ##
+  ## The two phases are separate processes (the dispatcher runs the managed
+  ## body once per phase), so the fact has to cross a process boundary. It
+  ## goes into the commit hooks' own report directory, under a name keyed by
+  ## the checkout, never into the repository: the gate must leave the index
+  ## and the working tree exactly as it found them. "" when the hooks may not
+  ## write here at all.
+  let dir = commitHookReportDir(workspaceRoot)
+  if dir.len == 0 or repoRoot.len == 0:
+    return ""
+  dir / ("pre-commit-repin-" &
+    content_id.sha256Hex(absolutePath(repoRoot))[0 ..< 16] & ".txt")
+
+proc notePreCommitRepin(workspaceRoot, repoRoot, lockPath: string) =
+  ## Record that this commit's refresh wrote and staged ``lockPath``. One line
+  ## per lock: its path relative to the checkout, TAB, the sha256 of the bytes
+  ## staged. The gate names the re-pin only when the index it judges still
+  ## holds exactly those bytes, so a note a crashed or skipped gate left
+  ## behind can never be misread as describing a later commit. Never raises.
+  try:
+    let marker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+    if marker.len == 0 or not fileExists(lockPath):
+      return
+    let relative = relativePath(absolutePath(lockPath),
+      absolutePath(repoRoot)).replace(DirSep, '/')
+    createDir(marker.parentDir)
+    var f: File
+    if open(f, marker, fmAppend):
+      f.writeLine(relative & "\t" & content_id.sha256Hex(readFile(lockPath)))
+      f.close()
+  except CatchableError:
+    discard
+
 proc emitPostCommitWarning(tag, diagnostic, workspaceRoot: string) =
   ## M19b — one line to stderr for any post-commit run that did not end with a
   ## published lock record and is not the designed local-only steady state.
@@ -50157,6 +50367,7 @@ proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
       let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath)
       if staged.ok:
         line.add("; staged into this commit")
+        notePreCommitRepin(workspaceRoot, repoRoot, plan.lockPath)
       else:
         line.add("; NOT STAGED: " & staged.diagnostic)
         stderr.writeLine("repro pre-commit: repro.lock was re-pinned but " &
@@ -50211,6 +50422,13 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # to observe, so there is nothing to record. Same ruling RA-10 makes for
     # `post-commit`, for the same reason.
     return 0
+  # TC-8g — a re-pin note describes ONE commit. Whatever an earlier commit
+  # left behind (its gate phase never ran) is dropped before this one's
+  # refresh can add its own.
+  let repinMarker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+  if repinMarker.len > 0:
+    try: removeFile(repinMarker)
+    except CatchableError: discard
 
   # (1) History rewriting, the half that is NOT handled by content-conditional
   # writing. `git commit --amend` fires this hook with nothing in flight and
@@ -50327,6 +50545,7 @@ proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
     let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath)
     if staged.ok:
       line.add("; staged into this commit")
+      notePreCommitRepin(workspaceRoot, repoRoot, result.lockPath)
     else:
       # Said out loud on BOTH channels. A refreshed-but-unstaged lock is the
       # one outcome that looks like success in the log and behaves like the
@@ -54741,6 +54960,257 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
       report.exitCode = 2
 
 # ============================================================================
+# TC-8g — the pre-commit certificate gate: the dispatcher's third phase.
+#
+# Because a certificate is bound to CONTENT, the question "do trusted
+# certificates cover this?" can be asked before a commit exists, about the
+# index the commit is about to record (test-certificates Standard §5.1,
+# Content-Id §5). The answer is EARLY FEEDBACK: `git commit --no-verify`
+# skips it, and the push gate and the receiving side remain the enforcement
+# points. Its value is that a refusal arrives while the work is still in hand.
+#
+# The phase runs LAST among the commit's hooks, after the chained user hook
+# (prek, a formatter) and the managed lock refresh, because §5.1 requires a
+# pre-commit gate to "run after every step of the commit that changes the
+# index": a hook that restages a rewritten file after the gate looked
+# produces a commit the gate never saw.
+#
+# Where things come from:
+#   * the CONTENT is ``git write-tree`` over the index being committed — the
+#     ``GIT_INDEX_FILE`` git hands the hook for ``commit -a`` and
+#     ``commit <paths>``, carried across the managed body's environment scrub
+#     as ``REPROBUILD_HOOK_GIT_INDEX_FILE``. It is computed over a COPY of
+#     that index, with optional locks off: the user's index is never written;
+#   * the CANDIDATES come from the standard local certificate store, both
+#     roots, under that content id — never from notes (operator decision D2).
+#     The store is per user and keyed by content only, so a certificate issued
+#     from another clone or worktree of the same content counts;
+#   * each candidate is VERIFIED through the same evaluator as every other
+#     client gate (TC-8b: registered signature, content match, reprobuild's
+#     lock step), for each required platform;
+#   * the MODE is ``commit_gate``, which defaults to ``gate_mode`` (D7). Until
+#     the shared branch policy exists (TC-9b/TC-9c) the requirement is the
+#     project's ``[certificates]`` table, which has no ``commit_gate`` key, so
+#     the default always applies. TC-9c changes the input, not this logic.
+#
+# A record-store project's lock is not part of the content (D8): the gate
+# passes on the certificate alone and never looks the lock record up. The
+# record is written after the commit, at pre-push.
+# ============================================================================
+
+proc commitGateMode*(policy: CertificatePolicy): CertificateGateMode =
+  ## The pre-commit gate's mode for ``policy`` (operator decision D7):
+  ## ``commit_gate``, defaulting to ``gate_mode``. The ``[certificates]``
+  ## table this reads today has no ``commit_gate`` key, so this is
+  ## ``gate_mode``; the shared branch policy (TC-9c) will supply both.
+  policy.gateMode
+
+proc consumePreCommitRepinNotes(workspaceRoot, repoRoot: string):
+    seq[tuple[path, digest: string]] =
+  ## Read and REMOVE the re-pin notes this commit's refresh phase left
+  ## (``notePreCommitRepin``). Removed whatever is found, so no later commit
+  ## can inherit them. Never raises.
+  let marker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+  if marker.len == 0 or not fileExists(marker):
+    return
+  try:
+    for line in readFile(marker).splitLines():
+      let tab = line.find('\t')
+      if tab > 0 and tab < line.len - 1:
+        result.add((path: line[0 ..< tab], digest: line[tab + 1 .. ^1]))
+  except CatchableError:
+    discard
+  try: removeFile(marker)
+  except CatchableError: discard
+
+proc hookIndexFile(repoRoot: string): string =
+  ## The index the commit in flight is built from: the managed body's private
+  ## carrier, else git's own ``GIT_INDEX_FILE`` (a hook that dispatches
+  ## directly, without the managed body's scrub), else "" — the repository's
+  ## default index. A relative value is resolved against the checkout, which
+  ## is where git interprets it for a hook.
+  result = getEnv(HookGitIndexFileEnv)
+  if result.len == 0:
+    result = getEnv("GIT_INDEX_FILE")
+  if result.len > 0 and not result.isAbsolute:
+    result = repoRoot / result
+
+proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
+  ## ``repro hooks dispatch pre-commit --phase=certificate-gate`` routes here.
+  ##
+  ## Returns 1 — git refuses the commit — only under ``commit_gate =
+  ## required``, from a canonical (not displaced) dispatcher, when the
+  ## index being committed is not covered or its coverage cannot be
+  ## established. Every other outcome returns 0: ``advisory`` reports,
+  ## ``off`` does nothing, a replay stands down, and a fault in the gate's
+  ## own inputs (no workspace, a manifest that does not resolve) is logged
+  ## and is not a reason to reject a developer's work — the push gate meets
+  ## the same fault and is the enforcement point.
+  let timestamp = isoTimestampNow()
+  let workspaceRoot = resolvePostCommitWorkspaceRoot(repoRoot, "")
+  if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
+    return 0
+  let repinNotes = consumePreCommitRepinNotes(workspaceRoot, repoRoot)
+  template log(line: string) =
+    appendPreCommitLog(workspaceRoot, timestamp & " certificate-gate " & line)
+
+  var resolved: ResolvedProject
+  var workspaceLocal: Option[WorkspaceLocal]
+  try:
+    (resolved, workspaceLocal) = resolveWorkspaceProjectShared(workspaceRoot,
+      "", "the pre-commit certificate gate")
+  except CatchableError as err:
+    log("not-evaluated: the workspace project did not resolve: " & err.msg)
+    return 0
+  let policy = resolved.certificatePolicy
+  let configured = commitGateMode(policy)
+  if configured == cgmOff:
+    return 0
+  if policy.requiredPlatforms.len == 0:
+    # Same reading as the push gate: no required platform, nothing to attest.
+    log("not-gated: the policy sets no required_platforms")
+    return 0
+
+  # Only a repository the project declares carries the project's
+  # certificates; a commit anywhere else (the manifest repository itself, an
+  # unrelated checkout under the workspace root) is not this policy's to judge.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    log("not-evaluated: git is not resolvable: " & err.msg)
+    return 0
+  let match = resolveRepoWorktreeMatch(identity, workspaceRoot,
+    resolved.repos, repoRoot)
+  if not match.found:
+    log("not-gated: " & repoRoot & " is not a repository of project '" &
+      resolved.projectName & "'" &
+      (if match.diagnostic.len > 0: " (" & match.diagnostic & ")" else: ""))
+    return 0
+  let repoName = resolved.repos[match.repoIndex].name
+
+  # A replay (rebase, cherry-pick, `am`) re-creates commits that already
+  # exist; judging each one again would stop the operation half way through
+  # for content the push gate judges anyway. Logged, so a gate that stood
+  # down is distinguishable from one that never ran.
+  let standDown = managedHookStandDown("pre-commit", repoRoot,
+    consultReflog = false)
+  if standDown.standDown:
+    log((if standDown.loud: "inert" else: "stood-down") & ": " &
+      standDown.report)
+    if standDown.loud:
+      stderr.writeLine("repro " & standDown.report)
+    return 0
+
+  # Displaced, the dispatcher runs as `pre-commit.legacy` and the manager that
+  # displaced it runs its own hooks AFTER it. Those may still change the
+  # index, so this gate cannot know it judged the final content: it reports
+  # and does not refuse.
+  let mode =
+    if displaced and configured == cgmRequired: cgmAdvisory else: configured
+  let prefix = "repro pre-commit: certificate gate: "
+
+  # The content id is computed by `git` children of this process, so the
+  # index being committed is named to them through the environment. This
+  # process is the gate alone and exits right after, and the variable is
+  # removed again before anything else runs.
+  let indexFile = hookIndexFile(repoRoot)
+  let hadIndexEnv = existsEnv("GIT_INDEX_FILE")
+  let savedIndexEnv = getEnv("GIT_INDEX_FILE")
+  if indexFile.len > 0:
+    putEnv("GIT_INDEX_FILE", indexFile)
+  var lookup: LocalStoreLookup
+  var verdict: ReprobuildCoverageVerdict
+  var repinned: seq[string]
+  try:
+    let state = indexUnderEvaluation(repoRoot, repoName)
+    lookup = findCertificatesInLocalStore(state)
+    # D8: a project whose lock lives in an out-of-tree record store has no
+    # lock in this content, and `reprobuildLockVerdict` does not consult the
+    # store for a state that is not a commit. The records directory is
+    # therefore not even resolved here.
+    let recordStore = pickRecordStoreRoot(
+      WorkspaceLockArgs(workspaceRoot: workspaceRoot), workspaceLocal)
+    let lockSource =
+      if recordStore.len > 0: recordStoreLockSource("")
+      else: committedLockSource()
+    let keys = readRegisteredKeyStoreChecked(
+      registeredKeyStorePath(workspaceRoot))
+    verdict = evaluateReprobuildCoverage(lookup.found, state,
+      policy.requiredPlatforms, policy.requiredTargets, keys, lockSource,
+      (if lookup.searchFailed: lookup.problems else: @[]))
+    if verdict.outcome != voCovered:
+      for note in repinNotes:
+        let staged = readContentFile(repoRoot, note.path, state.content)
+        if staged.status == cfsPresent and
+            content_id.sha256Hex(staged.bytes) == note.digest:
+          repinned.add(note.path)
+  finally:
+    if hadIndexEnv: putEnv("GIT_INDEX_FILE", savedIndexEnv)
+    else: delEnv("GIT_INDEX_FILE")
+
+  let content =
+    if lookup.contentIds.len > 0: lookup.contentIds.join(", ")
+    else: "the index being committed"
+  if verdict.outcome == voCovered:
+    log("covered: " & content & " for " & policy.requiredPlatforms.join(", ") &
+      " x [" & policy.requiredTargets.join(", ") & "]")
+    return 0
+
+  let refuses = mode == cgmRequired
+  let verdictTag =
+    if verdict.outcome == voUnverifiable: "unverifiable" else: "not-covered"
+  log((if refuses: "refused " else: "reported ") & verdictTag & ": " &
+    content & ": " & describeCoverageVerdict(verdict) &
+    (if displaced: " (dispatcher displaced)" else: "") &
+    (if repinned.len > 0: " (re-pinned: " & repinned.join(", ") & ")"
+     else: ""))
+  for problem in lookup.problems:
+    stderr.writeLine(prefix & "certificate store: " & problem)
+  if verdict.outcome == voUnverifiable:
+    stderr.writeLine(prefix & "coverage of the content being committed (" &
+      content & ") could not be established: " &
+      describeCoverageVerdict(verdict))
+    stderr.writeLine(prefix & "fix what is named (an unreadable key store " &
+      "or certificate store, an algorithm this reprobuild cannot compute); " &
+      "re-running the tests changes nothing")
+  else:
+    let searched =
+      if lookup.found.len == 0 and lookup.searched.len > 0:
+        " (no certificate in the local store; searched " &
+          lookup.searched.join(", ") & ")"
+      else: ""
+    stderr.writeLine(prefix & "no trusted certificate covers the content " &
+      "being committed (" & content & "): " &
+      describeCoverageVerdict(verdict) & searched)
+    if repinned.len > 0:
+      # HL-10 depends on this naming: the refresh, not the developer, moved
+      # the content away from what was tested.
+      stderr.writeLine(prefix & "cause: this commit's lock refresh re-pinned " &
+        "and staged " & repinned.join(", ") & ", so the content being " &
+        "committed is not the content the tests ran on")
+    stderr.writeLine(prefix & "remedy: run 'repro certify' on exactly what " &
+      "you are committing (on each required platform: " &
+      policy.requiredPlatforms.join(", ") & "), then commit again")
+  if displaced:
+    stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
+      "pre-commit.legacy under another hook manager, whose hooks run after " &
+      "this gate and may still change the index, so this gate cannot refuse. " &
+      "Restore it with 'repro hooks ensure --vcs " & repoRoot & "'")
+  if refuses:
+    stderr.writeLine(prefix & "the commit is REFUSED (commit_gate = " &
+      "required). This is early feedback, which `git commit " &
+      "--no-verify` skips; it is not the enforcement point: the push " &
+      "gate checks the pushed content again (test-certificates Standard " &
+      "§5.1)")
+    return 1
+  stderr.writeLine(prefix & "advisory: the commit proceeds. This is early " &
+    "feedback, which `git commit --no-verify` skips; it is not the " &
+    "enforcement point: the push gate checks the pushed " &
+    "content again (test-certificates Standard §5.1)")
+  0
+
+# ============================================================================
 # TC-6 — Receiving-side enforcement: the local push gateway.
 #
 # The CLIENT pre-push gate (TC-3) gives fast local feedback but is bypassable:
@@ -56198,6 +56668,28 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
+proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string] =
+  ## The enclosing workspace's resolved membership and the name it gives the
+  ## repo at ``repoRoot``: the lookup ``manifestDevelopSiblings`` and the lock
+  ## writer's ``declaredDevelopSet`` share. ``resolved`` is false under the
+  ## same conditions ``manifestDevelopSiblings`` documents (no workspace, a
+  ## workspace that is the repo itself, a membership that fails to resolve or
+  ## does not contain this repo).
+  result = (false, "", @[], "")
+  let root = committedLockPathBase(repoRoot)
+  let ws = enclosingWorkspaceRoot(root)
+  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+    return
+  var repos: seq[ResolvedRepo]
+  try:
+    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
+  except CatchableError:
+    return
+  for r in repos:
+    if cmpPaths(absolutePath(ws / r.path), root) == 0:
+      return (true, absolutePath(ws), repos, r.name)
+
 proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
     workspaceRoot: string; siblings: seq[ResolvedRepo]] =
   ## The develop-set siblings of the repo at ``repoRoot`` as the enclosing
@@ -56223,46 +56715,22 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## (see ``committedLockPathBase``) in the membership dimension rather than
   ## the path dimension.
   result = (false, "", @[])
-  let root = committedLockPathBase(repoRoot)
-  let ws = enclosingWorkspaceRoot(root)
-  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+  let membership = manifestMembershipOf(repoRoot)
+  if not membership.resolved:
     return
-  var repos: seq[ResolvedRepo]
-  try:
-    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
-  except CatchableError:
-    return
-  var selfName = ""
-  for r in repos:
-    if cmpPaths(absolutePath(ws / r.path), root) == 0:
-      selfName = r.name
-      break
-  if selfName.len == 0:
-    return
-  let closure = developSetClosure(repos, selfName)
+  let closure = developSetClosure(membership.repos, membership.selfName)
   var siblings: seq[ResolvedRepo] = @[]
-  for r in repos:
-    if r.name != selfName and r.name in closure:
+  for r in membership.repos:
+    if r.name != membership.selfName and r.name in closure:
       siblings.add(r)
   siblings.sort(proc(a, b: ResolvedRepo): int = cmp(a.name, b.name))
-  result = (true, absolutePath(ws), siblings)
+  result = (true, membership.workspaceRoot, siblings)
 
-proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
-    pushedRepoName: string): seq[string] =
-  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
-  ## repo the workspace declares, in first-seen order and de-duplicated.
-  ##
-  ## Such an edge used to be dropped in silence. The effect was that the gate
-  ## verified a SMALLER set than the manifests declare while still reporting
-  ## success: one typo in a ``depends`` list removed a real dependency from the
-  ## cleanliness / publication / lock stages, and nothing said so. That is the
-  ## same shape as a check that passes having verified nothing, just at the
-  ## granularity of one edge — so the gate refuses on it and names the edge.
-  ##
-  ## The resolver already refuses a fragment that references an undeclared
-  ## remote for exactly this reason ("turning a typo into a silent success is a
-  ## worse failure mode than the transitional convenience is worth"); this is
-  ## the same rule applied to the other cross-reference a fragment can make.
+proc undeclaredDependEdges(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[tuple[owner, dep: string]] =
+  ## The edges behind ``undeclaredDependsInClosure``: each ``depends`` entry
+  ## reachable from ``pushedRepoName`` that names no repo in ``repos``, with
+  ## the repo that declares it, in first-seen order and de-duplicated by name.
   if pushedRepoName.len == 0:
     return
   var byName = initHashSet[string]()
@@ -56289,10 +56757,29 @@ proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
       if dep notin byName:
         if dep notin reported:
           reported.incl(dep)
-          result.add(name & " -> " & dep)
+          result.add((owner: name, dep: dep))
         continue
       if dep notin seen:
         pending.add(dep)
+
+proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[string] =
+  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
+  ## repo the workspace declares, in first-seen order and de-duplicated.
+  ##
+  ## Such an edge used to be dropped in silence. The effect was that the gate
+  ## verified a SMALLER set than the manifests declare while still reporting
+  ## success: one typo in a ``depends`` list removed a real dependency from the
+  ## cleanliness / publication / lock stages, and nothing said so. That is the
+  ## same shape as a check that passes having verified nothing, just at the
+  ## granularity of one edge — so the gate refuses on it and names the edge.
+  ##
+  ## The resolver already refuses a fragment that references an undeclared
+  ## remote for exactly this reason ("turning a typo into a silent success is a
+  ## worse failure mode than the transitional convenience is worth"); this is
+  ## the same rule applied to the other cross-reference a fragment can make.
+  for edge in undeclaredDependEdges(repos, pushedRepoName):
+    result.add(edge.owner & " -> " & edge.dep)
 
 proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
     newTip, oldTip: string): string =
@@ -61623,6 +62110,37 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
       "shell on the machine: " & rows.join(" | "),
     remedy: "", fixKind: hfNone)
 
+const HealthDigestMaxShown = 5
+  ## How many findings a digested `repro health` detail names in default text
+  ## mode. CLI/health.md §Modes fixes this at 5 for every row that reports a
+  ## finding list, so it is a constant rather than a per-call-site default:
+  ## two rows that digested at different widths would make the `(+N more)`
+  ## suffix unreadable as a convention.
+
+proc formatFindingList(items: openArray[string]; verbose: bool;
+                       maxShown = HealthDigestMaxShown): string =
+  ## Render a finding list for a `repro health` detail: in full when `verbose`
+  ## or short enough, otherwise the first `maxShown` plus `(+N more)`.
+  ##
+  ## Was `formatHookList`, nested inside `gatherHealthChecks`'s `hooksCheck`
+  ## block. It is file-level and renamed because it now has a second caller —
+  ## the `lease-reaper` row's stuck-record list — and nothing about it was ever
+  ## hook-specific. A second copy of a five-line formatter in the same proc is
+  ## what §Code Quality's "keep it DRY" exists to stop, and two copies would
+  ## also be free to drift apart on the one thing that has to be uniform: the
+  ## width at which a list becomes a digest.
+  ##
+  ## The CALLER still builds its detail twice — once through this and once
+  ## unabridged — and passes the pair as `detail` / `fullDetail`, so
+  ## `--json` and `--verbose` keep the full list (`toJsonNode` emits
+  ## `fullDetail` as `detail` and this digest as `digest`).
+  if verbose or items.len <= maxShown:
+    items.join(", ")
+  else:
+    let shown = items[0 ..< maxShown]
+    let elided = items.len - maxShown
+    shown.join(", ") & " (+" & $elided & " more)"
+
 proc gatherHealthChecks(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
@@ -61645,9 +62163,13 @@ proc gatherHealthChecks(parsed: HealthArgs):
   # 2. Daemon / privilege mode. Either the per-user store daemon is
   #    running, or we are on the single-user direct path. Both are
   #    healthy; we report WHICH so a no-sudo user understands the mode.
+  # Hoisted out of `daemonCheck` because the `lease-reaper` row below needs
+  # them: "records present but no reap verdict" is a FAULT when a daemon is up
+  # (its tick should have written one) and a configuration when none is, and
+  # that probe has already been paid for here.
+  var running = false
+  var endpoint = ""
   block daemonCheck:
-    var running = false
-    var endpoint = ""
     try:
       let status = queryUserDaemonStatus()
       running = status.running
@@ -61671,6 +62193,204 @@ proc gatherHealthChecks(parsed: HealthArgs):
         detail: "no user daemon; single-user direct mode",
         remedy: self & " daemon start",
         fixKind: hfStartDaemon))
+
+  # 2b. The lease reaper's wall-clock tick — is it actually reaping?
+  #
+  #     This row exists because of a measured two-month outage that NOTHING
+  #     surfaced (reprobuild-pm/issues/
+  #     2026-09-29-lease-reap-tick-has-never-once-succeeded.md). The per-user
+  #     daemon's reap tick raised on its first record on every one of 131,882
+  #     consecutive attempts over 57 days and reaped nothing, EVER, while the
+  #     daemon reported itself running and every command that depends on it
+  #     succeeded. The only evidence was a log line in a file nobody reads, on
+  #     a path whose whole purpose is to run unattended.
+  #
+  #     So the question this asks is deliberately not "is a daemon up" — the
+  #     ``daemon-mode`` row above answered that affirmatively throughout —
+  #     but "has the thing the daemon is for made progress". The §4.2 tick
+  #     leaves a standing verdict beside the store it sweeps
+  #     (``LeaseReapTickHealth``) and this row reads it.
+  #
+  #     USER SCOPE, AND THE DEFAULT ROOT. The row reads
+  #     ``leaseStoreRootForScope(dlsUser)`` with NO override, which has two
+  #     consequences worth stating rather than discovering:
+  #
+  #       * a system-scoped reaper is not reported. It runs under the system
+  #         daemon's state dir, which this process generally cannot read, and
+  #         an "unknown" on every developer machine would be noise;
+  #       * a daemon started with an explicit ``--state-root`` writes its
+  #         verdict beside THAT store, which this row does not look at. Such a
+  #         daemon reads here as "records present, no verdict" at most — and
+  #         the ``lrsHoldsRecords`` arm names that possibility in its detail,
+  #         so the operator is not left to infer it. CLI/health.md states the
+  #         same caveat beside the location.
+  #
+  #     NOT ``--fix``-ABLE, and that is a safety property rather than an
+  #     omission: clearing this finding means destroying real infrastructure
+  #     (an Incus container, a network) or deleting the record that still
+  #     names it. Neither is a remediation a doctor may perform unasked —
+  #     contrast ``direnv allow`` or cloning a missing sibling, which are
+  #     recoverable. The remedy therefore names the sweep for the operator to
+  #     run, and ``--fix`` describes it instead of doing it.
+  block leaseReaperCheck:
+    let health = readLeaseReapTickHealth(dlsUser)
+    let storeRoot = leaseStoreRootForScope(dlsUser)
+
+    # TWO ELISION LAYERS, AND BOTH HAVE TO BE VISIBLE. They mean different
+    # things and the next reader will want to collapse them, so: `elidedStuck`
+    # is "the VERDICT never recorded these" — the tick's own persistence cap,
+    # because an unbounded list is an unbounded write every 30 s — while the
+    # digest is "this LINE is not showing you all of what was recorded".
+    # Conflating them would let a digest claim completeness about a verdict
+    # that was already truncated, which is the same class of lie as a stuck
+    # store reading as a healthy one. A row that dropped entries at both
+    # layers says so at both layers.
+    #
+    # `verbose` and `--json` suppress only the DIGEST. Nothing can recover
+    # what the verdict did not record, which is exactly why that count is
+    # reported separately rather than folded into the `(+N more)`.
+    proc renderStuck(h: LeaseReapTickHealth; verbose: bool): string =
+      if h.stuck.len == 0 and h.elidedStuck == 0:
+        return ""
+      result = formatFindingList(h.stuck, verbose)
+      if h.elidedStuck > 0:
+        result.add(" (+" & $h.elidedStuck & " more not recorded by the tick)")
+
+    if health.isSome:
+      let h = health.get
+      let lastTick = "last tick " & $fromUnix(h.lastTickUnix)
+      # "has NEVER succeeded" is reachable in exactly one way — the first tick
+      # recorded against this store already failed and so has every tick since
+      # — because an IDLE tick counts as a success. That one way is the live
+      # daemon's case, which is why the wording is worth having: a reaper that
+      # has not completed a sweep ONCE is a wiring fault, while one that
+      # stopped completing them is a new obstruction, and a bare count cannot
+      # tell them apart.
+      let lastSuccess =
+        if h.lastSuccessUnix == 0: "has NEVER completed a sweep"
+        else: "last completed a sweep " & $fromUnix(h.lastSuccessUnix)
+      if leaseReapTickIsUnhealthy(h):
+        # Built twice — digested and unabridged — and handed over as the
+        # `detail` / `fullDetail` pair the row convention uses, so `--verbose`
+        # and `--json` keep every recorded finding.
+        proc unhealthyDetail(verbose: bool): string =
+          "the lease reaper has not completed a sweep in " &
+            $h.consecutiveUnsuccessful & " consecutive ticks and " &
+            lastSuccess & " (" & $h.totalTicks & " ticks recorded, " &
+            lastTick & ", store " & storeRoot &
+            "). Leased ephemeral state is therefore ACCUMULATING: every " &
+            "record the sweep cannot destroy stays in the store and stays " &
+            "in the world. Stuck: " & renderStuck(h, verbose)
+        let digested = unhealthyDetail(parsed.verbose)
+        let full = unhealthyDetail(true)
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsFail,
+          detail: digested,
+          fullDetail: if digested != full: full else: "",
+          remedy: self & " reap --once --state-root=" & storeRoot &
+            "   # then act on what it names",
+          fixKind: hfNone))
+      else:
+        # A sweep completing unobstructed is the healthy state, and an idle
+        # tick is one of those: `lastSuccessUnix` says when a sweep last
+        # finished with nothing left stuck, not when something was last
+        # destroyed.
+        proc healthyDetail(verbose: bool): string =
+          "lease reaper sweeping " & storeRoot & ": " &
+            $h.totalTicks & " ticks recorded, " & lastSuccess & ", " &
+            lastTick & ", " & $h.consecutiveUnsuccessful &
+            " consecutive unsuccessful (threshold " &
+            $LeaseReapUnhealthyTickThreshold & ")" &
+            (if h.stuck.len > 0 or h.elidedStuck > 0:
+              ". Currently stuck: " & renderStuck(h, verbose)
+            else: "")
+        let digestedOk = healthyDetail(parsed.verbose)
+        let fullOk = healthyDetail(true)
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsOk,
+          detail: digestedOk,
+          fullDetail: if digestedOk != fullOk: fullOk else: "",
+          remedy: "", fixKind: hfNone))
+    else:
+      # NO VERDICT, which is three different states and only one of them is
+      # healthy. Answering them alike is how this row would keep the defect it
+      # was added to remove: a reaper that is stuck AND cannot write its
+      # verdict (an unwritable root makes the write raise inside
+      # `runAndRecordLeaseReapTick`, which hands it back as `healthWriteError`
+      # for the daemon to report once per run) leaves nothing to
+      # read, and "no verdict therefore nothing leased here" would call that
+      # healthy without having looked. So look.
+      let store = probeLeaseStore(dlsUser)
+      case store.kind
+      of lrsAbsent:
+        # Genuinely nothing: no store, so nothing has ever been leased under
+        # this scope and there is nothing for a reaper to do.
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsOk,
+          detail: "no user-scoped lease store at " & storeRoot &
+            "; no leased ephemeral state has been materialized on this host",
+          remedy: "", fixKind: hfNone))
+      of lrsEmpty:
+        # The store exists but holds no records. Nothing is accumulating, so
+        # a reaper that has not reported is not costing anything yet.
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsOk,
+          detail: "lease store " & storeRoot &
+            " holds no resource records, and no reap tick has reported a " &
+            "verdict against it; nothing is accumulating",
+          remedy: "", fixKind: hfNone))
+      of lrsHoldsRecords:
+        # Records are present and NOTHING has reported a tick against them.
+        # Either no daemon is reaping this store, or a tick is running and
+        # cannot persist its verdict. The two differ in severity and the
+        # daemon probe above already told us which: a daemon that is up OUGHT
+        # to have written one, so its absence is a fault rather than a
+        # configuration.
+        let sharedDetail = "lease store " & storeRoot & " holds " &
+          $store.records & " resource record(s) and NO reap tick has " &
+          "reported a verdict against it, so whether any of them are being " &
+          "reaped is unknown"
+        if running:
+          checks.add(HealthCheck(
+            name: "lease-reaper",
+            status: hsFail,
+            detail: sharedDetail &
+              ". A user daemon IS running (" & endpoint & "), so its tick " &
+              "should have recorded one: either it is not ticking against " &
+              "this store (a daemon started with a different --state-root " &
+              "writes its verdict beside THAT store) or it cannot write " &
+              "the verdict file. Its log names the reason once per run.",
+            remedy: self & " reap --once --state-root=" & storeRoot,
+            fixKind: hfNone))
+        else:
+          # No daemon is a supported path (§4.3: the store, not the daemon,
+          # is the source of truth), so this is a WARN: the records are
+          # enforceable by hand and by the next reconcile. It is reported
+          # because an unreaped store is still state accumulating in the
+          # world, which is the thing nobody was told about for 57 days.
+          checks.add(HealthCheck(
+            name: "lease-reaper",
+            status: hsWarn,
+            detail: sharedDetail &
+              ". No user daemon is running, so nothing is sweeping it on a " &
+              "wall clock; the records stay until a sweep runs by hand or a " &
+              "reconcile reaps them.",
+            remedy: self & " reap --once --state-root=" & storeRoot,
+            fixKind: hfNone))
+      of lrsUnreadable:
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsFail,
+          detail: "lease store " & storeRoot &
+            " could not be read, so neither what it holds nor whether it is " &
+            "being reaped can be established: " & store.reason,
+          remedy: "ensure " & storeRoot &
+            " is readable by this user, then re-run " & self & " health",
+          fixKind: hfNone))
 
   # 3. Store health. The content-addressed store root must be present
   #    and readable.
@@ -61956,14 +62676,6 @@ proc gatherHealthChecks(parsed: HealthArgs):
     # population: "4 wired" means nothing without "of 5 present in 1 repo".
     let census = $okCount & " managed hook(s) wired across " &
       $reposInspected & " participating repo(s)"
-    proc formatHookList(items: openArray[string]; verbose: bool; maxShown = 5): string =
-      if verbose or items.len <= maxShown:
-        items.join(", ")
-      else:
-        let shown = items[0 ..< maxShown]
-        let elided = items.len - maxShown
-        shown.join(", ") & " (+" & $elided & " more)"
-
     if enumerated.mode != "workspace":
       checks.add(HealthCheck(
         name: "vcs-hooks",
@@ -61999,17 +62711,17 @@ proc gatherHealthChecks(parsed: HealthArgs):
         "every marker a generated body carries, and demanding a contract " &
         "THIS build does not generate, so each fire refuses (pre-push) or " &
         "fails open in silence (the four observational hooks): " &
-        formatHookList(stale, parsed.verbose) & ". " & census &
+        formatFindingList(stale, parsed.verbose) & ". " & census &
         (if writers.len > 0:
           ". The installed bodies name their writer(s): " &
             writers.join(" | ") &
             " — compare STORE PATHS, not versions"
         else: "") &
         (if shadowed.len > 0:
-          ". Also " & $shadowed.len & " SHADOWED: " & formatHookList(shadowed, parsed.verbose)
+          ". Also " & $shadowed.len & " SHADOWED: " & formatFindingList(shadowed, parsed.verbose)
         else: "") &
         (if missing.len > 0:
-          ". Also " & $missing.len & " missing: " & formatHookList(missing, parsed.verbose)
+          ". Also " & $missing.len & " missing: " & formatFindingList(missing, parsed.verbose)
         else: "") &
         ". See the hook-interpreter row for whether this host's shells " &
         "even agree about which 'repro' runs them."
@@ -62026,7 +62738,7 @@ proc gatherHealthChecks(parsed: HealthArgs):
       let fullShadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
         "installer and not running: " & shadowed.join(", ") & ". " & census
       let shadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
-        "installer and not running: " & formatHookList(shadowed, parsed.verbose) & ". " & census
+        "installer and not running: " & formatFindingList(shadowed, parsed.verbose) & ". " & census
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
@@ -62038,7 +62750,7 @@ proc gatherHealthChecks(parsed: HealthArgs):
       let fullMissingDetail = $missing.len & " managed hook(s) missing across " &
         $reposInspected & " participating repo(s): " & missing.join(", ")
       let missingDetail = $missing.len & " managed hook(s) missing across " &
-        $reposInspected & " participating repo(s): " & formatHookList(missing, parsed.verbose)
+        $reposInspected & " participating repo(s): " & formatFindingList(missing, parsed.verbose)
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
@@ -72073,6 +72785,21 @@ const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
   ## emit the solved inputs.
 
+type UnreachedUsesSelector = object
+  ## A ``uses:`` selector the transitive solver-input walk
+  ## (``foldProviderSolverInputs``) could not resolve to a recipe directory:
+  ## no develop override, no on-disk sibling, no source-catalog recipe. Most
+  ## are plain tools (``cargo``, ``nim``) and are fine to leave unresolved;
+  ## one that names a develop-set sibling means that sibling's recipe — and
+  ## every range it declares — is missing from the solve. See
+  ## ``unreachedDevelopSiblings``.
+  selector: string
+    ## The bare package selector, as ``discoverProducerSourceRoot`` was
+    ## asked for it.
+  owner: string
+    ## The recipe DIRECTORY whose ``uses:`` named it (the project root for a
+    ## direct use, a sibling's directory for a transitive one).
+
 type CompiledProviderSolverInputs = object
   variants: seq[variant_encoder.VariantDecl]
   packages: seq[PackageDecl]
@@ -72085,6 +72812,10 @@ type CompiledProviderSolverInputs = object
     ## The `reprobuild-packages` catalog checkouts the solved tool uses'
     ## definitions were read from (`catalogRootsOfToolUses`). A lock records
     ## each one (Provisioning-Contributions.md, "Locks And Snapshots").
+  unreachedSelectors: seq[UnreachedUsesSelector]
+    ## Every ``uses:`` selector the transitive walk could not reach, with the
+    ## recipe that named it. Filled by ``foldProviderSolverInputs``; the lock
+    ## writer refuses when one names a develop-set sibling.
 
 type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
@@ -72610,6 +73341,11 @@ proc foldProviderSolverInputs(projectDir: string;
   for useDef in aggregate.toolUses:
     pending.add((root, useDef))
   var seenRecipeDirs = @[root]
+  # Which selectors resolved to a recipe from SOME owner. Discovery walks up
+  # from the naming recipe's directory, so the same selector can miss from one
+  # owner and hit from another; only a selector no owner reached is reported.
+  var reachedSelectors: seq[string] = @[]
+  var unreached: seq[UnreachedUsesSelector] = @[]
   var cursor = 0
   while cursor < pending.len:
     let (owner, useDef) = pending[cursor]
@@ -72619,7 +73355,21 @@ proc foldProviderSolverInputs(projectDir: string;
       let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
       recipeDir = sourceProviderRecipeDirForSolverFold(outcome)
     if recipeDir.len == 0:
+      # Not silently: this used to be a bare `continue`, and a develop-set
+      # sibling that was not checked out vanished from the solve with its
+      # ranges, so the lock fell to the floors of the recipes that remained
+      # (reprobuild-pm issue 2026-10-12, "lock refresh grounds a package at
+      # the root floor"). Most selectors land here legitimately — a plain tool
+      # such as `cargo` has no recipe to fold — so the walk only RECORDS the
+      # miss; deciding whether it names a develop-set sibling is the lock
+      # writer's job (`unreachedDevelopSiblings`), which knows the develop set.
+      let miss = UnreachedUsesSelector(selector: useDef.packageSelector,
+        owner: owner)
+      if miss notin unreached:
+        unreached.add(miss)
       continue
+    if useDef.packageSelector notin reachedSelectors:
+      reachedSelectors.add(useDef.packageSelector)
     recipeDir = absolutePath(recipeDir)
     if recipeDir in seenRecipeDirs:
       continue
@@ -72633,6 +73383,10 @@ proc foldProviderSolverInputs(projectDir: string;
       pending.add((recipeDir, transitiveUse))
     aggregate.mergeProviderSolverInputs(producerInputs)
   aggregate.sourceRecipeRoots = seenRecipeDirs[1 .. ^1]
+  aggregate.unreachedSelectors = @[]
+  for miss in unreached:
+    if miss.selector notin reachedSelectors:
+      aggregate.unreachedSelectors.add(miss)
   aggregate.catalogRoots = catalogRootsOfToolUses(aggregate.toolUses)
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
@@ -72645,11 +73399,16 @@ proc unreadableRecipeLockRefusal(recipe, failure: string): string =
     "uses resolve from; refusing to write one (the committed lock is " &
     "left as it is): " & failure
 
-proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
+type RefreshSolverInputs = tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-    catalogRoots: seq[string]] =
+    catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector]]
+  ## What ``resolveRefreshSolverInputs`` answers. Named once because
+  ## ``repro lock validate`` declares a variable of it.
+
+proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
+    RefreshSolverInputs =
   ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
   ## PREFERRING the compiled project provider (the real recipe's solve) and
   ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
@@ -72659,6 +73418,10 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
   ## FUP-M — ``usesSelectors`` carries the recipe's declared ``uses:`` producer
   ## selectors (provider path only; the sidecar has none) so ``lock refresh``
   ## folds each sibling PRODUCER edge into the committed lock's ``deps``.
+  ##
+  ## ``unreachedSelectors`` carries every ``uses:`` selector the transitive
+  ## fold could not resolve to a recipe (provider path only), so the lock
+  ## writer can refuse a solve that is missing a develop-set sibling's recipe.
   var probeFailure = ""
   if inputsOverride.len == 0:
     let fromProvider = solverInputsFromCompiledProvider(projectDir,
@@ -72678,16 +73441,18 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
         # records. Spelled exactly as the recipe-without-solve answer below,
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
-          p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
+          p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
+          p.unreachedSelectors)
       return (true, p.variants, p.packages, p.text, "provider",
-        p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
+        p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
+        p.unreachedSelectors)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[])
+      @[], @[], @[], @[])
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -72707,19 +73472,25 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
         # to PATH. A recipe this refresh cannot read is a failed refresh.
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
-      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[])
+      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[])
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
-  return (false, @[], @[], "", "", @[], @[], @[])
+  return (false, @[], @[], "", "", @[], @[], @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
                                 gen: LockVerbOptions;
                                 entryPoint: LockGenerationEntryPoint;
                                 verb: string;
-                                request: var LockGenerationRequest): int =
+                                request: var LockGenerationRequest;
+                                unreached: var seq[UnreachedUsesSelector]):
+                                int =
   ## Assemble the generation request the four CLI doors share.
+  ##
+  ## ``unreached`` receives the ``uses:`` selectors the solver-input fold could
+  ## not resolve to a recipe; each door decides, through
+  ## ``unreachedDevelopSiblings``, whether that makes the solve incomplete.
   ##
   ## MO-12 — the solver inputs come from the COMPILED PROJECT PROVIDER (the
   ## real recipe's solve) when available, falling back to the ``repro.solver``
@@ -72755,7 +73526,159 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
       resolved.sourceRecipeRoots, resolved.catalogRoots),
     entryPoint: entryPoint)
+  unreached = resolved.unreachedSelectors
   return 0
+
+const IncompleteSolveExitCode = 5
+  ## ``repro lock refresh`` / ``repro lock solve --write``: the solve could not
+  ## reach a develop-set sibling's recipe, so nothing was written. Distinct
+  ## from 1 (generic failure), 2 (usage / invalid lock), 3 (UNSAT) and 4 (a
+  ## sibling pin would move backward), so a caller can tell "check out the
+  ## sibling" apart from every other refusal.
+
+type UnreachedDevelopSibling = object
+  ## A develop-set sibling whose recipe a ``uses:`` names but the solve did
+  ## not read. The solve is then INCOMPLETE: every range that recipe declares
+  ## is missing, so a lock written from it pins the floors of fewer recipes
+  ## than the next build in a complete workspace checks against.
+  sibling: string     ## the develop-set repo name the selector matched
+  ownerRecipe: string ## the recipe whose ``uses:`` names it
+  expectedAt: string  ## the sibling's checkout path, absolute
+  checkedOut: bool
+    ## False: no checkout at ``expectedAt``. True: a checkout carrying a
+    ## recipe that ``uses:`` discovery did not find (it looks for
+    ## ``<ancestor>/<selector>/repro.nim`` above the naming recipe, or a
+    ## develop override), so the recipe exists and was still not read.
+  siblingRecipe: string ## that recipe's path when ``checkedOut``
+
+proc declaredDevelopSet(projectDir, lockPath: string):
+    seq[tuple[name, checkout: string]] =
+  ## The develop set a lock written for ``projectDir`` is answerable to, as
+  ## (repo name, absolute checkout path) pairs, each name once. It is the
+  ## UNION of every place that set is declared, because each one alone can
+  ## understate it — and an understated set is exactly how a partial solve
+  ## goes unnoticed:
+  ##
+  ##   * The workspace MANIFEST's ``depends`` closure over the resolved
+  ##     membership (``developSetClosure``), at the paths the manifest gives.
+  ##   * Every ``depends`` name in that closure the resolved membership does
+  ##     NOT contain (``undeclaredDependEdges``), at the workspace-sibling path
+  ##     ``<workspace>/<name>``. The membership is the ENABLED projects, not
+  ##     every repo the manifest knows: a workspace that enables a project
+  ##     containing ``codetracer`` but not the one containing ``isonim-tui``
+  ##     resolves no ``isonim-tui`` at all, though ``codetracer`` depends on
+  ##     it. Relying on the resolved closure alone missed precisely the
+  ##     sibling that is not checked out — the case this check exists for.
+  ##   * The committed lock at ``lockPath``: its non-root VCS ``deps``, at the
+  ##     paths it records. Outside a workspace (a standalone clone, CI) it is
+  ##     the only record; inside one it still names siblings a narrower
+  ##     membership cannot see. An unreadable or absent lock adds nothing.
+  ##
+  ## A manifest path wins over a lock path for the same name.
+  proc addMember(members: var seq[tuple[name, checkout: string]];
+                 name, checkout: string) =
+    for member in members:
+      if member.name == name: return
+    members.add((name, os.normalizedPath(absolutePath(checkout))))
+  let membership = manifestMembershipOf(projectDir)
+  if membership.resolved:
+    let closure = developSetClosure(membership.repos, membership.selfName)
+    for r in membership.repos:
+      if r.name != membership.selfName and r.name in closure:
+        result.addMember(r.name, membership.workspaceRoot / r.path)
+    for edge in undeclaredDependEdges(membership.repos, membership.selfName):
+      result.addMember(edge.dep, membership.workspaceRoot / edge.dep)
+  if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
+  var existing: seq[LockedDep]
+  try:
+    existing = parseWorkspaceLockedDeps(readFile(extendedPath(lockPath)),
+      lockPath).deps
+  except CatchableError:
+    return
+  let pathBase = committedLockPathBase(absolutePath(projectDir))
+  for d in existing:
+    if d.path == "." or d.path.len == 0 or d.coordinates.kind != ckVcs:
+      continue
+    result.addMember(d.name, pathBase / d.path)
+
+proc unreachedDevelopSiblings(projectDir, lockPath: string;
+    unreached: seq[UnreachedUsesSelector]): seq[UnreachedDevelopSibling] =
+  ## Which of the ``uses:`` selectors the solver-input fold could not reach
+  ## name a develop-set sibling whose recipe is therefore missing from the
+  ## solve.
+  ##
+  ## WHY. A lock written from a solve that never read a sibling's recipe pins
+  ## the floors of a strict SUBSET of the recipes a later build checks it
+  ## against; the build then refuses it (``ELockConflict``), and nothing at
+  ## write time said the solve was partial. That is reprobuild-pm issue
+  ## 2026-10-12 ("lock refresh grounds a package at the root floor"): every
+  ## refresh in a tree missing ``isonim-gpui`` wrote ``cargo = 1.0.0`` and
+  ## every build in a complete tree refused it.
+  ##
+  ## WHAT IS NOT A FINDING, deliberately:
+  ##   * a selector naming no develop-set sibling — a plain tool such as
+  ##     ``cargo`` or ``nim`` has no sibling recipe to miss;
+  ##   * a sibling checked out WITHOUT a recipe — it declares no constraints,
+  ##     so a solve without it loses nothing.
+  ## A sibling that is not checked out, or is checked out with a recipe that
+  ## discovery could not reach, is one: in both cases a recipe that exists is
+  ## absent from the solve.
+  if unreached.len == 0: return
+  let developSet = declaredDevelopSet(projectDir, lockPath)
+  if developSet.len == 0: return
+  var reported: seq[string] = @[]
+  for miss in unreached:
+    if miss.selector in reported: continue
+    var checkout = ""
+    for member in developSet:
+      if member.name == miss.selector:
+        checkout = member.checkout
+        break
+    if checkout.len == 0: continue
+    let ownerRecipe =
+      try:
+        let match = resolveProjectFile(miss.owner).path
+        if match.len > 0: match else: miss.owner
+      except CatchableError: miss.owner
+    var finding = UnreachedDevelopSibling(sibling: miss.selector,
+      ownerRecipe: ownerRecipe, expectedAt: checkout)
+    if dirExists(extendedPath(checkout)):
+      let siblingRecipe =
+        try: resolveProjectFile(checkout).path
+        except CatchableError:
+          # Both `repro.nim` and `reprobuild.nim`: a recipe exists, it is just
+          # ambiguous. It is still a recipe the solve did not read.
+          checkout / CanonicalProjectFileName
+      if siblingRecipe.len == 0:
+        continue  # a checkout without a recipe declares no constraints
+      finding.checkedOut = true
+      finding.siblingRecipe = siblingRecipe
+    reported.add(miss.selector)
+    result.add(finding)
+
+proc renderUnreachedDevelopSibling(f: UnreachedDevelopSibling): string =
+  ## One finding, as a self-contained sentence: the sibling, the recipe whose
+  ## `uses:` names it, where it was expected, why that matters, and the
+  ## remedy. The same text is a refusal for a writing door and a warning for
+  ## a non-writing one.
+  let consequence = "its recipe's constraints would be missing from the " &
+    "solve, so the lock would pin versions the next build in a complete " &
+    "workspace refuses"
+  if not f.checkedOut:
+    "develop-set sibling '" & f.sibling & "' is not checked out at " &
+      f.expectedAt & ", but " & f.ownerRecipe & " declares `uses: \"" &
+      f.sibling & "\"`; " & consequence & ". Check it out (`repro sync`, " &
+      "or `repro ws enable` the project that declares it) and run the " &
+      "command again"
+  else:
+    "develop-set sibling '" & f.sibling & "' is checked out at " &
+      f.expectedAt & " with a recipe (" & f.siblingRecipe & "), but the " &
+      "`uses: \"" & f.sibling & "\"` in " & f.ownerRecipe & " could not " &
+      "reach it (discovery looks for `<ancestor>/" & f.sibling &
+      "/repro.nim` above that recipe, or a develop override); " &
+      consequence & ". Check it out where the workspace declares it " &
+      "(`repro sync`, or `repro ws enable` the project that declares it) " &
+      "and run the command again"
 
 type
   RefreshPinGate = object
@@ -72902,10 +73825,30 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
   var request: LockGenerationRequest
+  var unreached: seq[UnreachedUsesSelector]
   let prc = buildLockGenerationRequest(projectDir, inputsOverride,
-    platformOverride, gen, entryPoint, verb, request)
+    platformOverride, gen, entryPoint, verb, request, unreached)
   if prc != 0: return prc
   let writeTo = if writeByDefault or gen.write: lockP else: ""
+  # A solve that could not read a develop-set sibling's recipe is a PARTIAL
+  # solve: a lock written from it is one the next build in a complete
+  # workspace refuses. A writing door refuses before anything is written (and
+  # before the pin gate, whose remedies would be moot); a non-writing one says
+  # the same thing as a warning, since its answer is still worth seeing.
+  let incomplete = unreachedDevelopSiblings(projectDir, lockP, unreached)
+  if incomplete.len > 0:
+    if writeTo.len > 0:
+      for f in incomplete:
+        stderr.writeLine("repro lock " & verb & ": " &
+          renderUnreachedDevelopSibling(f))
+      stderr.writeLine("repro lock " & verb & ": refusing to write a lock " &
+        "from a solve that could not read " & $incomplete.len &
+        " develop-set sibling recipe(s); the committed lock " & writeTo &
+        " is left as it is")
+      return IncompleteSolveExitCode
+    for f in incomplete:
+      stderr.writeLine("repro lock " & verb & ": warning: " &
+        renderUnreachedDevelopSibling(f))
   if entryPoint == lgeLockRefresh and writeTo.len > 0:
     let envAllowance = parsePinRegressionAllowance(
       getEnv(PinRegressionAllowEnv))
@@ -72964,7 +73907,9 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## produced; only the lock file is written. Exits 4, writing nothing, when
   ## a sibling pin would move backward or onto another line of history and
   ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` does not
-  ## name it.
+  ## name it. Exits 5 (``IncompleteSolveExitCode``), writing nothing, when a
+  ## ``uses:`` names a develop-set sibling whose recipe the solve could not
+  ## read (``unreachedDevelopSiblings``).
   runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
@@ -72986,9 +73931,16 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
   ## nothing is the shape this campaign keeps finding."
   var gen = LockVerbOptions(strategy: strategy, registries: @[], write: false)
   var request: LockGenerationRequest
+  var unreached: seq[UnreachedUsesSelector]
   let prc = buildLockGenerationRequest(projectDir, "", "", gen,
-    lgeStrategyHiddenLock, "build --strategy", request)
+    lgeStrategyHiddenLock, "build --strategy", request, unreached)
   if prc != 0: return prc
+  # The hidden lock is never committed, so an incomplete solve is a warning
+  # here rather than a refusal — but it is said: a build pinned from a solve
+  # missing a sibling's ranges may resolve versions that sibling forbids.
+  for f in unreachedDevelopSiblings(projectDir, committedLock, unreached):
+    stderr.writeLine("repro build: --strategy " & $strategy & ": warning: " &
+      renderUnreachedDevelopSibling(f))
   # NLF-M3 — a strategy invocation must SOLVE, not re-affirm. Any pins an
   # enclosing context left in the environment would make the hidden lock a
   # copy of the committed one and the whole experiment vacuous.
@@ -73138,11 +74090,7 @@ proc runReproLockValidate(rest: openArray[string]): int =
   # preferred, sidecar fallback) so a provider-sourced lock validates against
   # the provider's solve rather than mis-comparing it to a stale sidecar.
   block staleCheck:
-    var resolved: tuple[found: bool;
-      variants: seq[variant_encoder.VariantDecl];
-      packages: seq[PackageDecl]; text: string; source: string;
-      usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-      catalogRoots: seq[string]]
+    var resolved: RefreshSolverInputs
     try:
       resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
@@ -81552,6 +82500,31 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro gateway: error: " & err.msg &
         "; REJECTING (fail closed)")
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "reap":
+    # Ephemeral-State-Leases.md §4.3 fallback (b): `repro reap --once` — one
+    # lease sweep by hand, the always-available enforcer for a host with no
+    # daemon running and the diagnostic an operator reaches for when the
+    # `lease-reaper` health row goes red.
+    #
+    # `runReapCli` has existed and been tested since L3; nothing DISPATCHED
+    # it, so the command the spec promises exited 2 as an unknown
+    # subcommand. That is also why the health row above could not name a
+    # remedy before: a remedy that is not a command is not a remedy
+    # (Interactive-UX-And-Progress.md Principle 2).
+    #
+    # Default in-process transport. A sweep from the CLI reaps what this
+    # build links and REPORTS what it cannot, exiting non-zero — which is the
+    # diagnosis, not a failure of the command.
+    try:
+      let reapArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          newSeq[string]()
+      return runReapCli(reapArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro reap: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "health":
     # RA-30 — top-level `repro health` (the environment doctor) per

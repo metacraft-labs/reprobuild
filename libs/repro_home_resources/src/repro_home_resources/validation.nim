@@ -264,6 +264,26 @@ proc resourceValidationError*(r: Resource): string =
         return "pkg.homebrewCask extra arg '" & a &
           "' is not a safe brew flag (no shell metacharacters, " &
           "whitespace, or control bytes; non-empty)"
+  of rkMacosAppBundle:
+    # GM4c. The driver runs `ditto`, `codesign` and `spctl` through an
+    # argument vector (never a shell), so the check here is about paths:
+    # a bundle name that is not a single `.app` component, or relative
+    # directories, would place something somewhere other than
+    # `<Applications>/<Name>.app`.
+    let name = r.appBundleName
+    if name.len == 0 or '/' in name or name == ".." or
+        not name.endsWith(".app") or name.startsWith("."):
+      return "macos.appBundle resource '" & r.address & "' has bundle " &
+        "name '" & name & "', which is not a single '<Name>.app' component"
+    if not r.appBundleSource.startsWith("/"):
+      return "macos.appBundle resource '" & r.address & "' has a " &
+        "non-absolute source bundle '" & r.appBundleSource & "'"
+    if not r.appBundleTargetDir.startsWith("/"):
+      return "macos.appBundle resource '" & r.address & "' has a " &
+        "non-absolute Applications directory '" & r.appBundleTargetDir & "'"
+    if r.appBundleIdentity.len == 0:
+      return "macos.appBundle resource '" & r.address & "' carries no " &
+        "bundle identity"
   else:
     # Win32-API / pure-file-I/O drivers — no shell-out, nothing to
     # validate here.

@@ -108,6 +108,15 @@ type
       ## this list emptied and its rows merged into `activities`
       ## (Gradual-Nix-To-Reprobuild-Migration.md §Declarative data files
       ## read at plan time).
+    catalogImports*: seq[string]
+      ## The provisioning-contribution catalogs the profile's `catalogs:`
+      ## section imports: each entry names a catalog's Nim module relative
+      ## to the profile directory (forward slashes, validated by the macro
+      ## with `catalog_refs.catalogImportPathProblem`). The profile binary
+      ## never reads them; `repro home apply` imports them into the recipe
+      ## it extracts the profile's package references from, as a recipe
+      ## imports them (Provisioning-Contributions.md §"Profile Package
+      ## References").
 
   ActivityElementKind* = enum
     aekPackageRef

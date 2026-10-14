@@ -200,10 +200,48 @@
 ##     checkpoint that it could not exercise the boundary. Both refuse rather
 ##     than degrade.
 ##
-## HAZARD THIS FIXTURE HAS TO RESPECT. `sockaddr_un.sun_path` is 108 bytes.
+## HAZARD THIS FIXTURE HAS TO RESPECT. A unix socket path has a length limit,
+## and the one that binds here is not the kernel's `sun_path` but std/net's:
+## `connectUnix` (which `checkDeclaredDaemon` uses) refuses any path of
+## `posix.Sockaddr_un_path_length` bytes or more — 108 on Linux, but 92 on
+## macOS, below the kernel's 104 — and the refusal surfaces as `dcoUnreachable`.
 ## A fixture root under a long `TMPDIR` pushes the socket path past it and the
-## daemon fails to bind — which looks exactly like a real red. `makeFixture`
-## refuses such a root loudly instead of producing one.
+## check reports the daemon unreachable — which looks exactly like a real red.
+## `makeFixture` keeps its own path components short and refuses a root that
+## is still too long, loudly, instead of producing one.
+##
+## PLATFORM CONTRACT — LINUX GRADES THE CHECK, EVERY OTHER HOST GRADES ITS
+## REFUSAL. `reprobuild-pm/milestones/Dependency-Attribution.milestones.org`,
+## DA-4's `:status:`, records the mechanism as "INERT on macOS and Windows
+## (`peerCredentialsOfSocket` and `processStartIdentity` are both
+## `when defined(linux)`, and a peer with no re-validatable identity is
+## refused)". So on such a host every declaration that reaches the peer is
+## refused, nothing is registered, nothing re-validates, and every IPC loss
+## stands. A case whose Linux outcome needs the kernel's answer therefore has
+## TWO arms selected by `KernelIdentityHost`:
+##
+##   * on Linux, the original assertions, unchanged;
+##   * everywhere else, the REFUSAL, asserted concretely: the check answers
+##     `InertHostRefusal`, the registries stay empty, the edge does not
+##     publish and the warm run re-launches, and the `/proc` readers answer
+##     ""/-1 for a LIVE pid. Never a skip and never a vacuous pass.
+##
+## WHICH REFUSAL, MEASURED RATHER THAN READ OFF THE MILESTONE. The milestone
+## names `dcoNoKernelIdentity`; on aarch64-darwin (2026-10-14, reprobuild
+## `bfe4d3f8`) the check answers `dcoNoPeerCredentials` — it connects, and
+## `peerCredentialsOfSocket` yields pid 0 before the start-time read is ever
+## reached. Both are refusals and the milestone's verdict ("inert, refused")
+## holds; `InertHostRefusal` pins the one the code actually returns, so a
+## reordering of `checkDeclaredDaemon` is a red case rather than a silent
+## change of which guard answers.
+##
+## Cases that need no kernel answer (the pre-connect refusals of the
+## declaration surface, the unreachable endpoint, the loader, the `compiles`
+## structural case) have one arm and are graded identically on every host.
+## WHEN A NON-LINUX IDENTITY BACKEND LANDS (`LOCAL_PEERPID` plus
+## `proc_pidinfo` on macOS, say) `KernelIdentityHost` is the switch to flip,
+## and every non-Linux arm below is then expected to go RED — that is how a
+## re-grade of DA-4 for that platform finds every case it has to re-measure.
 
 import std/[options, os, osproc, posix, sequtils, strutils, tempfiles, unittest]
 
@@ -254,6 +292,32 @@ proc byId(res: BuildRunResult; id: string): ActionResult =
   raise newException(ValueError, "missing result " & id)
 
 const ReuseDecisions = {cdHit, cdHybridCutoff}
+
+const KernelIdentityHost = defined(linux)
+  ## Does this host publish the peer credential and the kernel start-time
+  ## identity a declared check rests on? Mirrors the `when defined(linux)` arms
+  ## of `peerCredentialsOfSocket` and `processStartIdentity` (and of
+  ## `processImagePath` / `processCommName` / `processEffectiveUid`) — see the
+  ## PLATFORM CONTRACT in the header. A runtime `if` on this constant, not a
+  ## `when`, selects each case's arm, so BOTH arms are compiled on every host
+  ## and a Linux arm cannot rot unseen on a macOS developer's machine.
+
+const InertHostRefusal = dcoNoPeerCredentials
+  ## What `checkDeclaredDaemon` answers, on a host that is not a
+  ## `KernelIdentityHost`, for every declaration that gets as far as the
+  ## connect: the socket connects, the peer credential comes back as pid 0,
+  ## and the check refuses there — before `processStartIdentity` could answer
+  ## `dcoNoKernelIdentity`. Measured on aarch64-darwin; see the header for why
+  ## this is pinned and not inferred from the milestone's wording.
+
+proc onKernelIdentityHost(linuxOutcome: DaemonCheckOutcome):
+    DaemonCheckOutcome =
+  ## The outcome a check of a REACHABLE unix-socket peer gives on this host:
+  ## `linuxOutcome` where the kernel can answer, `InertHostRefusal` elsewhere.
+  ## Only for checks whose every OTHER consequence is the same on both — a
+  ## refusal on Linux too — so the case reads identically apart from which
+  ## guard refuses.
+  if KernelIdentityHost: linuxOutcome else: InertHostRefusal
 
 proc ccPath(): string =
   result = findExe("cc")
@@ -469,12 +533,17 @@ proc compileC(source, output, workRoot, name: string) =
     raise newException(OSError, "helper " & name & " was not produced: " & res)
 
 proc makeFixture(): Fixture =
-  let root = createTempDir("repro-decltrust-", "", dir = nonVolatileTempBase())
+  # Short components on purpose (see the socket-length HAZARD in the header):
+  # under `scripts/run_tests.sh` the `TMPDIR` is a per-checkout slot below
+  # `~/.cache/reprobuild-test-tmp/`, and with the longer `repro-decltrust-` /
+  # `work` spelling a fixture socket there reached 95 bytes on macOS, past
+  # std/net's 92.
+  let root = createTempDir("rdt-", "", dir = nonVolatileTempBase())
   if root.isVolatilePrefix():
     raise newException(IOError,
       "fixture root " & root & " is under a volatile prefix the engine drops " &
       "from evidence; this suite cannot assert anything from there")
-  let workRoot = root / "work"
+  let workRoot = root / "w"
   createDir(workRoot)
   let binDir = workRoot / "b"
   createDir(binDir)
@@ -488,17 +557,21 @@ proc makeFixture(): Fixture =
     daemonPath: binDir / "decl_daemon",
     clientPath: binDir / "decl_client",
     logDir: logDir)
-  # `sockaddr_un.sun_path` is 108 bytes and a long `TMPDIR` silently exceeds
-  # it. Refuse here, where the reason is legible, rather than in a `bind`
-  # failure that reads like a real red.
+  # A long `TMPDIR` silently exceeds the socket-path limit (header HAZARD).
+  # Refuse here, where the reason is legible, rather than in a `bind` failure
+  # or a `dcoUnreachable` that reads like a real red. The limit is std/net's
+  # `Sockaddr_un_path_length` — what `connectUnix` / `bindUnix` enforce, with
+  # the same `>=` — not a hard-coded 108, which is Linux's value and let a
+  # 92..107-byte path through on macOS.
   # 24 bytes of headroom, not 6: the longest fixture socket basename in this
   # file is the two-endpoint case's, and a probe sized for `d.sock` would let a
   # marginal TMPDIR through and fail at `bind` instead of here.
   let probeSocket = workRoot / "0123456789012345.sock"
-  if probeSocket.len >= 108:
+  if probeSocket.len >= Sockaddr_un_path_length:
     raise newException(IOError,
       "fixture socket path is " & $probeSocket.len & " bytes, which will not " &
-      "fit sockaddr_un.sun_path (108); use a shorter TMPDIR")
+      "fit a unix socket address on this host (std/net refuses " &
+      $Sockaddr_un_path_length & " or more); use a shorter TMPDIR")
   compileC(DaemonSource, result.daemonPath, workRoot, "dmn.c")
   compileC(ClientSource, result.clientPath, workRoot, "cli.c")
 
@@ -630,8 +703,17 @@ proc stopDaemon(daemon: var LiveDaemon) =
   # than for a child status that will never arrive here. Waiting matters: the
   # "socket re-bound" case asserts the stale registration stops re-validating,
   # and that is a statement about `/proc`.
+  #
+  # Off Linux `processStartIdentity` is "" for EVERY pid (PLATFORM CONTRACT),
+  # so that test would return at once, with the daemon possibly still running
+  # — and still appending to its accept log while the case's `removeDir`
+  # tears the fixture down ("Directory not empty"). There, wait instead until
+  # `kill(pid, 0)` stops finding the pid, i.e. until its new parent reaps it.
   for _ in 0 ..< 250:
-    if processStartIdentity(daemon.pid).len == 0:
+    if KernelIdentityHost:
+      if processStartIdentity(daemon.pid).len == 0:
+        return
+    elif kill(Pid(daemon.pid), 0) != 0:
       return
     sleep(20)
 
@@ -889,6 +971,86 @@ proc selfAsCheckedPeer(): TrustedDaemonPeer =
     checkedProgram: processCommName(pid),
     checkedUid: int(geteuid()))
 
+# ---------------------------------------------------------------------------
+# The non-Linux arms — see the PLATFORM CONTRACT in the header. Each is the
+# refusal one family of cases is specified to give, written once so the arms
+# that share it cannot drift apart. Templates, so they expand into the case
+# body that uses them and every `check` is attributed to that case.
+# ---------------------------------------------------------------------------
+
+template checkDeclarationRefused(f: Fixture; daemon: LiveDaemon;
+                                 name, keys: string) =
+  ## Declare `keys` for the live `daemon` (started as `name`) and assert the check REFUSES with
+  ## `InertHostRefusal`, registers nothing, and says so in the rendered line.
+  ## The daemon is asserted reachable first (its accept log grows), so the
+  ## refusal is the missing peer credential and not `dcoUnreachable` wearing
+  ## its name.
+  reset()
+  f.declare(runquotadSection(daemon.address, keys))
+  let contactsBefore = f.contactCount(name)
+  let reports = applyDeclarationsNow()
+  checkpoint("inert host, declared '" & keys.replace("\n", "; ") &
+    "': " & (if reports.len > 0: renderDaemonCheckReport(reports[0]) else: ""))
+  check reports.len == 1
+  check reports.outcomeFor(ddkRunQuota) == InertHostRefusal
+  if reports.len == 1:
+    check renderDaemonCheckReport(reports[0]).contains("NOT trusted")
+  check f.contactsWithin(name, contactsBefore + 1, 5_000) >
+    contactsBefore
+  check declaredTrustedDaemonRegistry().len == 0
+  check derivedTrustedDaemonRegistry().len == 0
+  check declaredPids().len == 0
+
+proc namesInertHostPeer(line: string; peerPid: int; peerPath: string): bool =
+  ## Does io-mon's IPC-loss line name THIS daemon? On a host without kernel
+  ## peer identity (PLATFORM CONTRACT) the socket PATH is the deterministic
+  ## identifier: io-mon's macOS hook reads the peer pid through
+  ## `LOCAL_PEERPID` best-effort, and records 0 when the kernel would not
+  ## answer (`macos_interpose.recordIpcConnect`: "0 => unobtainable"). That
+  ## was measured intermittently on aarch64-darwin, when the daemon had
+  ## already closed the connection. So the line must carry this endpoint's
+  ## `path=`, and its `peer=` must be this daemon's pid or the documented
+  ## "unknown" 0, never some other process.
+  "ipc peer outside monitored tree" in line and
+    (line.endsWith(" path=" & peerPath) or
+      (" path=" & peerPath & " ") in line) and
+    ((" peer=" & $peerPid & " ") in line or " peer=0 " in line)
+
+template checkIpcLossStands(f: Fixture; edge: BuildAction;
+                            config: BuildEngineConfig; logName: string;
+                            peerPid: int; peerPath: string) =
+  ## THE SYMPTOM, STILL PRESENT — what the milestone specifies for a host DA-4
+  ## cannot reach. The edge runs, is NOT forgiven, does NOT publish, and the
+  ## warm run LAUNCHES AGAIN. The loss is asserted to be the IPC peer loss
+  ## naming this daemon (`namesInertHostPeer`: its socket `peerPath`, and
+  ## `peerPid` — io-mon reads it best-effort through `LOCAL_PEERPID` — or the
+  ## "unknown" 0), so the
+  ## downgrade is the one a declaration would have forgiven and not some
+  ## unrelated monitor failure that would make this arm green for the wrong
+  ## reason.
+  # Bound once: the arguments may be expressions, and a template would
+  # otherwise re-evaluate them at every use.
+  let theEdge = edge
+  let theConfig = config
+  let cold = runBuild(graph([theEdge]), theConfig)
+  let c0 = cold.byId(theEdge.id)
+  checkpoint("inert host, cold: status=" & $c0.status & " reason=" &
+    c0.reason & " diagnostics=" & $c0.evidence.diagnostics)
+  check c0.status == asSucceeded
+  check c0.launched
+  check f.runCount(logName) == 1
+  check attributionDiagnostics(c0).len == 0
+  check c0.evidence.diagnostics.anyIt(
+    namesInertHostPeer(it, peerPid, peerPath))
+  check not f.publishedRecordExists(theEdge)
+  let warm = runBuild(graph([theEdge]), theConfig)
+  let c1 = warm.byId(theEdge.id)
+  checkpoint("inert host, warm: decision=" & $c1.cacheDecision &
+    " launched=" & $c1.launched)
+  check c1.cacheDecision notin ReuseDecisions
+  check c1.launched
+  check f.runCount(logName) == 2
+
 suite "declared IPC trust: the check is what makes it a claim":
 
   test "a declared, checked daemon this build did not spawn publishes and warm-hits":
@@ -901,8 +1063,26 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## CONTROL arm is the same edge and the same out-of-band daemon with no
     ## declaration in force: that is the state of a provisioned host under DA-2
     ## alone, and it must not publish.
+    ##
+    ## NON-LINUX: the symptom is SPECIFIED TO REMAIN (DA-4 "INERT on macOS and
+    ## Windows"). The declaration that passes on Linux is refused, and the edge
+    ## that publishes on Linux behaves exactly like the control arm.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDetachedDaemon("unix", "declared")
+      defer: stopDaemon(daemon)
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+      checkDeclarationRefused(f, daemon, "declared",
+        "image = " & daemon.imagePath & "\nuid = " & $int(geteuid()))
+      let edge = f.clientEdge("decltrust/positive", "unix", daemon.address,
+        "positive")
+      checkIpcLossStands(f, edge, config, "positive", daemon.pid,
+        daemon.address)
     else:
       reset()
       let repoRoot = findRepoRoot()
@@ -985,8 +1165,31 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## on every member — the member list is what a later contributor edits.
     ## Each arm carries its own positive control, so a refusal is not a refusal
     ## produced by a fixture that could never have passed.
+    ##
+    ## NON-LINUX: no assertion can be verified, so the arms collapse to one
+    ## answer — every declaration, the would-be pass and the would-be mismatch
+    ## of each member alike, is refused with `InertHostRefusal` after a real
+    ## connect, and nothing is registered. Each declaration is still driven,
+    ## so a member whose check stopped refusing on this host would be red.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDetachedDaemon("unix", "checkfail")
+      defer: stopDaemon(daemon)
+      let myUid = int(geteuid())
+      let programKey = "program = " & daemon.imagePath.extractFilename & "\n"
+      for keys in [
+          "image = " & daemon.imagePath,
+          "image = " & f.clientPath,
+          "program = " & daemon.imagePath.extractFilename,
+          "program = runquotad",
+          programKey & "uid = " & $myUid,
+          programKey & "uid = " & $(myUid + 1),
+          "image = " & daemon.imagePath & "\nuid = " & $(myUid + 1)]:
+        checkDeclarationRefused(f, daemon, "checkfail", keys)
     else:
       reset()
       let f = makeFixture()
@@ -1050,7 +1253,10 @@ suite "declared IPC trust: the check is what makes it a claim":
       var daemon = f.startDetachedDaemon("unix", "e2efail")
       defer: stopDaemon(daemon)
       f.declare(runquotadSection(daemon.address, "program = runquotad"))
-      check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoProgramMismatch
+      # A refusal on every host; only WHICH guard refuses differs (PLATFORM
+      # CONTRACT), and everything below is the same downgrade on both.
+      check applyDeclarationsNow().outcomeFor(ddkRunQuota) ==
+        onKernelIdentityHost(dcoProgramMismatch)
       check declaredPids().len == 0
 
       let edge = f.clientEdge("decltrust/e2e-fail", "unix", daemon.address,
@@ -1085,10 +1291,17 @@ suite "declared IPC trust: the check is what makes it a claim":
       defer: stopDaemon(declared)
       var stranger = f.startDetachedDaemon("unix", "stranger")
       defer: stopDaemon(stranger)
-      f.declare(runquotadSection(declared.address,
-        "image = " & declared.imagePath))
-      check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoTrusted
-      check declaredPids() == @[declared.pid]
+      if KernelIdentityHost:
+        f.declare(runquotadSection(declared.address,
+          "image = " & declared.imagePath))
+        check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoTrusted
+        check declaredPids() == @[declared.pid]
+      else:
+        # The declared one cannot be trusted here (PLATFORM CONTRACT), so the
+        # "while a declared one is trusted" half is the refusal instead; the
+        # stranger's downgrade below is graded identically on both.
+        checkDeclarationRefused(f, declared, "named",
+          "image = " & declared.imagePath)
 
       let edge = f.clientEdge("decltrust/stranger", "unix", stranger.address,
         "stranger")
@@ -1152,8 +1365,16 @@ suite "declared IPC trust: the check is what makes it a claim":
       check renderDaemonCheckReport(reports[0]).contains("NOT trusted")
 
       trustDaemonWeSpawned(inet.process, "runquotad", tdcNoContent)
-      check revalidatedTrustedDaemons(
-        derivedTrustedDaemonRegistry()).anyIt(it.pid == inet.pid)
+      if KernelIdentityHost:
+        check revalidatedTrustedDaemons(
+          derivedTrustedDaemonRegistry()).anyIt(it.pid == inet.pid)
+      else:
+        # The registration itself is refused here (PLATFORM CONTRACT): no
+        # kernel identity for a pid that is demonstrably live. The INET edge's
+        # downgrade below is graded identically on both.
+        check inet.process.running
+        check processStartIdentity(inet.pid) == ""
+        check derivedTrustedDaemonRegistry().len == 0
 
       let edge = f.clientEdge("decltrust/inet", "inet", inet.address, "inet")
       let config = monitoredConfig(repoRoot, f.cacheRoot)
@@ -1187,8 +1408,63 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## question — WHICH uid field the re-check reads — needs a peer whose real
     ## and effective uids differ, which no fixture here is; that is the case
     ## immediately below.
+    ##
+    ## NON-LINUX: nothing is trusted to begin with, so there is nothing to
+    ## inherit (PLATFORM CONTRACT). The live arm asserts BOTH daemons' checks
+    ## refuse and the re-bound edge downgrades; the recorded-fact arms assert
+    ## the readers answer ""/-1 for this live process and that a fact carrying
+    ## FORGED non-empty readings for it — the unperturbed control and each
+    ## perturbation alike — is dropped, so the drop is the kernel-side re-read
+    ## and not merely the empty-field guard.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+
+      # (1) the socket is re-bound by a different process.
+      var first = f.startDetachedDaemon("unix", "rebind")
+      defer: stopDaemon(first)
+      checkDeclarationRefused(f, first, "rebind", "image = " & first.imagePath)
+      let checkedPid = first.pid
+      let checkedAddress = first.address
+      stopDaemon(first)
+      var second = f.startDetachedDaemon("unix", "rebind")
+      defer: stopDaemon(second)
+      check second.pid != checkedPid
+      check second.address == checkedAddress
+      checkDeclarationRefused(f, second, "rebind", "image = " & second.imagePath)
+      let edge = f.clientEdge("decltrust/rebound", "unix", second.address,
+        "rebound")
+      checkIpcLossStands(f, edge, monitoredConfig(repoRoot, f.cacheRoot),
+        "rebound", second.pid, second.address)
+
+      # (2)-(4) the recorded-fact arms.
+      let control = selfAsCheckedPeer()
+      check control.identity == ""
+      check control.checkedImage == ""
+      check control.checkedProgram == ""
+      check processEffectiveUid(getCurrentProcessId()) == -1
+      check processEffectiveUid(0) == -1
+      var forged = control
+      forged.identity = "1"
+      forged.checkedImage = getAppFilename()
+      forged.checkedProgram = getAppFilename().extractFilename
+      var recycled = forged
+      recycled.identity = "2"
+      var reExeced = forged
+      reExeced.checkedProgram = forged.checkedProgram & "-x"
+      var reImaged = forged
+      reImaged.checkedImage = forged.checkedImage & "-x"
+      var reUided = forged
+      reUided.checkedUid = forged.checkedUid + 1
+      var unreadableUid = forged
+      unreadableUid.checkedUid = -1
+      for fact in [control, forged, recycled, reExeced, reImaged, reUided,
+                   unreadableUid]:
+        check revalidatedTrustedDaemons([fact]).len == 0
     else:
       reset()
       let repoRoot = findRepoRoot()
@@ -1333,7 +1609,27 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## accessor returns the effective field, AND the production re-validation
     ## KEEPS a peer whose recorded uid is the effective one while DROPPING the
     ## same peer with the real one recorded.
-    if getuid() == 0:
+    ##
+    ## NON-LINUX: there is no `/proc/<pid>/status` to read either field from,
+    ## and the contract is FAIL-CLOSED (PLATFORM CONTRACT): the accessor
+    ## answers -1 for a live process rather than either uid, and a `daUid`
+    ## fact recorded with this process's real effective uid — under the empty
+    ## identity the host reports or a forged one — is dropped. No setuid
+    ## helper is run on that arm: it would add a privileged `execve` to the
+    ## host and could grade nothing the accessor's -1 does not already settle.
+    ## (Before the platform arms existed this case SKIPPED on macOS, because
+    ## `kernelReportedUids` found no `/proc` and no divergent peer was found.)
+    if not KernelIdentityHost:
+      let pid = getCurrentProcessId()
+      check processEffectiveUid(pid) == -1
+      check processStartIdentity(pid) == ""
+      for identity in ["", "1"]:
+        check revalidatedTrustedDaemons([TrustedDaemonPeer(
+          pid: pid, identity: identity, name: "runquotad",
+          contribution: tdcNoContent, origin: tdoDeclaredAndChecked,
+          declaredSocket: "/run/runquota/runquotad.sock",
+          checked: {daUid}, checkedUid: int(geteuid()))]).len == 0
+    elif getuid() == 0:
       # As root a setuid-root `execve` raises nothing — `ruid == euid == 0` —
       # so the divergence this case is about cannot exist here. Say what this
       # host is instead of passing quietly.
@@ -1483,8 +1779,16 @@ suite "declared IPC trust: the check is what makes it a claim":
       f.declare(runquotadSection(daemon.address,
         "program = " & daemon.imagePath.extractFilename &
         "\nuid = " & $int(geteuid())))
-      check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoTrusted
-      check declaredPids() == @[daemon.pid]
+      if KernelIdentityHost:
+        check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoTrusted
+        check declaredPids() == @[daemon.pid]
+      else:
+        # Adequate, so it gets past the surface and CONNECTS — and is then
+        # refused for want of a peer credential (PLATFORM CONTRACT). The
+        # accept-log control below holds on both, which is what keeps the two
+        # pre-connect refusals above graded here too.
+        check applyDeclarationsNow().outcomeFor(ddkRunQuota) == InertHostRefusal
+        check declaredPids().len == 0
       # AND THE ACCEPT LOG'S OWN POSITIVE CONTROL. An ADEQUATE declaration
       # does connect, and the daemon records it — so the two empty counts
       # above are the gate refusing before the connect and not a log that
@@ -1621,8 +1925,31 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## since exec. The kernel renders it `<path> (deleted)`, so the peer is
     ## running bytes the declared path no longer names, and the assertion is
     ## refused rather than matched against a mangled string.
+    ##
+    ## NON-LINUX: no image is readable at all — not pid 1's, not even this
+    ## process's own — so the check can verify no `image` assertion anywhere,
+    ## and it refuses (PLATFORM CONTRACT) on all three declarations: the image
+    ## that exists, the image unlinked since exec, and the `program` + `uid`
+    ## fallback. Refused rather than degraded, which is this case's property.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      check processImagePath(1) == ""
+      check processImagePath(getCurrentProcessId()) == ""
+      let copied = f.binDir / "decl_daemon2"
+      copyFile(f.daemonPath, copied)
+      setFilePermissions(copied, getFilePermissions(f.daemonPath))
+      var daemon = f.startDetachedDaemon("unix", "unlinked", copied)
+      defer: stopDaemon(daemon)
+      check processImagePath(daemon.pid) == ""
+      checkDeclarationRefused(f, daemon, "unlinked", "image = " & copied)
+      removeFile(copied)
+      checkDeclarationRefused(f, daemon, "unlinked", "image = " & copied)
+      checkDeclarationRefused(f, daemon, "unlinked",
+        "program = " & copied.extractFilename & "\nuid = " & $int(geteuid()))
     else:
       reset()
       let f = makeFixture()
@@ -1681,8 +2008,60 @@ suite "declared IPC trust: the check is what makes it a claim":
     ##     published, then call again. DA-2's own reach note says an adopted
     ##     daemon is not registered; this asserts that it is not, AND that the
     ##     declared peer is registered on that same call.
+    ##
+    ## NON-LINUX: the same two arms, and the declaration really is APPLIED on
+    ## both — the daemon's accept log grows, so the CLI did run the check — and
+    ## REFUSED on both (PLATFORM CONTRACT), so neither registry gains a peer.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDetachedDaemon("unix", "wiring")
+      defer: stopDaemon(daemon)
+      f.declare(runquotadSection(daemon.address,
+        "image = " & daemon.imagePath & "\nuid = " & $int(geteuid())))
+
+      # ---- the bypass arm ---------------------------------------------------
+      var bypassed = startAutoRunQuotaIfNeeded(bypassRunQuota = true)
+      check bypassed == nil
+      check f.contactsWithin("wiring", 1, 5_000) >= 1
+      check derivedTrustedDaemonRegistry().len == 0
+      check declaredTrustedDaemonRegistry().len == 0
+      check declaredPids().len == 0
+
+      # ---- the adopt arm ----------------------------------------------------
+      if findRunQuotaDaemonBin().len == 0:
+        checkpoint("no runquotad binary: the adopt arm is not driven here")
+      else:
+        let scratch = createTempDir("repro-declwire-", "",
+          dir = nonVolatileTempBase())
+        defer: removeDir(scratch)
+        let priorSocket = getEnv("RUNQUOTA_SOCKET", "")
+        putEnv("RUNQUOTA_SOCKET", scratch / "no-such-runquota.sock")
+        putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
+        reset()
+        f.declare(runquotadSection(daemon.address,
+          "image = " & daemon.imagePath & "\nuid = " & $int(geteuid())))
+        var spawned = startAutoRunQuotaIfNeeded(false)
+        defer:
+          releaseAutoRunQuotaProcess(spawned)
+          putEnv("RUNQUOTA_SOCKET", priorSocket)
+          reset()
+        check spawned != nil
+        reset()
+        f.declare(runquotadSection(daemon.address,
+          "image = " & daemon.imagePath & "\nuid = " & $int(geteuid())))
+        let contactsBeforeAdopt = f.contactCount("wiring")
+        var adopted = startAutoRunQuotaIfNeeded(false)
+        defer: releaseAutoRunQuotaProcess(adopted)
+        check adopted == nil
+        check f.contactsWithin("wiring", contactsBeforeAdopt + 1, 5_000) >
+          contactsBeforeAdopt
+        check derivedTrustedDaemonRegistry().len == 0
+        check declaredTrustedDaemonRegistry().len == 0
+        check declaredPids().len == 0
     else:
       reset()
       let f = makeFixture()
@@ -1697,12 +2076,18 @@ suite "declared IPC trust: the check is what makes it a claim":
       check bypassed == nil
       check derivedTrustedDaemonRegistry().len == 0
       check declaredPids() == @[daemon.pid]
-      let peer = declaredTrustedDaemonRegistry()[0]
-      check peer.origin == tdoDeclaredAndChecked
-      check peer.name == "runquotad"
-      check peer.contribution == tdcNoContent
-      check peer.declaredSocket == daemon.address
-      check peer.checked == {daImage, daUid}
+      # A FAILED CHECK, NOT A CRASH, when nothing was registered: indexing an
+      # empty registry used to raise `IndexDefect` here and abort the case,
+      # hiding every assertion after it (the adopt arm included).
+      let registered = declaredTrustedDaemonRegistry()
+      check registered.len > 0
+      if registered.len > 0:
+        let peer = registered[0]
+        check peer.origin == tdoDeclaredAndChecked
+        check peer.name == "runquotad"
+        check peer.contribution == tdcNoContent
+        check peer.declaredSocket == daemon.address
+        check peer.checked == {daImage, daUid}
 
       # ---- the adopt arm ----------------------------------------------------
       if findRunQuotaDaemonBin().len == 0:
@@ -1817,8 +2202,44 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## the four clauses satisfied — and only `outcome` refuses it. The check is
     ## the REAL one against a REAL live daemon; nothing here constructs a
     ## result, which is precisely why the fields are private.
+    ##
+    ## NON-LINUX: the isolating shape cannot be produced — the real check
+    ## refuses at the peer credential (PLATFORM CONTRACT), so it comes back
+    ## with `pid = 0`, an empty identity and nothing verified, and the
+    ## `outcome` clause cannot be graded alone on this host. What IS graded:
+    ## that refusal exactly, that `trustDaemonWeChecked` refuses it and the
+    ## zero value, and that the Linux arm's passing control is refused too.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDetachedDaemon("unix", "floor")
+      defer: stopDaemon(daemon)
+      for declaration in [
+          DeclaredDaemon(kind: ddkRunQuota, endpoint: daemon.address,
+            assertions: {daImage, daProgram}, image: daemon.imagePath,
+            program: "runquotad", uid: -1, source: "<case>"),
+          DeclaredDaemon(kind: ddkRunQuota, endpoint: daemon.address,
+            assertions: {daImage}, image: daemon.imagePath, uid: -1,
+            source: "<case>")]:
+        let refused = checkDeclaredDaemon(declaration)
+        checkpoint("inert host, refused: outcome=" &
+          $checkedDaemonOutcome(refused) & " pid=" & $checkedDaemonPid(refused) &
+          " detail=" & checkedDaemonDetail(refused))
+        check checkedDaemonOutcome(refused) == InertHostRefusal
+        check checkedDaemonPid(refused) == 0
+        check checkedDaemonIdentity(refused) == ""
+        check checkedDaemonAssertions(refused) == {}
+        check not trustDaemonWeChecked(ddkRunQuota, refused)
+        check declaredTrustedDaemonRegistry().len == 0
+        check declaredPids().len == 0
+      let unchecked = DaemonIdentityCheck()
+      check checkedDaemonOutcome(unchecked) == dcoNotChecked
+      check not trustDaemonWeChecked(ddkRunQuota, unchecked)
+      check declaredTrustedDaemonRegistry().len == 0
+      check renderDaemonCheckReport(DaemonCheckReport()).contains("NOT trusted")
     else:
       reset()
       let f = makeFixture()
@@ -1908,8 +2329,48 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## the exemption to the declared endpoint, this arm goes red — which is the
     ## intended way to find out, rather than discovering that the meaning of a
     ## trust fact changed silently.
+    ##
+    ## NON-LINUX: ARM 1 is the same pre-connect refusal on every host and is
+    ## graded identically. ARM 2's residual does not exist here, because the
+    ## program-identifying declaration is itself refused (PLATFORM CONTRACT):
+    ## the kernel names no peer on either endpoint, and the undeclared
+    ## endpoint's edge downgrades instead of being forgiven.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDetachedDaemon("unix", "mux1",
+        secondSocketName = "mux2")
+      defer: stopDaemon(daemon)
+      check daemon.secondAddress.len > 0
+      check daemon.secondAddress != daemon.address
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+      for endpoint in [daemon.address, daemon.secondAddress]:
+        let probe = checkDeclaredDaemon(DeclaredDaemon(kind: ddkRunQuota,
+          endpoint: endpoint, assertions: {daImage},
+          image: daemon.imagePath, uid: -1, source: "<case>"))
+        check checkedDaemonOutcome(probe) == InertHostRefusal
+        check checkedDaemonPid(probe) == 0
+      reset()
+
+      # ---- ARM 1: identical on every host -----------------------------------
+      f.declare(runquotadSection(daemon.address, "uid = " & $int(geteuid())))
+      check applyDeclarationsNow().outcomeFor(ddkRunQuota) ==
+        dcoNoProgramAssertion
+      check declaredPids().len == 0
+      checkIpcLossStands(f, f.clientEdge("decltrust/mux-undeclared-refused",
+        "unix", daemon.secondAddress, "muxrefused"), config, "muxrefused",
+        daemon.pid, daemon.secondAddress)
+
+      # ---- ARM 2: refused, so no residual -----------------------------------
+      checkDeclarationRefused(f, daemon, "mux1",
+        "image = " & daemon.imagePath & "\nuid = " & $int(geteuid()))
+      checkIpcLossStands(f, f.clientEdge("decltrust/mux-undeclared-forgiven",
+        "unix", daemon.secondAddress, "muxresidual"), config, "muxresidual",
+        daemon.pid, daemon.secondAddress)
     else:
       reset()
       let repoRoot = findRepoRoot()
@@ -1964,7 +2425,12 @@ suite "declared IPC trust: the check is what makes it a claim":
         "image = " & daemon.imagePath & "\nuid = " & $int(geteuid())))
       check applyDeclarationsNow().outcomeFor(ddkRunQuota) == dcoTrusted
       check declaredPids() == @[daemon.pid]
-      check declaredTrustedDaemonRegistry()[0].declaredSocket == daemon.address
+      # A failed check rather than an `IndexDefect` when nothing registered,
+      # for the same reason as in the wiring case.
+      let registered = declaredTrustedDaemonRegistry()
+      check registered.len > 0
+      if registered.len > 0:
+        check registered[0].declaredSocket == daemon.address
 
       let residualEdge = f.clientEdge("decltrust/mux-undeclared-forgiven",
         "unix", daemon.secondAddress, "muxresidual")
@@ -2027,8 +2493,59 @@ suite "declared IPC trust: the check is what makes it a claim":
     ## logic, and wiring is what an edit drops. The negative on the same arm is
     ## what keeps "the arm is wired" from being indistinguishable from "the arm
     ## forgives everything".
+    ##
+    ## NON-LINUX: the same fold site, refusing. The declaration is refused
+    ## (PLATFORM CONTRACT), and the capture read back off disk still carries
+    ## the `mrIpcConnect` to the daemon's socket (with its pid, which io-mon
+    ## reads best-effort through `LOCAL_PEERPID`, or 0 where the kernel would
+    ## not answer) and the loss text — so the evidence a passing check
+    ## would forgive is present and the refusal is the engine's — while the
+    ## edge does not publish and re-launches warm.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      reset()
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDetachedDaemon("unix", "reported")
+      defer: stopDaemon(daemon)
+      checkDeclarationRefused(f, daemon, "reported",
+        "image = " & daemon.imagePath & "\nuid = " & $int(geteuid()))
+
+      let capturePath = f.workRoot / "rep.iomon"
+      let edge = f.reportEdge(repoRoot, "decltrust/report", daemon.address,
+        "report", capturePath)
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+      let res = runBuild(graph([edge]), config)
+      let r0 = res.byId(edge.id)
+      checkpoint("inert host, report: status=" & $r0.status & " reason=" &
+        r0.reason & " stderr=" & r0.stderr &
+        " diagnostics=" & $r0.evidence.diagnostics)
+      check r0.status == asSucceeded
+      check f.runCount("report") == 1
+      check fileExists(capturePath)
+      check attributionDiagnostics(r0).len == 0
+      check not f.publishedRecordExists(edge)
+      var sawConnect = false
+      var sawLoss = false
+      if fileExists(capturePath):
+        for record in streamMonitorDepFileRecords(capturePath,
+            defaultMonitorDepFileReaderOptions()):
+          # Keyed on the socket path, with the pid this daemon's or the
+          # documented "unobtainable" 0 — see `namesInertHostPeer`.
+          if record.kind == mrIpcConnect and record.path == daemon.address and
+              record.childOsPid in [uint64(daemon.pid), 0'u64]:
+            sawConnect = true
+          if record.kind == mrEventLoss and
+              namesInertHostPeer(record.detail, daemon.pid, daemon.address):
+            sawLoss = true
+      check sawConnect
+      check sawLoss
+      let warm = runBuild(graph([edge]), config)
+      check warm.byId(edge.id).cacheDecision notin ReuseDecisions
+      check warm.byId(edge.id).launched
+      check f.runCount("report") == 2
     else:
       reset()
       let repoRoot = findRepoRoot()

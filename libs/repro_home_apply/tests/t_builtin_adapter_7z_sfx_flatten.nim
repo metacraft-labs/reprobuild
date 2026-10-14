@@ -6,9 +6,9 @@
 ##
 ## Hermetic: every fixture is materialized on disk and served via a
 ## ``file://`` URL. The single non-hermetic dependency is a host
-## ``7z.exe`` on PATH (or in a pre-staged ``sevenzip`` store prefix). Per
+## ``7z.exe`` on PATH (or in a pre-staged ``7zip`` store prefix). Per
 ## the M3 ``discoverSevenZipExe`` contract, the test pre-seeds the
-## store with a hand-rolled ``sevenzip`` prefix (GM4b: the stdlib 7-Zip
+## store with a hand-rolled ``7zip`` prefix (the stdlib 7-Zip
 ## package's name) that aliases the host's
 ## ``7z.exe`` so the catalog-prefix branch (Step i) of the discovery
 ## order is exercised end-to-end alongside the PATH-fallback (Step ii).
@@ -33,6 +33,7 @@ import repro_interface_artifacts
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
 from repro_test_support import testCaseScratchSlug
+import repro_test_support/reasoned_skip
 
 let FixtureRoot = "build/test-tmp/t-builtin-adapter-7z-sfx" /
   testCaseScratchSlug()
@@ -76,8 +77,9 @@ proc resolveRealSevenZip(hostExe: string): string =
           return value
   hostExe
 
-proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
-  ## Pre-populate the store with a ``sevenzip``-packaged prefix containing
+proc seedSevenZipPrefix(store: var Store; hostSevenZ: string;
+                        packageName = "7zip"): string =
+  ## Pre-populate the store with a ``packageName`` prefix containing
   ## ``bin/7z.exe`` (aliased from the host's discovered 7z). Returns
   ## the abs path of the realized prefix. Drives the M3
   ## ``discoverSevenZipExe`` Step (i) — catalog-prefix lookup —
@@ -88,12 +90,12 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
   ## Uses the same ``realizePrefix`` plumbing the real adapter does, so
   ## the on-disk layout + the ``prefixes`` index row both look identical
   ## to a "real" 7zip realize.
-  let prefixId = computeRealizationHash("sevenzip", "test-seed",
+  let prefixId = computeRealizationHash(packageName, "test-seed",
     "builtin", "sha256:seed", "bin/7z.exe", "file:///seed",
     "seed", @["fixture"])
   let hint = StoreReceiptHint(
     adapter: "builtin",
-    packageName: "sevenzip",
+    packageName: packageName,
     version: "test-seed",
     declaredExecutablePath: "bin/7z.exe",
     exportedExecutables: @["bin/7z.exe"],
@@ -196,6 +198,23 @@ suite "M3 — archive realizer 7z SFX flatten":
       let discovered = discoverSevenZipExe(store, "test-tool")
       check discovered.startsWith(prefixAbs)
       check fileExists(extendedPath(discovered))
+
+  test "test_discover_sevenzip_accepts_legacy_sevenzip_prefix":
+    ## Between GM4b and the fix that let ``package "7zip"`` be declared,
+    ## the stdlib 7-Zip package was named ``sevenzip``; a prefix realized
+    ## in that window is recorded under that name and must still be found.
+    let fixtureDir = FixtureRoot / "discover-legacy-name"
+    let storeDir = fixtureDir / "store"
+    resetDir(fixtureDir); resetDir(storeDir)
+    let hostSeven = findExe("7z")
+    if hostSeven.len == 0:
+      skip("no host 7z on PATH; cannot seed the legacy `sevenzip` prefix")
+    else:
+      var store = openStore(storeDir)
+      defer: store.close()
+      let prefixAbs = seedSevenZipPrefix(store, hostSeven, "sevenzip")
+      let discovered = discoverSevenZipExe(store, "test-tool")
+      check discovered.startsWith(prefixAbs)
 
   test "test_m3_discover_sevenzip_fails_closed_without_7zip":
     ## M3 ``discoverSevenZipExe`` Step (iii): no catalog prefix + no

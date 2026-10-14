@@ -15,7 +15,7 @@
 ##   generated from that list, so every package a recipe resolves by name is a
 ##   package a profile resolves by name;
 ## * the stdlib packages that carried a ``VersionedProvisioning`` catalog before
-##   GM4b (``jdk``, ``maven``, ``sevenzip``, ...). A recipe reaches these through an
+##   GM4b (``jdk``, ``maven``, ``7zip``, ...). A recipe reaches these through an
 ##   explicit import; a profile reached them through the retired
 ##   ``catalog_registry``, and must keep reaching them.
 ##
@@ -57,7 +57,7 @@ importBundledStdlibPackages()
 import ./packages/[jdk, cabal, claude_code, composer, crystal, elixir, erlang,
   ghc, gradle, maven, php, ruby, swift, zig, cmake, clingo, chocolatey, zstd,
   dotnet_sdk, gcc, gh, git, go, just, meson, nim, ninja, node, python3, fpc,
-  sevenzip, wix3, innounp, lessmsi, autoconf, automake, libtool, ocaml, alire,
+  pkg_7zip, wix3, innounp, lessmsi, autoconf, automake, libtool, ocaml, alire,
   gcc_winlibs, llvm_mingw, cargo, circom, clippy, forc, foundry, rustc,
   rustfmt, solc, create_dmg]
 
@@ -83,7 +83,7 @@ proc packageAvailability*(packageId: string): PackageAvailability =
   ##
   ## GM4b: the PMC-5 table of declarations for harvested-only packages
   ## (``HarvestedPlatformDeclarations``) is gone with the catalog it covered.
-  ## Those packages (wix3, innounp, lessmsi, sevenzip) now have ``package``
+  ## Those packages (wix3, innounp, lessmsi, 7zip) now have ``package``
   ## blocks, so their declarations are ordinary ``platforms:`` lines that a
   ## re-harvest no longer regenerates away.
   let declaration = declaredPackagePlatforms(packageId)

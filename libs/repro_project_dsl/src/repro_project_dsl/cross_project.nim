@@ -266,7 +266,12 @@ proc generatedCrossProjectPackageConst(packageName: string;
     return quote do:
       template build*(p: `legacyType`): PackageBuild[`packageLit`] =
         PackageBuild[`packageLit`]()
-  let packageIdent = ident(packageName)
+  # A package name is a selector string and need not be a Nim identifier
+  # (``package "7zip":``); such a name gets the same sanitized value
+  # identifier the legacy const path emits (``packageValueIdent``).
+  let packageIdent =
+    if packageName.validIdentifier: ident(packageName)
+    else: ident(packageValueIdent(packageName))
   result = quote do:
     const `packageIdent`* {.inject.}: Package[`packageLit`] =
       Package[`packageLit`]()

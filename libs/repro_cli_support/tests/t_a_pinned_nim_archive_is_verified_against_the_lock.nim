@@ -65,8 +65,9 @@ proc makeNimArchive(root: string): tuple[path, sha256: string] =
   createDir(tree / "lib")
   writeFile(tree / "bin" / addFileExt("nim", ExeExt), "not a compiler\n")
   # Executable, as upstream ships it: the tarball edge refuses a prefix whose
-  # declared executable is not one ("extracted tarball lacks executable
-  # bin/nim"), so on POSIX a 0644 stand-in is a fixture no real archive is.
+  # declared executable is not one ("extracted tarball declares executable
+  # bin/nim, which is present but carries no execute permission"), so on POSIX
+  # a 0644 stand-in is a fixture no real archive is.
   when defined(posix):
     setFilePermissions(tree / "bin" / "nim", {fpUserRead, fpUserWrite,
       fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})

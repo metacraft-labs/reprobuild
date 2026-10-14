@@ -116,6 +116,11 @@ type
       ## `nix`, `scoop`, `path`). Empty table when the profile carries no
       ## `adapterPreference:` block — resolution then uses
       ## `DefaultSelectionPolicy`, the same on every platform.
+    catalogImports*: seq[string]
+      ## The contribution catalogs the profile's `catalogs:` section
+      ## imports (profile-relative module paths), copied through from
+      ## `Profile.catalogImports` for the resolution context
+      ## (`catalog_projection`).
     ## Order: packages by `packageId`, generated files by
     ## `(absoluteOutputPath, sourceKind, contributingPackage)`, launchers
     ## by `commandName`. The planner enforces this; `compareEqual`
@@ -200,10 +205,10 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
 # closed because its extractor's prefix does not yet exist on disk.
 #
 # Concrete example surfaced by the predecessor campaign's M11 LIVE
-# smoke: a profile containing both ``package(7zip)`` (``sevenzip`` since
-# GM4b) and ``package(lessmsi)`` alphabetically sorts the 7-Zip package
+# smoke: a profile containing both ``package(7zip)`` and
+# ``package(lessmsi)`` alphabetically sorts the 7-Zip package
 # before ``lessmsi``, but
-# ``packages/sevenzip.nim`` uses ``imInstallerMsi`` which needs
+# ``packages/pkg_7zip.nim`` uses ``imInstallerMsi`` which needs
 # ``lessmsi.exe`` pre-realized OR on PATH. The smoke side-stepped the
 # bug by using a single-package profile; M0 closes it for real.
 #
@@ -379,6 +384,7 @@ proc buildPlan*(profile: Profile; profileDir: string;
   # realize + preview call sites build their resolution context without
   # re-loading the profile; an empty table selects the default policy.
   result.adapterPreference = profile.adapterPreference
+  result.catalogImports = profile.catalogImports
   let active = enabledActivitiesFor(profile, ctx.host)
   for child in profile.root.children:
     if child.kind != nkActivity:

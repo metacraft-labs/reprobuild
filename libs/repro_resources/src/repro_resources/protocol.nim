@@ -494,10 +494,12 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
   ##     ``observe``/``apply`` over the wire), reconstructing the effective
   ##     binding from the record. Otherwise materialize normally.
   ##   * RENEW: for a leased state, merge this run's holder deadlines into the
-  ##     record and recompute the reference-counted MAX ``effectiveDeadline``
-  ##     (keep-dominates -> ``none``); persist with the record.
+  ##     record (``keep`` holders by name, in ``keepHolders``) and recompute
+  ##     the reference-counted MAX ``effectiveDeadline`` (keep-dominates ->
+  ##     ``none``); persist with the record.
   ##   * a non-leased resource follows the L1 persist path (a record for every
-  ##     present binding after the reconcile).
+  ##     present binding after the reconcile), carrying any lease its existing
+  ##     record holds forward unchanged.
   ##
   ## When ``store`` is ``none`` (the default) the loop is BYTE-IDENTICAL to the
   ## pre-N3a behaviour: no store I/O, no record writes — the RP5b tests and the
@@ -571,15 +573,22 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
     # L1/L2 persist (only with a store — the no-store path is untouched).
     if store.isSome and effective.isSome and effective.get.present:
       if isLeasedState:
-        let existingHolders =
+        # The whole existing holder state, keep holders included, so a keep
+        # pin from an earlier run survives this run's dated renewals (same
+        # merge as `reconcileResources`).
+        let existing =
           if hasStateRecord(store.get, inst.address):
-            readStateRecord(store.get, inst.address).holders
+            some(readStateRecord(store.get, inst.address))
           else:
-            initTable[string, Time]()
-        let merged = mergeHolderDeadlines(existingHolders, renewals, now)
+            none(ResourceStateRecord)
+        let merged = mergeHolderDeadlines(existing, renewals, now)
         writeStateRecord(store.get, inst, effective.get,
           holders = merged.holders,
           effectiveDeadline = merged.effective,
-          lastRenewed = now)
+          lastRenewed = now,
+          keepHolders = merged.keepHolders,
+          keepHoldersKnown = merged.keepHoldersKnown)
       else:
-        writeStateRecord(store.get, inst, effective.get)
+        # Not consumed this run: carry any existing lease forward untouched
+        # (the same helper as `reconcileResources`).
+        writeUnconsumedStateRecord(store.get, inst, effective.get)

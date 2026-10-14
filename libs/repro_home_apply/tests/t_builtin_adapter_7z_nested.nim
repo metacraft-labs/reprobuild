@@ -53,11 +53,11 @@ proc resolveRealSevenZip(hostExe: string): string =
   hostExe
 
 proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
-  let prefixId = computeRealizationHash("sevenzip", "test-seed",
+  let prefixId = computeRealizationHash("7zip", "test-seed",
     "builtin", "sha256:seed", "bin/7z.exe", "file:///seed",
     "seed", @["fixture"])
   let hint = StoreReceiptHint(
-    adapter: "builtin", packageName: "sevenzip", version: "test-seed",
+    adapter: "builtin", packageName: "7zip", version: "test-seed",
     declaredExecutablePath: "bin/7z.exe",
     exportedExecutables: @["bin/7z.exe"],
     lockIdentity: "sha256:seed", provenanceUrl: "file:///seed",

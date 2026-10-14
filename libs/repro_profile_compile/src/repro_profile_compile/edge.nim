@@ -156,12 +156,14 @@ proc profileCompileKey*(absProfile: string): string =
   blake3.toHex(blake3.digest(absolutePath(absProfile).replace('\\', '/')))
 
 proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
-                                    rbpiPath: string): ContentDigest =
+                                    rbpiPath: string;
+                                    cCompiler = ""): ContentDigest =
   ## The weak fingerprint — the one part of the action key that is DECLARED
   ## rather than observed — reduced to what monitoring cannot supply:
   ##
-  ## * compiler identity: the `nim` the helper will resolve, and the helper
-  ##   binary itself (whose embedded encoder decides the envelope bytes);
+  ## * compiler identity: the `nim` and the C compiler the helper will
+  ##   resolve, and the helper binary itself (whose embedded encoder decides
+  ##   the envelope bytes);
   ## * declared output identity: the published envelope's path and the RBPI
   ##   schema version it is written in.
   ##
@@ -174,6 +176,7 @@ proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
   weakFingerprintFromText(
     "repro.profile.compile.v2\n" &
     "compiler=" & nimExe & "\n" &
+    "c-compiler=" & cCompiler & "\n" &
     "helper=" & publicCliPath & "\n" &
     "output=" & rbpiPath & "\n" &
     "rbpi-schema=" & $profile_envelope.RbpiSchemaVersion & "\n")
@@ -197,7 +200,18 @@ proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
 #     names the compiler variable and the temp-directory variables only
 #     (`ProfileCompileEnvPassthrough`): the helper picks its Nim with
 #     `resolveProfileNimCompiler` (`$REPRO_NIM_COMPILER`, then `PATH`) and
-#     takes its nimcache from argv, and it is handed no C toolchain variable.
+#     takes its nimcache from argv. Its C compiler comes from
+#     `resolveProfileCCompiler` (an explicit choice, else Nim's default, else
+#     the recipe compile's fallback); the variables it reads stay OBSERVED
+#     (keyed by value), and the resolved path is in the weak fingerprint.
+#     A clang is passed `-fno-temp-file` where it accepts the flag
+#     (`profileCompileCFlags`): otherwise the `arc4random` clang draws to
+#     name its temporary object file is entropy this unblessed edge cannot
+#     carry, and its first run goes unpublished. That flag is decided by the
+#     helper, not named here: it follows from the compiler binary and the
+#     helper binary, which the monitored record covers. Do not make the
+#     resolution prefer a `cc` that is clang either: a clang too old for the
+#     flag would bring the unpublished first run back.
 # ---------------------------------------------------------------------------
 
 const ProfileCompileScratchEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
@@ -381,6 +395,13 @@ proc compileProfileToRbpi*(profileRoot: string;
       resolveProfileNimCompiler()
     except CompileFailure as err:
       raiseProfileCompile(err.msg)
+  # The C compiler, likewise: the helper resolves the same one in the same
+  # environment, and a mis-named `$REPRO_BOOTSTRAP_CC` is refused here.
+  let cCompiler =
+    try:
+      resolveProfileCCompiler()
+    except CompileFailure as err:
+      raiseProfileCompile(err.msg)
 
   # On force-rebuild remove the published envelope. The engine configuration
   # sets `rebuildMissingOutputsOnCacheHit`, so a record whose declared output
@@ -390,7 +411,7 @@ proc compileProfileToRbpi*(profileRoot: string;
     removeFile(extendedPath(rbpiPath))
 
   let weak = profileCompileWeakFingerprint(nimExe, opts.publicCliPath,
-    rbpiPath)
+    rbpiPath, cCompiler)
   let buildAction = profileCompileBuildAction(absProfile, rbpiPath,
     nimcacheDir, opts.publicCliPath, opts.workDir, repoRoot, weak,
     opts.verbose)

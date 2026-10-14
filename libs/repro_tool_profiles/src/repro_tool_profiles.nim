@@ -11,12 +11,15 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/host_tar
+# GC roots for the store paths a Nix tool realization is recorded under.
+import repro_core/nix_store_roots
 # The tarball provisioner runs as a built-in executor on the build engine's
 # scheduler thread, possibly while the engine's worker pool is live, so its
 # extraction commands are released without ``osproc.close``'s double close of
 # the merged stdout/stderr descriptor (see ``repro_core/process_close``).
 from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
+from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
@@ -25,6 +28,13 @@ import repro_interface_artifacts
 # `uses:` and a home profile's `package` reference.
 import repro_tool_profiles/realization_selection
 export realization_selection
+# The probe a realized prefix's declared executable has to pass, and the
+# reason it gives when it does not. Exported because the home archive
+# realizer applies the same rule to the arms it owns, and because the catalog
+# conformance sweeps assert against the verdicts rather than against message
+# text (Provisioning-Contributions.md §"Conformance And Trust").
+import repro_tool_profiles/declared_executable
+export declared_executable
 import repro_local_store
 # Binary-cache substitution for realized tool prefixes. Adding these imports
 # is what closes the gap where a package realized by URL+digest never
@@ -1153,81 +1163,6 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse;
     nixpkgsNarHash: selected.nixpkgsNarHash,
     lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
 
-proc unsafeRelativePath(value: string): bool =
-  let normalized = value.replace('\\', '/')
-  if normalized.len == 0 or normalized.startsWith("/"):
-    return true
-  for part in normalized.split('/'):
-    if part == "..":
-      return true
-
-proc pathContainsSymlink(root, relativePath: string): bool =
-  var current = root
-  for part in relativePath.replace('\\', '/').split('/'):
-    if part.len == 0 or part == ".":
-      continue
-    current = current / part
-    try:
-      if getFileInfo(extendedPath(current), followSymlink = false).kind in
-          {pcLinkToFile, pcLinkToDir}:
-        return true
-    except OSError:
-      discard
-
-proc executableInStorePath(storePath, declaredExecutablePath: string;
-                           rejectSymlinks = false): string =
-  if declaredExecutablePath.unsafeRelativePath:
-    return ""
-  if rejectSymlinks and pathContainsSymlink(storePath, declaredExecutablePath):
-    return ""
-  let candidate = storePath / declaredExecutablePath
-  if not fileExists(extendedPath(candidate)):
-    return ""
-  # M9.R.14d.8b — data-file declarations (e.g. wayland-protocols's
-  # ``share/pkgconfig/wayland-protocols.pc``) point at non-executable
-  # files that exist only to verify the realization completed. Detect
-  # these by extension and accept them without the +x permission
-  # requirement; the consumer threads the parent prefix into
-  # PKG_CONFIG_PATH at build time rather than spawning the file
-  # directly.
-  # M9.R.15q.5.9 — hwdata ships ``share/hwdata/pnp.ids`` (the PnP
-  # vendor-ID database). Recognise ``.ids`` as a data declaration so
-  # the executable+permission check is skipped (the file is r--r--r--
-  # in the nix store).
-  # M9.R.15q.5.10 — ``.dll`` is the Windows sibling of ``.so`` and was
-  # missing from a list that already carried the POSIX one. The case that
-  # surfaced it: electron-builder's ``nsis-resources`` archive is a flat tree
-  # of plugin DLLs with no program in it at all, so the only anchor a
-  # declaration can name is a DLL, and a DLL is not something anyone spawns.
-  # Its absence here made the package's realize depend on Windows reporting
-  # execute permission for ordinary files rather than on a stated rule.
-  # M9.R.15q.5.11 — ``.bin`` and ``.onnx`` are MODEL WEIGHTS: a Whisper
-  # ``ggml-base.bin`` or a Piper voice's ``.onnx`` is a multi-megabyte blob
-  # that a runtime memory-maps and that nothing ever spawns. They arrive
-  # through ``archiveType = "raw"``, which copies a single downloaded file
-  # into the prefix under its declared name, so the declared path IS the
-  # payload and there is no program in the package to anchor on instead.
-  # M9.R.15q.5.12 — ``.js``/``.mjs``/``.cjs`` are SCRIPTS, and a script is
-  # the case ``launcher`` exists for: the declared path is the payload an
-  # interpreter runs, never a program the OS execs, so it carries no execute
-  # bit on any host. The launcher pair realize writes beside it is what ends
-  # up being invoked.
-  let dataExts = [".pc", ".so", ".dll", ".a", ".h", ".hpp", ".cmake",
-    ".json", ".xml", ".txt", ".ids", ".bin", ".onnx",
-    ".js", ".mjs", ".cjs"]
-  let lower = declaredExecutablePath.toLowerAscii
-  var isDataDecl = false
-  for ext in dataExts:
-    if lower.endsWith(ext) or lower.contains(ext & "."):
-      isDataDecl = true
-      break
-  if isDataDecl:
-    return absolutePath(candidate)
-  if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
-      it in getFilePermissions(extendedPath(candidate))):
-    return absolutePath(candidate)
-  return ""
-
 proc safeStoreSegment*(value, fallback: string): string =
   for ch in value:
     if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
@@ -1510,6 +1445,79 @@ proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   writeFile(extendedPath(path),
     toByteString(encodeNixMaterializationProfile(profile)))
 
+proc nixRealizationRootDir*(storeRoot: string; useDef: InterfaceToolUse;
+                            plan: NixAcquisitionPlan): string =
+  ## Where the GC roots of a Nix tool's CURRENT realization live:
+  ## ``<storeRoot>/nix-gc-roots/<package>.<executable>-<slot digest>``.
+  ##
+  ## The directory is keyed by the tool REQUEST — host, package name and
+  ## executable — and deliberately NOT by what realizes it (selector, lock
+  ## identity, nixpkgs pin, version), which is what the materialization
+  ## cache key adds. ``rootStorePaths`` keeps a directory's roots EXACTLY the
+  ## set it was last given, so when a nixpkgs bump (or a version bump)
+  ## re-realizes the tool, the new paths are rooted and the superseded
+  ## realization's roots are dropped from the same directory, new first. A
+  ## directory per materialization key would instead keep every realization
+  ## the project ever used alive for good: nothing retires a key, and the
+  ## store would grow with every bump on exactly the hosts that collect
+  ## because they are short of disk.
+  ##
+  ## The cost of that choice: two uses of the same package and executable
+  ## realized from different pins in one project share a directory, and
+  ## each resolution re-roots its own realization at the other's expense.
+  ## Neither is served stale for it: a recorded path that is collected is
+  ## re-realized on its next use (``nixMaterializationProfileMatches``).
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.nix.gc-root-slot.v1")
+  payload.writeString(hostOS)
+  payload.writeString(hostCPU)
+  let selector = useDef.packageSelector
+  let at = selector.rfind('@')
+  let packageName = if at > 0: selector[0 ..< at] else: selector
+  payload.writeString(packageName)
+  payload.writeString(useDef.executableName)
+  let slot = blake3.toHex(blake3.digest(toByteString(payload)))
+  storeRoot / "nix-gc-roots" /
+    (safeStoreSegment(packageName & "." & useDef.executableName,
+      "nix-tool") & "-" & slot[0 ..< 16])
+
+proc rootNixRealization(storeRoot: string; useDef: InterfaceToolUse;
+                        plan: NixAcquisitionPlan;
+                        storePaths: openArray[string]) =
+  ## Give the store paths of one realization a GC root of their own, under
+  ## ``nixRealizationRootDir`` (``repro_core/nix_store_roots``).
+  ##
+  ## With no ``storeRoot`` there is nothing to protect: no record, no
+  ## ``nix-store-path.txt`` and no materialization cache entry is written,
+  ## so the realization lives only as long as the returned profile, inside
+  ## this process, and any build output it produces is rooted by the build
+  ## engine's own ledger.
+  ##
+  ## A failure is a WARNING, not a provisioning failure. The realization is
+  ## valid right now, and its later loss is caught rather than served:
+  ## ``nixMaterializationProfileMatches`` and the tool-identity readers check
+  ## that a recorded path exists before reusing it, and the next resolution
+  ## retries the root.
+  if storeRoot.len == 0:
+    return
+  let storeDir = nixStoreDir()
+  var paths: seq[string] = @[]
+  for path in storePaths:
+    if path.startsWith(storeDir & "/"):
+      # Only a top-level store object can be a GC root; a path inside one
+      # (`…/lib`) is rooted through the object that contains it.
+      let slash = path.find('/', storeDir.len + 1)
+      paths.add(if slash < 0: path else: path[0 ..< slash])
+  if paths.len == 0:
+    return
+  try:
+    discard rootStorePaths(nixRealizationRootDir(storeRoot, useDef, plan),
+      paths, label = "nix://" & plan.nixSelector, storeDir = storeDir)
+  except CatchableError as err:
+    stderr.writeLine("repro tools: warning: the Nix store paths of " &
+      plan.nixSelector & " are not protected from garbage collection: " &
+      err.msg)
+
 proc addUniquePath*(dst: var seq[string]; value: string)
   ## Forward declaration — defined alongside the from-source populator
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
@@ -1568,6 +1576,11 @@ else:
     let selector = plan.nixSelector
     let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
     if cached.hit:
+      # The record is reusable only because its paths still exist (see
+      # ``nixMaterializationProfileMatches``); re-assert their root so they
+      # keep existing. Warm, this is one directory listing and no process.
+      rootNixRealization(storeRoot, useDef, plan,
+        cached.profile.realizedStorePaths)
       return cached.profile
 
     # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
@@ -1732,6 +1745,12 @@ else:
         nixVersion, "nix", plan.lockIdentity,
         plan.declaredExecutablePath, "nix://" & plan.nixSelector,
         selectedStorePath, realized)
+      # Root BEFORE recording: ``nix build --no-link`` (the helper's and the
+      # direct fallback's) left no root, and the record written next outlives
+      # the process by design. Without its own root the recorded path stays
+      # alive only while some dev-shell profile generation happens to name
+      # the same path (reprobuild-pm issue 2026-10-02, addendum 2026-10-03).
+      rootNixRealization(storeRoot, useDef, plan, realized)
       createDir(extendedPath(unified.absolutePath))
       writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
         selectedStorePath & "\n")
@@ -2341,7 +2360,7 @@ proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
 
 const
   # 7-Zip for the extractor dependency edge. MUST match the Windows x86_64
-  # entry of `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
+  # `tarball` of `package "7zip"` in `repro_dsl_stdlib/packages/pkg_7zip.nim`;
   # `t_sevenzip_bootstrap_matches_stdlib_catalog` checks that it does. The MSI,
   # not the `.exe` installer or a `.7z`, because `msiexec /a` unpacks it with
   # nothing but the OS: the extractor must not need an extractor.
@@ -3406,11 +3425,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     plan.url, plan.sha256, tarballPrefixLayoutParts(plan))
   let prefix = unified.absolutePath
   if dirExists(extendedPath(prefix)):
-    if executableInStorePath(prefix, plan.declaredExecutablePath,
-        rejectSymlinks = true).len == 0:
+    let existing = probeDeclaredExecutable(prefix,
+      plan.declaredExecutablePath, rejectSymlinks = true)
+    if existing.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: existing tarball realization lacks " &
-        plan.declaredExecutablePath & ": " & prefix)
+        "tool-resolution failed: existing tarball realization " &
+        existing.reason & ": " & prefix)
     return (prefix: prefix, archivePath: "",
         selectedUrl: selectedUrlFromReceipt(prefix))
 
@@ -3493,12 +3513,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
         raise newException(OSError,
           "tool-resolution failed: prune path could not be removed: " &
           target)
-    let extractedExecutable = executableInStorePath(tempPrefix,
+    let extractedProbe = probeDeclaredExecutable(tempPrefix,
       plan.declaredExecutablePath, rejectSymlinks = true)
-    if extractedExecutable.len == 0:
+    if extractedProbe.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: extracted tarball lacks executable " &
-        plan.declaredExecutablePath)
+        "tool-resolution failed: extracted tarball " & extractedProbe.reason)
+    let extractedExecutable = extractedProbe.resolvedPath
     # Optional alias. Some upstreams ship a binary named for its target
     # triple (``codex-x86_64-pc-windows-msvc.exe``) while every consumer
     # invokes it as ``codex``; a realized prefix goes on PATH as a DIRECTORY,
@@ -3561,11 +3581,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
         removeDir(extendedPath(tempPrefix))
       else:
         raise
-    if executableInStorePath(prefix, plan.declaredExecutablePath,
-        rejectSymlinks = true).len == 0:
+    let materializedProbe = probeDeclaredExecutable(prefix,
+      plan.declaredExecutablePath, rejectSymlinks = true)
+    if materializedProbe.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: materialized tarball lacks executable " &
-        plan.declaredExecutablePath)
+        "tool-resolution failed: materialized tarball " &
+        materializedProbe.reason)
     # Publish so the NEXT machine substitutes instead of downloading. Soft
     # fail: a developer without publish credentials still has a working
     # toolchain, they just did not contribute this one.
@@ -4090,12 +4111,13 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
         try:
           let materialized = materializeTarballPrefix(plan, storeRoot,
             writerMode, tools)
-          let resolved = executableInStorePath(materialized.prefix,
+          let edgeProbe = probeDeclaredExecutable(materialized.prefix,
             plan.declaredExecutablePath, rejectSymlinks = true)
-          if resolved.len == 0:
+          if edgeProbe.verdict != deOk:
             raise newException(OSError,
-              "tool-resolution failed: tarball realization lacks " &
-              plan.declaredExecutablePath)
+              "tool-resolution failed: tarball realization " &
+              edgeProbe.reason)
+          let resolved = edgeProbe.resolvedPath
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
           let receiptStore = receiptStoreRoot(absolutePath(receipt))
@@ -4208,9 +4230,19 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
            plan.declaredExecutableAlias))):
       break
     if attempt > 0:
+      # Name the reason the prefix the receipt points at does not satisfy the
+      # declaration, not merely that it does not. When the prefix is gone
+      # there is nothing to probe and the verdict is the honest "missing".
+      let receiptProbe =
+        if receipt.prefix.len > 0 and dirExists(extendedPath(receipt.prefix)):
+          probeDeclaredExecutable(receipt.prefix,
+            plan.declaredExecutablePath, rejectSymlinks = true)
+        else:
+          DeclaredExecutableProbe(verdict: deMissing,
+            declaredPath: plan.declaredExecutablePath)
       raise newException(OSError,
-        "tool-resolution failed: tarball realization lacks " &
-        plan.declaredExecutablePath & " (receipt " & edges.rootReceipt &
+        "tool-resolution failed: tarball realization " & receiptProbe.reason &
+        " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
   refuseUnrunnableTarballExecutable(useDef, receipt.executable)
   result = tarballProfileFor(useDef, plan, receipt.prefix,
@@ -4551,7 +4583,9 @@ type
       ## The pinned nixpkgs gcc (Linux hosts that have Nix).
     bcrSystem
       ## The host's system C compiler at its fixed location
-      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX).
+      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX),
+      ## else the C compiler this ``repro`` was built with
+      ## (``BuiltCCompilerPath``) when it exists.
     bcrXcode
       ## The Xcode Command Line Tools clang, at the path ``xcrun -f clang``
       ## names, with the SDK ``xcrun --show-sdk-path`` names (macOS).
@@ -4637,7 +4671,8 @@ proc describeBootstrapNimRoute*(route: BootstrapNimRoute): string =
       (when defined(linux): ", because this host has no Nix" else: "")
 
 proc describeBootstrapCRoute*(route: BootstrapCRoute;
-                              systemCandidates: openArray[string]): string =
+                              systemCandidates: openArray[string];
+                              builtCompiler = BuiltCCompilerPath): string =
   case route
   of bcrArchive:
     let useDef = bootstrapGccToolUse()
@@ -4653,6 +4688,10 @@ proc describeBootstrapCRoute*(route: BootstrapCRoute;
   of bcrSystem:
     "the host's system C compiler (the first of " &
       systemCandidates.join(", ") & ")" &
+      (if builtCompiler.len > 0:
+         ", else the C compiler this repro was built with (" &
+           builtCompiler & ")"
+       else: "") &
       (when defined(linux): ", because this host has no Nix" else: "")
   of bcrXcode:
     "the Xcode Command Line Tools clang (`xcrun -f clang`), the " &
@@ -4710,14 +4749,31 @@ else:
 
 proc provisionBootstrapCCompiler*(storeRoot: string;
     route = bootstrapCRoute();
-    systemCandidates: seq[string] = @bootstrapSystemCCompilers):
+    systemCandidates: seq[string] = @bootstrapSystemCCompilers;
+    builtCompiler = BuiltCCompilerPath):
     BootstrapCCompiler =
   ## Provision the recipe-compile C compiler by ``route`` and probe it, or
   ## raise saying which route failed and why. Never looks at ``PATH``.
   ##
+  ## ``bcrSystem`` takes the first existing ``systemCandidates`` entry, else
+  ## ``builtCompiler`` -- by default ``BuiltCCompilerPath``, the C compiler
+  ## this ``repro`` was built with -- when that file exists. That is the arm
+  ## an installed Nix package reaches where there is neither a ``nix``
+  ## executable nor a ``/usr/bin/cc``: the Nix build sandbox, which is where
+  ## a consumer's import-from-derivation runs ``repro home export`` and where
+  ## the package's own ``packaged-runtime-compile`` check builds a recipe
+  ## cold. The package embeds that path, so its closure carries the compiler
+  ## (Gradual-Nix-To-Reprobuild-Migration GM1l chose it as the profile
+  ## compile's fallback for the same reason); the package does not have to
+  ## pin one through its wrapper, which would oblige every native package to
+  ## ship a C compiler too. It is a fixed path chosen at build time, not a
+  ## ``PATH`` search, and it comes after the system compiler so a host with
+  ## one keeps using it. A build whose compiler is gone (a portable bundle
+  ## moved off the machine that built it) fails as before.
+  ##
   ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
   ## the steady-state cost is a file-existence check.
-  let origin = describeBootstrapCRoute(route, systemCandidates)
+  let origin = describeBootstrapCRoute(route, systemCandidates, builtCompiler)
   var cc = ""
   var sdk = ""
   try:
@@ -4733,9 +4789,17 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
         if fileExists(extendedPath(candidate)):
           cc = candidate
           break
+      if cc.len == 0 and builtCompiler.len > 0 and
+          fileExists(extendedPath(builtCompiler)):
+        cc = builtCompiler
       if cc.len == 0:
         raise newException(OSError, "none of " & systemCandidates.join(", ") &
-          " exists; install the system C compiler (e.g. the distribution's " &
+          " exists" &
+          (if builtCompiler.len > 0:
+             ", nor does the C compiler this repro was built with (" &
+               builtCompiler & ")"
+           else: "") &
+          "; install the system C compiler (e.g. the distribution's " &
           "gcc or build-essential package)")
     of bcrXcode:
       (cc, sdk) = resolveXcodeClang()

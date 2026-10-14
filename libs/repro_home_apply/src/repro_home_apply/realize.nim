@@ -33,6 +33,7 @@ from repro_core/paths import extendedPath
 import blake3
 import repro_local_store
 import repro_home_generations
+import repro_home_resources/drivers/app_bundle
 import repro_interface_artifacts
 import repro_tool_profiles
 
@@ -41,6 +42,7 @@ import ./plan
 import ./package_catalog
 import ./builtin_adapter
 import ./home_lock
+import ./macos_archives
 
 const
   PackageSourceEnvVar* = "REPRO_TEST_PACKAGE_SOURCE"
@@ -59,6 +61,21 @@ type
     akNix = "nix"
       ## GM4b: a ``nixPackage`` selection realized by
       ## ``repro_tool_profiles.resolveNixTool``.
+
+  AppBundleRealization* = object
+    ## GM4c: a realized macOS application bundle — what activation copies
+    ## into the Applications directory (``app_activation``).
+    storeBundlePath*: string
+      ## The verified bundle at the prefix root.
+    bundleName*: string
+      ## ``<Name>.app``; the name it is placed under.
+    expectation*: AppBundleExpectation
+      ## The record's declarations, re-checked on the placed copy.
+    identity*: seq[byte]
+      ## ``appBundleCanonicalBytes`` of the store bundle; the placed copy
+      ## must carry exactly this identity.
+    trust*: AppTrustPolicy
+      ## The trust policy the realization ran under (``{}`` in production).
 
   RealizedRecord* = object
     ## Per-package realization output: the prefix id + the resolved
@@ -94,6 +111,9 @@ type
       ## version and lock identity. The home-profile lock is written from
       ## these. Default (and ``fromProductionCatalog = false``) for a
       ## test-seam binding.
+    appBundle*: AppBundleRealization
+      ## GM4c: populated when the selection is an ``app-bundle`` record
+      ## (``storeBundlePath`` non-empty); the apply activates it.
 
 # ---------------------------------------------------------------------------
 # Env-driven catalog
@@ -301,10 +321,19 @@ proc realizeScoopAdapter(store: var Store; packageId: string;
 # ---------------------------------------------------------------------------
 
 proc realizeBuiltinAdapter(store: var Store;
-                           resolution: ArchiveRealization): RealizedRecord =
+                           resolution: ArchiveRealization;
+                           appTrust: AppTrustPolicy = {}): RealizedRecord =
   ## Run the home archive realizer on a projected ``tarball`` selection and
   ## pack the result into the ``RealizedRecord`` the pipeline consumes.
-  let outcome = realizeBuiltinPackage(store, resolution)
+  ## A macOS application that fails its archive handling or a trust check
+  ## fails the apply at step 7, naming the package and the check.
+  let outcome =
+    try:
+      realizeBuiltinPackage(store, resolution, appTrust)
+    except EAppBundleRefused as err:
+      raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
+    except EAppArchive as err:
+      raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
   result.packageId = resolution.packageId
   result.adapter = akBuiltin
   result.prefixId = outcome.prefixId
@@ -322,6 +351,13 @@ proc realizeBuiltinAdapter(store: var Store;
   # adapter callers can identify which adapter realized the prefix.
   result.provenance = bytesOfText("builtin:" & outcome.digestAlgorithm & ":" &
     outcome.digestValue)
+  if outcome.appBundlePath.len > 0:
+    result.appBundle = AppBundleRealization(
+      storeBundlePath: outcome.appBundlePath,
+      bundleName: extractFilename(outcome.appBundlePath),
+      expectation: appBundleExpectationOf(resolution),
+      identity: outcome.appBundleIdentity,
+      trust: appTrust)
 
 
 # ---------------------------------------------------------------------------
@@ -422,11 +458,16 @@ type
       ## The home-profile lock's record for this target, when one exists.
     relock*: bool
       ## Ignore the lock's pins (``repro home apply --relock``).
+    catalog*: ProfileCatalog
+      ## The references the ``reprobuild-packages`` catalog defines,
+      ## projected as a recipe beside the profile would project them
+      ## (``catalog_projection``). Empty when no reference names one.
 
 proc profileResolutionContext*(
     adapterPreference: OrderedTable[string, seq[string]];
     platform, arch: string; isHost: bool;
-    lock = none(HomeProfileLock); relock = false):
+    lock = none(HomeProfileLock); relock = false;
+    catalog = ProfileCatalog()):
     ProfileResolutionContext =
   ## Build the context for a profile evaluated for ``platform`` / ``arch``
   ## (``HostContext`` spellings). The host inventory is consulted only when
@@ -442,6 +483,7 @@ proc profileResolutionContext*(
   if lock.isSome:
     result.lockTarget = lockedTarget(lock.get, describeTarget(result.target))
   result.relock = relock
+  result.catalog = catalog
 
 proc hostProfileResolutionContext*(
     adapterPreference = initOrderedTable[string, seq[string]]();
@@ -471,12 +513,13 @@ proc resolveInContext*(ctx: ProfileResolutionContext;
   if pin.isNone:
     return resolveProfilePackage(p.packageId, ctx.target, ctx.policy,
       requestedVersion = p.requestedVersion, binaries = p.binaries,
-      inventory = ctx.inventory, scoop = ctx.scoop)
+      inventory = ctx.inventory, scoop = ctx.scoop, catalog = ctx.catalog)
   try:
     resolveProfilePackage(p.packageId, ctx.target, @[pin.get.kind],
       requestedVersion = p.requestedVersion, binaries = p.binaries,
       contributor = some(pin.get.contributor), inventory = ctx.inventory,
-      scoop = ctx.scoop, lockIdentity = pin.get.lockIdentity)
+      scoop = ctx.scoop, lockIdentity = pin.get.lockIdentity,
+      catalog = ctx.catalog)
   except EMissingRealization as err:
     let locked =
       (if pin.get.version.len > 0: " at version " & pin.get.version
@@ -498,9 +541,12 @@ proc resolveInContext*(ctx: ProfileResolutionContext;
     raise e
 
 proc realizeResolution*(store: var Store;
-                        resolution: ProfilePackageResolution):
+                        resolution: ProfilePackageResolution;
+                        appTrust: AppTrustPolicy = {}):
     RealizedRecord =
   ## Realize one resolved reference with the realizer of its selected kind.
+  ## ``appTrust`` reaches the app-bundle trust checks; production passes
+  ## ``{}``.
   let selection = resolution.selection
   case selection.kind
   of rkTarball:
@@ -508,7 +554,7 @@ proc realizeResolution*(store: var Store;
     of arExtract:
       result = realizeExtractTarball(store, resolution)
     of arInstaller:
-      result = realizeBuiltinAdapter(store, resolution.archive)
+      result = realizeBuiltinAdapter(store, resolution.archive, appTrust)
   of rkNix:
     result = realizeNixSelection(store, resolution)
   of rkScoop:
@@ -664,7 +710,8 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
 
 proc realizePlannedPackages*(store: var Store;
                              packages: seq[PlannedPackage];
-                             ctx: ProfileResolutionContext):
+                             ctx: ProfileResolutionContext;
+                             appTrust: AppTrustPolicy = {}):
     seq[RealizedRecord] =
   ## Realize every planned package. The `REPRO_TEST_PACKAGE_*` seams are
   ## TEST-ONLY bindings and win; every other package is resolved in ``ctx``
@@ -690,4 +737,4 @@ proc realizePlannedPackages*(store: var Store;
           raiseRealizeFailed(p.packageId, "<selection>", err.msg)
         except ValueError as err:
           raiseRealizeFailed(p.packageId, "<selection>", err.msg)
-      result.add(realizeResolution(store, resolution))
+      result.add(realizeResolution(store, resolution, appTrust))

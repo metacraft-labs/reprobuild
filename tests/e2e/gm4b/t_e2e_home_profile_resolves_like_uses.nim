@@ -22,7 +22,7 @@
 ##   context, under an `adapterPreference:` selection policy.
 ##
 ## Fixture packages: real stdlib definitions (`just`, `gh`, `jdk`, `python3`,
-## `sevenzip`) plus `gm4bcontrib` (`gm4b_contribution_fixture.nim`), which adds
+## `7zip`) plus `gm4bcontrib` (`gm4b_contribution_fixture.nim`), which adds
 ## an external contribution (contributor-prefixed lock identity) and an
 ## ambiguous Windows tarball.
 ##
@@ -57,7 +57,7 @@ import ./gm4b_contribution_fixture
 const FixtureModule = currentSourcePath().parentDir() /
   "gm4b_contribution_fixture"
 
-const FixturePackages = ["just", "gh", "jdk", "python3", "sevenzip",
+const FixturePackages = ["just", "gh", "jdk", "python3", "7zip",
   "gm4bcontrib"]
 
 type
@@ -117,7 +117,7 @@ proc extractRecipeUses(scratch: string): Table[string, InterfaceToolUse] =
   writeFile(project / "repro.nim", """
 import repro_project_dsl
 import repro_dsl_stdlib/packages/jdk
-import repro_dsl_stdlib/packages/sevenzip
+import repro_dsl_stdlib/packages/pkg_7zip
 import """ & "\"" & FixtureModule & "\"" & """
 
 
@@ -204,7 +204,10 @@ proc homeOutcomes(scratch: string; target: Target;
       policy.mapIt($it).join(", ") & "]\n\n")
   body.add("  activity default:\n")
   for p in FixturePackages:
-    body.add("    " & p & "\n")
+    # ``7zip`` is not a Nim identifier, so the profile names it as a
+    # string; the others stay bare.
+    if p.validIdentifier: body.add("    " & p & "\n")
+    else: body.add("    \"" & p & "\"\n")
   writeFile(dir / "home.nim", body)
   var opts: ApplyOptions
   opts.profileDir = dir

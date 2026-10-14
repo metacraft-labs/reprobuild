@@ -638,12 +638,25 @@ proc runHomeAdd(args: openArray[string]): int =
     # resolves to on this host, so pinning it does not change the
     # selection (Provisioning-Contributions.md §"Profile Package
     # References").
-    let latest = unpinnedHostVersion(pkg)
+    # A name the reprobuild-packages catalog defines resolves from it, as
+    # `repro home apply` would resolve it for this profile.
+    # The contribution catalogs the profile imports (`catalogs:`) take part
+    # as they do in `repro home apply`. `repro home add` edits the profile
+    # as text, so the text inspector reads it here as well.
+    let catalog =
+      try:
+        let profilePath = loadProfilePath()
+        projectCatalogPackages([pkg], profilePath,
+          resolveStateDir() / "catalog-projection",
+          loadProfile(profilePath).catalogImports)
+      except CatchableError:
+        ProfileCatalog()
+    let latest = unpinnedHostVersion(pkg, catalog)
     if latest.isNone:
       stderr.writeLine("repro home add: cannot resolve `" & pkg &
         "@latest`: no definition of '" & pkg & "' offers a versioned " &
         "(tarball or scoop) realization for this host")
-      let offered = offeredVersions(pkg)
+      let offered = offeredVersions(pkg, catalog)
       if offered.len > 0:
         stderr.writeLine("  hint: versions offered for other platforms: " &
           offered.join(", "))

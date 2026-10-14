@@ -174,6 +174,13 @@ type
       ## the text inspector (`repro home add --data` refuses a file not
       ## listed here); empty for a profile adapted from a compiled intent,
       ## whose rows are already expanded (see `loadedDataFiles`).
+    catalogImports*: seq[string]
+      ## The provisioning-contribution catalogs the profile's `catalogs:`
+      ## section imports, as Nim module paths relative to the profile
+      ## directory. Set by both the text inspector and the
+      ## compile-then-adapt path; `repro home apply` imports them where it
+      ## resolves the profile's package references
+      ## (`repro_home_apply/catalog_projection`).
     loadedDataFiles*: seq[LoadedDataFile]
       ## GM4: the data files the planner read for this profile, with the
       ## exact bytes it expanded. Set by the compile-then-adapt path; the
