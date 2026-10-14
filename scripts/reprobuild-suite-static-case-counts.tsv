@@ -179,8 +179,8 @@ libs/repro_core/tests/t_project_file_alias.nim	nim	9
 libs/repro_core/tests/t_python_dep_scanner.nim	nim	16
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
 libs/repro_core/tests/t_source_root_installed_layout.nim	nim	9
-libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	2
-libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	2
+libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
+libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
 libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	19
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10

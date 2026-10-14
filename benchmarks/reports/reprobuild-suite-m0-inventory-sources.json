@@ -1135,8 +1135,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 1063,
-      "platform/destructive": 121,
+      "integration": 1061,
+      "platform/destructive": 123,
       "pure unit": 610,
       "unclassified": 157
     },
@@ -9658,8 +9658,8 @@
     },
     {
       "binary": "build/test-bin/t_auto_started_daemon_does_not_hold_callers_pipe",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -9669,15 +9669,15 @@
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": true,
       "source": "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
       "binary": "build/test-bin/t_auto_started_daemon_does_not_hold_callers_working_directory",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -9687,8 +9687,8 @@
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": true,
       "source": "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
