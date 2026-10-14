@@ -306,7 +306,7 @@ proc resolveExpandArchiveArgv*(archive, destination: string;
   of eafSevenZip:
     # The spec explicitly lists ``7z`` as an accepted ``format = ...``
     # value but does NOT enumerate an argv shape (the underlying
-    # 7-Zip provisioning is the ``sevenzip.nim`` MSI on Windows; on
+    # 7-Zip provisioning is the ``pkg_7zip.nim`` MSI on Windows; on
     # Linux/macOS the closest equivalent is ``7z`` from ``p7zip``).
     # Refuse politely until a recipe lands that actually needs it.
     raise newException(ValueError,

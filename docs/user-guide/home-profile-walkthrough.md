@@ -202,8 +202,9 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
   package definition the engine links has that name, and nothing on the
   host realizes it. Check `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/`
   for the canonical name (some tools are spelled differently for
-  Nim-identifier reasons — e.g. `python3` not `python`, `sevenzip` not
-  `7zip`, `dotnet-sdk` not `dotnet`).
+  historical reasons — e.g. `python3` not `python`, `dotnet-sdk` not
+  `dotnet`). A name that is not a Nim identifier, such as `7zip`, is
+  written as a string: `"7zip"`.
 - **`--plan` reports "missing-realization: no realization of package
   '<id>' for <target>"**: the package is defined but offers nothing for
   your platform under your selection policy; the message lists each

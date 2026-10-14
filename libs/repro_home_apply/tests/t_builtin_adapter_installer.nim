@@ -4,7 +4,7 @@
 ##
 ## Hermetic by design: every fixture is materialized on disk and served
 ## via a ``file://`` URL. The non-hermetic dependencies are:
-##   * a host ``7z.exe`` (or pre-seeded catalog ``sevenzip`` prefix) for
+##   * a host ``7z.exe`` (or pre-seeded catalog ``7zip`` prefix) for
 ##     the NSIS-bundle outer-shell unwrap;
 ##   * a host ``dark.exe`` (or pre-seeded catalog ``wix3`` prefix) for
 ##     the MSI extraction (synthesized MSI fixtures via WiX's
@@ -138,8 +138,8 @@ proc seedInnounpExePrefix(store: var Store; hostInnounp: string): string =
 
 proc seedSevenZipExePrefix(store: var Store; hostSeven: string): string =
   ## 7-Zip needs the sibling 7z.dll to extract.
-  ## GM4b: the stdlib 7-Zip package is ``sevenzip``.
-  seedCatalogPrefix(store, "sevenzip", "test-seed", hostSeven, "bin/7z.exe",
+  ## The stdlib 7-Zip package is ``7zip``.
+  seedCatalogPrefix(store, "7zip", "test-seed", hostSeven, "bin/7z.exe",
     extraFiles = @{
       "bin/7z.dll": "<sibling>"
     })

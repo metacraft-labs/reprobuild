@@ -4230,6 +4230,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_starting_with_digit.nim",
+    binary: "build/test-bin/t_dsl_package_name_starting_with_digit",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim",
     binary: "build/test-bin/t_dsl_provisioning_expression_setters",
     defines: @[],

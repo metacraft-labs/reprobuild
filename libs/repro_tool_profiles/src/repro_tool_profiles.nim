@@ -2273,7 +2273,7 @@ proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
 
 const
   # 7-Zip for the extractor dependency edge. MUST match the Windows x86_64
-  # entry of `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
+  # `tarball` of `package "7zip"` in `repro_dsl_stdlib/packages/pkg_7zip.nim`;
   # `t_sevenzip_bootstrap_matches_stdlib_catalog` checks that it does. The MSI,
   # not the `.exe` installer or a `.7z`, because `msiexec /a` unpacks it with
   # nothing but the OS: the extractor must not need an extractor.

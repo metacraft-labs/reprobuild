@@ -287,6 +287,27 @@ const
     "yield", "break", "continue", "try", "except", "finally",
     "static", "block", "asm", "defer", "echo"]
 
+proc isQuotedPackageNameChar(ch: char): bool =
+  ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}
+
+proc validateQuotedPackageName(ctx: ParseCtx; idx, column: int;
+                               name, spelling: string) =
+  ## A double-quoted package name (``"7zip"``, ``package("7zip")``). A
+  ## package name is a selector string, not a Nim identifier
+  ## (Package-Model.md §"Package names"), so the quoted form is the one that
+  ## reaches a name starting with a digit — the profile macro accepts a
+  ## string literal there. It holds the characters the bare and backtick
+  ## forms allow, with no rule about the first.
+  if name.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, column,
+      "an empty quoted package name " & spelling,
+      "a non-empty package name (e.g. \"7zip\")")
+  for ch in name:
+    if not isQuotedPackageNameChar(ch):
+      raiseUnstructured(ctx.profilePath, idx + 1, column,
+        "'" & spelling & "' as a quoted package name",
+        "a quoted name containing only letters, digits, `_`, and `-`")
+
 proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
                           body: string): IntentNode =
   ## M69: parse the new `package(<id>[, "<version>"])` call form used
@@ -323,12 +344,23 @@ proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
     hasVersion = true
     inc i  # past comma
     versionArg = inner[i .. ^1]
-  let pkgId = idArg.strip()
+  var pkgId = idArg.strip()
   if pkgId.len == 0:
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "an empty package id in `package(...)`",
       "a package identifier (e.g. `package(jdk)`)")
-  if not (pkgId[0].isAlphaAscii() or pkgId[0] == '_'):
+  if pkgId[0] == '"':
+    # `package("windows-terminal")` / `package("7zip", "26.01")`:
+    # Home-Profile-Intent-Layer.md §"`package(...)` — explicit constructor
+    # forms", the quoted-name form.
+    if pkgId.len < 2 or pkgId[^1] != '"':
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & pkgId & "' as a `package(...)` id",
+        "a double-quoted package name with a closing quote")
+    let quoted = pkgId
+    pkgId = pkgId[1 ..< pkgId.len - 1]
+    validateQuotedPackageName(ctx, idx, indent + 1, pkgId, quoted)
+  elif not (pkgId[0].isAlphaAscii() or pkgId[0] == '_'):
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "'" & pkgId & "' as a `package(...)` id",
       "an identifier starting with a letter or underscore")
@@ -395,7 +427,19 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
   # attributes which we accept and preserve.
   var i = 0
   var pkgName = ""
-  if body[0] == '`':
+  if body[0] == '"':
+    # A quoted name, `"7zip"`: the bare form of a package name that is not
+    # a Nim identifier (the profile macro accepts a string literal here).
+    let closeIdx = body.find('"', 1)
+    if closeIdx < 1:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & body & "'",
+        "a closing double quote after the package name (e.g. \"7zip\")")
+    pkgName = body[1 ..< closeIdx]
+    i = closeIdx + 1
+    validateQuotedPackageName(ctx, idx, indent + 2, pkgName,
+      body[0 .. closeIdx])
+  elif body[0] == '`':
     # Phase F3: backtick-quoted form `<name>`.
     let closeIdx = body.find('`', 1)
     if closeIdx <= 1:

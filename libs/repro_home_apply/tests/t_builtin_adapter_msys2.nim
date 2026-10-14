@@ -412,7 +412,7 @@ suite "M6 — archive realizer imMsys2Pacman realize hook + afTarZst":
 
   test "test_m6_realize_imMsys2Pacman_fails_closed_without_extractor":
     ## Discovery (iv): when no zstd-capable extractor is on PATH AND
-    ## no catalog sevenzip prefix carries the codec, the realize raises
+    ## no catalog 7zip prefix carries the codec, the realize raises
     ## ``EBuiltinZstdUnavailable`` with a populated discovery trace.
     let fixtureDir = FixtureRoot / "fail-closed"
     let storeDir = fixtureDir / "store"
