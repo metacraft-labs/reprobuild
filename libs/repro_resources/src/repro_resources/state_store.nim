@@ -16,8 +16,11 @@
 ##     (`marshalAttrs` / `unmarshalAttrs` in `marshal.nim`); this module
 ##     does NOT invent a new attrs serialization,
 ##   * `identity` + last-observed `digest` (the reuse / cache-hit index),
-##   * lease fields (`holders: consumerId->deadline`, `effectiveDeadline`,
-##     `lastRenewed`) — defined + round-tripped now, populated by L2/L3.
+##   * lease fields (`holders: consumerId->deadline` for the DATED holders,
+##     `keepHolders` for the `keep` holders that pin with no deadline,
+##     `keepHoldersKnown`, `effectiveDeadline`, `lastRenewed`) — defined +
+##     round-tripped here, populated by L2 (reconcile) and L4 (daemon renew),
+##     read by the L3 reaper.
 ##
 ## Writes are ATOMIC: a record is serialized to a temp file in the same
 ## directory and `moveFile`-renamed over the destination, so a crash or a
@@ -49,17 +52,31 @@ const
     ## wrongly destroy. v1 stored a bare u64 and is not read. Track B keeps
     ## the v2 reader (`decodeRecordLegacy`) so on-disk records written
     ## before the SSZ migration still decode — nothing on disk breaks.
-  StateRecordSszVersion = 3'u16
+  StateRecordSszVersion = 4'u16
     ## Track B (Typed-Extension-Interfaces-And-Provider-Libraries.md,
     ## Incremental-Invalidation.md §"Binary formats from Reprobuild domain
-    ## types"): the CURRENT, WRITTEN format. The record body is now a
-    ## versioned SSZ envelope (magic + u16 version + u16 typeId + u32
-    ## payloadLen + SSZ payload + 32-byte BLAKE3 trailer) over the fixed
+    ## types"): the CURRENT, WRITTEN format. The record body is a versioned
+    ## SSZ envelope (magic + u16 version + u16 typeId + u32 payloadLen + SSZ
+    ## payload + 32-byte BLAKE3 trailer) over the fixed
     ## `ResourceStateRecordSsz` mirror type — spec-mandated versioned SSZ
-    ## over domain types, not a hand-written binary struct. The reader
-    ## accepts BOTH the SSZ envelope (this) and the legacy LE framing
-    ## (`StateRecordVersion` above): read-old / write-new, so pre-migration
-    ## caches degrade to a normal read, never a crash.
+    ## over domain types, not a hand-written binary struct.
+    ##
+    ## v4 adds `keepHolders` + `keepHoldersKnown` to the mirror: before it, a
+    ## `keep` holder was recorded nowhere, so `effectiveDeadline == none`
+    ## could not say whether a keep holder pinned the state or no dated holder
+    ## existed, and no reader could name the pin (reprobuild-pm issue
+    ## 2026-10-09-a-keep-holders-identity-is-never-persisted-in-a-lease-record).
+    ##
+    ## The reader accepts THREE framings: this v4 envelope, the v3 envelope
+    ## (`StateRecordSszVersionV3`, the same mirror without the keep-holder
+    ## fields), and the legacy LE framing (`StateRecordVersion` above).
+    ## Read-old / write-new: a pre-v4 record decodes with no keep holders and
+    ## `keepHoldersKnown = false` (true if it carries a dated deadline or was
+    ## never renewed — see `pre4KeepHoldersKnown`), and the next write
+    ## upgrades it to v4.
+  StateRecordSszVersionV3 = 3'u16
+    ## The pre-keep-holder SSZ envelope. READ-ONLY: nothing writes it. Its
+    ## payload is `ResourceStateRecordSszV3`.
   StateRecordSszTypeId = 1'u16
   RecordSuffix = ".rec"
   TempPrefix = ".tmp-"
@@ -103,15 +120,56 @@ type
       ## False once destroyed; a record may linger briefly for the reaper.
     # ----- lease fields (shape defined at L1; L2 populates, L3 uses) -----
     holders*: Table[string, Time]
-      ## consumerId -> that lease's deadline.
+      ## The DATED holders: consumerId -> that lease's deadline
+      ## (`immediate` / `delayed`).
+    keepHolders*: seq[string]
+      ## The consumer ids holding a `keep` lease — pinned with no deadline,
+      ## so they have no entry in `holders` (Ephemeral-State-Leases §2.3:
+      ## keep never auto-reaps and dominates every dated holder). Canonical:
+      ## sorted ascending, no duplicates; the codec writes it that way
+      ## whatever order a caller built it in.
+      ##
+      ## Invariant: a consumer id is in AT MOST ONE of `holders` /
+      ## `keepHolders` — a consumer holds one lease on a state, under the
+      ## policy it last renewed with. The codec refuses a record that breaks
+      ## it rather than persisting a holder with two answers.
+      ##
+      ## A keep holder persists across runs: it leaves this list only when
+      ## that same consumer renews under a dated policy (it moves to
+      ## `holders`), or the record is removed (explicit teardown / reap).
+    keepHoldersKnown*: bool
+      ## Whether `keepHolders` is the COMPLETE keep-holder set. True for every
+      ## record written in the v4 format by current code. For a record decoded
+      ## from the v3 SSZ or legacy LE formats, which never recorded keep
+      ## holders, it is false — UNLESS that record carries a dated
+      ## `effectiveDeadline` or was never renewed (`lastRenewed ==
+      ## fromUnix(0)`), either of which proves no keep holder existed (see
+      ## `pre4KeepHoldersKnown`). An unknown record therefore always has a
+      ## `none` deadline and may be pinned by a keep holder nobody can name,
+      ## so a renewal of it stays unknown and never re-arms a deadline under
+      ## it (see `reconcile.applyHolderRenewal`).
+      ##
+      ## Written to disk as-is (v4) so a still-unknown record stays unknown
+      ## across a re-write. NOTE Nim's object default for a `bool` is
+      ## `false`: a record built with an object constructor that omits this
+      ## field claims NOT to know its keep holders. `buildStateRecord` (and the
+      ## convenience `writeStateRecord` overload) default it to `true`.
     effectiveDeadline*: Option[Time]
-      ## Derived: MAX over live dated holders' deadlines — the reaper's gate
-      ## (`some(t)`: reapable once `now >= t`). `none` means NEVER REAP: no
-      ## dated holder, or at least one `keep` holder pinning the state with
-      ## no expiry. This is deliberately an `Option`, NOT an epoch-0/PAST
-      ## sentinel: a PAST sentinel would make the reaper's natural
-      ## `deadline < now -> reap` gate DESTROY a pinned state. The reaper
-      ## MUST skip `none` and only reap a `some(t)` with `t <= now`.
+      ## Derived: the reaper's gate (`some(t)`: reapable once `now >= t`).
+      ##
+      ##   * `none` with non-empty `keepHolders` — PINNED by those keep
+      ##     holders; never reap.
+      ##   * `none` with empty `keepHolders` and `keepHoldersKnown` — no holder
+      ##     pins it and none has a deadline: never reap (no lease asks for it).
+      ##   * `none` with `keepHoldersKnown == false` — a pre-v4 record: may be
+      ##     an anonymous keep pin; never reap.
+      ##   * `some(t)` — MAX over the dated holders' deadlines; only possible
+      ##     when no keep holder is recorded.
+      ##
+      ## This is deliberately an `Option`, NOT an epoch-0/PAST sentinel: a
+      ## PAST sentinel would make the reaper's natural `deadline < now ->
+      ## reap` gate DESTROY a pinned state. The reaper MUST skip `none` and
+      ## only reap a `some(t)` with `t <= now`.
     lastRenewed*: Time
       ## Wall-clock of the most recent lease renewal.
 
@@ -157,6 +215,31 @@ proc readDigest(bytes: openArray[byte]; pos: var int): Digest256 =
     result[i] = bytes[pos + i]
   pos += DigestSize
 
+proc pre4KeepHoldersKnown(effectiveDeadline: Option[Time];
+                          lastRenewed: Time): bool =
+  ## Can a record decoded from a format that never recorded keep holders (v3
+  ## SSZ, legacy LE) be trusted to have NONE? (Ephemeral-State-Leases §3.)
+  ##
+  ##   * It carries `some(deadline)`: every pre-v4 writer of a lease renewal
+  ##     — the reconcile merge and the daemon's renew — wrote a dated
+  ##     deadline only when the renewal it applied had no `keep` holder, so
+  ##     the record already says nothing pins it, and a pre-v4 reaper already
+  ##     acted on that.
+  ##   * It was never renewed (`lastRenewed == fromUnix(0)`): every pre-v4
+  ##     renewal set `lastRenewed = now`, and the non-leased write left it at
+  ##     the epoch default, so no lease ever touched it. Treating it as
+  ##     unknown would pin it forever (see `reconcile.applyHolderRenewal`)
+  ##     for a holder that never existed.
+  ##
+  ## Anything else — a renewed record whose deadline is `none` — may hide an
+  ## anonymous keep pin: unknown.
+  ##
+  ## Decided HERE, at decode, rather than in the renewal: it is a fact about
+  ## what the OLD writers did, so it belongs with the old readers, and every
+  ## consumer of the record (the reaper, a refusal naming holders) then sees
+  ## the same answer instead of each re-deriving it.
+  effectiveDeadline.isSome or lastRenewed == fromUnix(0)
+
 # --- Legacy LE reader (read-old). Kept verbatim so `.rec` files written
 #     before the Track B SSZ migration still decode into the SAME record
 #     — a pre-migration cache is a normal read, never a crash. NOTHING
@@ -189,6 +272,10 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
     let consumerId = readString(bytes, pos)
     let deadline = fromUnix(int64(readU64Le(bytes, pos)))
     result.holders[consumerId] = deadline
+  # The legacy framing never recorded keep holders (see `keepHoldersKnown`);
+  # whether it can be TRUSTED to have none is decided from the deadline and
+  # `lastRenewed`, read below.
+  result.keepHolders = @[]
   if pos >= bytes.len:
     raise newException(IOError,
       "truncated effectiveDeadline flag in state record")
@@ -199,6 +286,8 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
   else:
     result.effectiveDeadline = none(Time)
   result.lastRenewed = fromUnix(int64(readU64Le(bytes, pos)))
+  result.keepHoldersKnown =
+    pre4KeepHoldersKnown(result.effectiveDeadline, result.lastRenewed)
 
 # ---------------------------------------------------------------------------
 # Track B: versioned SSZ envelope over a fixed `ResourceStateRecordSsz` mirror
@@ -225,8 +314,33 @@ type
     deadlineUnix: uint64
 
   ResourceStateRecordSsz = object
-    ## Fixed-schema SSZ mirror of `ResourceStateRecord`. Field order is the
-    ## schema; changing it requires a new `StateRecordSszTypeId`/version.
+    ## Fixed-schema SSZ mirror of `ResourceStateRecord` — the v4 schema
+    ## (`StateRecordSszVersion`). Field order is the schema; changing it
+    ## requires a new `StateRecordSszTypeId`/version.
+    address: SszText
+    typeId: SszText
+    determinism: uint32
+    attrsTypeId: SszText
+    attrsJson: List[byte, MaxAttrsBytes]
+    dependsOn: List[SszText, MaxStateDeps]
+    identity: SszText
+    digest: array[DigestSize, byte]
+    present: bool
+    holders: List[StateHolderSsz, MaxStateHolders]
+    keepHolders: List[SszText, MaxStateHolders]
+      ## v4: the keep holders, sorted + de-duplicated. `holders.len +
+      ## keepHolders.len` is bounded by `MaxStateHolders` TOGETHER: it is one
+      ## holder population, split by policy.
+    keepHoldersKnown: bool
+      ## v4: `ResourceStateRecord.keepHoldersKnown`, written as-is.
+    hasEffectiveDeadline: bool
+    effectiveDeadlineUnix: uint64
+    lastRenewedUnix: uint64
+
+  ResourceStateRecordSszV3 = object
+    ## The v3 mirror (`StateRecordSszVersionV3`), kept so v3 records still
+    ## decode. READ-ONLY and FROZEN: it must match what the v3 encoder wrote,
+    ## byte for byte, or a v3 record stops decoding.
     address: SszText
     typeId: SszText
     determinism: uint32
@@ -258,6 +372,32 @@ proc fromStateText(value: SszText): string =
   for i, b in raw:
     result[i] = char(b)
 
+proc canonicalKeepHolders(ids: openArray[string]): seq[string] =
+  ## The canonical form of a keep-holder list: sorted ascending, duplicates
+  ## dropped. A consumer that renewed under `keep` twice is one holder.
+  result = @[]
+  for id in ids:
+    result.add(id)
+  result.sort()
+  var w = 0
+  for r in 0 ..< result.len:
+    if w == 0 or result[r] != result[w - 1]:
+      result[w] = result[r]
+      inc w
+  result.setLen(w)
+
+proc checkHolderSets(holders: Table[string, Time]; keepHolders: seq[string]) =
+  ## The two holder sets are one population split by policy: bound them
+  ## TOGETHER, and refuse an id that is in both (a consumer holds one lease
+  ## on a state, so a record naming it twice has two answers to "when may
+  ## this be reaped" and we will not persist — or trust — either).
+  if holders.len + keepHolders.len > MaxStateHolders:
+    failCodec("state-record holders + keepHolders exceeds SSZ bound")
+  for id in keepHolders:
+    if holders.hasKey(id):
+      failCodec("state-record consumer '" & id &
+        "' is both a dated holder and a keep holder")
+
 proc toSszRecord(rec: ResourceStateRecord): ResourceStateRecordSsz =
   result.address = toStateText(rec.address)
   result.typeId = toStateText(rec.typeId)
@@ -280,9 +420,9 @@ proc toSszRecord(rec: ResourceStateRecord): ResourceStateRecordSsz =
   result.present = rec.present
   # Tables have no stable iteration order; sort holders by consumerId so the
   # SSZ payload (hence the on-disk bytes) is canonical for a given record.
+  let keepHolders = canonicalKeepHolders(rec.keepHolders)
+  checkHolderSets(rec.holders, keepHolders)
   var holders: seq[StateHolderSsz] = @[]
-  if rec.holders.len > MaxStateHolders:
-    failCodec("state-record holders exceeds SSZ bound")
   var keys: seq[string] = @[]
   for consumerId in rec.holders.keys:
     keys.add(consumerId)
@@ -291,6 +431,11 @@ proc toSszRecord(rec: ResourceStateRecord): ResourceStateRecordSsz =
       consumerId: toStateText(consumerId),
       deadlineUnix: uint64(rec.holders[consumerId].toUnix())))
   result.holders = List[StateHolderSsz, MaxStateHolders].init(holders)
+  var keepWire: seq[SszText] = @[]
+  for consumerId in keepHolders:
+    keepWire.add(toStateText(consumerId))
+  result.keepHolders = List[SszText, MaxStateHolders].init(keepWire)
+  result.keepHoldersKnown = rec.keepHoldersKnown
   if rec.effectiveDeadline.isSome:
     result.hasEffectiveDeadline = true
     result.effectiveDeadlineUnix = uint64(rec.effectiveDeadline.get.toUnix())
@@ -318,11 +463,46 @@ proc fromSszRecord(wire: ResourceStateRecordSsz): ResourceStateRecord =
   for holder in wire.holders:
     result.holders[fromStateText(holder.consumerId)] =
       fromUnix(int64(holder.deadlineUnix))
+  var keepHolders: seq[string] = @[]
+  for consumerId in wire.keepHolders:
+    keepHolders.add(fromStateText(consumerId))
+  # Canonicalize on read too: the record a caller sees obeys the documented
+  # shape even if the bytes came from somewhere other than `encodeRecord`.
+  result.keepHolders = canonicalKeepHolders(keepHolders)
+  checkHolderSets(result.holders, result.keepHolders)
+  result.keepHoldersKnown = wire.keepHoldersKnown
   if wire.hasEffectiveDeadline:
     result.effectiveDeadline = some(fromUnix(int64(wire.effectiveDeadlineUnix)))
   else:
     result.effectiveDeadline = none(Time)
   result.lastRenewed = fromUnix(int64(wire.lastRenewedUnix))
+
+proc fromSszRecordV3(wire: ResourceStateRecordSszV3): ResourceStateRecord =
+  ## READ-OLD: lift a v3 payload into the current record. Every v3 field has
+  ## the same meaning in v4, so the v3 mirror is copied field-for-field into
+  ## a v4 mirror and decoded by the ONE v4 reader. What v3 lacks is the keep
+  ## holders, and since a v3 writer dropped them on the floor the record
+  ## cannot claim to know them — unless its deadline or `lastRenewed` proves
+  ## there are none: no `keepHolders`, and `keepHoldersKnown` from
+  ## `pre4KeepHoldersKnown`.
+  result = fromSszRecord(ResourceStateRecordSsz(
+    address: wire.address,
+    typeId: wire.typeId,
+    determinism: wire.determinism,
+    attrsTypeId: wire.attrsTypeId,
+    attrsJson: wire.attrsJson,
+    dependsOn: wire.dependsOn,
+    identity: wire.identity,
+    digest: wire.digest,
+    present: wire.present,
+    holders: wire.holders,
+    keepHolders: List[SszText, MaxStateHolders].init(newSeq[SszText]()),
+    keepHoldersKnown: false,            # decided below, from the decoded record
+    hasEffectiveDeadline: wire.hasEffectiveDeadline,
+    effectiveDeadlineUnix: wire.effectiveDeadlineUnix,
+    lastRenewedUnix: wire.lastRenewedUnix))
+  result.keepHoldersKnown =
+    pre4KeepHoldersKnown(result.effectiveDeadline, result.lastRenewed)
 
 # `SSZ.encode`/`SSZ.decode` are the generic seam #11225 warns about: keep
 # them in these concrete, NON-generic wrappers so no generic proc closes over
@@ -342,6 +522,14 @@ proc decodeSszPayload(payload: openArray[byte]): ResourceStateRecordSsz =
     failCodec("invalid SSZ state-record payload: " & err.msg)
   except IOError as err:
     failCodec("could not read SSZ state-record payload: " & err.msg)
+
+proc decodeSszPayloadV3(payload: openArray[byte]): ResourceStateRecordSszV3 =
+  try:
+    SSZ.decode(payload, ResourceStateRecordSszV3)
+  except SszError as err:
+    failCodec("invalid v3 SSZ state-record payload: " & err.msg)
+  except IOError as err:
+    failCodec("could not read v3 SSZ state-record payload: " & err.msg)
 
 proc encodeRecord(rec: ResourceStateRecord): seq[byte] =
   ## WRITE-NEW: emit the versioned SSZ envelope (the only format written).
@@ -363,7 +551,7 @@ proc decodeSszEnvelope(bytes: openArray[byte]): ResourceStateRecord =
     failCodec("SSZ state-record envelope too short")
   var pos = StateRecordMagic.len
   let version = readU16Le(bytes, pos)
-  if version != StateRecordSszVersion:
+  if version != StateRecordSszVersion and version != StateRecordSszVersionV3:
     failCodec("unsupported SSZ state-record version " & $version)
   let typeId = readU16Le(bytes, pos)
   if typeId != StateRecordSszTypeId:
@@ -380,15 +568,21 @@ proc decodeSszEnvelope(bytes: openArray[byte]): ResourceStateRecord =
   var payload = newSeq[byte](payloadLen)
   for i in 0 ..< payloadLen:
     payload[i] = bytes[payloadStart + i]
-  fromSszRecord(decodeSszPayload(payload))
+  # Same envelope, same checksum; only the payload schema differs by version.
+  if version == StateRecordSszVersionV3:
+    fromSszRecordV3(decodeSszPayloadV3(payload))
+  else:
+    fromSszRecord(decodeSszPayload(payload))
 
 proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
-  ## READ-BOTH dispatcher: after the shared `RSST` magic, sniff the format
+  ## READ-ALL dispatcher: after the shared `RSST` magic, sniff the format
   ## by the first version half-word. The SSZ envelope's version is a u16 LE
-  ## `StateRecordSszVersion` (3); the legacy LE framing's version is a u32 LE
-  ## `StateRecordVersion` (2), whose low half-word is therefore 2. The two
-  ## never collide (3 vs 2), so reading a u16 at the post-magic offset
-  ## disambiguates cleanly. A future SSZ version bump stays > any legacy
+  ## — `StateRecordSszVersion` (4, written) or `StateRecordSszVersionV3` (3,
+  ## read-only); the legacy LE framing's version is a u32 LE
+  ## `StateRecordVersion` (2), whose low half-word is therefore 2. None of
+  ## them collide (4 / 3 vs 2), so reading a u16 at the post-magic offset
+  ## disambiguates cleanly; `decodeSszEnvelope` then picks the payload schema
+  ## by that same version. A future SSZ version bump stays > any legacy
   ## value, preserving the split.
   if bytes.len < StateRecordMagic.len + 2:
     raise newException(IOError, "state record too short for magic")
@@ -397,7 +591,8 @@ proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
       raise newException(IOError, "bad state-record magic")
   var probe = StateRecordMagic.len
   let versionWord = readU16Le(bytes, probe)
-  if versionWord == StateRecordSszVersion:
+  if versionWord == StateRecordSszVersion or
+     versionWord == StateRecordSszVersionV3:
     decodeSszEnvelope(bytes)
   else:
     decodeRecordLegacy(bytes)
@@ -425,11 +620,17 @@ proc writeStateRecord*(store: StateStore; rec: ResourceStateRecord) =
 proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
                        holders: Table[string, Time] = initTable[string, Time]();
                        effectiveDeadline: Option[Time] = none(Time);
-                       lastRenewed: Time = fromUnix(0)): ResourceStateRecord =
+                       lastRenewed: Time = fromUnix(0);
+                       keepHolders: seq[string] = @[];
+                       keepHoldersKnown = true): ResourceStateRecord =
   ## Assemble a record from a reconciled resource + its recorded binding.
   ## The attrs are serialized HERE via the extension-registry marshaller
   ## (`marshalAttrs`) — the exact seam the RP protocol lane uses — so the
   ## store never re-implements attrs serialization.
+  ##
+  ## `keepHoldersKnown` defaults to TRUE: a record assembled by current code
+  ## knows its keep holders (possibly none). Only a renewal of a pre-v4
+  ## record that could not see them passes `false` through.
   ResourceStateRecord(
     address: inst.address,
     typeId: inst.typeId,
@@ -441,6 +642,8 @@ proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
     digest: binding.postWriteDigest,
     present: binding.present,
     holders: holders,
+    keepHolders: keepHolders,
+    keepHoldersKnown: keepHoldersKnown,
     effectiveDeadline: effectiveDeadline,
     lastRenewed: lastRenewed)
 
@@ -448,10 +651,13 @@ proc writeStateRecord*(store: StateStore; inst: ResourceInstance;
                        binding: ResourceBinding;
                        holders: Table[string, Time] = initTable[string, Time]();
                        effectiveDeadline: Option[Time] = none(Time);
-                       lastRenewed: Time = fromUnix(0)) =
+                       lastRenewed: Time = fromUnix(0);
+                       keepHolders: seq[string] = @[];
+                       keepHoldersKnown = true) =
   ## Convenience overload: build + atomically write in one call.
   writeStateRecord(store,
-    buildStateRecord(inst, binding, holders, effectiveDeadline, lastRenewed))
+    buildStateRecord(inst, binding, holders, effectiveDeadline, lastRenewed,
+                     keepHolders, keepHoldersKnown))
 
 proc readStateRecord*(store: StateStore; address: string): ResourceStateRecord =
   ## Read the record for `address`. Raises `IOError` if absent (callers

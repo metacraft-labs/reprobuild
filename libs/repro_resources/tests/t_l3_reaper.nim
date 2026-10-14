@@ -166,6 +166,27 @@ suite "L3: crash-safe reaper":
     # The predicate itself: a none-deadline record is never reapable.
     check not isReapable(rec, fromUnix(1_900_000_000))
 
+  test "(3b) a NAMED keep holder is a live holder, even beside a passed deadline":
+    # Defense in depth, the same reasoning as the dated live-holder check: the
+    # merge never writes a keep holder next to a dated effective deadline, but
+    # the reaper re-checks the holders it can see rather than trusting the
+    # folded deadline alone. A record naming a keep holder is pinned.
+    let t0 = fromUnix(1_700_000_000)
+    var rec = ResourceStateRecord(
+      address: "cluster", typeId: "l3.stub", present: true,
+      holders: initTable[string, Time](),
+      keepHolders: @["pinner"], keepHoldersKnown: true,
+      effectiveDeadline: some(t0), lastRenewed: t0)
+    let later = t0 + initDuration(days = 1)
+    check hasLiveHolder(rec, later)
+    check not isReapable(rec, later)
+    # `force` still selects it: an explicit teardown is the one way a keep
+    # pin ends (§2.3), and that is what `force` is.
+    check isReapable(rec, later, force = true)
+    # Control: without the keep holder the same record IS reapable.
+    rec.keepHolders = @[]
+    check isReapable(rec, later)
+
   test "(4) an ORPHANED lease (holder killed, deadline passed) IS reaped":
     # Simulate an orphan: a delayed lease was renewed at t0, then the
     # consumer process died. Nothing renews it; the store record still

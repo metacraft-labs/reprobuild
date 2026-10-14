@@ -30,6 +30,11 @@
 ##   (f) that "once" holds even when the failure's MESSAGE changes on every
 ##       tick — a provider refusing the destroy differently each time — so the
 ##       de-duplication is keyed on the record, not on the sentence.
+##   (g) a ``keep`` renew NAMES its holder in the record (``keepHolders``),
+##       a later dated renew by another consumer does not unpin it, and the
+##       keep holder renewing under a dated policy moves out again. Driven
+##       through ``applyLeaseRenew`` (the handler body) on a real store; the
+##       socket hop in front of it is (a)'s subject, not this one's.
 
 import std/[os, options, times, tables, locks, random, strutils, unittest]
 
@@ -506,3 +511,58 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     check worldHas("flaky")
     # And nothing raised out of the sweep.
     check logText.count("lease reap tick error") == 0
+
+  test "(g) a keep renew names its holder; a dated renew does not unpin it":
+    let root = scratchRoot("keep-renew")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    defer: removeDir(root)
+    let store = openStateStore(stateRoot)
+    let t0 = fromUnix(1_700_000_000)
+    materialize(store, "cluster", "smoke", delayed(initDuration(minutes = 1)), t0)
+    check readStateRecord(store, "cluster").effectiveDeadline.isSome
+
+    # A keep renew pins the state AND records who pins it.
+    let t1 = t0 + initDuration(seconds = 10)
+    let pin = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "pinner",
+      ttlSeconds: LeaseRenewKeepSentinel), stateRoot, t1)
+    check pin.ok and pin.hadRecord
+    check pin.effectiveDeadlineUnix == LeaseRenewKeepSentinel
+    let pinned = readStateRecord(store, "cluster")
+    check pinned.keepHolders == @["pinner"]
+    check not pinned.holders.hasKey("pinner")
+    check pinned.holders.hasKey("smoke")
+    check pinned.effectiveDeadline.isNone
+
+    # Another consumer renewing under a DATED policy must not unpin it: the
+    # keep holder is still recorded, so the record still answers who pins it.
+    let t2 = t1 + initDuration(seconds = 10)
+    let dated = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "smoke",
+      ttlSeconds: 3600), stateRoot, t2)
+    check dated.ok
+    check dated.effectiveDeadlineUnix == LeaseRenewKeepSentinel
+    let still = readStateRecord(store, "cluster")
+    check still.keepHolders == @["pinner"]
+    check still.holders["smoke"] == t2 + initDuration(seconds = 3600)
+    check still.effectiveDeadline.isNone
+
+    # The keep holder itself renewing under a dated policy releases the pin.
+    let t3 = t2 + initDuration(seconds = 10)
+    let release = applyLeaseRenew(DaemonLeaseRenewRequest(
+      scope: dlsUser, address: "cluster", consumerId: "pinner",
+      ttlSeconds: 60), stateRoot, t3)
+    check release.ok
+    let released = readStateRecord(store, "cluster")
+    check released.keepHolders.len == 0
+    check released.holders["pinner"] == t3 + initDuration(seconds = 60)
+    # MAX over the dated holders: smoke's hour outlives pinner's minute.
+    check released.effectiveDeadline == some(t2 + initDuration(seconds = 3600))
+    check release.effectiveDeadlineUnix == (t2 + initDuration(seconds = 3600)).toUnix
+
+    # The in-place primitive the handler uses names the holder too.
+    var rec = released
+    renewHolder(rec, "anchor", keep(), t3)
+    check rec.keepHolders == @["anchor"]
+    check rec.effectiveDeadline.isNone

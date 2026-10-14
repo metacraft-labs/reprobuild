@@ -10,13 +10,16 @@
 ##
 ## The SELECTION PREDICATE (the L2 reap-safety property, verified here):
 ##
-##   * `effectiveDeadline == none`  -> NEVER reap. `none` means "no dated
-##     holder / a `keep` holder pins it": there is NO reap deadline. This
-##     is deliberately an `Option`, not an epoch-0/PAST sentinel — a PAST
-##     sentinel would make the natural `deadline < now` gate destroy a
-##     pinned state. A `none` record is unconditionally skipped.
+##   * `effectiveDeadline == none`  -> NEVER reap. `none` means "a `keep`
+##     holder pins it" (named in `keepHolders`), "no dated holder", or — for
+##     a pre-v4 record (`keepHoldersKnown == false`) — "maybe an anonymous
+##     keep pin": there is NO reap deadline. This is deliberately an
+##     `Option`, not an epoch-0/PAST sentinel — a PAST sentinel would make
+##     the natural `deadline < now` gate destroy a pinned state. A `none`
+##     record is unconditionally skipped.
 ##   * `effectiveDeadline == some(t)` with `t <= now` AND no LIVE holder ->
-##     reap. A holder is LIVE if its own deadline is still in the future
+##     reap. A holder is LIVE if it is a recorded `keep` holder (no expiry)
+##     or its own deadline is still in the future
 ##     (`holders[c] > now`); a live holder keeps the state even if the
 ##     folded `effectiveDeadline` looks passed (defense in depth — normally
 ##     `effectiveDeadline == max(holders)`, so a live holder already lifts
@@ -118,9 +121,15 @@ proc sessionTransport*(resolve: proc (typeId: string): ProviderHandle {.closure.
 # ---------------------------------------------------------------------------
 
 proc hasLiveHolder*(rec: ResourceStateRecord; now: Time): bool =
-  ## A holder is LIVE if its own recorded deadline is still in the future.
-  ## A live holder keeps the state regardless of the folded
-  ## `effectiveDeadline`.
+  ## A holder is LIVE if it is a recorded `keep` holder — it pins with no
+  ## expiry, so it is live at every `now` — or its own recorded deadline is
+  ## still in the future. A live holder keeps the state regardless of the
+  ## folded `effectiveDeadline`. (The merge never writes a keep holder next
+  ## to a dated effective deadline; checking it here is the same defense in
+  ## depth as the dated check: the gate re-reads the holders it can see
+  ## rather than trusting the fold alone.)
+  if rec.keepHolders.len > 0:
+    return true
   for _, deadline in rec.holders:
     if deadline > now:
       return true
@@ -131,15 +140,17 @@ proc isReapable*(rec: ResourceStateRecord; now: Time; force = false): bool =
   ##
   ##   * `force`                     -> reap iff the record is still present
   ##     (ignore deadline + holder liveness — the `--hard-rebuild` path).
-  ##   * `effectiveDeadline.isNone`  -> NEVER reap (keep / no dated holder).
-  ##   * a live holder (`holders[c] > now`) -> NEVER reap (still in use).
+  ##   * `effectiveDeadline.isNone`  -> NEVER reap (a keep holder, possibly
+  ##     an anonymous pre-v4 one, or no dated holder).
+  ##   * a live holder (a recorded keep holder, or `holders[c] > now`) ->
+  ##     NEVER reap (still pinned / in use).
   ##   * otherwise reap iff `effectiveDeadline.get <= now`.
   if force:
     return rec.present
   if rec.effectiveDeadline.isNone:
     return false                       # never-reap: keep dominates
   if hasLiveHolder(rec, now):
-    return false                       # a live holder keeps it
+    return false                       # a keep or unexpired holder keeps it
   rec.effectiveDeadline.get <= now
 
 proc selectReapable*(records: seq[ResourceStateRecord]; now: Time;
