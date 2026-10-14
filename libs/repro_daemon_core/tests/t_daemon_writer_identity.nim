@@ -20,7 +20,9 @@
 ##
 ## MOCK POLICY: the process table is never mocked. macOS error cases use a
 ## native syscall interposer to inject EPERM for one real process probe (or
-## boot probe), since ordinary kernel permissions do not reliably deny these
+## boot probe), or shift a successful real boot-time response by +/-120 seconds,
+## since ordinary kernel permissions and calendar corrections cannot safely be
+## triggered by this test. These are narrow fault injections at the native
 ## sysctls. Every other syscall and the recorded identity remain real.
 ## This fault injection exercises the error boundary rather than inventing
 ## a process lifetime. Liveness is a question about
@@ -37,6 +39,7 @@ when defined(macosx):
   {.emit: """
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -48,19 +51,54 @@ int sysctl(int *mib, unsigned n, void *p, size_t *len, void *np, size_t nl) {
     fprintf(stderr, "injected EPERM\n"); errno = EPERM; return -1;
   }
   int (*real)(int *, unsigned, void *, size_t *, void *, size_t) = dlsym(RTLD_NEXT, "sysctl");
-  return real(mib, n, p, len, np, nl);
+  int rc = real(mib, n, p, len, np, nl);
+  if (getenv("BOOT_SHIFT_SECONDS") && n == 4 && mib[0] == CTL_KERN &&
+      mib[1] == KERN_PROC && mib[2] == KERN_PROC_PID)
+    fprintf(stderr, "forwarded process probe %d\n", mib[3]);
+  return rc;
 }
 int sysctlbyname(const char *name, void *p, size_t *len, void *np, size_t nl) {
   if (getenv("DENIED_BOOT") && strcmp(name, "kern.boottime") == 0) {
     fprintf(stderr, "injected EPERM\n"); errno = EPERM; return -1;
   }
   int (*real)(const char *, void *, size_t *, void *, size_t) = dlsym(RTLD_NEXT, "sysctlbyname");
-  return real(name, p, len, np, nl);
+  int rc = real(name, p, len, np, nl);
+  if (rc == 0 && getenv("BOOT_SHIFT_SECONDS") && strcmp(name, "kern.boottime") == 0 &&
+      p && len && *len == sizeof(struct timeval)) {
+    struct timeval *tv = p;
+    long delta = atol(getenv("BOOT_SHIFT_SECONDS"));
+    fprintf(stderr, "injected boot shift %ld seconds\n", delta);
+    tv->tv_sec += delta;
+  }
+  return rc;
 }
 """.}
   if paramCount() == 2 and paramStr(1) == "--probe-writer":
     echo writerLiveness(paramStr(2))
     quit(0)
+
+  if paramCount() == 2 and paramStr(1) == "--probe-shifted-writer":
+    echo "boot=" & $bootId()
+    echo writerLiveness(paramStr(2))
+    quit(0)
+
+  proc shiftedWriterProbe(encoded: string; shift: int; deniedPid = ""):
+      tuple[output: string, exitCode: int] =
+    let oldShift = os.getEnv("BOOT_SHIFT_SECONDS")
+    let oldPid = os.getEnv("DENIED_PID")
+    defer:
+      if oldShift.len == 0: delEnv("BOOT_SHIFT_SECONDS")
+      else: putEnv("BOOT_SHIFT_SECONDS", oldShift)
+      if oldPid.len == 0: delEnv("DENIED_PID")
+      else: putEnv("DENIED_PID", oldPid)
+    putEnv("BOOT_SHIFT_SECONDS", $shift)
+    if deniedPid.len == 0: delEnv("DENIED_PID")
+    else: putEnv("DENIED_PID", deniedPid)
+    let child = startProcess(getAppFilename(),
+      args = @["--probe-shifted-writer", encoded], options = {poStdErrToStdOut})
+    result.output = child.outputStream.readAll()
+    result.exitCode = child.waitForExit()
+    child.close()
 
 suite "writer identity recognises a live writer and only a dead one":
   test "this process is live under its own recorded identity":
@@ -176,12 +214,16 @@ suite "writer identity recognises a live writer and only a dead one":
     checkpoint("same live pid, different start stamp")
     check writerLiveness(encodeWriterIdentity(reused)) == wlDead
 
-  test "a record from another boot is dead without probing any process":
-    # After a reboot every pid is recycled from 1, so a pid-only rule is at
-    # its worst here. The boot id answers before any process is consulted.
+  test "native boot mismatches use the platform's evidence of death":
+    # Linux's boot UUID proves a different boot. Darwin's calendar-based
+    # boot stamp can change while this process remains alive, so the native
+    # process start stamp must settle its liveness instead.
     var otherBoot = currentWriterIdentity()
     otherBoot.bootId = otherBoot.bootId - 1
-    check writerLiveness(encodeWriterIdentity(otherBoot)) == wlDead
+    when defined(macosx):
+      check writerLiveness(encodeWriterIdentity(otherBoot)) == wlLive
+    else:
+      check writerLiveness(encodeWriterIdentity(otherBoot)) == wlDead
 
   test "a real child is live while it runs and dead once it exits":
     # End to end against an actual process lifetime rather than a synthesised
@@ -254,7 +296,49 @@ suite "writer identity recognises a live writer and only a dead one":
     check writerLiveness(encoded) == wlLive
 
   when defined(macosx):
-    test "a denied process or boot probe is unknown and never dead":
+    test "calendar corrections in either direction preserve a real live writer":
+      let identity = currentWriterIdentity()
+      let encoded = encodeWriterIdentity(identity)
+      require encoded.len > 0
+      # The child must recognise its actual live parent without injection first.
+      let control = execCmdEx(quoteShell(getAppFilename()) &
+        " --probe-writer " & quoteShell(encoded))
+      require control.exitCode == 0
+      require control.output.strip() == "wlLive"
+      for shift in [-120, 120]:
+        let child = shiftedWriterProbe(encoded, shift)
+        checkpoint("shift=" & $shift & " output=" & child.output)
+        require child.exitCode == 0
+        require ("injected boot shift " & $shift & " seconds") in child.output
+        let shiftedBoot = uint64(int64(identity.bootId) + int64(shift) * 1_000_000) or 1'u64
+        require ("boot=" & $shiftedBoot) in child.output
+        check ("forwarded process probe " & $identity.pid) in child.output
+        check child.output.strip().endsWith("wlLive")
+
+    test "calendar correction still requires evidence of absence or pid reuse":
+      let identity = currentWriterIdentity()
+      for shift in [-120, 120]:
+        var absent = identity
+        absent.pid = 999_999
+        var reused = identity
+        reused.startStamp = "1.1"
+        require reused.startStamp != identity.startStamp
+        for entry in [(identity, $identity.pid, "wlUnknown"),
+            (absent, "", "wlDead"), (reused, "", "wlDead")]:
+          let child = shiftedWriterProbe(encodeWriterIdentity(entry[0]), shift, entry[1])
+          checkpoint("shift=" & $shift & " expected=" & entry[2] & " output=" & child.output)
+          require child.exitCode == 0
+          require ("injected boot shift " & $shift & " seconds") in child.output
+          let shiftedBoot = uint64(int64(identity.bootId) + int64(shift) * 1_000_000) or 1'u64
+          require ("boot=" & $shiftedBoot) in child.output
+          if entry[1].len > 0:
+            check "injected EPERM" in child.output
+          else:
+            check ("forwarded process probe " & $entry[0].pid) in child.output
+          check child.output.strip().endsWith(entry[2])
+
+  when defined(macosx):
+    test "a denied process is unknown while a denied Darwin boot probe permits liveness":
       let identity = currentWriterIdentity()
       let encoded = encodeWriterIdentity(identity)
       require encoded.len > 0
@@ -278,8 +362,13 @@ suite "writer identity recognises a live writer and only a dead one":
         child.close()
         checkpoint("denyBoot=" & $denyBoot & " output=" & output)
         check status == 0
-        check "injected EPERM" in output
-        check output.strip().endsWith("wlUnknown")
+        if denyBoot:
+          # The calendar boot stamp is not evidence of death or a prerequisite
+          # for successful native process interrogation.
+          check output.strip() == "wlLive"
+        else:
+          check "injected EPERM" in output
+          check output.strip().endsWith("wlUnknown")
 
   when defined(macosx):
     test "legacy writers survive denied boot probes and retain denied process probes":
