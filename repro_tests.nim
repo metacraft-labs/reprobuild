@@ -4932,6 +4932,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_resources/tests/t_converge_does_not_attach_to_a_dead_instance.nim",
+    binary: "build/test-bin/t_converge_does_not_attach_to_a_dead_instance",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_resources/tests/t_dss10_readiness_edge_orders_the_registration.nim",
     binary: "build/test-bin/t_dss10_readiness_edge_orders_the_registration",
     defines: @[],

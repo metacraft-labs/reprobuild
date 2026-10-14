@@ -326,6 +326,19 @@ type
     holdersKnown*: seq[string]
       ## The holders the registry CAN name, sorted. On the rule-1 path
       ## this is §4.5's "naming the holders it does know".
+    droppedDeadPid*: int
+      ## Non-zero when an instance WAS registered at this key but its
+      ## process probed `silDead`, so converge dropped the record and
+      ## decided `scoMaterialise` as if nothing were there. The pid is
+      ## carried so a caller that cannot materialise -- a resolver's
+      ## command-less request -- can name the process that died instead
+      ## of only saying that nothing is running.
+    droppedDeadDetail*: string
+      ## The sentence saying so, empty exactly when `droppedDeadPid` is 0.
+      ## A field of its own rather than `diagnostic`, because
+      ## `diagnostic` is asserted EMPTY for `scoMaterialise`: a
+      ## materialise that replaces a dead record still has nothing to
+      ## refuse or warn about, it only has something to report.
 
   ServiceReleaseOutcome* = enum
     ## The outcomes of `repro down`.
@@ -948,6 +961,9 @@ proc convergeServiceInstance*(registry: var ServiceInstanceRegistry;
   ##
   ## ORDER OF DECISION, and it is not interchangeable:
   ##
+  ##   0. an instance is registered but its process probes `silDead` ->
+  ##      the record is dropped and this is step 1. See the note at the
+  ##      probe below.
   ##   1. no instance present -> `scoMaterialise`. `--replace` does NOT
   ##      refuse here and does not need to: there is nothing to take
   ##      over, and refusing would make `repro up --replace` unusable as
@@ -978,6 +994,42 @@ proc convergeServiceInstance*(registry: var ServiceInstanceRegistry;
     result.hadInstance = false
     return
   let entry = found.get
+  # IS THERE A PROCESS TO ATTACH TO. Asked before `--replace` and before
+  # `attachDecision`, through the registry's injected probe -- the same
+  # one the rebuild uses -- and not through a `kill -0` of our own. The
+  # daemon spawns instances detached and never waits on them, so a dead
+  # instance is an unreaped ZOMBIE: its pid, `/proc/<pid>/stat` and start
+  # time are all still there and `kill -0` succeeds on it. Only the real
+  # probe's `waitpid(WNOHANG)` step can tell, and it reaps the corpse as
+  # it answers.
+  #
+  # Without this, liveness was re-evaluated only by a REBUILD, so for the
+  # rest of a daemon's lifetime a dead shared instance kept answering
+  # `AttachSilently` and the consumer waited out the service's whole
+  # declared readiness timeout. See reprobuild-pm issue
+  # `2026-10-13-attach-succeeds-against-a-shared-instance-whose-process-
+  # is-a-zombie.md`.
+  #
+  # Only `silDead` drops the record. `silUnknown` proceeds exactly as
+  # `silLive` does, for the asymmetry the rebuild keeps: declaring a live
+  # instance dead would make this converge materialise a second one.
+  #
+  # The drop applies with or without `--replace`: there is nothing left
+  # to take over, so decision step 1's reasoning ("no instance present")
+  # is the one that holds.
+  if registry.probeLiveness(entry.record.process.processIdentity) ==
+      silDead:
+    registry.forgetServiceInstance(address)
+    result.outcome = scoMaterialise
+    result.diagnostic = ""
+    result.hadInstance = false
+    result.droppedDeadPid = entry.record.process.pid
+    # Worded to follow "no instance is running at `<address>`", which is
+    # where the daemon's command-less refusal appends it.
+    result.droppedDeadDetail =
+      "the instance registered there (pid " & $entry.record.process.pid &
+      ") had exited, and its record was dropped"
+    return
   result.hadInstance = true
   result.holderRecovery = entry.holderRecovery
   result.holdersKnown = entry.holdersOf()

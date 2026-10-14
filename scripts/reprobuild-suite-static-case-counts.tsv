@@ -554,6 +554,7 @@ libs/repro_project_dsl/tests/test_depends_on_macro.nim	nim	3
 libs/repro_project_dsl/tests/test_library_macro.nim	nim	12
 libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
+libs/repro_resources/tests/t_converge_does_not_attach_to_a_dead_instance.nim	nim	6
 libs/repro_resources/tests/t_dss10_readiness_edge_orders_the_registration.nim	nim	24
 libs/repro_resources/tests/t_dss11_converge_response_carries_the_instances_points.nim	nim	7
 libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim	nim	21
