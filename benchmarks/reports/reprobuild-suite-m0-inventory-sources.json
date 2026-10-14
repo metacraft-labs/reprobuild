@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 30,
-    "nimTestBinaries": 1972,
-    "pureUnitConsolidationGroups": 52,
+    "nimTestBinaries": 1974,
+    "pureUnitConsolidationGroups": 53,
     "pureUnitTests": 613,
-    "staticallyDetectedRuntimeCompilerFlowTests": 112,
-    "testEntries": 1989
+    "staticallyDetectedRuntimeCompilerFlowTests": 113,
+    "testEntries": 1991
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -464,7 +464,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl",
@@ -473,9 +473,23 @@
       "owner": "libs/repro_resources",
       "sources": [
         "libs/repro_resources/tests/t_l1_state_store.nim",
-        "libs/repro_resources/tests/t_l3_reaper.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "sources": [
+        "libs/repro_resources/tests/t_l2_lease_edge.nim",
+        "libs/repro_resources/tests/t_l3_reaper.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1135,7 +1149,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 13,
-      "integration": 1079,
+      "integration": 1081,
       "platform/destructive": 126,
       "pure unit": 613,
       "unclassified": 158
@@ -1322,9 +1336,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1972,
+    "nimTestBinaryCount": 1974,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1989
+    "testEntryCount": 1991
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4769,6 +4783,44 @@
         }
       ],
       "source": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "buildProvider",
+          "executedVariables": [],
+          "line": 177,
+          "path": "tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let artifact = extractInterfaceFromModule(modulePath, interfacePath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "buildProvider",
+          "executedVariables": [],
+          "line": 183,
+          "path": "tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let compiled = compileProviderBinary(modulePath, binPath,"
+        }
+      ],
+      "source": "tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim"
     },
     {
       "class": "integration",
@@ -9887,7 +9939,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_l4_daemon_leases.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16169,13 +16221,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_project_dsl",
+        "repro_provider_runtime",
         "repro_resources"
       ],
       "owner": "libs/repro_resources",
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l3_reaper.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 18,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29256,13 +29309,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_resources",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30611,6 +30665,28 @@
       "sourceSuiteCount": 19,
       "staticCaseCount": 53,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lease_reap_destroys_an_unlinked_type_over_a_session",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_resources"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -34103,6 +34179,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_reap_verb_is_dispatched",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_resources",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_reap_verb_is_dispatched.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -39,6 +39,27 @@
 ##       (a newer repro's) and unreadable — render as findings keyed on their
 ##       PATH, so a second bad record is a new finding; and a renew refuses to
 ##       rewrite a foreign record.
+##   (i) a tick that keeps failing leaves a readable VERDICT beside the store
+##       (``LeaseReapTickHealth``): the consecutive-failure count crosses the
+##       threshold ``repro health`` gates on, and "has never succeeded" is a
+##       value the verdict can state. Reporting once per run is what makes this
+##       necessary — after the first report the log says nothing at all.
+##   (j) the same counter RESETS on a successful tick, and an IDLE tick (empty
+##       store, nothing due) is itself a SUCCESS that advances
+##       ``lastSuccessUnix`` — so the verdict is falsifiable in both directions
+##       and a healthy daemon's row keeps reporting a LIVE time rather than
+##       freezing at its last destroy.
+##   (k) the recorded verdict is a function of the SWEEP, not of the logging:
+##       ``runAndRecordLeaseReapTick`` decides and writes it, and its signature
+##       admits no log path at all, so a log write that fails cannot persist a
+##       clean sweep as an unsuccessful one. Driven as a direct call — no
+##       daemon, no log file.
+##   (l) the three UNDECODABLE categories are weighed differently by the
+##       verdict: an UNREADABLE record (neither decoded nor quarantined, still
+##       in place) makes the tick unsuccessful, while a FOREIGN one (left
+##       untouched on purpose) and a QUARANTINED one (moved aside by this
+##       sweep) do not. ``failed`` is empty in all three, so a verdict keyed on
+##       ``failed`` alone would call a permanently obstructed store clean.
 
 import std/[os, options, times, tables, locks, random, strutils, unittest]
 
@@ -624,3 +645,299 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     check not resp.ok
     check resp.reason.contains("newer repro")
     check readFile(path) == bytes
+
+  test "(i) a reaper that never succeeds becomes a readable health finding":
+    ## §4.4 "a persistently failing reaper is a health finding".
+    ##
+    ## Cases (e) and (f) prove the tick reports a stuck record ONCE instead of
+    ## on every tick. That is the right fix for the 62 MB of repeated log lines
+    ## the live daemon produced, and it makes the underlying failure QUIETER
+    ## still: after the first report there is nothing new in the log at all. So
+    ## it cannot also be the answer to "has the reaper ever worked" — which is
+    ## the question nothing could answer for 57 days while `repro health`, the
+    ## daemon's status and every dependent command all read healthy
+    ## (reprobuild-pm/issues/
+    ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md, "Why it
+    ## matters").
+    ##
+    ## Driven against the real daemon on a real store: the verdict is whatever
+    ## the production tick wrote, read back through the production reader.
+    let root = scratchRoot("health-stuck")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    let store = openStateStore(stateRoot)
+    let past = getTime() - initDuration(hours = 1)
+
+    # A record the daemon cannot reconstruct in-process and has no provider
+    # session for: the live defect's shape, and unfixable by retrying.
+    writeStateRecord(store, ResourceStateRecord(
+      address: "orphan",
+      typeId: "l4.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l4.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @[],
+      identity: "stub:orphan",
+      present: true,
+      holders: initTable[string, Time](),
+      effectiveDeadline: some(past),
+      lastRenewed: past))
+
+    # No verdict before the daemon runs: an absent record is the healthy
+    # "nothing has swept this store" answer, not a failure to report.
+    check readLeaseReapTickHealth(dlsUser, stateRoot).isNone
+
+    putEnv("REPRO_DAEMON_LEASE_REAP_INTERVAL_MS", "50")
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      removeDir(root)
+
+    # Wait for the counter to cross the threshold the doctor gates on, rather
+    # than for a fixed number of milliseconds.
+    let deadline = epochTime() + 15.0
+    var health = readLeaseReapTickHealth(dlsUser, stateRoot)
+    while epochTime() < deadline and
+        (health.isNone or not leaseReapTickIsUnhealthy(health.get)):
+      sleep(50)
+      health = readLeaseReapTickHealth(dlsUser, stateRoot)
+
+    check health.isSome
+    let h = health.get
+    check leaseReapTickIsUnhealthy(h)
+    check h.consecutiveUnsuccessful >= LeaseReapUnhealthyTickThreshold
+    # NEVER succeeded — the issue's own case, and a distinct value from
+    # "succeeded a while ago". A reaper that has not worked once is a wiring
+    # fault; one that has stopped working is a new obstruction.
+    check h.lastSuccessUnix == 0
+    check h.totalTicks >= int64(LeaseReapUnhealthyTickThreshold)
+    check h.lastTickUnix > 0
+    # The verdict names the record and why, so the finding is actionable
+    # without reading the log.
+    check h.stuck.len == 1
+    check h.stuck[0].contains("address=orphan")
+    check h.stuck[0].contains("l4.unregistered")
+    # Nothing was destroyed and the record is still there to be resumed.
+    check hasStateRecord(store, "orphan")
+
+  test "(j) a successful tick resets the counter, and an IDLE tick is a success":
+    ## Two properties, and the second is the one that is easy to get backwards.
+    ##
+    ## (1) The counter is falsifiable in BOTH directions. A monotonically
+    ##     climbing counter would make the doctor's row go red once and stay
+    ##     red, which is the same uninformative constant as the row that was
+    ##     always green.
+    ##
+    ## (2) An IDLE tick — the store holds nothing due, so nothing is selected —
+    ##     counts as a SUCCESS and ADVANCES `lastSuccessUnix`. It is not a
+    ##     third neither-state. Asserting only `consecutiveUnsuccessful == 0`
+    ##     cannot see the difference, because the counter sits at 0 under
+    ##     either reading; the discriminator is whether `lastSuccessUnix` keeps
+    ##     MOVING once the store is empty. Under "idle is neither" it would
+    ##     freeze at the timestamp of the last destroy, and an operator reading
+    ##     the row would be told a stale time as if it were live.
+    ##
+    ## `lastSuccessUnix` therefore means "a sweep last completed unobstructed",
+    ## not "something was last destroyed".
+    let root = scratchRoot("health-ok")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    let store = openStateStore(stateRoot)
+    let past = getTime() - initDuration(hours = 1)
+
+    # A reapable stub record: the tick will destroy it and succeed.
+    materialize(store, "cluster", "smoke", delayed(initDuration(minutes = 1)),
+                past)
+    check hasStateRecord(store, "cluster")
+    check worldHas("cluster")
+
+    putEnv("REPRO_DAEMON_LEASE_REAP_INTERVAL_MS", "50")
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      removeDir(root)
+
+    let deadline = epochTime() + 10.0
+    var health = readLeaseReapTickHealth(dlsUser, stateRoot)
+    while epochTime() < deadline and
+        (health.isNone or health.get.lastSuccessUnix == 0):
+      sleep(50)
+      health = readLeaseReapTickHealth(dlsUser, stateRoot)
+
+    check health.isSome
+    let h = health.get
+    check h.lastSuccessUnix > 0
+    check h.consecutiveUnsuccessful == 0
+    check not leaseReapTickIsUnhealthy(h)
+    check h.stuck.len == 0
+    check not hasStateRecord(store, "cluster")   # it really did reap
+
+    # The store is now EMPTY (the one record was reaped), so every subsequent
+    # tick is idle. Wait for `lastSuccessUnix` to ADVANCE past the destroying
+    # tick's: that is property (2), and it is what distinguishes "idle is a
+    # success" from "idle is neither". The wait is on the value rather than on
+    # a fixed sleep because the field has one-second granularity.
+    let advanceDeadline = epochTime() + 10.0
+    var later = readLeaseReapTickHealth(dlsUser, stateRoot)
+    while epochTime() < advanceDeadline and
+        (later.isNone or later.get.lastSuccessUnix <= h.lastSuccessUnix):
+      sleep(50)
+      later = readLeaseReapTickHealth(dlsUser, stateRoot)
+
+    check later.isSome
+    # THE DISCRIMINATOR: an idle sweep recorded a success of its own.
+    check later.get.lastSuccessUnix > h.lastSuccessUnix
+    # Non-vacuity: those were idle ticks, not more destroys — the store stayed
+    # empty and nothing new was reaped.
+    check not hasStateRecord(store, "cluster")
+    check later.get.stuck.len == 0
+    # ...and the counter stayed down, which is property (1) holding through a
+    # run of idle ticks.
+    check later.get.consecutiveUnsuccessful == 0
+    check not leaseReapTickIsUnhealthy(later.get)
+    check later.get.totalTicks > h.totalTicks
+
+  test "(k) the recorded verdict is a function of the SWEEP, not of the logging":
+    ## S8: a tick that swept cleanly must never be PERSISTED as an unsuccessful
+    ## one because a log write failed. The two failures are unrelated — a full
+    ## disk or a revoked log file breaks `logLine`, not the reaper — and
+    ## conflating them manufactures the health finding this record exists to
+    ## report truthfully, which is strictly worse than a missing log line.
+    ##
+    ## The property is STRUCTURAL and this case pins the structure:
+    ## `runAndRecordLeaseReapTick` decides the verdict and writes it, and its
+    ## signature admits NO log path, NO config and NO logger — so there is
+    ## nothing it could fail on that belongs to logging, and no ordering a
+    ## later edit to the daemon's logging could get wrong. The event loop logs
+    ## only AFTER it returns, from the values it returns.
+    ##
+    ## Driven as a direct call rather than through a daemon, because that is
+    ## what makes the point: no daemon, no log file, no event loop — and the
+    ## verdict is still recorded correctly in both directions.
+    let root = scratchRoot("sweep-not-logging")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    defer: removeDir(root)
+    let store = openStateStore(stateRoot)
+    let past = getTime() - initDuration(hours = 1)
+
+    # --- An IDLE sweep over an empty store: successful, and recorded so. ---
+    let idle = runAndRecordLeaseReapTick(dlsUser, stateRoot)
+    check not idle.raised
+    check idle.reapedCount == 0
+    check idle.findings.len == 0
+    check idle.healthWriteError.len == 0
+    let afterIdle = readLeaseReapTickHealth(dlsUser, stateRoot)
+    check afterIdle.isSome
+    check afterIdle.get.lastSuccessUnix > 0          # idle IS a success
+    check afterIdle.get.consecutiveUnsuccessful == 0
+    check afterIdle.get.totalTicks == 1
+
+    # --- A sweep that really reaps: also successful. ---
+    materialize(store, "cluster", "smoke", delayed(initDuration(minutes = 1)),
+                past)
+    check hasStateRecord(store, "cluster")
+    let reaping = runAndRecordLeaseReapTick(dlsUser, stateRoot)
+    check not reaping.raised
+    check reaping.reapedCount == 1
+    check reaping.findings.len == 0
+    check not hasStateRecord(store, "cluster")
+    let afterReap = readLeaseReapTickHealth(dlsUser, stateRoot)
+    check afterReap.get.consecutiveUnsuccessful == 0
+    check afterReap.get.totalTicks == 2
+
+    # --- A sweep that gets stuck: UNsuccessful, and the finding is carried
+    # back for the caller to log rather than logged from inside. ---
+    writeStateRecord(store, ResourceStateRecord(
+      address: "orphan",
+      typeId: "l4.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l4.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @[],
+      identity: "stub:orphan",
+      present: true,
+      holders: initTable[string, Time](),
+      effectiveDeadline: some(past),
+      lastRenewed: past))
+    let stuck = runAndRecordLeaseReapTick(dlsUser, stateRoot)
+    check not stuck.raised              # the SWEEP completed; a record did not
+    check stuck.failedCount == 1
+    check stuck.findings.len == 1
+    check stuck.findings[0].line.contains("address=orphan")
+    # The signature carries the finding OUT; nothing was written to any log,
+    # because this proc has no log to write to.
+    let afterStuck = readLeaseReapTickHealth(dlsUser, stateRoot)
+    check afterStuck.get.consecutiveUnsuccessful == 1
+    check afterStuck.get.lastSuccessUnix == afterReap.get.lastSuccessUnix
+    check afterStuck.get.stuck.len == 1
+    check afterStuck.get.totalTicks == 3
+
+  test "(l) an UNREADABLE record makes the tick unsuccessful; foreign and quarantined do not":
+    ## The three undecodable categories `scanStateRecords` reports are NOT
+    ## alike, and the verdict has to tell them apart or it reports a
+    ## permanently obstructed store as a clean one — the failure this whole
+    ## record exists to remove.
+    ##
+    ##   * FOREIGN (a newer repro's record): deliberately left untouched. The
+    ##     reaper is working as specified, so the tick is successful.
+    ##   * QUARANTINED (corrupt): this sweep moved it out of the way. It made
+    ##     progress and the condition is gone, so the tick is successful.
+    ##   * UNREADABLE: "could neither be decoded nor quarantined; still in
+    ##     place". Nothing changed, the next tick meets it again, and no amount
+    ##     of retrying helps. That is the class the consecutive-unsuccessful
+    ##     counter is for, so it must count.
+    ##
+    ## Driven against a real store through the production tick, with a real
+    ## unreadable file (mode 000) rather than a synthetic report: case (h)
+    ## already covers the rendering of a synthetic one, and what is at stake
+    ## here is the VERDICT, which only the real sweep writes.
+    when defined(posix):
+      let root = scratchRoot("unreadable-verdict")
+      let stateRoot = root / "lease-state"
+      removeDir(root)
+      defer: removeDir(root)
+      discard openStateStore(stateRoot)
+
+      # A quarantinable (plain corrupt) record first: the sweep moves it out,
+      # which is progress, so the tick must be SUCCESSFUL.
+      writeFile(stateRoot / "corrupt.rec", "not a state record at all")
+      let quarantining = runAndRecordLeaseReapTick(dlsUser, stateRoot)
+      check not quarantining.raised
+      check quarantining.failedCount == 0
+      let afterQuarantine = readLeaseReapTickHealth(dlsUser, stateRoot)
+      check afterQuarantine.isSome
+      # Non-vacuity: the sweep really did report it, and really did move it.
+      check afterQuarantine.get.stuck.len == 1
+      check afterQuarantine.get.stuck[0].contains("quarantined")
+      check not fileExists(stateRoot / "corrupt.rec")
+      check afterQuarantine.get.lastSuccessUnix > 0
+      check afterQuarantine.get.consecutiveUnsuccessful == 0
+
+      # Now one that can be neither decoded NOR moved, because it cannot even
+      # be opened. The sweep leaves it in place and must say the tick failed.
+      let bad = stateRoot / "unreadable.rec"
+      writeFile(bad, "also not a state record")
+      setFilePermissions(bad, {})
+      defer: setFilePermissions(bad, {fpUserRead, fpUserWrite})
+      let obstructed = runAndRecordLeaseReapTick(dlsUser, stateRoot)
+      check not obstructed.raised          # the SWEEP completed...
+      check obstructed.failedCount == 0    # ...and selected nothing at all
+      check obstructed.findings.len == 1
+      check obstructed.findings[0].line.contains("cannot read record")
+      let afterUnreadable = readLeaseReapTickHealth(dlsUser, stateRoot)
+      check afterUnreadable.isSome
+      # THE DISCRIMINATOR: `failed` is empty, so a verdict keyed on `failed`
+      # alone would have called this a clean sweep and advanced the success
+      # timestamp. It must not.
+      check afterUnreadable.get.consecutiveUnsuccessful == 1
+      check afterUnreadable.get.lastSuccessUnix ==
+        afterQuarantine.get.lastSuccessUnix
+      check afterUnreadable.get.stuck.len == 1
+      check afterUnreadable.get.stuck[0].contains("cannot read record")
+      # It is still there, which is why retrying cannot help.
+      check fileExists(bad)

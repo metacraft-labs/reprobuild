@@ -17,15 +17,19 @@
 ## routes its `observe`/`apply(rakDestroy)` through those procs when
 ## `transport.kind == rtSession`. A dedicated live-session reap (launching a
 ## provider binary just to destroy) is HEAVY (an RP1 provider build per
-## test) and is deferred to the L5 topology integration, which exercises the
-## session-destroy path on a real provider. Here the core selection
-## predicate, reverse-topo, crash-safety, idempotency, and the `repro reap`
-## seam are proven hermetically over the in-process transport.
+## test) and lives in
+## `tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim`,
+## which drives a real launched provider — that is where the §4.4 "a session
+## reap needs no attrs codec in the reaping process" property is proven
+## end-to-end. Here the core selection predicate, reverse-topo, crash-safety,
+## idempotency, the `repro reap` seam, and (case 18) WHICH transport requires
+## the attrs codec are proven hermetically.
 
 import std/[tables, options, times, os, strutils, unittest]
 
 import repro_resources
 import repro_project_dsl          # TypedExtensionBox
+import repro_provider_runtime     # ProviderHandle — case (12)'s session resolver
 
 # ---------------------------------------------------------------------------
 # Stub provider with a DESTROY WITNESS LOG.
@@ -729,3 +733,103 @@ suite "L3: crash-safe reaper":
     check fileExists(live)                 # never touched: a write may hold it
     check report.quarantined.len == 0      # a temp is never judged as a record
     check report.unreadable.len == 0
+
+  test "(18) the attrs codec is required IN-PROCESS and not over a SESSION":
+    ## The transport asymmetry §4.4 settles, pinned in both directions against
+    ## ONE record in ONE process, so neither arm can drift into the other's
+    ## contract without a red case.
+    ##
+    ## The defect: the reaper reconstructed through the STRICT attrs codec
+    ## BEFORE it chose a transport. §4.2 gives the daemon a provider-session
+    ## destroy precisely so it can tear down an out-of-tree provider's
+    ## resources "WITHOUT linking it into the daemon", so a process holding a
+    ## provider artifact but not that provider's attrs codec — the
+    ## configuration §4.2 describes — could not reap over the session it had.
+    ##
+    ## NOT the cause of the outage in reprobuild-pm/issues/
+    ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md, and this case
+    ## does not claim to reproduce it. That daemon swept on the IN-PROCESS
+    ## transport for all 131,882 ticks — `buildLeaseReapTransport` falls back
+    ## to it when no provider artifact is registered, and nothing in the
+    ## shipped tree registers one — where its record had no linked driver
+    ## either and the strict path is still right. This case pins the second,
+    ## independent defect that would have produced the identical symptom in a
+    ## daemon that did have the artifact.
+    ##
+    ## The two arms want OPPOSITE things and that is the whole point:
+    ##
+    ##   * in-process  -> the linked driver dereferences the typed value, so a
+    ##     codec it cannot decode is unusable and must be a hard, diagnosable
+    ##     failure AT the seam. Loosening this arm would hand a `RawExtensionBox`
+    ##     to a driver that casts it to the wrong type.
+    ##   * session     -> the box is marshalled straight back out to a provider
+    ##     that DOES link the codec. Requiring one here is a requirement with no
+    ##     consumer.
+    let store = scratchStore("transport-codec")
+    let t0 = fromUnix(1_700_000_000)
+    let later = t0 + initDuration(hours = 1)
+
+    # One record whose attrs typeId has no registered marshaller in this
+    # process — hand written, because `buildStateRecord` marshals THROUGH the
+    # registry and so cannot produce one for such a type. This is exactly the
+    # daemon's situation: a record written by a process that had the codec,
+    # being swept by one that does not.
+    proc seedOrphan() =
+      writeStateRecord(store, ResourceStateRecord(
+        address: "nic0",
+        typeId: "l3.unregistered",
+        determinism: rdVolatile,
+        attrsTypeId: "l3.unregistered",
+        attrsJson: "\x01\x00\x00\x00\x00\x00",
+        dependsOn: @[],
+        identity: "incus:nic0",
+        present: true,
+        holders: initTable[string, Time](),
+        effectiveDeadline: some(t0),
+        lastRenewed: t0))
+
+    # --- IN-PROCESS: still a hard failure, and still non-destructive. ---
+    seedOrphan()
+    let inProc = reapOnce(store, now = later, inProcessTransport())
+    check inProc.reaped.len == 0
+    check inProc.failed.len == 1
+    check inProc.failed[0].address == "nic0"
+    check inProc.failed[0].kind == rfkUnreapable
+    check inProc.failed[0].reason.contains("marshaller")
+    # The record survives for a sweep that can do better, and nothing in the
+    # world was touched on the way to finding out.
+    check hasStateRecord(store, "nic0")
+    check destroyLog.len == 0
+    # The recorded reason names what the operator of THIS process can do.
+    # `unmarshalAttrs`'s own advice — import the producer's lifted interface —
+    # is unactionable for the daemon, which is a fixed binary with no recipe to
+    # add an import to; repeating it there is how a failure stays unfixed while
+    # nominally carrying a remedy.
+    check inProc.failed[0].reason.contains("provider session")
+    check inProc.failed[0].reason.contains("repro reap --once")
+
+    # --- SESSION: the codec is not consulted; the transport IS reached. ---
+    # The resolver raises a sentinel instead of launching a provider: this case
+    # is about WHERE the reap gets to, and a real launched provider is case
+    # `t_lease_reap_destroys_an_unlinked_type_over_a_session`'s subject. Before
+    # the fix the resolver was never called at all and the reason named the
+    # marshaller.
+    var resolverCalls = 0
+    var resolvedTypeIds: seq[string] = @[]
+    let resolve = proc (typeId: string): ProviderHandle =
+      inc resolverCalls
+      resolvedTypeIds.add(typeId)
+      raise newException(ValueError, "L3-SENTINEL session not launched here")
+
+    let viaSession = reapOnce(store, now = later, sessionTransport(resolve))
+    check resolverCalls == 1                       # the transport was REACHED
+    check resolvedTypeIds == @["l3.unregistered"]  # ...for the right type
+    check viaSession.failed.len == 1
+    check viaSession.failed[0].reason.contains("L3-SENTINEL")
+    # ...and the strict-codec refusal is GONE from this arm, which is the
+    # falsifiable half: before the fix this reason was the marshaller message.
+    check not viaSession.failed[0].reason.contains("marshaller")
+    # A session arm that failed to launch is still non-destructive and still
+    # leaves the record.
+    check hasStateRecord(store, "nic0")
+    check destroyLog.len == 0
