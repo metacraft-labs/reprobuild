@@ -440,12 +440,18 @@ suite "migrated Google Repo workspace pre-push compatibility":
     writeFile(nativeProject, validNativeProject)
 
     # Native metadata always wins. A malformed native file cannot be bypassed
-    # by the otherwise-valid legacy artifact.
+    # by the otherwise-valid legacy artifact: the push is refused with the
+    # strict reader's diagnostic naming the native file and its bad schema.
+    # (It used to be refused with "requires either ... neither was present",
+    # which was wrong about a file that IS present; a present-but-malformed
+    # state file is reported as such.)
     writeFile(fx.workspace / ".repro" / "workspace.toml",
       "schema = \"not-the-native-schema\"\n")
     let nativeShadow = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    nativeShadow.assertRefused("requires either `.repro/workspace-state.toml`")
+    nativeShadow.assertRefused(fx.workspace / ".repro" / "workspace.toml")
+    check "schema version mismatch" in nativeShadow.output
+    check "neither was present" notin nativeShadow.output
     check bareHead(gitBin, fx.origin) == outgoing
     removeFile(fx.workspace / ".repro" / "workspace.toml")
 

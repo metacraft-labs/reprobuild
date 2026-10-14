@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1995,
+    "nimTestBinaries": 2000,
     "pureUnitConsolidationGroups": 55,
     "pureUnitTests": 619,
     "staticallyDetectedRuntimeCompilerFlowTests": 117,
-    "testEntries": 2013
+    "testEntries": 2018
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1178,7 +1178,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 15,
-      "integration": 1093,
+      "integration": 1098,
       "platform/destructive": 126,
       "pure unit": 619,
       "unclassified": 160
@@ -1371,9 +1371,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1995,
+    "nimTestBinaryCount": 2000,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2013
+    "testEntryCount": 2018
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13151,7 +13151,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_local_store",
       "requiresReproBinary": false,
@@ -28494,6 +28495,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dangling_symlink_in_observed_directory_does_not_abort",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_dangling_symlink_in_observed_directory_does_not_abort.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_declared_daemon_ipc_trust",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -30005,6 +30023,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_health_reports_a_malformed_repo_fragment",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_reports_a_malformed_repo_fragment.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -32283,6 +32318,40 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_malformed_settings_file_is_an_error",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_malformed_settings_file_is_an_error.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_malformed_state_file_is_reported_accurately",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_malformed_state_file_is_reported_accurately.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_managed_hook_reentry_guard_prevents_recursive_publish",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -34426,6 +34495,23 @@
       "source": "tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_push_gateway_opt_out_is_a_settings_key",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_push_gateway_opt_out_is_a_settings_key.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -284,7 +284,8 @@ proc lockingFromTree(c: TreeCtx; n: TomlValueRef): BootstrapLockingBody =
 
 # ---- the shared file --------------------------------------------------------
 
-const settingsTopLevelKeys = ["schema", "workspace", "projects", "records",
+const settingsTopLevelKeys = ["schema", "push_gateway", "workspace",
+  "projects", "records",
   "manifest", "profiles", "branch-roles", "verify", "develop", "locking",
   "foreign_env", "extensions"]
 
@@ -296,6 +297,8 @@ proc decodeSettingsTree(path, content: string): WorkspaceSettings =
   c.checkKeys("", tree, settingsTopLevelKeys)
   result.path = path
   result.schema = schemaWorkspaceSettingsV1
+  result.push_gateway = c.optString("", tree, "push_gateway")
+  checkPushGatewayValue(path, schemaWorkspaceSettingsV1, result.push_gateway)
   let settingsDir = parentDir(absolutePath(path))
 
   let ws = child(tree, "workspace")
@@ -418,6 +421,7 @@ proc settingsFromBootstrap(cfg: WorkspaceBootstrap;
   ## every consumer read from it before (see `WorkspaceSettings`).
   result.path = path
   result.schema = schemaWorkspaceBootstrapV1
+  result.push_gateway = cfg.push_gateway
   result.projects = cfg.projects
   if cfg.manifest.url.len > 0:
     result.records.url = some(cfg.manifest.url)

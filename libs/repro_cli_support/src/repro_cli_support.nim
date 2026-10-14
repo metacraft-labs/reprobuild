@@ -9156,10 +9156,17 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
   var cache = openActionCache(sharedRoot / "action-cache")
   defer:
     cache.flushHotIndex()
-  let record = cache.recordActionResult(cas, regenerationAction.weakFingerprint,
-    regenerationAction.actionCachePolicy, regenerationAction.inputs,
-    regenerationAction.outputs, regenerationAction.cwd,
-    storeOutputBlobs = false)
+  let record =
+    try:
+      cache.recordActionResult(cas, regenerationAction.weakFingerprint,
+        regenerationAction.actionCachePolicy, regenerationAction.inputs,
+        regenerationAction.outputs, regenerationAction.cwd,
+        storeOutputBlobs = false)
+    except UnreadableInputError:
+      # An input this content-keyed record would need cannot be read, so
+      # there is no record to seed: report "not seeded" and let the edge
+      # run, rather than failing the build over an observed file's state.
+      return false
   writeActionResultRecordFile(
     dependencyEvidencePath(cmakeCacheRoot, regenerationAction.id), record)
   true
@@ -18915,15 +18922,15 @@ proc detectWorkspaceProjectName(workspaceRoot: string): string =
   ## ``[workspace].project``; when neither workspace.toml nor that field
   ## is present we look for exactly one ``projects/*.toml`` under
   ## ``projects/`` and use its stem.
+  ## A state file that exists but does not parse raises the strict reader's
+  ## diagnostic: guessing a project from ``projects/`` instead would resolve
+  ## a workspace other than the one the file records.
   let workspaceToml = workspaceTomlPath(workspaceRoot)
   if fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        return recorded
-    except WorkspaceManifestParseError:
-      discard
+    let recorded =
+      readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+    if recorded.len > 0:
+      return recorded
   let projectsDir = manifestsRoot(workspaceRoot) / "projects"
   if dirExists(projectsDir):
     var single = ""
@@ -18936,7 +18943,7 @@ proc detectWorkspaceProjectName(workspaceRoot: string): string =
       return extractFilename(single).changeFileExt("")
   ""
 
-proc enumerateParticipatingRepos(workspaceRoot: string):
+proc enumerateParticipatingReposStrict(workspaceRoot: string):
     tuple[mode: string; projectName: string;
           repos: seq[HookRepoTarget]] =
   ## Returns ``(mode, projectName, repos)``. ``mode`` is
@@ -19044,6 +19051,24 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
   result.projectName = ""
   # The single-repo path leaves ``repos`` empty; the caller falls back to
   # ``gitHooksDir(targetPath)`` exactly like the pre-M17 implementation.
+
+
+proc enumerateParticipatingRepos(workspaceRoot: string):
+    tuple[mode: string; projectName: string;
+          repos: seq[HookRepoTarget]] =
+  ## ``enumerateParticipatingReposStrict``. A manifest file that does not
+  ## parse (a ``repos/*.toml`` fragment, a project manifest) raises its
+  ## diagnostic — except inside ``toleratingMalformedWorkspaceFiles``
+  ## (``repro health``), where it is set aside for health's ``manifest`` row
+  ## and no repo is enumerated, so the rows that sweep the repo set (hooks,
+  ## push gateway) report on nothing instead of aborting the whole report.
+  try:
+    result = enumerateParticipatingReposStrict(workspaceRoot)
+  except WorkspaceManifestParseError as err:
+    if not setAsideMalformedWorkspaceFile(err, mwkManifest):
+      raise
+    result = (mode: "workspace", projectName: "",
+      repos: newSeq[HookRepoTarget]())
 
 proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   ## M17 workspace-aware ``ensure`` driver. Walks every participating
@@ -30182,19 +30207,18 @@ proc resolveDevelopWorkspacePrimary(
     return composeWorkspaceLayers(workspaceRoot, unrecordedProject)
   let manifestsRoot = manifestsRoot(workspaceRoot)
   if fileExists(workspaceToml):
-    try:
-      let recorded = readWorkspaceLocal(absolutePath(workspaceToml))
-      if recorded.workspace.project.len > 0:
-        let projectFile = manifestsRoot / "projects" /
-          (recorded.workspace.project & ".toml")
-        let variantFile = manifestsRoot / "variants" /
-          (recorded.workspace.project & ".toml")
-        if fileExists(projectFile):
-          return resolveProject(projectFile)
-        if fileExists(variantFile):
-          return resolveVariant(variantFile)
-    except WorkspaceManifestParseError:
-      discard
+    # A malformed state file raises the strict reader's diagnostic; it is
+    # never mistaken for an absent one.
+    let recorded = readWorkspaceLocal(absolutePath(workspaceToml))
+    if recorded.workspace.project.len > 0:
+      let projectFile = manifestsRoot / "projects" /
+        (recorded.workspace.project & ".toml")
+      let variantFile = manifestsRoot / "variants" /
+        (recorded.workspace.project & ".toml")
+      if fileExists(projectFile):
+        return resolveProject(projectFile)
+      if fileExists(variantFile):
+        return resolveVariant(variantFile)
   # Last resort: a workspace with exactly one ``projects/*.toml`` and no
   # metadata file. M22's primary callers always have a workspace.toml
   # (M9 init writes one) so this arm mostly serves tests that pre-seed
@@ -31572,12 +31596,19 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
   # Load the existing override file once; fold every placed node into it. Read
   # BEFORE the ``--list`` branch too: the `develop` state of a row is exactly
   # "this repo has an override entry".
-  var overrides =
-    try:
-      let existing = readDevelopOverridesFile(root)
-      if existing.isSome: existing.get() else: newDevelopOverrides()
-    except WorkspaceManifestParseError:
-      newDevelopOverrides()
+  #
+  # An override file that exists but does not parse is a refusal carrying the
+  # strict reader's diagnostic: treating it as empty would lose every
+  # registration it holds the next time this command writes the file back.
+  var overrides = newDevelopOverrides()
+  try:
+    let existing = readDevelopOverridesFile(root)
+    if existing.isSome:
+      overrides = existing.get()
+  except WorkspaceManifestParseError as err:
+    notices.add(err.msg)
+    return DevelopAllResult(outcomes: @[], notices: notices, exitCode: 2,
+      backends: composed.backends)
 
   # ---- DS-6 — ``--list``: print the resolved lock set and exit. -----------
   #
@@ -36915,12 +36946,12 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
     # A metadata-only workspace.toml (M13) can supply the project name so the
     # single-project branch resolves without the user repeating it.
     if fileExists(workspaceToml):
-      try:
-        let recorded =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-        if recorded.len > 0: name = recorded
-      except WorkspaceManifestParseError:
-        discard
+      # A state file that exists but does not parse raises the strict
+      # reader's diagnostic (file and key) rather than reading as absent and
+      # ending in "neither was present".
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0: name = recorded
     else:
       # repo-workspaces v2.10 wrote its metadata immediately before the
       # native-layout cutover. Read that known migration artifact narrowly;
@@ -37040,9 +37071,8 @@ proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
   # declares (the composer's ``noLayerDeclaresProjectTag``) falls through to
   # the diagnostics below; any other composition failure (an unreachable
   # layer, a malformed fragment, conflicting declarations) is the answer.
-  let rootOnlyNonProject = not fileExists(projectFile) and
-    (fileExists(variantFile) or fileExists(repoSetFile))
-  if not rootOnlyNonProject and isCompositionalWorkspaceToml(workspaceRoot, name):
+  if not namesOnlyRootVariantOrRepoSet(workspaceRoot, name) and
+      isCompositionalWorkspaceToml(workspaceRoot, name):
     try:
       return resolveWorkspaceProjectByName(workspaceRoot, name,
         layersMayOmitProject = true)
@@ -42502,11 +42532,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     let workspaceToml = workspaceTomlPath(args.workspaceRoot)
     var haveBase = isCompositionalWorkspaceToml(args.workspaceRoot)
     if not haveBase and fileExists(workspaceToml):
-      try:
-        haveBase =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project.len > 0
-      except WorkspaceManifestParseError:
-        haveBase = false
+      haveBase =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project.len > 0
     if haveBase:
       # Resolve the recorded/composed workspace, not the positional, so the
       # scope filter below can narrow the full set.
@@ -45176,21 +45203,19 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name.
     if fileExists(workspaceToml):
-      try:
-        let recordedProject =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-        if recordedProject.len > 0:
-          var withProject = parsed
-          withProject.projectName = recordedProject
-          # PS-2 — a lock with no explicit ``<project>`` is a snapshot of the
-          # WORKSPACE, so it pins every repo of the active project set. The
-          # lock's DESTINATION stays the primary project (see
-          # ``pickRecordStoreRoot`` and the ``locks/<project>/`` layout).
-          let recovered = resolveWorkspaceLockProject(withProject)
-          return (extendWithActiveProjectSet(parsed.workspaceRoot,
-            recovered.resolved), recovered.workspaceLocal)
-      except WorkspaceManifestParseError:
-        discard
+      # A malformed state file raises the strict reader's diagnostic.
+      let recordedProject =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recordedProject.len > 0:
+        var withProject = parsed
+        withProject.projectName = recordedProject
+        # PS-2 — a lock with no explicit ``<project>`` is a snapshot of the
+        # WORKSPACE, so it pins every repo of the active project set. The
+        # lock's DESTINATION stays the primary project (see
+        # ``pickRecordStoreRoot`` and the ``locks/<project>/`` layout).
+        let recovered = resolveWorkspaceLockProject(withProject)
+        return (extendWithActiveProjectSet(parsed.workspaceRoot,
+          recovered.resolved), recovered.workspaceLocal)
     else:
       let migratedProject =
         legacyMigratedWorkspaceProjectName(parsed.workspaceRoot)
@@ -49381,7 +49406,14 @@ proc pinRegressionSyncCommand*(workspaceRoot, repo: string): string =
     if recorded.len > 0: candidates.add(recorded)
   except CatchableError:
     discard
-  for p in activeProjectSetOrEmpty(root):
+  # Best-effort like the read above: this only words a remedy for a refusal
+  # that is already being reported, so unreadable state must not replace it.
+  var active: seq[string]
+  try:
+    active = activeProjectSetOrEmpty(root)
+  except CatchableError:
+    discard
+  for p in active:
     if p notin candidates: candidates.add(p)
   for p in candidates:
     var resolved: ResolvedProject
@@ -51312,12 +51344,12 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
   ##   2. The ``workspaceLocal`` we already loaded (composer-mode
   ##      shortcut that avoids re-reading the file).
   ##   3. The resolver's ``trunk``.
-  try:
-    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
-    if recorded.isSome:
-      return recorded.get()
-  except WorkspaceManifestParseError:
-    discard
+  ##
+  ## A malformed state file raises the strict reader's diagnostic: the gate
+  ## must not guess the branch from a file it could not read.
+  let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+  if recorded.isSome:
+    return recorded.get()
   if workspaceLocal.isSome and
       workspaceLocal.get().workspace.branch.isSome and
       workspaceLocal.get().workspace.branch.get().len > 0:
@@ -56382,37 +56414,28 @@ const
     ## state today and must not be reported as a defect.
 
 proc workspaceDeclaresGatewayOff(workspaceRoot: string): bool =
-  ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` in
-  ## ``.repro-workspace.toml``.
+  ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` at the top level of
+  ## the workspace settings file (``repro-workspace.toml``, or the old
+  ## ``.repro-workspace.toml``), read through the typed settings reader — the
+  ## one source of truth for that file, which also refuses any value §7.4
+  ## does not define, naming the file and the key.
   ##
-  ## Read by a line scan rather than through the typed bootstrap reader, and
-  ## the reason is stated so it is not mistaken for laziness: the key has NO
-  ## schema entry yet (PG-11 owns adding one), so a typed read would either
-  ## reject the file or silently drop the field. A scan that skips comments and
-  ## requires the key on the left of ``=`` is narrow enough not to match prose,
-  ## and the failure direction is the safe one — an unrecognised spelling reads
-  ## as "not opted out", which reports MORE than the operator asked for, and
-  ## §7.4 is explicit that an opt-out suppresses wiring and never reporting.
+  ## A settings file that does not parse raises, like every other reader of
+  ## it. Inside ``repro health`` (``toleratingMalformedWorkspaceFiles``) the failure
+  ## is set aside and reported in health's own ``workspace-settings`` row, and
+  ## the workspace reads as NOT opted out — the direction that reports more,
+  ## never less, which is §7.4's rule (an opt-out suppresses wiring, never
+  ## reporting).
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return false
-  var content = ""
   try:
-    content = readFile(configPath)
-  except CatchableError:
+    return readWorkspaceSettings(configPath).push_gateway ==
+      some(pushGatewayOptOutValues[0])
+  except WorkspaceManifestParseError as err:
+    if not setAsideMalformedWorkspaceFile(err, mwkSettings):
+      raise
     return false
-  for rawLine in content.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    let eq = line.find('=')
-    if eq <= 0:
-      continue
-    if line[0 ..< eq].strip() != "push_gateway":
-      continue
-    let value = line[(eq + 1) .. ^1].strip().strip(chars = {'"', '\''})
-    return value.toLowerAscii() in ["off", "false", "no", "disabled"]
-  false
 
 proc observeWorkspaceGateways*(workspaceRoot: string; cacheRoot = "";
                                remoteName = "origin"):
@@ -59067,7 +59090,11 @@ proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## writes/refreshes and passes, but must NOT publish to the central manifest
   ## repo. Any read/parse error is treated as "not enabled" (fail closed toward
   ## the safe, non-publishing default) — this gates PUBLICATION only and never
-  ## affects manifest FETCH / refresh / augmentation.
+  ## affects manifest FETCH / refresh / augmentation. It runs only after the
+  ## gate passed, and the gate resolves the workspace through the strict
+  ## settings reader, so a malformed settings file has already refused the
+  ## push before this point; the catch here guards the post-gate publish
+  ## step, which sits outside the gate's error translation.
   # Resolve the config the SAME way ``loadLockingRouting`` resolves the
   # ``[locking]`` table (``findBootstrapConfigPath``: ``REPRO_WORKSPACE_CONFIG``
   # override → ``<workspaceRoot>/repro-workspace.toml`` (or the old
@@ -61312,15 +61339,13 @@ proc deriveActiveBranch(workspaceRoot: string;
   ##      default branch, e.g. ``main``). Used when no live repo
   ##      checkout reports a current branch.
   ##   4. Empty string.
-  try:
-    let recorded = readWorkspaceBranch(workspaceRoot)
-    if recorded.isSome:
-      return recorded.get()
-  except WorkspaceManifestParseError:
-    # A malformed workspace.toml: fall back to the M12 heuristic so
-    # ``status`` still produces a useful answer. The dispatcher will
-    # have already surfaced the structured diagnostic if needed.
-    discard
+  ##
+  ## A malformed state file raises the strict reader's diagnostic rather
+  ## than falling back to the heuristic: a guessed branch about a workspace
+  ## whose state could not be read is an answer the operator cannot trust.
+  let recorded = readWorkspaceBranch(workspaceRoot)
+  if recorded.isSome:
+    return recorded.get()
   # Composer-mode workspaces that pre-date M13 and never re-ran init
   # carry their branch directly on the parsed ``WorkspaceLocal`` — the
   # ``readWorkspaceBranch`` path above already covers them, but we
@@ -61659,17 +61684,15 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
     return extendWithActiveProjectSet(parsed.workspaceRoot,
       composeWorkspaceLayers(parsed.workspaceRoot, parsed.projectName))
   if parsed.projectName.len == 0:
-    # Allow a metadata-only workspace.toml to supply the project name. Only the
-    # read of workspace.toml is guarded here: if resolving the *named* project
-    # fails (e.g. its manifest references an undeclared remote), that error must
-    # propagate rather than be masked by the "requires a project" message below.
+    # Allow a metadata-only workspace.toml to supply the project name. A
+    # state file that exists but does not parse raises the strict reader's
+    # diagnostic, and so does a failure to resolve the *named* project (e.g.
+    # its manifest references an undeclared remote): neither may be masked by
+    # the "requires a project" message below.
     var recordedProject = ""
     if fileExists(workspaceToml):
-      try:
-        recordedProject =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      except WorkspaceManifestParseError:
-        recordedProject = ""
+      recordedProject =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
     if recordedProject.len > 0:
       var withProject = parsed
       withProject.projectName = recordedProject
@@ -61801,6 +61824,9 @@ type
     initialized: bool
     resolved: ResolvedProject
     resolvedOk: bool
+    setAsideFiles: int
+      ## Malformed workspace files ``gatherHealthChecks`` set aside; the rows
+      ## then describe the workspace without them, so ``--fix`` must not act.
     missingSiblings: seq[ResolvedRepo]
     gitIdentity: GitToolIdentity
     gitOk: bool
@@ -62216,7 +62242,7 @@ proc formatFindingList(items: openArray[string]; verbose: bool;
     let elided = items.len - maxShown
     shown.join(", ") & " (+" & $elided & " more)"
 
-proc gatherHealthChecks(parsed: HealthArgs):
+proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
   ## resolved context (so ``--fix`` can act without re-resolving).
@@ -63287,6 +63313,64 @@ proc gatherHealthChecks(parsed: HealthArgs):
 
   result = (checks: checks, ctx: ctx)
 
+proc gatherHealthChecks(parsed: HealthArgs):
+    tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
+  ## ``gatherHealthChecksOverSettings`` with a malformed settings or state
+  ## file reported as a failing row (``workspace-settings`` /
+  ## ``workspace-state``, naming the file and the key) instead of aborting
+  ## the whole diagnosis. Every other verb refuses such a file; health keeps
+  ## diagnosing the remaining layers as if the file declared / recorded
+  ## nothing (``toleratingMalformedWorkspaceFiles``) and localizes the failure
+  ## here (CLI/health.md), so it is never silent.
+  var setAside: seq[SetAsideWorkspaceFile]
+  toleratingMalformedWorkspaceFiles(setAside):
+    result = gatherHealthChecksOverSettings(parsed)
+  result.ctx.setAsideFiles = setAside.len
+  for failure in setAside:
+    if failure.kind == mwkManifest:
+      # The ``manifest`` row resolves the same closure and already failed
+      # naming the file and the key; add one only if it somehow did not.
+      var reported = false
+      for row in result.checks.mitems:
+        if row.name == "manifest" and row.status == hsFail:
+          reported = true
+          # Say what it cost the rows that sweep the repo set, which would
+          # otherwise read as a clean bill of health over zero repos.
+          const sweptNone = " (so the rows that sweep the workspace's repos " &
+            "— vcs-hooks, push-gateway — swept none)"
+          if sweptNone notin row.detail:
+            row.detail.add(sweptNone)
+      if reported:
+        continue
+    if failure.kind == mwkState:
+      # The ladder behind the manifest row read the set-aside state as
+      # recording nothing and said so ("neither was present"), which is false
+      # about a file that IS present. Say what actually happened.
+      for row in result.checks.mitems:
+        if row.name == "manifest" and row.status == hsFail:
+          row.detail = "manifest unresolved: the workspace state file does " &
+            "not parse, so no project could be read from it (the " &
+            "`workspace-state` row names the file and the key)"
+    let what =
+      case failure.kind
+      of mwkSettings: "settings file does not parse, so its `[[manifest]]` " &
+        "layers were NOT applied to the rows above: "
+      of mwkState: "state file does not parse, so the rows above read the " &
+        "workspace as recording no state: "
+      of mwkManifest: "manifest unresolved, so the rows above that sweep " &
+        "the workspace's repos swept none: "
+    let fix =
+      if failure.keyPath.len > 0: "fix the named key in " & failure.path
+      else: "fix the TOML syntax at the line and column named in " &
+        failure.path
+    result.checks.add(HealthCheck(
+      name: $failure.kind,
+      status: hsFail,
+      detail: what & failure.message,
+      remedy: fix & "; every other `repro` verb refuses this workspace " &
+        "until it parses",
+      fixKind: hfNone))
+
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
   for c in checks:
     if c.status == hsFail:
@@ -63475,7 +63559,13 @@ proc runHealthCommand*(args: openArray[string]): int =
   let parsed = parseHealthArgs(args)
   var (checks, ctx) = gatherHealthChecks(parsed)
 
-  if parsed.fix:
+  if parsed.fix and ctx.setAsideFiles > 0:
+    # The rows were computed with a malformed workspace file set aside, so the
+    # repo set they name may not be this workspace's. Report, do not act.
+    stderr.writeLine("repro health: --fix skipped: a workspace settings, " &
+      "state or manifest file does not parse (see the failing row); fix it " &
+      "first")
+  elif parsed.fix:
     let actions = applyHealthFixes(parsed, checks, ctx)
     # Re-diagnose after fixing so the final report reflects the new state.
     (checks, ctx) = gatherHealthChecks(parsed)
@@ -64955,13 +65045,11 @@ proc resolveBranchProject(parsed: BranchArgs):
   # argument every repo of the active project set participates.
   let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
+    # A malformed state file raises the strict reader's diagnostic.
+    let recorded =
+      readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+    if recorded.len > 0:
+      projectName = recorded
   if projectName.len == 0:
     # Principle 2 -- see ``noNameableProjectError``: the diagnosis plus the
     # command that records a project set (or, at a bare manifests clone, the
@@ -65011,13 +65099,12 @@ proc executeBranchShow(parsed: BranchArgs): BranchReport =
   # ``project`` field. The show form never fails when no project is
   # recoverable; we just leave the field empty.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
+  # The state file was already read successfully above (a malformed one
+  # returned ``metadata_unreadable``), so this read cannot fail on parsing.
   if fileExists(workspaceToml):
-    try:
-      let local = readWorkspaceLocal(absolutePath(workspaceToml))
-      if local.workspace.project.len > 0:
-        result.project = local.workspace.project
-    except WorkspaceManifestParseError:
-      discard
+    let local = readWorkspaceLocal(absolutePath(workspaceToml))
+    if local.workspace.project.len > 0:
+      result.project = local.workspace.project
   result.exitCode = 0
 
 proc executeBranchCreate(parsed: BranchArgs): BranchReport =
@@ -65800,13 +65887,11 @@ proc resolveSwitchProject(parsed: SwitchArgs):
   # explicit project argument every repo of the active project set switches.
   let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
+    # A malformed state file raises the strict reader's diagnostic.
+    let recorded =
+      readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+    if recorded.len > 0:
+      projectName = recorded
   if projectName.len == 0:
     # Principle 2 -- see ``noNameableProjectError`` (and the same raise in
     # ``resolveBranchProject``).
@@ -68056,15 +68141,12 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # repo's own ``origin/HEAD``.
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
     if bootstrapPath.len > 0:
-      try:
-        let declared = rootMainline(readWorkspaceSettings(bootstrapPath))
-        if declared.isSome:
-          rootMainlineBranch = declared.get().strip()
-      except CatchableError:
-        # An unreadable bootstrap config is not this command's error to raise;
-        # fall through to ``origin/HEAD`` and, failing that, to the refusal
-        # below, which names the key to set.
-        discard
+      # A settings file that exists but does not parse raises the strict
+      # reader's diagnostic: falling through to ``origin/HEAD`` would cut the
+      # root from a branch other than the one the file declares.
+      let declared = rootMainline(readWorkspaceSettings(bootstrapPath))
+      if declared.isSome:
+        rootMainlineBranch = declared.get().strip()
     if rootMainlineBranch.len == 0:
       let headRef = gitRunPlain(identity,
         ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
@@ -74895,6 +74977,14 @@ proc runPromptCommand*(args: openArray[string]): int =
   ## computing them reads and decodes the settings files — neither fits a
   ## segment that must be silent when it has nothing to show and do only cheap
   ## reads (CLI/prompt.md). The verbs the operator actually runs report them.
+  ##
+  ## Malformed files follow the same rule. The prompt never reads the settings
+  ## files, and a state file that does not parse only costs it the branch
+  ## field (``readPromptState``): the segment degrades to ``[ws]``, exit 0,
+  ## nothing on stderr. Every workspace-resolving verb refuses such a file
+  ## loudly, naming it and the key; the prompt is the one place that must not,
+  ## because it runs on every shell render (CLI/prompt.md: "each read is
+  ## defensive").
   let parsed = parsePromptArgs(args)
   withoutWorkspaceNotices:
     let root =
@@ -75356,31 +75446,23 @@ proc readDefaultTemplateFromHostConfig(workspaceRoot: string): string =
   ## in the binary, so an absent config or an absent key means "no default" and
   ## the empty stub is what gets written.
   ##
-  ## Best-effort in the same sense `[projects] default` is: an unreadable
-  ## config yields "" rather than failing the `add`. That is the safe
-  ## direction here — no template is the pre-template behaviour, whereas
-  ## refusing would make an unrelated config typo block authoring entirely.
+  ## A settings file that exists but does not parse raises the strict
+  ## reader's diagnostic: silently writing the empty stub would hide that the
+  ## declared template was not applied.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return ""
-  try:
-    let cfg = readWorkspaceSettings(configPath)
-    return cfg.projects.default_template.get("")
-  except CatchableError:
-    return ""
+  readWorkspaceSettings(configPath).projects.default_template.get("")
 
 proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   ## RA-8 fallback source for ``enable --default``: the host bootstrap
-  ## config's ``[projects] default`` set. Best-effort — a missing/malformed
-  ## config yields an empty set (the env var is the primary source).
+  ## config's ``[projects] default`` set. A missing config yields an empty
+  ## set (the env var is the primary source); one that exists but does not
+  ## parse raises the strict reader's diagnostic.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return @[]
-  try:
-    let cfg = readWorkspaceSettings(configPath)
-    return cfg.projects.default
-  except CatchableError:
-    return @[]
+  readWorkspaceSettings(configPath).projects.default
 
 # ---- WV-2: `repro workspace enable` / `disable` -----------------------------
 #
@@ -75505,6 +75587,16 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     elif arg.startsWith("-"):
       stderr.writeLine("repro workspace enable: unknown flag " & arg)
       return 2
+
+  # A state or settings file that exists but does not parse is refused here,
+  # before anything is recorded: the resolution step below tolerates an
+  # unreachable manifest (and records membership anyway), and it must not
+  # tolerate a file the operator wrote and the strict reader rejected.
+  try:
+    checkWorkspaceSettingsAndState(workspaceRoot)
+  except WorkspaceManifestParseError as err:
+    stderr.writeLine("repro workspace enable: error: " & err.msg)
+    return 1
 
   var toAdd: seq[string]
   if useDefault:
@@ -81444,6 +81536,11 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     # i.e. it is part of this workspace's participating set. Computed from the
     # resolved set rather than from the fragment, because a fragment says
     # nothing about who includes it.
+    #
+    # The resolution below tolerates a manifest it cannot reach yet (every repo
+    # then lists as disabled); a state or settings file that exists but does
+    # not parse is not that, and raises the strict reader's diagnostic first.
+    checkWorkspaceSettingsAndState(workspaceRoot)
     var enabledPaths: seq[string]
     if active.len > 0:
       try:
@@ -81467,6 +81564,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     sort(files)
     var arr = newJArray()
     var lines: seq[string]
+    var unreadableFragments = false
     for file in files:
       let fragmentName = file.splitFile.name
       var repoPath = fragmentName
@@ -81480,8 +81578,13 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # blank column for every converted fragment.
         remote = m.repo.url_prefix.get(m.repo.remote.get(""))
         revision = m.repo.mainlineBranch.get(m.repo.revision.get(""))
-      except CatchableError:
-        discard
+      except CatchableError as err:
+        # Still listed — this listing is the remedy other diagnostics point
+        # at for a fragment the reader refuses (an escaping checkout path) —
+        # but never silently: the reader's diagnostic names the file and the
+        # key, and the listing exits non-zero.
+        stderr.writeLine("repro workspace repos list: error: " & err.msg)
+        unreadableFragments = true
       if scopeSet.len > 0 and repoPath notin scopePaths:
         continue
       let enabled = repoPath in enabledPaths
@@ -81507,7 +81610,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     else:
       for line in lines:
         stdout.writeLine(line)
-    return 0
+    return (if unreadableFragments: 1 else: 0)
 
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   let gitBin = identity.binaryPath
