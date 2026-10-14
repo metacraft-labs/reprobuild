@@ -288,16 +288,133 @@ proc readDevEnvTask(bytes: openArray[byte]; pos: var int): DevEnvTaskMetadata =
     command: readString(bytes, pos),
     activityRequirements: readStringSeq(bytes, pos))
 
+proc writeDevEnvSharedResolution(outp: var seq[byte];
+                                 value: DevEnvSharedResolution) =
+  ## Shared-Development-Services D-SS11: one resolver call on the
+  ## provider wire. Field order is the record's declaration order, and
+  ## the four parallel contribution seqs are written adjacently so a
+  ## reader that mis-frames one of them mis-frames the next and the
+  ## length check below catches it.
+  outp.writeString(value.ownerPackage)
+  outp.writeString(value.serviceName)
+  outp.writeString(value.activityName)
+  outp.writeString(value.ownerRecipeDir)
+  outp.writeString(value.consumerPackage)
+  outp.writeString(value.environment)
+  outp.writeString(value.sourceFile)
+  outp.writeU64Le(cast[uint64](value.sourceLine))
+  outp.writeStringSeq(value.contributionPoints)
+  outp.writeStringSeq(value.contributionOperations)
+  outp.writeStringSeq(value.contributionPrecedences)
+  outp.writeStringSeq(value.contributionSites)
+  outp.writeStringSeq(value.contributionMemberPoints)
+  outp.writeStringSeq(value.contributionMembers)
+
+proc readDevEnvSharedResolution(bytes: openArray[byte];
+                                pos: var int): DevEnvSharedResolution =
+  result.ownerPackage = readString(bytes, pos)
+  result.serviceName = readString(bytes, pos)
+  result.activityName = readString(bytes, pos)
+  result.ownerRecipeDir = readString(bytes, pos)
+  result.consumerPackage = readString(bytes, pos)
+  result.environment = readString(bytes, pos)
+  result.sourceFile = readString(bytes, pos)
+  result.sourceLine = cast[int64](readU64Le(bytes, pos))
+  result.contributionPoints = readStringSeq(bytes, pos)
+  result.contributionOperations = readStringSeq(bytes, pos)
+  result.contributionPrecedences = readStringSeq(bytes, pos)
+  result.contributionSites = readStringSeq(bytes, pos)
+  result.contributionMemberPoints = readStringSeq(bytes, pos)
+  result.contributionMembers = readStringSeq(bytes, pos)
+  # The four per-contribution seqs are parallel BY CONSTRUCTION (one
+  # loop builds them), so a disagreement here is a shifted offset or a
+  # record assembled from two reads. REFUSED rather than truncated to
+  # the shortest: truncating would drop a contribution, and a dropped
+  # contribution is the defect this whole lane exists to prevent.
+  if result.contributionOperations.len != result.contributionPoints.len or
+     result.contributionPrecedences.len != result.contributionPoints.len or
+     result.contributionSites.len != result.contributionPoints.len:
+    raiseEnvelopeError(eeMalformed,
+      "dev-env shared resolution for `" & result.ownerPackage & "." &
+      result.serviceName & "` carries " & $result.contributionPoints.len &
+      " contribution points but " & $result.contributionOperations.len &
+      " operations, " & $result.contributionPrecedences.len &
+      " precedences and " & $result.contributionSites.len &
+      " sites. The four lists are parallel by construction, so a " &
+      "mismatch means the record was not read as it was written.")
+  if result.contributionMemberPoints.len != result.contributionMembers.len:
+    raiseEnvelopeError(eeMalformed,
+      "dev-env shared resolution for `" & result.ownerPackage & "." &
+      result.serviceName & "` carries " &
+      $result.contributionMembers.len & " members but " &
+      $result.contributionMemberPoints.len &
+      " member points. Each member names the point it belongs to; a " &
+      "mismatch would attribute members to the wrong point silently.")
+
 proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
   outp.writeString(value.name)
   outp.writeStringSeq(value.activityRequirements)
   outp.writeString(value.metadata)
+  # Shared-Development-Services L8: appended at the END so the three
+  # fields above keep their offsets. Both halves of this codec are
+  # compiled from this tree, so there is no mixed-version pairing to
+  # carry -- what the ordering buys is that a diff of this proc reads as
+  # an addition rather than a reshuffle.
+  outp.writeString(value.identityKind)
+  outp.writeString(value.identityStableId)
+  outp.writeString(value.scope)
+  outp.writeU32Le(value.compatibilityMajor)
+  outp.writeStringSeq(value.typedCommand)
+  outp.writeStringSeq(value.registrationPoints)
+  outp.writeStringSeq(value.registrationMembers)
+  outp.writeStringSeq(value.registrationContributors)
+  # Shared-Development-Services L9: appended at the END, for the same
+  # reason L8's block was. The two int64s cross as `uint64` because
+  # `repro_core/codec.nim` has an unsigned pair and no signed one, and
+  # `keep` is -1: a cast round-trips the bit pattern exactly, where a
+  # decimal string would be a third encoding of a number this record
+  # already carries twice.
+  outp.writeString(value.readinessKind)
+  outp.writeString(value.readinessPath)
+  outp.writeString(value.readinessUrl)
+  outp.writeU64Le(cast[uint64](value.readinessTimeoutMs))
+  outp.writeString(value.workingDirectory)
+  outp.writeStringSeq(value.stateDirectories)
+  outp.writeByte(if value.instanceDeclared: 1'u8 else: 0'u8)
+  outp.writeU64Le(cast[uint64](value.instanceLeaseTtlSeconds))
+  outp.writeString(value.instanceEnvironment)
 
 proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetadata =
-  DevEnvServiceMetadata(
+  result = DevEnvServiceMetadata(
     name: readString(bytes, pos),
     activityRequirements: readStringSeq(bytes, pos),
     metadata: readString(bytes, pos))
+  result.identityKind = readString(bytes, pos)
+  result.identityStableId = readString(bytes, pos)
+  result.scope = readString(bytes, pos)
+  result.compatibilityMajor = readU32Le(bytes, pos)
+  result.typedCommand = readStringSeq(bytes, pos)
+  result.registrationPoints = readStringSeq(bytes, pos)
+  result.registrationMembers = readStringSeq(bytes, pos)
+  result.registrationContributors = readStringSeq(bytes, pos)
+  result.readinessKind = readString(bytes, pos)
+  result.readinessPath = readString(bytes, pos)
+  result.readinessUrl = readString(bytes, pos)
+  result.readinessTimeoutMs = cast[int64](readU64Le(bytes, pos))
+  result.workingDirectory = readString(bytes, pos)
+  result.stateDirectories = readStringSeq(bytes, pos)
+  # A byte rather than a bool, because `readByte` is what this codec
+  # has; anything other than 0 or 1 is REFUSED rather than coerced to
+  # `true`, so a shifted offset surfaces here instead of turning a
+  # session-owned service into a shared one.
+  let instanceFlag = readByte(bytes, pos)
+  if instanceFlag > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "dev-env service `instanceDeclared` flag is " & $instanceFlag &
+      ", which is neither 0 nor 1")
+  result.instanceDeclared = instanceFlag == 1'u8
+  result.instanceLeaseTtlSeconds = cast[int64](readU64Le(bytes, pos))
+  result.instanceEnvironment = readString(bytes, pos)
 
 proc writeDevEnvDiagnostic(outp: var seq[byte]; value: DevEnvDiagnostic) =
   outp.writeByte(byte(ord(value.severity)))
@@ -354,6 +471,11 @@ proc writeDevEnvResult(outp: var seq[byte]; value: DevEnvResult) =
   outp.writeU32Le(uint32(value.sourceFingerprints.len))
   for item in value.sourceFingerprints:
     outp.writeDevEnvFingerprint(item)
+  # Shared-Development-Services D-SS11: appended at the END, for the
+  # reason L8's and L9's service blocks were.
+  outp.writeU32Le(uint32(value.sharedResolutions.len))
+  for item in value.sharedResolutions:
+    outp.writeDevEnvSharedResolution(item)
 
 proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
   result.schemaVersion = readU32Le(bytes, pos)
@@ -392,6 +514,10 @@ proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
   result.sourceFingerprints = newSeq[DevEnvSourceFingerprint](count)
   for i in 0 ..< count:
     result.sourceFingerprints[i] = readDevEnvFingerprint(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.sharedResolutions = newSeq[DevEnvSharedResolution](count)
+  for i in 0 ..< count:
+    result.sharedResolutions[i] = readDevEnvSharedResolution(bytes, pos)
 
 proc writeStoredFragment(outp: var seq[byte]; value: StoredGraphFragment) =
   outp.writeString(value.invocationKey)

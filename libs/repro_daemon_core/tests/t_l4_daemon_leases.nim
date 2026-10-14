@@ -60,13 +60,25 @@
 ##       untouched on purpose) and a QUARANTINED one (moved aside by this
 ##       sweep) do not. ``failed`` is empty in all three, so a verdict keyed on
 ##       ``failed`` alone would call a permanently obstructed store clean.
+##   (m) the same tick reaps a shared service INSTANCE whose last lease has
+##       lapsed -- Shared-Development-Services §4.5's "an instance is reaped
+##       when its last lease lapses", end to end through the DAEMON rather
+##       than through a direct `reapOnce`. This is the case that measures
+##       the WIRING: that the daemon installs the real instance-reap handler
+##       around its tick, that the handler reaches the daemon's own
+##       registry, and that the stop is a real signal to a real process.
+##       Nothing is stubbed in it -- the instance is a real detached child
+##       and its absence is read from `/proc`.
 
 import std/[os, options, times, tables, locks, random, strutils, unittest]
 
 import repro_core
 import repro_daemon_core
+import repro_daemon_core/instance_registry   # the real probe + materialiser
 import repro_resources
-import repro_project_dsl          # TypedExtensionBox
+import repro_resources/service_identity
+import repro_resources/service_registry
+import repro_project_dsl          # TypedExtensionBox / ServiceIdentityDef
 
 # ---------------------------------------------------------------------------
 # Stub provider — PLAIN globals + a lock (cross-thread visible), destroy log.
@@ -941,3 +953,104 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
       check afterUnreadable.get.stuck[0].contains("cannot read record")
       # It is still there, which is why retrying cannot help.
       check fileExists(bad)
+
+  test "(m) the tick reaps a shared service INSTANCE whose last lease lapsed":
+    ## Shared-Development-Services §4.5: "an instance is reaped when its
+    ## last lease lapses." Cases (b) and (c) above measure the tick over a
+    ## STUB resource; this one measures it over a real shared service
+    ## instance, which is a different path through the same sweep: an
+    ## instance record carries no attrs marshaller and no provider driver
+    ## by design, so it is reaped through the typed `ReapHandler` the
+    ## daemon installs around the tick rather than through
+    ## `reconstructInstance`.
+    ##
+    ## WHY THIS CASE EXISTS BESIDE THE REGISTRY'S OWN SUITE.
+    ## `libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim`
+    ## drives `reapOnce` with the handler installed BY THE TEST. That
+    ## measures the handler. It cannot measure the WIRING -- that
+    ## `runScopedLeaseReapTick` installs it, that it is handed a pointer to
+    ## the daemon's own registry object, and that it is restored afterwards
+    ## -- because in that suite the test is the installer. Here the daemon
+    ## is, and the test only writes a record and waits.
+    ##
+    ## NOTHING IS STUBBED. The key comes from the real
+    ## `serviceInstanceKey` over a real `ServiceIdentityDef`; the record is
+    ## written by the real `recordMaterialisedInstance` through the real
+    ## `mergeHolderDeadlines` into the real `StateStore` the daemon is
+    ## pointed at; the instance is a real detached child started by the
+    ## real `materialiseServiceInstanceProcess`; the liveness probe is the
+    ## real `writerLiveness`; and "the process is gone" is read from
+    ## `/proc`, not from the daemon's report.
+    let root = scratchRoot("instance-tick")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    createDir(stateRoot)
+
+    let key = serviceInstanceKey(
+      DslServiceDef(packageName: "l4InstPkg", serviceName: "zitadel",
+        identity: ServiceIdentityDef(kind: sikStable,
+          stableId: "com.example.l4.instance-tick"),
+        scope: sscWorkspace),
+      ServiceScopeContext(projectRoot: root, workspaceRoot: root,
+        workspaceId: "l4-instance-tick", user: "l4tester"),
+      [], "dev")
+    let address = serviceInstanceAddress(key)
+
+    var registry = openServiceInstanceRegistry(stateRoot,
+      serviceInstanceLivenessProbe())
+    let started = materialiseServiceInstanceProcess(
+      @["sh", "-c", "while :; do sleep 1; done"], root,
+      serviceInstanceOutputLogPath(stateRoot, key))
+    doAssert not started.exitedEarly,
+      "fixture instance died during its start grace window: " &
+      describeEarlyServiceInstanceExit(started, address)
+    let process = started.process
+    # A lease that lapsed an hour ago: the holder is dated (`delayed`), so
+    # the gate SELECTS the record. A `keep` holder would never be selected,
+    # which is D-SS5's default and is asserted in the registry's own suite.
+    discard recordMaterialisedInstance(registry, key,
+      ServiceInterfaceSnapshot(serviceName: "zitadel",
+        packageName: "l4InstPkg", projectName: "l4", activityName: "sso",
+        handleType: "H", compatibilityMajor: 1, fingerprint: "f",
+        projectFingerprint: "pf", members: @[]),
+      process, "holder:l4-instance-tick",
+      delayed(initDuration(minutes = 1)),
+      getTime() - initDuration(hours = 1))
+
+    let store = openStateStore(stateRoot)
+    check hasStateRecord(store, address)
+    check readStateRecord(store, address).typeId == ServiceInstanceTypeId
+    check dirExists("/proc/" & $process.pid)
+
+    putEnv("REPRO_DAEMON_LEASE_REAP_INTERVAL_MS", "100")
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      # Belt and braces: if the tick did NOT stop the instance, this case
+      # must not leak a `sleep` loop into the rest of the suite.
+      discard stopServiceInstanceProcess(process, graceMs = 1500)
+      removeDir(root)
+
+    let deadline = epochTime() + 15.0
+    while epochTime() < deadline and hasStateRecord(store, address):
+      sleep(50)
+
+    # The RECORD is gone...
+    check not hasStateRecord(store, address)
+    # ...and so is the PROCESS, read from the process table. `/proc/<pid>`
+    # survives an exit until the child is waited on, so its absence also
+    # witnesses that the daemon reaped the zombie rather than merely
+    # signalling it.
+    let pidDeadline = epochTime() + 10.0
+    while epochTime() < pidDeadline and dirExists("/proc/" & $process.pid):
+      sleep(50)
+    check not dirExists("/proc/" & $process.pid)
+
+    # And the daemon SAID so. Without this, a tick that silently declined
+    # every record would be indistinguishable from one that reaped.
+    let log = readFile(config.logPath)
+    check log.contains("lease reap tick reaped=")
+    check not log.contains("lease reap tick error")
+    check not log.contains("cannot reap address=" & address)

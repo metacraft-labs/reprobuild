@@ -112,6 +112,20 @@ import repro_local_store
 import repro_cas_store
 import repro_store_daemon
 import repro_daemon_core
+# Shared-Development-Services L8: `serviceInstanceStoreRoot` is the ONE
+# derivation of the registry's store root -- `leaseStoreRootForScope`,
+# called rather than re-derived (see its own note). The CLI reconciles
+# the registrations after the daemon has answered, so it needs that same
+# root; re-deriving it here is how a reconcile ends up writing into a
+# store the reaper does not sweep.
+import repro_cli_support/service_registrar  # §7.2: the declared registrar program
+from repro_daemon_core/instance_registry import serviceInstanceStoreRoot
+import repro_resources/service_registry
+  # Shared-Development-Services L7 (§4.5): the instance registry's key
+  # codec and outcome vocabulary. It re-exports `service_attach` and
+  # `service_identity`, so this one import brings
+  # `serviceInterfaceSnapshot`, `serviceLeaseHolderId` and
+  # `degradationReport` with it.
 import repro_resources          # Named-Runnable-Edges N2: ResourceInstance / StateStore / decodeResourceGraphPayload / toLeasedDep (the leased-consumes bridge)
 import repro_launch_plan
 import repro_hcr_agent
@@ -342,11 +356,11 @@ proc renderUsage*(programName: string): string =
           programName &
       " shell hook bash|zsh|fish|nushell|pwsh [--repro-bin=PATH]\n       " &
           programName &
-      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT]\n       " &
+      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS] [--replace [--force]]\n       " &
           programName &
-      " down [selector] [--activity=name] [--force]\n       " &
+      " down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n       " &
           programName &
-      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N]\n       " &
+      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n       " &
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n       " &
           programName &
@@ -6729,6 +6743,26 @@ proc canonicalVariantAssignments(): string =
   parts.sort()
   parts.join(",")
 
+proc canonicalEnvironmentSignature(): string =
+  ## Shared-Development-Services L5 (§6.4): the SELECTED ENVIRONMENT, in
+  ## the canonical form both lowered-graph cache keys fold in.
+  ##
+  ## §6.4 is a requirement on exactly this code: "The selected
+  ## environment MUST be a tracked solver input that participates in the
+  ## graph cache key. An ambient `getEnv` is silently ignored when a
+  ## lowered graph is served from cache, so an environment selected that
+  ## way could hand a developer a production issuer out of a warm cache
+  ## — a failure that is both silent and security-relevant."
+  ##
+  ## The projection itself lives in ``repro_project_dsl``
+  ## (``canonicalEnvironmentSelection``) because that is where the
+  ## ``environment`` block is declared and where the selection is read
+  ## when the bindings are applied; reading it twice, in two normal
+  ## forms, is how a cache key and the value it is supposed to track
+  ## drift apart. Empty when no environment is selected, so the key is
+  ## byte-identical to the pre-L5 one for every build that selects none.
+  canonicalEnvironmentSelection()
+
 proc providerGraphStoreRoot(base: string): string =
   ## Provider-graph snapshot store root, isolated per active variant set.
   ##
@@ -6745,7 +6779,20 @@ proc providerGraphStoreRoot(base: string): string =
   ## start (and a fresh provider invocation) when the variants change, and lets
   ## the two configurations' snapshots coexist and cache independently — the
   ## same way cargo keeps ``target/debug`` and ``target/release`` separate.
-  let sig = canonicalVariantAssignments()
+  # Shared-Development-Services L5 (§6.4): the selected ENVIRONMENT is
+  # folded in beside the variant set, for the identical reason the
+  # comment above gives for variants. An environment's bindings are
+  # applied at provider-run time (module init of the recipe), so they
+  # change the EMITTED GRAPH -- a service's argv carries the bound
+  # hostname -- while leaving ``providerArtifactId`` untouched. Two
+  # builds differing only in their environment would otherwise share one
+  # snapshot and the second would reuse the first's fragments with
+  # ``providerInvocations: 0``, which is §6.4's "production issuer out of
+  # a warm cache" in its most literal form.
+  let envSig = canonicalEnvironmentSignature()
+  let sig =
+    if envSig.len == 0: canonicalVariantAssignments()
+    else: canonicalVariantAssignments() & "|env=" & envSig
   if sig.len == 0:
     return base
   var slug = ""
@@ -6781,6 +6828,21 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(toolIdentityCacheKey(artifact, mode))
   payload.addCacheField(providerArtifactId)
   payload.addCacheField(canonicalVariantAssignments())
+  # Shared-Development-Services L5 (§6.4): the selected environment.
+  # This is the field the gate's control measures -- "a warm cache
+  # cannot serve a graph lowered for another environment".
+  #
+  # APPENDED ONLY WHEN NON-EMPTY, and that is deliberate rather than
+  # tidy. ``addCacheField("")`` is not a no-op: it appends ``"0:\n"``,
+  # so an unconditional field would change the key of every build that
+  # selects NO environment and cold-start the whole fleet's lowered-graph
+  # caches once, for a feature those builds do not use. Guarded, the
+  # no-environment key is BYTE-IDENTICAL to the pre-L5 one. There is no
+  # ambiguity cost: every field is length-prefixed, and "" is not a
+  # spellable environment name -- it IS the unselected case.
+  let environmentSignature = canonicalEnvironmentSignature()
+  if environmentSignature.len > 0:
+    payload.addCacheField(environmentSignature)
   if fileExists(extendedPath(providerSnapshotPath)):
     payload.addCacheField(fileContentDigest(providerSnapshotPath))
   else:
@@ -7121,6 +7183,30 @@ proc prewarmDaemonParentCaches*(outDir: string): DaemonParentPrewarmReport =
   result.toolIdentities = prewarmToolIdentitiesFrom(outDir, stamps)
   prewarmStamps = stamps
   prewarmedOutDir = if stamps.len > 0: outDir else: ""
+
+when defined(reproEnvironmentCacheKeyTest):
+  ## Seams for
+  ## ``libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim``.
+  ## ``loweredGraphCacheKey`` and ``providerGraphStoreRoot`` are
+  ## module-private and the property under test -- that a warm cache
+  ## cannot serve a graph lowered for another environment -- is a
+  ## property of the KEY, not of anything observable from a finished
+  ## build. Compiled in only for that test, so no shipped image carries
+  ## a second way to compute a cache key.
+  proc loweredGraphCacheKeyForTest*(artifact: ProjectInterfaceArtifact;
+                                    mode: ToolProvisioningMode;
+                                    providerArtifactId,
+                                    providerSnapshotPath,
+                                    pathEnv: string;
+                                    extensionSignature = ""): string =
+    loweredGraphCacheKey(artifact, mode, providerArtifactId,
+      providerSnapshotPath, pathEnv, extensionSignature)
+
+  proc providerGraphStoreRootForTest*(base: string): string =
+    providerGraphStoreRoot(base)
+
+  proc canonicalEnvironmentSignatureForTest*(): string =
+    canonicalEnvironmentSignature()
 
 when defined(reproDaemonParentPrewarmTest):
   ## Seams for ``t_daemon_parent_prewarm``. The warm tables and the cache
@@ -9756,9 +9842,16 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     # No engine-executable image to spawn back into. Embedded callers and
     # the bootstrap path land here; they get the pre-existing in-process
     # extraction, which is the same code the helper runs.
-    return extractInterfaceFromModule(modulePath, artifactPath, stubPath,
+    result = extractInterfaceFromModule(modulePath, artifactPath, stubPath,
       workDir, scratchDir, requireStub, resourceModule, extraPaths,
       consumerRoot)
+    # Shared-Development-Services §4.3's stale-lift precondition -- see
+    # the publish sites at the foot of this proc for the full note. This
+    # is the embedded/bootstrap path, and it produced the bytes in this
+    # process, so it records their provenance like the others.
+    writeInterfaceArtifactProvenance(artifactPath, modulePath,
+      resourceModule = resourceModule, extraPaths = extraPaths)
+    return
 
   # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
   # compiles" (owner decision 2026-10-09): the extraction runs IN the
@@ -10074,6 +10167,29 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
         publishIfChanged(stubPath, readFile(extendedPath(edgeStubPath)))
     else:
       result = readInterfaceArtifact(artifactPath)
+    # Shared-Development-Services §4.3's STALE-LIFT PRECONDITION: record
+    # what the artifact at the CALLER's path was lifted from, beside it.
+    #
+    # HERE, in the parent, rather than in the edge child, and the reason
+    # is measured. For a relocatable edge the child writes its outputs
+    # under the action-cache root (`recipeCompileOutputDir`) and only the
+    # ARTIFACT and the STUB are copied to `artifactPath` -- which is why,
+    # at `8b39340a0`, `.repro/dev-env/default/` in this checkout carries
+    # neither `.inputs` nor `.inputs.meta` while `.repro/build/repro/`
+    # carries both. A sidecar written by the child would therefore be
+    # absent from exactly the two directories a consumer's resolver
+    # enumerates (`.repro/dev-env/*/`, `.repro/build/*/`).
+    #
+    # This runs on a cache HIT as well as on a RUN, and that is sound
+    # rather than lax: the engine has just decided these bytes are the
+    # correct output for this recipe's current inputs, so the closure
+    # hashed here is the closure they were produced from. What is NOT
+    # done is stamping an artifact nobody asked the engine about -- see
+    # the session-result short-circuit above, which returns without
+    # stamping, and `writeInterfaceArtifactProvenance`'s own note on why
+    # there is no `ensure` variant.
+    writeInterfaceArtifactProvenance(artifactPath, modulePath,
+      resourceModule = resourceModule, extraPaths = extraPaths)
     interfaceEdgeSessionResults[sessionKey] = result
   finally:
     releaseInterfaceArtifactLock(artifactLock)
@@ -11185,6 +11301,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               let stagedPath = projectionPath & ".projection-tmp"
               writeInterfaceArtifact(stagedPath, producerArtifact)
               moveFile(extendedPath(stagedPath), extendedPath(projectionPath))
+            # Shared-Development-Services §4.3's stale-lift precondition.
+            #
+            # FOUND BY GOING LOOKING, not by a failing test. This is a
+            # SECOND publication of a producer's interface, at a path
+            # `extractInterfaceEdge` above did not write -- and it is one
+            # of the two directories a consumer's resolver enumerates
+            # (`ownerInterfaceCandidates`: `.repro/dev-env/*/` and
+            # `.repro/build/*/`). Left unstamped it would be found,
+            # answered "provenance unknown" and refused: the safe
+            # direction, but a refusal with the wrong cause for a
+            # producer that had just been lifted correctly. Stamped here
+            # rather than by an `ensure` helper, because this is the site
+            # that produced those bytes from `recipeDir / "repro.nim"`.
+            writeInterfaceArtifactProvenance(projectionPath,
+              recipeDir / "repro.nim")
           finally:
             releaseInterfaceArtifactLock(projectionLock)
         let dependencies =
@@ -15663,9 +15794,49 @@ type
     httpBind: string
     debounceMs: int
     force: bool
+    replace: bool
+      ## Shared-Development-Services L7 / §4.3's explicit takeover:
+      ## ``repro up --replace`` stops the running instance of a shared
+      ## service and starts THIS definition. Accepted only by ``up`` and
+      ## ``dev`` -- ``down`` refuses it, because ``down`` takes nothing
+      ## over.
+      ##
+      ## L6 deliberately did NOT add this flag, and said why: there was
+      ## no registry to resolve against, so a flag that parsed and then
+      ## did nothing "would be a silently-dropped construct added by the
+      ## milestone whose standing hunt is for silently-dropped
+      ## constructs". L7 is the milestone that supplies the registry, so
+      ## the flag arrives with the behaviour.
+    readyTimeoutMs: int
+      ## ``--ready-timeout=MS``, or 0 when the user did not pass it. Reaches
+      ## ``waitForDevSessionReady`` through ``readyBudget``; see
+      ## ``runUpOrDevCommand``.
+    stopTimeoutMs: int
+      ## ``--stop-timeout=MS``, or 0 when the user did not pass it. Reaches
+      ## ``runDownCommand``'s wait through ``stopBudget``. The mirror image
+      ## of the field above, and accepted on exactly the opposite set of
+      ## commands.
 
-proc parseDevSessionArgs(args: openArray[string]; commandName: string):
-    ParsedDevSessionCommand =
+proc parseDevSessionArgs(args: openArray[string]; commandName: string;
+                         acceptReadyTimeout: bool;
+                         acceptStopTimeout = false;
+                         acceptReplace = false): ParsedDevSessionCommand =
+  ## ``acceptReadyTimeout`` has no default because ``down`` must REFUSE
+  ## ``--ready-timeout`` rather than accept and ignore it: ``down`` does not
+  ## wait for readiness, so an accepted flag there would be a flag that
+  ## parses and does nothing, which is the failure mode this campaign keeps
+  ## finding. A new caller has to decide in writing.
+  ##
+  ## ``acceptReplace`` follows the same rule and the same default-to-
+  ## refusing convention: ``down`` must REFUSE ``--replace`` rather than
+  ## accept and ignore it, because ``down`` takes no instance over.
+  ##
+  ## ``acceptStopTimeout`` is the same rule pointing the other way, and it
+  ## DOES default -- to false, the refusing value. ``up`` and ``dev`` do not
+  ## wait for a session to stop, so ``--stop-timeout`` there would parse and
+  ## do nothing; only ``down`` passes true. A default that refuses means a
+  ## future command gets the refusal until someone writes down that it
+  ## waits.
   var selection = DevEnvCliSelection()
   result.httpBind = "127.0.0.1:0"
   result.debounceMs = 250
@@ -15683,12 +15854,35 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string):
       result.foreground = true
     elif arg == "--force":
       result.force = true
+    elif arg == "--replace":
+      if not acceptReplace:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.replace = true
     elif arg == "--http" or arg.startsWith("--http="):
       result.httpBind = valueFromFlag(args, i, "--http")
     elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
       result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
       if result.debounceMs < 0:
         raise newException(ValueError, "--debounce-ms must be non-negative")
+    elif arg == "--ready-timeout" or arg.startsWith("--ready-timeout="):
+      if not acceptReadyTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.readyTimeoutMs = parseInt(valueFromFlag(args, i,
+        "--ready-timeout"))
+      if result.readyTimeoutMs <= 0:
+        raise newException(ValueError,
+          "--ready-timeout must be a positive number of milliseconds")
+    elif arg == "--stop-timeout" or arg.startsWith("--stop-timeout="):
+      if not acceptStopTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.stopTimeoutMs = parseInt(valueFromFlag(args, i,
+        "--stop-timeout"))
+      if result.stopTimeoutMs <= 0:
+        raise newException(ValueError,
+          "--stop-timeout must be a positive number of milliseconds")
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported " & commandName & " flag: " & arg)
@@ -15766,12 +15960,1410 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
       raise newException(OSError,
         "failed to launch dev session supervisor: " & command)
 
+const DevSessionStillStartingExitCode* = 75
+  ## The exit code ``repro up`` / ``repro dev`` returns when its wait expired
+  ## while the session was STILL COMING UP, as opposed to failing to start.
+  ##
+  ## The choice, stated explicitly because the issue turns on it. Three
+  ## outcomes need three codes, and the daemonised default is why:
+  ##
+  ## * ``0`` -- the session is up. Reserved for exactly that. Returning 0
+  ##   for "still starting" was the tempting fix and it is wrong: a script
+  ##   that reads 0 goes on to use the services, and they are not there yet.
+  ## * ``1`` -- the session CANNOT start. Unchanged: every genuine failure
+  ##   to start keeps the code it had, which is what the dispatcher returns
+  ##   for any ``CatchableError`` out of here.
+  ## * ``75`` -- still starting; THIS COMMAND STOPPED NOTHING. Worded that
+  ##   way rather than "the session was left running", because that is the
+  ##   part the code can promise: nothing on this path stops a supervisor,
+  ##   but in the arm where no status was ever read nothing established that
+  ##   there is a supervisor to leave. The diagnostic draws the same
+  ##   distinction per arm; see ``waitForDevSessionReady``. A script can
+  ##   now tell this from both of the above, which is the whole complaint in
+  ##   the issue: ``repro up`` used to return the failure code for a session
+  ##   that was about to be fine, so the caller could neither trust success
+  ##   nor act on failure, and a second ``repro up`` would contend with the
+  ##   first. On 75 the correct response is to keep waiting (or to raise
+  ##   ``--ready-timeout``), never to start another session.
+  ##
+  ## 75 is ``EX_TEMPFAIL`` from ``sysexits.h`` -- "the user is invited to
+  ## retry" -- which is as close to this meaning as a conventional code
+  ## gets. It is outside the 1-2 range the rest of the CLI uses for
+  ## refusals, so no existing caller can confuse it with one.
+
+const
+  SharedInstanceLedgerFile = "shared-instances.json"
+    ## Where `repro up` records the shared service instances THIS session
+    ## took a holder on, so `repro down` releases exactly those.
+  SharedInstanceLedgerSchemaId =
+    "reprobuild.dev-session.shared-instances.v1"
+
+proc sharedInstanceLedgerPath(outDir: string): string =
+  outDir.sessionDir / SharedInstanceLedgerFile
+
+proc writeSharedInstanceLedger(outDir, holderId: string;
+    entries: openArray[tuple[serviceName, keyJson, address: string]]) =
+  ## Record what was converged.
+  ##
+  ## WHY A LEDGER RATHER THAN RE-READING THE RECIPE AT `repro down` TIME.
+  ## `down` must release the holder this session TOOK, and the recipe can
+  ## have changed since -- an identity renamed, a scope widened, an
+  ## `instance` block deleted. Re-resolving would then release a
+  ## different instance (or none) and leave this project counted as a
+  ## holder of the real one forever, which is the one failure that cannot
+  ## be recovered from without a daemon restart. The ledger is also why
+  ## `down` needs no dev-env edge: it does not have to evaluate the
+  ## provider to know what to let go of.
+  createDir(extendedPath(outDir.sessionDir))
+  var instances = newJArray()
+  for entry in entries:
+    instances.add(%*{"serviceName": entry.serviceName,
+      "keyJson": entry.keyJson, "address": entry.address})
+  let doc = %*{"schemaId": SharedInstanceLedgerSchemaId,
+    "holderId": holderId}
+  doc["instances"] = instances
+  writeFile(extendedPath(outDir.sharedInstanceLedgerPath), $doc & "\n")
+
+proc readSharedInstanceLedger(outDir: string):
+    tuple[holderId: string;
+          entries: seq[tuple[serviceName, keyJson, address: string]]] =
+  ## Read the ledger back. A missing ledger is the ordinary case (a
+  ## session with no shared services) and yields an empty result; a
+  ## ledger that is present and unreadable RAISES, because silently
+  ## releasing nothing is how a holder becomes permanent.
+  result.entries = @[]
+  let path = outDir.sharedInstanceLedgerPath
+  if not fileExists(extendedPath(path)):
+    return
+  let doc = readJsonFileResilient(path)
+  if doc.isNil or doc.kind != JObject:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " is not a JSON object; " &
+      "this session's holders cannot be released without it")
+  let schemaId = doc{"schemaId"}.getStr("")
+  if schemaId != SharedInstanceLedgerSchemaId:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " carries schemaId `" &
+      schemaId & "`; this build reads `" & SharedInstanceLedgerSchemaId &
+      "` only")
+  result.holderId = doc{"holderId"}.getStr("")
+  if result.holderId.len == 0:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " names no holder, so " &
+      "there is no reference to drop")
+  let instances = doc{"instances"}
+  if not instances.isNil and instances.kind == JArray:
+    for item in instances:
+      if item.kind != JObject:
+        continue
+      result.entries.add((
+        serviceName: item{"serviceName"}.getStr(""),
+        keyJson: item{"keyJson"}.getStr(""),
+        address: item{"address"}.getStr("")))
+
+proc liftedServiceDeclaration(interfacePath, serviceName: string):
+    tuple[snapshot: ServiceInterfaceSnapshot;
+          identity: ServiceIdentityDef; scope: ServiceScope] =
+  ## Everything `repro up` needs about a shared service, out of the REAL
+  ## project interface artifact the dev-env edge just produced -- the
+  ## same lift L3 built, L4 put the identity and scope on, and L6
+  ## decides over. Not reconstructed and not approximated.
+  ##
+  ## ONE READ, THREE FACTS, so the interface fingerprint and the instance
+  ## key cannot come from different revisions of the same recipe. The
+  ## enum mappings are ordinal-for-ordinal on pairs that
+  ## `repro_interface_artifacts` keeps in step with static asserts.
+  if not fileExists(extendedPath(interfacePath)):
+    raise newException(IOError,
+      "service `" & serviceName & "` declares a shared `instance`, and " &
+      "the project interface artifact that carries its interface " &
+      "fingerprint, identity and scope is not at " & interfacePath &
+      ". Shared-Development-Services.md §4.3 decides attach-or-refuse " &
+      "on that fingerprint, so there is nothing to decide with.")
+  let bytes = readFile(extendedPath(interfacePath))
+  var raw = newSeq[byte](bytes.len)
+  if bytes.len > 0:
+    copyMem(addr raw[0], unsafeAddr bytes[0], bytes.len)
+  let artifact = decodeProjectInterfaceArtifact(raw)
+  result.snapshot = serviceInterfaceSnapshot(artifact.projectInterface,
+    serviceName)
+  for svc in artifact.projectInterface.publicServices:
+    if svc.name != serviceName:
+      continue
+    result.identity = ServiceIdentityDef(
+      kind: ServiceIdentityKind(ord(svc.identityMode)),
+      stableId: svc.identityStableId)
+    result.scope = ServiceScope(ord(svc.scope))
+    return
+  # Unreachable in practice: `serviceInterfaceSnapshot` above already
+  # raises `ServiceAttachError` naming every service the interface
+  # declares. Stated rather than left implicit, because a silent
+  # fall-through here would hand back the DEFAULT identity (`derived`,
+  # empty id) and the default scope -- a key every service would share.
+  raise newException(ServiceAttachError,
+    "the lifted interface carries a snapshot for service `" &
+    serviceName & "` but no row for it, which cannot happen; refusing " &
+    "rather than resolving a default identity")
+
+proc ownerArtifactGeneration*(artifactPath, ownerRecipeDir,
+                              ownerPackage, ownerProject: string):
+    ServiceArtifactGenerationCheck =
+  ## Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION,
+  ## ESTABLISHED: does the owner's lifted interface artifact correspond
+  ## to the owner's definition as it stands on disk right now?
+  ##
+  ## § THE MECHANISM, AND WHY IT IS THIS ONE
+  ##
+  ## The lift records a PROVENANCE STAMP beside the artifact -- the
+  ## content-addressed semantic identity of the recipe's own import
+  ## closure (`recipeClosureSourceDigests`, over
+  ## `projectSourceSemanticIdentity`). This proc reads that stamp,
+  ## RE-WALKS the owner's recipe closure, and compares. Three answers,
+  ## because §4.3 names three states.
+  ##
+  ## The comparand is a pure function of the owner's SOURCES -- no
+  ## absolute path, no `workDir`, no compiler identity, no reprobuild
+  ## library fingerprint -- which is the property the check needs,
+  ## because the process that re-establishes it is a different process
+  ## in a different directory, often with a different engine install,
+  ## from the one that recorded it. The three records already in the
+  ## tree all fail that test; `repro_interface_artifacts`'
+  ## provenance section says exactly how, for each.
+  ##
+  ## THE CLOSURE IS RE-DISCOVERED, NOT RE-HASHED FROM THE RECORDED
+  ## LIST. Adding an import adds a file, so a check that hashed only the
+  ## files the record names could not see a definition grow -- and that
+  ## is not hypothetical here: `extractInterfaceEdge`'s own header
+  ## records a previous hand-rolled gate being UNSOUND for the mirror
+  ## reason (its key could not see a file the recipe acquires during
+  ## macro expansion). The recorded per-source digests are used only to
+  ## NAME what moved.
+  ##
+  ## § WHAT IS AND IS NOT ESTABLISHED
+  ##
+  ## This establishes "the artifact was lifted from the recipe closure
+  ## that is on disk now". It does NOT establish that the closure is
+  ## everything the lift read: a `staticRead`, a `staticExec`, or a
+  ## `dslDeps` package the recipe acquires during macro expansion is
+  ## seen by the engine's monitored read set and NOT by
+  ## `discoverNimSources`. So a `sagFresh` answer is a true statement
+  ## about the import closure and a conservative one about everything
+  ## else -- it can miss a staleness, and it cannot invent one. That
+  ## asymmetry is the right direction (§4.3 makes a refusal cheap and a
+  ## silent attach expensive) but it is a LIMIT, stated here rather than
+  ## left for a reader to discover, and it is the residue a lift-side
+  ## stamp over the monitored read set would close.
+  result = ServiceArtifactGenerationCheck(
+    generation: sagUnknownProvenance,
+    artifactPath: artifactPath,
+    ownerPackage: ownerPackage,
+    ownerProject: ownerProject,
+    movedSources: @[])
+  let recorded = readInterfaceArtifactProvenance(artifactPath)
+  if recorded.isNone:
+    result.detail =
+      "No readable provenance record is beside it, at " &
+      interfaceArtifactProvenancePath(artifactPath) &
+      " -- so what it was lifted from is unknown. An artifact produced " &
+      "before the lift recorded provenance reads exactly like this, and " &
+      "it is answered with a refusal rather than an assumption."
+    return
+  let provenance = recorded.get
+  if provenance.recipeFileName.len == 0 or ownerRecipeDir.len == 0:
+    result.detail =
+      "Its provenance record names no recipe file (or the owning " &
+      "project's directory is not known here), so the definition to " &
+      "compare it against cannot be located."
+    return
+  let recipePath = ownerRecipeDir / provenance.recipeFileName
+  if not fileExists(extendedPath(recipePath)):
+    result.detail =
+      "Its provenance record says it was lifted from `" &
+      provenance.recipeFileName & "`, and there is no such file at " &
+      recipePath & " -- so the current definition cannot be read."
+    return
+  # A declared resource module / extra path CHANGES THE CLOSURE, so one
+  # that cannot be resolved here is UNKNOWN provenance and not a closure
+  # walked without it. Walking a narrower closure would compute a
+  # different identity and report a difference that is an artefact of
+  # this proc, which is a false refusal -- still the safe direction, but
+  # a refusal that names the wrong cause, and this names the right one.
+  var resourceModule = ""
+  if provenance.resourceModule.len > 0:
+    resourceModule = ownerRecipeDir / provenance.resourceModule
+    if not fileExists(extendedPath(resourceModule)):
+      result.detail =
+        "Its provenance record says the lift included the separate " &
+        "resource module `" & provenance.resourceModule & "`, and there " &
+        "is no such file at " & resourceModule & " -- so the closure it " &
+        "was lifted from cannot be re-walked."
+      return
+  var extraPaths: seq[string] = @[]
+  for extra in provenance.extraPaths:
+    let resolved = ownerRecipeDir / extra
+    if not dirExists(extendedPath(resolved)):
+      result.detail =
+        "Its provenance record says the lift searched the extra path `" &
+        extra & "`, and there is no such directory at " & resolved &
+        " -- so the closure it was lifted from cannot be re-walked."
+      return
+    extraPaths.add(resolved)
+  var current: tuple[identity: string;
+                     sources: seq[tuple[path, digest: string]]]
+  try:
+    current = recipeClosureSourceDigests(recipePath, resourceModule,
+      extraPaths, provenance.includeSiblingSources)
+  except CatchableError as err:
+    result.detail =
+      "The owner's definition at " & recipePath & " could not be walked " &
+      "to compute its current source closure (" & err.msg & ")."
+    return
+  result.recordedIdentity = provenance.closureIdentity
+  result.currentIdentity = current.identity
+  if provenance.closureIdentity == current.identity:
+    result.generation = sagFresh
+    return
+  result.generation = sagStale
+  # WHICH sources moved, from the per-source digests both sides carry.
+  # Named in the running instance's... no: named in the RECORD's order
+  # first (changed and removed), then the additions, which is the same
+  # shape `memberDifferences` uses and for the same reason -- a reader
+  # scanning a refusal should meet the two sides in one order.
+  var recordedByPath = initTable[string, string]()
+  for src in provenance.sourceDigests:
+    recordedByPath[src.path] = src.digest
+  var currentByPath = initTable[string, string]()
+  for src in current.sources:
+    currentByPath[src.path] = src.digest
+  for src in provenance.sourceDigests:
+    if src.path notin currentByPath:
+      result.movedSources.add(src.path & " (removed)")
+    elif currentByPath[src.path] != src.digest:
+      result.movedSources.add(src.path & " (edited)")
+  for src in current.sources:
+    if src.path notin recordedByPath:
+      result.movedSources.add(src.path & " (added)")
+  if result.movedSources.len == 0:
+    # The identities differ and no per-source row explains it. Said out
+    # loud rather than reported as an empty list: it means the recorded
+    # rows and the comparand were produced by different schemes, which
+    # is a defect in this pair of procs and not a fact about the owner.
+    result.movedSources.add(
+      "(the recorded source rows do not explain the difference -- the " &
+      "closure identity is what decided, and the two were computed by " &
+      "schemes that disagree; this is a reprobuild defect, not an " &
+      "owner's edit)")
+
+proc ownerInterfaceCandidates(ownerRecipeDir: string): seq[string] =
+  ## Every path the owner's lifted interface could be at, in a
+  ## deterministic order.
+  ##
+  ## There is NO single path, and that is a fact about this tree rather
+  ## than a choice here: `repro dev-env` writes
+  ## `<project>/.repro/dev-env/<activity-segment>/project-interface.rbsz`
+  ## (`defaultDevEnvOutDir`) and `repro build` writes
+  ## `<project>/.repro/build/<target>/project-interface.rbsz`
+  ## (`outputDirForTarget`), so the segment depends on which activity
+  ## the owner enabled and which target it built. A hard-coded path
+  ## would be right for exactly one owner layout and silently absent for
+  ## every other, which the caller would report as "run `repro dev-env`"
+  ## for a project that had already run it.
+  ##
+  ## So the candidates are enumerated and SORTED, and the caller picks
+  ## the first that actually carries the service it is resolving. Sorted
+  ## rather than directory order so two runs on one tree agree about
+  ## which artifact answered.
+  for parent in [".repro" / "dev-env", ".repro" / "build"]:
+    let base = ownerRecipeDir / parent
+    if not dirExists(extendedPath(base)):
+      continue
+    var segments: seq[string] = @[]
+    for kind, path in walkDir(base):
+      if kind == pcDir or kind == pcLinkToDir:
+        segments.add(lastPathPart(path))
+    segments.sort()
+    for segment in segments:
+      let candidate = base / segment / "project-interface.rbsz"
+      if fileExists(extendedPath(candidate)):
+        result.add(candidate)
+
+proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
+                                    edge: DevEnvEdgeResult;
+                                    commandName: string): int =
+  ## Shared-Development-Services D-SS11 (§4.6): run every
+  ## `<package>.<service>.shared(...)` this project's recipe wrote.
+  ##
+  ## THIS IS WHERE §4's MACHINERY TRIGGERS FOR A CONSUMER. §4.6: "The
+  ## resolver is where the machinery of §4 is triggered. It resolves
+  ## `(identity, scope, environment)`, takes a lease, and runs the attach
+  ## decision of §4.3 -- so a fingerprint mismatch warns *here*, at a
+  ## named call site in the consumer's recipe, rather than somewhere
+  ## inside a supervisor's log." Every diagnostic this proc prints names
+  ## the resolver's own file and line, which the resolution record
+  ## carries from the consumer's compilation.
+  ##
+  ## FOUR STEPS PER RESOLUTION, in this order and not interchangeable:
+  ##
+  ##   1. READ THE OWNER'S LIFTED INTERFACE, from the owner's own
+  ##      project-interface artifact. That is where the identity, the
+  ##      scope and the interface FINGERPRINT come from -- §4.3 decides
+  ##      attach-or-refuse on the fingerprint, and a consumer that
+  ##      invented one would be comparing the running instance against
+  ##      itself. Absent is a REFUSAL naming the path and the project to
+  ##      run `repro dev-env` in.
+  ##   2. RESOLVE THE KEY: `(identity, scope, environment)` through the
+  ##      same `sharedServiceInstanceKey` the owner's converge uses, with
+  ##      the environment the consumer's EVALUATION selected.
+  ##   3. CONVERGE, ATTACH-ONLY: the daemon runs L6's `attachDecision`
+  ##      and takes this project's lease. The request carries NO command,
+  ##      and that is the whole of "a resolver is not a constructor"
+  ##      (§4.6): a consumer cannot materialise a service it does not
+  ##      own, because it has no definition of one -- the lift carries
+  ##      the signature and deliberately not the `executable` or `args`.
+  ##      The daemon already refuses a command-less converge that finds
+  ##      no instance, by name.
+  ##   4. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
+  ##      instance declares. Refused, never dropped (§4.6), including
+  ##      under version skew.
+  ##   5. READ BACK WHAT THE INSTANCE MINTED, from the instance's own
+  ##      durable registration record, into THIS session's minted file --
+  ##      L9's **F5**. See the step's own comment at the foot of the
+  ##      loop for the design and for the four alternatives it rejects.
+  ##
+  ## Returns 0 when every resolution attached and deposited, and 1 when
+  ## any refused. Called BEFORE the supervisor is launched, for
+  ## `convergeSharedServiceInstances`' reason: a refusal has to stop the
+  ## session rather than arrive after it published `session.up`.
+  let artifact =
+    try:
+      readDevEnvArtifact(edge.artifactPath)
+    except CatchableError as err:
+      raise newException(IOError,
+        "could not read the dev-env artifact at " & edge.artifactPath &
+        " to find resolved shared services: " & err.msg)
+  if artifact.sharedResolutions.len == 0:
+    return 0
+  let projectRoot = parsed.selection.projectRoot
+  let holderId = serviceLeaseHolderId(projectRoot)
+  let storeRoot = serviceInstanceStoreRoot(dlsUser)
+  var refused = 0
+  # L9 F5: what every instance this session resolved has minted,
+  # accumulated across the resolutions and merged into the session's
+  # minted record ONCE, below the loop. Accumulated rather than merged
+  # per resolution because the merge is a read-modify-write of one file:
+  # doing it inside the loop would read back rows it had just written,
+  # which is the shape in which a merge rule becomes order-dependent.
+  var crossSessionMinted: seq[tuple[serviceName, member, mintedId: string;
+                                    provenance: RegistrarProvenance]] = @[]
+  # §7.3: and what every such instance reported ABOUT ITSELF. On the
+  # SAME durable record, read by the SAME call, merged into the SAME
+  # session document -- which is §7.3's decision rather than a saving:
+  # "Giving the issuer a second, different mechanism would mean two ways
+  # to carry one class of value, and the one that looked simpler would be
+  # the one that cannot work." A second accumulator here would be the
+  # start of that second mechanism; a second READER would be the whole of
+  # it.
+  var crossSessionAttributes: seq[SharedInstanceAttributeRow] = @[]
+  for resolution in artifact.sharedResolutions:
+    let site =
+      if resolution.sourceFile.len == 0: "<unknown site>"
+      else: resolution.sourceFile & ":" & $resolution.sourceLine
+    let reference = resolution.ownerPackage &
+      (if resolution.activityName.len > 0: "." & resolution.activityName
+       else: "") & "." & resolution.serviceName
+    proc refuse(detail: string) =
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & detail)
+    let candidates =
+      if resolution.ownerRecipeDir.len == 0: @[]
+      else: ownerInterfaceCandidates(resolution.ownerRecipeDir)
+    var lifted: tuple[snapshot: ServiceInterfaceSnapshot;
+                      identity: ServiceIdentityDef; scope: ServiceScope]
+    var liftedFrom = ""
+    var liftErrors: seq[string] = @[]
+    for candidate in candidates:
+      try:
+        lifted = liftedServiceDeclaration(candidate, resolution.serviceName)
+        liftedFrom = candidate
+        break
+      except CatchableError as err:
+        liftErrors.add(candidate & ": " & err.msg)
+    if liftedFrom.len == 0:
+      refuse("the owning project's lifted interface does not carry " &
+        "service `" & resolution.serviceName & "`, so this resolver " &
+        "has no identity, no scope and no interface fingerprint to " &
+        "resolve against. Shared-Development-Services.md §4.3 decides " &
+        "attach-or-refuse on that fingerprint, so there is nothing to " &
+        "decide with. " &
+        (if candidates.len == 0:
+           "No project-interface artifact was found under " &
+           (resolution.ownerRecipeDir / ".repro") &
+           " at all; run `repro dev-env` in the project that declares `" &
+           resolution.ownerPackage & "`."
+         else:
+           "Probed: " & liftErrors.join("; ") & ".") &
+        " (Refused rather than attached on a default identity: the " &
+        "default is `derived` with an empty id, which every service in " &
+        "the workspace would share.)")
+      inc refused
+      continue
+    let declaration = SharedServiceInstanceDeclaration(
+      declared: true,
+      serviceName: resolution.serviceName,
+      environment: resolution.environment,
+      leaseTtlSeconds: SharedServiceInstanceDefaultTtlSeconds)
+    let key =
+      try:
+        sharedServiceInstanceKey(declaration, projectRoot,
+          lifted.identity, lifted.scope)
+      except CatchableError as err:
+        refuse(err.msg)
+        inc refused
+        continue
+    if key.degradationReport().len > 0:
+      # Reported, never swallowed -- L4's rule, and the consumer side
+      # needs it as much as the owner's: a narrower-than-declared
+      # sharing boundary here means this consumer attaches to a
+      # DIFFERENT instance than the owner started, and the symptom
+      # would be contributions that never appear.
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & key.degradationReport())
+    let response = requestUserDaemonServiceConverge(
+      DaemonServiceConvergeRequest(
+        scope: dlsUser,
+        keyJson: encodeServiceInstanceKey(key),
+        snapshotJson: encodeServiceInterfaceSnapshot(lifted.snapshot),
+        holderId: holderId,
+        ttlSeconds: declaration.leaseTtlSeconds,
+        # NO COMMAND, and no `--replace` / `--force` either. A resolver
+        # attaches; it does not construct, and it does not take over. A
+        # takeover is `repro up --replace` in the project that DECLARES
+        # the service, which is the only place a definition to run
+        # exists.
+        command: @[],
+        workingDir: projectRoot,
+        replace: false,
+        force: false,
+        # §4.3's SAME-GENERATION PRECONDITION, established HERE because
+        # this is the process that can: it knows the owner's recipe
+        # directory (`resolution.ownerRecipeDir`) and which artifact
+        # under it answered (`liftedFrom`). The daemon knows neither --
+        # it holds the RUNNING instance's snapshot, which is the other
+        # side of the comparison.
+        generationJson: encodeServiceArtifactGenerationCheck(
+          ownerArtifactGeneration(liftedFrom, resolution.ownerRecipeDir,
+            resolution.ownerPackage, lifted.snapshot.projectName))))
+    let outcome =
+      try:
+        parseConvergeOutcome(response.outcome)
+      except CatchableError as err:
+        raise newException(ValueError,
+          "the daemon answered `repro " & commandName &
+          "` with an outcome this build does not know: " & err.msg)
+    if not response.ok or convergeRefused(outcome):
+      refuse((if response.diagnostic.len > 0: response.diagnostic
+              else: "the daemon refused the attach (" &
+                response.outcome & ")") &
+        " A resolver ATTACHES to an instance and cannot materialise " &
+        "one: the lift carries the service's signature and " &
+        "deliberately not its command, so `repro up` in the project " &
+        "that DECLARES `" & resolution.serviceName & "` is what starts " &
+        "it (Shared-Development-Services.md §4.6).")
+      inc refused
+      continue
+    if response.diagnostic.len > 0:
+      # §4.3 row 2's warning, AT THE RESOLVER'S OWN CALL SITE, which is
+      # the property §4.6 asks for by name.
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & response.diagnostic)
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()` " & outcomeWord(outcome) & " at " &
+      response.address & " with " & $response.holders.len & " holder" &
+      (if response.holders.len == 1: "" else: "s"))
+    # The RUNNING instance's own declaration of its contribution points,
+    # as the DAEMON answered -- not as the owner's artifact on disk
+    # describes it.
+    #
+    # §4.6's refusal is about what the INSTANCE declares, and under
+    # version skew the instance was built from an older definition than
+    # the artifact now on disk. Reading the artifact a second time would
+    # make the skew case undetectable; the daemon reads the registry
+    # entry's own persisted snapshot, which is the running definition.
+    #
+    # And it is the daemon's answer rather than a store read for a
+    # measured reason: the daemon's records live under its own
+    # `--state-root`, while this process's
+    # `serviceInstanceStoreRoot(dlsUser)` with no override is the user
+    # cache. A client that read the record itself would find nothing
+    # whenever the daemon was started with an explicit root.
+    let runningPoints = response.contributionPoints
+    var rows: seq[ServiceContribution] = @[]
+    for i in 0 ..< resolution.contributionPoints.len:
+      var members: seq[string] = @[]
+      for j in 0 ..< resolution.contributionMembers.len:
+        if resolution.contributionMemberPoints[j] ==
+           resolution.contributionPoints[i]:
+          members.add(resolution.contributionMembers[j])
+      rows.add(ServiceContribution(
+        point: resolution.contributionPoints[i],
+        contributor: resolution.consumerPackage,
+        operation: resolution.contributionOperations[i],
+        precedence: resolution.contributionPrecedences[i],
+        members: members,
+        site: resolution.contributionSites[i]))
+    try:
+      validateServiceContributions(runningPoints, rows,
+        serviceInstanceAddress(key))
+    except CatchableError as err:
+      refuse(err.msg)
+      inc refused
+      continue
+    let deposited =
+      try:
+        depositServiceContributions(storeRoot, key,
+          resolution.consumerPackage, rows)
+      except CatchableError as err:
+        refuse("depositing this project's contributions failed: " & err.msg)
+        inc refused
+        continue
+    # Said out loud even when nothing changed, and even when the
+    # deposit is EMPTY. An empty deposit is a withdrawal, not a no-op,
+    # and a consumer that removed its last contribution should see that
+    # its removal was recorded rather than wonder whether the resolver
+    # ran at all.
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()`: deposited " & $deposited.added &
+      " contribution" & (if deposited.added == 1: "" else: "s") &
+      " for `" & resolution.consumerPackage & "`, replacing " &
+      $deposited.replaced & ", of " &
+      $deposited.set.contributions.len & " on the instance")
+
+    # ── STEP 5 — L9's F5: READ WHAT THE INSTANCE MINTED, FROM THE
+    # INSTANCE, IN A SESSION THAT DID NOT CONVERGE IT ────────────────
+    #
+    # THE DEFECT, as L9 F4 measured it at `f927919fa`: the minted table
+    # lived ONLY in the session directory of the process that converged
+    # the instance. `substituteMintedAttributes` resolves
+    # `@minted:<member>@` out of
+    # `readSharedInstanceMintedAttributes(config.outDir)`, the one
+    # writer of that file is `convergeSharedServiceInstances` in the
+    # SAME `repro up`, and a second project's session directory has no
+    # such file. So a consuming service declared in another product's
+    # recipe, asking for a member the shared instance had already
+    # minted, was REFUSED -- and F5 (delete the hand-written wrapper),
+    # the product recipe migration and §9's "declared once" were all
+    # blocked behind that one reader.
+    #
+    # THE READER IS KEYED ON THE INSTANCE, NOT ON THE SESSION, and that
+    # is the whole decision. §4.4 already settled where a shared
+    # instance's state lives -- "addressed by its identity" -- and L8
+    # put the registrations there for its own reason ("KEYED BY THE
+    # INSTANCE, SO THE IDENTIFIERS SURVIVE A RESTART"). A value keyed by
+    # `(identity, scope, environment)` is by construction "one place per
+    # instance, not per session", so the crossing needs no new store, no
+    # new file format and no new protocol verb: it needs the read that
+    # was missing. `readServiceRegistrations` is the same proc the
+    # owner's `reconcileServiceRegistrations` reads through, so the two
+    # sessions cannot disagree about what the instance minted.
+    #
+    # WHAT WAS REJECTED, AND WHY:
+    #
+    #   * COPY THE OWNER'S SESSION FILE. Keyed on the session, which is
+    #     the defect; needs the owner's project path, which this process
+    #     has no business knowing; and survives the owner's `repro down`
+    #     as last run's answer, which is the exposure L9's review
+    #     measured in `dev-server.sh`'s descriptor.
+    #   * SERVE THE TABLE FROM THE DAEMON. The registration record is
+    #     deliberately NOT the daemon's: "The instance record is the
+    #     DAEMON's ... The registrations are the CONSUMER's reconcile,
+    #     run from the CLI after the daemon has answered. Two writers on
+    #     one record is a race." A verb that served a record the daemon
+    #     never writes would put it in front of state it does not own,
+    #     and would need protocol negotiation to deliver bytes both
+    #     sides can already read from one agreed root -- the root the
+    #     cross-process CONTRIBUTION lane above already crosses on.
+    #   * A DESCRIPTOR FILE OR AN ENVIRONMENT VARIABLE between the two
+    #     projects. That is the construct §7.2 exists to replace: it
+    #     carries no stamp, so the consumer cannot ask where the value
+    #     came from, and it outlives the issuer it describes.
+    #   * RE-RUN THE REGISTRAR IN THE CONSUMER'S SESSION. It would mint
+    #     in a SECOND identifier space -- L9 F4's measured defect, the
+    #     one §7.2 closed -- and would require every consumer to hold
+    #     the issuer's credentials.
+    #   * LET THE CONSUMER RESOLVE THE KEY ITSELF, without the lift.
+    #     §4.6 puts the machinery here for §4.3's reason: a consumer
+    #     that invented an identity would attach to a DIFFERENT instance
+    #     and see contributions that never appear. That is `key`'s
+    #     `degradationReport()` above, reported rather than swallowed.
+    #
+    # THE INSTANCE NOT RUNNING, AND THE READER NOT BEING A HOLDER, ARE
+    # BOTH UNREPRESENTABLE HERE, STRUCTURALLY AND NOT BY ASSERTION.
+    # This statement is reachable only below step 3's `continue`s: the
+    # daemon's command-less converge refuses by name when no instance is
+    # present (a resolver attaches, it cannot materialise), and the same
+    # request is what TOOK this project's lease with `holderId`. So a
+    # reader that gets here has an instance and is one of its holders,
+    # and a reader that is neither never reads -- `repro up` returns
+    # non-zero with the daemon's own refusal and the supervisor is never
+    # launched.
+    #
+    # AN EMPTY RECORD IS NOT A REFUSAL HERE. A consumer may resolve a
+    # service only to attach and contribute, with no token to
+    # concretize, and an instance with no `converge` point mints
+    # nothing. The refusal for a token that cannot be resolved belongs
+    # at the POINT OF USE, where `substituteMintedAttributes` already
+    # names the attribute, the resource and the ordering edge. Refusing
+    # here would break every consumer that reads nothing by design.
+    let instanceMinted =
+      try:
+        readServiceRegistrations(storeRoot, key)
+      except CatchableError as err:
+        refuse("reading what this instance has minted failed: " &
+          err.msg & " The registration record is where a consumer in " &
+          "another session reads an identifier this instance minted " &
+          "(Shared-Development-Services.md §4.4), so this is refused " &
+          "rather than read as `nothing minted`: reading it as empty " &
+          "would turn a corrupt record into an unresolvable token and " &
+          "report the wrong cause.")
+        inc refused
+        continue
+    for reg in instanceMinted.registrations:
+      # THE STAMP CROSSES WITH THE VALUE, verbatim from the durable row.
+      # §7.2's refusal has to stay reachable from the second session --
+      # "a cross-session reader that loses the stamp would be strictly
+      # worse than the refusal it replaces" -- so nothing here derives,
+      # defaults or upgrades a provenance. A row minted before the field
+      # existed arrives as `unstamped` and `@issuer-minted:` refuses it,
+      # which is the fail-closed direction.
+      crossSessionMinted.add((serviceName: resolution.serviceName,
+        member: reg.member, mintedId: reg.mintedId,
+        provenance: reg.provenance))
+    for attr in instanceMinted.attributes:
+      # §7.3's rows cross with their stamps for the same reason, and the
+      # fail-closed direction is the same: a row written by a build that
+      # predates the field arrives `unstamped`, and
+      # `@instance-attribute:` refuses it rather than pointing this
+      # project's service at a URL nothing claimed.
+      crossSessionAttributes.add((serviceName: resolution.serviceName,
+        name: attr.name, value: attr.value, registrar: attr.registrar,
+        provenance: attr.provenance))
+    # SAID OUT LOUD, including when it is zero. A read that silently
+    # found nothing is this campaign's own defect class, and the number
+    # is the one fact that distinguishes "the instance minted nothing"
+    # from "this session never read it".
+    # §7.3's count is APPENDED AFTER `from instance <address>`, not spliced
+    # between the minted count and it, and the position is load-bearing
+    # rather than stylistic: `t_f5_two_sessions_read_one_instances_minted_id`
+    # asserts the exact substring `read 1 minted attribute from instance`
+    # twice, and that control is L9 F5's -- it is what distinguishes "the
+    # cross-session reader ran and found the row" from "the session had the
+    # row all along". Splicing a second count into the middle of it reddened
+    # both assertions while the behaviour they test was intact, which is a
+    # false negative in exactly the control this round must not weaken. The
+    # new count is said out loud for its own reason (a read that silently
+    # found nothing is this campaign's defect class), so it is added where it
+    # costs no existing assertion its power.
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()`: read " &
+      $instanceMinted.registrations.len & " minted attribute" &
+      (if instanceMinted.registrations.len == 1: "" else: "s") &
+      " from instance " & serviceInstanceAddress(key) & " and " &
+      $instanceMinted.attributes.len & " instance attribute" &
+      (if instanceMinted.attributes.len == 1: "" else: "s") &
+      " of that instance")
+  if crossSessionMinted.len > 0 or crossSessionAttributes.len > 0:
+    # MERGED, not written: `convergeSharedServiceInstances` has already
+    # written this session's OWN declarations' rows at this point in
+    # `runUpOrDevCommand`, and a project may both declare one shared
+    # service and resolve another. A plain write here would discard the
+    # rows it converged a moment ago.
+    mergeSharedInstanceMinted(parsed.selection.outDir, crossSessionMinted,
+      crossSessionAttributes)
+  if refused > 0: 1 else: 0
+
+proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
+                                    edge: DevEnvEdgeResult;
+                                    commandName: string): int =
+  ## Shared-Development-Services L7 (§4.5): converge every shared service
+  ## instance this project declares, BEFORE the supervisor is launched.
+  ##
+  ## Before, and not after, for a reason that is not ordering taste: a
+  ## session-owned service may depend on the shared instance being up,
+  ## and a refusal (§4.3's major mismatch, §4.5 rule 1) has to stop the
+  ## session rather than arrive after it published `session.up`.
+  ##
+  ## Returns 0 when every declaration converged, and 1 when any refused.
+  ## A non-zero return means NOTHING was started: the supervisor has not
+  ## been launched yet at this point in `runUpOrDevCommand`.
+  let artifact =
+    try:
+      readDevEnvArtifact(edge.artifactPath)
+    except CatchableError as err:
+      raise newException(IOError,
+        "could not read the dev-env artifact at " & edge.artifactPath &
+        " to find shared service instances: " & err.msg)
+  var declarations: seq[tuple[declaration: SharedServiceInstanceDeclaration;
+    service: DevEnvServiceSummary]] = @[]
+  for service in artifact.services:
+    let declaration = sharedServiceInstanceOf(service)
+    if declaration.declared:
+      declarations.add((declaration: declaration, service: service))
+  if declarations.len == 0:
+    # No shared services. The ledger is removed rather than left behind:
+    # a stale ledger from a previous `repro up` of a recipe that has since
+    # dropped its `instance` block would make the next `repro down`
+    # release a holder this session never took.
+    try:
+      removeFile(extendedPath(
+        parsed.selection.outDir.sharedInstanceLedgerPath))
+    except OSError, IOError:
+      discard
+    # Shared-Development-Services L8: and the MINTED record, for exactly
+    # the reason above one level over. A stale registration record from
+    # a previous `repro up` of a recipe that has since dropped its
+    # `converge` (or its whole `instance` block) would let the
+    # supervisor concretize a `@minted:` token the recipe no longer
+    # declares -- a value from a run nobody can see, which is worse than
+    # the refusal the author would otherwise get. The write at the foot
+    # of this proc already says "written unconditionally, including
+    # empty" for the same reason; this is the path that never reaches
+    # it.
+    try:
+      removeFile(extendedPath(
+        parsed.selection.outDir.sharedInstanceMintedPath))
+    except OSError, IOError:
+      discard
+    return 0
+  if parsed.replace and declarations.len == 0:
+    return 0
+  let projectRoot = parsed.selection.projectRoot
+  let holderId = serviceLeaseHolderId(projectRoot)
+  # The one artifact path this proc reads its lifted declarations from,
+  # named once so the §4.3 generation check below and
+  # `liftedServiceDeclaration` cannot be pointed at two different files.
+  let interfacePathForGeneration = edge.interfacePath
+  var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
+  var minted: seq[tuple[serviceName, member, mintedId: string;
+                        provenance: RegistrarProvenance]] = @[]
+  # Shared-Development-Services §7.3: what each instance reported ABOUT
+  # ITSELF, accumulated beside what it minted and written to the same
+  # session document at the foot of this proc.
+  var attributes: seq[SharedInstanceAttributeRow] = @[]
+  var refused = 0
+  for item in declarations:
+    let lifted = liftedServiceDeclaration(edge.interfacePath,
+      item.declaration.serviceName)
+    let snapshot = lifted.snapshot
+    # Shared-Development-Services L8 -- ONE FACT, AND A REFUSAL IF THE
+    # TWO CHANNELS DISAGREE.
+    #
+    # The identity and the scope now reach `DevEnvServiceSummary`
+    # directly (L7's review assigned that plumbing to L8). The interface
+    # artifact still carries them too, because that is where the
+    # FINGERPRINT comes from and §4.3 decides attach-or-refuse on the
+    # fingerprint. So there are two readings of one fact, and the thing
+    # to do with two readings is not to pick one: it is to compare them
+    # and refuse a disagreement. A disagreement means the artifact and
+    # the interface were produced from different evaluations of the
+    # recipe, and continuing would attach this project to an instance
+    # key neither declaration names.
+    let summaryDeclared = summaryDeclaredIdentityAndScope(item.service)
+    if summaryDeclared.declared:
+      if summaryDeclared.identity != lifted.identity or
+         summaryDeclared.scope != lifted.scope:
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: the dev-env artifact and " &
+          "the interface artifact disagree about this service's " &
+          "declared identity/scope (artifact: " &
+          $summaryDeclared.identity.kind & " `" &
+          summaryDeclared.identity.stableId & "` / " &
+          $summaryDeclared.scope & "; interface: " &
+          $lifted.identity.kind & " `" & lifted.identity.stableId &
+          "` / " & $lifted.scope & "). They are produced from one " &
+          "`service` block, so a disagreement means the two artifacts " &
+          "came from different evaluations. Re-run `repro dev-env` to " &
+          "rebuild both; attaching on either reading would pick an " &
+          "instance key the recipe does not declare.")
+        inc refused
+        continue
+    let key = sharedServiceInstanceKey(item.declaration, projectRoot,
+      lifted.identity, lifted.scope)
+    if key.degradationReport().len > 0:
+      # Reported, never swallowed. L4's own note: a caller that reports
+      # nothing "turns a narrower-than-declared sharing boundary into a
+      # silent one".
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & key.degradationReport())
+
+    let launch = sharedServiceInstanceLaunch(projectRoot, item.service)
+    let response = requestUserDaemonServiceConverge(
+      DaemonServiceConvergeRequest(
+        scope: dlsUser,
+        keyJson: encodeServiceInstanceKey(key),
+        snapshotJson: encodeServiceInterfaceSnapshot(snapshot),
+        holderId: holderId,
+        ttlSeconds: item.declaration.leaseTtlSeconds,
+        command: launch.command,
+        workingDir: launch.workingDir,
+        replace: parsed.replace,
+        force: parsed.force,
+        # §4.3's SAME-GENERATION PRECONDITION, on the OWNER's own
+        # converge too.
+        #
+        # It is tempting to claim `sagFresh` by construction here --
+        # this artifact is `edge.interfacePath`, which the dev-env edge
+        # this very command just ran produced. It is not claimed, and
+        # the reason is measured: `repro_dev_env_engine`'s own
+        # `useCachedInterface` gate is keyed by `devEnvCacheKey`, whose
+        # `projectFile=` part fingerprints the recipe FILE and not its
+        # import closure, so an edit to a module the recipe imports does
+        # not move that key and the edge can hand back an interface
+        # older than the definition. An owner that attaches to its own
+        # instance on a stale artifact is the same defect as a consumer
+        # doing so -- so the owner establishes it the same way, from the
+        # same stamp, rather than asserting it.
+        generationJson: encodeServiceArtifactGenerationCheck(
+          ownerArtifactGeneration(interfacePathForGeneration,
+            projectRoot, snapshot.packageName, snapshot.projectName))))
+    let outcome =
+      try:
+        parseConvergeOutcome(response.outcome)
+      except CatchableError as err:
+        raise newException(ValueError,
+          "the daemon answered `repro " & commandName &
+          "` with an outcome this build does not know: " & err.msg)
+    if not response.ok or convergeRefused(outcome):
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & response.diagnostic)
+      refused.inc
+      continue
+    if response.diagnostic.len > 0:
+      # §4.3 row 2's warning, and §4.5 rule 2's forced-override notice.
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & response.diagnostic)
+    stderr.writeLine("repro " & commandName & ": service `" &
+      item.declaration.serviceName & "` " & outcomeWord(outcome) &
+      " at " & response.address & " pid " & $response.pid &
+      " with " & $response.holders.len & " holder" &
+      (if response.holders.len == 1: "" else: "s"))
+    ledger.add((serviceName: item.declaration.serviceName,
+      keyJson: encodeServiceInstanceKey(key), address: response.address))
+    # Shared-Development-Services L8 -- RECONCILE THE REGISTRATIONS, now
+    # that the instance is LIVE.
+    #
+    # §7's ordering requirement, and it is the whole of what §7 says is
+    # left to build: "The registration resource's provider needs the
+    # issuer *running* before it can reconcile, so the resource depends
+    # on the service's readiness, and consuming edges depend on the
+    # resource." This is that point in the program: the daemon has
+    # answered that the instance is materialised or attached, and the
+    # supervisor has NOT been launched yet, so every consuming edge is
+    # downstream of here.
+    #
+    # D-SS10 IS NOT RESOLVED BY THIS, and the difference is worth
+    # stating. The decision asks whether the ordering edge is "an
+    # ordinary `dependsOn` onto the service node, a leased
+    # `stateGroup`, or a distinct readiness edge". This is none of the
+    # three: it is a sequential step in the CLI, ordered by program
+    # order rather than by a graph edge. It satisfies the REQUIREMENT
+    # (nothing reads an attribute before it is computed) without taking
+    # the decision.
+    #
+    # THE MINTER IS A PLACEHOLDER AND IT SAYS SO. There is no OIDC
+    # client in this repository: the real minter registers an
+    # application against a running Zitadel, which L9 owns. What runs
+    # here derives a deterministic identifier from the instance address
+    # and the member -- which is enough to prove the lane (mint once,
+    # persist, reuse byte-identically, reach argv) and is NOT enough to
+    # be an OIDC client id. A consumer handed one of these will fail at
+    # the issuer, loudly, which is the right failure for a placeholder.
+    # Shared-Development-Services D-SS11 (§4.6) -- APPLY THE
+    # CROSS-PROCESS CONTRIBUTIONS.
+    #
+    # §4.6: the consumer's contributions are "applied by the owner's
+    # instance when it converges". This is that point: the instance is
+    # live, and the members this instance must register are the owner's
+    # own fold PLUS every row a consumer's `repro up` deposited in the
+    # instance's identity-keyed contribution store.
+    #
+    # THE OWNER MUST READ THEM, and that is not an enhancement.
+    # `reconcileServiceRegistrations` removes a member no longer
+    # contributed -- §5's withdrawal property -- so an owner that passed
+    # only its own members would WITHDRAW every consumer's registration
+    # on its next `repro up`. A live OIDC client would be deleted
+    # because the project that asked for it was not the one converging.
+    #
+    # THE GATE IS `registrationPoints`, NOT `registrationMembers`, and
+    # this is a deliberate change from L8's gate. A service that
+    # declares `converge` points and currently folds no members of its
+    # own can still have a consumer's members to register, and -- the
+    # other direction -- a consumer that withdrew its last contribution
+    # must cause a withdrawal rather than leave last week's registration
+    # in place with nothing asking for it. The old gate made both of
+    # those no-ops.
+    var unionMembers = item.service.registrationMembers
+    var unionContributors = item.service.registrationContributors
+    let declaredPoints = contributionPointsOf(snapshot)
+    if item.service.registrationPoints.len > 0:
+      let contributionStoreRoot = serviceInstanceStoreRoot(dlsUser)
+      let stored =
+        try:
+          readServiceContributions(contributionStoreRoot, key)
+        except CatchableError as err:
+          stderr.writeLine("repro " & commandName & ": service `" &
+            item.declaration.serviceName &
+            "`: reading the cross-process contributions of this " &
+            "instance failed: " & err.msg)
+          refused.inc
+          continue
+      if stored.contributions.len > 0:
+        let folded =
+          try:
+            foldCrossProcessContributions(declaredPoints,
+              stored.contributions, serviceInstanceAddress(key))
+          except CatchableError as err:
+            stderr.writeLine("repro " & commandName & ": service `" &
+              item.declaration.serviceName & "`: " & err.msg)
+            refused.inc
+            continue
+        for i in 0 ..< folded.members.len:
+          unionMembers.add(folded.members[i])
+          unionContributors.add(folded.contributors[i])
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: applying " &
+          $folded.members.len & " contributed member" &
+          (if folded.members.len == 1: "" else: "s") & " from " &
+          $stored.contributions.len & " cross-process contribution" &
+          (if stored.contributions.len == 1: "" else: "s"))
+    if item.service.registrationPoints.len > 0:
+      let storeRoot = serviceInstanceStoreRoot(dlsUser)
+      # Shared-Development-Services D-SS10 (§7.1) -- THE EDGE, AND WHAT
+      # CHANGED HERE.
+      #
+      # The registration no longer runs because this statement is below
+      # the converge. It runs because `reconcileResources` reaches it
+      # after the SERVICE NODE it `dependsOn`, and that node's provider
+      # completes on the service's DECLARED READINESS. The comment this
+      # replaces said the ordering was "a sequential step in the CLI,
+      # ordered by program order rather than by a graph edge ... It
+      # satisfies the REQUIREMENT ... without taking the decision." The
+      # decision is now taken, and the ordering is `topoOrder`'s.
+      #
+      # IT ALSO FIXES WHAT THAT ORDERING MEANT. The daemon answers
+      # converged when the instance is MATERIALISED or attached -- for a
+      # child it has just spawned, and (L9's review measured this) even
+      # for one that has already died. A registration ordered on that
+      # answer reconciles against the listening-but-unseeded instance
+      # §7.1 refuses. The service node waits for the probe instead.
+      var reconciled: tuple[set: ServiceRegistrationSet;
+        outcomes: seq[tuple[member: string;
+                            outcome: ServiceRegistrationOutcome]]]
+      var registrarRan = false
+      setServiceReadinessProber(
+        proc (url: string): bool {.closure.} =
+          readinessProbeSatisfied(url))
+      setReadinessEdgeEventSink(
+        proc (kind, service, detail: string) {.closure.} =
+          appendSessionEvent(parsed.selection.outDir, kind, service, detail))
+      # Shared-Development-Services §7.2 -- WHICH REGISTRAR, AND WHY THE
+      # DEVELOPMENT ONE IS STILL THE DEFAULT.
+      #
+      # "The development registrar stays the default for `repro up` in a
+      # workspace with no issuer, because requiring one to bring a stack
+      # up would make the offline path impossible. It is the SILENCE
+      # that is wrong, not the fallback." So the fallback is kept and
+      # the silence is removed: whichever registrar is installed
+      # announces itself into the session's `events.jsonl` (the
+      # `registrar.installed` event, published by
+      # `announceInstalledRegistrar`), and everything it produces is
+      # STAMPED with its provenance all the way to the supervisor
+      # child's argv.
+      #
+      # Reprobuild ships no product registrar (§7.2 settles that), so
+      # the issuer's one arrives as a declared program --
+      # `REPRO_SERVICE_REGISTRAR`, see `service_registrar.nim` for why
+      # that spelling and what the protocol is.
+      let registrarProgram = resolveExternalServiceRegistrarProgram()
+      let registrarIdentity =
+        if registrarProgram.len > 0:
+          externalServiceRegistrarIdentity(registrarProgram)
+        else:
+          developmentRegistrarIdentity
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: registrar " &
+        registrarIdentity.name & " (provenance " &
+        $registrarIdentity.provenance & ")")
+      # What the declared program answered, captured so the reconcile's
+      # REUSED rows can be checked against it below.
+      var issuerAnswers = initTable[string, string]()
+      # §7.3: what the SAME answer said about the instance itself, and
+      # what the store recorded for it. Captured from the one run of the
+      # registrar -- `runExternalServiceRegistrarAnswer` returns both
+      # halves of one document, so there is no second run, no second
+      # parse, and no way for the two halves to come from different
+      # answers.
+      var answeredAttributes: seq[tuple[name, value: string]] = @[]
+      var recordedAttributes: seq[ServiceInstanceAttribute] = @[]
+      # The service's name as a plain local. `item` is a `lent` loop
+      # variable, so a closure that reached into it would not compile
+      # ("cannot be captured as it would violate memory safety") -- and
+      # the refusal below needs the name.
+      let convergingServiceName = item.declaration.serviceName
+      setServiceRegistrar(
+        proc (attrs: ServiceRegistrationAttrs):
+            seq[tuple[member, mintedId: string]] {.closure.} =
+          if registrarProgram.len > 0:
+            # Run ONCE for the whole folded member set, before the
+            # reconcile, rather than per missing member. The issuer is
+            # the authority on what a member's client id is, so a run
+            # that asked only about the members this workspace happens
+            # not to have recorded could not notice that a recorded one
+            # has since changed at the issuer.
+            let answer = runExternalServiceRegistrarAnswer(
+              registrarProgram,
+              parsed.selection.outDir.sessionDir / "registrar", attrs)
+            for row in answer.registrations:
+              issuerAnswers[row.member] = row.mintedId
+            answeredAttributes = answer.instanceAttributes
+          # ── §7.3 — RECORD THE INSTANCE'S OWN ATTRIBUTES ─────────────
+          #
+          # UNCONDITIONALLY, INCLUDING ON THE OFFLINE PATH, and that is
+          # the whole anti-staleness mechanism rather than an
+          # afterthought. The call REPLACES the stored set with what the
+          # registrar installed RIGHT NOW answered, so:
+          #
+          #   * the development registrar answers nothing and the
+          #     previous run's issuer URL is REMOVED. Skipping the call
+          #     when no program is declared would leave last run's URL
+          #     on the record and serve it to a consumer as if it were
+          #     this instance's -- the `dev-server.sh` descriptor defect
+          #     L9's review measured, reconstructed inside the fix for
+          #     the minted half;
+          #   * a program that answers a DIFFERENT URL replaces the old
+          #     one, because an issuer URL legitimately moves when the
+          #     instance rebinds. That is the opposite of the minted
+          #     id's mint-once reuse, and the asymmetry is in the
+          #     values, not in the lane.
+          #
+          # AND IT RUNS *BEFORE* THE REGISTRATIONS RECONCILE, which is
+          # the only ordering that closes a stale read. The registration
+          # reconcile can REFUSE -- an empty minted id, or the issuer
+          # having changed a client id this workspace already recorded
+          # (the refusal raised a few lines below) -- and a refusal
+          # after this call would leave the PREVIOUS run's issuer URL on
+          # the durable record for a consumer in another session to
+          # read. Running first means the attribute written is always
+          # the one the registrar just reported about the instance that
+          # is actually up, whatever the registrations then do; and that
+          # is sound rather than optimistic, because the instance IS
+          # running at that address -- it is the REGISTRATIONS that are
+          # in doubt, not the address.
+          #
+          # THIS IS PROGRAM ORDER, NOT AN ASSERTED PROPERTY. No test
+          # covers the ordering: provoking it needs a converge whose
+          # registrar answers successfully and whose registration
+          # reconcile then refuses, with the instance's address having
+          # moved in between. `t_dss72_the_registrar_reaches_a_services
+          # _argv`'s case C constructs the refusal and
+          # `t_dss73_the_issuer_url_reaches_a_consuming_services_argv`'s
+          # case C constructs the move; a case composing the two, and
+          # reading the durable record rather than the session file,
+          # would redden if these two statements were swapped back.
+          recordedAttributes = reconcileServiceInstanceAttributes(
+            storeRoot, key, answeredAttributes,
+            registrar = registrarIdentity.name,
+            provenance = registrarIdentity.provenance).attributes
+          reconciled = reconcileServiceRegistrations(storeRoot, key,
+            attrs.members, attrs.contributors,
+            proc (member, contributor: string): string {.closure.} =
+              if registrarProgram.len > 0:
+                # `""` is impossible here: `decodeServiceRegistrarAnswer`
+                # refuses an answer that omits a requested member, and
+                # `reconcileServiceRegistrations` refuses an empty
+                # minted id anyway. Spelled as a lookup with no default
+                # so a future change cannot turn it into one.
+                issuerAnswers[member]
+              else:
+                digestHex(blake3DomainDigest(
+                  ("repro-dev-registration.v1\x00" & response.address &
+                   "\x00" & member).bytesOf(),
+                  hdMetadataEnvelope))[0 ..< 24],
+            registrar = registrarIdentity.name,
+            # §7.2's stamp, now RECORDED IN THE DURABLE ROW and not only
+            # in this session's file. L9 F5: a consumer in another
+            # project's session reads this record, and that process has
+            # no registrar installed -- it attaches, it does not mint --
+            # so a stamp that lived only in `computedAttributes` would
+            # not survive the crossing. Taken from the SAME
+            # `registrarIdentity` that `setServiceRegistrar` installed,
+            # so the durable stamp and the in-process one cannot
+            # disagree about a value minted in this run.
+            provenance = registrarIdentity.provenance)
+          registrarRan = true
+          result = @[]
+          for reg in reconciled.set.registrations:
+            if issuerAnswers.hasKey(reg.member) and
+               issuerAnswers[reg.member] != reg.mintedId:
+              # The store and the issuer disagree about a member this
+              # workspace already had. REFUSED rather than resolved
+              # either way: preferring the store would hand a consumer a
+              # client id the issuer has replaced, and silently
+              # preferring the issuer would rewrite a record L8 makes
+              # byte-stable on purpose.
+              raise newException(ValueError,
+                "member `" & reg.member & "` of service `" &
+                convergingServiceName & "` is recorded as `" &
+                reg.mintedId & "` by registrar `" &
+                registrarIdentity.name & "`, but that registrar now " &
+                "answers `" & issuerAnswers[reg.member] & "`. The " &
+                "issuer's registration changed after this workspace " &
+                "recorded it. Refused rather than guessed: clear this " &
+                "instance's registration record (`repro down` for this " &
+                "activity, then remove the `registrations` state " &
+                "record under " & storeRoot & ") and converge again, " &
+                "which re-registers every member against the issuer " &
+                "as it is now.")
+            result.add((member: reg.member, mintedId: reg.mintedId)),
+        registrarIdentity)
+      try:
+        let plan = planRegistrationEdge(item.declaration.serviceName,
+          response.address,
+          ServiceReadinessProbe(kind: launch.readinessKind,
+            path: launch.readinessPath, url: launch.readinessUrl,
+            timeoutMs: launch.readinessTimeoutMs),
+          unionMembers, unionContributors)
+        discard reconcileResources(plan)
+      except CatchableError as err:
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName &
+          "`: registering its contributed members failed: " & err.msg)
+        refused.inc
+        continue
+      if not registrarRan:
+        # The registrar is the ONLY thing that computes an attribute, so
+        # a reconcile that returned without calling it is a silent drop
+        # wearing the shape of a success. Refused rather than reported as
+        # "0 minted": a run that registers nothing and says so cheerfully
+        # is how a consumer ends up with an uncomputed `clientId` and a
+        # failure at the issuer.
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: the registration resource " &
+          "reconciled WITHOUT running its registrar, so nothing was " &
+          "registered and no attribute was computed. That is a defect " &
+          "in the D-SS10 readiness edge, not in this recipe; report it.")
+        refused.inc
+        continue
+      for reg in reconciled.set.registrations:
+        # THE STAMP IS READ BACK FROM WHERE THE PROVIDER RECORDED IT,
+        # not re-derived from `registrarIdentity` here. Two independent
+        # derivations of one fact are two things that can disagree, and
+        # the one that matters is the provider's: it is what
+        # `registrationApply` actually attached to the value. Reading it
+        # also means an attribute the provider did not record REFUSES
+        # here, by name, instead of being written to the session file
+        # with a confident provenance.
+        let stamp = computedResourceAttributeStamp(
+          computedClientIdAddress(response.address, reg.member),
+          ClientIdAttributeName, response.address)
+        minted.add((serviceName: item.declaration.serviceName,
+          member: reg.member, mintedId: stamp.value,
+          provenance: stamp.provenance))
+      for attr in recordedAttributes:
+        # READ BACK FROM WHAT THE STORE RECORDED, not from the
+        # registrar's answer, for the reason the minted stamp is read
+        # back from `computedResourceAttributeStamp`: the durable row is
+        # what a consumer in ANOTHER session will read, so this
+        # session's argv has to be concretized from the same bytes. Two
+        # independent derivations of one fact are two things that can
+        # disagree, and here they would disagree silently -- one
+        # session's service pointed at one issuer and another's at
+        # another.
+        attributes.add((serviceName: item.declaration.serviceName,
+          name: attr.name, value: attr.value, registrar: attr.registrar,
+          provenance: attr.provenance))
+      var mintedCount = 0
+      var reusedCount = 0
+      var withdrawnCount = 0
+      for outcome in reconciled.outcomes:
+        case outcome.outcome
+        of sroMinted: inc mintedCount
+        of sroReused: inc reusedCount
+        of sroWithdrawn: inc withdrawnCount
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & $mintedCount &
+        " registration" & (if mintedCount == 1: "" else: "s") &
+        " minted, " & $reusedCount & " reused, " & $withdrawnCount &
+        " withdrawn")
+      # §7.3, SAID OUT LOUD INCLUDING WHEN IT IS ZERO, for the reason
+      # the cross-session read's count is: a reader that silently found
+      # nothing is this campaign's own defect class, and the number is
+      # the one fact that distinguishes "this registrar reported no
+      # attributes" from "nobody looked". Zero is the normal, correct
+      # answer on the offline path, and it is the answer a developer
+      # debugging a refused `@instance-attribute:` token needs to see.
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " &
+        $recordedAttributes.len & " instance attribute" &
+        (if recordedAttributes.len == 1: "" else: "s") & " recorded" &
+        (if recordedAttributes.len == 0: "" else: ": " &
+           recordedAttributes.mapIt(it.name).join(", ")))
+  # D-SS10: drop the readiness edge's installed collaborators.
+  #
+  # `setServiceReadinessProber` / `setServiceRegistrar` /
+  # `setReadinessEdgeEventSink` are module globals (the driver callbacks
+  # are `{.nimcall.}` and have no closure environment), and the registrar
+  # installed above CAPTURES this loop's `key`, `response` and
+  # `storeRoot`. Leaving it installed would mean that any later
+  # `reconcileResources` in this process -- `reconcileConsumedStateGroups`
+  # is one -- could reach a registrar bound to a declaration it has
+  # nothing to do with. No such resource exists today, so this is a
+  # hazard rather than a defect; it is cleared because the alternative is
+  # to rely on nobody adding one.
+  clearReadinessEdgeCollaborators()
+  # The ledger records what was CONVERGED, including on a run where
+  # another declaration refused: this project really does hold those
+  # instances, and a `repro down` that did not release them would leave
+  # them held forever.
+  writeSharedInstanceLedger(parsed.selection.outDir, holderId, ledger)
+  # And what was MINTED, for the supervisor child to concretize argv
+  # from. Written unconditionally, including empty: a stale file from a
+  # previous run would otherwise resolve a token the recipe no longer
+  # declares.
+  writeSharedInstanceMinted(parsed.selection.outDir, minted, attributes)
+  if refused > 0: 1 else: 0
+
+proc releaseSharedServiceInstances(outDir: string): int =
+  ## L7 (§4.5): drop this project's holder on every instance the ledger
+  ## records. Returns 0 when every release was decided, 1 when any
+  ## refused or failed.
+  # L9 F5 -- THE MINTED RECORD GOES FIRST, AND BEFORE THE EARLY RETURN.
+  #
+  # A NEAR-MISS FOUND BY PROBING THE CROSS-SESSION READER, in the same class
+  # as the one L9's review found in `infra`'s `dev-server.sh` (`cleanup()`
+  # removed the readiness marker and not the descriptor, so a product read a
+  # dead issuer's client ids after `repro down`). This file is the same shape:
+  # it names identifiers of an instance this session has just stopped holding,
+  # and nothing removed it.
+  #
+  # A HAZARD RATHER THAN A LIVE DEFECT, stated precisely because the
+  # difference matters: every `repro up` rewrites it before the supervisor
+  # starts -- a project with declarations writes it at the foot of
+  # `convergeSharedServiceInstances`, and a PURE CONSUMER has it REMOVED by
+  # that proc's `declarations.len == 0` arm and then re-merged by the
+  # resolver -- so no run reads a stale table. What the removal closes is the
+  # window between a `down` and the next `up`, in which the file on disk
+  # names an instance that may already be gone. The descriptor case says what
+  # that window costs when someone reads it.
+  #
+  # BEFORE the `ledger.entries.len == 0` early return, and that placement is
+  # the whole point: a PURE CONSUMER -- the F5 case, a project that resolves
+  # another's service and declares none of its own -- takes no holder and so
+  # has NO LEDGER. A removal placed after that return would be dead code for
+  # exactly the sessions this reader was built for.
+  try:
+    removeFile(extendedPath(outDir.sharedInstanceMintedPath))
+  except OSError, IOError:
+    discard
+  let ledger =
+    try:
+      readSharedInstanceLedger(outDir)
+    except CatchableError as err:
+      stderr.writeLine("repro down: " & err.msg)
+      return 1
+  if ledger.entries.len == 0:
+    return 0
+  var failed = 0
+  var released = 0
+  for entry in ledger.entries:
+    let response = requestUserDaemonServiceRelease(
+      DaemonServiceReleaseRequest(
+        scope: dlsUser, keyJson: entry.keyJson,
+        holderId: ledger.holderId))
+    if not response.ok:
+      stderr.writeLine("repro down: service `" & entry.serviceName &
+        "`: " & response.diagnostic)
+      failed.inc
+      continue
+    if response.diagnostic.len > 0:
+      stderr.writeLine("repro down: service `" & entry.serviceName &
+        "`: " & response.diagnostic)
+    let outcome =
+      try:
+        parseReleaseOutcome(response.outcome)
+      except CatchableError as err:
+        stderr.writeLine("repro down: " & err.msg)
+        failed.inc
+        continue
+    if outcome == srlRefuseUnknownHolders:
+      failed.inc
+      continue
+    stderr.writeLine("repro down: service `" & entry.serviceName & "` " &
+      outcomeWord(outcome) & " at " & response.address & "; " &
+      $response.remainingHolders.len & " holder" &
+      (if response.remainingHolders.len == 1: "" else: "s") & " remain" &
+      (if response.remainingHolders.len == 1: "s" else: ""))
+    released.inc
+  if failed > 0:
+    # The ledger is KEPT when anything refused, so a later `repro down`
+    # can retry the releases that did not happen. Deleting it would make
+    # this project a permanent holder of whatever was left.
+    return 1
+  try:
+    removeFile(extendedPath(outDir.sharedInstanceLedgerPath))
+  except OSError, IOError:
+    discard
+  0
+
 proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
                        mode: DevSessionMode): int =
   let commandName = if mode == dsmDev: "dev" else: "up"
-  var parsed = parseDevSessionArgs(args, commandName)
+  var parsed = parseDevSessionArgs(args, commandName,
+    acceptReadyTimeout = true, acceptReplace = true)
+  if parsed.force and not parsed.replace:
+    # REFUSED, not ignored, and this closes a silent drop that was
+    # present at the base commit: `parseDevSessionArgs` set
+    # `result.force` for every command and only `runDownCommand` ever
+    # read it, so `repro up --force` and `repro dev --force` parsed
+    # cleanly and did nothing at all. §4.3 gives `--force` exactly one
+    # meaning on `up` -- "proceeds under `--force`" over other holders of
+    # a shared instance -- and that meaning needs `--replace` to be
+    # about anything.
+    raise newException(ValueError,
+      "--force has no effect on `repro " & commandName &
+        "` without --replace: its only meaning here is to override the " &
+        "live holders of a shared service instance that `--replace` is " &
+        "taking over (Shared-Development-Services.md §4.3). Pass both, " &
+        "or neither.")
+  if parsed.foreground and parsed.readyTimeoutMs > 0:
+    # Refused rather than ignored. ``--foreground`` runs the supervisor in
+    # this process, so there is no parent wait for ``--ready-timeout`` to
+    # bound -- the flag would parse and do nothing, and the user would
+    # reasonably believe it had taken effect.
+    raise newException(ValueError,
+      "--ready-timeout has no effect with --foreground: a foreground " &
+        "session IS the supervisor, so there is no wait to bound. Drop one " &
+        "of the two flags.")
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
+  # Shared-Development-Services L7 (§4.5): converge the shared service
+  # instances this project declares before anything in this session is
+  # started. A refusal returns here, with nothing launched.
+  let converged = convergeSharedServiceInstances(parsed, edge, commandName)
+  if converged != 0:
+    return converged
+  # Shared-Development-Services D-SS11 (§4.6): and run every resolver
+  # this project's recipe wrote, AFTER its own declarations converged and
+  # before anything is started.
+  #
+  # AFTER, for a reason that is not ordering taste: a project may both
+  # declare a shared service and resolve another one, and its own
+  # declaration's instance has to exist before a sibling consumer
+  # attaches to it in the same workspace. Before the supervisor, because
+  # a refused resolution must stop the session rather than arrive after
+  # `session.up`.
+  let resolved = resolveSharedServiceReferences(parsed, edge, commandName)
+  if resolved != 0:
+    return resolved
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
     # W2 — the SAME resolver the detached arm re-creates in
@@ -15779,15 +17371,37 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     # a required parameter precisely so these two arms cannot drift again.
     return runDevSessionSupervisor(config,
       devEnvProducerOpsResolver(parsed.selection.projectRoot))
+  let budget = config.readyBudget(parsed.readyTimeoutMs)
+  # The previous session's published control-API bind is removed BEFORE the
+  # supervisor is launched, so that neither this process's wait nor the
+  # supervisor's own can read a port that closed when the last session
+  # ended. Doing it here rather than only in the supervisor is what closes
+  # the window: the supervisor is a detached child, so between the launch
+  # below and its own removal the file is still on disk and this process is
+  # already polling. See ``discardStaleControlApiBind``.
+  config.discardStaleControlApiBind()
   config.startBackgroundSupervisor()
-  let status = waitForDevSessionReady(config)
+  # Announced BEFORE the wait, and on stderr beside the dev-env
+  # announcement, for two reasons: a `repro up` that sits for minutes should
+  # say what it is waiting for and for how long, and the number it is about
+  # to hold itself to should be visible on the SUCCESS path too -- not only
+  # in the diagnostic nobody sees when things work.
+  stderr.writeLine("repro " & commandName & ": waiting up to " &
+    budget.describe() & " for the session to report `session.up`")
+  let status =
+    try:
+      waitForDevSessionReady(config, budget)
+    except DevSessionStillStartingError as err:
+      stderr.writeLine("repro " & commandName & ": " & err.msg)
+      return DevSessionStillStartingExitCode
   echo "repro " & commandName & ": session " &
     status["sessionId"].getStr() & " " & status["status"].getStr() &
     " " & status["httpBind"].getStr()
   0
 
 proc runDownCommand(args: openArray[string]): int =
-  let parsed = parseDevSessionArgs(args, "down")
+  let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false,
+    acceptStopTimeout = true)
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
     raise newException(IOError,
@@ -15817,18 +17431,82 @@ proc runDownCommand(args: openArray[string]): int =
       StopRequestFile), "{\"source\":\"force-file\"}\n")
     stderr.writeLine("repro down: HTTP stop failed; wrote stop request file: " &
       err.msg)
+  # The wait is DERIVED, from the same number the supervisor's own stop
+  # honours, rather than the hardcoded `10000` this used to be. That
+  # constant was the start side's defect one command over: a session with
+  # four services is allowed four sequential stop graces by
+  # `stopServices`, which is 12_000 ms of supervisor work this process used
+  # to abandon at 10_000 and report as a timeout. See
+  # `derivedStopTimeoutMs` for why the derivation is NOT the start side's
+  # and why `--stop-timeout` exists anyway.
+  let budget = stopBudget(metadata, parsed.stopTimeoutMs)
+  # Announced before the wait, on stderr, for the reason `repro up`
+  # announces its own: a command that may sit for half a minute should say
+  # what it is waiting for and for how long, and the number should be
+  # visible on the path where nothing goes wrong too.
+  stderr.writeLine("repro down: waiting up to " & budget.describe() &
+    " for the session to report `down`")
+  let started = epochTime()
+  # `lastStatus` exists to BOUND WHAT THE DIAGNOSTIC MAY ASSERT, exactly as
+  # its namesake does in `waitForDevSessionReady`: empty means no status was
+  # ever read, and the message must not describe a session state in that
+  # case. It is not a second source of truth for the loop's decision --
+  # that still turns on what the current read says.
+  var lastStatus = ""
   var waited = 0
-  while waited <= 10000:
+  while waited <= budget.timeoutMs:
     if fileExists(extendedPath(metadataPath)):
       let current = readJsonFileResilient(metadataPath)
-      if current{"status"}.getStr() == "down":
+      let reported = current{"status"}.getStr("")
+      if reported.len > 0:
+        lastStatus = reported
+      if lastStatus == "down":
         echo "repro down: session " & current{"sessionId"}.getStr() &
           " down"
-        return 0
+        # Shared-Development-Services L7 (§4.5): drop this project's
+        # holder on every shared instance, AFTER the session is down.
+        # After, because a session-owned service may still have been
+        # talking to the instance a moment ago, and §4.5's point is that
+        # this release stops nothing unless it was the last reference.
+        return releaseSharedServiceInstances(parsed.selection.outDir)
     sleep(100)
     waited.inc(100)
+  # WHAT THIS MESSAGE MAY ASSERT IS BOUNDED BY WHAT THE LOOP OBSERVED, the
+  # same discipline `waitForDevSessionReady`'s expiry diagnostic keeps. The
+  # text this replaces -- "timed out waiting for dev session to stop:
+  # <path>" -- named the file and nothing else: not the status the file was
+  # actually reporting, not how long the wait had been, not where that
+  # length came from, and not the one artifact that can say why the
+  # supervisor had not finished. A reader could not tell a session still
+  # working through its services from one that never heard the stop
+  # request.
+  let waitedMs = int((epochTime() - started) * 1000.0)
+  let headline =
+    if lastStatus.len > 0:
+      "it still reports `" & lastStatus & "`, not `down`, after this " &
+        "command waited " & $waitedMs & " ms"
+    else:
+      "no status was ever read from " & metadataPath & " after this " &
+        "command waited " & $waitedMs & " ms"
+  let evidence =
+    if lastStatus == "stopping":
+      "  the supervisor HAD begun stopping, so this is a wait that " &
+        "expired rather than a stop that was not heard"
+    elif lastStatus.len > 0:
+      "  the supervisor had not begun stopping: it never published " &
+        "`stopping`, so either it has not yet read the stop request or it " &
+        "is not running to read it"
+    else:
+      "  that file was absent or unreadable for the whole wait"
   raise newException(IOError,
-    "timed out waiting for dev session to stop: " & metadataPath)
+    "dev session " & metadata{"sessionId"}.getStr("(unnamed)") &
+      " did not stop: " & headline & "\n" &
+      "  that wait was " & budget.describe() & "\n" &
+      evidence & "\n" &
+      "  per-service state: " & (parsed.selection.outDir.sessionDir /
+        "events.jsonl") & "\n" &
+      "  supervisor output: " & (parsed.selection.outDir.sessionDir /
+        "supervisor.log"))
 
 proc runDevSessionSupervisorHelper(args: openArray[string];
                                    publicCliPath: string): int =
@@ -77146,27 +78824,35 @@ proc flakeInputOriginals(flakeRoot: string;
 
 proc flakeOriginalRepository(reference: FlakeInputOriginal):
     tuple[present: bool; identity, diagnostic: string] =
-  ## Having either coordinate forbids guessing by the consumer's attribute
-  ## name, even when the other coordinate or fetcher kind is unsupported.
+  ## A hosted fetcher or any coordinate component requires a complete source
+  ## identity. Missing owner/repo fields cannot turn a malformed hosted
+  ## reference into a coordinate-free indirect/path input eligible for name
+  ## fallback.
   if reference.diagnostic.len > 0:
     result.present = true
     result.diagnostic = reference.diagnostic
     return
   let original = reference.original
   if original == nil: return
-  result.present = original.hasKey("repo") or original.hasKey("owner")
+  let kindValue = original{"type"}
+  if kindValue != nil and (kindValue.kind != JString or kindValue.getStr().len == 0):
+    result.present = true
+    result.diagnostic = "original repository fetcher type is malformed"
+    return
+  let kind = kindValue.getStr()
+  let defaultHost = case kind
+    of "github": "github.com"
+    of "gitlab": "gitlab.com"
+    of "sourcehut": "git.sr.ht"
+    else: ""
+  result.present = original.hasKey("repo") or original.hasKey("owner") or
+    original.hasKey("host") or defaultHost.len > 0
   if not result.present: return
   let owner = original{"owner"}.getStr()
   let repo = original{"repo"}.getStr()
   if owner.len == 0 or repo.len == 0:
     result.diagnostic = "original owner/repo coordinates are incomplete"
     return
-  let kind = original{"type"}.getStr()
-  let defaultHost = case kind
-    of "github": "github.com"
-    of "gitlab": "gitlab.com"
-    of "sourcehut": "git.sr.ht"
-    else: ""
   if defaultHost.len == 0:
     result.diagnostic = "original owner/repo coordinates use unsupported fetcher '" & kind & "'"
     return

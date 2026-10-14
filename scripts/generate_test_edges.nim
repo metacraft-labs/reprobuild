@@ -505,6 +505,44 @@ proc isProviderModePath(path: string): bool =
     # Measures the macro's module-init startup pass over a ``build:``
     # body, which the macro emits only under this define.
     "tests/unit/t_provider_startup_body_containment.nim",
+    # Shared-Development-Services L1: drives ``buildPackageFragment`` and
+    # ``buildPackageDevEnv`` directly, and asserts on ``servicePlaceholder``
+    # -- all three exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_service_lowers_typed_edges_into_the_graph_fragment.nim",
+    # Shared-Development-Services L2: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` body declares parameterised activities, and
+    # asserts on ``servicePlaceholder`` -- the dev-env ``activity`` surface
+    # itself (``proc activity(name: string)`` included) exists only under
+    # this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_activity_params_reach_the_services_they_declare.nim",
+    # Shared-Development-Services L5: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` activity reads configurables an
+    # ``environment`` binds, and asserts on the argv of the service the
+    # provider lowered -- ``buildPackageDevEnv`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l5_environment_reaches_the_service_argv.nim",
+    # Shared-Development-Services L8: both drive ``buildPackageDevEnv``
+    # over a fixture whose ``devEnv:`` activity declares contribution
+    # points, and read the services the provider lowered --
+    # ``buildPackageDevEnv``, ``ProviderGraphRequest`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_contribution_operation_is_a_second_axis.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services D-SS11: drives ``buildPackageDevEnv``
+    # over a fixture whose consumer packages resolve a shared service
+    # through ``<package>.<service>.shared(...)``, and reads the
+    # resolutions the provider lowered -- ``buildPackageDevEnv``,
+    # ``ProviderGraphRequest`` and the generated ``devEnv<Pkg>Package``
+    # exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss11_resolutions_reach_the_dev_env_artifact.nim",
   ]:
     if p == exact:
       return true

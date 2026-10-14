@@ -636,6 +636,17 @@ const
     ## `except CatchableError` -> peer miss), and the standalone `.rbar`
     ## diagnostic reader. The shm tier stores digests, not bytes, and reopens
     ## the containers through the same path.
+  TrustedActionRecordVersions = {ActionRecordVersionEvidenceEpoch,
+                                 ActionRecordVersionInheritedEnv}
+    ## THE decoder's accept set, named once so that it has exactly one
+    ## source of truth. `decodeRecord` tests membership of this set, and
+    ## `actionRecordVersionsThisBuildRefuses` is derived from it, so a
+    ## trust decision cannot be made in one place and missed in the other.
+    ##
+    ## A SET and not a `>=` for the reason the epoch comment above gives
+    ## at length: a version becomes readable only once someone has written
+    ## down why it is trustworthy, so the readable versions are enumerated
+    ## rather than bounded.
   MaxRecordPathTableEntries = 4_000_000'u32
   # Per-edge record file: a small self-describing container holding the
   # edge's bounded record set. Each contained record is the existing
@@ -2602,6 +2613,19 @@ const
 proc inputAccessFileName*(strongHex: string): string =
   strongHex & InputAccessFileExt
 
+proc firstUnknownInputAccessVersion*(): uint16 =
+  ## One past `InputAccessVersion`: the lowest sidecar version this build
+  ## does not know, exported for the same reason as
+  ## `firstUnknownActionRecordVersion` below.
+  ##
+  ## What the "a sidecar for another record, version or shape is refused"
+  ## probe wants. Poking a bare literal into the version word there reads
+  ## as covering "a version this build cannot know" while actually naming
+  ## one fixed number, and stops covering it the moment the format bumps
+  ## past it -- silently, because the probe still passes for the wrong
+  ## reason. Derived, it tracks the bump.
+  InputAccessVersion + 1
+
 proc writeFrontCoded(outp: var seq[byte]; paths: openArray[string]) =
   outp.writeU32Le(uint32(paths.len))
   var previous = ""
@@ -3327,7 +3351,7 @@ proc decodeRecordImpl(payload: openArray[byte]): ActionResultRecord =
   # the whole mechanism -- see `ActionRecordVersionEvidenceEpoch`. This is a
   # trust decision, so it is a SET and not a `>=`: a version is readable only
   # once someone has said why it is trustworthy.
-  if version notin {ActionRecordVersionEvidenceEpoch, ActionRecordVersionInheritedEnv}:
+  if version notin TrustedActionRecordVersions:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
   let interned = version >= ActionRecordVersionInterned
   result.weakFingerprint = readDigest(payload, pos)
@@ -3438,6 +3462,67 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
 proc writeActionResultRecordFile*(path: string; record: ActionResultRecord) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), byteString(encodeRecord(record)))
+
+proc actionRecordVersionWithoutEnvInputs*(): uint16 =
+  ## The version `encodeRecord` stamps on a record carrying NO observed
+  ## environment inputs. One of the two values the encoder chooses
+  ## between, and the one a probe means when it says "patch this frame
+  ## down to the version an env-free record gets".
+  ##
+  ## There is deliberately NO `actionRecordVersionWithEnvInputs` beside
+  ## it. One was written and then removed: nothing in the tree wanted
+  ## it, and an exported accessor with no caller is surface that has to
+  ## be maintained against a use that does not exist. Add it when a
+  ## probe needs it; the one line it takes is not worth pre-paying for.
+  ActionRecordVersionEvidenceEpoch
+
+proc newestTrustedActionRecordVersion(): uint16 =
+  ## The highest member of `TrustedActionRecordVersions`, read OUT of the
+  ## set rather than named a second time. Private, and factored out
+  ## because both public accessors below need it: writing
+  ## `ActionRecordVersionInheritedEnv` at each of them would reintroduce
+  ## the thing this whole change removes -- a second place that decides
+  ## which version is newest, free to disagree with the set.
+  for v in TrustedActionRecordVersions:
+    result = max(result, v)
+
+proc firstUnknownActionRecordVersion*(): uint16 =
+  ## One past the newest version `TrustedActionRecordVersions` holds: the
+  ## lowest version number ABOVE everything this build reads.
+  ##
+  ## What an "an unknown future version is refused rather than guessed
+  ## at" probe wants. The two probes of that shape in the tree poked a
+  ## literal 99 -- harmless at 92 bumps of headroom, and the same shape
+  ## that was not harmless three sites over, which is the argument for
+  ## deriving it rather than for grading each instance by its headroom.
+  newestTrustedActionRecordVersion() + 1
+
+proc actionRecordVersionsThisBuildRefuses*(): seq[uint16] =
+  ## Every version number up to and including the newest frame this build
+  ## WRITES that its decoder nonetheless REFUSES -- derived from
+  ## `TrustedActionRecordVersions`, which is the decoder's own accept set.
+  ##
+  ## Exists so that "a frame differing only in its version word is refused
+  ## for every untrusted version" can be written as the property it is,
+  ## rather than as a hand-listed range. The hand-listed form was
+  ## `[2, 3, 4, 5]` in `test_m10_observed_env_cache_key`: correct when the
+  ## epoch was 6, and the moment the epoch moved to 7 it stopped meaning
+  ## "everything below current" and silently stopped covering 6. Nothing
+  ## failed. That is the defect this name removes -- it is a PROBE's
+  ## helper, not a pin: it must keep measuring the same property across a
+  ## bump, which is the opposite of what the two literal
+  ## `check version == 6` / `== 7` pins in that same test do.
+  ##
+  ## An accessor over the private consts rather than exporting them,
+  ## because the set is DERIVED: exporting `TrustedActionRecordVersions`
+  ## would let a caller re-derive the complement differently, and the
+  ## point of the name is that there is one derivation. (Ambiguity is not
+  ## the reason -- exporting envelope-version consts that share a name
+  ## across libraries was measured to compile clean, as
+  ## `repro_dev_env_artifacts.devEnvEnvelopeVersion` now records.)
+  for v in 0'u16 .. newestTrustedActionRecordVersion():
+    if v notin TrustedActionRecordVersions:
+      result.add(v)
 
 proc encodeActionResultRecord*(record: ActionResultRecord): seq[byte] =
   ## Public wrapper over the on-disk record codec. Used by the peer-cache

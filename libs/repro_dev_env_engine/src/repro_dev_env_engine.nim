@@ -663,6 +663,22 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     interfaceArtifact = extractInterfaceFromModule(active.modulePath,
       interfacePath, stubPath, workDir, compileScratchDir,
       consumerRoot = parentDir(absolutePath(active.modulePath)))
+    # Shared-Development-Services §4.3's stale-lift precondition: record
+    # what this artifact was lifted from, beside it, so a CONSUMER of a
+    # shared service this recipe declares can establish whether it still
+    # corresponds to this recipe.
+    #
+    # Inside the `not useCachedInterface` branch ON PURPOSE. The cached
+    # branch above is gated by `devEnvCacheKey`, whose `projectFile=`
+    # part fingerprints the recipe FILE and not its import closure -- so
+    # an edit to a module the recipe imports does NOT move that key and
+    # the cached branch really can serve an interface older than the
+    # definition. Stamping there would record the current closure against
+    # that older artifact, which is the silent attach §4.3 forbids,
+    # performed by the freshness check itself. Left unstamped, the
+    # sidecar from the run that PRODUCED those bytes stays in place and
+    # the consumer's check reports the staleness.
+    writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
   let effectiveProvisioning =
     active.effectiveToolProvisioning(interfaceArtifact)
 

@@ -143,6 +143,16 @@ suite "flake input original coordinates":
 
     # Partial and unsupported coordinates also forbid a same-name fallback.
     for original in [%*{"owner": "metacraft-labs"},
+        %*{"type": "github", "host": "other-forge.example"},
+        %*{"host": "other-forge.example"},
+        %*{"type": "github", "host": 42},
+        %*{"host": 42},
+        %*{"type": 42},
+        %*{"type": nil},
+        %*{"type": ""},
+        %*{"type": "github"},
+        %*{"type": "gitlab"},
+        %*{"type": "sourcehut"},
         %*{"type": "unknown-forge", "owner": "other-owner", "repo": "gamma"},
         %*{"type": "github", "owner": "other-owner", "repo": "gamma", "host": 42},
         %*{"type": "github", "owner": "other-owner", "repo": "gamma", "host": nil},
@@ -152,10 +162,26 @@ suite "flake input original coordinates":
       lock["nodes"]["gamma-src"]["original"] = original
       writeFile(lockPath(fx), $lock)
       let rejected = invoke("override-args")
+      checkpoint("original reference: " & $original)
       checkpoint(rejected.output)
       check rejected.code == 0
       check "--override-input gamma-src" notin rejected.output
       check "input-name fallback is disabled" in rejected.output
+      var namedRefusal = false
+      for line in rejected.output.splitLines():
+        if "NOT substituted: flake input 'gamma-src'" in line and
+            "input-name fallback is disabled" in line:
+          namedRefusal = true
+      check namedRefusal
+
+    # An indirect reference really carries no hosted repository identity;
+    # preserve its suffix-based fallback as the positive control.
+    lock["nodes"]["gamma-src"]["original"] = %*{"type": "indirect", "id": "gamma-src"}
+    writeFile(lockPath(fx), $lock)
+    let indirect = invoke("override-args")
+    checkpoint(indirect.output)
+    check indirect.code == 0
+    check "--override-input gamma-src" in indirect.output
 
     # Missing and malformed metadata never establish coordinate absence.
     for mode in ["follows", "dangling", "missing", "bad-original", "bad-json", "bad-root", "bad-inputs", "bad-target"]:

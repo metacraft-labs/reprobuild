@@ -597,6 +597,24 @@ lint:
     # is a live walk of `tests/`, not a list, so a new file cannot be invisible
     # to it (Verification-Harness-Traps.md Sec. 35).
     python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
+    # The version-literal gate, beside the vacuous-case and bare-skip gates
+    # because it guards the same property from a third side: a case that
+    # PRETENDS to have run, a case that declines to run, and -- this one -- a
+    # case that runs and measures the wrong thing. It refuses an integer
+    # literal standing in for a format version: a number poked into the
+    # version word at byte 4/5, a hand-listed set of version numbers driving
+    # such a poke, or a literal pinned against one, unless the line carries
+    # `# version-literal-ok: <reason>`. Measured at ee229299f: SEVENTEEN
+    # unannotated instances across seven files, ten of them live defects
+    # and three of those a verbatim `[2, 3, 4, 5]` that had silently stopped
+    # covering version 6 when the action-record epoch moved 6 -> 7. Source
+    # scan, no compiler, seconds -- same cost class as its neighbours.
+    python3 ./scripts/check_version_literals.py 2>&1 | tee -a test-logs/lint.log
+    # ...and the proof it still has the power it claims, on the model of the
+    # shell-command-strings self-test above. Every exemption is a licence to
+    # ignore a real defect, so each shape is probed with an instance that
+    # must be caught and each allowance with one that must not be.
+    python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,
     # under a second -- and here because of what it catches, which nothing

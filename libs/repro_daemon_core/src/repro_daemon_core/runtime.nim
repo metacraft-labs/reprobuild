@@ -10,6 +10,7 @@ import ./writer_identity
 import ./protocol
 import ./stats_store
 import ./lease_registry
+import ./instance_registry
 when defined(windows):
   import ./windows_detached_spawn
 
@@ -1493,6 +1494,59 @@ proc handleLeaseRenew(socket: IpcConn; config: UserDaemonConfig;
     $request.ttlSeconds & " ok=" & $response.ok & " hadRecord=" &
     $response.hadRecord)
 
+proc handleServiceConverge(socket: IpcConn; config: UserDaemonConfig;
+                           instances: var ServiceInstanceRegistry;
+                           request: DaemonServiceConvergeRequest) =
+  ## Shared-Development-Services L7 (§4.5) converge handler: resolve
+  ## `(identity, scope, environment)` against the instance registry,
+  ## attach when an instance is present and materialise one otherwise.
+  ##
+  ## THE REGISTRY IS THE DAEMON'S, NOT THIS REQUEST'S. It is rebuilt once
+  ## at daemon start and mutated in place by each handler, which is what
+  ## §4.5 means by "in-memory, and authoritative only while the daemon is
+  ## running" -- and it is what makes the gate's daemon-restart clause
+  ## non-vacuous: a registry re-read from disk on every request would
+  ## satisfy that clause without ever exercising a rebuild.
+  ##
+  ## The accept loop is single-threaded and sequential (one
+  ## `handleClient` at a time), so a `var` registry needs no lock; the
+  ## comment is here because adding a worker thread to that loop would
+  ## break this assumption silently.
+  let response =
+    try:
+      applyServiceConverge(instances, request)
+    except CatchableError as err:
+      DaemonServiceConvergeResponse(ok: false,
+        outcome: outcomeWord(scoRefuseUnknownHolders),
+        diagnostic: "service converge raised: " & err.msg)
+  socket.writeFrame(udkServiceConvergeAck,
+    serviceConvergeResponseBody(response))
+  logLine(config.logPath, "service converge holder=" & request.holderId &
+    " address=" & response.address & " outcome=" & response.outcome &
+    " ok=" & $response.ok & " hadInstance=" & $response.hadInstance &
+    " holderSetRecoverable=" & $response.holderSetRecoverable &
+    " holders=" & $response.holders.len & " pid=" & $response.pid)
+
+proc handleServiceRelease(socket: IpcConn; config: UserDaemonConfig;
+                          instances: var ServiceInstanceRegistry;
+                          request: DaemonServiceReleaseRequest) =
+  ## L7 (§4.5) release handler: drop ONE holder, and stop the instance
+  ## only when that holder was the last.
+  let response =
+    try:
+      applyServiceRelease(instances, request)
+    except CatchableError as err:
+      DaemonServiceReleaseResponse(ok: false,
+        outcome: outcomeWord(srlRefuseUnknownHolders),
+        diagnostic: "service release raised: " & err.msg)
+  socket.writeFrame(udkServiceReleaseAck,
+    serviceReleaseResponseBody(response))
+  logLine(config.logPath, "service release holder=" & request.holderId &
+    " address=" & response.address & " outcome=" & response.outcome &
+    " ok=" & $response.ok & " remaining=" &
+    $response.remainingHolders.len & " stoppedPid=" &
+    $response.stoppedPid)
+
 proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
                  frameBody: openArray[byte];
                  devRestart = DevRestartState()): bool =
@@ -2199,6 +2253,7 @@ proc handleWatchDetach(socket: IpcConn; config: UserDaemonConfig;
 proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
                   generation: string; shuttingDown: var bool;
                   sessions: var seq[UserDaemonSession];
+                  instances: var ServiceInstanceRegistry;
                   devRestart: DevRestartState) =
   # Both request-side reads are bounded: the accept loop is single-threaded,
   # so a client that connects and then goes quiet must not be able to starve
@@ -2292,6 +2347,24 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
           "malformed udkLeaseRenew body: " & err.msg))
         return
     handleLeaseRenew(socket, config, request)
+  of udkServiceConverge:
+    let request =
+      try:
+        parseServiceConvergeRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkServiceConverge body: " & err.msg))
+        return
+    handleServiceConverge(socket, config, instances, request)
+  of udkServiceRelease:
+    let request =
+      try:
+        parseServiceReleaseRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkServiceRelease body: " & err.msg))
+        return
+    handleServiceRelease(socket, config, instances, request)
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
@@ -2533,7 +2606,8 @@ proc reportOnce(state: var LeaseReapTickState; config: UserDaemonConfig;
   logLine(config.logPath, message)
 
 proc runScopedLeaseReapTick(config: UserDaemonConfig;
-                            state: var LeaseReapTickState) =
+                            state: var LeaseReapTickState;
+                            instances: ptr ServiceInstanceRegistry) =
   ## Ephemeral-State-Leases L4 (§4.2): run ONE wall-clock reap sweep against
   ## this daemon's scoped lease store. Best-effort — a reap must never wedge
   ## the event loop or crash the daemon, so all errors are logged + swallowed.
@@ -2551,6 +2625,19 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ## unreadable store root), which is equally unfixable-by-retrying and so is
   ## deduplicated on the same terms.
   ##
+  ## Shared-Development-Services L7 (§4.5): "an instance is reaped when its
+  ## last lease lapses". A shared service INSTANCE record lives in THIS store
+  ## — one root, deliberately, see ``serviceInstanceStoreRoot`` — so this
+  ## tick is where that clause is honoured. The real instance-reap handler is
+  ## installed for the duration of the sweep and the DECLINING one
+  ## (``repro_resources/service_registry``'s) restored afterwards, so nothing
+  ## outside this tick can remove an instance record while its process is
+  ## still running. The handler is scoped to the sweep rather than installed
+  ## once at startup because it has to reach THIS daemon's registry object:
+  ## stopping the process without dropping the in-memory entry would leave
+  ## the next ``repro up`` attaching a consumer to a process this tick had
+  ## just killed.
+  ##
   ## THE VERDICT IS RECORDED BY THE SWEEP, NOT BY THIS LOGGING.
   ## ``runAndRecordLeaseReapTick`` runs the sweep and persists its verdict in
   ## one step and returns only what to log, which is what makes a reaper that
@@ -2559,37 +2646,48 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ## permanently stuck reaper says NOTHING at all, so the log stops being
   ## evidence of its own state.
   ##
-  ## Everything below is therefore best-effort reporting around an outcome
-  ## already decided and already on disk. Each logging call is individually
-  ## guarded, including the ``reportOnce`` calls — ``reportOnce`` writes to the
-  ## log too, so the arm that reports a failure can fail the same way, and this
-  ## proc is called from the startup sweep and from the event loop, neither of
-  ## which wraps it. An escape here would stop the daemon over a log write.
-  let outcome = runAndRecordLeaseReapTick(daemonLeaseScope(config),
-    overrideRoot = config.leaseStoreRoot)
+  ## Everything in the inner ``try`` is therefore best-effort reporting around
+  ## an outcome already decided and already on disk. Each logging call is
+  ## individually guarded, including the ``reportOnce`` calls — ``reportOnce``
+  ## writes to the log too, so the arm that reports a failure can fail the
+  ## same way, and this proc is called from the startup sweep and from the
+  ## event loop, neither of which wraps it. An escape there would stop the
+  ## daemon over a log write.
+  ##
+  ## THE OUTER ``try`` CARRIES ONLY A ``finally``, which is the whole reason
+  ## the sweep can sit inside it: it uninstalls the instance handler whatever
+  ## happens, and it catches NOTHING, so a whole-sweep raise propagates
+  ## exactly as it does without the handler scoping. The sweep is not made
+  ## best-effort by being lexically inside a ``try``.
+  installServiceInstanceReapHandler(instances)
   try:
-    if outcome.raised:
-      reportOnce(state, config, "sweep\x00" & outcome.failure,
-        "lease reap tick error (reported once per daemon run): " &
-          outcome.failure)
-    else:
-      if outcome.reapedCount > 0:
-        logLine(config.logPath, "lease reap tick reaped=" &
-          $outcome.reapedCount & " kept=" & $outcome.keptCount &
-          " unreapable=" & $outcome.failedCount & " scope=" &
-          (if config.systemScope: "system" else: "user"))
-      for finding in outcome.findings:
-        reportOnce(state, config, finding.signature,
-          "lease reap tick (reported once per daemon run) " & finding.line)
-    if outcome.healthWriteError.len > 0:
-      reportOnce(state, config, "health-write\x00" & outcome.healthWriteError,
-        "lease reap tick health not recorded (reported once per daemon run): " &
-          outcome.healthWriteError)
-  except CatchableError:
-    # Nowhere left to report a reporting failure, and nothing depends on it:
-    # the tick's verdict is already written, and it is the thing
-    # ``repro health`` actually reads.
-    discard
+    let outcome = runAndRecordLeaseReapTick(daemonLeaseScope(config),
+      overrideRoot = config.leaseStoreRoot)
+    try:
+      if outcome.raised:
+        reportOnce(state, config, "sweep\x00" & outcome.failure,
+          "lease reap tick error (reported once per daemon run): " &
+            outcome.failure)
+      else:
+        if outcome.reapedCount > 0:
+          logLine(config.logPath, "lease reap tick reaped=" &
+            $outcome.reapedCount & " kept=" & $outcome.keptCount &
+            " unreapable=" & $outcome.failedCount & " scope=" &
+            (if config.systemScope: "system" else: "user"))
+        for finding in outcome.findings:
+          reportOnce(state, config, finding.signature,
+            "lease reap tick (reported once per daemon run) " & finding.line)
+      if outcome.healthWriteError.len > 0:
+        reportOnce(state, config, "health-write\x00" & outcome.healthWriteError,
+          "lease reap tick health not recorded (reported once per daemon run): " &
+            outcome.healthWriteError)
+    except CatchableError:
+      # Nowhere left to report a reporting failure, and nothing depends on it:
+      # the tick's verdict is already written, and it is the thing
+      # ``repro health`` actually reads.
+      discard
+  finally:
+    uninstallServiceInstanceReapHandler()
 
 proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # A daemon started by hand may have been given relative flags; its dev
@@ -2665,6 +2763,21 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
       "reclaimed abandoned sessions count=" & $reclaimed)
   cleanupPreviousStagedGeneration(config)
   var sessions: seq[UserDaemonSession] = @[]
+  # Shared-Development-Services L7 (§4.5): "A daemon that restarts
+  # rebuilds it from the lease records". This IS that rebuild, and it runs
+  # at startup rather than lazily for the same reason
+  # `reclaimAbandonedSessions` above does: a daemon nobody asks still has
+  # to drop the records of instances whose processes are gone, or the
+  # next `repro up` attaches to one that is not there.
+  let instancesOpen = openDaemonServiceInstanceRegistry(
+    daemonLeaseScope(config), config.leaseStoreRoot)
+  var instances = instancesOpen.registry
+  logLine(config.logPath, describeRebuild(instancesOpen.report))
+  for event in instancesOpen.report.events:
+    logLine(config.logPath, "service instance " & $event.kind &
+      " address=" & event.address & " liveness=" & $event.liveness &
+      " holderRecovery=" & $event.holderRecovery &
+      " detail=" & event.detail)
   writeStatusFile(config, statusFor(config, startedAt, generation,
     sessions.len, devRestart))
   logLine(config.logPath, "started role=" & UserDaemonRole &
@@ -2687,7 +2800,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # (an expired record left by a crashed/stopped prior instance is reaped on
   # the first pass rather than after a full interval).
   if leaseReapMs > 0:
-    runScopedLeaseReapTick(config, leaseReapState)
+    runScopedLeaseReapTick(config, leaseReapState, addr instances)
 
   var shuttingDown = false
   while not shuttingDown:
@@ -2698,7 +2811,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
         selfRestarting = true
         return 0
     if leaseReapMs > 0 and nowUnixMs() - lastLeaseReapMs >= leaseReapMs:
-      runScopedLeaseReapTick(config, leaseReapState)
+      runScopedLeaseReapTick(config, leaseReapState, addr instances)
       lastLeaseReapMs = nowUnixMs()
     var pollMs = int(devRestartPollIntervalMs())
     if leaseReapMs > 0 and leaseReapMs < pollMs:
@@ -2708,7 +2821,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
     var client = listener.acceptIpc()
     try:
       handleClient(client, config, startedAt, generation, shuttingDown,
-        sessions, devRestart)
+        sessions, instances, devRestart)
     except CatchableError as err:
       logLine(config.logPath, "client error: " & err.msg)
       try:
