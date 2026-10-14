@@ -712,15 +712,19 @@
       perSystem =
         { pkgs, system, ... }:
         let
-          version =
+          # The `version = "..."` line of a reprobuild.nimble (this tree's, and
+          # in `nixpkgs-package-src-sync` the one of package.nix's `src`).
+          nimbleVersionOf =
+            nimbleFile:
             let
               versionMatches = builtins.filter (match: match != null) (
                 map (line: builtins.match ''version = "([^"]+)"'' line) (
-                  pkgs.lib.splitString "\n" (builtins.readFile ./reprobuild.nimble)
+                  pkgs.lib.splitString "\n" (builtins.readFile nimbleFile)
                 )
               );
             in
             builtins.elemAt (builtins.head versionMatches) 0;
+          version = nimbleVersionOf ./reprobuild.nimble;
           # libblake3 has split `out`/`dev` outputs (dev has include/blake3.h,
           # out has lib/libblake3.so). config.nims's prefix-lookup expects a
           # single tree containing both, so they are joined with symlinkJoin —
@@ -1777,6 +1781,122 @@
                   echo "package.nix and reprobuild.nimble agree on version $literal"
                   mkdir -p "$out"
                 '';
+            # The sibling of the version check for the source arguments.
+            # package.nix's defaults are one coherent snapshot of a PUBLISHED
+            # reprobuild commit: `src` names it, its `reprobuild.nimble`
+            # carries the `version` literal, and its `flake.lock` pins every
+            # `*Src` default of package.nix and nim-fork.nix. That snapshot is
+            # what a nixpkgs consumer builds with -- it has no flake plumbing
+            # to override them -- and before this check six defaults had
+            # drifted from any lock, one of them (io-mon) by 46 commits.
+            #
+            # It compares against the lock OF THE `src` COMMIT, not this
+            # tree's: this tree's lock moves with every sibling pin refresh
+            # (dozens a month), and a default cannot name the commit that
+            # contains it, so "mirror this tree's lock" could only be kept
+            # green by editing package.nix on every refresh. The snapshot
+            # moves only when someone moves `src` (with `version` and the
+            # defaults, together). The `src` tree is fetched at evaluation
+            # time by its rev and its own hash (a locked, pure fetch), so a
+            # wrong `src` hash fails here too. Each default's rev must equal
+            # the lock node's, and its hash the node's `narHash` where the
+            # lock records one. Decided at evaluation time, like `lib-tests`,
+            # so it builds nothing.
+            nixpkgs-package-src-sync =
+              let
+                defaultSrc = defaultPackage.src;
+                srcTree = builtins.fetchTree {
+                  type = "github";
+                  owner = "metacraft-labs";
+                  repo = "reprobuild";
+                  inherit (defaultSrc) rev;
+                  narHash = defaultSrc.outputHash;
+                };
+                lock = builtins.fromJSON (builtins.readFile "${srcTree}/flake.lock");
+                rootInputs = lock.nodes.${lock.root}.inputs;
+                srcNimbleVersion = nimbleVersionOf "${srcTree}/reprobuild.nimble";
+                lockedOf = input: lock.nodes.${rootInputs.${input}}.locked;
+                defaultNimFork = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/nim-fork.nix { };
+                defaultPackage = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/package.nix {
+                  # Same as the flake's own call: the pinned nixpkgs spells it
+                  # `xxHash`. Not a source argument.
+                  xxhash = pkgs.xxHash;
+                };
+                # argument -> the flake input passed for it (see the
+                # `callPackage` calls of package.nix and nim-fork.nix above).
+                packageArgs = {
+                  nimcryptoSrc = "nimcrypto-src";
+                  bearsslSrc = "bearssl-src";
+                  stackableHooksSrc = "nim-stackable-hooks-src";
+                  ctTraceFormatSrc = "ct-trace-format-src";
+                  ioMonSrc = "io-mon-src";
+                  shmGsetSrc = "nim-shm-gset-src";
+                  shmQueueSrc = "nim-shm-queue-src";
+                  codetracerSrc = "codetracer-src";
+                  ctTestRunnerSrc = "reprobuild-ct-test-runner-src";
+                  testAdaptersSrc = "reprobuild-test-adapters-src";
+                  runquotaSrc = "runquota-src";
+                };
+                nimForkArgs = {
+                  forkSrc = "nim-fork-src";
+                  csourcesSrc = "nim-csources-src";
+                  traceFormatSrc = "ct-trace-format-src";
+                  stewSrc = "nim-stew-src";
+                  resultsSrc = "nim-results-src";
+                  checksumsSrc = "nim-checksums-src";
+                  nimonySrc = "nim-nimony-src";
+                };
+                problems =
+                  file: sources: args:
+                  pkgs.lib.concatLists (
+                    pkgs.lib.mapAttrsToList (
+                      arg: input:
+                      let
+                        src = sources.${arg};
+                        locked = lockedOf input;
+                      in
+                      if !(sources ? ${arg}) then
+                        [ "${file}: `${arg}` is not in passthru.sources" ]
+                      else if !(rootInputs ? ${input}) then
+                        [
+                          "${file}: `${arg}`: the `src` commit's flake.lock has no input `${input}`"
+                        ]
+                      else if (src.rev or null) != locked.rev then
+                        [
+                          "${file}: `${arg}` defaults to rev ${toString (src.rev or null)}, the `src` commit's flake.lock pins `${input}` at ${locked.rev}"
+                        ]
+                      else if locked ? narHash && (src.outputHash or null) != locked.narHash then
+                        [
+                          "${file}: `${arg}` hash ${toString (src.outputHash or null)} != the `src` commit's flake.lock `${input}` narHash ${locked.narHash}"
+                        ]
+                      else
+                        [ ]
+                    ) args
+                  );
+                # Vacuity guard: the two tables cover every source argument
+                # each file exposes, so a new `*Src` argument cannot escape.
+                coverage =
+                  file: sources: args:
+                  pkgs.lib.optional (builtins.attrNames sources != builtins.attrNames args)
+                    "${file}: passthru.sources (${toString (builtins.attrNames sources)}) and this check's table (${toString (builtins.attrNames args)}) name different arguments";
+                versionProblem = pkgs.lib.optional (srcNimbleVersion != defaultPackage.version) "package.nix: `version` is ${defaultPackage.version}, but the `src` commit (${defaultSrc.rev}) has reprobuild.nimble version ${srcNimbleVersion}";
+                found =
+                  versionProblem
+                  ++ coverage "package.nix" defaultPackage.sources packageArgs
+                  ++ coverage "nim-fork.nix" defaultNimFork.sources nimForkArgs
+                  ++ problems "package.nix" defaultPackage.sources packageArgs
+                  ++ problems "nim-fork.nix" defaultNimFork.sources nimForkArgs;
+              in
+              if found == [ ] then
+                pkgs.writeText "reprobuild-nixpkgs-package-src-sync" (
+                  builtins.toJSON {
+                    checked =
+                      builtins.length (builtins.attrNames packageArgs)
+                      + builtins.length (builtins.attrNames nimForkArgs);
+                  }
+                )
+              else
+                throw "reprobuild nixpkgs-package-src-sync: package.nix defaults are not the snapshot of their `src` commit ${defaultSrc.rev}:\n${builtins.concatStringsSep "\n" found}";
             packaged-runtime-compile = packagedRuntimeCompileCheck;
 
             # ── The Nix helper library (GM5) ──────────────────────────────

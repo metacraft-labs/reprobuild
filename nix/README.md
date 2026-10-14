@@ -127,8 +127,13 @@ gh workflow run sync-channels.yml -R metacraft-labs/nixpkgs
 
 `update.sh` stops if the tag's `flake.lock` has a `*-src` input the fork
 does not pass to `package.nix` yet: a new source input needs a matching
-entry there. The stale `*Src` defaults in this directory's `package.nix`
-are therefore harmless to the fork, which overrides every one of them.
+entry there. The fork overrides every `*Src` default of this directory's
+`package.nix`. Those defaults are one coherent snapshot for a consumer that
+takes the file as it is: `src` names a published commit, `version` is that
+commit's `reprobuild.nimble` version, and every `*Src` default is that
+commit's `flake.lock` pin. `nix build .#checks.<system>.nixpkgs-package-src-sync`
+enforces it. It compares against the `src` commit's lock, not this tree's,
+so refreshing sibling pins here does not require editing `package.nix`.
 
 ## Upstream-submission status
 
