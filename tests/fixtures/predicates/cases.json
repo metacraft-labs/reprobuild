@@ -356,8 +356,8 @@
       ]
     },
     {
-      "predicate": "host == \"m1",
-      "host": "m1",
+      "predicate": "host == \"m\\\"1\"",
+      "host": "m\"1",
       "holdsOn": [
         "x86_64-linux",
         "aarch64-linux",
@@ -366,7 +366,7 @@
         "x86_64-windows",
         "aarch64-windows"
       ],
-      "description": "current behaviour: an unterminated string literal runs to the end of the predicate (issues/2026-10-14-predicate-lexer-accepts-an-unterminated-string.md)"
+      "description": "a backslash escapes the next character; the escaped quote does not close the literal"
     }
   ],
   "rejections": [
@@ -486,6 +486,26 @@
     {
       "predicate": "host == \"a\" == \"b\"",
       "error": "invalid"
+    },
+    {
+      "predicate": "host == \"m1",
+      "error": "invalid",
+      "description": "an unterminated string literal (issues/2026-10-14-predicate-lexer-accepts-an-unterminated-string.md)"
+    },
+    {
+      "predicate": "host == \"m1\\\"",
+      "error": "invalid",
+      "description": "the only quote after the opening one is escaped, so the literal is unterminated"
+    },
+    {
+      "predicate": "host in [\"a\", \"b",
+      "error": "invalid",
+      "description": "an unterminated string literal inside a list"
+    },
+    {
+      "predicate": "linux \"x",
+      "error": "invalid",
+      "description": "an unterminated string literal where the expression should end"
     }
   ]
 }

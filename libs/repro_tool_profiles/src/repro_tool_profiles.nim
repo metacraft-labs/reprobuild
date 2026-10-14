@@ -11,12 +11,15 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/host_tar
+# GC roots for the store paths a Nix tool realization is recorded under.
+import repro_core/nix_store_roots
 # The tarball provisioner runs as a built-in executor on the build engine's
 # scheduler thread, possibly while the engine's worker pool is live, so its
 # extraction commands are released without ``osproc.close``'s double close of
 # the merged stdout/stderr descriptor (see ``repro_core/process_close``).
 from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
+from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
@@ -1442,6 +1445,79 @@ proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   writeFile(extendedPath(path),
     toByteString(encodeNixMaterializationProfile(profile)))
 
+proc nixRealizationRootDir*(storeRoot: string; useDef: InterfaceToolUse;
+                            plan: NixAcquisitionPlan): string =
+  ## Where the GC roots of a Nix tool's CURRENT realization live:
+  ## ``<storeRoot>/nix-gc-roots/<package>.<executable>-<slot digest>``.
+  ##
+  ## The directory is keyed by the tool REQUEST — host, package name and
+  ## executable — and deliberately NOT by what realizes it (selector, lock
+  ## identity, nixpkgs pin, version), which is what the materialization
+  ## cache key adds. ``rootStorePaths`` keeps a directory's roots EXACTLY the
+  ## set it was last given, so when a nixpkgs bump (or a version bump)
+  ## re-realizes the tool, the new paths are rooted and the superseded
+  ## realization's roots are dropped from the same directory, new first. A
+  ## directory per materialization key would instead keep every realization
+  ## the project ever used alive for good: nothing retires a key, and the
+  ## store would grow with every bump on exactly the hosts that collect
+  ## because they are short of disk.
+  ##
+  ## The cost of that choice: two uses of the same package and executable
+  ## realized from different pins in one project share a directory, and
+  ## each resolution re-roots its own realization at the other's expense.
+  ## Neither is served stale for it: a recorded path that is collected is
+  ## re-realized on its next use (``nixMaterializationProfileMatches``).
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.nix.gc-root-slot.v1")
+  payload.writeString(hostOS)
+  payload.writeString(hostCPU)
+  let selector = useDef.packageSelector
+  let at = selector.rfind('@')
+  let packageName = if at > 0: selector[0 ..< at] else: selector
+  payload.writeString(packageName)
+  payload.writeString(useDef.executableName)
+  let slot = blake3.toHex(blake3.digest(toByteString(payload)))
+  storeRoot / "nix-gc-roots" /
+    (safeStoreSegment(packageName & "." & useDef.executableName,
+      "nix-tool") & "-" & slot[0 ..< 16])
+
+proc rootNixRealization(storeRoot: string; useDef: InterfaceToolUse;
+                        plan: NixAcquisitionPlan;
+                        storePaths: openArray[string]) =
+  ## Give the store paths of one realization a GC root of their own, under
+  ## ``nixRealizationRootDir`` (``repro_core/nix_store_roots``).
+  ##
+  ## With no ``storeRoot`` there is nothing to protect: no record, no
+  ## ``nix-store-path.txt`` and no materialization cache entry is written,
+  ## so the realization lives only as long as the returned profile, inside
+  ## this process, and any build output it produces is rooted by the build
+  ## engine's own ledger.
+  ##
+  ## A failure is a WARNING, not a provisioning failure. The realization is
+  ## valid right now, and its later loss is caught rather than served:
+  ## ``nixMaterializationProfileMatches`` and the tool-identity readers check
+  ## that a recorded path exists before reusing it, and the next resolution
+  ## retries the root.
+  if storeRoot.len == 0:
+    return
+  let storeDir = nixStoreDir()
+  var paths: seq[string] = @[]
+  for path in storePaths:
+    if path.startsWith(storeDir & "/"):
+      # Only a top-level store object can be a GC root; a path inside one
+      # (`…/lib`) is rooted through the object that contains it.
+      let slash = path.find('/', storeDir.len + 1)
+      paths.add(if slash < 0: path else: path[0 ..< slash])
+  if paths.len == 0:
+    return
+  try:
+    discard rootStorePaths(nixRealizationRootDir(storeRoot, useDef, plan),
+      paths, label = "nix://" & plan.nixSelector, storeDir = storeDir)
+  except CatchableError as err:
+    stderr.writeLine("repro tools: warning: the Nix store paths of " &
+      plan.nixSelector & " are not protected from garbage collection: " &
+      err.msg)
+
 proc addUniquePath*(dst: var seq[string]; value: string)
   ## Forward declaration — defined alongside the from-source populator
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
@@ -1500,6 +1576,11 @@ else:
     let selector = plan.nixSelector
     let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
     if cached.hit:
+      # The record is reusable only because its paths still exist (see
+      # ``nixMaterializationProfileMatches``); re-assert their root so they
+      # keep existing. Warm, this is one directory listing and no process.
+      rootNixRealization(storeRoot, useDef, plan,
+        cached.profile.realizedStorePaths)
       return cached.profile
 
     # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
@@ -1664,6 +1745,12 @@ else:
         nixVersion, "nix", plan.lockIdentity,
         plan.declaredExecutablePath, "nix://" & plan.nixSelector,
         selectedStorePath, realized)
+      # Root BEFORE recording: ``nix build --no-link`` (the helper's and the
+      # direct fallback's) left no root, and the record written next outlives
+      # the process by design. Without its own root the recorded path stays
+      # alive only while some dev-shell profile generation happens to name
+      # the same path (reprobuild-pm issue 2026-10-02, addendum 2026-10-03).
+      rootNixRealization(storeRoot, useDef, plan, realized)
       createDir(extendedPath(unified.absolutePath))
       writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
         selectedStorePath & "\n")
@@ -2273,7 +2360,7 @@ proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
 
 const
   # 7-Zip for the extractor dependency edge. MUST match the Windows x86_64
-  # entry of `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
+  # `tarball` of `package "7zip"` in `repro_dsl_stdlib/packages/pkg_7zip.nim`;
   # `t_sevenzip_bootstrap_matches_stdlib_catalog` checks that it does. The MSI,
   # not the `.exe` installer or a `.7z`, because `msiexec /a` unpacks it with
   # nothing but the OS: the extractor must not need an extractor.
@@ -4496,7 +4583,9 @@ type
       ## The pinned nixpkgs gcc (Linux hosts that have Nix).
     bcrSystem
       ## The host's system C compiler at its fixed location
-      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX).
+      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX),
+      ## else the C compiler this ``repro`` was built with
+      ## (``BuiltCCompilerPath``) when it exists.
     bcrXcode
       ## The Xcode Command Line Tools clang, at the path ``xcrun -f clang``
       ## names, with the SDK ``xcrun --show-sdk-path`` names (macOS).
@@ -4582,7 +4671,8 @@ proc describeBootstrapNimRoute*(route: BootstrapNimRoute): string =
       (when defined(linux): ", because this host has no Nix" else: "")
 
 proc describeBootstrapCRoute*(route: BootstrapCRoute;
-                              systemCandidates: openArray[string]): string =
+                              systemCandidates: openArray[string];
+                              builtCompiler = BuiltCCompilerPath): string =
   case route
   of bcrArchive:
     let useDef = bootstrapGccToolUse()
@@ -4598,6 +4688,10 @@ proc describeBootstrapCRoute*(route: BootstrapCRoute;
   of bcrSystem:
     "the host's system C compiler (the first of " &
       systemCandidates.join(", ") & ")" &
+      (if builtCompiler.len > 0:
+         ", else the C compiler this repro was built with (" &
+           builtCompiler & ")"
+       else: "") &
       (when defined(linux): ", because this host has no Nix" else: "")
   of bcrXcode:
     "the Xcode Command Line Tools clang (`xcrun -f clang`), the " &
@@ -4655,14 +4749,31 @@ else:
 
 proc provisionBootstrapCCompiler*(storeRoot: string;
     route = bootstrapCRoute();
-    systemCandidates: seq[string] = @bootstrapSystemCCompilers):
+    systemCandidates: seq[string] = @bootstrapSystemCCompilers;
+    builtCompiler = BuiltCCompilerPath):
     BootstrapCCompiler =
   ## Provision the recipe-compile C compiler by ``route`` and probe it, or
   ## raise saying which route failed and why. Never looks at ``PATH``.
   ##
+  ## ``bcrSystem`` takes the first existing ``systemCandidates`` entry, else
+  ## ``builtCompiler`` -- by default ``BuiltCCompilerPath``, the C compiler
+  ## this ``repro`` was built with -- when that file exists. That is the arm
+  ## an installed Nix package reaches where there is neither a ``nix``
+  ## executable nor a ``/usr/bin/cc``: the Nix build sandbox, which is where
+  ## a consumer's import-from-derivation runs ``repro home export`` and where
+  ## the package's own ``packaged-runtime-compile`` check builds a recipe
+  ## cold. The package embeds that path, so its closure carries the compiler
+  ## (Gradual-Nix-To-Reprobuild-Migration GM1l chose it as the profile
+  ## compile's fallback for the same reason); the package does not have to
+  ## pin one through its wrapper, which would oblige every native package to
+  ## ship a C compiler too. It is a fixed path chosen at build time, not a
+  ## ``PATH`` search, and it comes after the system compiler so a host with
+  ## one keeps using it. A build whose compiler is gone (a portable bundle
+  ## moved off the machine that built it) fails as before.
+  ##
   ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
   ## the steady-state cost is a file-existence check.
-  let origin = describeBootstrapCRoute(route, systemCandidates)
+  let origin = describeBootstrapCRoute(route, systemCandidates, builtCompiler)
   var cc = ""
   var sdk = ""
   try:
@@ -4678,9 +4789,17 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
         if fileExists(extendedPath(candidate)):
           cc = candidate
           break
+      if cc.len == 0 and builtCompiler.len > 0 and
+          fileExists(extendedPath(builtCompiler)):
+        cc = builtCompiler
       if cc.len == 0:
         raise newException(OSError, "none of " & systemCandidates.join(", ") &
-          " exists; install the system C compiler (e.g. the distribution's " &
+          " exists" &
+          (if builtCompiler.len > 0:
+             ", nor does the C compiler this repro was built with (" &
+               builtCompiler & ")"
+           else: "") &
+          "; install the system C compiler (e.g. the distribution's " &
           "gcc or build-essential package)")
     of bcrXcode:
       (cc, sdk) = resolveXcodeClang()

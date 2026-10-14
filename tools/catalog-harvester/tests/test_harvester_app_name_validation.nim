@@ -11,9 +11,15 @@
 ## source-mode dispatch (so the fail-fast path never touches the
 ## network or the on-disk bucket cache).
 ##
+## A name that starts with a digit is NOT invalid any more: a package name
+## is a selector string (Package-Model.md §"Package names"), so ``--app
+## 7zip`` writes ``pkg_7zip.nim`` declaring ``package "7zip":`` (reprobuild-pm
+## issue 2026-10-13-package-macro-cannot-declare-a-name-starting-with-a-digit).
+##
 ## Cases covered:
 ##
-##   * digit-prefix rejected (``7zip``)
+##   * digit-prefix accepted (``7zip``), and emitted as a quoted package
+##     name in a ``pkg_``-prefixed module
 ##   * hyphen rejected (``dotnet-sdk``)
 ##   * dot rejected (defensive)
 ##   * empty alias target — caught by the existing
@@ -21,9 +27,7 @@
 ##   * a valid bare identifier (``ripgrep``) is accepted as far as
 ##     the validator is concerned (the test stops checking before
 ##     the bucket clone)
-##   * a digit-prefix name CAN be harvested when paired with a
-##     correctly-shaped ``--app-alias`` (``7zip=sevenzip``); the
-##     emitted file uses the alias as the package name
+##   * an ``--app-alias`` target drives the emitted package and file name
 ##
 ## All cases invoke the harvester as a subprocess (the same way an
 ## operator invokes it). We deliberately do NOT call ``parseCli``
@@ -86,9 +90,10 @@ suite "M8 follow-up — output app name validation":
   setup:
     ensureHarvesterBuilt()
 
-  test "test_harvester_rejects_invalid_nim_identifier_app_name":
-    # --app 7zip (no alias) → exit 2 + clear error message + no
-    # output file written.
+  test "test_harvester_accepts_digit_leading_app_name":
+    # --app 7zip (no alias) passes validation. The bucket-simple fixture
+    # has no 7zip manifest, so the harvest itself fails (exit 3), but
+    # not at the validator (exit 2).
     let outDir = tempOutDir("digit-prefix-no-alias")
     let (rc, output) = runHarvester(@[
       "harvest",
@@ -97,17 +102,30 @@ suite "M8 follow-up — output app name validation":
       "--app", "7zip",
       "--output-dir", outDir,
     ])
-    check rc == 2
-    check "invalid output app name '7zip'" in output
-    check "--app-alias" in output
-    check "cannot start with a digit" in output
-    # The validator runs BEFORE source-mode dispatch — the output
-    # directory exists (it was created upstream of the validator
-    # call? no — validator runs first) but contains no .nim files.
-    var emitted: seq[string] = @[]
-    for kind, path in walkDir(outDir):
-      if path.endsWith(".nim"): emitted.add(path)
-    check emitted.len == 0
+    check rc != 2
+    check (not output.contains("invalid output app name"))
+
+  test "test_harvester_emits_digit_leading_name_as_quoted_package":
+    # The fixture's 'hello' manifest aliased to a digit-leading name: the
+    # module is named by selectorModuleName (pkg_7hello.nim) and declares
+    # the name as a string, so it compiles; packageId keeps the name.
+    let outDir = tempOutDir("digit-prefix-emit")
+    let (rc, output) = runHarvester(@[
+      "harvest",
+      "--source", "scoop",
+      "--bucket", FixturesDir / "bucket-simple",
+      "--app", "hello",
+      "--app-alias", "hello=7hello",
+      "--output-dir", outDir,
+    ])
+    checkpoint output
+    check rc == 0
+    check (not fileExists(outDir / "7hello.nim"))
+    let emitted = outDir / "pkg_7hello.nim"
+    check fileExists(emitted)
+    let body = readFile(emitted)
+    check "\npackage \"7hello\":\n" in body
+    check "packageId = \"7hello@" in body
 
   test "test_harvester_rejects_hyphen_in_app_name_without_alias":
     # --app dotnet-sdk (hyphen) without alias → rejected. M67
@@ -161,15 +179,12 @@ suite "M8 follow-up — output app name validation":
     let body = readFile(emitted)
     check "\npackage hello:\n" in body
     check "tarball url = " in body
-    # Spot-check: emitted file is NOT the bug shape (no digit-prefix
-    # identifier).
-    check (not body.contains("package 7"))
 
   test "test_harvester_accepts_app_alias_override":
-    # --app 7zip --app-alias 7zip=sevenzip → resolved name is
-    # 'sevenzip' which is a valid identifier; validator passes.
+    # --app dotnet-sdk --app-alias dotnet-sdk=dotnet_sdk → resolved
+    # name is 'dotnet_sdk'; validator passes.
     # The bucket-simple fixture only has 'hello.json' so the
-    # harvest of the (renamed) '7zip' app will fail with
+    # harvest of the (renamed) app will fail with
     # "no manifest file" — but that exit is 3 (harvest error),
     # NOT 2 (CLI validation). We assert rc != 2 AND the
     # validation-stage error message is absent from stderr.
@@ -178,12 +193,12 @@ suite "M8 follow-up — output app name validation":
       "harvest",
       "--source", "scoop",
       "--bucket", FixturesDir / "bucket-simple",
-      "--app", "7zip",
-      "--app-alias", "7zip=sevenzip",
+      "--app", "dotnet-sdk",
+      "--app-alias", "dotnet-sdk=dotnet_sdk",
       "--output-dir", outDir,
     ])
     check rc != 2
-    check (not output.contains("invalid output app name '7zip'"))
+    check (not output.contains("invalid output app name"))
     # And conversely the harvester DID get past validation —
     # whatever message it produces is from the source-mode
     # dispatch, not from our validator.

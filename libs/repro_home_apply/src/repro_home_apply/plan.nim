@@ -205,10 +205,10 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
 # closed because its extractor's prefix does not yet exist on disk.
 #
 # Concrete example surfaced by the predecessor campaign's M11 LIVE
-# smoke: a profile containing both ``package(7zip)`` (``sevenzip`` since
-# GM4b) and ``package(lessmsi)`` alphabetically sorts the 7-Zip package
+# smoke: a profile containing both ``package(7zip)`` and
+# ``package(lessmsi)`` alphabetically sorts the 7-Zip package
 # before ``lessmsi``, but
-# ``packages/sevenzip.nim`` uses ``imInstallerMsi`` which needs
+# ``packages/pkg_7zip.nim`` uses ``imInstallerMsi`` which needs
 # ``lessmsi.exe`` pre-realized OR on PATH. The smoke side-stepped the
 # bug by using a single-package profile; M0 closes it for real.
 #

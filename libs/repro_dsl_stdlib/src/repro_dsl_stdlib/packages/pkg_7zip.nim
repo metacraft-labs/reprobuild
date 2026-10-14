@@ -6,8 +6,12 @@
 ##
 ## **Re-harvest command (for byte-equal verify):**
 ##   repro_catalog_harvester harvest --bucket ScoopInstaller/Main \
-##     --app 7zip --app-alias 7zip=sevenzip \
+##     --app 7zip \
 ##     --output-dir libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/
+##
+## (The harvester writes ``pkg_7zip.nim``: a module name cannot begin with a
+## digit, so the module is named by ``selectorModuleName("7zip")``, the
+## selector-to-module mapping ``usesImportCode`` imports through.)
 ##
 ## **Post-harvest hand-edit** (per the M4 lessmsi convention also used
 ## by ``packages/meson.nim`` and ``packages/python3.nim``): the
@@ -46,13 +50,11 @@ import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
-# GM4b: the registry key and the extractor provider name are ``7zip``, but
-# the package macro cannot declare that name — `7zip` does not lex, and
-# `` `7 zip` `` lexes but the macro then emits ``7zip`` as a type/value
-# identifier and the generated code fails to parse. The package is
-# therefore declared as ``sevenzip`` (its module name); mapping ``7zip`` to
-# it is the registry's job.
-package sevenzip:
+# The package's name is ``7zip``, the name operators use. ``7zip`` is not a
+# Nim identifier, so it is declared as a string; the macro derives the
+# package's Nim identifiers from it (value ``pkg_7zip``, type
+# ``Pkg7zipPackage``).
+package "7zip":
   platforms [windows], msg = "This entry is the Windows 7-Zip distribution used by the realize closure. p7zip exists on POSIX but is a DIFFERENT package with a different provisioning shape; catalogue it separately rather than widening this entry."
   provisioning:
     tarball url = "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-x64.msi",

@@ -94,11 +94,12 @@ let
   };
 
   # Home-scope kinds Reprobuild plans that no Home Manager category covers
-  # (repro_home_intent `KnownResourceKinds`, adapter_home
-  # `isHomeScopeResource`). They are reported `uncategorized`: Reprobuild
+  # (repro_home_intent `KnownResourceKinds`, repro_profile_compile
+  # `resourceScope` = `rsHome`). They are reported `uncategorized`: Reprobuild
   # applies them, Nix does not. Any kind in neither this list nor a category
   # -- a kind added to Reprobuild after this library, or a system-scope kind
-  # in a home profile -- is NOT recognised, and is reported `unmapped` (an
+  # in a document `repro home export` did not produce (the planner refuses a
+  # home profile that declares one) -- is NOT recognised, and is reported `unmapped` (an
   # error by default) whichever categories are enabled: the module cannot
   # tell whether it belongs to an enabled category, and treating it as
   # "not ours" would let a declaration silently never take effect

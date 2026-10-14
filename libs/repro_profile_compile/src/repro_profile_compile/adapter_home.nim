@@ -35,6 +35,7 @@ import std/[tables]
 
 import repro_profile
 import repro_home_intent
+import ./resource_scope
 
 proc predicateExprToCondBlock(expr: string): IntentNode
 
@@ -225,41 +226,37 @@ proc buildResourceEntry(r: ResourceIntent; ordinal: int): IntentNode =
       resourceAttrLine: 0,
       startLine: 0, endLine: 0, indent: 0))
 
-proc isHomeScopeResource(kind: string): bool =
-  ## Home-scope resource kinds. The system-scope kinds (capability,
-  ## optionalFeature, service, vsInstaller, systemDefault, systemdSystemUnit,
-  ## launchdSystemDaemon, fsSystemFile, envSystemVariable, passwdUser,
-  ## windows.registryValueHKLM) are filtered out of the home adapter's
-  ## resources block and surface in the system adapter instead.
-  ##
-  ## M83 step 4b: `systemd.userUnit` + `launchd.userAgent` are POSIX
-  ## per-user services — home-scope, NOT system-scope. They live
-  ## under `~/.config/systemd/user/` / `~/Library/LaunchAgents/`
-  ## respectively and are reconciled by `systemctl --user` /
-  ## `launchctl bootstrap gui/<uid>` unelevated. The system-scope
-  ## peers `systemd.systemUnit` + `launchd.systemDaemon` (under
-  ## `/etc/systemd/system/` / `/Library/LaunchDaemons/`) are
-  ## elevated and live in `adapter_system.nim`.
-  case kind
-  of "env.userPath", "env.userVariable", "fs.managedBlock",
-     "shell.integration", "windows.registryValueHKCU",
-     "windows.startup", "fs.userFile", "vscode.extension",
-     "systemd.userUnit", "launchd.userAgent",
-     "linux.dconfKey", "linux.kdeConfigKey",
-     "pkg.homebrewFormula", "pkg.homebrewCask":
-    true
-  else:
-    false
+proc resourceLabel(r: ResourceIntent): string =
+  ## `fs.systemFile `/etc/x.conf`` -- the kind, and the address when it has
+  ## one, the way the planner's other diagnostics name a resource.
+  r.kind & (if r.address.len > 0: " `" & r.address & "`" else: "")
 
 proc buildResourcesBlock(resources: seq[ResourceIntent]): IntentNode =
+  ## The home planner's resources. A resource the home planner does not
+  ## apply is refused, naming it, rather than left out: leaving it out let a
+  ## profile declare an `fsSystemFile(...)` that never took effect while
+  ## `repro home apply` / `repro home export` reported success
+  ## (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped).
+  ## A guard does not change this: the declaration is misplaced on every
+  ## host, including the ones where the guard is false.
   result = IntentNode(kind: nkResourcesBlock,
     resourcesHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
   for i, r in resources:
-    if not isHomeScopeResource(r.kind):
-      continue
-    result.resourcesEntries.add(guardedBy(r.guard,
-      buildResourceEntry(r, i + 1)))
+    case resourceScope(r.kind)
+    of rsHome:
+      result.resourcesEntries.add(guardedBy(r.guard,
+        buildResourceEntry(r, i + 1)))
+    of rsSystem:
+      raise newException(ValueError,
+        "home profile resource " & resourceLabel(r) & " is system-scope: " &
+        "the home planner (`repro home apply`) does not apply it. Declare " &
+        "it in a system profile (`system.nim`, applied by `repro infra " &
+        "apply`), or use the home-scope counterpart if there is one")
+    of rsUnknown:
+      raise newException(ValueError,
+        "home profile resource " & resourceLabel(r) & " has a kind that " &
+        "neither the home nor the system planner applies")
 
 proc profileIntentToHomeProfile*(p: ProfileIntent;
                                  profilePath: string): Profile =
@@ -278,7 +275,8 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
   ##     ActivityElement of aekWhenGuard  -> nkCondBlock with predicate AST
   ##   ProfileIntent.configOverrides -> nkConfigBlock with per-pkg sub-blocks
   ##   ProfileIntent.hosts       -> nkHostsBlock with "<host>": [activities]
-  ##   ProfileIntent.resources   -> nkResourcesBlock with home-scope kinds
+  ##   ProfileIntent.resources   -> nkResourcesBlock (home-scope kinds;
+  ##     any other kind is refused, see `buildResourcesBlock`)
   ##     ResourceIntent.fields   -> nkResourceAttr children
   ##     ResourceIntent.dependsOn-> the depends_on attribute
   ##     ResourceIntent.guard    -> an nkCondBlock around the entry

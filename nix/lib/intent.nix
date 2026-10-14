@@ -39,12 +39,13 @@
 #   * resources and config overrides: those whose `guard` holds, in intent
 #     order.
 #
-# One deliberate difference: Reprobuild's home planner drops resources whose
-# kind is not home-scope without a word (filed as
-# issues/2026-10-14-home-planner-silently-drops-a-system-scope-resource.md),
-# and `--target`'s `evaluation.resources` omits them. This evaluation keeps
-# every resource whose guard holds; the Home Manager module reports the kinds
-# it cannot map instead of dropping them.
+# Resource scope: the home planner refuses a home profile that declares a
+# resource it does not apply (a system-scope kind such as `fs.systemFile`),
+# so `repro home export` never emits one. This evaluation therefore needs no
+# scope list of its own (a second one is what the spec's §Principles P6 rules
+# out): it keeps every resource whose guard holds, and a document that does
+# carry a kind the Home Manager module does not know -- hand-edited, or
+# newer than this library -- reaches the module as `unmapped`, never dropped.
 { predicate, platforms }:
 let
   inherit (builtins)
@@ -120,7 +121,7 @@ let
 
   # Evaluate a validated document for `system` and `host`. Returns the
   # `evaluation` object `repro home export --target` prints (see the module
-  # header for the one difference).
+  # header: packages are sorted by name).
   evaluate =
     doc: system: host:
     let

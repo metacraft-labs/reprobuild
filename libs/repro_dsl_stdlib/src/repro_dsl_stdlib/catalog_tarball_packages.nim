@@ -54,8 +54,8 @@ const CatalogTarballModules* = [
     "mingw_gcc", "mktemp", "msys2_libevent", "msys2_ncurses", "neovim",
     "nim", "nimble", "ninja", "node", "npm", "npx", "nsis", "ocaml",
     "openssl", "perl", "php", "piper", "piper_voice_lessac_medium",
-    "piper_voice_lessac_medium_config", "postgresql", "python3",
-    "python_dev", "ruby", "rustc", "rustfmt", "rustup", "sevenzip", "sh",
+    "piper_voice_lessac_medium_config", "pkg_7zip", "postgresql",
+    "python3", "python_dev", "ruby", "rustc", "rustfmt", "rustup", "sh",
     "solc", "stylus", "swift", "swig", "taplo", "tar", "tmux", "uv",
     "wasm_opt", "whisper_ggml_base", "windows_terminal", "winfsp", "wix",
     "wix3", "wix3_tools", "zig", "zstd"
