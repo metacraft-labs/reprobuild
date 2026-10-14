@@ -10479,12 +10479,21 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # consume it as this execution's evidence: another monitor can truncate
       # or replace it after our child exits. Capture privately on the same
       # filesystem, then fold before atomically publishing the diagnostic.
+      #
+      # The capture is CREATED through ``extendedPath``: CMake's TryCompile
+      # scratch puts this directory ~200 characters below a project's build
+      # directory, so the capture's name routinely carries its path past
+      # Windows' ``MAX_PATH``. The path RECORDED is the ordinary spelling --
+      # it is handed to io-mon on its argv and compared and logged later, and
+      # ``extendedPath`` is for file-system calls only. Every later touch of
+      # the capture (io-mon's write, the fold, the flush's rename, the cleanup)
+      # applies the prefix itself.
       try:
-        createDir(depfile.parentDir)
+        createDir(extendedPath(depfile.parentDir))
         let capture = createTempFile("." & depfile.extractFilename & ".capture-",
-          ".tmp", depfile.parentDir)
+          ".tmp", extendedPath(depfile.parentDir))
         capture.cfile.close()
-        result.capturePath = capture.path
+        result.capturePath = depfile.parentDir / capture.path.extractFilename
       except CatchableError as err:
         result.diagnostic = "cannot create monitor capture: " & err.msg
         return
@@ -19752,7 +19761,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # Only this build's exclusive capture files belong to this cleanup.
     for capture in wrappedMonitorCaptures.values:
       try:
-        removeFile(capture)
+        removeFile(extendedPath(capture))
       except CatchableError as err:
         runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
   finishStat("repro scheduler total", totalStart)

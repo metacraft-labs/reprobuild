@@ -114,7 +114,12 @@ if [[ -n "${REPRO_HCR_LANE_MANIFEST:-}" ]]; then
 fi
 
 echo "== HCR lane: $PLATFORM =="
-echo "-- host: $host_os $host_arch"
+# The kernel release belongs in the banner, not just the OS and arch.
+# These gates park and signal threads, and a kernel change has already
+# moved five of them from pass to SIGSEGV with the tree unchanged.
+# Without the release here, attributing that from a lane log alone is
+# impossible and the comparison has to be re-derived by hand per host.
+echo "-- host: $host_os $host_arch $(uname -r 2>/dev/null || echo 'kernel unknown')"
 echo
 
 # STEP 1 — the work list must agree with the tree before any gate runs.

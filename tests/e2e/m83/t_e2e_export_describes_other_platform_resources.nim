@@ -37,28 +37,18 @@
 ## io-mon shim, real filesystem; the `nim` spy is a pass-through counter
 ## (harness header). Nothing is applied.
 
-import repro_test_support/reasoned_skip
+## Platforms: every host. The per-target expectations are written out for
+## every target; the compiling host only decides which of them the plan
+## cross-check uses (`compilingPlatformSystem()`).
 
-const PlatformSkipReason =
-  "[platform N/A] t_e2e_export_describes_other_platform_resources: the nim " &
-  "spy and the stderr capture are POSIX shell, and the profile-compile edge " &
-  "is verified on Linux, where io-mon is the established backend."
+import std/[algorithm, json, strutils, unittest]
 
-when not defined(linux):
-  import std/unittest
+import repro_profile_compile
+import repro_cli_support/home_export
 
-  suite "repro home export: other platforms":
-    test "e2e_export_describes_other_platform_resources":
-      skip(PlatformSkipReason)
-else:
-  import std/[algorithm, json, strutils, unittest]
+import ./profile_compile_edge_harness
 
-  import repro_profile_compile
-  import repro_cli_support/home_export
-
-  import ./profile_compile_edge_harness
-
-  const NeutralProfile = """
+const NeutralProfile = """
 import repro_profile
 import ./modules/platform_tools
 
@@ -106,7 +96,7 @@ profile "gm3Neutral":
     "gm3-host": [dev]
 """
 
-  const PlatformToolsModule = """
+const PlatformToolsModule = """
 import repro_profile
 
 proc platformDevTools*(): seq[ActivityElement] =
@@ -125,145 +115,151 @@ template platformResources*(targetResources: var seq[ResourceIntent]) =
       content = "helper\n", address = "windowsHelper")
 """
 
-  type Expected = object
-    resources: seq[string]   ## "<address>=<hostFile>", sorted
-    config: seq[string]      ## "<pkg>.<key>=<value>", sorted
-    packages: seq[string]    ## sorted
+type Expected = object
+  resources: seq[string]   ## "<address>=<hostFile>", sorted
+  config: seq[string]      ## "<pkg>.<key>=<value>", sorted
+  packages: seq[string]    ## sorted
 
-  proc sortedCopy(xs: seq[string]): seq[string] =
-    result = xs
-    result.sort()
+proc sortedCopy(xs: seq[string]): seq[string] =
+  result = xs
+  result.sort()
 
-  proc expectedFor(system: string): Expected =
-    ## What the profile declares on `system`, written out by hand.
-    let common = "common=~/.gm3-common"
-    let base = @["git.userName=gm3"]
-    case system
-    of "x86_64-linux", "aarch64-linux":
-      result.resources = @[common, "platformRc=~/.config/gm3/linux.conf"]
-      result.config = base & @["git.credentialHelper=libsecret",
-        "tmux.prefix=C-a"]
-      result.packages = @["git", "gm3-strace", "ripgrep"]
-    of "aarch64-darwin":
-      result.resources = @[common,
-        "platformRc=~/Library/Preferences/gm3-macos.conf",
-        "appleSilicon=~/.gm3-apple-silicon"]
-      result.config = base & @["git.credentialHelper=osxkeychain"]
-      result.packages = @["git", "gm3-mac-app", "ripgrep"]
-    of "x86_64-darwin":
-      result.resources = @[common,
-        "platformRc=~/Library/Preferences/gm3-macos.conf"]
-      result.config = base & @["git.credentialHelper=osxkeychain"]
-      result.packages = @["git", "gm3-mac-app", "ripgrep"]
-    of "x86_64-windows", "aarch64-windows":
-      result.resources = @[common,
-        "platformRc=~/AppData/Roaming/gm3/windows.conf",
-        "windowsHelper=~/gm3-windows-helper.txt"]
-      result.config = base & @["git.autocrlf=true",
-        "git.credentialHelper=manager"]
-      result.packages = @["git", "gm3-windows-terminal", "ripgrep"]
-    else:
-      doAssert false, "no expectation for " & system
-    result.resources = sortedCopy(result.resources)
-    result.config = sortedCopy(result.config)
-    result.packages = sortedCopy(result.packages)
+proc expectedFor(system: string): Expected =
+  ## What the profile declares on `system`, written out by hand.
+  let common = "common=~/.gm3-common"
+  let base = @["git.userName=gm3"]
+  case system
+  of "x86_64-linux", "aarch64-linux":
+    result.resources = @[common, "platformRc=~/.config/gm3/linux.conf"]
+    result.config = base & @["git.credentialHelper=libsecret",
+      "tmux.prefix=C-a"]
+    result.packages = @["git", "gm3-strace", "ripgrep"]
+  of "aarch64-darwin":
+    result.resources = @[common,
+      "platformRc=~/Library/Preferences/gm3-macos.conf",
+      "appleSilicon=~/.gm3-apple-silicon"]
+    result.config = base & @["git.credentialHelper=osxkeychain"]
+    result.packages = @["git", "gm3-mac-app", "ripgrep"]
+  of "x86_64-darwin":
+    result.resources = @[common,
+      "platformRc=~/Library/Preferences/gm3-macos.conf"]
+    result.config = base & @["git.credentialHelper=osxkeychain"]
+    result.packages = @["git", "gm3-mac-app", "ripgrep"]
+  of "x86_64-windows", "aarch64-windows":
+    result.resources = @[common,
+      "platformRc=~/AppData/Roaming/gm3/windows.conf",
+      "windowsHelper=~/gm3-windows-helper.txt"]
+    result.config = base & @["git.autocrlf=true",
+      "git.credentialHelper=manager"]
+    result.packages = @["git", "gm3-windows-terminal", "ripgrep"]
+  else:
+    doAssert false, "no expectation for " & system
+  result.resources = sortedCopy(result.resources)
+  result.config = sortedCopy(result.config)
+  result.packages = sortedCopy(result.packages)
 
-  proc observed(evaluation: JsonNode): Expected =
-    for r in evaluation["resources"]:
-      result.resources.add r["address"].getStr & "=" &
-        r["fields"]["hostFile"]["value"].getStr
-    for c in evaluation["configOverrides"]:
-      result.config.add c["pkg"].getStr & "." & c["key"].getStr & "=" &
-        c["value"]["value"].getStr
-    for p in evaluation["packages"]:
-      result.packages.add p["name"].getStr
-    result.resources = sortedCopy(result.resources)
-    result.config = sortedCopy(result.config)
-    result.packages = sortedCopy(result.packages)
+proc observed(evaluation: JsonNode): Expected =
+  for r in evaluation["resources"]:
+    result.resources.add r["address"].getStr & "=" &
+      r["fields"]["hostFile"]["value"].getStr
+  for c in evaluation["configOverrides"]:
+    result.config.add c["pkg"].getStr & "." & c["key"].getStr & "=" &
+      c["value"]["value"].getStr
+  for p in evaluation["packages"]:
+    result.packages.add p["name"].getStr
+  result.resources = sortedCopy(result.resources)
+  result.config = sortedCopy(result.config)
+  result.packages = sortedCopy(result.packages)
 
-  const Targets = ["x86_64-linux", "aarch64-linux", "x86_64-darwin",
-    "aarch64-darwin", "x86_64-windows"]
+const Targets = ["x86_64-linux", "aarch64-linux", "x86_64-darwin",
+  "aarch64-darwin", "x86_64-windows"]
 
-  suite "repro home export: other platforms":
+suite "repro home export: other platforms":
 
-    test "e2e_export_describes_other_platform_resources":
-      let sb = newProfileSandbox("gm3-neutral", NeutralProfile)
-      defer: sb.dispose()
-      sb.writeProfileFile("modules/platform_tools.nim", PlatformToolsModule)
+  test "e2e_export_describes_other_platform_resources":
+    let sb = newProfileSandbox("gm3-neutral", NeutralProfile)
+    defer: sb.dispose()
+    sb.writeProfileFile("modules/platform_tools.nim", PlatformToolsModule)
 
-      let exportRun = sb.runRepro(["home", "export", "--host", "gm3-host"],
-        host = "")
-      checkpoint("export stderr:\n" & exportRun.stderr)
-      require exportRun.exitCode == 0
-      let doc = parseJson(exportRun.stdout)
+    let exportRun = sb.runRepro(["home", "export", "--host", "gm3-host"],
+      host = "")
+    checkpoint("export stderr:\n" & exportRun.stderr)
+    require exportRun.exitCode == 0
+    let doc = parseJson(exportRun.stdout)
 
-      # The intent holds every platform's elements, guards as data.
-      var guards: seq[string]
-      for r in doc["intent"]["resources"]:
-        guards.add r["address"].getStr & ":" &
-          (if r["guard"].kind == JNull: "-" else: r["guard"].getStr)
-      checkpoint("resource guards: " & $guards)
-      check doc["intent"]["resources"].len == 6
-      check "platformRc:linux" in guards
-      check "platformRc:macos and not linux" in guards
-      check "platformRc:not linux and not macos and windows" in guards
-      check "appleSilicon:arm64 and macos" in guards
-      check "windowsHelper:windows" in guards
-      check "common:-" in guards
+    # The intent holds every platform's elements, guards as data.
+    var guards: seq[string]
+    for r in doc["intent"]["resources"]:
+      guards.add r["address"].getStr & ":" &
+        (if r["guard"].kind == JNull: "-" else: r["guard"].getStr)
+    checkpoint("resource guards: " & $guards)
+    check doc["intent"]["resources"].len == 6
+    check "platformRc:linux" in guards
+    check "platformRc:macos and not linux" in guards
+    check "platformRc:not linux and not macos and windows" in guards
+    check "appleSilicon:arm64 and macos" in guards
+    check "windowsHelper:windows" in guards
+    check "common:-" in guards
 
-      # The probe evaluated the profile for every platform and found it the
-      # same everywhere: the document describes all of them.
-      checkpoint("platforms: " & $doc["platforms"] & "\nprobe: " &
-        $doc["provenance"]["compile"]["probe"])
-      for system in targetSystemNames():
-        check doc["platforms"][system].getStr == "same"
+    # The probe evaluated the profile for every platform and found it the
+    # same everywhere: the document describes all of them.
+    checkpoint("platforms: " & $doc["platforms"] & "\nprobe: " &
+      $doc["provenance"]["compile"]["probe"])
+    for system in targetSystemNames():
+      check doc["platforms"][system].getStr == "same"
 
+    for system in Targets:
+      checkpoint("target " & system)
+      let cli = sb.runRepro(["home", "export", "--host", "gm3-host",
+        "--target", system], host = "")
+      checkpoint("stderr:\n" & cli.stderr)
+      require cli.exitCode == 0
+      let viaCli = parseJson(cli.stdout)["evaluation"]
+      let viaLibrary = evaluateHomeExport(doc, system)
+      check viaCli == viaLibrary
+      check viaCli["target"].getStr == system
+      check viaCli["host"].getStr == "gm3-host"
+      let got = observed(viaCli)
+      let want = expectedFor(system)
+      check got.resources == want.resources
+      check got.config == want.config
+      check got.packages == want.packages
+
+    # Vacuity: every platform-specific element is present for its own
+    # platform and absent for every other one.
+    for (marker, owners) in [
+        ("platformRc=~/.config/gm3/linux.conf",
+         @["x86_64-linux", "aarch64-linux"]),
+        ("platformRc=~/Library/Preferences/gm3-macos.conf",
+         @["x86_64-darwin", "aarch64-darwin"]),
+        ("appleSilicon=~/.gm3-apple-silicon", @["aarch64-darwin"]),
+        ("platformRc=~/AppData/Roaming/gm3/windows.conf",
+         @["x86_64-windows"]),
+        ("windowsHelper=~/gm3-windows-helper.txt", @["x86_64-windows"])]:
       for system in Targets:
-        checkpoint("target " & system)
-        let cli = sb.runRepro(["home", "export", "--host", "gm3-host",
-          "--target", system], host = "")
-        checkpoint("stderr:\n" & cli.stderr)
-        require cli.exitCode == 0
-        let viaCli = parseJson(cli.stdout)["evaluation"]
-        let viaLibrary = evaluateHomeExport(doc, system)
-        check viaCli == viaLibrary
-        check viaCli["target"].getStr == system
-        check viaCli["host"].getStr == "gm3-host"
-        let got = observed(viaCli)
-        let want = expectedFor(system)
-        check got.resources == want.resources
-        check got.config == want.config
-        check got.packages == want.packages
+        let has = marker in observed(evaluateHomeExport(doc, system)).resources
+        checkpoint(marker & " on " & system & ": " & $has)
+        check has == (system in owners)
 
-      # Vacuity: every platform-specific element is present for its own
-      # platform and absent for every other one.
-      for (marker, owners) in [
-          ("platformRc=~/.config/gm3/linux.conf",
-           @["x86_64-linux", "aarch64-linux"]),
-          ("platformRc=~/Library/Preferences/gm3-macos.conf",
-           @["x86_64-darwin", "aarch64-darwin"]),
-          ("appleSilicon=~/.gm3-apple-silicon", @["aarch64-darwin"]),
-          ("platformRc=~/AppData/Roaming/gm3/windows.conf",
-           @["x86_64-windows"]),
-          ("windowsHelper=~/gm3-windows-helper.txt", @["x86_64-windows"])]:
-        for system in Targets:
-          let has = marker in observed(evaluateHomeExport(doc, system)).resources
-          checkpoint(marker & " on " & system & ": " & $has)
-          check has == (system in owners)
-
-      # For the compiling platform the evaluation is what the planner plans
-      # on this host.
-      let plan = sb.runHomePlan(host = "gm3-host")
-      checkpoint("plan output:\n" & plan.output)
-      require plan.exitCode == 0
-      var planned: seq[string]
-      for line in plan.createLines:
-        for address in ["common", "platformRc", "appleSilicon",
-                        "windowsHelper"]:
-          if line.contains(address):
-            planned.add address
-      var evaluated: seq[string]
-      for r in evaluateHomeExport(doc, compilingPlatformSystem())["resources"]:
-        evaluated.add r["address"].getStr
-      check sortedCopy(planned) == sortedCopy(evaluated)
-      check planned.len == 2
+    # For the compiling platform the evaluation is what the planner plans
+    # on this host.
+    let plan = sb.runHomePlan(host = "gm3-host")
+    checkpoint("plan output:\n" & plan.output)
+    require plan.exitCode == 0
+    var planned: seq[string]
+    for line in plan.createLines:
+      for address in ["common", "platformRc", "appleSilicon",
+                      "windowsHelper"]:
+        if line.contains(address):
+          planned.add address
+    var evaluated: seq[string]
+    for r in evaluateHomeExport(doc, compilingPlatformSystem())["resources"]:
+      evaluated.add r["address"].getStr
+    check sortedCopy(planned) == sortedCopy(evaluated)
+    # Vacuity, per compiling platform: exactly the resources written out for
+    # it above (two on Linux and x86_64 macOS, three on Apple silicon and
+    # Windows).
+    var wantAddresses: seq[string]
+    for entry in expectedFor(compilingPlatformSystem()).resources:
+      wantAddresses.add entry.split('=')[0]
+    check sortedCopy(planned) == sortedCopy(wantAddresses)
