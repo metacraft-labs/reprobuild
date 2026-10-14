@@ -343,8 +343,9 @@
       #
       # f51e0ab advances the workspace pin with Windows injection diagnostics;
       # the Darwin source is unchanged.
+      # 6522766 is the promotion merge with the same tree as f51e0ab.
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/f51e0ab3bb79b6bdf5fba0cecd57c30cf4edceff";
+      url = "github:metacraft-labs/nim-stackable-hooks/6522766fb87f60efb503550042f4f066e2a86a9e";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -441,7 +442,9 @@
       # still names trace-format 808ffdb4, so ``ct-trace-format-src`` stays.
       # 7662d329 carries replay-option forwarding and its regression test;
       # the incremental adapter and trace-format resolution are unchanged.
-      url = "github:metacraft-labs/codetracer/7662d32921a8981b889f7a0c71a3e2f4824573cc";
+      # 47eda1fd adds native recording navigation; ct-test and the incremental
+      # adapter are unchanged. Align the pin with the published workspace.
+      url = "github:metacraft-labs/codetracer/47eda1fd580a17099541ead32f5528cb2e37bdc0";
       flake = false;
     };
 
