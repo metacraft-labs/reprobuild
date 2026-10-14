@@ -41,8 +41,8 @@
   forkSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim";
-    rev = "f902ddcb7a29b262385645809aede76834015278";
-    hash = "sha256-DCzEpcXr52up6f4JoyjmxfjrldqVKHVyljHN4EwDQDw=";
+    rev = "1e19cf261413667ef69123a3ef221e239d1f8897";
+    hash = "sha256-q4V7qEJRJGo6f0Wli/aauix78DbIPt4/eu7YQqO8APw=";
   },
   csourcesSrc ? fetchFromGitHub {
     owner = "nim-lang";

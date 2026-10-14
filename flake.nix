@@ -514,8 +514,20 @@
     # hot-code-reloading transform. The latter is required by CodeTracer's
     # monitored import/restore path: an initialized local could make the JS HCR
     # transform absorb the following try and emit an orphaned finally.
+    #
+    # Advanced from f902ddcb to 1e19cf26 for a compiler crash: after a
+    # term-rewriting template fires (`warnExecCmdEx` and its siblings in
+    # repro_core/ambient_execution.nim), the compiler folded constants over the
+    # rewritten statement including its type sections and declared types, and
+    # crashed (SIGSEGV, no position) on the untyped `typeOfIter` symbol that
+    # `mapIt` leaves there. That is why
+    # t_repro_test_runner_process_group_cleanup.nim could not import the whole
+    # `repro_daemon_core` facade; it does again. Riding along: a cgen fix that
+    # passes a raising call's temporary to its destructor the way the
+    # destructor takes it, and VM/NimScript trace recording changes (exact I/O
+    # event kinds, one value-carrying step per recorded position).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=f902ddcb7a29b262385645809aede76834015278";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1e19cf261413667ef69123a3ef221e239d1f8897";
       flake = false;
     };
     nim-csources-src = {
