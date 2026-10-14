@@ -22,6 +22,7 @@
 
 import std/[os, strutils, tables]
 
+import ./drivers/app_bundle
 import ./drivers/dconf_key
 import ./drivers/defaults
 import ./drivers/env_user
@@ -157,6 +158,31 @@ proc observeHomebrewFormulaR*(r: Resource): ObservedState {.nimcall.} =
 proc observeHomebrewCaskR*(r: Resource): ObservedState {.nimcall.} =
   return observeHomebrewCask(r.caskName, r.caskVersion)
 
+proc observeAppBundleAt*(targetPath: string): ObservedState =
+  ## GM4c: what is at an Applications-directory path. Absent when nothing
+  ## is there; otherwise its identity bytes (`appBundleCanonicalBytes`), or
+  ## a marker for a path that is not a readable bundle, so any such object
+  ## differs from every recorded bundle and is never mistaken for one.
+  if not (symlinkExists(targetPath) or fileExists(targetPath) or
+      dirExists(targetPath)):
+    result.present = false
+    result.digest = zeroDigest()
+    return
+  result.present = true
+  var bytes: seq[byte]
+  try:
+    bytes = appBundleCanonicalBytes(readAppBundleIdentity(targetPath))
+  except EAppBundleRefused:
+    let marker = AppBundleIdentityFormat & "\nnot-a-bundle\n"
+    bytes = newSeq[byte](marker.len)
+    for i, ch in marker:
+      bytes[i] = byte(ord(ch))
+  result.rawBytes = bytes
+  result.digest = digestOfBytes(bytes)
+
+proc observeMacosAppBundle*(r: Resource): ObservedState {.nimcall.} =
+  return observeAppBundleAt(realWorldIdentity(r))
+
 proc observeResource*(r: Resource): ObservedState =
   ## Read the current real-world state for a desired resource.
   ##
@@ -171,6 +197,9 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
   ## longer in the desired set (destroy candidate). The recorded
   ## binding tells us which driver to ask.
   case binding.kind
+  of rkMacosAppBundle:
+    # The resourceId is the placed bundle's path.
+    return observeAppBundleAt(binding.resourceId)
   of rkFsManagedBlock:
     # The recorded resourceId is "<hostFile>#<blockId>" per
     # types.realWorldIdentity. Split it back.

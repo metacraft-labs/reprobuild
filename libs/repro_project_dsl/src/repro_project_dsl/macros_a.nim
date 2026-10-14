@@ -1490,7 +1490,8 @@ proc unsafeRelativePath(value: string): bool =
 
 const TarballInstallMethods* = ["extract", "installer-silent",
     "msys2-pacman", "source-bootstrap", "installer-msi",
-    "installer-nsis-bundle", "installer-nsis", "installer-inno-setup"]
+    "installer-nsis-bundle", "installer-nsis", "installer-inno-setup",
+    "app-bundle", "pkg-install"]
   ## GM4b: the closed set a ``tarball installMethod = "..."`` accepts. It is
   ## the token set of ``packages_schema.InstallMethod``, which this module
   ## cannot import (the stdlib depends on the DSL, not the reverse);
@@ -1540,9 +1541,106 @@ proc parseTarballArchiveDetail(node: NimNode;
   of "launcheremit": detail.launcherEmit.add(exprCode(value))
   of "cpulevel": detail.cpuLevel = exprCode(value)
   of "cpufeatures": detail.cpuFeatures = exprCode(value)
+  of "appbundle": detail.appBundle = exprCode(value)
+  of "bundleid": detail.bundleId = exprCode(value)
+  of "teamid": detail.teamId = exprCode(value)
   else:
     return false
   true
+
+const
+  MacosAppInstallMethods = ["app-bundle", "pkg-install", "installer-silent"]
+    ## GM4c: the install methods a record that names an ``appBundle`` may
+    ## declare. ``app-bundle`` is realized by the home archive realizer;
+    ## the other two are vendor shapes declared for completeness and refused
+    ## at realization (Store-And-Installation-Layout.md § macOS Application
+    ## Bundles, "Shapes this does not cover").
+  AppBundleArchiveTypes = ["dmg", "pkg", "zip", "tar.gz", "tar.xz",
+    "tar.bz2"]
+    ## GM4c: the archive types an ``app-bundle`` realization unpacks.
+
+proc validMacosTeamId(text: string): bool =
+  ## Apple team identifiers are ten upper-case letters and digits.
+  if text.len != 10:
+    return false
+  for ch in text:
+    if ch notin {'A'..'Z', '0'..'9'}:
+      return false
+  true
+
+proc validateMacosAppRecord(node: NimNode) =
+  ## GM4c: authoring-time rules for the macOS application fields. A record
+  ## that names an ``appBundle`` must say which bundle it delivers and who
+  ## signs it, because realization refuses anything it cannot verify against
+  ## those declarations. Only LITERAL values are inspected; an expression is
+  ## validated where it is evaluated (the realizer re-checks every rule).
+  var methodNode, appBundleNode, bundleIdNode, teamIdNode, versionNode,
+    archiveNode, exeNode, sha256Node: NimNode = nil
+  for i in 1 ..< node.len:
+    let arg = node[i]
+    if arg.kind != nnkExprEqExpr:
+      continue
+    case identText(arg[0]).normalize
+    of "installmethod": methodNode = arg[1]
+    of "appbundle": appBundleNode = arg[1]
+    of "bundleid": bundleIdNode = arg[1]
+    of "teamid": teamIdNode = arg[1]
+    of "version": versionNode = arg[1]
+    of "archivetype": archiveNode = arg[1]
+    of "executablepath": exeNode = arg[1]
+    of "sha256": sha256Node = arg[1]
+    else: discard
+  let methodText = litText(methodNode)
+  let wantsApp = methodText == "app-bundle" or methodText == "pkg-install"
+  let anyAppField = not appBundleNode.isNil or not bundleIdNode.isNil or
+    not teamIdNode.isNil
+  if not wantsApp and not anyAppField:
+    return
+  if anyAppField and methodNode.isNil:
+    error("tarball appBundle / bundleId / teamId describe a macOS " &
+      "application; declare installMethod = \"app-bundle\" (or the " &
+      "vendor shape it has)", node)
+  if anyAppField and methodText.len > 0 and
+      methodText notin MacosAppInstallMethods:
+    error("tarball appBundle / bundleId / teamId describe a macOS " &
+      "application; installMethod must be one of " &
+      MacosAppInstallMethods.join("|") & ", got '" & methodText & "'", node)
+  if appBundleNode.isNil or bundleIdNode.isNil or teamIdNode.isNil:
+    error("a macOS application tarball needs appBundle = \"<Name>.app\", " &
+      "bundleId = \"<CFBundleIdentifier>\" and teamId = \"<signing team>\"; " &
+      "realization verifies the bundle against all three", node)
+  if wantsApp and versionNode.isNil:
+    error("a macOS application tarball needs version = \"<" &
+      "CFBundleShortVersionString>\"", node)
+  if wantsApp and sha256Node.isNil:
+    # The archive is attached or expanded before any signature is checked,
+    # so its bytes must be pinned by a strong digest first.
+    error("a macOS application tarball needs sha256 = \"<digest>\"; " &
+      "sha512 / sha1 alone are not accepted for an application archive",
+      node)
+  let teamText = litText(teamIdNode)
+  if teamIdNode.isStrLit and not validMacosTeamId(teamText):
+    error("tarball teamId must be a 10-character Apple team identifier " &
+      "(upper-case letters and digits); got '" & teamText & "'", node)
+  let bundleText = litText(appBundleNode)
+  if appBundleNode.isStrLit:
+    if bundleText.unsafeRelativePath or not bundleText.endsWith(".app"):
+      error("tarball appBundle must be a relative path inside the archive " &
+        "that names a .app bundle; got '" & bundleText & "'", node)
+  if methodText == "app-bundle":
+    let archiveText = litText(archiveNode)
+    if archiveNode.isNil or (archiveNode.isStrLit and
+        archiveText.toLowerAscii() notin AppBundleArchiveTypes):
+      error("an app-bundle tarball's archiveType must be one of " &
+        AppBundleArchiveTypes.join("|") & "; got '" & archiveText & "'",
+        node)
+    let exeText = litText(exeNode)
+    if appBundleNode.isStrLit and exeNode.isStrLit:
+      let leaf = bundleText.replace('\\', '/').split('/')[^1]
+      if not exeText.startsWith(leaf & "/"):
+        error("an app-bundle tarball's executablePath is relative to the " &
+          "realized prefix, which holds the bundle at its root: it must " &
+          "start with '" & leaf & "/'; got '" & exeText & "'", node)
 
 proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   let loc = lineFile(node)
@@ -1657,6 +1755,7 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
       "upstream publishes no SHA-256)", node)
   if executablePathNode.isNil:
     error("tarball requires executablePath = \"bin/name\"", node)
+  validateMacosAppRecord(node)
   if urlNode.isStrLit and urlNode.strVal.len == 0:
     error("tarball requires url = \"...\"", node)
   if not sha256Node.isNil and sha256Node.isStrLit and
@@ -2752,7 +2851,10 @@ proc tarballArchiveDetailLiteral*(detail: TarballArchiveDetail): string =
       codeListLiteral(detail.preInstallUnrecognized) &
     ", launcherEmit: " & codeListLiteral(detail.launcherEmit) &
     ", cpuLevel: " & codeOrEmpty(detail.cpuLevel) &
-    ", cpuFeatures: " & codeOrEmpty(detail.cpuFeatures) & ")"
+    ", cpuFeatures: " & codeOrEmpty(detail.cpuFeatures) &
+    ", appBundle: " & codeOrEmpty(detail.appBundle) &
+    ", bundleId: " & codeOrEmpty(detail.bundleId) &
+    ", teamId: " & codeOrEmpty(detail.teamId) & ")"
 
 proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
   ## The ``TarballProvisioningDef(...)`` literal for a macro-time record.

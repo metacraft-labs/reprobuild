@@ -658,8 +658,13 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 21'u16
-    ## v21 (current): retains ``detail`` (``TarballArchiveDetail``) on
+  EnvelopeVersion = 22'u16
+    ## v22 (current): ``TarballArchiveDetail`` also retains the macOS
+    ##                application fields ``appBundle``, ``bundleId`` and
+    ##                ``teamId`` (GM4c), encoded after ``cpuFeatures``. v21
+    ##                payloads decode with them empty, which is a record
+    ##                that delivers no application bundle.
+    ## v21: retains ``detail`` (``TarballArchiveDetail``) on
     ##                tarball provisioning — the archive-realization metadata
     ##                the retired ``VersionedProvisioning`` catalog records
     ##                held (GM4b). Encoded after ``os``, before ``location``.
@@ -1079,8 +1084,9 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc writeTarballArchiveDetail(outp: var seq[byte];
-                               detail: TarballArchiveDetail) =
-  ## GM4b (v21). Field order is the declaration order of
+                               detail: TarballArchiveDetail;
+                               version: uint16) =
+  ## GM4b (v21), GM4c (v22). Field order is the declaration order of
   ## ``TarballArchiveDetail``; ``readTarballArchiveDetail`` mirrors it.
   outp.writeString(detail.version)
   outp.writeString(detail.sha512)
@@ -1099,9 +1105,13 @@ proc writeTarballArchiveDetail(outp: var seq[byte];
   outp.writeStringSeq(detail.launcherEmit)
   outp.writeString(detail.cpuLevel)
   outp.writeString(detail.cpuFeatures)
+  if version >= 22'u16:
+    outp.writeString(detail.appBundle)
+    outp.writeString(detail.bundleId)
+    outp.writeString(detail.teamId)
 
-proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int):
-    TarballArchiveDetail =
+proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
+                              version: uint16): TarballArchiveDetail =
   result.version = readString(bytes, pos)
   result.sha512 = readString(bytes, pos)
   result.sha1 = readString(bytes, pos)
@@ -1119,6 +1129,10 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int):
   result.launcherEmit = readStringSeq(bytes, pos)
   result.cpuLevel = readString(bytes, pos)
   result.cpuFeatures = readString(bytes, pos)
+  if version >= 22'u16:
+    result.appBundle = readString(bytes, pos)
+    result.bundleId = readString(bytes, pos)
+    result.teamId = readString(bytes, pos)
 
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
@@ -1148,7 +1162,7 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.cpu)
   outp.writeString(provisioning.os)
   if version >= 21'u16:
-    outp.writeTarballArchiveDetail(provisioning.detail)
+    outp.writeTarballArchiveDetail(provisioning.detail, version)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -1181,7 +1195,7 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     result.cpu = readString(bytes, pos)
     result.os = readString(bytes, pos)
   if version >= 21'u16:
-    result.detail = readTarballArchiveDetail(bytes, pos)
+    result.detail = readTarballArchiveDetail(bytes, pos, version)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -2512,7 +2526,10 @@ proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
     ", preInstallUnrecognized: " & listLit(detail.preInstallUnrecognized) &
     ", launcherEmit: " & listLit(detail.launcherEmit) &
     ", cpuLevel: " & escForCode(detail.cpuLevel) &
-    ", cpuFeatures: " & escForCode(detail.cpuFeatures) & ")"
+    ", cpuFeatures: " & escForCode(detail.cpuFeatures) &
+    ", appBundle: " & escForCode(detail.appBundle) &
+    ", bundleId: " & escForCode(detail.bundleId) &
+    ", teamId: " & escForCode(detail.teamId) & ")"
 
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =

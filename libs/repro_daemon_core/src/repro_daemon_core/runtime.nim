@@ -2740,11 +2740,51 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
     result.add("--state-root")
     result.add(config.leaseStoreRoot)
 
-proc launchdLabel(config: UserDaemonConfig): string =
+proc endpointNameDigest(config: UserDaemonConfig): string =
+  ## The digest that makes a service-manager name identify the WHOLE
+  ## endpoint: 16 hex characters (64 bits) of blake3 over the endpoint string
+  ## VERBATIM. Shared by ``launchdLabel`` and ``systemdUnitName`` so the two
+  ## platforms cannot drift apart; ``systemdUnitName``'s docstring carries the
+  ## reasoning for each of those choices.
+  blake3.digest(config.endpoint).toHex()[0 ..< 16]
+
+proc legacyLaunchdLabel(config: UserDaemonConfig): string =
+  ## The label binaries before the endpoint-keyed naming registered: the
+  ## endpoint's basename alone. Kept only so the launcher and the cleanup can
+  ## find a job such a binary left behind -- see ``bootoutLegacyLaunchdJob``.
   "org.reprobuild.repro-daemon." &
     safePathSegment(config.endpoint.extractFilename, "user")
 
-proc launchdPlistPath(config: UserDaemonConfig): string =
+proc launchdLabel*(config: UserDaemonConfig): string =
+  ## The launchd label the daemon for ``config.endpoint`` is registered under.
+  ##
+  ## KEYED ON THE WHOLE ENDPOINT PATH, NOT ON ITS LAST COMPONENT, for the
+  ## reason ``systemdUnitName`` gives: a label is a per-user GLOBAL namespace
+  ## while endpoints are not unique by basename (every one of them is some
+  ## directory's ``d.sock``). The basename stays in front of the digest
+  ## because the label is also what ``launchctl list`` shows.
+  ##
+  ## On launchd a shared label cost more than the fallback it cost on
+  ## systemd. Measured on macOS 2026-10-14: a second ``launchctl bootstrap``
+  ## of a loaded label fails with ``Bootstrap failed: 5: Input/output
+  ## error``, but ``launchWithLaunchd`` boots out any prior job under its
+  ## label first, and ``bootout`` SIGTERMs a running job -- so launching the
+  ## second daemon KILLED the first, and
+  ## ``cleanupPlatformBackgroundRegistration`` for one endpoint stopped
+  ## whichever daemon held the label.
+  ##
+  ## The result is bounded and legal: an AF_UNIX endpoint is at most 104
+  ## bytes on macOS (``sun_path``), and ``safePathSegment`` produces only
+  ## ``[A-Za-z0-9._-]`` (characters a label and a file name both accept), so
+  ## ``<label>.plist`` stays well under the 255-byte file-name limit.
+  ##
+  ## Exported so a second derivation -- a test teardown -- asks for the name
+  ## instead of restating it.
+  legacyLaunchdLabel(config) & "-" & endpointNameDigest(config)
+
+proc launchdPlistPath*(config: UserDaemonConfig): string =
+  ## Where the launcher writes the plist for ``launchdLabel(config)``; it
+  ## moves with the label.
   config.stateDir / "launchd" / (launchdLabel(config) & ".plist")
 
 proc processOwnerTokenForLaunch(config: UserDaemonConfig): string =
@@ -2827,6 +2867,62 @@ proc quoteCommand(args: openArray[string]): string =
     parts.add(quoteShell(arg))
   parts.join(" ")
 
+proc launchdJobServesEndpoint(serviceTarget, endpoint: string): bool =
+  ## Does the launchd job ``serviceTarget`` (``gui/<uid>/<label>``) run with
+  ## ``--endpoint <endpoint>`` among its program arguments?
+  ##
+  ## Read from ``launchctl print``, which lists them one per line between
+  ## ``arguments = {`` and ``}``. There is no structured form of that output;
+  ## it is the same tool the launcher and the cleanup already drive. A job
+  ## that is not loaded, or whose output does not parse, answers false: the
+  ## caller only acts on a positive match.
+  when defined(macosx):
+    let res = execCmdEx(quoteCommand(["launchctl", "print", serviceTarget]))
+    if res.exitCode != 0:
+      return false
+    var inArguments = false
+    var arguments: seq[string] = @[]
+    for line in res.output.splitLines():
+      let stripped = line.strip()
+      if not inArguments:
+        if stripped == "arguments = {":
+          inArguments = true
+      elif stripped == "}":
+        break
+      else:
+        arguments.add(stripped)
+    for i in 0 ..< arguments.len - 1:
+      if arguments[i] == "--endpoint" and arguments[i + 1] == endpoint:
+        return true
+    false
+  else:
+    false
+
+proc bootoutLegacyLaunchdJob(config: UserDaemonConfig) =
+  ## Boot out a job a binary from before ``launchdLabel`` was keyed on the
+  ## whole endpoint registered for ``config.endpoint`` under the basename-only
+  ## ``legacyLaunchdLabel``. Nothing else will ever boot that label out, and a
+  ## finished ``KeepAlive=false`` job stays loaded under it until logout.
+  ##
+  ## The legacy label is shared by every endpoint with this basename, so the
+  ## job is booted out only when launchd confirms it serves THIS endpoint --
+  ## otherwise this would stop another endpoint's daemon, the very collision
+  ## the new label removes.
+  when defined(macosx):
+    let legacyTarget = "gui/" & $currentUid() & "/" &
+      legacyLaunchdLabel(config)
+    if launchdJobServesEndpoint(legacyTarget, config.endpoint):
+      discard execCmdEx(quoteCommand(["launchctl", "bootout", legacyTarget]))
+      let legacyPlist = config.stateDir / "launchd" /
+        (legacyLaunchdLabel(config) & ".plist")
+      if fileExists(legacyPlist):
+        try:
+          removeFile(legacyPlist)
+        except OSError:
+          discard
+  else:
+    discard
+
 proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
   when defined(macosx):
     try:
@@ -2859,6 +2955,9 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
       # job simply means there was nothing to remove.
       discard execCmdEx(quoteCommand(["launchctl", "bootout",
         serviceTarget & "/" & launchdLabel(config)]))
+      # The same for a job an older binary left for this endpoint under the
+      # basename-only label: the bootout above no longer reaches it.
+      bootoutLegacyLaunchdJob(config)
       let bootstrap = execCmdEx(quoteCommand(["launchctl", "bootstrap",
         serviceTarget, plistPath]))
       if bootstrap.exitCode == 0:
@@ -2915,7 +3014,7 @@ proc systemdUnitName*(config: UserDaemonConfig): string =
   ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
   ## ``sun_path`` (108 bytes).
   "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
-    "-" & blake3.digest(config.endpoint).toHex()[0 ..< 16] & ".service"
+    "-" & endpointNameDigest(config) & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =
@@ -3044,7 +3143,16 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
     logLine(config.logPath, "launch requested backend=posix-fork pid=" &
       $pid)
 
-proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
+proc cleanupPlatformBackgroundRegistration*(requested: UserDaemonConfig) =
+  ## Deregister the daemon for ``requested.endpoint`` from the platform
+  ## service manager (launchd job / systemd transient unit).
+  ##
+  ## The paths are anchored first, exactly as ``startUserDaemon`` anchors them
+  ## before it launches: the name the manager knows the daemon by is derived
+  ## from the endpoint string, and the launcher registered it under the
+  ## ABSOLUTE one. A caller passing ``--endpoint`` relative to its working
+  ## directory would otherwise ask for a name nothing was registered under.
+  let config = withAnchoredDaemonPaths(requested)
   when defined(macosx):
     discard execCmdEx(quoteCommand(["launchctl", "bootout",
       "gui/" & $currentUid() & "/" & launchdLabel(config)]))
@@ -3053,6 +3161,7 @@ proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
         removeFile(launchdPlistPath(config))
       except OSError:
         discard
+    bootoutLegacyLaunchdJob(config)
   elif defined(linux):
     discard execCmdEx(quoteCommand(["systemctl", "--user", "stop",
       systemdUnitName(config)]))
