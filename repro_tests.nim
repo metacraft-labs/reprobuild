@@ -1845,6 +1845,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_is_enrolled_for_conformance.nim",
+    binary: "build/test-bin/t_every_catalog_tarball_arm_is_enrolled_for_conformance",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
     binary: "build/test-bin/t_isonim_ssg_render_edge",
     defines: @[],
@@ -2585,6 +2594,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_home_apply/tests/t_smoke_home_apply.nim",
     binary: "build/test-bin/t_smoke_home_apply",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_home_apply/tests/t_stdlib_catalog_archive_arms_realize.nim",
+    binary: "build/test-bin/t_stdlib_catalog_archive_arms_realize",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -5276,6 +5294,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim",
     binary: "build/test-bin/t_a_declared_alias_is_never_served_from_a_prefix_without_it",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim",
+    binary: "build/test-bin/t_a_symlinked_declared_executable_is_not_reported_missing",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -14537,6 +14564,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_status_health_add_remove_use_unified_resolver.nim",
     binary: "build/test-bin/t_status_health_add_remove_use_unified_resolver",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_stdlib_catalog_tarball_arms_realize.nim",
+    binary: "build/test-bin/t_stdlib_catalog_tarball_arms_realize",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

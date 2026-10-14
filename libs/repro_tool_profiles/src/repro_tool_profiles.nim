@@ -25,6 +25,13 @@ import repro_interface_artifacts
 # `uses:` and a home profile's `package` reference.
 import repro_tool_profiles/realization_selection
 export realization_selection
+# The probe a realized prefix's declared executable has to pass, and the
+# reason it gives when it does not. Exported because the home archive
+# realizer applies the same rule to the arms it owns, and because the catalog
+# conformance sweeps assert against the verdicts rather than against message
+# text (Provisioning-Contributions.md §"Conformance And Trust").
+import repro_tool_profiles/declared_executable
+export declared_executable
 import repro_local_store
 # Binary-cache substitution for realized tool prefixes. Adding these imports
 # is what closes the gap where a package realized by URL+digest never
@@ -1152,81 +1159,6 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse;
     nixpkgsRev: selected.nixpkgsRev,
     nixpkgsNarHash: selected.nixpkgsNarHash,
     lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
-
-proc unsafeRelativePath(value: string): bool =
-  let normalized = value.replace('\\', '/')
-  if normalized.len == 0 or normalized.startsWith("/"):
-    return true
-  for part in normalized.split('/'):
-    if part == "..":
-      return true
-
-proc pathContainsSymlink(root, relativePath: string): bool =
-  var current = root
-  for part in relativePath.replace('\\', '/').split('/'):
-    if part.len == 0 or part == ".":
-      continue
-    current = current / part
-    try:
-      if getFileInfo(extendedPath(current), followSymlink = false).kind in
-          {pcLinkToFile, pcLinkToDir}:
-        return true
-    except OSError:
-      discard
-
-proc executableInStorePath(storePath, declaredExecutablePath: string;
-                           rejectSymlinks = false): string =
-  if declaredExecutablePath.unsafeRelativePath:
-    return ""
-  if rejectSymlinks and pathContainsSymlink(storePath, declaredExecutablePath):
-    return ""
-  let candidate = storePath / declaredExecutablePath
-  if not fileExists(extendedPath(candidate)):
-    return ""
-  # M9.R.14d.8b — data-file declarations (e.g. wayland-protocols's
-  # ``share/pkgconfig/wayland-protocols.pc``) point at non-executable
-  # files that exist only to verify the realization completed. Detect
-  # these by extension and accept them without the +x permission
-  # requirement; the consumer threads the parent prefix into
-  # PKG_CONFIG_PATH at build time rather than spawning the file
-  # directly.
-  # M9.R.15q.5.9 — hwdata ships ``share/hwdata/pnp.ids`` (the PnP
-  # vendor-ID database). Recognise ``.ids`` as a data declaration so
-  # the executable+permission check is skipped (the file is r--r--r--
-  # in the nix store).
-  # M9.R.15q.5.10 — ``.dll`` is the Windows sibling of ``.so`` and was
-  # missing from a list that already carried the POSIX one. The case that
-  # surfaced it: electron-builder's ``nsis-resources`` archive is a flat tree
-  # of plugin DLLs with no program in it at all, so the only anchor a
-  # declaration can name is a DLL, and a DLL is not something anyone spawns.
-  # Its absence here made the package's realize depend on Windows reporting
-  # execute permission for ordinary files rather than on a stated rule.
-  # M9.R.15q.5.11 — ``.bin`` and ``.onnx`` are MODEL WEIGHTS: a Whisper
-  # ``ggml-base.bin`` or a Piper voice's ``.onnx`` is a multi-megabyte blob
-  # that a runtime memory-maps and that nothing ever spawns. They arrive
-  # through ``archiveType = "raw"``, which copies a single downloaded file
-  # into the prefix under its declared name, so the declared path IS the
-  # payload and there is no program in the package to anchor on instead.
-  # M9.R.15q.5.12 — ``.js``/``.mjs``/``.cjs`` are SCRIPTS, and a script is
-  # the case ``launcher`` exists for: the declared path is the payload an
-  # interpreter runs, never a program the OS execs, so it carries no execute
-  # bit on any host. The launcher pair realize writes beside it is what ends
-  # up being invoked.
-  let dataExts = [".pc", ".so", ".dll", ".a", ".h", ".hpp", ".cmake",
-    ".json", ".xml", ".txt", ".ids", ".bin", ".onnx",
-    ".js", ".mjs", ".cjs"]
-  let lower = declaredExecutablePath.toLowerAscii
-  var isDataDecl = false
-  for ext in dataExts:
-    if lower.endsWith(ext) or lower.contains(ext & "."):
-      isDataDecl = true
-      break
-  if isDataDecl:
-    return absolutePath(candidate)
-  if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
-      it in getFilePermissions(extendedPath(candidate))):
-    return absolutePath(candidate)
-  return ""
 
 proc safeStoreSegment*(value, fallback: string): string =
   for ch in value:
@@ -3406,11 +3338,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     plan.url, plan.sha256, tarballPrefixLayoutParts(plan))
   let prefix = unified.absolutePath
   if dirExists(extendedPath(prefix)):
-    if executableInStorePath(prefix, plan.declaredExecutablePath,
-        rejectSymlinks = true).len == 0:
+    let existing = probeDeclaredExecutable(prefix,
+      plan.declaredExecutablePath, rejectSymlinks = true)
+    if existing.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: existing tarball realization lacks " &
-        plan.declaredExecutablePath & ": " & prefix)
+        "tool-resolution failed: existing tarball realization " &
+        existing.reason & ": " & prefix)
     return (prefix: prefix, archivePath: "",
         selectedUrl: selectedUrlFromReceipt(prefix))
 
@@ -3493,12 +3426,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
         raise newException(OSError,
           "tool-resolution failed: prune path could not be removed: " &
           target)
-    let extractedExecutable = executableInStorePath(tempPrefix,
+    let extractedProbe = probeDeclaredExecutable(tempPrefix,
       plan.declaredExecutablePath, rejectSymlinks = true)
-    if extractedExecutable.len == 0:
+    if extractedProbe.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: extracted tarball lacks executable " &
-        plan.declaredExecutablePath)
+        "tool-resolution failed: extracted tarball " & extractedProbe.reason)
+    let extractedExecutable = extractedProbe.resolvedPath
     # Optional alias. Some upstreams ship a binary named for its target
     # triple (``codex-x86_64-pc-windows-msvc.exe``) while every consumer
     # invokes it as ``codex``; a realized prefix goes on PATH as a DIRECTORY,
@@ -3561,11 +3494,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
         removeDir(extendedPath(tempPrefix))
       else:
         raise
-    if executableInStorePath(prefix, plan.declaredExecutablePath,
-        rejectSymlinks = true).len == 0:
+    let materializedProbe = probeDeclaredExecutable(prefix,
+      plan.declaredExecutablePath, rejectSymlinks = true)
+    if materializedProbe.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: materialized tarball lacks executable " &
-        plan.declaredExecutablePath)
+        "tool-resolution failed: materialized tarball " &
+        materializedProbe.reason)
     # Publish so the NEXT machine substitutes instead of downloading. Soft
     # fail: a developer without publish credentials still has a working
     # toolchain, they just did not contribute this one.
@@ -4090,12 +4024,13 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
         try:
           let materialized = materializeTarballPrefix(plan, storeRoot,
             writerMode, tools)
-          let resolved = executableInStorePath(materialized.prefix,
+          let edgeProbe = probeDeclaredExecutable(materialized.prefix,
             plan.declaredExecutablePath, rejectSymlinks = true)
-          if resolved.len == 0:
+          if edgeProbe.verdict != deOk:
             raise newException(OSError,
-              "tool-resolution failed: tarball realization lacks " &
-              plan.declaredExecutablePath)
+              "tool-resolution failed: tarball realization " &
+              edgeProbe.reason)
+          let resolved = edgeProbe.resolvedPath
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
           let receiptStore = receiptStoreRoot(absolutePath(receipt))
@@ -4208,9 +4143,19 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
            plan.declaredExecutableAlias))):
       break
     if attempt > 0:
+      # Name the reason the prefix the receipt points at does not satisfy the
+      # declaration, not merely that it does not. When the prefix is gone
+      # there is nothing to probe and the verdict is the honest "missing".
+      let receiptProbe =
+        if receipt.prefix.len > 0 and dirExists(extendedPath(receipt.prefix)):
+          probeDeclaredExecutable(receipt.prefix,
+            plan.declaredExecutablePath, rejectSymlinks = true)
+        else:
+          DeclaredExecutableProbe(verdict: deMissing,
+            declaredPath: plan.declaredExecutablePath)
       raise newException(OSError,
-        "tool-resolution failed: tarball realization lacks " &
-        plan.declaredExecutablePath & " (receipt " & edges.rootReceipt &
+        "tool-resolution failed: tarball realization " & receiptProbe.reason &
+        " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
   refuseUnrunnableTarballExecutable(useDef, receipt.executable)
   result = tarballProfileFor(useDef, plan, receipt.prefix,
