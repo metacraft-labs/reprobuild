@@ -497,6 +497,73 @@ suite "S7 the CAS-restore configuration is reachable and gated":
     check reported.hasPath(destRoot / "usr" / "libfoo.so")
     check reported.hasPath(buildDir / "CMakeCache.txt")
 
+  test "explicit symlink spellings cannot hide declared roots or output files":
+    let base = createTempDir("repro-s7-explicit-link", "")
+    defer: removeDir(base)
+    let physical = base / "real"
+    createDir(physical / "build" / "out" / "nested")
+    createDir(physical / "scratch")
+    writeFile(physical / "build" / "out" / "product", "product")
+    writeFile(physical / "build" / "out" / "sidecar", "sidecar")
+    writeFile(physical / "scratch" / "scratch.o", "scratch")
+    let logical = base / "link"
+    createSymlink(expandFilename(physical), logical)
+    let resolved = expandFilename(physical)
+    require logical != resolved
+    require expandFilename(logical) == resolved
+
+    for productBase in [logical, resolved]:
+      for prefixBase in [logical, resolved]:
+        checkpoint("product=" & productBase & " prefix=" & prefixBase)
+        var act = action("symlink-product", @["tool"], cwd = logical,
+          outputs = @[productBase / "build" / "out" / "product"],
+          cacheable = true,
+          dependencyPolicy = automaticMonitorGatheringPolicy(@[
+            prefixBase / "build", prefixBase / "build" / "out",
+            prefixBase / "build" / "out" / "nested",
+            prefixBase / "scratch"]),
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        act.declaredOutputs = @[productBase / "build" / "out"]
+        let prefixes = act.honouredDerivedPrefixes()
+        require prefixes.len > 0
+        for prefix in prefixes:
+          check expandFilename(prefix) == resolved / "scratch"
+
+        # Without a write-root declaration, the output FILE must still
+        # disqualify its directory and its ancestors in either spelling.
+        act.declaredOutputs = @[]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@[
+          prefixBase / "build", prefixBase / "build" / "out"])
+        check act.honouredDerivedPrefixes().len == 0
+        var evidence: PathSetEvidence
+        evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+          evcMonitorCapture, [resolved / "build" / "out" / "sidecar"])
+        check act.undeclaredSurvivingWrites(evidence).hasPath(
+          resolved / "build" / "out" / "sidecar")
+
+        # Product declarations remain protected before the product exists.
+        act.outputs = @[productBase / "build" / "out" / "absent" / "product"]
+        check act.honouredDerivedPrefixes().len == 0
+        act.declaredOutputs = @[productBase / "build" / "out" / "absent"]
+        act.outputs = @["stamp"]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@[
+          prefixBase / "build" / "out" / "absent"])
+        check act.honouredDerivedPrefixes().len == 0
+        act.declaredOutputs = @[resolved / "build" / "out"]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@["build/out"])
+        check act.honouredDerivedPrefixes().len == 0
+
+        # Disjoint scratch writes in either spelling retain their exemption.
+        act.declaredOutputs = @[]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@[
+          prefixBase / "scratch"])
+        var scratchEvidence: PathSetEvidence
+        scratchEvidence.monitorWrites.observeAll(
+          scratchEvidence.evidenceProvenance, evcMonitorCapture,
+          [logical / "scratch" / "scratch.o",
+           resolved / "scratch" / "scratch.o"])
+        check act.undeclaredSurvivingWrites(scratchEvidence).len == 0
+
   test "a derived prefix disjoint from the product is still honoured":
     ## The other half, and the reason the rule is disjointness rather than
     ## "no prefix ever exempts": the nimcache declaration this milestone

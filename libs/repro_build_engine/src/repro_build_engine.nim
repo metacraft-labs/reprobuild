@@ -9091,6 +9091,36 @@ proc expandPolicyPath(action: BuildAction; path: string): string =
       result = result[0 ..< start] & value & result.substr(stop)
     start = result.find('$', start)
 
+proc canonicalPolicyPath(path: string): string =
+  ## Resolve symlinked spellings for policy comparisons, including absent
+  ## descendants: a missing probe or output still belongs to its existing
+  ## parent. Relative input-policy roots stay relative; only the restore
+  ## gate materializes them against the action's cwd before calling this.
+  if not path.isAbsolute:
+    return normalizeWriteRoot(path)
+  var ancestor = normalizeWriteRoot(path)
+  var suffix: seq[string] = @[]
+  while ancestor.len > 0:
+    try:
+      result = expandFilename(ancestor)
+      for i in countdown(suffix.high, 0):
+        result = result / suffix[i]
+      return normalizeWriteRoot(result)
+    except CatchableError:
+      let parent = parentDir(ancestor)
+      if parent.len == 0 or parent == ancestor:
+        break
+      suffix.add(extractFilename(ancestor))
+      ancestor = parent
+  # If no ancestor can be resolved, retain the original spelling rather
+  # than invent a relationship to an unrelated directory.
+  normalizeWriteRoot(path)
+
+proc canonicalPolicyRoots(roots: openArray[string]): seq[string] =
+  var seen = initHashSet[string]()
+  for root in roots:
+    result.addUnique(seen, canonicalPolicyPath(root))
+
 proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## Each ignored prefix, in BOTH the spelling the recipe wrote and the
   ## spelling the kernel reports, because those are routinely not the same
@@ -9111,11 +9141,10 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## it missed too. Measured: every one of those paths was recorded under
   ## `/private/tmp`, and not one under `/tmp`.
   ##
-  ## Resolved once per root rather than per observed path: there are a
-  ## handful of roots and tens of thousands of paths, and resolving the
-  ## latter would put a syscall on the hot comparison. A root that does not
-  ## exist yet simply contributes its literal spelling, which is what it
-  ## does today.
+  ## Keep both emitted spellings for callers of the prefix set. Policy
+  ## comparisons canonicalize both the roots and observed paths, so a
+  ## physical prefix also covers logical observations, including missing
+  ## descendants beneath an existing symlinked directory.
   ##
   ## Only an ABSOLUTE root is resolved. ``expandFilename`` resolves a relative
   ## path against THIS PROCESS's working directory, which is not the action's
@@ -9309,6 +9338,11 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
       return true
 
+proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool =
+  ## Roots have already been canonicalized once by the caller. Avoid any
+  ## filesystem resolution when the action has no ignored roots.
+  roots.len > 0 and canonicalPolicyPath(path).isUnderAnyRoot(roots)
+
 const
   MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
   CompilerWrapperScratchPrefixes = ["cc-params.", "ld-params."]
@@ -9444,7 +9478,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # self-written set applies to the ENUMERATION channel only — see
   # `enumerationIgnoredRoots` for the whole argument, and for the shipped
   # recipe that makes the difference load-bearing.
-  let ignoredRoots = action.ignoredInputRoots()
+  let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
   let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
@@ -9461,7 +9495,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9472,7 +9507,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9483,7 +9519,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9653,10 +9690,14 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
   ##   stays exempt through ``selfWrittenOutputKeys`` either way, so all
   ##   this costs is that its undeclared NEIGHBOURS are seen again.
   ##
+  ## Both sides of coverage resolve symlinks, including the existing parent
+  ## of an absent product. Comparing only the prefix's resolved spelling
+  ## would let it escape disqualification against a logical product path.
+  ##
   ## Note the asymmetry with ``ignoredInputRoots``' use in
   ## ``cacheInputPaths``: this side materializes the prefix against
-  ## ``action.cwd`` while the input side compares raw, so a RELATIVE prefix
-  ## is honoured here and inert there. That difference is deliberate and it
+  ## ``action.cwd`` while the input side leaves relative roots raw, so a
+  ## RELATIVE prefix is honoured here and inert there. That difference is deliberate and it
   ## is this side that is right — a recipe spells its scratch directory the
   ## way it spells its outputs, and a declaration the author wrote must not
   ## be honoured or ignored depending on whether they happened to write it
@@ -9681,7 +9722,7 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
     ## product?", where a MISSED match re-enables the exemption and loses
     ## the product. Folding is the fail-closed direction here and the
     ## strict spelling is the fail-closed direction there.
-    let normalized = normalizeWriteRoot(path)
+    let normalized = canonicalPolicyPath(path)
     when defined(windows): normalized.toLowerAscii()
     else: normalized
 
@@ -9695,8 +9736,9 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
     let normalized = coverageKey(materialPath(action.cwd, output))
     if normalized.len > 0:
       productFiles.add(normalized)
+  var seenPrefixes = initHashSet[string]()
   for raw in action.ignoredInputRoots():
-    let materialized = materialPath(action.cwd, raw)
+    let materialized = canonicalPolicyPath(materialPath(action.cwd, raw))
     let prefix = coverageKey(materialized)
     if prefix.len == 0:
       continue
@@ -9712,7 +9754,7 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
           break
     if covers:
       continue
-    result.add(materialized)
+    result.addUnique(seenPrefixes, materialized)
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -9779,7 +9821,7 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
     let path = materialPath(action.cwd, write)
     if selfWritten.contains(path.replace('\\', '/')):
       continue
-    if path.isUnderAnyRoot(derivedRoots):
+    if path.isUnderCanonicalPolicyRoot(derivedRoots):
       continue
     if dirExists(path) or not fileExists(path):
       continue
@@ -9796,7 +9838,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   ## one either, or the record would carry membership for something it does
   ## not record at all.
   let toolRoots = action.toolInputRoots()
-  let ignoredRoots = action.enumerationIgnoredRoots()
+  let ignoredRoots = canonicalPolicyRoots(action.enumerationIgnoredRoots())
   let selfWrittenDirs = action.selfWrittenDirectoryKeys()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
@@ -9808,7 +9850,8 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     if declaredMaterialized.contains(path.replace('\\', '/')):
       result.addUnique(seen, path)
       continue
-    if path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots):
+    if path.isUnderAnyRoot(toolRoots) or
+        path.isUnderCanonicalPolicyRoot(ignoredRoots):
       continue
     # The action's OWN output directory: its entry list changed because this
     # action added an entry to it, so the membership digest is derived state
