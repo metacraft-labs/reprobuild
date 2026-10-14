@@ -208,7 +208,7 @@
         # identity where it touches the descriptor instead of once per record,
         # and the Linux close hook lets a tracee's close of a replaced
         # descriptor number reach the kernel.
-      url = "github:metacraft-labs/io-mon/295a2e518325440698de013663dab8deeef1dc19";
+      url = "github:metacraft-labs/io-mon/2a354db93e60f165e2d9feb86396b7e3950aae65";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -343,9 +343,10 @@
       #
       # f51e0ab advances the workspace pin with Windows injection diagnostics;
       # the Darwin source is unchanged.
-      # 6522766 is the promotion merge with the same tree as f51e0ab.
-      # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/6522766fb87f60efb503550042f4f066e2a86a9e";
+      # 600f2a8 additionally carries caller/target Windows injection diagnostics.
+      # Keep this pin aligned with the synced, published workspace dependency;
+      # the pre-push gate rejects a pin that lags that checkout.
+      url = "github:metacraft-labs/nim-stackable-hooks/600f2a80c9e582e860d36be20c04b9c74263458d";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

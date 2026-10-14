@@ -265,9 +265,15 @@ suite "a withheld cache publish is attributable from one run":
         let probe = work / "probe.txt"
         writeFile(probe, "one")
 
+        # `-fno-temp-file`: without it clang writes `-o` through a temporary
+        # whose name libLLVM draws with `arc4random`. io-mon reports that
+        # draw, so this unblessed edge would withhold its first publish and
+        # the warm run would find no record at all, not a non-matching one.
+        # The flag is clang-only; a non-SIP `cc` on macOS is a clang.
         proc g(): BuildGraph =
           graph([action("candidate-count",
-            @[nonSip, "-E", "-x", "c", probe, "-o", work / "out.i"],
+            @[nonSip, "-fno-temp-file", "-E", "-x", "c", probe, "-o",
+              work / "out.i"],
             cwd = work, inputs = [probe], outputs = [work / "out.i"],
             cacheable = true,
             governingLockIdentity = lockIdentityOutsideSolvedGraph())])

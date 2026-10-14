@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1989,
+    "nimTestBinaries": 1990,
     "pureUnitConsolidationGroups": 54,
-    "pureUnitTests": 616,
+    "pureUnitTests": 617,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 2007
+    "testEntries": 2008
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -602,7 +602,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_interface_artifacts",
@@ -611,7 +611,8 @@
       "owner": "libs/repro_tool_profiles",
       "sources": [
         "libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim",
-        "libs/repro_tool_profiles/tests/t_realization_selection.nim"
+        "libs/repro_tool_profiles/tests/t_realization_selection.nim",
+        "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1165,7 +1166,7 @@
       "graph-fixture": 15,
       "integration": 1091,
       "platform/destructive": 126,
-      "pure unit": 616,
+      "pure unit": 617,
       "unclassified": 159
     },
     "graphOwnedTestArtifacts": [
@@ -1356,9 +1357,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1989,
+    "nimTestBinaryCount": 1990,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2007
+    "testEntryCount": 2008
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3899,7 +3900,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFixtureProvider",
           "executedVariables": [],
-          "line": 36,
+          "line": 52,
           "path": "tests/integration/t_dev_env_artifact.nim",
           "patterns": [
             "repro-extract-interface"
@@ -3915,7 +3916,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFixtureProvider",
           "executedVariables": [],
-          "line": 38,
+          "line": 54,
           "path": "tests/integration/t_dev_env_artifact.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -18001,6 +18002,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_uses_realization_version_range",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_zip_extraction_cost_does_not_scale_with_progress_records",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -28443,7 +28462,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_dev_env_artifact.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
