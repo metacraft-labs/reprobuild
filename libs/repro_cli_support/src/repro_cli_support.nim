@@ -8998,10 +8998,17 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
   var cache = openActionCache(sharedRoot / "action-cache")
   defer:
     cache.flushHotIndex()
-  let record = cache.recordActionResult(cas, regenerationAction.weakFingerprint,
-    regenerationAction.actionCachePolicy, regenerationAction.inputs,
-    regenerationAction.outputs, regenerationAction.cwd,
-    storeOutputBlobs = false)
+  let record =
+    try:
+      cache.recordActionResult(cas, regenerationAction.weakFingerprint,
+        regenerationAction.actionCachePolicy, regenerationAction.inputs,
+        regenerationAction.outputs, regenerationAction.cwd,
+        storeOutputBlobs = false)
+    except UnreadableInputError:
+      # An input this content-keyed record would need cannot be read, so
+      # there is no record to seed: report "not seeded" and let the edge
+      # run, rather than failing the build over an observed file's state.
+      return false
   writeActionResultRecordFile(
     dependencyEvidencePath(cmakeCacheRoot, regenerationAction.id), record)
   true

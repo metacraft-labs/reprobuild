@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1930,
+    "nimTestBinaries": 1931,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 607,
     "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1947
+    "testEntries": 1948
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1111,7 +1111,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 1052,
+      "integration": 1053,
       "platform/destructive": 120,
       "pure unit": 607,
       "unclassified": 157
@@ -1292,9 +1292,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1930,
+    "nimTestBinaryCount": 1931,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1947
+    "testEntryCount": 1948
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12210,7 +12210,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_local_store",
       "requiresReproBinary": false,
@@ -26944,6 +26945,23 @@
       "source": "tests/integration/t_daemon_parent_prewarm_e2e.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dangling_symlink_in_observed_directory_does_not_abort",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_dangling_symlink_in_observed_directory_does_not_abort.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

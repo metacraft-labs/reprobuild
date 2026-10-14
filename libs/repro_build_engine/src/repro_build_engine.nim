@@ -3378,6 +3378,25 @@ proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
       text.add(". " & causeNote)
     result.results[resultIndex].cachePublishSkipReason = text
 
+proc traceUnreadableInput(result: var BuildRunResult; actionId: string;
+                          resultIndex: int; detail: string) =
+  ## The action succeeded, but one of its observed inputs has content a
+  ## content-keyed record needs and cannot read (`UnreadableInputError`).
+  ##
+  ## This is the "make it non-cacheable" arm of Monitor-Hook-Shim.md
+  ## §"Failure Semantics", taken at publish time: the outputs stand, nothing
+  ## is published, and the edge re-executes next build. It used to be the
+  ## other arm by accident -- the read's `IOError` escaped the publish and
+  ## failed the whole build, so one unreadable path the monitor happened to
+  ## observe (a stale link in a listed directory) broke every build on the
+  ## host. Failing an exit-0 action to punish its evidence is exactly what
+  ## that section rules out.
+  result.trace(actionId, "cache-skip-unreadable-input",
+    "action-cache publication skipped; " & detail)
+  if resultIndex >= 0 and resultIndex < result.results.len:
+    result.results[resultIndex].cachePublishSkipReason =
+      "reasons=unreadable-input; " & detail
+
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
 
@@ -18771,37 +18790,40 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # Cache ineligibility withholds publication, not successful outputs.
             if action.cacheable and (not evidence.disableCacheHits or
                 determinismProbeAdmits(action, evidence)):
-              let recordStart = statStart()
-              let storeOutputBlobs =
-                storeOutputBlobsFor(action, evidence.evidence)
-              let record = cache.recordActionResult(cas.inner,
-                action.weakFingerprint,
-                action.actionCachePolicy,
-                action.recordedInputNames(
-                  action.cacheInputPaths(evidence.evidence)),
-                action.outputs, action.cwd,
-                storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache,
-                envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                # An elevated edge reaches this site instead of the
-                # monitored one, and it used to record every directory
-                # input with NO membership digest. That is not "less
-                # precise": a recorded `mtimeNs = 0` means "not
-                # membership-tracked", such a directory is never
-                # re-listed, and the hit path does not re-record — so the
-                # record was PERMANENTLY existence-only
-                # (Incremental-Invalidation.md:814-821). The evidence was
-                # already collected two lines up; only the hand-off was
-                # missing.
-                enumeratedDirectories = action.recordedInputNames(
-                  action.cacheEnumeratedDirectories(evidence.evidence)),
-                determinism = entryDeterminismFor(config, action))
-              finishStat("repro cache record", recordStart)
-              writeActionResultRecordFile(
-                dependencyEvidencePath(cacheRoot, action.id), record)
-              recordPortableFingerprint(idx, action, evidence.evidence, record)
-              publishPeerCacheBundle(action.weakFingerprint, record)
-              publishBinaryCacheBundle(action, record)
+              try:
+                let recordStart = statStart()
+                let storeOutputBlobs =
+                  storeOutputBlobsFor(action, evidence.evidence)
+                let record = cache.recordActionResult(cas.inner,
+                  action.weakFingerprint,
+                  action.actionCachePolicy,
+                  action.recordedInputNames(
+                    action.cacheInputPaths(evidence.evidence)),
+                  action.outputs, action.cwd,
+                  storeOutputBlobs = storeOutputBlobs,
+                  metadataCache = addr fileMetadataCache,
+                  envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+                  # An elevated edge reaches this site instead of the
+                  # monitored one, and it used to record every directory
+                  # input with NO membership digest. That is not "less
+                  # precise": a recorded `mtimeNs = 0` means "not
+                  # membership-tracked", such a directory is never
+                  # re-listed, and the hit path does not re-record — so the
+                  # record was PERMANENTLY existence-only
+                  # (Incremental-Invalidation.md:814-821). The evidence was
+                  # already collected two lines up; only the hand-off was
+                  # missing.
+                  enumeratedDirectories = action.recordedInputNames(
+                    action.cacheEnumeratedDirectories(evidence.evidence)),
+                  determinism = entryDeterminismFor(config, action))
+                finishStat("repro cache record", recordStart)
+                writeActionResultRecordFile(
+                  dependencyEvidencePath(cacheRoot, action.id), record)
+                recordPortableFingerprint(idx, action, evidence.evidence, record)
+                publishPeerCacheBundle(action.weakFingerprint, record)
+                publishBinaryCacheBundle(action, record)
+              except UnreadableInputError as err:
+                runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
             elif action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(id, evidence,
                 idToIndex.resultIndex(id),
@@ -18977,45 +18999,48 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # Cache ineligibility withholds publication, not successful outputs.
             if plan.action.cacheable and (not evidence.disableCacheHits or
                 determinismProbeAdmits(plan.action, evidence)):
-              let recordStart = statStart()
-              # Peer-Cache M1: when a publisher closure is set, force
-              # output-blob retention so the publisher can read the
-              # blob payloads back out of the local CAS. The
-              # publisher-less path (legacy CLI default) keeps the
-              # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
-              # M9.L.4-refactor Step A: ALSO force retention when the
-              # binary-cache publisher is configured AND this action
-              # opted into publishing — the publish hook guards on
-              # ``outputPayloadKind == opkCasBlobs`` and would
-              # silently skip otherwise.
-              let storeOutputBlobs =
-                storeOutputBlobsFor(plan.action, evidence.evidence)
-              let record = cache.recordActionResult(cas.inner,
-                plan.action.weakFingerprint,
-                plan.action.actionCachePolicy,
-                plan.action.recordedInputNames(
-                  plan.action.cacheInputPaths(evidence.evidence)),
-                plan.action.outputs, plan.action.cwd,
-                storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache,
-                envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                # Same omission as the elevated site above, reached by
-                # builtin edges and by anything whose plan is not a
-                # `bakProcess`. A builtin cannot be wrapped in the
-                # io-monitor, so its enumeration evidence arrives either
-                # from a converter path set or from a monitor depfile a
-                # direct engine caller prewired — both of which
-                # `collectEvidence` has already folded by this point.
-                enumeratedDirectories = plan.action.recordedInputNames(
-                  plan.action.cacheEnumeratedDirectories(evidence.evidence)),
-                determinism = entryDeterminismFor(config, plan.action))
-              finishStat("repro cache record", recordStart)
-              writeActionResultRecordFile(
-                dependencyEvidencePath(cacheRoot, plan.action.id), record)
-              recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                record)
-              publishPeerCacheBundle(plan.action.weakFingerprint, record)
-              publishBinaryCacheBundle(plan.action, record)
+              try:
+                let recordStart = statStart()
+                # Peer-Cache M1: when a publisher closure is set, force
+                # output-blob retention so the publisher can read the
+                # blob payloads back out of the local CAS. The
+                # publisher-less path (legacy CLI default) keeps the
+                # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
+                # M9.L.4-refactor Step A: ALSO force retention when the
+                # binary-cache publisher is configured AND this action
+                # opted into publishing — the publish hook guards on
+                # ``outputPayloadKind == opkCasBlobs`` and would
+                # silently skip otherwise.
+                let storeOutputBlobs =
+                  storeOutputBlobsFor(plan.action, evidence.evidence)
+                let record = cache.recordActionResult(cas.inner,
+                  plan.action.weakFingerprint,
+                  plan.action.actionCachePolicy,
+                  plan.action.recordedInputNames(
+                    plan.action.cacheInputPaths(evidence.evidence)),
+                  plan.action.outputs, plan.action.cwd,
+                  storeOutputBlobs = storeOutputBlobs,
+                  metadataCache = addr fileMetadataCache,
+                  envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+                  # Same omission as the elevated site above, reached by
+                  # builtin edges and by anything whose plan is not a
+                  # `bakProcess`. A builtin cannot be wrapped in the
+                  # io-monitor, so its enumeration evidence arrives either
+                  # from a converter path set or from a monitor depfile a
+                  # direct engine caller prewired — both of which
+                  # `collectEvidence` has already folded by this point.
+                  enumeratedDirectories = plan.action.recordedInputNames(
+                    plan.action.cacheEnumeratedDirectories(evidence.evidence)),
+                  determinism = entryDeterminismFor(config, plan.action))
+                finishStat("repro cache record", recordStart)
+                writeActionResultRecordFile(
+                  dependencyEvidencePath(cacheRoot, plan.action.id), record)
+                recordPortableFingerprint(idx, plan.action, evidence.evidence,
+                  record)
+                publishPeerCacheBundle(plan.action.weakFingerprint, record)
+                publishBinaryCacheBundle(plan.action, record)
+              except UnreadableInputError as err:
+                runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
             elif plan.action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(finished.id, evidence,
                 idToIndex.resultIndex(finished.id),
@@ -19599,28 +19624,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # Cache ineligibility withholds publication, not successful outputs.
         if action.cacheable and (not evidence.disableCacheHits or
             determinismProbeAdmits(action, evidence)):
-          let recordStart = statStart()
-          # M9.L.4-refactor Step A: force output-blob retention when
-          # either the peer-cache publisher OR the binary-cache
-          # publisher (with this action opted in) needs to read the
-          # blob payloads back out of the local CAS.
-          let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
-          let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
-            action.actionCachePolicy,
-            action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
-            action.outputs, action.cwd,
-            storeOutputBlobs = storeOutputBlobs,
-            metadataCache = addr fileMetadataCache,
-            envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-            enumeratedDirectories = action.recordedInputNames(
-              action.cacheEnumeratedDirectories(evidence.evidence)),
-            determinism = entryDeterminismFor(config, action))
-          finishStat("repro cache record", recordStart)
-          writeActionResultRecordFile(
-            dependencyEvidencePath(cacheRoot, action.id), record)
-          recordPortableFingerprint(idx, action, evidence.evidence, record)
-          publishPeerCacheBundle(action.weakFingerprint, record)
-          publishBinaryCacheBundle(action, record)
+          try:
+            let recordStart = statStart()
+            # M9.L.4-refactor Step A: force output-blob retention when
+            # either the peer-cache publisher OR the binary-cache
+            # publisher (with this action opted in) needs to read the
+            # blob payloads back out of the local CAS.
+            let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
+            let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
+              action.actionCachePolicy,
+              action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
+              action.outputs, action.cwd,
+              storeOutputBlobs = storeOutputBlobs,
+              metadataCache = addr fileMetadataCache,
+              envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+              enumeratedDirectories = action.recordedInputNames(
+                action.cacheEnumeratedDirectories(evidence.evidence)),
+              determinism = entryDeterminismFor(config, action))
+            finishStat("repro cache record", recordStart)
+            writeActionResultRecordFile(
+              dependencyEvidencePath(cacheRoot, action.id), record)
+            recordPortableFingerprint(idx, action, evidence.evidence, record)
+            publishPeerCacheBundle(action.weakFingerprint, record)
+            publishBinaryCacheBundle(action, record)
+          except UnreadableInputError as err:
+            runResult.traceUnreadableInput(finished.id, idx, err.msg)
         elif action.cacheable and evidence.disableCacheHits:
           runResult.traceCacheIneligibility(finished.id, evidence, idx,
             unobservableRootImageNote(action, unsafeAddr config))

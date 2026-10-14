@@ -10287,6 +10287,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_dangling_symlink_in_observed_directory_does_not_abort.nim",
+    binary: "build/test-bin/t_dangling_symlink_in_observed_directory_does_not_abort",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_declared_daemon_ipc_trust.nim",
     binary: "build/test-bin/t_declared_daemon_ipc_trust",
     defines: @[],
