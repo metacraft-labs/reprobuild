@@ -171,6 +171,28 @@ type
 ## than printing an empty result; a non-zero exit is surfaced here as a raised
 ## exception rather than as an empty `targetJson`, so no caller can mistake
 ## "the target refused to run" for "the target ran and observed nothing".
+proc describeChildFate(process: Process): string =
+  ## What became of the target, for a message raised by a FAILED socket read.
+  ##
+  ## A crashed target presents to the coordinator as an EOF on the agent
+  ## socket, and both read sites below only reach the exit code AFTER the
+  ## delivery call -- so an exception there used to discard the child's fate
+  ## entirely and leave an `IOError` about an IPC header as the whole story. A
+  ## SIGSEGV hid behind that for a day and cost a filed issue a wrong cause.
+  let output =
+    try: process.outputStream.readAll()
+    except CatchableError: ""
+  let code =
+    try: process.waitForExit()
+    except CatchableError: -1
+  try: process.close()
+  except CatchableError: discard
+  result = "; target exited " & $code
+  if code > 128:
+    result.add " (signal " & $(code - 128) & ")"
+  if output.len > 0:
+    result.add ":\n" & output
+
 proc runReload*(repoRoot, targetBin, socketName: string;
                 request: HcrPatchRequest;
                 managedTypes: openArray[string] = [];
@@ -197,7 +219,11 @@ proc runReload*(repoRoot, targetBin, socketName: string;
     env = env, options = {poStdErrToStdOut})
   var connection = acceptHcrAgentConnection(listener)
   var client = initHcrCoordinatorClient(SupportProfile)
-  result.delivery = client.deliverPatchRequest(connection, request)
+  try:
+    result.delivery = client.deliverPatchRequest(connection, request)
+  except CatchableError as err:
+    connection.close()
+    raise newException(IOError, err.msg & describeChildFate(process))
   connection.close()
 
   result.targetOutput = process.outputStream.readAll()
@@ -253,7 +279,11 @@ proc runReloadTimed*(repoRoot, targetBin, socketName: string;
   var connection = acceptHcrAgentConnection(listener)
   var client = initHcrCoordinatorClient(SupportProfile)
   let started = getMonoTime()
-  result.run.delivery = client.deliverPatchRequest(connection, request)
+  try:
+    result.run.delivery = client.deliverPatchRequest(connection, request)
+  except CatchableError as err:
+    connection.close()
+    raise newException(IOError, err.msg & describeChildFate(process))
   result.coordinatorWaitMs =
     int(inMilliseconds(getMonoTime() - started))
   connection.close()
