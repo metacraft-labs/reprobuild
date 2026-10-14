@@ -647,7 +647,7 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     check readFile(path) == bytes
 
   test "(i) a reaper that never succeeds becomes a readable health finding":
-    ## §4.4 "a persistently failing reaper is a health finding".
+    ## §4.5 "a persistently failing reaper is a health finding".
     ##
     ## Cases (e) and (f) prove the tick reports a stuck record ONCE instead of
     ## on every tick. That is the right fix for the 62 MB of repeated log lines
