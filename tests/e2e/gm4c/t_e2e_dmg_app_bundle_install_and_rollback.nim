@@ -63,6 +63,17 @@
 ## attached. A second home is used because re-applying in the first one
 ## would be a no-op of the placed bundle, never reaching placement.
 ##
+## Rollback refusal: the earlier generation's bundle in the STORE is
+## changed after that generation was superseded, and the rollback that would
+## re-place it fails with the structured `ERollbackAppBundleFailed` naming
+## the package, the resource address, the bundle, the target and the failed
+## check -- not a bare `EAppBundleRefused` -- and changes nothing: the
+## current generation's bundle is still placed (the user is never left with
+## neither version), a file resource the rollback would have removed is still
+## there (every re-placed bundle is staged and verified before ANY rollback
+## operation runs), no staging directory is left, `current` does not move,
+## and no disk image is attached.
+##
 ## Never touches the real `~/Applications` or `/Applications`: the apply's
 ## home is a temporary directory.
 
@@ -141,12 +152,19 @@ when defined(macosx):
       sourceFile: currentSourcePath(), sourceLine: 3,
       tarballProvisioning: @[bad]))
 
-  proc writeProfile(root: string; packages: openArray[string]) =
+  proc writeProfile(root: string; packages: openArray[string];
+                    marker = "") =
+    ## ``marker``, when set, adds an `fs.userFile` resource writing it to
+    ## `~/.gm4c-marker`.
     var text = "import repro/profile\n\nprofile \"gm4cApps\":\n" &
       "  adapterPreference:\n    darwin: [tarball]\n\n" &
       "  activity default:\n"
     for p in packages:
       text.add("    " & p & "\n")
+    if marker.len > 0:
+      text.add("\n  resources:\n    fs.userFile marker:\n" &
+        "      hostFile = \"~/.gm4c-marker\"\n" &
+        "      content = \"" & marker & "\"\n")
     writeFile(root / "profile" / "home.nim", text)
 
   proc applyOptions(root: string; at: int64): ApplyOptions =
@@ -406,5 +424,82 @@ when defined(macosx):
         placedApp(first))) == identityV1
       removeDir(second)
       removeDir(first)
+
+    test "a rollback whose earlier bundle fails verification fails with " &
+        "a structured error and leaves the current generation intact":
+      let root = newRoot("rollback-refused")
+      withApplyEnv(root):
+        # Generation B: v1. Generation C: v2 plus a file resource, which a
+        # rollback to B would remove.
+        registerFixtures("1.0.0")
+        writeProfile(root, ["gm4cbase", "gm4capp"])
+        let genB = runApply(applyOptions(root, 1000))
+        check genB.kind == aokFreshApplied
+        registerFixtures("2.0.0")
+        writeProfile(root, ["gm4cbase", "gm4capp"], marker = "from C")
+        var upgrade = applyOptions(root, 2000)
+        upgrade.relock = true
+        let genC = runApply(upgrade)
+        check genC.kind == aokFreshApplied
+        let app = placedApp(root)
+        let marker = root / "home" / ".gm4c-marker"
+        check appBundleCanonicalBytes(readAppBundleIdentity(app)) ==
+          identityV2
+        check readFile(marker) == "from C"
+        # Change a sealed resource of B's bundle in the store (v1's prefix).
+        var storeV1 = ""
+        block:
+          var store = openStore(root / "store")
+          defer: store.close()
+          for row in listPrefixes(store):
+            let bundle = store.absolutePrefixPath(row.realizedPath) /
+              (AppName & ".app")
+            if row.packageName == "gm4capp" and
+                plistValue(bundle, "CFBundleShortVersionString") == "1.0.0":
+              storeV1 = bundle
+        check storeV1.len > 0 and dirExists(storeV1)
+        let payload = storeV1 / "Contents" / "Resources" / "payload.txt"
+        setFilePermissions(payload, {fpUserRead, fpUserWrite})
+        setFilePermissions(payload.parentDir,
+          {fpUserRead, fpUserWrite, fpUserExec})
+        tamperFixtureApp(storeV1)
+
+        var refused = false
+        try:
+          discard runRollback(RollbackOptions(stateDir: root / "state",
+            storeRoot: root / "store", homeDir: root / "home",
+            targetGenerationId: genB.generationIdHex,
+            activationTimestamp: 3000))
+        except ERollbackAppBundleFailed as err:
+          refused = true
+          checkpoint err.msg
+          check err.packageId == "gm4capp"
+          check err.resourceAddress == "home.package.gm4capp.app"
+          check err.bundleName == AppName & ".app"
+          check err.targetPath == app
+          check err.check == "signature"
+          check err.targetGenerationIdHex == genB.generationIdHex
+          check "package gm4capp" in err.msg
+          check "signature check" in err.msg
+          check "sealed resource" in err.msg
+        except CatchableError as err:
+          checkpoint "unstructured failure: " & $err.name & ": " & err.msg
+        check refused
+        # The current generation is intact: still active, its bundle (v2)
+        # in place, its file resource not removed, nothing staged beside
+        # the bundle, no disk image attached.
+        check readCurrentGenerationId(root / "state") == genC.generationIdHex
+        check dirExists(app)
+        check appBundleCanonicalBytes(readAppBundleIdentity(app)) ==
+          identityV2
+        check fileExists(marker) and readFile(marker) == "from C"
+        var entries: seq[string] = @[]
+        for kind, path in walkDir(root / "home" / "Applications",
+            relative = true):
+          entries.add(path)
+        check entries == @[AppName & ".app"]
+        check attachedImagesOf(dmgV1).len == 0
+        check attachedImagesOf(dmgV2).len == 0
+      removeDir(root)
 
   removeDir(fixtureRoot)

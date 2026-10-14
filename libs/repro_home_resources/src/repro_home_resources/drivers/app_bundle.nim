@@ -18,8 +18,9 @@
 ##   — what the resource lifecycle digests: identifier, versions, team and
 ##   the code-directory hash of the main executable. Cheap: it reads the
 ##   signature, it does not re-verify the bundle;
-## * **placement** (``placeAppBundle`` / ``removeAppBundle``) — stage,
-##   verify the staged copy, then rename it into place. Refusal places
+## * **placement** (``placeAppBundle`` / ``removeAppBundle``, and the two
+##   halves of placement, ``stageAppBundle`` / ``commitStagedAppBundle``) —
+##   stage, verify the staged copy, then rename it into place. Refusal places
 ##   nothing. A bundle at the target path that Reprobuild did not place is
 ##   never overwritten.
 ##
@@ -372,6 +373,129 @@ proc verifyPinnedAppBundle*(bundlePath: string;
       "generation recorded.\nrecorded:\n" & pinnedText & "observed:\n" &
       observedText)
 
+type
+  StagedAppBundle* = object
+    ## A verified copy of a bundle waiting beside its target
+    ## (``stageAppBundle``). It is either renamed into place
+    ## (``commitStagedAppBundle``) or discarded (``discardStagedAppBundle``);
+    ## until then the target is exactly as it was.
+    target*: string            ## ``applicationsDir / bundleName``
+    identity*: AppBundleIdentity
+      ## What the staged copy carries (verified).
+    applicationsDir: string
+    stagingDir: string         ## private directory holding the staged copy
+    retiredDir: string         ## where a replaced bundle is moved aside
+    createdDir: bool           ## staging created ``applicationsDir``
+
+proc dropDirIfCreatedAndEmpty(staged: StagedAppBundle) =
+  ## Remove the Applications directory when staging created it and nothing
+  ## else is in it, so a refused placement leaves the filesystem as it found
+  ## it. Never removes a directory that holds anything (another bundle
+  ## staged by the same caller, or a file someone else put there).
+  if not staged.createdDir or not dirExists(staged.applicationsDir):
+    return
+  for _ in walkDir(staged.applicationsDir):
+    return
+  try: removeDir(staged.applicationsDir, checkDir = false)
+  except OSError: discard
+
+proc discardStagedAppBundle*(staged: StagedAppBundle) =
+  ## Drop a staged copy that will not be placed. The target is untouched.
+  ## Several bundles staged into one newly created Applications directory
+  ## must be discarded in the reverse order of staging for that directory
+  ## to be removed (only the first staging created it).
+  try: removeTree(staged.stagingDir) except CatchableError: discard
+  dropDirIfCreatedAndEmpty(staged)
+
+proc stageAppBundle*(source, applicationsDir, bundleName: string;
+                     expected: AppBundleExpectation;
+                     policy: AppTrustPolicy = {};
+                     managedPrior = false;
+                     pinned: seq[byte] = @[]): StagedAppBundle =
+  ## The first half of ``placeAppBundle``: copy ``source`` beside
+  ## ``applicationsDir / bundleName`` and verify the copy, without touching
+  ## the target. Raises (``EAppBundleCollision``, ``EAppBundleRefused``,
+  ## ``EAppBundlePlacement``) with nothing left behind: no staged copy and
+  ## no Applications directory this call created. Verification is as
+  ## documented on ``placeAppBundle``.
+  ##
+  ## A caller placing several bundles stages them all first and commits
+  ## only when every one verified, so a refusal of any bundle changes none
+  ## (rollback does this). Each bundle has its own staging directory, so
+  ## several can be staged into one Applications directory at once.
+  if bundleName.len == 0 or '/' in bundleName or bundleName == "." or
+      bundleName == ".." or not bundleName.endsWith(".app"):
+    var e = newException(EAppBundlePlacement, "invalid bundle name " &
+      bundleName.escape)
+    e.targetPath = applicationsDir / bundleName
+    raise e
+  let target = applicationsDir / bundleName
+  if pathPresent(target) and not managedPrior:
+    var e = newException(EAppBundleCollision, target.escape & " already " &
+      "exists and was not placed by Reprobuild; refusing to replace it. " &
+      "Remove or rename it, or claim it with `repro home adopt`.")
+    e.targetPath = target
+    raise e
+  # Staging and retired copies keep the bundle's OWN name, inside private
+  # directories beside the target (same volume, so the final moves are
+  # renames). The name matters: a bundle whose `CFBundleExecutable` is empty
+  # (DB Browser for SQLite ships one) has its main executable found from the
+  # bundle's directory name, so a renamed copy is "not signed at all". The
+  # directories are per bundle so that several bundles can be staged at
+  # once.
+  let workRoot = applicationsDir / (".repro-" & $getCurrentProcessId() &
+    "-" & bundleName.changeFileExt(""))
+  result = StagedAppBundle(target: target, applicationsDir: applicationsDir,
+    stagingDir: workRoot & ".staging", retiredDir: workRoot & ".old",
+    createdDir: not dirExists(applicationsDir))
+  let staging = result.stagingDir / bundleName
+  try:
+    createDir(applicationsDir)
+    removeTree(result.stagingDir)
+    removeTree(result.retiredDir)
+    createDir(result.stagingDir)
+    copyBundle(source, staging)
+    makeOwnerWritable(staging)
+    if expected.teamId.len == 0 and pinned.len > 0:
+      result.identity = verifyPinnedAppBundle(staging, pinned)
+    else:
+      result.identity = verifyAppBundle(staging, expected, policy)
+      if pinned.len > 0:
+        discard verifyPinnedAppBundle(staging, pinned)
+  except CatchableError:
+    discardStagedAppBundle(result)
+    raise
+
+proc commitStagedAppBundle*(staged: StagedAppBundle): AppBundleIdentity =
+  ## The second half of ``placeAppBundle``: rename the staged copy into
+  ## place. A bundle already at the target is first moved aside and is
+  ## removed only after the staged copy is in place, so the target never
+  ## holds neither. A failed rename puts the moved-aside bundle back and
+  ## raises ``EAppBundlePlacement``.
+  let bundleName = extractFilename(staged.target)
+  let staging = staged.stagingDir / bundleName
+  let retired = staged.retiredDir / bundleName
+  var movedAside = false
+  try:
+    if pathPresent(staged.target):
+      createDir(staged.retiredDir)
+      moveDir(staged.target, retired)
+      movedAside = true
+    moveDir(staging, staged.target)
+  except OSError as err:
+    if movedAside and not pathPresent(staged.target):
+      try: moveDir(retired, staged.target) except OSError: discard
+    try: removeTree(staged.retiredDir) except CatchableError: discard
+    discardStagedAppBundle(staged)
+    var e = newException(EAppBundlePlacement, "could not move " &
+      staging.escape & " into place at " & staged.target.escape & ": " &
+      err.msg)
+    e.targetPath = staged.target
+    raise e
+  removeTree(staged.stagingDir)
+  removeTree(staged.retiredDir)
+  staged.identity
+
 proc placeAppBundle*(source, applicationsDir, bundleName: string;
                      expected: AppBundleExpectation;
                      policy: AppTrustPolicy = {};
@@ -393,71 +517,10 @@ proc placeAppBundle*(source, applicationsDir, bundleName: string;
   ## pins the store bundle's identity, so the placed copy is the realized
   ## bundle). Rollback passes ``pinned`` with an empty ``expected.teamId``
   ## to verify against the recorded identity alone
-  ## (``verifyPinnedAppBundle``).
-  if bundleName.len == 0 or '/' in bundleName or bundleName == "." or
-      bundleName == ".." or not bundleName.endsWith(".app"):
-    var e = newException(EAppBundlePlacement, "invalid bundle name " &
-      bundleName.escape)
-    e.targetPath = applicationsDir / bundleName
-    raise e
-  let target = applicationsDir / bundleName
-  if pathPresent(target) and not managedPrior:
-    var e = newException(EAppBundleCollision, target.escape & " already " &
-      "exists and was not placed by Reprobuild; refusing to replace it. " &
-      "Remove or rename it, or claim it with `repro home adopt`.")
-    e.targetPath = target
-    raise e
-  # Remember whether this call creates the Applications directory, so a
-  # refused placement leaves the filesystem exactly as it found it.
-  let createdDir = not dirExists(applicationsDir)
-  createDir(applicationsDir)
-  proc dropCreatedDir() =
-    if createdDir:
-      try: removeDir(applicationsDir, checkDir = false) except OSError: discard
-  # Staging and retired copies keep the bundle's OWN name, inside private
-  # directories beside the target (same volume, so the final moves are
-  # renames). The name matters: a bundle whose `CFBundleExecutable` is empty
-  # (DB Browser for SQLite ships one) has its main executable found from the
-  # bundle's directory name, so a renamed copy is "not signed at all".
-  let workRoot = applicationsDir / (".repro-" & $getCurrentProcessId())
-  let stagingDir = workRoot & ".staging"
-  let retiredDir = workRoot & ".old"
-  let staging = stagingDir / bundleName
-  let retired = retiredDir / bundleName
-  removeTree(stagingDir)
-  removeTree(retiredDir)
-  createDir(stagingDir)
-  try:
-    copyBundle(source, staging)
-    makeOwnerWritable(staging)
-    if expected.teamId.len == 0 and pinned.len > 0:
-      result = verifyPinnedAppBundle(staging, pinned)
-    else:
-      result = verifyAppBundle(staging, expected, policy)
-      if pinned.len > 0:
-        discard verifyPinnedAppBundle(staging, pinned)
-  except CatchableError:
-    removeTree(stagingDir)
-    dropCreatedDir()
-    raise
-  var movedAside = false
-  try:
-    if pathPresent(target):
-      createDir(retiredDir)
-      moveDir(target, retired)
-      movedAside = true
-    moveDir(staging, target)
-  except OSError as err:
-    if movedAside and not pathPresent(target):
-      try: moveDir(retired, target) except OSError: discard
-    removeTree(stagingDir)
-    removeTree(retiredDir)
-    var e = newException(EAppBundlePlacement, "could not move " &
-      staging.escape & " into place at " & target.escape & ": " & err.msg)
-    e.targetPath = target
-    raise e
-  removeTree(stagingDir)
-  removeTree(retiredDir)
+  ## (``verifyPinnedAppBundle``). ``stageAppBundle`` followed by
+  ## ``commitStagedAppBundle``.
+  commitStagedAppBundle(stageAppBundle(source, applicationsDir, bundleName,
+    expected, policy, managedPrior, pinned))
 
 proc removeAppBundle*(targetPath: string) =
   ## Remove a bundle Reprobuild placed. The caller has established

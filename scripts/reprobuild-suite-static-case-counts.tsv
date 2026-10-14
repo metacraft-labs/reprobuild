@@ -306,7 +306,7 @@ libs/repro_home_apply/tests/test_m69_env_export.nim	nim	11
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	nim	4
 libs/repro_home_generations/tests/t_smoke_home_generations.nim	nim	7
 libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	32
-libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	18
+libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	5
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	163
@@ -860,7 +860,7 @@ tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim	nim	1
 tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	nim	6
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
-tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	4
+tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	5
 tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
