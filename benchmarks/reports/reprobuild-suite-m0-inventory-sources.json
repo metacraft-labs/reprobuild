@@ -7741,14 +7741,13 @@
       "localDependencyShape": [
         "io_mon",
         "repro_build_engine",
-        "repro_local_store",
         "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
