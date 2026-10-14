@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 119,
-    "testEntries": 2077
+    "testEntries": 2078
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1280,7 +1280,7 @@
       "integration": 1105,
       "platform/destructive": 126,
       "pure unit": 646,
-      "unclassified": 183
+      "unclassified": 184
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1477,8 +1477,8 @@
       }
     ],
     "nimTestBinaryCount": 2059,
-    "pythonTestFileCount": 18,
-    "testEntryCount": 2077
+    "pythonTestFileCount": 19,
+    "testEntryCount": 2078
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -44259,6 +44259,21 @@
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_release_smoke_dev_exec.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
