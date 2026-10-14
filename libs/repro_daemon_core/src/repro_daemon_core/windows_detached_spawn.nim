@@ -36,6 +36,15 @@
 ##
 ## The handles created here are closed again as soon as the child exists; the
 ## child holds its own duplicates.
+##
+## THE WORKING DIRECTORY IS THE SAME RULE APPLIED TO THE CURRENT DIRECTORY.
+## With `lpCurrentDirectory = nil` the child starts in the caller's current
+## directory, and Windows refuses to delete a directory that is some process's
+## current directory. A daemon started from a CMake `TryCompile-<id>` scratch
+## directory would keep it undeletable for its whole life (reprobuild-specs
+## issue 2026-10-14, "auto-started repro-daemon holds its starter's working
+## directory on Windows"). The caller therefore names the directory the child
+## starts in, and it must be one the child owns.
 
 when defined(windows):
   import std/[algorithm, os, strutils, winlean]
@@ -103,14 +112,17 @@ when defined(windows):
   proc spawnWithOwnStdio*(exe: string; args: openArray[string];
                           env: openArray[(string, string)];
                           inheritEnvironment: bool;
-                          logPath: string): int =
+                          logPath: string;
+                          workingDir: string): int =
     ## Start `exe args` with a hidden console, stdin from `NUL` and
     ## stdout/stderr appended to `logPath` (or `NUL` when it cannot be
-    ## opened), inheriting NO other handle of this process. The environment is
-    ## exactly `env` unless `inheritEnvironment` is true, in which case it is
-    ## this process's. Returns the child's pid; raises `OSError` when the
-    ## process cannot be created. The child is not waited for and no handle to
-    ## it is kept.
+    ## opened), inheriting NO other handle of this process, in `workingDir`
+    ## (an existing absolute directory; "" keeps this process's, which a
+    ## long-lived child must not do -- see the module comment). The
+    ## environment is exactly `env` unless `inheritEnvironment` is true, in
+    ## which case it is this process's. Returns the child's pid; raises
+    ## `OSError` when the process cannot be created. The child is not waited
+    ## for and no handle to it is kept.
     var commandLine = quoteShellWindows(exe)
     for arg in args:
       commandLine.add(' ')
@@ -171,8 +183,14 @@ when defined(windows):
     var spawned = PROCESS_INFORMATION()
     var applicationName = newWideCString(exe)
     var mutableCommandLine = newWideCString(commandLine)
+    # The wide string is held by a named variable for the whole call: a
+    # temporary would be destroyed right after its pointer was taken.
+    var currentDirectoryStorage = newWideCString(workingDir)
+    let currentDirectory: WideCString =
+      if workingDir.len > 0: toWideCString(currentDirectoryStorage) else: nil
     let created = createProcessExW(applicationName, mutableCommandLine,
-      nil, nil, 1, flags, environmentPointer, nil, addr startup, spawned)
+      nil, nil, 1, flags, environmentPointer, currentDirectory, addr startup,
+      spawned)
     if created == 0:
       raiseOSError(osLastError(), "CreateProcessW " & exe)
     discard closeHandle(spawned.hThread)

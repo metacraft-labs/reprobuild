@@ -421,6 +421,69 @@ proc absoluteNormalized(path: string): string =
   else:
     os.normalizedPath(getCurrentDir() / path)
 
+proc anchoredToCurrentDir(path: string): string =
+  ## ``path`` made absolute against THIS process's working directory. An
+  ## absolute path, and "", are returned byte-for-byte: the endpoint string is
+  ## also an identity (the systemd unit name and launchd label are derived
+  ## from it), so only a path that would otherwise change meaning is touched.
+  if path.len == 0 or path.isAbsolute: path
+  else: os.normalizedPath(getCurrentDir() / path)
+
+proc withAnchoredDaemonPaths(config: UserDaemonConfig): UserDaemonConfig =
+  ## ``config`` with every path the daemon process will read made absolute
+  ## here, against the caller's working directory.
+  ##
+  ## Required because the daemon does NOT start in the caller's working
+  ## directory (``daemonWorkingDirectory``): a relative ``--state-dir`` or
+  ## ``--log`` handed to it would be resolved against its state directory
+  ## instead, and a relative staged image path would not even execute. Also
+  ## applied by the daemon to its own flags, so that a daemon started by hand
+  ## with relative flags passes absolute ones to its dev self-restart.
+  result = config
+  if endpointKindOf(config.endpoint) == ekUnixSocket:
+    result.endpoint = anchoredToCurrentDir(config.endpoint)
+  result.stateDir = anchoredToCurrentDir(config.stateDir)
+  result.logPath = anchoredToCurrentDir(config.logPath)
+  result.daemonExe = anchoredToCurrentDir(config.daemonExe)
+  result.sourceExe = anchoredToCurrentDir(config.sourceExe)
+  result.stagedGenerationDir = anchoredToCurrentDir(config.stagedGenerationDir)
+  result.previousStagedGenerationDir =
+    anchoredToCurrentDir(config.previousStagedGenerationDir)
+  result.leaseStoreRoot = anchoredToCurrentDir(config.leaseStoreRoot)
+
+proc daemonWorkingDirectory(config: UserDaemonConfig): string =
+  ## The directory a daemon that ``repro`` starts on a caller's behalf runs
+  ## in: its STATE DIRECTORY, never the caller's working directory.
+  ##
+  ## WHY NOT THE CALLER'S. The daemon outlives the ``repro`` that started it,
+  ## so it must keep nothing of that invocation. On Windows a process's
+  ## current directory cannot be deleted while the process lives, so a daemon
+  ## auto-started by a CMake ``try_compile`` made that ``TryCompile-<id>``
+  ## scratch directory undeletable until it exited (reprobuild-specs issue
+  ## 2026-10-14). On POSIX the deletion succeeds, but the daemon keeps the
+  ## file system busy (no unmount) and serves from a deleted directory.
+  ##
+  ## WHY THE STATE DIRECTORY, rather than ``/`` or the home directory. It is
+  ## the one directory the daemon owns: every launch site creates it before
+  ## the daemon starts, it is private to the daemon instance (a test's private
+  ## daemon gets a private one), and the daemon already depends on it for its
+  ## whole life -- its lock file, session records and dev-mode staged image
+  ## live there -- so nobody can remove it under a running daemon without
+  ## breaking that daemon anyway. Pinning it as the current directory takes
+  ## nothing away from anyone else.
+  ##
+  ## Nothing in the daemon resolves a path against its own working directory
+  ## on the request path: build and watch requests carry ``workingDir`` and
+  ## the executors enter it for the request's duration (and come back here
+  ## afterwards), and every path in ``daemonProcessArgs`` is absolute
+  ## (``withAnchoredDaemonPaths``).
+  ##
+  ## Used by the two launches that inherit the starter's directory: Windows'
+  ## ``spawnWithOwnStdio`` and POSIX's ``launchWithFork``. The systemd and
+  ## launchd launches never did; their manager starts the unit in its own
+  ## default directory.
+  config.stateDir
+
 proc companionFullCliPath(imagePath: string): string =
   ## After the single-`repro` consolidation there is no separate `repro-full`
   ## companion image — `repro` IS the full CLI. Return "" so the image digest
@@ -2422,12 +2485,14 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   # 'daemon status' for 20 s, and the restart appears to time out.
   # On Windows the same guarantee comes from ``spawnWithOwnStdio``: the new
   # daemon inherits only NUL and its log, never a handle of this process.
+  # Both start it in ``daemonWorkingDirectory``, as the first launch did.
   when defined(posix):
     launchWithFork(staged.imagePath, nextConfig)
   else:
     let pid = spawnWithOwnStdio(staged.imagePath,
       daemonProcessArgs(nextConfig), [], inheritEnvironment = true,
-      logPath = nextConfig.logPath)
+      logPath = nextConfig.logPath,
+      workingDir = daemonWorkingDirectory(nextConfig))
     logLine(config.logPath, "dev restart launched backend=windows-handle-list " &
       "pid=" & $pid)
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
@@ -2497,7 +2562,10 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
       "lease reap tick error (reported once per daemon run): " & err.msg)
 
 proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
-  var config = initialConfig
+  # A daemon started by hand may have been given relative flags; its dev
+  # self-restart starts the successor in the state directory, where they
+  # would mean something else.
+  var config = withAnchoredDaemonPaths(initialConfig)
   config.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
   # The OS keeps the exec-time environment used by the test runner to identify
   # this process. Remove the live entry before handling requests so daemon
@@ -2945,12 +3013,22 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
     let cenv = allocCStringArray(environment)
     let exeCString = cstring(exe)
     let logPathCString = cstring(config.logPath)
+    # Prepared before the fork: the child may only make async-signal-safe
+    # calls, and ``chdir`` is one, allocating a C string is not.
+    let workingDir = daemonWorkingDirectory(config)
+    let workingDirCString = cstring(workingDir)
     let pid = fork()
     if pid < 0:
       raise newException(UserDaemonRuntimeError,
         "failed to fork repro-daemon")
     if pid == 0:
       discard setsid()
+      # Not the caller's working directory: the daemon outlives the caller,
+      # and would keep that directory's file system busy and serve from it
+      # after it was deleted (``daemonWorkingDirectory``). ``/`` is the
+      # conventional fallback when the state directory cannot be entered.
+      if posix.chdir(workingDirCString) != 0:
+        discard posix.chdir(cstring("/"))
       let devNull = posix.open(cstring("/dev/null"), O_RDONLY)
       if devNull >= 0:
         discard dup2(devNull, 0)
@@ -2990,8 +3068,11 @@ proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
   raise newException(UserDaemonRuntimeError,
     "timed out waiting for repro-daemon at " & endpoint)
 
-proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
-    UserDaemonStatus =
+proc startUserDaemon*(publicCliPath: string;
+                      requestedConfig: UserDaemonConfig): UserDaemonStatus =
+  # Absolute before anything is derived from it: the daemon starts in its
+  # state directory, not ours (``daemonWorkingDirectory``).
+  let config = withAnchoredDaemonPaths(requestedConfig)
   let sourceExe =
     # Executable-Consolidation M2: the user daemon IS the `repro` image, run as
     # `repro daemon serve …` (see `daemonProcessArgs`). Self-spawn the current
@@ -3101,7 +3182,10 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     # including the write end of whatever pipe our caller reads our output
     # from. A caller reading to EOF (CMake's try_compile, a test runner) then
     # waited for as long as the daemon lived. ``spawnWithOwnStdio`` passes
-    # exactly NUL and the log, which is ``launchWithFork``'s guarantee.
+    # exactly NUL and the log, which is ``launchWithFork``'s guarantee. It
+    # also starts the daemon in its state directory, not in ours, which
+    # Windows would otherwise refuse to delete while the daemon lives.
+    createDir(launchConfig.stateDir)
     var env = newStringTable(modeCaseInsensitive)
     for key, value in envPairs():
       if cmpIgnoreCase(key, ReproTestRunnerOwnerTokenEnv) != 0:
@@ -3115,7 +3199,8 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
       envPairsForChild.add((key, value))
     let pid = spawnWithOwnStdio(exe, daemonProcessArgs(launchConfig),
       envPairsForChild, inheritEnvironment = false,
-      logPath = launchConfig.logPath)
+      logPath = launchConfig.logPath,
+      workingDir = daemonWorkingDirectory(launchConfig))
     logLine(launchConfig.logPath,
       "launch requested backend=windows-handle-list pid=" & $pid)
   waitForUserDaemonStatus(launchConfig.endpoint)

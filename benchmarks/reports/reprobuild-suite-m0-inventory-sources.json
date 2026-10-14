@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 29,
-    "nimTestBinaries": 1943,
+    "nimTestBinaries": 1944,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 610,
     "staticallyDetectedRuntimeCompilerFlowTests": 111,
-    "testEntries": 1960
+    "testEntries": 1961
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1135,7 +1135,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 1060,
+      "integration": 1061,
       "platform/destructive": 121,
       "pure unit": 610,
       "unclassified": 157
@@ -1316,9 +1316,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1943,
+    "nimTestBinaryCount": 1944,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1960
+    "testEntryCount": 1961
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9663,6 +9663,24 @@
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": true,
       "source": "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_auto_started_daemon_does_not_hold_callers_working_directory",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": true,
+      "source": "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,

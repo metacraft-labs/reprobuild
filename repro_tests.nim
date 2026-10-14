@@ -1566,6 +1566,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
+    binary: "build/test-bin/t_auto_started_daemon_does_not_hold_callers_working_directory",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
     binary: "build/test-bin/t_daemon_active_session_tally",
     defines: @[],
