@@ -10279,8 +10279,8 @@
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 30,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
