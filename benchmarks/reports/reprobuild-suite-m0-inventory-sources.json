@@ -40681,8 +40681,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_nimcache_is_worktree_local.nim",
-      "sourceSuiteCount": 0,
-      "staticCaseCount": 0,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
