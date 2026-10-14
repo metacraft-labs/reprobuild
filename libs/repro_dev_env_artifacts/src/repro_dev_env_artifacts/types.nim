@@ -8,7 +8,16 @@ type
     logicalName*: string
     packageIdentity*: string
     executionProfileId*: Digest32
-    realizedPrefix*: string
+    policyPath*: string
+      ## The `uses:` nesting policy path the tool was declared under, its
+      ## segments joined with ":" (`lint:` → `strict:` → "lint:strict"); empty
+      ## for a top-level `uses:` entry.
+      ##
+      ## It is NOT where the tool was realized. The artifact is produced, and
+      ## cached by content, before activation realizes any tool, so it holds
+      ## no prefix: the realized prefix appears only in the activated PATH. The field was once named `realizedPrefix`, and the
+      ## empty value every top-level tool carried was read as "nothing was
+      ## realized".
     activityRequirements*: seq[string]
 
   DevEnvTaskSummary* = object

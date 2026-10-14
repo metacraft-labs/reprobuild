@@ -1206,7 +1206,7 @@ tests/integration/t_dependency_report_and_converter_paths.nim	nim	1
 tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	nim	9
 tests/integration/t_derived_daemon_ipc_trust.nim	nim	10
 tests/integration/t_dev_env_allow.nim	nim	1
-tests/integration/t_dev_env_artifact.nim	nim	2
+tests/integration/t_dev_env_artifact.nim	nim	3
 tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	nim	4
 tests/integration/t_dev_shell_override_guards.nim	nim	22
 tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim	nim	1
