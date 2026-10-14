@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1975,
+    "nimTestBinaries": 1976,
     "pureUnitConsolidationGroups": 53,
     "pureUnitTests": 613,
-    "staticallyDetectedRuntimeCompilerFlowTests": 114,
-    "testEntries": 1992
+    "staticallyDetectedRuntimeCompilerFlowTests": 115,
+    "testEntries": 1993
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1149,7 +1149,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 13,
-      "integration": 1082,
+      "integration": 1083,
       "platform/destructive": 126,
       "pure unit": 613,
       "unclassified": 158
@@ -1342,9 +1342,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1975,
+    "nimTestBinaryCount": 1976,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1992
+    "testEntryCount": 1993
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1730,6 +1730,44 @@
         }
       ],
       "source": "tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "extractRecipe",
+          "executedVariables": [],
+          "line": 148,
+          "path": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let artifact = extractInterfaceFromModule(dir / \"repro.nim\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 180,
+          "path": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let artifact = extractInterfaceFromModule(dir / \"repro.nim\","
+        }
+      ],
+      "source": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim"
     },
     {
       "class": "integration",
@@ -22067,6 +22105,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_home_profile_imports_contribution_catalog",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_apply",
+        "repro_home_intent",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_home_profile_resolves_just_for_darwin",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -22127,7 +22187,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

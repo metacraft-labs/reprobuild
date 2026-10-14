@@ -857,9 +857,10 @@ tests/e2e/generated-config/t_e2e_generated_config_file_json_value.nim	nim	3
 tests/e2e/generated-config/t_e2e_generated_config_file_managed_block.nim	nim	4
 tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim	nim	1
+tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	nim	6
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
-tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	3
+tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	4
 tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2

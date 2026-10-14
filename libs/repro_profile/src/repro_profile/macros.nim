@@ -52,6 +52,10 @@
 ## - `data:` lists plan-time data files (GM4). The macro records the
 ##   paths only; the planner reads and expands the files, so a data edit
 ##   never recompiles the profile.
+## - `catalogs:` lists the provisioning-contribution catalogs the profile
+##   imports, as Nim module paths relative to the profile directory. The
+##   macro records the paths only; `repro home apply` imports them where it
+##   resolves the profile's package references.
 ## - The intent is built by a proc of its own, so the platform probe can
 ##   evaluate it at compile time for other platforms (see the end of the
 ##   `profile` macro).
@@ -66,6 +70,7 @@ import ./types
 import ./predicates
 import ./emit
 import ./data_refs
+import ./catalog_refs
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -884,6 +889,42 @@ proc parseDataSection(body: NimNode; profileVar: NimNode): NimNode =
         "relative to the profile directory (e.g. \"data/apps.toml\"); got " &
         $entry.kind, entry)
 
+proc parseCatalogsSection(body: NimNode; profileVar: NimNode): NimNode =
+  ## `catalogs:` body is one string literal per line, each naming the Nim
+  ## module of a provisioning-contribution catalog relative to the profile
+  ## directory -- the module a recipe would `import`:
+  ##
+  ##   catalogs:
+  ##     "../reprobuild-scoop-packages/repro"
+  ##
+  ## The macro records the REFERENCES only (`ProfileIntent.catalogImports`);
+  ## the profile binary never imports or reads them. `repro home apply`
+  ## imports them into the recipe it extracts the profile's package
+  ## references from (`repro_home_apply/catalog_projection`).
+  result = newNimNode(nnkStmtList)
+  if body.kind != nnkStmtList:
+    error("catalogs: expects an indented block of catalog module paths", body)
+  var seen: seq[string] = @[]
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt:
+      continue
+    of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+      let path = entry.strVal
+      let problem = catalogImportPathProblem(path)
+      if problem.len > 0:
+        error("catalogs: \"" & path & "\": " & problem, entry)
+      if path in seen:
+        error("catalogs: \"" & path & "\" is declared twice", entry)
+      seen.add path
+      let pathLit = newStrLitNode(path)
+      result.add quote do:
+        `profileVar`.catalogImports.add `pathLit`
+    else:
+      error("catalogs: entries must be string literals naming a catalog " &
+        "module relative to the profile directory (e.g. " &
+        "\"../reprobuild-scoop-packages/repro\"); got " & $entry.kind, entry)
+
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an
   ## ActivityIntent into __profileIntent.activities.
@@ -927,6 +968,7 @@ macro profile*(name: static[string]; body: untyped): untyped =
     error("profile body must be an indented block", body)
 
   var sawData = false
+  var sawCatalogs = false
   for stmt in body:
     case stmt.kind
     of nnkCommand:
@@ -964,6 +1006,13 @@ macro profile*(name: static[string]; body: untyped): untyped =
             error("exactly one `data:` section per profile", stmt)
           sawData = true
           stmts.add parseDataSection(stmt[1], profSym)
+        of "catalogs":
+          if stmt.len < 2 or stmt[1].kind != nnkStmtList:
+            error("catalogs must be `catalogs: <body>`", stmt)
+          if sawCatalogs:
+            error("exactly one `catalogs:` section per profile", stmt)
+          sawCatalogs = true
+          stmts.add parseCatalogsSection(stmt[1], profSym)
         else:
           error("unrecognised profile body form: " & $head, stmt)
       else:

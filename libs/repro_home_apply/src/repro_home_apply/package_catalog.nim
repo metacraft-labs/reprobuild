@@ -1178,13 +1178,19 @@ proc profileToolUse*(packageId: string;
   ## ``catalog_projection`` from the profile's location) wins; otherwise the
   ## other stdlib definitions the engine links (the former catalog packages,
   ## which a recipe reaches through an explicit import).
-  if not isBundledStdlibSelector(packageId):
-    if packageId in catalog.failures:
-      raise newException(ValueError, catalog.failures[packageId])
-    if packageId in catalog.uses:
-      var use = catalog.uses[packageId]
-      use.location = SourceLocation(file: "home-profile", line: 1)
-      return (use, true)
+  ##
+  ## When the profile imports contribution catalogs (``catalogs:``), every
+  ## reference with a definition in scope is in ``catalog`` -- bundled ones
+  ## included -- projected by a recipe that imports those catalogs, so the
+  ## contributions they register are candidates exactly as for that recipe.
+  ## Without imports a bundled selector never is, and resolves from the
+  ## linked definition below.
+  if packageId in catalog.failures:
+    raise newException(ValueError, catalog.failures[packageId])
+  if packageId in catalog.uses:
+    var use = catalog.uses[packageId]
+    use.location = SourceLocation(file: "home-profile", line: 1)
+    return (use, true)
   var home = PackageDef(packageName: ProfileProjectionPackage,
     sourceFile: "home-profile", sourceLine: 1)
   home.toolUses.add(PackageUseDef(rawConstraint: packageId,

@@ -116,6 +116,11 @@ type
       ## `nix`, `scoop`, `path`). Empty table when the profile carries no
       ## `adapterPreference:` block — resolution then uses
       ## `DefaultSelectionPolicy`, the same on every platform.
+    catalogImports*: seq[string]
+      ## The contribution catalogs the profile's `catalogs:` section
+      ## imports (profile-relative module paths), copied through from
+      ## `Profile.catalogImports` for the resolution context
+      ## (`catalog_projection`).
     ## Order: packages by `packageId`, generated files by
     ## `(absoluteOutputPath, sourceKind, contributingPackage)`, launchers
     ## by `commandName`. The planner enforces this; `compareEqual`
@@ -379,6 +384,7 @@ proc buildPlan*(profile: Profile; profileDir: string;
   # realize + preview call sites build their resolution context without
   # re-loading the profile; an empty table selects the default policy.
   result.adapterPreference = profile.adapterPreference
+  result.catalogImports = profile.catalogImports
   let active = enabledActivitiesFor(profile, ctx.host)
   for child in profile.root.children:
     if child.kind != nkActivity:

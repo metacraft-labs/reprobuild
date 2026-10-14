@@ -7659,6 +7659,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim",
+    binary: "build/test-bin/t_e2e_home_profile_imports_contribution_catalog",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim",
     binary: "build/test-bin/t_e2e_home_profile_resolves_just_for_darwin",
     defines: @[],

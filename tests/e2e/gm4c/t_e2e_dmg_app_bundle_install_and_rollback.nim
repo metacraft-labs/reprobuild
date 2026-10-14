@@ -50,6 +50,19 @@
 ## identity check runs its own `codesign --verify`, with `EAppBundleRefused`
 ## instead of the realize-step refusal, after publishing the prefix).
 ##
+## Staged-copy refusal: the bundle in the STORE is changed after it was
+## realized (a sealed resource rewritten, the way a damaged or tampered
+## store looks), and a second home that shares the store applies the same
+## profile. Realization is a cache hit (the prefix was verified when it was
+## published), so the first check to see the change is the verification of
+## the staged copy in `~/Applications`. The apply fails with the structured
+## `EApplyAppBundleFailed` (step 9b) naming the package, the bundle, the
+## target and the failed check -- not a bare `EAppBundleRefused` -- and
+## leaves nothing behind: no bundle at the target, no staging directory,
+## no Applications directory it created, no generation, and no disk image
+## attached. A second home is used because re-applying in the first one
+## would be a no-op of the placed bundle, never reaching placement.
+##
 ## Never touches the real `~/Applications` or `/Applications`: the apply's
 ## home is a temporary directory.
 
@@ -329,5 +342,69 @@ when defined(macosx):
         check readFile(mine / "Contents" / "user-owned") == "mine"
         check readCurrentGenerationId(root / "state").len == 0
       removeDir(root)
+
+    test "a staged copy that fails verification fails the apply with a " &
+        "structured error naming package, bundle and check; nothing is " &
+        "placed and nothing is left behind":
+      let first = newRoot("staged-source")
+      let second = newRoot("staged-refused")
+      withApplyEnv(first):
+        registerFixtures("1.0.0")
+        writeProfile(first, ["gm4cbase", "gm4capp"])
+        let placed = runApply(applyOptions(first, 1000))
+        check placed.kind == aokFreshApplied
+        check dirExists(placedApp(first))
+      # Change a sealed resource of the REALIZED bundle in the store, after
+      # it passed every check and was published.
+      var storeBundle = ""
+      block:
+        var store = openStore(first / "store")
+        defer: store.close()
+        for row in listPrefixes(store):
+          if row.packageName == "gm4capp":
+            storeBundle = store.absolutePrefixPath(row.realizedPath) /
+              (AppName & ".app")
+      check storeBundle.len > 0 and dirExists(storeBundle)
+      let payload = storeBundle / "Contents" / "Resources" / "payload.txt"
+      setFilePermissions(payload, {fpUserRead, fpUserWrite})
+      setFilePermissions(payload.parentDir,
+        {fpUserRead, fpUserWrite, fpUserExec})
+      tamperFixtureApp(storeBundle)
+      withApplyEnv(second):
+        writeProfile(second, ["gm4cbase", "gm4capp"])
+        var opts = applyOptions(second, 2000)
+        opts.storeRoot = first / "store"
+        var refused = false
+        try:
+          discard runApply(opts)
+        except EApplyAppBundleFailed as err:
+          refused = true
+          checkpoint err.msg
+          check err.step == 9
+          check err.stepName == "place_app_bundle"
+          check err.packageId == "gm4capp"
+          check err.resourceAddress == "home.package.gm4capp.app"
+          check err.bundleName == AppName & ".app"
+          check err.targetPath == placedApp(second)
+          check err.check == "signature"
+          check "package gm4capp" in err.msg
+          check AppName & ".app" in err.msg
+          check "signature check" in err.msg
+          check "sealed resource" in err.msg
+        except CatchableError as err:
+          checkpoint "unstructured failure: " & $err.name & ": " & err.msg
+        check refused
+        # Nothing placed, the staged copy gone, and the Applications
+        # directory the placement created removed again.
+        check not dirExists(placedApp(second))
+        check not dirExists(second / "home" / "Applications")
+        check readCurrentGenerationId(second / "state").len == 0
+        check attachedImagesOf(dmgV1).len == 0
+      # The first home's bundle is untouched by the refused placement.
+      check dirExists(placedApp(first))
+      check appBundleCanonicalBytes(readAppBundleIdentity(
+        placedApp(first))) == identityV1
+      removeDir(second)
+      removeDir(first)
 
   removeDir(fixtureRoot)

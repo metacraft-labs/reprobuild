@@ -306,7 +306,8 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
     hasTrailingNewline: true,
     root: root,
     indentStep: 2,
-    adapterPreference: p.adapterPreference)
+    adapterPreference: p.adapterPreference,
+    catalogImports: p.catalogImports)
   ## M2.5: thread the per-OS adapter preference through the macro->text
   ## adapter so both code paths feed the same field into the apply
   ## pipeline downstream.
