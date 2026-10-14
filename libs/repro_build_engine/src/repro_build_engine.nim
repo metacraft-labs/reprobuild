@@ -5725,10 +5725,14 @@ type
       ## a pid collision.
     dcoNoPeerCredentials
       ## Peer credentials are unavailable on this platform, or the connected
-      ## socket's kernel would not name a peer.
+      ## socket's kernel would not name a peer. Every non-Linux host is here
+      ## today, deliberately: `peerCredentialsOfSocket` answers `(0, 0)` there,
+      ## so the check is refused at this step and never reaches
+      ## `dcoNoKernelIdentity`.
     dcoNoKernelIdentity
       ## No `/proc/<pid>/stat` start time, so the trust could never be
-      ## re-validated. Every non-Linux host is here today, deliberately.
+      ## re-validated. Reached only where the kernel named a peer but will not
+      ## publish its start time (on Linux, a peer that exited after connect).
     dcoNothingAsserted
       ## The declaration named an endpoint and asserted nothing about the peer.
       ## Refused: "something is listening at this path" is not a check.
