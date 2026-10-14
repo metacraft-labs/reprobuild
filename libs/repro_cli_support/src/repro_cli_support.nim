@@ -15921,6 +15921,15 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   # which is the shape in which a merge rule becomes order-dependent.
   var crossSessionMinted: seq[tuple[serviceName, member, mintedId: string;
                                     provenance: RegistrarProvenance]] = @[]
+  # §7.3: and what every such instance reported ABOUT ITSELF. On the
+  # SAME durable record, read by the SAME call, merged into the SAME
+  # session document -- which is §7.3's decision rather than a saving:
+  # "Giving the issuer a second, different mechanism would mean two ways
+  # to carry one class of value, and the one that looked simpler would be
+  # the one that cannot work." A second accumulator here would be the
+  # start of that second mechanism; a second READER would be the whole of
+  # it.
+  var crossSessionAttributes: seq[SharedInstanceAttributeRow] = @[]
   for resolution in artifact.sharedResolutions:
     let site =
       if resolution.sourceFile.len == 0: "<unknown site>"
@@ -16195,22 +16204,47 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
       crossSessionMinted.add((serviceName: resolution.serviceName,
         member: reg.member, mintedId: reg.mintedId,
         provenance: reg.provenance))
+    for attr in instanceMinted.attributes:
+      # §7.3's rows cross with their stamps for the same reason, and the
+      # fail-closed direction is the same: a row written by a build that
+      # predates the field arrives `unstamped`, and
+      # `@instance-attribute:` refuses it rather than pointing this
+      # project's service at a URL nothing claimed.
+      crossSessionAttributes.add((serviceName: resolution.serviceName,
+        name: attr.name, value: attr.value, registrar: attr.registrar,
+        provenance: attr.provenance))
     # SAID OUT LOUD, including when it is zero. A read that silently
     # found nothing is this campaign's own defect class, and the number
     # is the one fact that distinguishes "the instance minted nothing"
     # from "this session never read it".
+    # §7.3's count is APPENDED AFTER `from instance <address>`, not spliced
+    # between the minted count and it, and the position is load-bearing
+    # rather than stylistic: `t_f5_two_sessions_read_one_instances_minted_id`
+    # asserts the exact substring `read 1 minted attribute from instance`
+    # twice, and that control is L9 F5's -- it is what distinguishes "the
+    # cross-session reader ran and found the row" from "the session had the
+    # row all along". Splicing a second count into the middle of it reddened
+    # both assertions while the behaviour they test was intact, which is a
+    # false negative in exactly the control this round must not weaken. The
+    # new count is said out loud for its own reason (a read that silently
+    # found nothing is this campaign's defect class), so it is added where it
+    # costs no existing assertion its power.
     stderr.writeLine("repro " & commandName & ": " & site & ": `" &
       reference & ".shared()`: read " &
       $instanceMinted.registrations.len & " minted attribute" &
       (if instanceMinted.registrations.len == 1: "" else: "s") &
-      " from instance " & serviceInstanceAddress(key))
-  if crossSessionMinted.len > 0:
+      " from instance " & serviceInstanceAddress(key) & " and " &
+      $instanceMinted.attributes.len & " instance attribute" &
+      (if instanceMinted.attributes.len == 1: "" else: "s") &
+      " of that instance")
+  if crossSessionMinted.len > 0 or crossSessionAttributes.len > 0:
     # MERGED, not written: `convergeSharedServiceInstances` has already
     # written this session's OWN declarations' rows at this point in
     # `runUpOrDevCommand`, and a project may both declare one shared
     # service and resolve another. A plain write here would discard the
     # rows it converged a moment ago.
-    mergeSharedInstanceMinted(parsed.selection.outDir, crossSessionMinted)
+    mergeSharedInstanceMinted(parsed.selection.outDir, crossSessionMinted,
+      crossSessionAttributes)
   if refused > 0: 1 else: 0
 
 proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
@@ -16277,6 +16311,10 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
   var minted: seq[tuple[serviceName, member, mintedId: string;
                         provenance: RegistrarProvenance]] = @[]
+  # Shared-Development-Services §7.3: what each instance reported ABOUT
+  # ITSELF, accumulated beside what it minted and written to the same
+  # session document at the foot of this proc.
+  var attributes: seq[SharedInstanceAttributeRow] = @[]
   var refused = 0
   for item in declarations:
     let lifted = liftedServiceDeclaration(edge.interfacePath,
@@ -16524,6 +16562,14 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
       # What the declared program answered, captured so the reconcile's
       # REUSED rows can be checked against it below.
       var issuerAnswers = initTable[string, string]()
+      # §7.3: what the SAME answer said about the instance itself, and
+      # what the store recorded for it. Captured from the one run of the
+      # registrar -- `runExternalServiceRegistrarAnswer` returns both
+      # halves of one document, so there is no second run, no second
+      # parse, and no way for the two halves to come from different
+      # answers.
+      var answeredAttributes: seq[tuple[name, value: string]] = @[]
+      var recordedAttributes: seq[ServiceInstanceAttribute] = @[]
       # The service's name as a plain local. `item` is a `lent` loop
       # variable, so a closure that reached into it would not compile
       # ("cannot be captured as it would violate memory safety") -- and
@@ -16539,9 +16585,60 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
             # that asked only about the members this workspace happens
             # not to have recorded could not notice that a recorded one
             # has since changed at the issuer.
-            for row in runExternalServiceRegistrar(registrarProgram,
-                parsed.selection.outDir.sessionDir / "registrar", attrs):
+            let answer = runExternalServiceRegistrarAnswer(
+              registrarProgram,
+              parsed.selection.outDir.sessionDir / "registrar", attrs)
+            for row in answer.registrations:
               issuerAnswers[row.member] = row.mintedId
+            answeredAttributes = answer.instanceAttributes
+          # ── §7.3 — RECORD THE INSTANCE'S OWN ATTRIBUTES ─────────────
+          #
+          # UNCONDITIONALLY, INCLUDING ON THE OFFLINE PATH, and that is
+          # the whole anti-staleness mechanism rather than an
+          # afterthought. The call REPLACES the stored set with what the
+          # registrar installed RIGHT NOW answered, so:
+          #
+          #   * the development registrar answers nothing and the
+          #     previous run's issuer URL is REMOVED. Skipping the call
+          #     when no program is declared would leave last run's URL
+          #     on the record and serve it to a consumer as if it were
+          #     this instance's -- the `dev-server.sh` descriptor defect
+          #     L9's review measured, reconstructed inside the fix for
+          #     the minted half;
+          #   * a program that answers a DIFFERENT URL replaces the old
+          #     one, because an issuer URL legitimately moves when the
+          #     instance rebinds. That is the opposite of the minted
+          #     id's mint-once reuse, and the asymmetry is in the
+          #     values, not in the lane.
+          #
+          # AND IT RUNS *BEFORE* THE REGISTRATIONS RECONCILE, which is
+          # the only ordering that closes a stale read. The registration
+          # reconcile can REFUSE -- an empty minted id, or the issuer
+          # having changed a client id this workspace already recorded
+          # (the refusal raised a few lines below) -- and a refusal
+          # after this call would leave the PREVIOUS run's issuer URL on
+          # the durable record for a consumer in another session to
+          # read. Running first means the attribute written is always
+          # the one the registrar just reported about the instance that
+          # is actually up, whatever the registrations then do; and that
+          # is sound rather than optimistic, because the instance IS
+          # running at that address -- it is the REGISTRATIONS that are
+          # in doubt, not the address.
+          #
+          # THIS IS PROGRAM ORDER, NOT AN ASSERTED PROPERTY. No test
+          # covers the ordering: provoking it needs a converge whose
+          # registrar answers successfully and whose registration
+          # reconcile then refuses, with the instance's address having
+          # moved in between. `t_dss72_the_registrar_reaches_a_services
+          # _argv`'s case C constructs the refusal and
+          # `t_dss73_the_issuer_url_reaches_a_consuming_services_argv`'s
+          # case C constructs the move; a case composing the two, and
+          # reading the durable record rather than the session file,
+          # would redden if these two statements were swapped back.
+          recordedAttributes = reconcileServiceInstanceAttributes(
+            storeRoot, key, answeredAttributes,
+            registrar = registrarIdentity.name,
+            provenance = registrarIdentity.provenance).attributes
           reconciled = reconcileServiceRegistrations(storeRoot, key,
             attrs.members, attrs.contributors,
             proc (member, contributor: string): string {.closure.} =
@@ -16637,6 +16734,19 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         minted.add((serviceName: item.declaration.serviceName,
           member: reg.member, mintedId: stamp.value,
           provenance: stamp.provenance))
+      for attr in recordedAttributes:
+        # READ BACK FROM WHAT THE STORE RECORDED, not from the
+        # registrar's answer, for the reason the minted stamp is read
+        # back from `computedResourceAttributeStamp`: the durable row is
+        # what a consumer in ANOTHER session will read, so this
+        # session's argv has to be concretized from the same bytes. Two
+        # independent derivations of one fact are two things that can
+        # disagree, and here they would disagree silently -- one
+        # session's service pointed at one issuer and another's at
+        # another.
+        attributes.add((serviceName: item.declaration.serviceName,
+          name: attr.name, value: attr.value, registrar: attr.registrar,
+          provenance: attr.provenance))
       var mintedCount = 0
       var reusedCount = 0
       var withdrawnCount = 0
@@ -16650,6 +16760,19 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         " registration" & (if mintedCount == 1: "" else: "s") &
         " minted, " & $reusedCount & " reused, " & $withdrawnCount &
         " withdrawn")
+      # §7.3, SAID OUT LOUD INCLUDING WHEN IT IS ZERO, for the reason
+      # the cross-session read's count is: a reader that silently found
+      # nothing is this campaign's own defect class, and the number is
+      # the one fact that distinguishes "this registrar reported no
+      # attributes" from "nobody looked". Zero is the normal, correct
+      # answer on the offline path, and it is the answer a developer
+      # debugging a refused `@instance-attribute:` token needs to see.
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " &
+        $recordedAttributes.len & " instance attribute" &
+        (if recordedAttributes.len == 1: "" else: "s") & " recorded" &
+        (if recordedAttributes.len == 0: "" else: ": " &
+           recordedAttributes.mapIt(it.name).join(", ")))
   # D-SS10: drop the readiness edge's installed collaborators.
   #
   # `setServiceReadinessProber` / `setServiceRegistrar` /
@@ -16672,7 +16795,7 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   # from. Written unconditionally, including empty: a stale file from a
   # previous run would otherwise resolve a token the recipe no longer
   # declares.
-  writeSharedInstanceMinted(parsed.selection.outDir, minted)
+  writeSharedInstanceMinted(parsed.selection.outDir, minted, attributes)
   if refused > 0: 1 else: 0
 
 proc releaseSharedServiceInstances(outDir: string): int =

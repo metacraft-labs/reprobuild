@@ -89,6 +89,27 @@ import repro_core/ambient_execution      # uncontrolledStartProcess
 import repro_resources/readiness_edge    # the §7.2 provenance contract
 
 type
+  ServiceRegistrarAnswer* = object
+    ## Everything one answer document says, decoded ONCE.
+    ##
+    ## §7.3 adds the instance's own computed attributes to this protocol,
+    ## and the shape is deliberately not a second file, a second run or a
+    ## second parse: "the issuer URL is a computed attribute OF THE
+    ## INSTANCE, reached by the same mechanism as the minted client id".
+    ## The registrar is the one component that has actually spoken to the
+    ## running instance, so it is the one component that can report what
+    ## that instance is; asking it twice, or asking something else, would
+    ## be the second mechanism §7.3 rejects.
+    ##
+    ## TWO READINGS OF ONE DOCUMENT IS TWO THINGS THAT CAN DISAGREE, so
+    ## `decodeServiceRegistrarAnswer` is a PROJECTION of this and not a
+    ## second parse -- the same relationship
+    ## `readSharedInstanceMintedAttributes` has to
+    ## `readSharedInstanceMintedRows`.
+    registrations*: seq[tuple[member, mintedId: string]]
+    instanceAttributes*: seq[tuple[name, value: string]]
+      ## Sorted by name, so two runs of one registrar produce one order.
+
   ServiceRegistrarError* = object of CatchableError
     ## Every refusal this module raises. Distinct from
     ## `ReadinessEdgeError` so a caller can tell "the project's registrar
@@ -111,6 +132,23 @@ const
 
   RegistrarRequestFlag* = "--request"
   RegistrarAnswerFlag* = "--answer"
+
+  RegistrarAnswerInstanceAttributesField* = InstanceAttributesField
+    ## §7.3's half of the answer document: `{"issuer": "https://..."}`.
+    ##
+    ## BOUND TO THE STORE DOCUMENT'S KEY rather than re-spelled as its
+    ## own literal, for `RegistrationAddressSuffix`' reason: the answer
+    ## and the durable record carry the same field under the same name,
+    ## and an invariant maintained by a sentence is not an invariant.
+    ## There is now one definition, so the two cannot drift.
+    ##
+    ## OPTIONAL, and that is not laxity. A registrar for a service that
+    ## has no external identity of its own has nothing to report here,
+    ## and requiring the key would make every such registrar write an
+    ## empty object to say so. What is NOT optional is the value of a key
+    ## that IS present: an empty string, a non-string, or a repeated name
+    ## is refused by name, because each of those is a value nobody
+    ## determined wearing the shape of one somebody did.
 
 proc resolveExternalServiceRegistrarProgram*(): string =
   ## The declared registrar program, or `""` for "none declared".
@@ -151,9 +189,9 @@ proc encodeServiceRegistrarRequest*(attrs: ServiceRegistrationAttrs): string =
     "contributors": contributors}
   $doc & "\n"
 
-proc decodeServiceRegistrarAnswer*(program, text: string;
-                                   requested: openArray[string]):
-    seq[tuple[member, mintedId: string]] =
+proc decodeServiceRegistrarAnswerDocument*(program, text: string;
+                                           requested: openArray[string]):
+    ServiceRegistrarAnswer =
   ## Read a registrar's answer, or REFUSE BY NAME.
   ##
   ## `requested` is what was asked for, and it is a parameter rather than
@@ -286,11 +324,76 @@ proc decodeServiceRegistrarAnswer*(program, text: string;
   # reader diffing two runs' `shared-instance-registrations.json` should
   # not see a reordering that means nothing.
   for m in requested:
-    result.add((member: m, mintedId: seen[m]))
+    result.registrations.add((member: m, mintedId: seen[m]))
+  # ── §7.3 — THE INSTANCE'S OWN ATTRIBUTES ──────────────────────────
+  #
+  # Decoded HERE, in the one parse of this document, and validated with
+  # the same severity as a client id. An attribute is not minted, so the
+  # "did the issuer really say this" question of §7.2 does not arise --
+  # but the "is this the instance I am about to be pointed at" question
+  # does, and every shape below is a way for the answer to be no while
+  # looking like yes.
+  let attrNode = doc{RegistrarAnswerInstanceAttributesField}
+  if not attrNode.isNil and attrNode.kind != JNull:
+    if attrNode.kind != JObject:
+      raise newException(ServiceRegistrarError,
+        "the service registrar `" & program & "` answered `" &
+        RegistrarAnswerInstanceAttributesField & "` as a JSON " &
+        $attrNode.kind & " rather than an object of name/value pairs. " &
+        "The shape is `{\"" & IssuerAttributeName &
+        "\": \"https://...\"}` (Shared-Development-Services.md §7.3).")
+    var names: seq[string] = @[]
+    for name, value in attrNode:
+      if name.len == 0:
+        raise newException(ServiceRegistrarError,
+          "the service registrar `" & program & "` answered an " &
+          RegistrarAnswerInstanceAttributesField & " entry with an " &
+          "EMPTY name, so nothing can ask for it by name.")
+      if value.kind != JString:
+        raise newException(ServiceRegistrarError,
+          "the service registrar `" & program & "` answered the " &
+          "instance attribute `" & name & "` as a JSON " & $value.kind &
+          " rather than a string. Refused rather than stringified: `" &
+          IssuerAttributeName & "` reaches a consuming service's argv " &
+          "verbatim, and a number or an object rendered into it would " &
+          "be a URL nobody wrote.")
+      if value.getStr("").len == 0:
+        raise newException(ServiceRegistrarError,
+          "the service registrar `" & program & "` answered the " &
+          "instance attribute `" & name & "` as an EMPTY string. " &
+          "D-SS10: \"a nil or an empty string is the one answer that " &
+          "must not be chosen\". OMIT an attribute you could not " &
+          "determine -- an absent attribute REFUSES at the point of " &
+          "use, naming itself, while an empty one reaches the service " &
+          "as an empty argument and fails at the issuer.")
+      names.add(name)
+    # A JSON object cannot carry one key twice in this parser -- the
+    # later wins silently -- so the repeated-name refusal that
+    # `reconcileServiceInstanceAttributes` raises is not reachable from
+    # here. Said out loud rather than left as a gap the next reader has
+    # to rediscover: the store-level refusal is the one that covers a
+    # caller assembling rows itself, and this level's protection is the
+    # object shape.
+    names.sort()
+    for name in names:
+      result.instanceAttributes.add(
+        (name: name, value: attrNode[name].getStr("")))
 
-proc runExternalServiceRegistrar*(program, scratchDir: string;
-                                  attrs: ServiceRegistrationAttrs):
+proc decodeServiceRegistrarAnswer*(program, text: string;
+                                   requested: openArray[string]):
     seq[tuple[member, mintedId: string]] =
+  ## The REGISTRATIONS of an answer document — a projection of
+  ## `decodeServiceRegistrarAnswerDocument`, not a second parse.
+  ##
+  ## Kept because the registration rows are what most callers want, and
+  ## because every §7.2 test that asserts a refusal asserts it through
+  ## this spelling. A second parse here would be two readings of one
+  ## document, which is the shape in which two readers disagree.
+  decodeServiceRegistrarAnswerDocument(program, text, requested).registrations
+
+proc runExternalServiceRegistrarAnswer*(program, scratchDir: string;
+                                        attrs: ServiceRegistrationAttrs):
+    ServiceRegistrarAnswer =
   ## Run the declared program once and read its answer.
   ##
   ## `scratchDir` is where the two protocol files live. A parameter rather
@@ -339,14 +442,37 @@ proc runExternalServiceRegistrar*(program, scratchDir: string;
       "every member's `" & ClientIdAttributeName & "` uncomputed while " &
       "reporting success, so the missing file is refused here rather " &
       "than discovered at the issuer.")
-  decodeServiceRegistrarAnswer(program, readFile(extendedPath(answerPath)),
-    attrs.members)
+  decodeServiceRegistrarAnswerDocument(program,
+    readFile(extendedPath(answerPath)), attrs.members)
+
+proc runExternalServiceRegistrar*(program, scratchDir: string;
+                                  attrs: ServiceRegistrationAttrs):
+    seq[tuple[member, mintedId: string]] =
+  ## The REGISTRATIONS of one run — a projection of
+  ## `runExternalServiceRegistrarAnswer`, which is the one that runs the
+  ## program.
+  ##
+  ## ONE RUN, NOT TWO. A caller that wanted both halves and called both
+  ## procs would launch the registrar twice and, against a real issuer,
+  ## register twice; so the wrapper delegates rather than duplicating,
+  ## and a caller that needs the attributes asks for the document.
+  runExternalServiceRegistrarAnswer(program, scratchDir, attrs).registrations
 
 proc externalServiceRegistrar*(program, scratchDir: string): ServiceRegistrar =
   ## The injectable form: a `ServiceRegistrar` that runs the declared
   ## program. Install it with
   ## `setServiceRegistrar(externalServiceRegistrar(p, d),
   ## externalServiceRegistrarIdentity(p))`.
+  ##
+  ## IT DROPS §7.3'S INSTANCE ATTRIBUTES, because `ServiceRegistrar`'s
+  ## return type is per-member and §7.3's values are per-instance. The
+  ## CLI therefore does not install the registrar through this proc: it
+  ## runs `runExternalServiceRegistrarAnswer` itself so that both halves
+  ## of one answer reach the store from one run. This spelling is kept
+  ## for a caller that genuinely wants only the registrations, and the
+  ## sentence above is here so that a caller who wants the issuer URL
+  ## does not reach for it and silently get nothing -- which is this
+  ## campaign's own defect class, in a convenience wrapper.
   result = proc (attrs: ServiceRegistrationAttrs):
       seq[tuple[member, mintedId: string]] {.closure.} =
     runExternalServiceRegistrar(program, scratchDir, attrs)
