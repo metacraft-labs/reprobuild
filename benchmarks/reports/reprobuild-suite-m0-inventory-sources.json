@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 54,
     "pureUnitTests": 614,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 1997
+    "testEntries": 1998
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1165,7 +1165,7 @@
       "integration": 1085,
       "platform/destructive": 126,
       "pure unit": 614,
-      "unclassified": 157
+      "unclassified": 158
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1356,8 +1356,8 @@
       }
     ],
     "nimTestBinaryCount": 1980,
-    "pythonTestFileCount": 17,
-    "testEntryCount": 1997
+    "pythonTestFileCount": 18,
+    "testEntryCount": 1998
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -42321,6 +42321,21 @@
       "source": "tests/unit/test_cmake_generator_competitiveness_bench.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_cmake_prereq_sdk.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
