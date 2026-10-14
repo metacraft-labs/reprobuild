@@ -29,6 +29,14 @@
 ##     ``reapExpiredAtReconcileStart`` against the scoped store. The daemon
 ##     event loop calls this on a bounded cadence; it is a plain store sweep,
 ##     so it SURVIVES a daemon restart by construction (the store is on disk).
+##   * ``runAndRecordLeaseReapTick`` — the tick the daemon event loop calls:
+##     one sweep, its STANDING VERDICT (``LeaseReapTickHealth``) persisted
+##     beside the store it swept, and counts plus pre-rendered finding lines
+##     returned for the caller to log. Sweep and record are ONE call so that a
+##     logging failure at the call site cannot be recorded as a sweep failure.
+##   * ``readLeaseReapTickHealth`` + ``probeLeaseStore`` — the reader's half,
+##     used by ``repro health``'s ``lease-reaper`` row. Logging a finding is
+##     not reporting it; see the block comment above the constants.
 
 import std/[os, options, times, tables, strutils]
 
@@ -364,6 +372,439 @@ proc leaseReapFindings*(report: ReapReport):
         $f.kind,
       line: verb & " address=" & f.address & " typeId=" & f.typeId &
         ": " & f.reason))
+
+# ---------------------------------------------------------------------------
+# THE TICK'S OWN HEALTH — the record `repro health` reads.
+#
+# Reporting each finding once per daemon run (above) fixed the flood. It did
+# NOT fix the thing that let the flood run for 57 days: a log line in a daemon
+# nobody reads is not a report. Nothing asked whether the reaper had ever
+# worked — not `repro health`, not the daemon's own status — so a component
+# that was dead from its first tick looked exactly like one with nothing to do,
+# while every command that depends on it kept succeeding
+# (reprobuild-pm/issues/2026-09-29-lease-reap-tick-has-never-once-succeeded.md,
+# "Why it matters"). Worse, the de-duplication makes a persistent failure
+# QUIETER: after the first report there is nothing new in the log at all.
+#
+# So the tick leaves a standing, readable verdict beside the store it sweeps,
+# and `repro health` turns a run of unsuccessful ticks into a finding. The
+# record is per-store rather than per-daemon-instance on purpose: the question
+# is "is this store's state being reaped", which outlives any one daemon, and a
+# restart must not launder a stuck store into a clean one.
+# ---------------------------------------------------------------------------
+
+const
+  LeaseReapUnhealthyTickThreshold* = 10
+    ## How many consecutive UNSUCCESSFUL ticks make the reaper a health
+    ## finding. At the 30 s default cadence that is five minutes.
+    ##
+    ## The number is a judgement about two failure modes, not a round figure.
+    ## Too low and a transient trips it: a provider session that needs one
+    ## relaunch, a host under load, an `observe` that times out once — all of
+    ## which the NEXT tick clears, and a doctor that goes red on them is a
+    ## doctor people stop running (the same reasoning the `unpublished-heads`
+    ## row states for staying a `warn`). Too high and it reproduces the defect
+    ## in miniature: the condition this exists to catch was unfixable by
+    ## retrying and persisted for 131,882 ticks, so anything that waits hours
+    ## to say so has conceded the argument. Ten says "retrying has had a fair
+    ## chance and is not working", within one coffee break rather than within
+    ## two months.
+  LeaseReapHealthFile = "reap-health"
+    ## The record's filename inside the lease store root. It is deliberately
+    ## NOT a `*.rec` name: `listStateRecords` walks the store directory and
+    ## keeps only entries ending in `.rec` (skipping `.tmp-*` partials), so
+    ## this file is invisible to every store reader and cannot be mistaken for
+    ## a resource record.
+  LeaseReapHealthMaxStuck = 16
+    ## How many findings one verdict carries. The store is unbounded and every
+    ## selected-but-unreapable record produces a finding, so without a cap the
+    ## tick rewrites an ever-growing file every 30 s and the doctor renders an
+    ## ever-growing string into both its table and its JSON. Sixteen is enough
+    ## to show a pattern — the same typeId repeating, or one record blocking a
+    ## chain — which is what an operator reads the list for; the exact
+    ## population is in the store, and `elidedStuck` says how many were cut.
+  LeaseReapHealthMaxStuckBytes = 8 * 1024
+    ## A byte budget over the kept findings, because the count alone does not
+    ## bound the size: a `reason` ends in provider text of any length. Reached
+    ## before the count, it stops the list early and the remainder is elided
+    ## the same way.
+
+type
+  LeaseReapTickHealth* = object
+    ## The standing verdict on one lease store's reaper, as of its last tick.
+    ##
+    ## WHAT "SUCCESSFUL" MEANS HERE, stated once because every field below and
+    ## the whole health row rest on it: a tick is SUCCESSFUL when it completed
+    ## and left nothing it had SELECTED unreaped and nothing it could not even
+    ## READ (see `recordLeaseReapTickOutcome` for the three undecodable
+    ## categories and which of them count). An IDLE tick — the store held
+    ## nothing due, so nothing was selected — therefore COUNTS AS SUCCESSFUL,
+    ## and that is deliberate rather than incidental: an idle sweep genuinely
+    ## demonstrates an unobstructed reaper (it listed the store, applied the
+    ## predicate and finished), which is the useful thing to record. Most ticks
+    ## on a healthy host are idle, and treating them as a third neither-state
+    ## would leave a perfectly working daemon's verdict frozen at whatever its
+    ## last destroy happened to be.
+    lastTickUnix*: int64
+      ## When a tick last RAN against this store.
+    lastSuccessUnix*: int64
+      ## When a sweep last COMPLETED UNOBSTRUCTED — not when something was
+      ## last destroyed. An idle tick advances this; a tick that reaped three
+      ## records and got stuck on a fourth does not.
+      ##
+      ## ``0`` means no tick has ever completed unobstructed. Because an idle
+      ## tick counts as a success, that is reachable in exactly one way: the
+      ## FIRST recorded tick already failed, and every tick since has. It is
+      ## precisely the live daemon's case — 131,882 ticks, every one of them
+      ## stuck on the same record, not one clean sweep — which is why the
+      ## doctor is worth teaching to say "never" rather than only a count.
+    totalTicks*: int64
+      ## Ticks recorded against this store, across daemon instances.
+    consecutiveUnsuccessful*: int
+      ## Ticks since the last successful one. Reset to 0 by a success —
+      ## including an idle one — so the verdict is falsifiable in both
+      ## directions rather than a counter that only ever climbs.
+    stuck*: seq[string]
+      ## The most recent tick's findings (`leaseReapFindings` lines), each
+      ## naming the record, its typeId and why it could not be reaped. The
+      ## LAST tick's, not an accumulation: the question the doctor answers is
+      ## what is stuck now.
+      ##
+      ## BOUNDED — see `LeaseReapHealthMaxStuck` / `LeaseReapHealthMaxStuckBytes`.
+      ## A finding's `reason` is partly out-of-tree provider text and the store
+      ## can hold thousands of records, so an uncapped list is an unbounded
+      ## write on every tick and an unbounded string in the doctor's JSON.
+    elidedStuck*: int
+      ## Findings the last tick had but did not record, because the caps above
+      ## were reached. Carried so the row can say how many it is not showing:
+      ## a truncated list that does not admit to being truncated reads as the
+      ## whole population, which is the same class of lie as a stuck store
+      ## reading as a healthy one.
+
+proc leaseReapTickIsUnhealthy*(health: LeaseReapTickHealth): bool =
+  ## The one place the threshold is applied, so the daemon, the doctor and
+  ## the tests cannot drift apart on what "persistently failing" means.
+  health.consecutiveUnsuccessful >= LeaseReapUnhealthyTickThreshold
+
+proc leaseReapHealthPath*(scope: DaemonLeaseScope = dlsUser;
+                          overrideRoot = ""): string =
+  ## Where the verdict for the store `scope`/`overrideRoot` selects lives.
+  ## Derived from `leaseStoreRootForScope`, so the writer (the daemon tick)
+  ## and the reader (`repro health`) cannot disagree about the location.
+  leaseStoreRootForScope(scope, overrideRoot) / LeaseReapHealthFile
+
+proc escapeHealthValue(value: string): string =
+  ## `key=value` lines cannot carry a raw newline, and a `reason` is partly
+  ## out-of-tree provider text — free to contain one. Escape rather than
+  ## truncate: the reason is the whole content of the finding.
+  result = newStringOfCap(value.len)
+  for ch in value:
+    case ch
+    of '\\': result.add("\\\\")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    else: result.add(ch)
+
+proc unescapeHealthValue(value: string): string =
+  result = newStringOfCap(value.len)
+  var i = 0
+  while i < value.len:
+    if value[i] == '\\' and i + 1 < value.len:
+      case value[i + 1]
+      of '\\': result.add('\\'); i += 2
+      of 'n': result.add('\n'); i += 2
+      of 'r': result.add('\r'); i += 2
+      else: result.add(value[i]); inc i
+    else:
+      result.add(value[i]); inc i
+
+proc writeLeaseReapHealth(path: string; health: LeaseReapTickHealth) =
+  ## Persist atomically: a temp file in the same directory, renamed over the
+  ## destination (`writeStateRecord`'s pattern — a rename within one directory
+  ## is atomic on POSIX and NTFS). A doctor must never read a half-written
+  ## verdict, and a crash mid-write must leave the previous one.
+  ##
+  ## `key=value` text, like the daemon's own status file, and deliberately not
+  ## JSON: `AGENTS.md` §Boundaries rules JSON out as an on-disk source of
+  ## truth. This is also a file an operator may well `cat` while diagnosing,
+  ## which is an argument for the same shape the status file already uses.
+  let dir = parentDir(path)
+  let tmp = dir / (".tmp-" & LeaseReapHealthFile)
+  var body = "lastTickUnix=" & $health.lastTickUnix & "\n" &
+    "lastSuccessUnix=" & $health.lastSuccessUnix & "\n" &
+    "totalTicks=" & $health.totalTicks & "\n" &
+    "consecutiveUnsuccessful=" & $health.consecutiveUnsuccessful & "\n" &
+    "elidedStuck=" & $health.elidedStuck & "\n"
+  for i, line in health.stuck:
+    body.add("stuck." & $i & "=" & escapeHealthValue(line) & "\n")
+  writeFile(tmp, body)
+  moveFile(tmp, path)
+
+proc readLeaseReapTickHealth*(scope: DaemonLeaseScope = dlsUser;
+                              overrideRoot = ""):
+    Option[LeaseReapTickHealth] =
+  ## The verdict, or `none` when this store has none that can be read.
+  ##
+  ## `none` IS NOT "HEALTHY", and a caller must not render it as such on its
+  ## own. It means only "this file did not yield a verdict", which covers a
+  ## store nothing has ever ticked against (healthy, and the common case) AND
+  ## a store whose tick cannot write its verdict (not healthy at all, and the
+  ## residual form of the very invisibility the health row exists to remove).
+  ## Distinguishing them needs a look at the store itself — `probeLeaseStore`
+  ## — and the `lease-reaper` row does exactly that before it reports.
+  ##
+  ## NEVER RAISES. A caller is the daemon's own tick or the environment
+  ## doctor; neither may be taken down by an unreadable or garbled file. A
+  ## verdict that cannot be parsed is returned as `none` rather than as a
+  ## partial one, because a truncated file read back as
+  ## `consecutiveUnsuccessful=0` would positively ASSERT health, which `none`
+  ## at least does not do by itself.
+  let path = leaseReapHealthPath(scope, overrideRoot)
+  var raw = ""
+  try:
+    if not fileExists(path):
+      return none(LeaseReapTickHealth)
+    raw = readFile(path)
+  except CatchableError:
+    return none(LeaseReapTickHealth)
+  var health = LeaseReapTickHealth(stuck: @[])
+  var sawTick = false
+  try:
+    for line in raw.splitLines:
+      if line.len == 0:
+        continue
+      let eq = line.find('=')
+      if eq <= 0:
+        continue
+      let key = line[0 ..< eq]
+      let value = line[eq + 1 .. ^1]
+      if key == "lastTickUnix":
+        health.lastTickUnix = parseBiggestInt(value)
+        sawTick = true
+      elif key == "lastSuccessUnix":
+        health.lastSuccessUnix = parseBiggestInt(value)
+      elif key == "totalTicks":
+        health.totalTicks = parseBiggestInt(value)
+      elif key == "consecutiveUnsuccessful":
+        health.consecutiveUnsuccessful = parseInt(value)
+      elif key == "elidedStuck":
+        health.elidedStuck = parseInt(value)
+      elif key.startsWith("stuck."):
+        health.stuck.add(unescapeHealthValue(value))
+  except CatchableError:
+    return none(LeaseReapTickHealth)
+  # A file with no `lastTickUnix` is not a verdict about anything.
+  if not sawTick:
+    return none(LeaseReapTickHealth)
+  some(health)
+
+type
+  LeaseReapStoreStateKind* = enum
+    ## What is actually at a lease store root, for a reader that found NO
+    ## verdict there and must not guess which of these it is looking at.
+    lrsAbsent        ## no store root at all
+    lrsEmpty         ## present and readable, holding no resource records
+    lrsHoldsRecords  ## present and readable, holding records
+    lrsUnreadable    ## present, but it could not be listed
+
+  LeaseReapStoreState* = object
+    kind*: LeaseReapStoreStateKind
+    records*: int     ## `lrsHoldsRecords`: how many
+    reason*: string   ## `lrsUnreadable`: why
+
+proc probeLeaseStore*(scope: DaemonLeaseScope = dlsUser;
+                      overrideRoot = ""): LeaseReapStoreState =
+  ## Look at the store, for a caller deciding what an ABSENT verdict means.
+  ##
+  ## "No verdict" has three very different causes and only one of them is
+  ## healthy. Reporting them alike is how this row would keep the defect it was
+  ## added to remove: a reaper that is stuck AND cannot write its verdict
+  ## (unwritable root — the verdict write raises inside
+  ## `runAndRecordLeaseReapTick`, which returns it as `healthWriteError` for the
+  ## daemon to report once per run) leaves no verdict at all, and a reader that treats
+  ## "no verdict" as "nothing leased here" calls that healthy without having
+  ## looked. The whole point of the row is to stop answering questions about
+  ## the reaper from something other than the reaper's own state.
+  ##
+  ## NEVER RAISES, for the same reason `readLeaseReapTickHealth` does not: a
+  ## diagnostic that dies on an unreadable directory has become the fault it
+  ## was meant to report.
+  let root = leaseStoreRootForScope(scope, overrideRoot)
+  if not dirExists(root):
+    return LeaseReapStoreState(kind: lrsAbsent)
+  # `listStateRecords` walks with the stdlib's default `checkDir = false`,
+  # which yields NOTHING for a directory it cannot open rather than raising —
+  # so leaning on it alone would report an unreadable root as an empty one,
+  # the exact conflation this probe exists to prevent. Ask for openability
+  # explicitly, where a failure is an exception.
+  try:
+    for _ in walkDir(root, checkDir = true):
+      break
+  except CatchableError as err:
+    return LeaseReapStoreState(kind: lrsUnreadable, reason: err.msg)
+  try:
+    let records = listStateRecords(openStateStore(root))
+    if records.len == 0:
+      LeaseReapStoreState(kind: lrsEmpty)
+    else:
+      LeaseReapStoreState(kind: lrsHoldsRecords, records: records.len)
+  except CatchableError as err:
+    # Openable but a record would not decode: not "empty", and not something
+    # to answer a question about the reaper with.
+    LeaseReapStoreState(kind: lrsUnreadable, reason: err.msg)
+
+proc recordLeaseReapTickOutcome(successful: bool; findings: seq[string];
+                                scope: DaemonLeaseScope;
+                                overrideRoot: string; now: Time) =
+  ## Fold ONE tick into the store's standing verdict.
+  ##
+  ## WHAT COUNTS AS SUCCESSFUL, which is the whole definition this record rests
+  ## on: a tick is SUCCESSFUL when it completed and left nothing it had
+  ## SELECTED unreaped and nothing it could not even READ. It is UNSUCCESSFUL
+  ## when the sweep RAISED, when it finished holding at least one record it had
+  ## selected and could not reap (`ReapReport.failed`), or when it left a
+  ## record it could neither decode nor quarantine (`ReapReport.unreadable`).
+  ## A FOREIGN record (a newer repro's, deliberately untouched) and a
+  ## QUARANTINED one (moved out of the way by this sweep) are the reaper
+  ## working as specified and do NOT count against it.
+  ##
+  ## Two consequences, both deliberate and both easy to get backwards:
+  ##
+  ##   * An IDLE tick — nothing was due, so nothing was selected — is
+  ##     SUCCESSFUL, and advances `lastSuccessUnix`. It listed the store,
+  ##     applied the predicate and finished with no obstruction, which is
+  ##     exactly what the counter is asking about. `lastSuccessUnix` therefore
+  ##     means "a sweep last completed unobstructed", NOT "something was last
+  ##     destroyed". Most ticks on a healthy host are idle; a third
+  ##     neither-state for them would freeze a working daemon's verdict at
+  ##     whatever its last destroy happened to be, and the operator would be
+  ##     reading a stale timestamp as a live one.
+  ##   * A tick that reaped three records and got stuck on a fourth is
+  ##     UNSUCCESSFUL. Partial progress is how a stuck store hides.
+  ##
+  ## So `lastSuccessUnix == 0` ("never") is reachable in exactly one way: the
+  ## FIRST tick recorded against this store already failed, and so has every
+  ## tick since. That is the live daemon's case and nothing else.
+  ##
+  ## ONE TICKER PER STORE is assumed, and it is what the daemon lock already
+  ## gives: a scope's store is swept by the daemon that holds
+  ## ``.repro-daemon.lock`` for it. The read-modify-write below is therefore
+  ## not guarded against a concurrent writer — two tickers on one store could
+  ## lose a count. The individual WRITE is still atomic (temp + rename), so the
+  ## worst case is an undercount, never a corrupt or half-written verdict. A
+  ## hand sweep (``repro reap``) deliberately does not write here at all: it is
+  ## not a tick, and letting it reset the counter would let the operator's
+  ## diagnostic erase the finding that sent them to it.
+  let root = leaseStoreRootForScope(scope, overrideRoot)
+  # No store, nothing to reap, nothing to report. Writing here would also
+  # CREATE the store root as a side effect of a tick against a host that has
+  # never leased anything, which the tick itself is careful not to do.
+  if not dirExists(root):
+    return
+  var health = readLeaseReapTickHealth(scope, overrideRoot).get(
+    LeaseReapTickHealth(stuck: @[]))
+  health.lastTickUnix = now.toUnix
+  inc health.totalTicks
+  # Bounded, and honest about being bounded (see the two caps' docstrings).
+  health.stuck = @[]
+  health.elidedStuck = 0
+  var budget = LeaseReapHealthMaxStuckBytes
+  for finding in findings:
+    if health.stuck.len >= LeaseReapHealthMaxStuck or finding.len > budget:
+      inc health.elidedStuck
+      continue
+    budget -= finding.len
+    health.stuck.add(finding)
+  if successful:
+    health.lastSuccessUnix = now.toUnix
+    health.consecutiveUnsuccessful = 0
+  else:
+    inc health.consecutiveUnsuccessful
+  writeLeaseReapHealth(leaseReapHealthPath(scope, overrideRoot), health)
+
+type
+  LeaseReapTickOutcome* = object
+    ## Everything the daemon event loop needs to LOG about one tick, in
+    ## vocabulary that does not name the resource lane.
+    ##
+    ## This type exists for the module boundary stated at the top of this
+    ## file: `lease_registry` is the ONE module in `repro_daemon_core` that
+    ## links `repro_resources`, so the event loop cannot name `ReapReport` to
+    ## decide what to print. It gets counts and pre-rendered finding lines.
+    raised*: bool
+      ## The sweep itself failed, as opposed to one record in it: an
+      ## unreadable store root, or anything else that stops the sweep before
+      ## it can report per-record findings.
+      ##
+      ## An UNDECODABLE RECORD is no longer such a cause, and it is worth
+      ## saying so because it used to be the canonical example: `3700fb02`
+      ## guarded the decode loop, so `scanStateRecords` now reports a corrupt
+      ## record as quarantined, a newer repro's as foreign and an unopenable
+      ## one as unreadable — each a per-record finding, none of them a raise.
+    failure*: string
+      ## `raised`: the message.
+    reapedCount*, keptCount*, failedCount*: int
+    findings*: seq[tuple[signature, line: string]]
+      ## Per-record findings, each with the key to de-duplicate it on.
+    healthWriteError*: string
+      ## Non-empty when the verdict could not be PERSISTED. Returned rather
+      ## than raised: a diagnostic that cannot be written must not be able to
+      ## take down the tick it describes, and the caller wants to report it
+      ## once per run like any other finding.
+
+proc runAndRecordLeaseReapTick*(scope: DaemonLeaseScope = dlsUser;
+                                overrideRoot = "";
+                                now: Time = getTime()):
+    LeaseReapTickOutcome =
+  ## Run ONE tick and persist its verdict, returning what to log.
+  ##
+  ## THE VERDICT IS DECIDED AND WRITTEN HERE, FROM THE SWEEP ALONE. That is
+  ## the point of folding the two steps into one proc rather than leaving the
+  ## caller to run the sweep and then record it: the caller also LOGS, logging
+  ## can fail (a full disk, a revoked log file), and a caller that wrapped
+  ## both in one `try` would persist a tick that SUCCEEDED as an unsuccessful
+  ## one — manufacturing the very health finding this record exists to report
+  ## truthfully. Keeping the decision on this side of the boundary means a
+  ## later edit to the daemon's logging cannot reintroduce that.
+  ##
+  ## NEVER RAISES. Both the sweep failure and a failure to persist the verdict
+  ## come back as fields.
+  var reportFailures: seq[tuple[signature, line: string]] = @[]
+  var successful = false
+  try:
+    let report = runLeaseReapTick(scope, overrideRoot = overrideRoot, now = now)
+    result.reapedCount = report.reaped.len
+    result.keptCount = report.skipped.len
+    result.failedCount = report.failed.len
+    reportFailures = leaseReapFindings(report)
+    result.findings = reportFailures
+    # `unreadable` counts against the tick; `foreign` and `quarantined` do
+    # not. The three are not alike: a FOREIGN record is deliberately left
+    # alone (a newer repro owns it) and a QUARANTINED one was just moved out
+    # of the way by this very sweep — both are the reaper working as
+    # specified. An UNREADABLE record "could neither be decoded nor
+    # quarantined; still in place": nothing changed, the next tick meets it
+    # again, and it is unfixable by retrying. That is exactly the class the
+    # consecutive-unsuccessful counter exists to surface, so a sweep that
+    # ends with one must not be recorded as a clean sweep.
+    successful = report.failed.len == 0 and report.unreadable.len == 0
+  except CatchableError as err:
+    result.raised = true
+    result.failure = err.msg
+    successful = false
+
+  var findingLines: seq[string] = @[]
+  if result.raised:
+    findingLines.add("whole sweep failed: " & result.failure)
+  else:
+    for finding in reportFailures:
+      findingLines.add(finding.line)
+
+  try:
+    recordLeaseReapTickOutcome(successful, findingLines, scope, overrideRoot,
+      now)
+  except CatchableError as err:
+    result.healthWriteError = err.msg
 
 # ---------------------------------------------------------------------------
 # L5 deferral (ii): the concrete consume-site renew hook.

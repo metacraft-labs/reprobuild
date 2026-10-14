@@ -22,7 +22,7 @@ from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
   installedLayoutPackageTrees
 from repro_core/ambient_execution import uncontrolledFindExe
 from repro_core/c_compiler import CCompilerUnusableError, explicitCCompiler,
-  fallbackCCompiler, nimCCompilerFlags
+  fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags
 
 import repro_profile
 import repro_profile_intent
@@ -108,11 +108,12 @@ proc resolveProfileCCompiler*(): string =
   ## output, and this edge carries no entropy blessing, see `edge.nim`); only
   ## the determinism probe admits the second identical run, so an unchanged
   ## profile hit on run 3 instead of run 2 and every cache-hit gate failed.
-  ## `-fno-temp-file` removes the draw (reprobuild-pm issue
-  ## 2026-10-14-clang-profile-compile-is-not-published-on-its-first-run).
-  ## The recipe compile blesses compiler entropy and is unaffected. A host with
-  ## Nim's default compiler keeps it; only a host without it -- where the
-  ## compile could not run at all -- gets one picked.
+  ## The compile now passes clang `-fno-temp-file`, which removes the draw
+  ## (`profileCompileCFlags`), but only where the compiler accepts it; the
+  ## order is kept so a clang that does not is never preferred. The recipe
+  ## compile blesses compiler entropy and is unaffected. A host with Nim's
+  ## default compiler keeps it; only a host without it -- where the compile
+  ## could not run at all -- gets one picked.
   try:
     result = explicitCCompiler()
   except CCompilerUnusableError as err:
@@ -122,6 +123,35 @@ proc resolveProfileCCompiler*(): string =
   if uncontrolledFindExe(NimDefaultCCompilerExe).len > 0:
     return ""
   result = fallbackCCompiler()
+
+proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
+  ## The flags the profile compile hands the C compiler through Nim's
+  ## `--passC`, for the compiler that will actually run: `cCompiler` (from
+  ## `resolveProfileCCompiler`), or Nim's default (`NimDefaultCCompilerExe`
+  ## on `PATH`) when that is "".
+  ##
+  ## Today one flag: clang's `-fno-temp-file`
+  ## (`repro_core/c_compiler.clangNoTempFileCFlags`). Without it clang calls
+  ## `arc4random` to name the temporary file it renames onto each `-o`
+  ## object, io-mon reports the call, and this edge -- which carries no
+  ## entropy blessing (`edge.nim`) -- had its first run's publish skipped:
+  ## an unchanged profile hit on run 3 instead of run 2 (reprobuild-pm issue
+  ## 2026-10-14-clang-profile-compile-is-not-published-on-its-first-run).
+  ## That is Nim's default on macOS, and the compiler any host gets from an
+  ## explicit `$REPRO_BOOTSTRAP_CC` / `$CC` that is a clang. gcc gets
+  ## nothing, and a clang that rejects the flag (probed with a real compile
+  ## in `scratchDir`) compiles as before.
+  ##
+  ## Decided inside the edge, by the helper, rather than by the caller that
+  ## schedules it: the decision is a function of the compiler binary and of
+  ## this code, both of which the edge's monitored record already covers, and
+  ## deciding it in the caller would spawn the compiler twice on every warm
+  ## `repro home plan` to fingerprint a fact the record already holds. Pass a
+  ## `scratchDir` the edge ignores as an input (the nimcache).
+  let effective =
+    if cCompiler.len > 0: cCompiler
+    else: uncontrolledFindExe(NimDefaultCCompilerExe)
+  clangNoTempFileCFlags(effective, scratchDir)
 
 proc requireReprobuildSources*(repoRoot: string) =
   ## Refuse a source root that holds no reprobuild libs, naming the
@@ -158,7 +188,8 @@ const ProfileCompileDefines*: seq[string] = @[]
   ## plus whatever its own `config.nims` defines.
 
 proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
-                         repoRoot: string; cCompiler = ""): seq[string] =
+                         repoRoot: string; cCompiler = "";
+                         cFlags: openArray[string] = []): seq[string] =
   ## The `nim c` command line for a profile compile, as an argv sequence.
   ##
   ## Built as a sequence and handed to the process launcher unchanged. It
@@ -172,10 +203,14 @@ proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
   ##
   ## `cCompiler` (from `resolveProfileCCompiler`) becomes the compiler and
   ## linker Nim uses (`nimCCompilerFlags`); "" leaves Nim's default.
+  ## `cFlags` (from `profileCompileCFlags`) each become one `--passC:`,
+  ## applied to every C compile and not to the link.
   result = @[nimExe, "c", "--hints:off", "--warnings:off",
     "--nimcache:" & nimcacheDir,
     "--out:" & outBinary]
   result.add nimCCompilerFlags(cCompiler)
+  for flag in cFlags:
+    result.add "--passC:" & flag
   for define in ProfileCompileDefines:
     result.add "-d:" & define
   for path in profileNimPaths(repoRoot):
@@ -360,6 +395,49 @@ proc finishProfileNim*(p: Process): tuple[output: string; exitCode: int] =
 # Direct Nim invocation (two-phase: `nim c` then run the binary).
 # ---------------------------------------------------------------------------
 
+type RuntimeStderrCapture = object
+  stream: Stream
+  text: string
+  readError: string
+
+proc captureRuntimeStderr(capture: ptr RuntimeStderrCapture) {.thread.} =
+  # This stream is owned by the reader until joinThread returns. Stream's
+  # virtual methods lack gcsafe annotations; no other thread touches it.
+  {.cast(gcsafe).}:
+    try:
+      capture.text = drainStream(capture.stream)
+    except CatchableError as err:
+      capture.readError = err.msg
+
+proc runProfileBinary(outBinary: string): tuple[
+    output, stderrText: string; exitCode: int] =
+  let p = startProcess(outBinary, args = [], options = {})
+  var capture = RuntimeStderrCapture(stream: p.errorStream)
+  var reader: Thread[ptr RuntimeStderrCapture]
+  try:
+    createThread(reader, captureRuntimeStderr, addr capture)
+  except:
+    p.terminate()
+    discard p.waitForExit()
+    p.close()
+    raise
+  try:
+    try:
+      result.output = drainStream(p.outputStream)
+      result.exitCode = p.waitForExit()
+    except:
+      # Stop the writer before joining if stdout capture failed, otherwise
+      # it could remain blocked writing to the pipe we stopped draining.
+      p.terminate()
+      discard p.waitForExit()
+      raise
+  finally:
+    joinThread(reader)
+    p.close()
+  if capture.readError.len > 0:
+    raise newException(IOError, "reading profile stderr: " & capture.readError)
+  result.stderrText = capture.text
+
 proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
                            repoRoot: string;
                            verbose: bool = false): tuple[
@@ -375,9 +453,11 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
 
+  # The probe compile runs in the nimcache: the edge ignores it as an input.
+  let cFlags = profileCompileCFlags(cCompiler, nimcacheDir)
   let stagedConfig = stageProfileConfig(profileRoot, repoRootAbs)
   let nimArgv = profileCompileArgv(nimExe, profileRoot, nimcacheDir,
-    outBinary, repoRootAbs, cCompiler)
+    outBinary, repoRootAbs, cCompiler, cFlags)
   if verbose:
     stderr.writeLine("repro profile compile: " & nimArgv.join(" "))
 
@@ -396,23 +476,18 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
 
     # Run the profile binary directly, not through a shell, for the same
     # reason the compile is an argv: the binary sits under the nimcache, so
-    # its path carries any space the state directory has. stderr is merged
-    # into the captured output as `execCmdEx` did before, so a profile that
-    # fails keeps reporting its diagnostics.
-    var runProc = startProcess(outBinary, args = [],
-                               options = {poStdErrToStdOut})
-    let runOutput = drainStream(runProc.outputStream)
-    let runExit = runProc.waitForExit()
-    runProc.close()
-    let runRes = (output: runOutput, exitCode: runExit)
+    # its path carries any space the state directory has. Only stdout is
+    # intent JSON. Drain stderr concurrently so diagnostics larger than a
+    # pipe buffer cannot block the profile before it emits its intent.
+    let runRes = runProfileBinary(outBinary)
     if runRes.exitCode != 0:
       var err = new CompileFailure
       err.msg = "compiled profile binary exited " & $runRes.exitCode &
         " for " & profileRoot
-      err.stderrText = runRes.output
+      err.stderrText = compileRes.output & runRes.stderrText & runRes.output
       raise err
     result.jsonOutput = runRes.output
-    result.stderrText = compileRes.output
+    result.stderrText = compileRes.output & runRes.stderrText
   finally:
     unstageProfileConfig(stagedConfig)
 

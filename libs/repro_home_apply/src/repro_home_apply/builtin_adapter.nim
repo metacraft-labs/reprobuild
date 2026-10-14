@@ -120,8 +120,8 @@ type
     ## operator sees exactly which paths were tried. Remediation:
     ## install Git for Windows (ships ``tar`` with the ``--zstd``
     ## filter) OR install the full 7-Zip suite (the M3 hand-authored
-    ## ``packages/sevenzip.nim`` ships ``7zr.exe`` which does NOT
-    ## include the zstd codec; re-harvest sevenzip to the MSI shape
+    ## ``packages/sevenzip.nim`` shipped ``7zr.exe`` which does NOT
+    ## include the zstd codec; re-harvest 7zip to the MSI shape
     ## via the M11 follow-up).
     packageId*: string
     discoveryTrace*: seq[string]
@@ -131,7 +131,7 @@ type
     ## discovery order (catalog-registered prefix → PATH → fail-closed)
     ## exhausted without finding one. Carries the discovery trace so
     ## the operator sees exactly which steps were attempted.
-    ## Remediation: ``repro home add sevenzip`` (or list ``sevenzip``
+    ## Remediation: ``repro home add 7zip`` (or list ``7zip``
     ## ahead of the 7z-needing tools in ``home.nim``).
     packageId*: string
     discoveryTrace*: seq[string]
@@ -250,12 +250,12 @@ type
       ## pins the placed copy to.
 
 const
-  SevenZipPackageNames* = ["sevenzip", "7zip"]
-    ## Store rows the 7z-family discovery accepts as the 7-Zip package.
-    ## GM4b: the canonical stdlib definition is ``package sevenzip`` (the
-    ## package macro cannot declare a name that starts with a digit); prefixes
-    ## realized before GM4b were recorded under the old registry key
-    ## ``7zip`` and still count.
+  SevenZipPackageNames* = ["7zip", "sevenzip"]
+    ## Store rows the 7z-family discovery accepts as the 7-Zip package. The
+    ## canonical stdlib definition is ``package "7zip"``. For a while after
+    ## GM4b it was ``package sevenzip``, because the package macro could not
+    ## declare a name starting with a digit, so prefixes realized in that
+    ## window are recorded as ``sevenzip`` and still count.
   BuiltinAdapterName* = "builtin"
     ## The string that goes into the receipt's `adapter` field. Matches
     ## `ArchiveRoute.arInstaller` and `AdapterKind.akBuiltin`.
@@ -575,7 +575,7 @@ proc discoverSevenZipExe*(store: var Store; packageId: string):
   ##
   ##   (i)  catalog-registered prefix — look up an already-realized
   ##        ``7zip`` package in the current store. The hand-authored
-  ##        ``packages/sevenzip.nim`` ships ``bin/7z.exe`` so a
+  ##        ``packages/sevenzip.nim`` shipped ``bin/7z.exe`` so a
   ##        store-resident 7zip prefix is hit cleanly via
   ##        ``listPrefixes``. Iterates over every prefix whose
   ##        ``packageName`` in ``SevenZipPackageNames`` and returns the
@@ -590,8 +590,8 @@ proc discoverSevenZipExe*(store: var Store; packageId: string):
   ##   (iii) fail closed — raise ``EBuiltinSevenZipUnavailable`` with
   ##        ``packageId`` (the tool whose realize needed 7z) plus the
   ##        per-step discovery trace. Operator remediation:
-  ##        ``repro home add sevenzip`` (or hand-edit ``home.nim`` to list
-  ##        ``sevenzip`` ahead of the 7z-needing tool).
+  ##        ``repro home add 7zip`` (or hand-edit ``home.nim`` to list
+  ##        ``7zip`` ahead of the 7z-needing tool).
   ##
   ## NB per M3 honest scope: this discovery does NOT recursively invoke
   ## the apply pipeline mid-realize to bootstrap 7zip on demand. The
@@ -637,7 +637,7 @@ proc discoverSevenZipExe*(store: var Store; packageId: string):
     "' could not discover a 7z.exe binary. Discovery trace: " &
     trace.join("; ") &
     ". Remediation: add 7-Zip to your home profile (`repro home add " &
-    "sevenzip`) or list `sevenzip` ahead of the 7z-needing tool in home.nim " &
+    "7zip`) or list `7zip` ahead of the 7z-needing tool in home.nim " &
     "(M3 uses discovery-by-prefix; the formal " &
     "`requires_for_realize: [7zip]` schema field is deferred to a " &
     "future campaign).")
@@ -1980,7 +1980,7 @@ proc extractTar(packageId, archivePath, destDir, format: string) =
 #        FULL 7-Zip distribution (26.01+ ships the zstd codec; the
 #        reduced ``7zr.exe`` does NOT). The M3 hand-authored
 #        ``packages/sevenzip.nim`` currently routes through 7zr; until
-#        the M11 follow-up re-harvests sevenzip to the MSI shape, this
+#        the M11 follow-up re-harvests 7zip to the MSI shape, this
 #        step typically misses on freshly-bootstrapped hosts.
 #   (ii) host ``tar`` with the ``--zstd`` filter (Git for Windows ships
 #        this).
@@ -1991,7 +1991,7 @@ proc extractTar(packageId, archivePath, destDir, format: string) =
 # Per the bundling-posture amendment we do NOT vendor a zstd binary; the
 # spec's ``libs/repro_home_apply/vendor/zstd/`` deliverable is replaced
 # with the multi-strategy host discovery + the future re-harvested
-# sevenzip MSI catalog. Documented in the M6 spec note.
+# 7zip MSI catalog. Documented in the M6 spec note.
 
 proc probe7zZstdSupport(sevenZipExe: string): bool =
   ## Probe whether the discovered ``7z.exe`` supports the zstd codec by
@@ -2043,7 +2043,7 @@ proc discoverZstdExtractor*(store: var Store; packageId: string):
   ## NB the catalog-prefix lookup probes for the FULL 7z (zstd codec
   ## present), NOT just any ``bin/7z.exe``. The M3 hand-authored 7zr
   ## entry will report no zstd support; we treat that as a miss and
-  ## fall through to host tools. Once sevenzip is re-harvested to the
+  ## fall through to host tools. Once 7zip is re-harvested to the
   ## MSI shape, this branch will hit cleanly.
   var trace: seq[string] = @[]
   # Step (i): catalog-registered 7zip prefix with zstd codec.
@@ -2058,14 +2058,14 @@ proc discoverZstdExtractor*(store: var Store; packageId: string):
         return ZstdExtractor(kind: zekSevenZip, sevenZipExe: candidate)
       trace.add("catalog-prefix:row " & row.realizedPath &
         " has bin/7z.exe but no zstd codec (likely reduced 7zr; " &
-        "re-harvest sevenzip to the MSI shape per M11 follow-up)")
+        "re-harvest 7zip to the MSI shape per M11 follow-up)")
     let candidateBare = prefixAbs / "bin" / "7z"
     if fileExists(extendedPath(candidateBare)):
       if probe7zZstdSupport(candidateBare):
         return ZstdExtractor(kind: zekSevenZip, sevenZipExe: candidateBare)
       trace.add("catalog-prefix:row " & row.realizedPath &
         " has bin/7z but no zstd codec")
-  # Step (i'): PATH-resident 7z with zstd (Scoop sevenzip ships the
+  # Step (i'): PATH-resident 7z with zstd (Scoop 7zip ships the
   # full codec set; useful for hosts where 7zip is host-installed).
   let path7z = findExe("7z.exe")
   if path7z.len > 0 and probe7zZstdSupport(path7z):
@@ -2979,7 +2979,7 @@ proc realizeBuiltinPackage*(store: var Store;
         # M11 (Realize-Closure-And-Catalog-Expansion spec): plain NSIS
         # installer (the erlang OTP shape — bona-fide NSIS, NOT a Burn
         # outer wrapping inner MSIs). The full ``7z.exe`` from the M8
-        # sevenzip MSI re-harvest transparently recognises the modern
+        # 7zip MSI re-harvest transparently recognises the modern
         # NSIS installer envelope and dumps its inner file tree —
         # no dark.exe / no lessmsi / no per-MSI sandwich. The M8 retro
         # documented this as the missing 3-line dispatch closing the

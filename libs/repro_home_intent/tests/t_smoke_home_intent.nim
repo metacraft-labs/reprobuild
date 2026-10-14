@@ -119,6 +119,64 @@ profile "x":
     let after = readFile(extendedPath(path))
     check after == original
 
+  test "a package name starting with a digit is written quoted":
+    # reprobuild-pm issue 2026-10-13-package-macro-cannot-declare-a-name-
+    # starting-with-a-digit: the 7-Zip package is named `7zip`, which is
+    # not a Nim identifier. A profile names it `"7zip"` or
+    # `package("7zip"[, "<version>"])`, and the editor writes those forms.
+    let dir = createTempDir("repro-home-smoke-digit-", "")
+    defer: removeDir(dir)
+    let path = dir / "repro-home-smoke-digit.nim"
+    writeFile(extendedPath(path), """
+import repro/profile
+
+profile "x":
+  activity default:
+    "7zip"
+    package("2fa")
+    package("3dtool", "1.2.3")
+    package("windows-terminal")
+""")
+    let act = findActivity(loadProfile(path), "default")
+    check act.isSome
+    var names: seq[string] = @[]
+    var versions: seq[string] = @[]
+    for child in act.get.activityChildren:
+      names.add child.packageName
+      versions.add child.packageVersion
+    check names == @["7zip", "2fa", "3dtool", "windows-terminal"]
+    check versions == @["", "", "1.2.3", ""]
+
+    let sample = writeSample(dir)
+    let original = readFile(extendedPath(sample))
+    addPackageReference(sample, "7zip", activity = "default")
+    addPackageReference(sample, "9pkg", activity = "default",
+      version = "26.01")
+    let added = readFile(extendedPath(sample))
+    check "\n    \"7zip\"\n" in added
+    check "\n    package(\"9pkg\", \"26.01\")\n" in added
+    var reread: seq[string] = @[]
+    for child in findActivity(loadProfile(sample), "default").get.activityChildren:
+      if child.kind == nkPackageRef:
+        reread.add child.packageName
+    check "7zip" in reread
+    check "9pkg" in reread
+    removePackageReference(sample, "9pkg", activity = "default",
+      version = "26.01")
+    removePackageReference(sample, "7zip", activity = "default")
+    check readFile(extendedPath(sample)) == original
+
+  test "a quoted package name must be non-empty and closed":
+    let dir = createTempDir("repro-home-smoke-badquote-", "")
+    defer: removeDir(dir)
+    for body in ["\"\"", "\"7zip", "package(\"\")", "package(\"7 zip\")"]:
+      let path = dir / "bad.nim"
+      writeFile(extendedPath(path), "import repro/profile\n\n" &
+        "profile \"x\":\n  activity default:\n    " & body & "\n")
+      checkpoint body
+      expect EUnstructured:
+        discard loadProfile(path)
+
   test "setConfigurable creates config + sub-block + entry":
     # Use a profile WITHOUT a config block.
     let p = """

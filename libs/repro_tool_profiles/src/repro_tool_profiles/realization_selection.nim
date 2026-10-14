@@ -18,6 +18,7 @@
 
 import std/[options, sequtils, strutils]
 
+import repro_solver/version_constraints
 import repro_interface_artifacts
 import repro_dsl_stdlib/packages_schema
 
@@ -403,9 +404,35 @@ proc describeCoverage(records: openArray[InterfaceTarballProvisioning]):
       seen.add(label)
   seen.join(", ")
 
+proc requestedUsesVersionRange*(useDef: InterfaceToolUse): string =
+  ## A uses constraint starts with its selector; only the following clause
+  ## is a range. Accept all whitespace used by the DSL's tokenization.
+  let constraint = useDef.rawConstraint.strip()
+  for i, ch in constraint:
+    if ch in Whitespace:
+      return constraint[i + 1 .. ^1].strip()
+
+proc parsedVersionRange(range: string): Option[SemverRange] =
+  if range.len == 0:
+    return none(SemverRange)
+  try:
+    some(parseSemverRange(range))
+  except ESemverParse as err:
+    raise newException(ValueError, "invalid uses version range '" & range &
+      "': " & err.msg)
+
+proc matchesVersionRange(version: string; range: Option[SemverRange]): bool =
+  ## Unknown or malformed versions cannot prove a versioned request.
+  if range.isNone: return true
+  if version.len == 0: return false
+  try:
+    satisfies(parseSemver(version), range.get)
+  except ESemverParse:
+    false
+
 proc selectTarballRecord*(records: openArray[InterfaceTarballProvisioning];
                           target: RealizationTarget; version = "";
-                          contributor = none(string)): KindChoice =
+                          contributor = none(string); versionRange = ""): KindChoice =
   ## Select among ``tarball`` records: filter by contributor pin, target
   ## platform and version pin; refuse an ambiguous contributor set; then
   ## ``selectArm`` (most specific coordinate, highest satisfied floor,
@@ -415,6 +442,7 @@ proc selectTarballRecord*(records: openArray[InterfaceTarballProvisioning];
     result.status = kcNoRecords
     result.detail = "no tarball realization declared"
     return
+  let range = parsedVersionRange(versionRange)
   var arms: seq[PlatformBinary] = @[]
   var armRecord: seq[int] = @[]
   var platformMatched = false
@@ -437,9 +465,10 @@ proc selectTarballRecord*(records: openArray[InterfaceTarballProvisioning];
     if single.index < 0:
       continue
     platformMatched = true
-    if record.detail.version.len > 0 and
-        record.detail.version notin versions:
-      versions.add(record.detail.version)
+    let offered = if record.detail.version.len > 0: record.detail.version
+                  else: "unversioned"
+    if offered notin versions: versions.add(offered)
+    if not matchesVersionRange(record.detail.version, range): continue
     if version.len > 0 and record.detail.version != version:
       continue
     arms.add(arm.arm)
@@ -447,9 +476,10 @@ proc selectTarballRecord*(records: openArray[InterfaceTarballProvisioning];
     if record.contributor notin result.contributors:
       result.contributors.add(record.contributor)
   if arms.len == 0:
-    if platformMatched and version.len > 0:
+    if platformMatched and (version.len > 0 or range.isSome):
       result.status = kcVersionNotOffered
-      result.detail = "no tarball realization at version '" & version &
+      result.detail = "no tarball realization satisfies " &
+        (if range.isSome: "range '" & versionRange else: "version '" & version) &
         "' for " & describeTarget(target) & " (offered: " &
         (if versions.len > 0: versions.join(", ") else: "unversioned") & ")"
     elif contributorFiltered and contributor.isSome:
@@ -537,7 +567,7 @@ proc scoopServesTarget*(target: RealizationTarget): bool =
 
 proc selectScoopRecord*(records: openArray[InterfaceScoopProvisioning];
                         target: RealizationTarget; version = "";
-                        contributor = none(string)): KindChoice =
+                        contributor = none(string); versionRange = ""): KindChoice =
   result.index = -1
   if records.len == 0:
     result.status = kcNoRecords
@@ -548,10 +578,15 @@ proc selectScoopRecord*(records: openArray[InterfaceScoopProvisioning];
     result.detail = "scoop does not realize packages for " &
       describeTarget(target)
     return
+  let range = parsedVersionRange(versionRange)
+  var versions: seq[string] = @[]
   var versionMatched = false
   for i, record in records:
     if not contributorAllowed(record.contributor, contributor):
       continue
+    let offered = if record.version.len > 0: record.version else: "unversioned"
+    if offered notin versions: versions.add(offered)
+    if not matchesVersionRange(record.version, range): continue
     if version.len > 0 and record.version != version:
       continue
     versionMatched = true
@@ -560,9 +595,12 @@ proc selectScoopRecord*(records: openArray[InterfaceScoopProvisioning];
     if result.index < 0:
       result.index = i
   if result.index < 0:
-    if version.len > 0 and not versionMatched:
+    if (version.len > 0 or range.isSome) and not versionMatched and
+        versions.len > 0:
       result.status = kcVersionNotOffered
-      result.detail = "no scoopApp realization pins version '" & version & "'"
+      result.detail = "no scoopApp realization satisfies " &
+        (if range.isSome: "range '" & versionRange else: "version '" & version) &
+        "' (offered: " & versions.join(", ") & ")"
     else:
       result.status = kcContributorNotOffered
       result.detail = "contributor " & contributorLabel(contributor.get) &

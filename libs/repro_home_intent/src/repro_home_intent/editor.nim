@@ -336,6 +336,13 @@ proc profileHasMacroImport(p: Profile): bool =
       return true
   false
 
+proc needsQuotedPackageSpelling(pkg: string): bool =
+  ## A package name that cannot be written bare or backtick-quoted because
+  ## it does not start like a Nim identifier (``7zip``). It is written as a
+  ## string, the form the parser and the profile macro both accept
+  ## (Package-Model.md §"Package names").
+  pkg.len > 0 and not (pkg[0].isAlphaAscii() or pkg[0] == '_')
+
 proc renderPackageRefSpelling(p: Profile; pkg: string): string =
   ## M83 Phase F3: emit a hyphenated package name with backticks
   ## (`` `pkg-x` ``) so the resulting line is also a valid Phase A
@@ -344,6 +351,8 @@ proc renderPackageRefSpelling(p: Profile; pkg: string): string =
   ## import). Legacy text-form profiles keep the bare spelling so the
   ## structural editor's round-trip stays byte-identical against the
   ## existing home-intent test fixtures.
+  if needsQuotedPackageSpelling(pkg):
+    return "\"" & pkg & "\""
   if not profileHasMacroImport(p):
     return pkg
   for ch in pkg:
@@ -381,7 +390,9 @@ proc renderPackageLineText(p: Profile; pkg, version: string): string =
   ## bare form so a no-version `add` continues to produce the
   ## byte-identical line the existing round-trip tests assert.
   if version.len > 0:
-    return "package(" & pkg & ", \"" & version & "\")"
+    let id =
+      if needsQuotedPackageSpelling(pkg): "\"" & pkg & "\"" else: pkg
+    return "package(" & id & ", \"" & version & "\")"
   renderPackageRefSpelling(p, pkg)
 
 proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string;

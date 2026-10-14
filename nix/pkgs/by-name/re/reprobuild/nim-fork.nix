@@ -35,14 +35,16 @@
   # ── Source pins ────────────────────────────────────────────────────────────
   # Defaults are ordinary nixpkgs fixed-output fetches, so a nixpkgs consumer
   # needs no flake plumbing. reprobuild's flake passes its own inputs here.
-  # Keep every default in step with the corresponding `flake.lock` entry; the
+  # Keep every default in step with the corresponding entry of the
+  # `flake.lock` of package.nix's `src` commit (the flake check
+  # `nixpkgs-package-src-sync` fails otherwise); the
   # `hash` is the fetched tree's NAR hash (set it to `lib.fakeHash` and copy the
   # `got:` line from the resulting build failure when bumping a rev).
   forkSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim";
-    rev = "f902ddcb7a29b262385645809aede76834015278";
-    hash = "sha256-DCzEpcXr52up6f4JoyjmxfjrldqVKHVyljHN4EwDQDw=";
+    rev = "1e19cf261413667ef69123a3ef221e239d1f8897";
+    hash = "sha256-q4V7qEJRJGo6f0Wli/aauix78DbIPt4/eu7YQqO8APw=";
   },
   csourcesSrc ? fetchFromGitHub {
     owner = "nim-lang";
@@ -236,6 +238,20 @@ stdenv.mkDerivation {
     "$out/bin/nim" --version
     runHook postInstall
   '';
+
+  # The source arguments as given, read back by reprobuild's flake check
+  # `nixpkgs-package-src-sync` to compare the defaults with `flake.lock`.
+  passthru.sources = {
+    inherit
+      forkSrc
+      csourcesSrc
+      traceFormatSrc
+      stewSrc
+      resultsSrc
+      checksumsSrc
+      nimonySrc
+      ;
+  };
 
   meta = {
     description = "metacraft-labs/nim fork (Nim 2.3.1 devel) — reprobuild toolchain";

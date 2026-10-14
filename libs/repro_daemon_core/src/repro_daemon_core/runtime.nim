@@ -2614,14 +2614,14 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ## The store is on disk, so this is correct on the FIRST tick after a
   ## restart (an expired record left by a prior instance is reaped here).
   ##
-  ## A record the sweep could not reap comes back in ``report.failed`` rather
-  ## than as a raise — see ``reapOnce``'s "one unhandleable record must not
-  ## abort the sweep". So does a record the sweep could not even DECODE: the
-  ## listing (``scanStateRecords``) reports a newer repro's record as foreign
-  ## and quarantines a corrupt one instead of raising, and those come back
-  ## through ``leaseReapFindings`` too — logged even on a tick that reaped
-  ## nothing, since the findings loop does not depend on ``reaped``. The
-  ## ``except`` below therefore now catches only a WHOLE-SWEEP failure (an
+  ## A record the sweep could not reap comes back as a FINDING rather than as
+  ## a raise — see ``reapOnce``'s "one unhandleable record must not abort the
+  ## sweep". So does a record the sweep could not even DECODE: the listing
+  ## (``scanStateRecords``) reports a newer repro's record as foreign and
+  ## quarantines a corrupt one instead of raising, and those come back through
+  ## ``leaseReapFindings`` too — reported even on a tick that reaped nothing,
+  ## since the findings loop below does not depend on ``reapedCount``.
+  ## ``outcome.raised`` is therefore set only by a WHOLE-SWEEP failure (an
   ## unreadable store root), which is equally unfixable-by-retrying and so is
   ## deduplicated on the same terms.
   ##
@@ -2637,21 +2637,55 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ## stopping the process without dropping the in-memory entry would leave
   ## the next ``repro up`` attaching a consumer to a process this tick had
   ## just killed.
+  ##
+  ## THE VERDICT IS RECORDED BY THE SWEEP, NOT BY THIS LOGGING.
+  ## ``runAndRecordLeaseReapTick`` runs the sweep and persists its verdict in
+  ## one step and returns only what to log, which is what makes a reaper that
+  ## is not working visible to ``repro health``. The de-duplication above is
+  ## precisely why that record is not optional: after the first report a
+  ## permanently stuck reaper says NOTHING at all, so the log stops being
+  ## evidence of its own state.
+  ##
+  ## Everything in the inner ``try`` is therefore best-effort reporting around
+  ## an outcome already decided and already on disk. Each logging call is
+  ## individually guarded, including the ``reportOnce`` calls — ``reportOnce``
+  ## writes to the log too, so the arm that reports a failure can fail the
+  ## same way, and this proc is called from the startup sweep and from the
+  ## event loop, neither of which wraps it. An escape there would stop the
+  ## daemon over a log write.
+  ##
+  ## THE OUTER ``try`` CARRIES ONLY A ``finally``, which is the whole reason
+  ## the sweep can sit inside it: it uninstalls the instance handler whatever
+  ## happens, and it catches NOTHING, so a whole-sweep raise propagates
+  ## exactly as it does without the handler scoping. The sweep is not made
+  ## best-effort by being lexically inside a ``try``.
   installServiceInstanceReapHandler(instances)
   try:
-    let report = runLeaseReapTick(daemonLeaseScope(config),
+    let outcome = runAndRecordLeaseReapTick(daemonLeaseScope(config),
       overrideRoot = config.leaseStoreRoot)
-    if report.reaped.len > 0:
-      logLine(config.logPath, "lease reap tick reaped=" & $report.reaped.len &
-        " kept=" & $report.skipped.len &
-        " unreapable=" & $report.failed.len & " scope=" &
-        (if config.systemScope: "system" else: "user"))
-    for finding in leaseReapFindings(report):
-      reportOnce(state, config, finding.signature,
-        "lease reap tick (reported once per daemon run) " & finding.line)
-  except CatchableError as err:
-    reportOnce(state, config, "sweep\x00" & err.msg,
-      "lease reap tick error (reported once per daemon run): " & err.msg)
+    try:
+      if outcome.raised:
+        reportOnce(state, config, "sweep\x00" & outcome.failure,
+          "lease reap tick error (reported once per daemon run): " &
+            outcome.failure)
+      else:
+        if outcome.reapedCount > 0:
+          logLine(config.logPath, "lease reap tick reaped=" &
+            $outcome.reapedCount & " kept=" & $outcome.keptCount &
+            " unreapable=" & $outcome.failedCount & " scope=" &
+            (if config.systemScope: "system" else: "user"))
+        for finding in outcome.findings:
+          reportOnce(state, config, finding.signature,
+            "lease reap tick (reported once per daemon run) " & finding.line)
+      if outcome.healthWriteError.len > 0:
+        reportOnce(state, config, "health-write\x00" & outcome.healthWriteError,
+          "lease reap tick health not recorded (reported once per daemon run): " &
+            outcome.healthWriteError)
+    except CatchableError:
+      # Nowhere left to report a reporting failure, and nothing depends on it:
+      # the tick's verdict is already written, and it is the thing
+      # ``repro health`` actually reads.
+      discard
   finally:
     uninstallServiceInstanceReapHandler()
 

@@ -115,10 +115,27 @@ int main(int argc, char **argv) {
       read_for_monitor(argv[i]);
     }
   }
-  char **next_argv = calloc((size_t)argc + 1, sizeof(char *));
+  char **next_argv = calloc((size_t)argc + 2, sizeof(char *));
   if (next_argv == NULL) return 126;
-  next_argv[0] = real_compiler;
-  for (int i = 1; i < argc; i++) next_argv[i] = argv[i];
+  int next = 0;
+  next_argv[next++] = real_compiler;
+#if defined(__APPLE__)
+  /* The real compiler here is clang, which writes a `-c` object through a
+     temporary whose name libLLVM draws with arc4random. The monitor reports
+     that draw (as it does on Linux for a clang), and a gcc edge carries no
+     entropy blessing, so the object's cache publication would be withheld
+     and the cases that assert the C objects are cache hits would fail for a
+     reason unrelated to what they test. `-fno-temp-file` writes the object
+     directly; it is what reprobuild's own profile compile passes clang
+     (`clangNoTempFileFlag`). Only on a compile, where the flag applies. */
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-c") == 0) {
+      next_argv[next++] = "-fno-temp-file";
+      break;
+    }
+  }
+#endif
+  for (int i = 1; i < argc; i++) next_argv[next++] = argv[i];
 
 #if defined(__APPLE__)
   /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose

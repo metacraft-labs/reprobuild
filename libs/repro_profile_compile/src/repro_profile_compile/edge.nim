@@ -203,10 +203,15 @@ proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
 #     takes its nimcache from argv. Its C compiler comes from
 #     `resolveProfileCCompiler` (an explicit choice, else Nim's default, else
 #     the recipe compile's fallback); the variables it reads stay OBSERVED
-#     (keyed by value), and the resolved path is in the weak fingerprint. Do
-#     NOT make it prefer a `cc` that is clang: the `arc4random` clang draws
-#     to name its temporary object file is entropy this unblessed edge
-#     cannot carry, so its first run would go unpublished.
+#     (keyed by value), and the resolved path is in the weak fingerprint.
+#     A clang is passed `-fno-temp-file` where it accepts the flag
+#     (`profileCompileCFlags`): otherwise the `arc4random` clang draws to
+#     name its temporary object file is entropy this unblessed edge cannot
+#     carry, and its first run goes unpublished. That flag is decided by the
+#     helper, not named here: it follows from the compiler binary and the
+#     helper binary, which the monitored record covers. Do not make the
+#     resolution prefer a `cc` that is clang either: a clang too old for the
+#     flag would bring the unpublished first run back.
 # ---------------------------------------------------------------------------
 
 const ProfileCompileScratchEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]

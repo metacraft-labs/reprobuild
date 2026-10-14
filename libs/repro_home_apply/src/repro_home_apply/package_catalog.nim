@@ -726,7 +726,7 @@ proc detectHostTarget*(): PlatformTarget =
 # hard-coded map. Migration starting point: move these consts into the
 # per-package realization
 # (each affected `packages/<tool>.nim` declares its own
-# `requires_for_realize: @["sevenzip"]` or similar in the
+# `requires_for_realize: @["7zip"]` or similar in the
 # `tarball` statement); then have `extractorDependencies`
 # below read `resolution.requiresForRealize` directly instead of
 # pattern-matching on `archive_format` / `install_method`. The case
@@ -734,9 +734,9 @@ proc detectHostTarget*(): PlatformTarget =
 # See Realize-Layer-Plumbing-Closures.milestones.org M0 Outstanding
 # Tasks for the planned schema shape.
 const
-  ExtractorProvider7zip*    = "sevenzip"
-    ## GM4b: the stdlib definition is ``package sevenzip`` (the package
-    ## macro cannot declare a name that starts with a digit).
+  ExtractorProvider7zip*    = "7zip"
+    ## The stdlib definition is ``package "7zip"`` (module
+    ## ``packages/pkg_7zip.nim``).
   ExtractorProviderLessmsi* = "lessmsi"
   ExtractorProviderWix3*    = "wix3"
   ExtractorProviderInnounp* = "innounp"
@@ -757,9 +757,9 @@ proc extractorDependencies*(packageId: string;
   ## ``uses:`` provisioning edge, has no extractor-discovery edge.
   ##
   ## The returned seq never contains ``packageId`` itself (self-edges are
-  ## skipped) — even though e.g. ``sevenzip.nim`` itself uses
+  ## skipped) — even though e.g. ``pkg_7zip.nim`` itself uses
   ## ``imInstallerMsi`` which needs ``lessmsi``, that's a real edge
-  ## (sevenzip → lessmsi); the self-edge filter is for the degenerate
+  ## (7zip → lessmsi); the self-edge filter is for the degenerate
   ## case where the mapping ever points a package at itself.
   var deps: seq[string] = @[]
   # archive_format-driven edges
@@ -1178,13 +1178,19 @@ proc profileToolUse*(packageId: string;
   ## ``catalog_projection`` from the profile's location) wins; otherwise the
   ## other stdlib definitions the engine links (the former catalog packages,
   ## which a recipe reaches through an explicit import).
-  if not isBundledStdlibSelector(packageId):
-    if packageId in catalog.failures:
-      raise newException(ValueError, catalog.failures[packageId])
-    if packageId in catalog.uses:
-      var use = catalog.uses[packageId]
-      use.location = SourceLocation(file: "home-profile", line: 1)
-      return (use, true)
+  ##
+  ## When the profile imports contribution catalogs (``catalogs:``), every
+  ## reference with a definition in scope is in ``catalog`` -- bundled ones
+  ## included -- projected by a recipe that imports those catalogs, so the
+  ## contributions they register are candidates exactly as for that recipe.
+  ## Without imports a bundled selector never is, and resolves from the
+  ## linked definition below.
+  if packageId in catalog.failures:
+    raise newException(ValueError, catalog.failures[packageId])
+  if packageId in catalog.uses:
+    var use = catalog.uses[packageId]
+    use.location = SourceLocation(file: "home-profile", line: 1)
+    return (use, true)
   var home = PackageDef(packageName: ProfileProjectionPackage,
     sourceFile: "home-profile", sourceLine: 1)
   home.toolUses.add(PackageUseDef(rawConstraint: packageId,

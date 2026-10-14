@@ -1,0 +1,17 @@
+# GM5 fixture data: package rows reach the export expanded; the resource row
+# is built by its constructor and carries its `when` as the guard.
+[[package]]
+name = "llvm"
+activity = "cli"
+when = "linux or macos"
+
+[[package]]
+name = "gm5-windows-tool"
+activity = "default"
+when = "windows"
+
+[[resource]]
+kind = "env.userVariable"
+when = "host == \"m1\""
+name = "GM5_M1"
+value = "yes"

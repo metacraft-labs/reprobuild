@@ -9,6 +9,9 @@ library's `reprobuild.lib.readData` tests (GM5): both implementations must
 select the same rows for every case.
 
 Each case is a directory holding the data file `data.toml` and `case.json`.
+Rows may be written as `[[package]]` / `[[resource]]` tables or as an inline
+array of inline tables (`package = [{ ... }]`, `[]` for none): the same TOML
+data, which Nix's `builtins.fromTOML` cannot tell apart (case `inline-rows`).
 
 `row-selection/<case>/case.json`:
 

@@ -56,7 +56,8 @@ import ssz_serialization
 import repro_core                       # writeString / readString / writeU32Le …
 from repro_home_generations/pointer import Digest256, DigestSize
 import repro_resources/instance
-import repro_resources/marshal          # marshalAttrs / unmarshalAttrs (extension registry)
+import repro_resources/marshal          # marshalAttrs / unmarshalAttrs /
+                                        # unmarshalAttrsOrRaw (extension registry)
 
 const
   StateRecordMagic = "RSST"             ## resource-state store, record
@@ -998,9 +999,51 @@ proc reconstructInstance*(rec: ResourceStateRecord): ResourceInstance =
   ## The attrs marshaller for `attrsTypeId` MUST be registered in this
   ## process (the reaper/consumer links the provider module) — an unknown
   ## id is a HARD `KeyError`, never a silent drop.
+  ##
+  ## USE THIS ONLY WHEN THE CONSUMER DEREFERENCES THE TYPED VALUE. A linked
+  ## `ResourceProviderDriver` does exactly that (`TypedExtensionBox[T](
+  ## inst.attrs).val`), so for an in-process op a missing codec has to be a
+  ## hard error here rather than a wrong-type crash three frames later. A
+  ## consumer that only ROUTES the box onward wants
+  ## `reconstructInstanceOpaque` instead — see its docstring for why the
+  ## distinction is load-bearing rather than a convenience.
   ResourceInstance(
     typeId: rec.typeId,
     address: rec.address,
     attrs: unmarshalAttrs(rec.attrsTypeId, rec.attrsJson),
+    dependsOn: rec.dependsOn,
+    determinism: rec.determinism)
+
+proc reconstructInstanceOpaque*(rec: ResourceStateRecord): ResourceInstance =
+  ## `reconstructInstance` for a consumer that FORWARDS the attrs box rather
+  ## than reading it: the payload is re-hydrated through
+  ## `unmarshalAttrsOrRaw`, so an `attrsTypeId` whose codec is not registered
+  ## in THIS process becomes a `RawExtensionBox` carrying the persisted bytes
+  ## verbatim. `marshalAttrs` re-serializes such a box to those same bytes
+  ## with no registry lookup (M2 opaque pass-through), so what reaches the
+  ## provider session — or goes back to the store — is byte-for-byte what was
+  ## read.
+  ##
+  ## WHY THIS EXISTS. §4.2 of Ephemeral-State-Leases.md gives the daemon a
+  ## provider-SESSION destroy transport precisely so it can tear down an
+  ## out-of-tree provider's resources "WITHOUT linking it into the daemon",
+  ## and states that the persisted `typeId` + attrs are transport-agnostic.
+  ## They were not: the reaper reconstructed through the STRICT path before it
+  ## picked a transport, so a process holding a provider artifact but not that
+  ## provider's attrs codec — the configuration §4.2 describes — could not
+  ## reap over the session it had. Routing a box one does not need to read
+  ## through a codec one cannot have is the defect; this proc is the seam that
+  ## does not.
+  ##
+  ## NOT the cause of the outage recorded in
+  ## reprobuild-pm/issues/2026-09-29-lease-reap-tick-has-never-once-succeeded.md.
+  ## That daemon reaped on the IN-PROCESS transport throughout (no provider
+  ## artifact was registered, and nothing in the shipped tree registers one),
+  ## where its record had no linked driver either and the strict path is still
+  ## the right one. See `reaper.nim`'s module header.
+  ResourceInstance(
+    typeId: rec.typeId,
+    address: rec.address,
+    attrs: unmarshalAttrsOrRaw(rec.attrsTypeId, rec.attrsJson),
     dependsOn: rec.dependsOn,
     determinism: rec.determinism)

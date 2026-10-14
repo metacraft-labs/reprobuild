@@ -262,6 +262,11 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # `data:` section is unchanged.
   if p.dataFiles.len > 0:
     result.add ",\"dataFiles\":" & encodeStringArray(p.dataFiles)
+  # The contribution catalogs the profile imports, only when it declares
+  # any, so the key set of a profile without a `catalogs:` section is
+  # unchanged.
+  if p.catalogImports.len > 0:
+    result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -398,6 +403,10 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
   if root.hasKey("dataFiles"):
     for it in root["dataFiles"]:
       result.dataFiles.add it.getStr()
+  # Optional; absent when the profile imports no contribution catalog.
+  if root.hasKey("catalogImports"):
+    for it in root["catalogImports"]:
+      result.catalogImports.add it.getStr()
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.

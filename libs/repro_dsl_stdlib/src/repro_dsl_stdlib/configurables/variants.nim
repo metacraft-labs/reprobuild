@@ -675,6 +675,19 @@ proc rangePartOf(rawConstraint: string): string =
     return ""
   trimmed[space + 1 .. ^1].strip()
 
+proc lockRecordsPackage(pins: LockPins; packageName: string): bool =
+  ## Whether the lock's solved graph carries ``packageName`` itself — under
+  ## either identifier spelling, since a recipe's package reaches a lock as
+  ## ``isonim_gpui`` from one path and ``isonim-gpui`` from another (the issue
+  ## below lists both side by side). A solve that SAW a recipe records that
+  ## recipe's package (``buildPackageDecls`` gives every parent package a
+  ## synthetic ``0.1.0`` candidate), so absence is evidence the writing solve
+  ## never had the recipe at all.
+  if packageName in pins.packages: return true
+  let hyphen = packageName.replace('_', '-')
+  let underscore = packageName.replace('-', '_')
+  hyphen in pins.packages or underscore in pins.packages
+
 proc assertLockedVersionsSatisfyDeclaredRanges(pins: LockPins) =
   ## Named-Lock-Files NLF-M3, deliverable 3 — a lock that cannot be satisfied
   ## FAILS, naming the conflicting constraint, instead of silently resolving to
@@ -712,11 +725,35 @@ proc assertLockedVersionsSatisfyDeclaredRanges(pins: LockPins) =
       # would fail builds that are fine.
       continue
     if not satisfied:
-      raise newException(ELockConflict,
+      let conflict =
         "the " & lockSourceDescription(pins) & " pins '" & entry.depPackage &
         "' to " & locked & ", but package '" & entry.parentPackage &
         "' declares `uses: " & entry.depPackage & " " & rangePart &
-        "`, which " & locked & " does not satisfy. A committed lock is a " &
+        "`, which " & locked & " does not satisfy. "
+      if not pins.lockRecordsPackage(entry.parentPackage):
+        # The lock is a PARTIAL solve, not a relaxed one: it was written from
+        # a registry that never held this recipe (a `uses:`-reachable sibling
+        # that was not checked out where the lock was regenerated), so its
+        # pins are the floors of a smaller recipe set than this build sees.
+        # "Regenerate with `repro lock refresh`" is exactly the advice that
+        # loops here — run in the same incomplete tree it writes the same
+        # lock. Name the missing recipe and the condition a correct refresh
+        # needs instead. Issue: reprobuild-pm/issues/2026-10-12-lock-refresh-
+        # grounds-a-package-at-the-root-floor-so-the-writer-cannot-produce-a-
+        # lock-the-checker-accepts.md.
+        raise newException(ELockConflict, conflict &
+          "The lock records no pin for '" & entry.parentPackage &
+          "' itself, so the solve that wrote it never saw the recipe that " &
+          "declares this constraint: the lock was regenerated where that " &
+          "recipe was not reachable (typically a develop-set sibling that " &
+          "was not checked out), and its pins are the floors of fewer " &
+          "recipes than this build sees. Regenerate it with `repro lock " &
+          "refresh` from a workspace where the sibling declaring '" &
+          entry.parentPackage & "' is checked out; a refresh that cannot " &
+          "reach such a sibling now refuses rather than dropping its " &
+          "constraints.")
+      raise newException(ELockConflict, conflict &
+        "A committed lock is a " &
         "pin, not a preference: the build refuses to re-solve '" &
         entry.depPackage & "' to a version the lock does not name. " &
         "Regenerate the lock with `repro lock refresh` or relax the " &

@@ -249,6 +249,35 @@ proc decodeRow(profilePath, dataPath: string; row: int;
   if table[].hasKey("when"):
     validateRowGuard(profilePath, dataPath, row, result.whenPredicate)
 
+proc isArrayOfTables(value: TomlValueRef): bool =
+  ## Whether a top-level row key holds an array of tables. TOML writes one
+  ## either with `[[package]]` headers or as an inline array of inline
+  ## tables (`package = [{ name = "jq", activity = "cli" }]`, or `[]`);
+  ## both are the same data (https://toml.io/en/v1.0.0#array-of-tables),
+  ## and Nix's `builtins.fromTOML` cannot tell them apart, so the Nix
+  ## helper library's `readData` must read the same files this reader
+  ## reads. Anything else (`[package]`, a scalar, an array holding a
+  ## non-table) is refused.
+  case value.kind
+  of TomlKind.Tables: true
+  of TomlKind.Array:
+    for item in value.arrayVal:
+      if item.kind notin {TomlKind.Table, TomlKind.InlineTable}:
+        return false
+    true
+  else: false
+
+proc rowTablesOf(value: TomlValueRef): seq[TomlTableRef] =
+  ## The rows of a value `isArrayOfTables` accepted, in file order.
+  case value.kind
+  of TomlKind.Tables: value.tablesVal
+  of TomlKind.Array:
+    var rows: seq[TomlTableRef]
+    for item in value.arrayVal:
+      rows.add item.tableVal
+    rows
+  else: @[]
+
 proc parseDataFileRows*(profilePath, dataPath, content: string):
     DataFileRows =
   ## Decode and validate the text of the data file `dataPath` (the
@@ -271,16 +300,16 @@ proc parseDataFileRows*(profilePath, dataPath, content: string):
       raiseDataFile(profilePath, dataPath, 0, key,
         "unknown top-level key; a data file holds `[[" & DataRowTable &
         "]]` and `[[" & ResourceRowTable & "]]` rows only")
-    if value.kind != TomlKind.Tables:
+    if not isArrayOfTables(value):
       raiseDataFile(profilePath, dataPath, 0, key,
         "`" & key & "` must be an array of tables (`[[" & key &
         "]]`), got " & $value.kind)
   # Package rows first, then resource rows, each in file order.
   if root.tableVal[].hasKey(DataRowTable):
-    for i, table in root.tableVal[][DataRowTable].tablesVal:
+    for i, table in rowTablesOf(root.tableVal[][DataRowTable]):
       result.packages.add decodeRow(profilePath, dataPath, i + 1, table)
   if root.tableVal[].hasKey(ResourceRowTable):
-    for i, table in root.tableVal[][ResourceRowTable].tablesVal:
+    for i, table in rowTablesOf(root.tableVal[][ResourceRowTable]):
       result.resources.add decodeResourceRow(profilePath,
         dataPath & " resource", i + 1, table)
 

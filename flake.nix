@@ -208,7 +208,7 @@
         # identity where it touches the descriptor instead of once per record,
         # and the Linux close hook lets a tracee's close of a replaced
         # descriptor number reach the kernel.
-      url = "github:metacraft-labs/io-mon/295a2e518325440698de013663dab8deeef1dc19";
+      url = "github:metacraft-labs/io-mon/2a354db93e60f165e2d9feb86396b7e3950aae65";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -341,8 +341,12 @@
       # the declared x86 child architecture. Only `windows_entry_park.nim`
       # changes under `src/`.
       #
-      # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/c6602ce6866b8c5ef6a9201cb7d90b920268e8d0";
+      # f51e0ab advances the workspace pin with Windows injection diagnostics;
+      # the Darwin source is unchanged.
+      # 600f2a8 additionally carries caller/target Windows injection diagnostics.
+      # Keep this pin aligned with the synced, published workspace dependency;
+      # the pre-push gate rejects a pin that lags that checkout.
+      url = "github:metacraft-labs/nim-stackable-hooks/600f2a80c9e582e860d36be20c04b9c74263458d";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -437,7 +441,11 @@
       # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
       # ``src/ct_incremental_adapter.nim`` are unchanged and the ``repro.lock``
       # still names trace-format 808ffdb4, so ``ct-trace-format-src`` stays.
-      url = "github:metacraft-labs/codetracer/222a4a0099115066ba331817e94a3ac9f2293290";
+      # 7662d329 carries replay-option forwarding and its regression test;
+      # the incremental adapter and trace-format resolution are unchanged.
+      # 47eda1fd adds native recording navigation; ct-test and the incremental
+      # adapter are unchanged. Align the pin with the published workspace.
+      url = "github:metacraft-labs/codetracer/47eda1fd580a17099541ead32f5528cb2e37bdc0";
       flake = false;
     };
 
@@ -507,8 +515,20 @@
     # hot-code-reloading transform. The latter is required by CodeTracer's
     # monitored import/restore path: an initialized local could make the JS HCR
     # transform absorb the following try and emit an orphaned finally.
+    #
+    # Advanced from f902ddcb to 1e19cf26 for a compiler crash: after a
+    # term-rewriting template fires (`warnExecCmdEx` and its siblings in
+    # repro_core/ambient_execution.nim), the compiler folded constants over the
+    # rewritten statement including its type sections and declared types, and
+    # crashed (SIGSEGV, no position) on the untyped `typeOfIter` symbol that
+    # `mapIt` leaves there. That is why
+    # t_repro_test_runner_process_group_cleanup.nim could not import the whole
+    # `repro_daemon_core` facade; it does again. Riding along: a cgen fix that
+    # passes a raising call's temporary to its destructor the way the
+    # destructor takes it, and VM/NimScript trace recording changes (exact I/O
+    # event kinds, one value-carrying step per recorded position).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=f902ddcb7a29b262385645809aede76834015278";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1e19cf261413667ef69123a3ef221e239d1f8897";
       flake = false;
     };
     nim-csources-src = {
@@ -549,6 +569,31 @@
       url = "github:nim-lang/nimony/bbfb21529845567c55b67d176354daef0e7d6c29";
       flake = false;
     };
+    # The Nix provisioning contribution catalog. `reprobuild.lib`
+    # (nix/lib/realizations.nix, `nixRealizationOf`) reads the contribution
+    # records it publishes as data -- `provisioning-contributions.json`,
+    # generated from its `repro.nim` and kept current by its own tests -- so a
+    # Nix module consuming a profile's intent maps canonical package names to
+    # nixpkgs attributes from ONE pinned catalog (reprobuild-pm spec
+    # Gradual-Nix-To-Reprobuild-Migration.md §The Nix helper library).
+    #
+    # A flake input of THIS flake, not of each consumer: the library is what
+    # reads the catalog, and the catalog revision is part of what
+    # `reprobuild.lib` means, so consumers inherit one pin through the one
+    # reprobuild pin they already have (devops-modules -> reprobuild), and
+    # `follows` it only to test a catalog change. It is not a second
+    # reprobuild pin -- the catalog is a separate repository, which pins no
+    # reprobuild in any flake (it has no flake.nix). `flake = false`: only the
+    # published JSON is read, nothing is built from it. Because the catalog has
+    # no flake.nix, `.envrc`'s auto-override arm does not reach a
+    # `../reprobuild-nix-packages` sibling (declared in
+    # scripts/dev-shell-pinned-siblings.tsv); try a catalog change with
+    # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
+    # Move the pin when the catalog's records change.
+    reprobuild-nix-packages-src = {
+      url = "github:metacraft-labs/reprobuild-nix-packages/842fd4718fa2381e17f32b1b4eeeec1735538d3c";
+      flake = false;
+    };
   };
 
   outputs =
@@ -572,9 +617,31 @@
       nim-results-src,
       nim-checksums-src,
       nim-nimony-src,
+      reprobuild-nix-packages-src,
       bundlers,
       ...
     }:
+    let
+      # The Nix helper library (milestone GM5; docs/user-guide/nix-helper-library.md),
+      # exported as `lib` and tested by the `lib-*` checks below.
+      # System-independent: the IFD derivation of `readIntent` is built for
+      # whichever system the CALLER names as the evaluator (`buildSystem`),
+      # with that system's nixpkgs and `packages.<system>.repro`.
+      reprobuildLibFor =
+        catalogs:
+        import ./nix/lib {
+          inherit catalogs;
+          pkgsFor = system: inputs.nixpkgs.legacyPackages.${system};
+          reproFor = system: inputs.self.packages.${system}.repro;
+        };
+      reprobuildLib = reprobuildLibFor [
+        {
+          name = "reprobuild-nix-packages";
+          records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+        }
+      ];
+      intentHomeManagerModule = import ./nix/modules/home-manager-intent.nix { inherit reprobuildLib; };
+    in
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [
         "x86_64-linux"
@@ -614,6 +681,8 @@
           };
         in
         {
+          lib = reprobuildLib;
+
           nixosModules = {
             reprobuild = reprobuildModules.nixos;
             repro-binary-cache = reproBinaryCacheModule;
@@ -632,6 +701,9 @@
           };
 
           homeManagerModules = {
+            # Applies a profile's evaluated intent (`repro home export`)
+            # through Home Manager, one category at a time.
+            intent = intentHomeManagerModule;
             reprobuild = reprobuildModules.homeManager;
             reprobuild-legacy-option-names = reprobuildModules.legacyOptionNames;
             default = reprobuildModules.homeManager;
@@ -641,15 +713,19 @@
       perSystem =
         { pkgs, system, ... }:
         let
-          version =
+          # The `version = "..."` line of a reprobuild.nimble (this tree's, and
+          # in `nixpkgs-package-src-sync` the one of package.nix's `src`).
+          nimbleVersionOf =
+            nimbleFile:
             let
               versionMatches = builtins.filter (match: match != null) (
                 map (line: builtins.match ''version = "([^"]+)"'' line) (
-                  pkgs.lib.splitString "\n" (builtins.readFile ./reprobuild.nimble)
+                  pkgs.lib.splitString "\n" (builtins.readFile nimbleFile)
                 )
               );
             in
             builtins.elemAt (builtins.head versionMatches) 0;
+          version = nimbleVersionOf ./reprobuild.nimble;
           # libblake3 has split `out`/`dev` outputs (dev has include/blake3.h,
           # out has lib/libblake3.so). config.nims's prefix-lookup expects a
           # single tree containing both, so they are joined with symlinkJoin —
@@ -1160,16 +1236,28 @@
                                     }
                                     trap cleanupDaemon EXIT
                                     trap showFailureLogs ERR
+                                    # Let the ERR trap fire inside shell functions too: a
+                                    # failed `test` in assertColdActionLog used to end the
+                                    # build with no output at all.
+                                    set -o errtrace
 
                                     assertColdActionLog() {
                                       log="$1"
                                       test "$(grep -Ec '^providerCompileAction: ' "$log")" -eq 1
                                       test "$(grep -Ec '^action: ' "$log")" -eq 3
-                                      test "$(grep -Ec '^providerCompileAction: __repro_provider_compile status=asSucceeded launched=true( |$)' "$log")" -eq 1
+                                      # The provider compile edge is consulted more than once
+                                      # per invocation and only the LAST consultation is
+                                      # logged; after a real compile that one reads
+                                      # `asUpToDate ... reason=outputs-present`. Whether THIS
+                                      # invocation compiled the provider is `compiled=`
+                                      # (repro_cli_support `providerCompileInvocationSummary`),
+                                      # so a cold build must say `compiled=true`.
+                                      test "$(grep -Ec '^providerCompileAction: __repro_provider_compile status=(asSucceeded launched=true|asUpToDate launched=false .*reason=outputs-present) .*compiled=true( |$)' "$log")" -eq 1
                                       for actionName in build-dir compile-hello run-hello; do
                                         test "$(grep -Ec "^action: $actionName status=asSucceeded launched=true( |$)" "$log")" -eq 1
                                       done
-                                      if grep -Eq '^(providerCompileAction|action): .*status=(asFailed|asBlocked|asSkipped|asUpToDate|asCacheHit)' "$log"; then
+                                      if grep -Eq '^action: .*status=(asFailed|asBlocked|asSkipped|asUpToDate|asCacheHit)' "$log" ||
+                                        grep -Eq '^providerCompileAction: .*status=(asFailed|asBlocked|asSkipped|asCacheHit)' "$log"; then
                                         echo "cold package gate accepted a non-launched action" >&2
                                         return 1
                                       fi
@@ -1248,7 +1336,27 @@
                                           done
                                         else
                                           case "$candidate" in
-                                            ${reprobuild}/lib/*|${reprobuild}/bin/.*-wrapped)
+                                            ${reprobuild}/bin/.*-wrapped)
+                                              # A wrapper target may be an interpreter
+                                              # script (`reprobuild-nix-daemon` is Python):
+                                              # it has no RPATH to carry, but its
+                                              # interpreter must be an executable in the
+                                              # store, never one found on the host.
+                                              interpreter=$(head -n 1 "$candidate" | sed -n 's|^#! *\([^ ]*\).*|\1|p')
+                                              case "$interpreter" in
+                                                /nix/store/*)
+                                                  if test ! -x "$interpreter"; then
+                                                    echo "wrapper target's interpreter is not executable: $candidate -> $interpreter" >&2
+                                                    exit 1
+                                                  fi
+                                                  ;;
+                                                *)
+                                                  echo "non-ELF wrapper target without a store interpreter: $candidate" >&2
+                                                  exit 1
+                                                  ;;
+                                              esac
+                                              ;;
+                                            ${reprobuild}/lib/*)
                                               echo "non-ELF installed binary/library role: $candidate" >&2
                                               exit 1
                                               ;;
@@ -1531,7 +1639,12 @@
           # (non-flake) activation; keep the two lists in step.
           conventionTestToolchains =
             let
-              available = pkgs.lib.filter (p: pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform p);
+              # `availableOn` checks meta.platforms only; a package nixpkgs
+              # marks broken on this platform (fpc on x86_64-darwin) is just as
+              # unusable, and evaluating it refuses the whole dev shell.
+              available = pkgs.lib.filter (
+                p: pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform p && !(p.meta.broken or false)
+              );
               toolchains = available (
                 [
                   pkgs.go
@@ -1622,11 +1735,25 @@
 
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
+          # The name the Nix helper library and its consumers use
+          # (`reprobuild.packages.<system>.repro`, spec §The Nix helper
+          # library): the same package, whose wrapper already makes the
+          # installed `repro` compile profiles with no checkout and no
+          # consumer-side environment (GM1/GM1l). `readIntent`'s IFD derivation
+          # runs it in the build sandbox as is; `checks.lib-intent-ifd` is
+          # the proof.
+          packages.repro = reprobuild;
           # The Nim fork toolchain, exposed for standalone build/verification.
           packages.nim-fork = nimFork;
           packages.repro-binary-cache = reproBinaryCache;
           # Self-contained, /nix/store-free `repro` (see `reproPortable`).
-          packages.repro-portable = reproPortable;
+          # Linux only: the bundle runs the closure in a user-namespace chroot
+          # (`nix-user-chroot`, whose meta.platforms is Linux), so on darwin
+          # the output could not even be evaluated, and `nix flake check
+          # --all-systems` stopped there. A dynamic attribute whose name is
+          # `null` is omitted, which keeps the output out of the darwin
+          # package sets instead of declaring one that throws.
+          packages.${if pkgs.stdenv.hostPlatform.isLinux then "repro-portable" else null} = reproPortable;
 
           checks = {
             inherit pre-commit-check;
@@ -1667,7 +1794,162 @@
                   echo "package.nix and reprobuild.nimble agree on version $literal"
                   mkdir -p "$out"
                 '';
+            # The sibling of the version check for the source arguments.
+            # package.nix's defaults are one coherent snapshot of a PUBLISHED
+            # reprobuild commit: `src` names it, its `reprobuild.nimble`
+            # carries the `version` literal, and its `flake.lock` pins every
+            # `*Src` default of package.nix and nim-fork.nix. That snapshot is
+            # what a nixpkgs consumer builds with -- it has no flake plumbing
+            # to override them -- and before this check six defaults had
+            # drifted from any lock, one of them (io-mon) by 46 commits.
+            #
+            # It compares against the lock OF THE `src` COMMIT, not this
+            # tree's: this tree's lock moves with every sibling pin refresh
+            # (dozens a month), and a default cannot name the commit that
+            # contains it, so "mirror this tree's lock" could only be kept
+            # green by editing package.nix on every refresh. The snapshot
+            # moves only when someone moves `src` (with `version` and the
+            # defaults, together). The `src` tree is fetched at evaluation
+            # time by its rev and its own hash (a locked, pure fetch), so a
+            # wrong `src` hash fails here too. Each default's rev must equal
+            # the lock node's, and its hash the node's `narHash` where the
+            # lock records one. Decided at evaluation time, like `lib-tests`,
+            # so it builds nothing.
+            nixpkgs-package-src-sync =
+              let
+                defaultSrc = defaultPackage.src;
+                srcTree = builtins.fetchTree {
+                  type = "github";
+                  owner = "metacraft-labs";
+                  repo = "reprobuild";
+                  inherit (defaultSrc) rev;
+                  narHash = defaultSrc.outputHash;
+                };
+                lock = builtins.fromJSON (builtins.readFile "${srcTree}/flake.lock");
+                rootInputs = lock.nodes.${lock.root}.inputs;
+                srcNimbleVersion = nimbleVersionOf "${srcTree}/reprobuild.nimble";
+                lockedOf = input: lock.nodes.${rootInputs.${input}}.locked;
+                defaultNimFork = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/nim-fork.nix { };
+                defaultPackage = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/package.nix {
+                  # Same as the flake's own call: the pinned nixpkgs spells it
+                  # `xxHash`. Not a source argument.
+                  xxhash = pkgs.xxHash;
+                };
+                # argument -> the flake input passed for it (see the
+                # `callPackage` calls of package.nix and nim-fork.nix above).
+                packageArgs = {
+                  nimcryptoSrc = "nimcrypto-src";
+                  bearsslSrc = "bearssl-src";
+                  stackableHooksSrc = "nim-stackable-hooks-src";
+                  ctTraceFormatSrc = "ct-trace-format-src";
+                  ioMonSrc = "io-mon-src";
+                  shmGsetSrc = "nim-shm-gset-src";
+                  shmQueueSrc = "nim-shm-queue-src";
+                  codetracerSrc = "codetracer-src";
+                  ctTestRunnerSrc = "reprobuild-ct-test-runner-src";
+                  testAdaptersSrc = "reprobuild-test-adapters-src";
+                  runquotaSrc = "runquota-src";
+                };
+                nimForkArgs = {
+                  forkSrc = "nim-fork-src";
+                  csourcesSrc = "nim-csources-src";
+                  traceFormatSrc = "ct-trace-format-src";
+                  stewSrc = "nim-stew-src";
+                  resultsSrc = "nim-results-src";
+                  checksumsSrc = "nim-checksums-src";
+                  nimonySrc = "nim-nimony-src";
+                };
+                problems =
+                  file: sources: args:
+                  pkgs.lib.concatLists (
+                    pkgs.lib.mapAttrsToList (
+                      arg: input:
+                      let
+                        src = sources.${arg};
+                        locked = lockedOf input;
+                      in
+                      if !(sources ? ${arg}) then
+                        [ "${file}: `${arg}` is not in passthru.sources" ]
+                      else if !(rootInputs ? ${input}) then
+                        [
+                          "${file}: `${arg}`: the `src` commit's flake.lock has no input `${input}`"
+                        ]
+                      else if (src.rev or null) != locked.rev then
+                        [
+                          "${file}: `${arg}` defaults to rev ${toString (src.rev or null)}, the `src` commit's flake.lock pins `${input}` at ${locked.rev}"
+                        ]
+                      else if locked ? narHash && (src.outputHash or null) != locked.narHash then
+                        [
+                          "${file}: `${arg}` hash ${toString (src.outputHash or null)} != the `src` commit's flake.lock `${input}` narHash ${locked.narHash}"
+                        ]
+                      else
+                        [ ]
+                    ) args
+                  );
+                # Vacuity guard: the two tables cover every source argument
+                # each file exposes, so a new `*Src` argument cannot escape.
+                coverage =
+                  file: sources: args:
+                  pkgs.lib.optional (builtins.attrNames sources != builtins.attrNames args)
+                    "${file}: passthru.sources (${toString (builtins.attrNames sources)}) and this check's table (${toString (builtins.attrNames args)}) name different arguments";
+                versionProblem = pkgs.lib.optional (srcNimbleVersion != defaultPackage.version) "package.nix: `version` is ${defaultPackage.version}, but the `src` commit (${defaultSrc.rev}) has reprobuild.nimble version ${srcNimbleVersion}";
+                found =
+                  versionProblem
+                  ++ coverage "package.nix" defaultPackage.sources packageArgs
+                  ++ coverage "nim-fork.nix" defaultNimFork.sources nimForkArgs
+                  ++ problems "package.nix" defaultPackage.sources packageArgs
+                  ++ problems "nim-fork.nix" defaultNimFork.sources nimForkArgs;
+              in
+              if found == [ ] then
+                pkgs.writeText "reprobuild-nixpkgs-package-src-sync" (
+                  builtins.toJSON {
+                    checked =
+                      builtins.length (builtins.attrNames packageArgs)
+                      + builtins.length (builtins.attrNames nimForkArgs);
+                  }
+                )
+              else
+                throw "reprobuild nixpkgs-package-src-sync: package.nix defaults are not the snapshot of their `src` commit ${defaultSrc.rev}:\n${builtins.concatStringsSep "\n" found}";
             packaged-runtime-compile = packagedRuntimeCompileCheck;
+
+            # ── The Nix helper library (GM5) ──────────────────────────────
+            # `lib-tests` and `lib-home-manager` are decided at EVALUATION
+            # time (the derivation exists only when every case passes), so
+            # `nix flake check --all-systems` checks them for every system,
+            # darwin included, from a Linux evaluator and vice versa.
+            lib-tests =
+              let
+                result = import ./nix/tests/lib.nix {
+                  inherit (pkgs) lib;
+                  inherit reprobuildLib;
+                  libFor = reprobuildLibFor;
+                  root = ./.;
+                };
+              in
+              if result.failures == [ ] then
+                pkgs.writeText "reprobuild-lib-tests" (builtins.toJSON result.counts)
+              else
+                throw "reprobuild lib-tests: ${toString (builtins.length result.failures)} failure(s):\n${builtins.toJSON result.failures}";
+            lib-home-manager = import ./nix/tests/home-manager.nix {
+              inherit pkgs system;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
+              intentModule = intentHomeManagerModule;
+              root = ./.;
+            };
+            # readIntent's IFD mode: the packaged `repro` exports the fixture
+            # profiles inside the build sandbox, on the EVALUATOR's system
+            # (`builtins.currentSystem` under `--impure`, else this check's
+            # own system), and the result must say what the committed
+            # snapshots say, evaluated for this check's target system. Under
+            # `nix flake check --impure --all-systems` on Linux the darwin
+            # checks therefore evaluate an export Linux produced -- the
+            # non-native evaluator case.
+            lib-intent-ifd = import ./nix/tests/intent-ifd.nix {
+              inherit pkgs system reprobuildLib;
+              buildSystem = builtins.currentSystem or system;
+              root = ./.;
+            };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''
@@ -1680,6 +1962,10 @@
           };
 
           devShells.default = pkgs.mkShell {
+            # Framework regression uses a real GCC without putting its cc ahead
+            # of the shell's clang. /usr/bin/gcc on Darwin is Apple clang.
+            REPRO_TEST_DARWIN_GCC = if pkgs.stdenv.isDarwin
+              then pkgs.lib.getExe pkgs.gcc else "";
             inputsFrom = [ pkgs.nix ];
             # repro_solver's clingo bindings dlopen libclingo.so at module init.
             # build_apps.sh clears NIX_LDFLAGS + LD_LIBRARY_PATH for every `nim c`
