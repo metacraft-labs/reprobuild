@@ -43488,6 +43488,11 @@ type
     project*: string
     workspaceRoot*: string
     flavor*: string
+    dryRun*: bool
+      ## CLI/sync.md §`--dry-run` with `--mainline`: the document is a PLAN.
+      ## Each entry's ``outcome`` is the planner's verdict and ``action`` the
+      ## step a real run would take, but nothing ran, so ``headAfter`` equals
+      ## ``headBefore`` and ``exitCode`` is 0.
     repos*: seq[MainlineSyncEntry]
     exitCode*: int
 
@@ -43496,6 +43501,7 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["mainline"] = %true
+  result["dryRun"] = %report.dryRun
   result["flavor"] = %report.flavor
   var repos = newJArray()
   for e in report.repos:
@@ -43519,8 +43525,23 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
   var counts = initOrderedTable[string, int]()
   for e in report.repos:
     counts[e.outcome] = counts.getOrDefault(e.outcome, 0) + 1
+    # CLI/sync.md §`--dry-run` with `--mainline`: a dry run names every repo
+    # with a PENDING action as "would <action>", routine or not — a planned
+    # fast-forward is the very thing the operator asked to preview, and
+    # printing the planner's past-tense verdict alone ("fast_forwarded") read
+    # as if it had happened. Repos with no pending action (up to date, or a
+    # refusal) render exactly as in a real run.
+    let pending = report.dryRun and e.action.len > 0 and e.action != "none"
     let isRoutine = e.outcome in ["up_to_date", "fast_forwarded"]
-    if verbose or not isRoutine:
+    if pending:
+      var line = "workspace sync: " & e.path & " would " & e.action &
+        " (" & e.outcome & ")"
+      if e.branch.len > 0 and e.mainlineBranch.len > 0:
+        line.add(" " & e.branch & " <- " & e.mainlineBranch)
+      if e.diagnostic.len > 0:
+        line.add(" (" & e.diagnostic & ")")
+      result.add(line)
+    elif verbose or not isRoutine:
       var line = "workspace sync: " & e.path & " " & e.outcome
       if e.branch.len > 0 and e.mainlineBranch.len > 0:
         line.add(" " & e.branch & " <- " & e.mainlineBranch)
@@ -43530,7 +43551,11 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
   var parts: seq[string]
   for tag, n in counts:
     parts.add($n & " " & tag)
-  result.add("workspace sync --mainline: " & parts.join(", ") &
+  # Same "(dry-run)" marker the ordinary sync's summary carries.
+  let summaryPrefix =
+    if report.dryRun: "workspace sync --mainline (dry-run): "
+    else: "workspace sync --mainline: "
+  result.add(summaryPrefix & parts.join(", ") &
     " (" & $report.repos.len & " repo(s))")
 
 proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
@@ -43540,8 +43565,18 @@ proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
   of msfMerge: "merge"
 
 proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
+  ## Run (or, under ``--dry-run``, only plan) a mainline sync.
+  ##
+  ## CLI/sync.md §`--dry-run` with `--mainline`: a dry run reads refs and
+  ## predicts conflicts, and does nothing else. Every phase that writes is
+  ## gated on ``args.dryRun`` below — the receipt directory, the fetch phase,
+  ## the clone-action construction (whose shared-bare refresh is itself a
+  ## fetch into the clone cache), and the ff/rebase/merge steps — so the plan
+  ## is computed against whatever remote-tracking refs the last fetch left.
+  ## A stale preview is acceptable; a preview that moves refs is not.
   result.workspaceRoot = args.workspaceRoot
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
+  result.dryRun = args.dryRun
 
   var resolveArgs = args
   if args.scopeProjects.len > 0:
@@ -43568,8 +43603,16 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   var fetchActions: seq[BuildAction]
   var fetchIdByPath = initTable[string, string]()
   let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
-  createDir(receiptDir)
-  for idx, repo in resolved.repos:
+  # A dry run creates no receipts and does not fetch: no receipt directory,
+  # and no fetch actions, so the engine (and its cache root) never runs.
+  # ``reposToFetch`` is empty under a dry run, which leaves ``fetchActions``
+  # empty and ``fetchFailure`` with no entries.
+  if not args.dryRun:
+    createDir(receiptDir)
+  let reposToFetch =
+    if args.dryRun: newSeq[ResolvedRepo]()
+    else: resolved.repos
+  for idx, repo in reposToFetch:
     if not dirExists(args.workspaceRoot / repo.path / ".git"):
       continue
     let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
@@ -43636,8 +43679,17 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     # split commit-graph chain prints a warning on stderr and nothing on
     # stdout, which merged read as one dirty line and made this gatherer
     # report a pristine sibling as dirty.
-    obs.isClean = gitRunPlainQuery(identity,
-      ["-C", repoAbs, "status", "--porcelain"]).output.strip().len == 0
+    #
+    # Under ``--dry-run`` the query also passes ``--no-optional-locks``:
+    # ``git status`` otherwise opportunistically rewrites the index to record
+    # refreshed stat data, which is a write to the checkout a preview must not
+    # make (https://git-scm.com/docs/git#Documentation/git.txt---no-optional-locks).
+    let statusArgs =
+      if args.dryRun:
+        @["--no-optional-locks", "-C", repoAbs, "status", "--porcelain"]
+      else:
+        @["-C", repoAbs, "status", "--porcelain"]
+    obs.isClean = gitRunPlainQuery(identity, statusArgs).output.strip().len == 0
     if obs.mainlineBranch.len > 0:
       obs.mainlineTip = revParse(identity, repoAbs,
         "refs/remotes/" & gitRemoteNameFor(repo) & "/" & obs.mainlineBranch)
@@ -43678,10 +43730,15 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     sharedBareForClone[fetchUrl] = reference
     reference
 
+  # Not even CONSTRUCTED under a dry run: building a clone action calls
+  # ``cloneReferenceFor``, whose ``refreshSharedBare`` clones or fetches the
+  # shared bare into the clone cache — a network fetch and a cache write
+  # before any clone runs. The plan's ``clone`` verdict comes from
+  # ``decisions`` alone.
   var cloneActions: seq[BuildAction]
   var cloneActionRepoIdx = initTable[string, int]()
   for i, decision in decisions:
-    if decision.action == msaClone:
+    if decision.action == msaClone and not args.dryRun:
       let repo = resolved.repos[i]
       let idSeg = safeRepoIdSegment(repo.name) & "-" & $i
       let receiptRel = ".repro" / "workspace" / "receipts" /
@@ -43824,8 +43881,13 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
             stderr.writeLine("workspace sync: [" & (if isRebase: "rebased" else: "merged") & "] " & repo.path)
     result.repos.add(entry)
 
+  # CLI/sync.md §`--dry-run` with `--mainline`: "The exit code is `0` whatever
+  # the verdicts: a dry run is informational, and the refusal and failure
+  # codes describe a run that happened." The verdicts themselves stay in the
+  # entries, so a script still reads which repos would be refused.
   result.exitCode =
-    if anyFailure: 1
+    if args.dryRun: 0
+    elif anyFailure: 1
     elif anyRefusal: 2
     else: 0
 
@@ -43837,8 +43899,13 @@ proc writeMainlineSyncReport(report: MainlineSyncReport; destination: string) =
 
 proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
   let report = executeMainlineSync(parsed)
-  writeMainlineSyncReport(report,
-    reportDestination(parsed.report, report.workspaceRoot, "sync"))
+  # A dry run persists no report, even under ``--write-report``: there is
+  # nothing to record about a run that did not happen, and the plan reaches
+  # the operator on stdout below (CLI/sync.md §`--dry-run` with `--mainline`;
+  # the ordinary path in ``runWorkspaceSyncCommand`` does the same).
+  if not parsed.dryRun:
+    writeMainlineSyncReport(report,
+      reportDestination(parsed.report, report.workspaceRoot, "sync"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -43870,7 +43937,9 @@ execution:
   --jobs N, -j N        default parallelism for fetch and checkout
   --jobs-network N      parallel fetches (default 8)
   --jobs-checkout N     parallel checkouts (default: CPU count)
-  --dry-run             print the plan and exit; mutates nothing
+  --dry-run             print the plan and exit 0; mutates nothing (no
+                        fetch, so --mainline plans against the current
+                        remote-tracking refs)
   --json                one machine-readable document on stdout
   --write-report[=PATH] persist the report as sync-report.json
   --verbose, -v         include raw per-repo tool output
@@ -43891,7 +43960,9 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ##     projects' repos); an unknown name errors clearly. No positional =
   ##     the whole workspace.
   ##   - The plan (which repos / what action) is ANNOUNCED before acting;
-  ##     ``--dry-run`` prints the plan and exits WITHOUT mutating.
+  ##     ``--dry-run`` prints the plan and exits WITHOUT mutating. That holds
+  ##     under ``--mainline`` too (``executeMainlineSync``): no fetch, clone,
+  ##     integration, receipt or report, and exit 0 whatever the verdicts.
   ##   - Per-repo live progress is emitted to stderr (suppressed under
   ##     ``--json``); the run ends with a scannable per-repo summary digest.
   ##   - ``--json`` emits the machine surface (plan + per-repo results +
