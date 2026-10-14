@@ -197,7 +197,18 @@
         # ancestor. 142f658 carries capture controls into explicit Linux child
         # environments and hands nested Linux evidence back to the parent; the
         # macOS and Windows capture paths are unchanged.
-      url = "github:metacraft-labs/io-mon/ca28cce6667f60ab5d71182a81ea4830122826f7";
+        # Bumped to f72ee0e (2026-10-14), io-mon's `agents` tip; ca28cce is an
+        # ancestor. 41c114f resolves connect forwarding before application
+        # constructors and b364626 keeps capture complete across cooperating
+        # shim images, both in the Linux preload runtime. `fs_snoop` now keeps
+        # a nested child's public evidence scope and carries the enclosing
+        # run's full collection in a separate, host-owned variable.
+        # Bumped to 295a2e5 (2026-10-14), io-mon's `agents` tip; f72ee0e is an
+        # ancestor. The batched fragment writer checks the descriptor's
+        # identity where it touches the descriptor instead of once per record,
+        # and the Linux close hook lets a tracee's close of a replaced
+        # descriptor number reach the kernel.
+      url = "github:metacraft-labs/io-mon/295a2e518325440698de013663dab8deeef1dc19";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -343,8 +354,14 @@
       # Bumped to 4aa8892 (2026-10-11), the published `agents`/`dev` tip;
       # 2a7c5f7 is an ancestor and only `flake.lock` differs.
       #
+      # Bumped to c6602ce (2026-10-14), the published `agents`/`dev` tip;
+      # 4aa8892 is an ancestor. Windows entry parking borrows a parked thread
+      # with a real call, so a CET shadow stack accepts it, and stays within
+      # the declared x86 child architecture. Only `windows_entry_park.nim`
+      # changes under `src/`.
+      #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/4aa8892844a43ac59d4be74a4f992161b09491fe";
+      url = "github:metacraft-labs/nim-stackable-hooks/c6602ce6866b8c5ef6a9201cb7d90b920268e8d0";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -434,7 +451,12 @@
       # ancestor and ``src/ct_incremental_adapter.nim`` is unchanged) the
       # ``repro.lock`` names trace-format 808ffdb4, so ``ct-trace-format-src``
       # moves again with it.
-      url = "github:metacraft-labs/codetracer/17c111fb280214f6d331f1bafd560989b6bd509b";
+      #
+      # At 222a4a009 (2026-10-14, the published `agents` tip; 17c111fb2 is an
+      # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
+      # ``src/ct_incremental_adapter.nim`` are unchanged and the ``repro.lock``
+      # still names trace-format 808ffdb4, so ``ct-trace-format-src`` stays.
+      url = "github:metacraft-labs/codetracer/222a4a0099115066ba331817e94a3ac9f2293290";
       flake = false;
     };
 
