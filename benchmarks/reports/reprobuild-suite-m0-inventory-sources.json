@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1991,
+    "nimTestBinaries": 1993,
     "pureUnitConsolidationGroups": 54,
     "pureUnitTests": 616,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 2009
+    "testEntries": 2011
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1163,10 +1163,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 15,
-      "integration": 1094,
+      "integration": 1095,
       "platform/destructive": 126,
       "pure unit": 616,
-      "unclassified": 158
+      "unclassified": 159
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1356,9 +1356,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1991,
+    "nimTestBinaryCount": 1993,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2009
+    "testEntryCount": 2011
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10650,6 +10650,25 @@
       "source": "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_lock",
+        "repro_solver"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31736,6 +31755,26 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -215,6 +215,7 @@ libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim	nim
 libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_is_enrolled_for_conformance.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
+libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	nim	2
@@ -1393,6 +1394,7 @@ tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	nim	2
 tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim	nim	7
 tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	nim	2
 tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim	nim	2
+tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim	nim	2
 tests/integration/t_lock_refresh_refuses_an_unreadable_recipe.nim	nim	2
 tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim	nim	1
 tests/integration/t_lock_store_backend_roundtrip_each_backend.nim	nim	1
