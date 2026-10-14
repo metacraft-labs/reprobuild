@@ -881,6 +881,13 @@ type
       ## same callback pushed every WARM activation off the artifact-lookup +
       ## invalidation-check fast path the no-op benchmark gates
       ## (Reprobuild-Dev-Environments.milestones.org, performance gates).
+    recordCacheHitProvenance*: bool
+      ## The caller will judge each reused action by where its cache record
+      ## came from (certificate issuance, test-certificates Standard §6.2.1).
+      ## Each per-action hit then reports `ActionResult.cacheRecordObservedHere`
+      ## and `cacheRecordInputs`, and the whole-graph no-op fast path is not
+      ## taken, because it answers without the per-action records those two
+      ## are read from. Off by default: it costs the fast path.
     cancelCallback*: BuildCancelCallback
     statsEnabled*: bool
     suppressTrace*: bool
@@ -1823,6 +1830,21 @@ type
       ## permanent miss rather than to the prefix's cost.
     outputBytes*: int64
       ## Total size of the action's declared outputs after it settled.
+    cacheRecordObservedHere*: bool
+      ## The action-cache record that answered this action carries this cache
+      ## root's execution-observation mark
+      ## (`ActionResultRecord.observedExecution`): the execution behind it
+      ## ran here, not on a LAN peer. Set only by the scheduler's per-action
+      ## `aclHit` / `aclHybridCutoff` arms. Every other way an action can be
+      ## reported reused — the whole-graph no-op fast path, a portable-memo
+      ## resolution, a hit synthesized outside the scheduler — leaves it
+      ## false, so a reader that needs provenance fails closed. Populated
+      ## only under `BuildEngineConfig.recordCacheHitProvenance`.
+    cacheRecordInputs*: seq[string]
+      ## The keyed input paths of the record that answered this action
+      ## (`ActionResultRecord.inputs`, resolved against the action's `cwd`):
+      ## what the execution behind the record was observed reading. Same
+      ## arms and same condition as `cacheRecordObservedHere`.
 
   SchedulerTraceEvent* = object
     seq*: uint64
@@ -2336,7 +2358,7 @@ const
     dgPostBuildConverter,
     dgPostBuildConverterValidatedByMonitor
   }
-  MonitorPolicyKinds = {
+  MonitorPolicyKinds* = {
     dgAutomaticMonitor,
     dgRecognizedFormatValidatedByMonitor,
     dgPostBuildConverterValidatedByMonitor
@@ -15942,6 +15964,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     else:
       item.evidence = evidenceFromRecord(action, record)
 
+  proc noteCacheRecordProvenance(item: var ActionResult;
+                                 action: BuildAction;
+                                 record: ActionResultRecord) =
+    ## Under `recordCacheHitProvenance`, say where the record that answered
+    ## this action came from and what its execution read. Called from the
+    ## scheduler's per-action hit arms only — a record that arrived from a
+    ## LAN peer reaches them through the same lookup and carries no mark.
+    if not config.recordCacheHitProvenance:
+      return
+    item.cacheRecordObservedHere = cache.observedExecutionOf(record)
+    item.cacheRecordInputs = @[]
+    for input in record.inputs:
+      item.cacheRecordInputs.add(materialPath(action.cwd, input.path))
+
   proc publishPeerCacheBundle(weakFingerprint: ContentDigest;
                               record: ActionResultRecord) =
     ## Peer-Cache M1 publisher hook (Linux-Distro-Recipe-Validation
@@ -16958,6 +16994,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
     if config.progressCallback != nil and not config.fastNoopReportsProgress:
+      return none(BuildRunResult)
+    # The caller needs each hit's record provenance, which only the
+    # per-action lookup reports.
+    if config.recordCacheHitProvenance:
       return none(BuildRunResult)
     # A forced rebuild is a request to re-execute, and `config.forceRebuild`
     # is read in exactly one place: the scheduler's per-action cache
@@ -18493,6 +18533,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              noteCacheRecordProvenance(
+                runResult.results[idToIndex.resultIndex(id)], action, lookup.record)
               recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:
@@ -18524,6 +18566,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              noteCacheRecordProvenance(
+                runResult.results[idToIndex.resultIndex(id)], action, lookup.record)
               recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:
@@ -18539,6 +18583,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              noteCacheRecordProvenance(
+                runResult.results[idToIndex.resultIndex(id)], action, lookup.record)
               recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:
@@ -18567,6 +18613,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              noteCacheRecordProvenance(
+                runResult.results[idToIndex.resultIndex(id)], action, lookup.record)
               recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:

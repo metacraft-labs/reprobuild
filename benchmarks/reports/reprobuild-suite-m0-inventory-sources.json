@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 30,
-    "nimTestBinaries": 1946,
+    "nimTestBinaries": 1949,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 610,
+    "pureUnitTests": 611,
     "staticallyDetectedRuntimeCompilerFlowTests": 111,
-    "testEntries": 1963
+    "testEntries": 1966
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -266,7 +266,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -276,6 +276,7 @@
       "owner": "libs/repro_local_store",
       "sources": [
         "libs/repro_local_store/tests/t_input_access_sidecar.nim",
+        "libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim",
         "libs/repro_local_store/tests/t_retention_gc.nim"
       ],
       "targetOs": "soAny"
@@ -1135,9 +1136,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 1061,
+      "integration": 1063,
       "platform/destructive": 123,
-      "pure unit": 610,
+      "pure unit": 611,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1322,9 +1323,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1946,
+    "nimTestBinaryCount": 1949,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1963
+    "testEntryCount": 1966
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12468,6 +12469,25 @@
       "source": "libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 22,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_observed_execution_mark_is_local_only",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33512,6 +33532,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repro_certify_runs_the_required_set_in_workspace_mode",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_certify_runs_the_required_set_in_workspace_mode.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repro_cli_input_matches_declared_output",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -33832,6 +33870,24 @@
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_test_workspace_mode_issues_a_content_bound_certificate",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_test_workspace_mode_issues_a_content_bound_certificate.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

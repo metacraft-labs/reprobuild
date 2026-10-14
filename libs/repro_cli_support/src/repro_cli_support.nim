@@ -7876,6 +7876,54 @@ type
     activeActions: seq[string]
     completedActions: HashSet[string]
 
+  ExecutedActionRecord* = object
+    ## One action of a finished build, as certificate issuance reads it
+    ## (Test-Certificates TC-8e): what the engine scheduled, how it settled,
+    ## and whether THIS run launched it. Issuance needs exactly this and
+    ## nothing the build report adds: a certificate records the argument
+    ## vectors a run actually executed (Standard §3.3), in execution order,
+    ## and certifies a node only when its whole closure settled successfully.
+    id*: string
+      ## The engine's action id (the public name after target aliasing).
+    kind*: BuildActionKind
+    argv*: seq[string]
+      ## The argument vector the engine launched, unshelled, after forwarded
+      ## arguments were appended. Empty for a builtin action.
+    status*: ActionStatus
+    launched*: bool
+      ## True when this run executed the action. A cache hit or an
+      ## up-to-date action settled without executing anything.
+    cacheDecision*: CacheDecision
+      ## ``cdHit`` / ``cdHybridCutoff`` when an action-cache record whose
+      ## key matched this run's inputs answered the action.
+    cacheRecordObservedHere*: bool
+      ## The record that answered the action came from an execution this
+      ## host observed (``ActionResult.cacheRecordObservedHere``). False for
+      ## a record installed from a LAN peer and for every reuse the engine
+      ## cannot attribute.
+    cacheRecordInputs*: seq[string]
+      ## What the execution behind that record was observed reading.
+    keyCoversObservedReads*: bool
+      ## The action's cache key covers every input the monitor observed it
+      ## reading: a cacheable process action under a monitored dependency
+      ## policy with no ignored input prefix (``cacheInputPaths`` keys the
+      ## observed reads; only content-addressed tool roots, which are in the
+      ## weak fingerprint, and declared ignore prefixes are elided).
+    exitCode*: int
+    monitorDepfile*: string
+      ## The io-mon depfile the action's monitored launch wrote ("" when it
+      ## was not launched under the monitor).
+    startOrder*: int
+      ## Position in the order the scheduler STARTED actions (0-based), or -1
+      ## when it never started this one. Parallel actions have no other total
+      ## order; the start order is the one the run itself imposed.
+
+  BuildActionOutcomeSink* = proc(records: seq[ExecutedActionRecord])
+    ## Receives the per-action outcome of an engine pass that ran a lowered
+    ## graph. Only an in-process build can deliver it: a daemon-hosted build
+    ## reports an exit code and diagnostics, so a caller that installs a sink
+    ## gets a direct build (``runBuildCommand``).
+
   BuildCommandOutcome = object
     exitCode: int
     modulePath: string
@@ -8842,6 +8890,55 @@ proc emitActionOutputs(buildResult: BuildRunResult;
         renderer.clearProgressLine()
         stdout.write(chunk)
         stdout.flushFile()
+
+proc recordActionStarts(config: var BuildEngineConfig;
+                        started: ref seq[string]) =
+  ## Prepare an engine pass for certificate issuance. Wrap the engine's
+  ## progress callback so every action the scheduler starts is appended to
+  ## ``started``, in start order, before the existing callback (if any) sees
+  ## the event; the scheduling loop emits these events itself, so the order
+  ## is the one it imposed. And ask the engine for each reused action's
+  ## record provenance (``recordCacheHitProvenance``), which issuance judges
+  ## a reused test command by. That keeps the run off the whole-graph no-op
+  ## fast path, which answers without per-action records.
+  config.recordCacheHitProvenance = true
+  let inner = config.progressCallback
+  config.progressCallback = proc(event: BuildProgressEvent) =
+    if event.kind == bpkActionStarted:
+      started[].add(event.actionId)
+    if inner != nil:
+      inner(event)
+
+proc executedActionRecords(actions: openArray[BuildAction];
+                           run: BuildRunResult;
+                           started: seq[string]): seq[ExecutedActionRecord] =
+  ## Join the scheduled actions with the engine's per-action results and the
+  ## recorded start order. An action the engine reported no result for is
+  ## left out, so a reader that needs it finds it missing rather than
+  ## pending.
+  var order = initTable[string, int]()
+  for i, id in started:
+    if not order.hasKey(id):
+      order[id] = i
+  var byId = initTable[string, int]()
+  for i, action in actions:
+    byId[action.id] = i
+  for item in run.results:
+    var record = ExecutedActionRecord(id: item.id, status: item.status,
+      launched: item.launched, cacheDecision: item.cacheDecision,
+      cacheRecordObservedHere: item.cacheRecordObservedHere,
+      cacheRecordInputs: item.cacheRecordInputs, exitCode: item.exitCode,
+      monitorDepfile: item.monitorDepfilePath,
+      startOrder: order.getOrDefault(item.id, -1))
+    if byId.hasKey(item.id):
+      let action = actions[byId[item.id]]
+      record.kind = action.kind
+      record.argv = action.argv
+      record.keyCoversObservedReads = action.cacheable and
+        action.kind == bakProcess and
+        action.dependencyPolicy.kind in MonitorPolicyKinds and
+        action.dependencyPolicy.ignoredInputPrefixes.len == 0
+    result.add(record)
 
 proc emitFailedActionSummaries(buildResult: BuildRunResult;
                                eventSink: BuildCommandEventSink;
@@ -10054,8 +10151,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCacheFetcher: PeerCacheActionFetcher = nil;
                         peerCachePublisher: PeerCacheActionPublisher = nil;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
-                          nil):
+                          nil;
+                        actionOutcomeSink: BuildActionOutcomeSink = nil):
     BuildCommandOutcome =
+  ## ``actionOutcomeSink`` receives the per-action outcome of the engine pass
+  ## this invocation runs over its lowered graph (``ExecutedActionRecord``),
+  ## for certificate issuance. It is not called when no graph ran.
+  ##
   ## ``wantsInputEvidencePaths`` — does the CALLER intend to read
   ## ``BuildCommandOutcome.inputEvidencePaths``? Only ``repro watch`` does;
   ## it arms its filesystem watcher over that set and is blind without it.
@@ -10562,6 +10664,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         })
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
+    # TC-8e: certificate issuance needs the order the actions started in.
+    let startedActions = new(seq[string])
+    if actionOutcomeSink != nil:
+      recordActionStarts(engineConfig, startedActions)
     let engineStart = statStart(statsEnabled)
     # Cross-Repo-Source-Consumption SC-2/SC-3 (§4.2 points 3-4): attach each
     # materialized LIBRARY-channel producer as a tool ref on the consumer
@@ -10621,6 +10727,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       actionLogStart)
     buildResult.stats = buildStats
     collectInputEvidence(buildResult)
+    if actionOutcomeSink != nil:
+      actionOutcomeSink(executedActionRecords(scheduledActions, buildResult,
+        startedActions[]))
     recordStatsForBuildRun(buildResult)
     if actionOutput == baoAll:
       emitActionOutputs(buildResult, eventSink, progressRenderer)
@@ -12178,6 +12287,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         })
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
+    # TC-8e: certificate issuance needs the order the actions started in.
+    let startedActions = new(seq[string])
+    if actionOutcomeSink != nil:
+      recordActionStarts(engineConfig, startedActions)
     let engineStart = statStart(statsEnabled)
     # Cross-Repo-Source-Consumption SC-2/SC-3 (§4.2 points 3-4): attach each
     # materialized LIBRARY-channel producer as a tool ref on the consumer
@@ -12250,6 +12363,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       actionLogStart)
     buildResult.stats = buildStats
     collectInputEvidence(buildResult)
+    if actionOutcomeSink != nil:
+      actionOutcomeSink(executedActionRecords(scheduledActions, buildResult,
+        startedActions[]))
     result.inputEvidencePaths = collectedInputEvidence
     recordStatsForBuildRun(buildResult)
     if actionOutput == baoAll:
@@ -14356,7 +14472,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil): int
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil): int
 
 type
   RunTargetResolution = object
@@ -23797,7 +23914,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil): int =
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -24442,7 +24560,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         forwardedActionArgs = forwardedActionArgs,
         peerCacheFetcher = peerCacheBuildWiring.fetcher,
         peerCachePublisher = peerCacheBuildWiring.publisher,
-        peerCacheInstaller = peerCacheBuildWiring.installer).exitCode
+        peerCacheInstaller = peerCacheBuildWiring.installer,
+        actionOutcomeSink = actionOutcomeSink).exitCode
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -24535,7 +24654,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     updateBenchmarkDaemonConnection(benchmarkPath, daemonResult.connectionUs)
     daemonResult.exitCode
 
-  if forceDirect or daemonMode == bdmOff:
+  # A caller that needs the per-action outcome (certificate issuance) gets a
+  # direct build: the daemon protocol carries an exit code and diagnostics,
+  # not the engine's per-action results.
+  if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil:
     return runDirectBuild()
   try:
     return runDaemonBuild()
@@ -25714,6 +25836,9 @@ type
     certificates*: CertificateExportTable
     targets*: Table[string, BuildTargetDef]
     materialized*: HashSet[string]
+    actionDeps*: Table[string, seq[string]]
+      ## Every declared action's dependencies (after inference), so a reader
+      ## can walk a marked node's closure (TC-8e issuance).
 
   CertificatePlan* = object
     ## A plan as the certificate query sees it. ``noCertify`` is
@@ -25843,6 +25968,48 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
     else:
       includeAction(root)
   result.materialized = materialized
+  for id, action in byId:
+    result.actionDeps[id] = action.deps
+
+proc certificateNodeMembers*(part: CertificatePlanPart;
+                             nodeKind: CertificateNodeKind;
+                             node: string): seq[string] =
+  ## The edges a marked node names directly, as provider action ids: the
+  ## edge itself for a marked edge; every edge a marked target groups,
+  ## nested targets included, for a marked target. These are the node's test
+  ## commands; everything else in its closure builds what they need.
+  case nodeKind
+  of cnkAction:
+    result = @[node]
+  of cnkTarget:
+    var seen = initHashSet[string]()
+    var pending = @[node]
+    while pending.len > 0:
+      let name = pending.pop()
+      if seen.contains(name) or not part.targets.hasKey(name):
+        continue
+      seen.incl(name)
+      for nested in part.targets[name].targets:
+        pending.add(nested)
+      for actionId in part.targets[name].actions:
+        if result.find(actionId) < 0:
+          result.add(actionId)
+
+proc certificateNodeClosure*(part: CertificatePlanPart;
+                             members: openArray[string]): seq[string] =
+  ## ``members`` and every action they depend on, transitively, as provider
+  ## action ids. A marked node passes only when all of these settle
+  ## successfully (Test-Certificates.md §"Marking a node": "it passes when it
+  ## and its whole closure materialize").
+  var seen = initHashSet[string]()
+  var pending = @members
+  while pending.len > 0:
+    let id = pending.pop()
+    if seen.containsOrIncl(id):
+      continue
+    result.add(id)
+    for dep in part.actionDeps.getOrDefault(id):
+      pending.add(dep)
 
 proc certificateNodeMaterialized(part: CertificatePlanPart;
                                  entry: CertificateExportEntry): bool =
@@ -25852,28 +26019,13 @@ proc certificateNodeMaterialized(part: CertificatePlanPart;
   ## materialize" (Test-Certificates.md §"Marking a node"), so a plan that
   ## builds only some of its members does not contain it. A target that
   ## groups no edge is never materialized.
-  case entry.nodeKind
-  of cnkAction:
-    part.materialized.contains(entry.node)
-  of cnkTarget:
-    var members: seq[string] = @[]
-    var seen = initHashSet[string]()
-    var pending = @[entry.node]
-    while pending.len > 0:
-      let name = pending.pop()
-      if seen.contains(name) or not part.targets.hasKey(name):
-        continue
-      seen.incl(name)
-      for nested in part.targets[name].targets:
-        pending.add(nested)
-      for actionId in part.targets[name].actions:
-        members.add(actionId)
-    if members.len == 0:
+  let members = certificateNodeMembers(part, entry.nodeKind, entry.node)
+  if members.len == 0:
+    return false
+  for actionId in members:
+    if not part.materialized.contains(actionId):
       return false
-    for actionId in members:
-      if not part.materialized.contains(actionId):
-        return false
-    true
+  true
 
 proc planCertificateNodes*(plan: CertificatePlan): seq[CertificatePlanNode] =
   ## Test-Certificates TC-9a: the certificate-producing nodes ``plan``
@@ -70125,6 +70277,547 @@ proc fixtureSelectors(opts: ReproTestShardOpts): seq[string] =
   except CatchableError:
     discard
 
+proc issuancePreconditionLabel(kind: IssuancePreconditionKind): string =
+  ## The short reason a refused precondition prints after "no certificate —".
+  case kind
+  of ipDirty: "a develop-mode sibling's working tree is dirty"
+  of ipUnpublished: "dependency has unpushed commits"
+  of ipOffLock: "repo not at the locked revision"
+  of ipNoWorkspace: "not a workspace"
+  of ipNoContentId: "the tested state has no content id"
+  of ipNoLockInContent: "the tested content carries no usable lock"
+  of ipGateError: "workspace gate error"
+  of ipOk: ""
+
+proc reportRefusedPreconditions(pre: IssuancePreconditions) =
+  stderr.writeLine("repro test: no certificate — " &
+    issuancePreconditionLabel(pre.kind) &
+    (if pre.offender.len > 0: " (" & pre.offender & ")" else: "") &
+    (if pre.remedy.len > 0: " — " & pre.remedy else: ""))
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-8e — issuance on the real ``repro test`` path.
+#
+# A plain ``repro test [SELECTOR...]`` is ``repro build test`` (or the given
+# selectors): the build engine runs every test edge as an ordinary action,
+# under the filesystem monitor. Issuance therefore reads the engine's own
+# per-action outcome (``ExecutedActionRecord``) — how each action settled,
+# whether this run launched it, its argv and its monitor capture — and needs
+# nothing from an external test runner.
+#
+# One certificate per certificate-producing node the plan materializes
+# (``planCertificateNodes``, TC-9a) and platform, with ``targets = [<name>]``:
+#
+#   * the node PASSES when every action in its closure settled successfully;
+#     a failed or blocked action, or one the run reported nothing for, leaves
+#     its name uncertified while other passing nodes are still certified
+#     (Standard §8, partial coverage is normal);
+#   * its test commands are the edges it names directly (the marked edge, or
+#     every edge a marked target groups). Each one either EXECUTED in this run
+#     or was answered by an action-cache record the producer may attest
+#     (Standard §6.2.1, decision D16 of Test-Certificates.milestones.org):
+#     a key-matched record of an action whose key covers what the monitor
+#     observed it reading, produced by an execution this host observed
+#     (``reusedResultRefusal``). A record from a LAN peer, or one whose origin
+#     is not recorded, is a caller-supplied claim (Standard §6.2); a name that
+#     rests on one is withheld with the remedy ``repro certify <name>``.
+#     ``repro certify`` is incremental like ``repro test``; when a name rests
+#     on such a record it re-executes that name's test commands (a hard
+#     rebuild scoped to them) and judges the name again from that run;
+#   * ``[[certificate.command]]`` lists their argv in dependency order,
+#     reused ones before executed ones where both are free to go, executed
+#     ones in the order the scheduler started them;
+#   * the TC-8d preconditions, the before/after content id, the sibling
+#     re-observation and the untracked-inputs judgement apply unchanged. The
+#     read set is the union of the monitor captures of every action in the
+#     node's closure that this run executed and of the recorded reads of
+#     every one it reused — the monitored path TC-8d's "read-set" mode was
+#     waiting for;
+#   * signing happens only here, after the observed passing run (Standard
+#     §6.2); the certificate goes to the local store's user root and, until
+#     the carrier switch, also onto the shared notes ref under its tree.
+#
+# Withholding never changes the exit code: the build's own is returned.
+# ---------------------------------------------------------------------------
+
+type
+  CertificateNodeRun = object
+    node: CertificatePlanNode
+    members: seq[string]
+      ## The node's test commands, as engine action ids.
+    closure: seq[string]
+      ## The members and everything they depend on, as engine action ids.
+    memberDeps: Table[string, seq[string]]
+      ## For each member, the other members it depends on, transitively.
+
+  CertificateNodeVerdict = object
+    ## Did a node pass in this build, and which commands does its claim rest
+    ## on? See ``certificateNodeVerdict``.
+    passed: bool
+    problem, remedy: string
+    refused: seq[string]
+      ## Members answered by the cache with a result that cannot be attested
+      ## (``reusedResultRefusal``); ``repro certify`` re-executes their node.
+    commands: seq[seq[string]]
+    depfiles: seq[string]
+      ## Monitor captures of the closure's executed actions.
+    recordedReads: seq[string]
+      ## What the records of the closure's reused actions say their
+      ## executions read, from ``recordedSources`` records.
+    recordedSources: int
+
+proc reusedResultRefusal(record: ExecutedActionRecord): string =
+  ## Why a test command the action cache answered may NOT be attested, or
+  ## ``""`` when it may (test-certificates Standard §6.2.1, decision D16 of
+  ## Test-Certificates.milestones.org). All three of the standard's
+  ## conditions:
+  ##
+  ##   * the record covers the inputs: a key-matched record answered it
+  ##     (``cdHit`` / ``cdHybridCutoff``, so every keyed input is byte- or
+  ##     metadata-identical now), and the action's key is one that covers
+  ##     what the monitor observed it reading (``keyCoversObservedReads``);
+  ##   * the record came from an execution this host observed
+  ##     (``cacheRecordObservedHere``). Reprobuild has no record signed by a
+  ##     project-registered key today, so that second arm of the standard is
+  ##     never available and every other record is refused;
+  ##   * the record reports success: the engine publishes a record only for
+  ##     an action that succeeded, so a reused failure cannot reach here, and
+  ##     a member that failed in this run is refused before this is asked.
+  if record.cacheDecision notin {cdHit, cdHybridCutoff}:
+    return "reported up to date without a matching cache record"
+  if not record.keyCoversObservedReads:
+    return "its cache key does not cover every input the monitor observed " &
+      "it reading"
+  if not record.cacheRecordObservedHere:
+    return "its cache record is not one this host observed executing (a " &
+      "LAN peer's, or one whose origin is not recorded)"
+  ""
+
+proc certificateNodeVerdict(run: CertificateNodeRun;
+    records: Table[string, ExecutedActionRecord]): CertificateNodeVerdict =
+  ## Did ``run.node`` pass in this build, and which commands does the claim
+  ## rest on? Pure over the engine's records: it runs and signs nothing.
+  ## ``depfiles`` are the monitor captures of the closure's executed actions;
+  ## ``recordedReads`` are what the records of its reused actions say their
+  ## executions read, so the untracked-inputs rule sees a reused test's reads
+  ## too.
+  var failed, missing, refusals: seq[string]
+  for id in run.closure:
+    if not records.hasKey(id):
+      missing.add(id)
+      continue
+    let record = records[id]
+    if record.status notin {asSucceeded, asCacheHit, asUpToDate}:
+      failed.add(id & " (" & $record.status &
+        (if record.status == asFailed: ", exit code " & $record.exitCode
+         else: "") & ")")
+    elif record.launched:
+      if record.monitorDepfile.len > 0:
+        result.depfiles.add(record.monitorDepfile)
+    elif record.cacheDecision in {cdHit, cdHybridCutoff}:
+      inc result.recordedSources
+      for path in record.cacheRecordInputs:
+        result.recordedReads.add(path)
+  if failed.len > 0:
+    result.problem = "it did not pass: " & failed.join(", ")
+    result.remedy = "fix the failing actions and re-run"
+    return
+  if missing.len > 0:
+    result.problem = "the build reported no outcome for " & missing.join(", ")
+    result.remedy = "re-run; a certificate is never issued for an action " &
+      "whose result is unknown"
+    return
+  # The claim rests on every test command, executed or reused (Standard
+  # §6.2.1: "a reused command is not marked differently").
+  var attested: seq[string]
+  for id in run.members:
+    let record = records[id]
+    if not record.launched:
+      let refusal = reusedResultRefusal(record)
+      if refusal.len > 0:
+        result.refused.add(id)
+        refusals.add(id & " (" & refusal & ")")
+        continue
+    if record.argv.len > 0:
+      attested.add(id)
+  if refusals.len > 0:
+    result.problem = $refusals.len & " of its " & $run.members.len &
+      " test command(s) were answered by the action cache with a result " &
+      "that cannot be attested: " & refusals.join(", ")
+    result.remedy = "run 'repro certify " & run.node.name & "', which " &
+      "re-executes them"
+    return
+  # Order: a member never precedes a member it depends on; among those free
+  # to go next, a reused one (it settled without starting) precedes the
+  # executed ones, which keep the order the scheduler started them in, and
+  # the node's member order breaks the remaining ties.
+  proc key(id: string): tuple[start, index: int] =
+    let record = records[id]
+    ((if record.launched: record.startOrder else: -1), run.members.find(id))
+  var pending = attested
+  while pending.len > 0:
+    var best = -1
+    for i, id in pending:
+      var ready = true
+      for dep in run.memberDeps.getOrDefault(id):
+        if pending.find(dep) >= 0:
+          ready = false
+      if ready and (best < 0 or key(id) < key(pending[best])):
+        best = i
+    if best < 0:
+      # A dependency cycle cannot come out of a validated graph; fall back
+      # to the plain key order rather than loop.
+      pending.sort(proc(a, b: string): int = cmp(key(a), key(b)))
+      best = 0
+    result.commands.add(records[pending[best]].argv)
+    pending.delete(best)
+  if result.commands.len == 0:
+    result.problem = "it executed no command to attest"
+    result.remedy = "mark a node whose closure runs a test command"
+    return
+  result.passed = true
+
+proc readSetFromMonitorDepFiles(paths: openArray[string];
+                                recordedReads: openArray[string] = [];
+                                recordedSources = 0): CapturedReadSet =
+  ## The union of several monitor captures and of what ``recordedSources``
+  ## reused cache records say their executions read (``recordedReads``,
+  ## already absolute). A capture that cannot be read contributes nothing,
+  ## but what the others observed WAS read: the set counts as captured when
+  ## at least one capture or record was read, and ``source`` names the
+  ## captures that were not. With none, nothing was captured.
+  var seen = initHashSet[string]()
+  var read, unreadable: seq[string]
+  for path in paths:
+    let one = readSetFromMonitorDepFile(path)
+    if not one.captured:
+      unreadable.add(path)
+      continue
+    read.add(path)
+    for p in one.paths:
+      if not seen.containsOrIncl(p):
+        result.paths.add(p)
+  for p in recordedReads:
+    if not seen.containsOrIncl(p):
+      result.paths.add(p)
+  result.captured = read.len > 0 or recordedSources > 0
+  let recorded =
+    if recordedSources > 0:
+      " and the cache records of " & $recordedSources & " reused action(s)"
+    else: ""
+  result.source =
+    if paths.len == 0 and recordedSources == 0:
+      "no action in the node's closure was executed under the monitor"
+    elif paths.len == 0:
+      "the cache records of " & $recordedSources & " reused action(s)"
+    elif unreadable.len == 0:
+      "the monitor captures of " & $read.len & " executed action(s)" &
+        recorded
+    else:
+      "the monitor captures of " & $read.len & " of " & $paths.len &
+        " executed action(s)" & recorded & "; unreadable: " &
+        unreadable.join(", ")
+
+proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
+    commands: seq[seq[string]]; readSet: CapturedReadSet;
+    workspaceRoot, certificateOut: string): bool =
+  ## Confirm the tested state for one passing node, then build, sign, deliver
+  ## and note its certificate. Returns true when one was issued; every
+  ## refusal is printed with its remedy.
+  let tested = confirmTestedState(pre, readSet)
+  if tested.reason != tswNone:
+    stderr.writeLine("repro test: no certificate for '" & name & "' — " &
+      $tested.reason & ": " & tested.message & " — " & tested.remedy)
+    return false
+  if tested.note.len > 0:
+    stderr.writeLine("repro test: " & tested.note)
+  var confirmed = pre
+  confirmed.untracked = tested.untracked
+  var cert = issueCertificate(confirmed, @[name], commands,
+    "repro-test@" & issuerHostTag())
+  try:
+    signCertificateOnIssuance(cert, reproSigningKeyId(),
+      reproSigningKeyPath(workspaceRoot))
+  except CertificateSigningError as err:
+    stderr.writeLine("repro test: no certificate for '" & name & "' — the " &
+      "daemon could not sign it (" & err.msg & "); the attestation is " &
+      "withheld")
+    return false
+  let delivered = publishCertificateToLocalStore(cert, pre.repository)
+  if delivered.error.len > 0:
+    stderr.writeLine("repro test: no certificate for '" & name & "' — it " &
+      "was issued but could not be written to the local certificate store: " &
+      delivered.error)
+    return false
+  if delivered.retentionProblem.len > 0:
+    stderr.writeLine("repro test: " & delivered.retentionProblem)
+  for problem in delivered.pruned.errors:
+    stderr.writeLine("repro test: local certificate store prune: " & problem)
+  # Until the carrier switch (D12), the certificate also travels as a note on
+  # the shared ref, keyed by the tree its content names; a certificate
+  # already noted there is not appended twice.
+  let gitBin = findExe("git")
+  let noteKey = certificateNoteKey(cert.vcs.content)
+  if gitBin.len == 0 or not noteKey.ok:
+    stderr.writeLine("repro test: certificate for '" & name & "' is in the " &
+      "local store but was not noted: " &
+      (if gitBin.len == 0: "git not found on PATH" else: noteKey.problem))
+  else:
+    var alreadyNoted = false
+    for existing in readAttachedCertificates(gitBin, pre.repository,
+        noteKey.oid):
+      if existing.signature.value == cert.signature.value:
+        alreadyNoted = true
+    if not alreadyNoted:
+      let att = attachCertificate(gitBin, pre.repository, cert)
+      if not att.ok:
+        stderr.writeLine("repro test: certificate for '" & name & "' is in " &
+          "the local store but attaching it as a git note failed: " &
+          att.diagnostic)
+  if certificateOut.len > 0:
+    writeCertificateFile(cert, certificateOut)
+  stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
+    " for '" & name & "' on " & cert.platform & " for content " &
+    cert.vcs.content &
+    (if cert.vcs.base.len > 0: " (base " & cert.vcs.base & ")"
+     else: " (unborn branch: no base)") & " → " & delivered.path &
+    (if certificateOut.len > 0: " (copy: " & certificateOut & ")" else: "") &
+    " (signed " & certificateSignatureAlgorithm & ", key_id=" & cert.keyId &
+    ", " & $cert.commands.len & " command(s))")
+  true
+
+proc plainTestBuild(buildArgs, selectors: seq[string];
+                    publicCliPath: string): int =
+  ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
+  var args = buildArgs
+  for sel in (if selectors.len == 0: @["test"] else: selectors):
+    args.add(sel)
+  runBuildCommand(args, publicCliPath)
+
+proc reportUnselectedCertificates(unselected: seq[string]) =
+  ## The one line naming the project's marked nodes this run did not select.
+  if unselected.len > 0:
+    stderr.writeLine("repro test: not certified by this run: " &
+      unselected.join(", ") & " (declared by the project, not selected; " &
+      "'repro certify' produces them)")
+
+type ActionOutcomeCollector = ref object
+  ## What the build's ``actionOutcomeSink`` delivered.
+  delivered: bool
+  records: Table[string, ExecutedActionRecord]
+
+proc collectorSink(collector: ActionOutcomeCollector): BuildActionOutcomeSink =
+  ## A sink that stores every delivered record in ``collector``, by id.
+  result = proc(batch: seq[ExecutedActionRecord]) =
+    collector.delivered = true
+    for record in batch:
+      collector.records[record.id] = record
+
+proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
+                            publicCliPath: string): int =
+  ## TC-8e: ``repro test`` / ``repro certify`` on the build-engine path, with
+  ## issuance for the certificate-producing nodes the plan materializes (see
+  ## the block comment above). ``buildArgs`` are the ``repro build``
+  ## arguments without selectors.
+  let mode =
+    if opts.toolProvisioning == tpmUnspecified: tpmPathOnly
+    else: opts.toolProvisioning
+  var workRoot = ""
+  for flag in opts.buildFlags:
+    if flag.startsWith("--work-root="):
+      workRoot = flag["--work-root=".len .. ^1]
+  var selectors = opts.selectors
+
+  # 1. The plan: the stored graph, as ``repro certificates plan`` reads it.
+  var info: BuildGraphInspection
+  var part: CertificatePlanPart
+  var names: seq[string]
+  try:
+    var autoRunQuota = startAutoRunQuotaIfNeeded(
+      "--no-runquota" in opts.buildFlags)
+    defer: releaseAutoRunQuotaProcess(autoRunQuota)
+    if selectors.len == 0 and opts.certifyExplicit:
+      # ``repro certify`` with no names materializes every declared
+      # certificate-producing node. (Once the shared branch policy exists it
+      # will be the names the current branch's rule requires instead.)
+      let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
+        selectDefaultAction = false, workRoot = workRoot, lowerGraph = false)
+      for entry in aggregateCertificateExportTable(declared.snapshot).entries:
+        if selectors.find(entry.name) < 0:
+          selectors.add(entry.name)
+      if selectors.len == 0:
+        stderr.writeLine("repro certify: this project declares no " &
+          "certificate-producing node (see 'repro certificates list'); " &
+          "nothing to certify")
+        return 2
+    let resolved = parseAndResolveSelectors(
+      (if selectors.len == 0: @["test"] else: selectors), "repro test")
+    let anchorName = splitTarget(resolved.target).fragment
+    if anchorName.len > 0:
+      names.add(anchorName)
+    for name in resolved.extraNameSelectors:
+      if names.find(name) < 0:
+        names.add(name)
+    info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
+      selectDefaultAction = false, workRoot = workRoot, lowerGraph = false)
+    part = certificatePlanPart(info.snapshot, info.projectRoot, names)
+  except BuildTargetUnknownError, BuildTargetAmbiguousError:
+    # The build reports the same selector error in its ordinary form.
+    return plainTestBuild(buildArgs, selectors, publicCliPath)
+  except CatchableError as err:
+    stderr.writeLine("repro test: no certificate — the plan's " &
+      "certificate-producing nodes could not be read (" & err.msg & ")")
+    return plainTestBuild(buildArgs, selectors, publicCliPath)
+  let nodes = planCertificateNodes(CertificatePlan(parts: @[part]))
+  var unselected: seq[string]
+  for entry in part.certificates.entries:
+    var planned = false
+    for node in nodes:
+      if node.name == entry.name: planned = true
+    if not planned and unselected.find(entry.name) < 0:
+      unselected.add(entry.name)
+  if nodes.len == 0:
+    let code = plainTestBuild(buildArgs, selectors, publicCliPath)
+    reportUnselectedCertificates(unselected)
+    return code
+
+  # 2. The issuance preconditions (TC-8d) for the repository the plan builds.
+  let currentRepo =
+    if opts.certCurrentRepo.len > 0: absolutePath(opts.certCurrentRepo)
+    else: part.repository
+  let workspaceRoot =
+    if opts.certWorkspaceRoot.len > 0: absolutePath(opts.certWorkspaceRoot)
+    else: enclosingWorkspaceRoot(currentRepo)
+  var pre: IssuancePreconditions
+  if workspaceRoot.len == 0:
+    pre = IssuancePreconditions(kind: ipNoWorkspace, offender: currentRepo,
+      remedy: "run inside an initialized reprobuild workspace, or pass " &
+        "--workspace-root=PATH")
+  else:
+    pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+
+  # 3. The incremental no-op, per name: a name the local store already
+  # certifies for this content on this platform is not issued again. When
+  # every selector is such a name, nothing runs at all.
+  var covered: seq[string]
+  if pre.kind == ipOk:
+    let algorithmName = parseContentId(pre.content).algorithmName
+    let existing = findCertificatesInLocalStore(stateWithKnownContent(
+      [KnownContentId(algorithm: algorithmName, id: pre.content)]))
+    for node in nodes:
+      if certificateNoOpDecision(existing.certificates, pre, @[node.name],
+          opts.certTraceDir, info.projectRoot,
+          defaultCachePath(info.projectRoot)):
+        covered.add(node.name)
+    var allCovered = covered.len > 0
+    for name in names:
+      if covered.find(name) < 0:
+        allCovered = false
+    if allCovered:
+      stderr.writeLine("repro test: re-certify is a no-op — the local " &
+        "certificate store (" & existing.searched.join(", ") & ") already " &
+        "covers [" & covered.join(", ") & "] for content " & pre.content &
+        " on " & pre.platform & " (no relevant change; tests not re-run)")
+      reportUnselectedCertificates(unselected)
+      return 0
+    for name in covered:
+      stderr.writeLine("repro test: '" & name & "' is already certified " &
+        "for content " & pre.content & " on " & pre.platform &
+        "; not issued again")
+
+  # 4. Each remaining node's test commands and closure, in engine ids, and
+  # which of its members each member depends on (for the command order).
+  var aliases = DirectTargetAliases(byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  for target in part.targets.values:
+    considerDirectAlias(aliases, target)
+  var runs: seq[CertificateNodeRun]
+  for node in nodes:
+    if covered.find(node.name) >= 0:
+      continue
+    let members = certificateNodeMembers(part, node.nodeKind, node.node)
+    var run = CertificateNodeRun(node: node)
+    for id in members:
+      run.members.add(aliases.byAction.getOrDefault(id, id))
+    for id in certificateNodeClosure(part, members):
+      run.closure.add(aliases.byAction.getOrDefault(id, id))
+    for id in members:
+      var above: seq[string]
+      for dep in certificateNodeClosure(part, [id]):
+        if dep != id and members.find(dep) >= 0:
+          above.add(aliases.byAction.getOrDefault(dep, dep))
+      run.memberDeps[aliases.byAction.getOrDefault(id, id)] = above
+    runs.add(run)
+
+  # 5. The build, in-process so its per-action outcome is observable. It
+  # keeps the action cache: a reused test result counts when it may be
+  # attested (D16, ``reusedResultRefusal``).
+  proc certifyingBuild(extra: seq[string]):
+      tuple[code: int; delivered: bool;
+            records: Table[string, ExecutedActionRecord]] =
+    var args = buildArgs & extra
+    for name in names:
+      args.add(name)
+    let collector = ActionOutcomeCollector()
+    result.code = runBuildCommand(args, publicCliPath,
+      actionOutcomeSink = collectorSink(collector))
+    result.delivered = collector.delivered
+    result.records = collector.records
+
+  var outcome = certifyingBuild(@[])
+  var verdicts: seq[CertificateNodeVerdict]
+  if pre.kind == ipOk and outcome.delivered:
+    for run in runs:
+      verdicts.add(certificateNodeVerdict(run, outcome.records))
+    # ``repro certify`` is the remedy for a reused result that cannot be
+    # attested: it re-executes the test commands of every name that rests on
+    # one (a hard rebuild scoped to them) and judges the names again from
+    # that run. A plain ``repro test`` reports the remedy instead.
+    if opts.certifyExplicit:
+      var rerun: seq[string]
+      for i, run in runs:
+        if verdicts[i].refused.len > 0:
+          for id in run.members:
+            if rerun.find(id) < 0:
+              rerun.add(id)
+      if rerun.len > 0:
+        stderr.writeLine("repro certify: re-executing " & $rerun.len &
+          " test command(s) whose cached results cannot be attested: " &
+          rerun.join(", "))
+        var extra = @["--hard-rebuild"]
+        for id in rerun:
+          extra.add("--only=" & id)
+        outcome = certifyingBuild(extra)
+        verdicts.setLen(0)
+        if outcome.delivered:
+          for run in runs:
+            verdicts.add(certificateNodeVerdict(run, outcome.records))
+  let code = outcome.code
+
+  # 6. Issue for each passing node.
+  if pre.kind != ipOk:
+    reportRefusedPreconditions(pre)
+  elif not outcome.delivered:
+    stderr.writeLine("repro test: no certificate — the build reported no " &
+      "per-action outcome to certify from" &
+      (if code != 0: " (it failed before running its graph)" else: ""))
+  else:
+    let copyOut = if runs.len == 1: opts.certificateOut else: ""
+    if opts.certificateOut.len > 0 and runs.len != 1:
+      stderr.writeLine("repro test: --certificate-out names one file and " &
+        "this run certifies " & $runs.len & " names; no copy is written")
+    for i, run in runs:
+      let verdict = verdicts[i]
+      if not verdict.passed:
+        stderr.writeLine("repro test: no certificate for '" & run.node.name &
+          "' — " & verdict.problem & " — " & verdict.remedy)
+        continue
+      discard issueForCertificateNode(pre, run.node.name, verdict.commands,
+        readSetFromMonitorDepFiles(verdict.depfiles, verdict.recordedReads,
+          verdict.recordedSources), workspaceRoot, copyOut)
+  reportUnselectedCertificates(unselected)
+  code
+
 proc runReproTestCommand*(args: openArray[string];
                           publicCliPath: string): int =
   ## ``repro test`` entry point with the CI-sharding flag surface from
@@ -70207,6 +70900,17 @@ proc runReproTestCommand*(args: openArray[string];
       buildArgs.add(opts.lockFlag)
     if opts.peerCacheSpec.len > 0:
       buildArgs.add("--peer-cache=" & opts.peerCacheSpec)
+    # TC-8e: a run that executes tests issues a certificate for each
+    # certificate-producing node it materializes. ``--no-certify`` opts out,
+    # and a run that executes nothing (a dry run, a listing, a solved-graph
+    # print, a prepare-only pass) has nothing to attest.
+    var executesTests = opts.certify
+    for flag in opts.buildFlags:
+      if flag in ["--dry-run", "--prepare-only", "--list-targets",
+          "--list-targets-json", "--print-solved-graph"]:
+        executesTests = false
+    if executesTests:
+      return runCertifyingTestBuild(opts, buildArgs, publicCliPath)
     if opts.selectors.len == 0:
       buildArgs.add("test")
     else:
@@ -70286,19 +70990,7 @@ proc runReproTestCommand*(args: openArray[string];
     let code = runFixtureModeShard(opts, peer, outcome)
     # Decide issuance from the REAL outcome + preconditions.
     if pre.kind != ipOk:
-      let label =
-        case pre.kind
-        of ipDirty: "a develop-mode sibling's working tree is dirty"
-        of ipUnpublished: "dependency has unpushed commits"
-        of ipOffLock: "repo not at the locked revision"
-        of ipNoWorkspace: "not a workspace"
-        of ipNoContentId: "the tested state has no content id"
-        of ipNoLockInContent: "the tested content carries no usable lock"
-        of ipGateError: "workspace gate error"
-        of ipOk: ""
-      stderr.writeLine("repro test: no certificate — " & label &
-        (if pre.offender.len > 0: " (" & pre.offender & ")" else: "") &
-        (if pre.remedy.len > 0: " — " & pre.remedy else: ""))
+      reportRefusedPreconditions(pre)
     elif not outcome.allPassed:
       stderr.writeLine("repro test: no certificate — the run did not pass " &
         "(result is not 'passed'); fix the failing targets and re-run")
@@ -70368,7 +71060,15 @@ proc runReproTestCommand*(args: openArray[string];
         " (signed " & certificateSignatureAlgorithm & ", key_id=" &
         cert.keyId & ")")
     return code
-  return runWorkspaceModeShard(opts, peer, publicCliPath)
+  # A sharded run hands its test edges to the external test runner, which
+  # does not report a per-node outcome or the commands it executed, so this
+  # path issues nothing. Say so when a certificate was asked for explicitly.
+  let shardCode = runWorkspaceModeShard(opts, peer, publicCliPath)
+  if opts.certifyExplicit:
+    stderr.writeLine("repro test: no certificate — a sharded run (--shard, " &
+      "--emit-partition-plan, --plan-from) does not issue certificates yet; " &
+      "run 'repro certify' without shard flags")
+  return shardCode
 
 const checkSetTarget* = "pre-commit"
   ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
