@@ -46,14 +46,13 @@
 ## Mocks: none. A real `nix build`, the real wrapped package, the real build
 ## engine, a real `nim c` and the real planner.
 
-import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import std/[json, os, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
 import repro_dsl_stdlib/packaging/runtime_contract
 import repro_test_support/reasoned_skip
 
-const ProjectRoot = currentSourcePath().parentDir().parentDir().parentDir()
-  .parentDir()
+import ./nix_package_support
 
 const MarkerName = "gm1-nix-package-marker.txt"
 const ProfileBody = """
@@ -64,38 +63,6 @@ profile "gm1NixPackage":
     fsUserFile(hostFile = "~/""" & MarkerName & """",
       content = "planned by the installed package\n")
 """
-
-type RunResult = tuple[exitCode: int; output: string]
-
-proc run(exe: string; args: openArray[string]; cwd: string;
-         env: StringTableRef = nil): RunResult =
-  let p = startProcess(exe, workingDir = cwd, args = @args, env = env,
-    options = {poStdErrToStdOut, poUsePath})
-  let output = p.outputStream.readAll()
-  let code = p.waitForExit()
-  p.close()
-  (exitCode: code, output: output)
-
-proc buildNixPackage(): string =
-  ## `nix build` of this checkout's `#default`. The flake is a git tree, so
-  ## nix builds the working tree's tracked files — the code under test, not a
-  ## pinned release.
-  let res = run("nix", ["build", "--no-link", "--print-out-paths",
-    ProjectRoot & "#default"], ProjectRoot)
-  doAssert res.exitCode == 0, "nix build failed:\n" & res.output
-  for line in res.output.splitLines:
-    if line.strip().startsWith("/nix/store/"):
-      result = line.strip()
-  doAssert result.len > 0, "nix build printed no store path:\n" & res.output
-
-proc wrapperDefault(wrapper, name: string): string =
-  ## The value a makeWrapper `--set-default` line gives `name`:
-  ##   export NAME=${NAME-'value'}
-  let prefix = "export " & name & "=${" & name & "-'"
-  for line in readFile(wrapper).splitLines:
-    if line.startsWith(prefix) and line.endsWith("'}"):
-      return line[prefix.len ..< line.len - 2]
-  doAssert false, wrapper & " sets no default for " & name
 
 proc pathWithoutNim(): string =
   var kept: seq[string]

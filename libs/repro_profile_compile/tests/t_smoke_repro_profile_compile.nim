@@ -39,6 +39,7 @@ import std/[os, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
 from repro_core/source_root import InstalledSourceRootSubdir,
   InstalledSourceTreesSubdir
+from repro_core/c_compiler import BuiltCCompilerPath
 
 import repro_core
 import repro_build_engine
@@ -253,6 +254,9 @@ suite "M83 Phase C: profileCompileBuildAction":
       "/opt/repro", "/s/profile-cache/k.rbpi")
     check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
       "/bin/repro", "/s/profile-cache/other.rbpi")
+    # The C compiler is part of the compiler identity (GM1l).
+    check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
+      "/bin/repro", "/s/profile-cache/k.rbpi", "/nix/cc/bin/cc")
 
   test "verbose=true adds --verbose argv element":
     let weak = weakFingerprintFromText("smoke.weak.v")
@@ -407,6 +411,82 @@ suite "installed repro: profile compile source root and compiler":
     withEnv(ProfileNimCompilerEnvVar, dir / "no-such-nim"):
       expect CompileFailure:
         discard resolveProfileNimCompiler()
+
+  # The C compiler: the recipe compile's selection
+  # (`repro_core/c_compiler.resolveConfiguredCCompiler`), handed to nim as an
+  # explicit compiler and linker (Gradual-Nix-To-Reprobuild-Migration GM1l).
+  # The end-to-end proof against the installed Nix package in a clean
+  # environment is `tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim`.
+
+  test "REPRO_BOOTSTRAP_CC names the profile compile's C compiler":
+    let dir = createTempDir("repro-profile-cc-", " dir")
+    defer: removeDir(dir)
+    let fakeCC = dir / addFileExt("my cc", ExeExt)
+    writeFile(extendedPath(fakeCC), "")
+    withEnv("REPRO_BOOTSTRAP_CC", fakeCC):
+      check resolveProfileCCompiler() == fakeCC
+      let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+        "/c/out", "/r", resolveProfileCCompiler())
+      for flag in ["--gcc.exe:", "--gcc.linkerexe:", "--clang.exe:",
+                   "--clang.linkerexe:"]:
+        check (flag & fakeCC) in argv
+      var families = 0
+      for arg in argv:
+        if arg.startsWith("--cc:"):
+          inc families
+      check families == 1
+      # Flags come before the profile, which stays the last argument.
+      check argv[^1] == "/p/home.nim"
+
+  test "a REPRO_BOOTSTRAP_CC naming no file is refused by name":
+    let dir = createTempDir("repro-profile-cc-missing-", "")
+    defer: removeDir(dir)
+    withEnv("REPRO_BOOTSTRAP_CC", dir / "no-such-cc"):
+      try:
+        discard resolveProfileCCompiler()
+        check false
+      except CompileFailure as err:
+        check ("REPRO_BOOTSTRAP_CC=" & dir / "no-such-cc") in err.msg
+
+  test "no C compiler in the environment falls back to the build compiler":
+    # What an installed package meets in a clean environment: no variable
+    # and no `cc` on PATH. The compiler `repro` was built with is the answer
+    # wherever it still exists (always, for a Nix package: the binary's
+    # reference keeps it in the closure).
+    when defined(windows):
+      check BuiltCCompilerPath.len == 0
+    else:
+      let emptyBin = createTempDir("repro-profile-cc-path-", "")
+      defer: removeDir(emptyBin)
+      check BuiltCCompilerPath.len > 0
+      withEnv("REPRO_BOOTSTRAP_CC", ""):
+        withEnv("CC", ""):
+          withEnv("PATH", emptyBin):
+            check resolveProfileCCompiler() == BuiltCCompilerPath
+
+  test "nim's default C compiler on PATH is left to nim":
+    # The recipe compile would take `cc` from PATH; the profile compile keeps
+    # Nim's default where it is available (see `resolveProfileCCompiler` for
+    # the measured reason: a `cc` that is clang left the edge's first run
+    # unpublished).
+    let bin = createTempDir("repro-profile-cc-default-", "")
+    defer: removeDir(bin)
+    for name in [NimDefaultCCompilerExe, "cc"]:
+      let exe = bin / addFileExt(name, ExeExt)
+      writeFile(extendedPath(exe), "")
+      setFilePermissions(extendedPath(exe), {fpUserRead, fpUserWrite,
+        fpUserExec})
+    withEnv("REPRO_BOOTSTRAP_CC", ""):
+      withEnv("CC", ""):
+        withEnv("PATH", bin):
+          check resolveProfileCCompiler() == ""
+
+  test "an empty C compiler leaves nim's default in place":
+    let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+      "/c/out", "/r")
+    for arg in argv:
+      check not arg.startsWith("--cc:")
+      check not arg.startsWith("--gcc.exe:")
 
 # ---------------------------------------------------------------------------
 # An installed layout's source-only inputs (Gradual-Nix-To-Reprobuild-Migration

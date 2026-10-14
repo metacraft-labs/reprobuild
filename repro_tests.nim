@@ -8901,6 +8901,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim",
+    binary: "build/test-bin/t_e2e_nix_package_compiles_profile_clean_env",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_phase_g_action_edges.nim",
     binary: "build/test-bin/t_e2e_phase_g_action_edges",
     defines: @[],

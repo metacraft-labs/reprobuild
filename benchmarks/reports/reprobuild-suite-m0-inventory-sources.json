@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 30,
-    "nimTestBinaries": 1971,
+    "nimTestBinaries": 1972,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 613,
     "staticallyDetectedRuntimeCompilerFlowTests": 112,
-    "testEntries": 1988
+    "testEntries": 1989
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1135,7 +1135,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 13,
-      "integration": 1078,
+      "integration": 1079,
       "platform/destructive": 126,
       "pure unit": 613,
       "unclassified": 158
@@ -1322,9 +1322,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1971,
+    "nimTestBinaryCount": 1972,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1988
+    "testEntryCount": 1989
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1537,7 +1537,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 312,
+          "line": 316,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -1553,7 +1553,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 328,
+          "line": 332,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -1569,7 +1569,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 333,
+          "line": 337,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -1585,7 +1585,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 336,
+          "line": 340,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -14395,7 +14395,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 21,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -24231,14 +24231,13 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_home_generations",
-        "repro_test_support"
+        "repro_home_generations"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24442,6 +24441,25 @@
       "source": "tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_nix_package_compiles_profile_clean_env",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_profile",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

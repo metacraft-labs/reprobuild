@@ -17,134 +17,112 @@
 ##     points at the migration recipe, and suggests the plan
 ##     subcommand;
 ##   * no generation was committed to the state dir.
+##
+## The harness is portable: processes are spawned from argv, and every
+## directory the CLI touches (`HOME` and `USERPROFILE`, the profile, state and
+## store directories) is a scratch directory named through the environment.
+## It used to run on Windows only, behind a skip claiming a Windows-shaped
+## layout that no part of it depends on; it runs on every host.
 
-const PlatformSkipReason =
-  "[platform N/A] t_e2e_compile_fail_is_hard_error: " &
-    "validated on Windows; the apply-path harness uses Windows " &
-    "stow / launcher / state-dir layout"
+import std/[os, osproc, streams, strtabs, strutils, tempfiles]
 
-import repro_test_support/reasoned_skip
+import std/unittest
+import repro_home_generations
 
-when not defined(windows):
-  # The Windows-only branch below cannot be compiled here (its imports
-  # and harness are Windows-shaped), so the cases are re-declared as
-  # skips rather than left undeclared. Previously this branch did
-  # ``echo`` + ``quit(0)`` at module init: the binary emitted no
-  # catalog, stayed an opaque whole-binary exit-0 PASS, and these three
-  # cases were invisible to every gate. The names must stay in step with
-  # the ``else`` branch.
-  import std/unittest
+const ProjectRoot = currentSourcePath().parentDir().parentDir()
+  .parentDir().parentDir()
+const FixtureSrc = currentSourcePath().parentDir().parentDir()
+  .parentDir() / "fixtures" / "m83" / "home_compile_fail.nim"
 
-  suite "M83 Phase F3 gate: profile compile failure is a HARD error":
+proc reproBinary(): string =
+  let exeName = when defined(windows): "repro.exe" else: "repro"
+  let candidate = ProjectRoot / "build" / "bin" / exeName
+  doAssert fileExists(candidate),
+    "repro binary not found at " & candidate &
+    "; build with `nim c --out:build/bin/repro.exe apps/repro/repro.nim`"
+  candidate
 
-    test "repro home apply hard-errors on a broken Phase A profile":
-      skip(PlatformSkipReason)
+proc runRepro(envOverrides: openArray[tuple[k, v: string]];
+              args: openArray[string]):
+    tuple[exitCode: int; output: string] =
+  var processEnv = newStringTable(modeCaseSensitive)
+  for k, v in envPairs():
+    processEnv[k] = v
+  for kv in envOverrides:
+    processEnv[kv.k] = kv.v
+  let p = startProcess(reproBinary(), args = @args, env = processEnv,
+    options = {poUsePath, poStdErrToStdOut})
+  let stream = p.outputStream()
+  var combined = ""
+  while not stream.atEnd():
+    let chunk = stream.readAll()
+    if chunk.len == 0: break
+    combined.add chunk
+  let code = p.waitForExit()
+  p.close()
+  result = (exitCode: code, output: combined)
 
-    test "repro home apply --plan hard-errors on a broken Phase A profile":
-      skip(PlatformSkipReason)
+proc setup(tempRoot: string): seq[tuple[k, v: string]] =
+  let stateDir = tempRoot / "state"
+  let storeRoot = tempRoot / "store"
+  let homeDir = tempRoot / "home"
+  let profileDir = tempRoot / "profile"
+  createDir(stateDir)
+  createDir(storeRoot)
+  createDir(homeDir)
+  createDir(profileDir)
+  copyFile(FixtureSrc, profileDir / "home.nim")
+  result = @[
+    (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
+    (k: "REPRO_HOME_STATE_DIR", v: stateDir),
+    (k: "REPRO_STORE_ROOT", v: storeRoot),
+    (k: "HOME", v: homeDir),
+    (k: "USERPROFILE", v: homeDir),
+    (k: "REPRO_HOST", v: "compile-fail-host"),
+    (k: "REPRO_HOME_PACKAGE_CATALOG", v: "neovim,tmux")]
 
-    test "repro home plan hard-errors on a broken Phase A profile":
-      skip(PlatformSkipReason)
-else:
-  import std/[os, osproc, streams, strtabs, strutils, tempfiles]
+template assertHardErrorOutput(out0: string) =
+  ## Every apply-path entry surfaces the same uniform diagnostic
+  ## shape (formatted by `cli_home.formatProfileCompileError`).
+  check out0.contains("profile compilation failed for")
+  check out0.contains("home.nim")
+  # The Nim diagnostic is forwarded verbatim — `nope_undefined_predicate`
+  # is the offending identifier in the fixture.
+  check out0.contains("nope_undefined_predicate")
+  # The hints (migration recipe + plan suggestion) are stable.
+  check out0.contains("Profile-Migration-Patterns.md")
+  check out0.contains("`repro home plan`")
 
-  import std/unittest
-  import repro_home_generations
+suite "M83 Phase F3 gate: profile compile failure is a HARD error":
 
-  const ProjectRoot = currentSourcePath().parentDir().parentDir()
-    .parentDir().parentDir()
-  const FixtureSrc = currentSourcePath().parentDir().parentDir()
-    .parentDir() / "fixtures" / "m83" / "home_compile_fail.nim"
-
-  proc reproBinary(): string =
-    let exeName = when defined(windows): "repro.exe" else: "repro"
-    let candidate = ProjectRoot / "build" / "bin" / exeName
-    doAssert fileExists(candidate),
-      "repro binary not found at " & candidate &
-      "; build with `nim c --out:build/bin/repro.exe apps/repro/repro.nim`"
-    candidate
-
-  proc runRepro(envOverrides: openArray[tuple[k, v: string]];
-                args: openArray[string]):
-      tuple[exitCode: int; output: string] =
-    var processEnv = newStringTable(modeCaseSensitive)
-    for k, v in envPairs():
-      processEnv[k] = v
-    for kv in envOverrides:
-      processEnv[kv.k] = kv.v
-    let p = startProcess(reproBinary(), args = @args, env = processEnv,
-      options = {poUsePath, poStdErrToStdOut})
-    let stream = p.outputStream()
-    var combined = ""
-    while not stream.atEnd():
-      let chunk = stream.readAll()
-      if chunk.len == 0: break
-      combined.add chunk
-    let code = p.waitForExit()
-    p.close()
-    result = (exitCode: code, output: combined)
-
-  proc setup(tempRoot: string): seq[tuple[k, v: string]] =
+  test "repro home apply hard-errors on a broken Phase A profile":
+    let tempRoot = createTempDir("repro-m83-f3-apply-", "")
+    defer:
+      try: removeDir(tempRoot) except OSError: discard
+    let env = setup(tempRoot)
+    let res = runRepro(env, ["home", "apply"])
+    check res.exitCode != 0
+    assertHardErrorOutput(res.output)
+    # No generation was recorded.
     let stateDir = tempRoot / "state"
-    let storeRoot = tempRoot / "store"
-    let homeDir = tempRoot / "home"
-    let profileDir = tempRoot / "profile"
-    createDir(stateDir)
-    createDir(storeRoot)
-    createDir(homeDir)
-    createDir(profileDir)
-    copyFile(FixtureSrc, profileDir / "home.nim")
-    result = @[
-      (k: "REPRO_HOME_PROFILE_DIR", v: profileDir),
-      (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-      (k: "REPRO_STORE_ROOT", v: storeRoot),
-      (k: "HOME", v: homeDir),
-      (k: "USERPROFILE", v: homeDir),
-      (k: "REPRO_HOST", v: "compile-fail-host"),
-      (k: "REPRO_HOME_PACKAGE_CATALOG", v: "neovim,tmux")]
+    let records = enumerateGenerations(stateDir)
+    check records.len == 0
+    check readCurrentGenerationId(stateDir).len == 0
 
-  template assertHardErrorOutput(out0: string) =
-    ## Every apply-path entry surfaces the same uniform diagnostic
-    ## shape (formatted by `cli_home.formatProfileCompileError`).
-    check out0.contains("profile compilation failed for")
-    check out0.contains("home.nim")
-    # The Nim diagnostic is forwarded verbatim — `nope_undefined_predicate`
-    # is the offending identifier in the fixture.
-    check out0.contains("nope_undefined_predicate")
-    # The hints (migration recipe + plan suggestion) are stable.
-    check out0.contains("Profile-Migration-Patterns.md")
-    check out0.contains("`repro home plan`")
+  test "repro home apply --plan hard-errors on a broken Phase A profile":
+    let tempRoot = createTempDir("repro-m83-f3-applyplan-", "")
+    defer:
+      try: removeDir(tempRoot) except OSError: discard
+    let env = setup(tempRoot)
+    let res = runRepro(env, ["home", "apply", "--plan"])
+    check res.exitCode != 0
+    assertHardErrorOutput(res.output)
 
-  suite "M83 Phase F3 gate: profile compile failure is a HARD error":
-
-    test "repro home apply hard-errors on a broken Phase A profile":
-      let tempRoot = createTempDir("repro-m83-f3-apply-", "")
-      defer:
-        try: removeDir(tempRoot) except OSError: discard
-      let env = setup(tempRoot)
-      let res = runRepro(env, ["home", "apply"])
-      check res.exitCode != 0
-      assertHardErrorOutput(res.output)
-      # No generation was recorded.
-      let stateDir = tempRoot / "state"
-      let records = enumerateGenerations(stateDir)
-      check records.len == 0
-      check readCurrentGenerationId(stateDir).len == 0
-
-    test "repro home apply --plan hard-errors on a broken Phase A profile":
-      let tempRoot = createTempDir("repro-m83-f3-applyplan-", "")
-      defer:
-        try: removeDir(tempRoot) except OSError: discard
-      let env = setup(tempRoot)
-      let res = runRepro(env, ["home", "apply", "--plan"])
-      check res.exitCode != 0
-      assertHardErrorOutput(res.output)
-
-    test "repro home plan hard-errors on a broken Phase A profile":
-      let tempRoot = createTempDir("repro-m83-f3-plan-", "")
-      defer:
-        try: removeDir(tempRoot) except OSError: discard
-      let env = setup(tempRoot)
-      let res = runRepro(env, ["home", "plan"])
-      check res.exitCode != 0
-      assertHardErrorOutput(res.output)
+  test "repro home plan hard-errors on a broken Phase A profile":
+    let tempRoot = createTempDir("repro-m83-f3-plan-", "")
+    defer:
+      try: removeDir(tempRoot) except OSError: discard
+    let env = setup(tempRoot)
+    let res = runRepro(env, ["home", "plan"])
+    check res.exitCode != 0
+    assertHardErrorOutput(res.output)

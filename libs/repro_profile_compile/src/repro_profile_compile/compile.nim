@@ -20,6 +20,9 @@ from repro_core/paths import extendedPath
 from repro_core/process_streams import drainStream
 from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
   installedLayoutPackageTrees
+from repro_core/ambient_execution import uncontrolledFindExe
+from repro_core/c_compiler import CCompilerUnusableError, explicitCCompiler,
+  fallbackCCompiler, nimCCompilerFlags
 
 import repro_profile
 import repro_profile_intent
@@ -73,6 +76,53 @@ proc resolveProfileNimCompiler*(): string =
       "(https://nim-lang.org/install.html) on PATH, and retry.")
   nimExe
 
+const NimDefaultCCompilerExe* =
+  when defined(macosx): "clang" else: "gcc"
+  ## The C compiler executable Nim runs when told none (its default `cc`
+  ## family on this platform), looked up through `PATH`.
+
+proc resolveProfileCCompiler*(): string =
+  ## The C compiler the profile compile names to Nim, or "" to let Nim use
+  ## its default. Built from the recipe compile's selection
+  ## (`repro_core/c_compiler`):
+  ##
+  ## 1. an explicit choice -- `$REPRO_BOOTSTRAP_CC`, an absolute `$CC`
+  ##    (`explicitCCompiler`); a `$REPRO_BOOTSTRAP_CC` naming no file is
+  ##    refused, as the recipe compile refuses it;
+  ## 2. otherwise "" when Nim's default compiler (`NimDefaultCCompilerExe`)
+  ##    is on `PATH`: the compile then runs exactly as it always has;
+  ## 3. otherwise `cc` on `PATH`, then the compiler `repro` was built with
+  ##    (`fallbackCCompiler`).
+  ##
+  ## Why arm 3 exists: the compile used to name no compiler at all, and the
+  ## Nix package's wrapper names its Nim but no C compiler, so from the
+  ## installed package in a clean environment every profile compile failed
+  ## with `gcc: command not found` -- although the package carries its build
+  ## compiler (Gradual-Nix-To-Reprobuild-Migration GM1l).
+  ##
+  ## Why arm 2 sits before the recipe compile's `cc`-on-`PATH` arm: in
+  ## reprobuild's own Linux dev shell `cc` is a clang and `gcc` is gcc.
+  ## Measured 2026-10-14 (home-pc, x86_64-linux): naming that `cc` left the
+  ## edge's FIRST run unpublished (`reasons=unblessed-entropy`: clang calls
+  ## `arc4random` to name the temporary file it renames onto its `-o`
+  ## output, and this edge carries no entropy blessing, see `edge.nim`); only
+  ## the determinism probe admits the second identical run, so an unchanged
+  ## profile hit on run 3 instead of run 2 and every cache-hit gate failed.
+  ## `-fno-temp-file` removes the draw (reprobuild-pm issue
+  ## 2026-10-14-clang-profile-compile-is-not-published-on-its-first-run).
+  ## The recipe compile blesses compiler entropy and is unaffected. A host with
+  ## Nim's default compiler keeps it; only a host without it -- where the
+  ## compile could not run at all -- gets one picked.
+  try:
+    result = explicitCCompiler()
+  except CCompilerUnusableError as err:
+    raise newException(CompileFailure, "repro profile compile: " & err.msg)
+  if result.len > 0:
+    return
+  if uncontrolledFindExe(NimDefaultCCompilerExe).len > 0:
+    return ""
+  result = fallbackCCompiler()
+
 proc requireReprobuildSources*(repoRoot: string) =
   ## Refuse a source root that holds no reprobuild libs, naming the
   ## variables that select one. Without this the failure surfaced as
@@ -108,7 +158,7 @@ const ProfileCompileDefines*: seq[string] = @[]
   ## plus whatever its own `config.nims` defines.
 
 proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
-                         repoRoot: string): seq[string] =
+                         repoRoot: string; cCompiler = ""): seq[string] =
   ## The `nim c` command line for a profile compile, as an argv sequence.
   ##
   ## Built as a sequence and handed to the process launcher unchanged. It
@@ -119,9 +169,13 @@ proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
   ## Support/repro/home`) puts one in the nimcache path of every apply:
   ## `Error: arguments can only be given if the '--run' option is selected`.
   ## Each element below is one argument whatever characters it holds.
+  ##
+  ## `cCompiler` (from `resolveProfileCCompiler`) becomes the compiler and
+  ## linker Nim uses (`nimCCompilerFlags`); "" leaves Nim's default.
   result = @[nimExe, "c", "--hints:off", "--warnings:off",
     "--nimcache:" & nimcacheDir,
     "--out:" & outBinary]
+  result.add nimCCompilerFlags(cCompiler)
   for define in ProfileCompileDefines:
     result.add "-d:" & define
   for path in profileNimPaths(repoRoot):
@@ -315,6 +369,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   ## chatter on stderr and the profile binary's stdout JSON on stdout.
   ## Raises `CompileFailure` if either step exits non-zero.
   let nimExe = resolveProfileNimCompiler()
+  let cCompiler = resolveProfileCCompiler()
   let repoRootAbs = absolutePath(repoRoot)
   requireReprobuildSources(repoRootAbs)
   createDir(extendedPath(nimcacheDir))
@@ -322,7 +377,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
 
   let stagedConfig = stageProfileConfig(profileRoot, repoRootAbs)
   let nimArgv = profileCompileArgv(nimExe, profileRoot, nimcacheDir,
-    outBinary, repoRootAbs)
+    outBinary, repoRootAbs, cCompiler)
   if verbose:
     stderr.writeLine("repro profile compile: " & nimArgv.join(" "))
 
