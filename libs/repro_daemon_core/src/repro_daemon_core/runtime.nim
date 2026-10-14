@@ -10,6 +10,8 @@ import ./writer_identity
 import ./protocol
 import ./stats_store
 import ./lease_registry
+when defined(windows):
+  import ./windows_detached_spawn
 
 const ReproTestRunnerOwnerTokenEnv =
   "REPRO_TEST_RUNNER_OWNER_TOKEN"
@@ -2418,13 +2420,16 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   # process.close(); the new daemon then dies of SIGPIPE on the first
   # write to stderr — the listener never binds, the test polls
   # 'daemon status' for 20 s, and the restart appears to time out.
+  # On Windows the same guarantee comes from ``spawnWithOwnStdio``: the new
+  # daemon inherits only NUL and its log, never a handle of this process.
   when defined(posix):
     launchWithFork(staged.imagePath, nextConfig)
   else:
-    let process = startProcess(staged.imagePath,
-      args = daemonProcessArgs(nextConfig),
-      options = {poUsePath, poDaemon})
-    process.close()
+    let pid = spawnWithOwnStdio(staged.imagePath,
+      daemonProcessArgs(nextConfig), [], inheritEnvironment = true,
+      logPath = nextConfig.logPath)
+    logLine(config.logPath, "dev restart launched backend=windows-handle-list " &
+      "pid=" & $pid)
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
   true
 
@@ -3090,19 +3095,29 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
           "the platform manager started a daemon that never became ready")
         launchWithFork(exe, launchConfig)
   else:
-    var env = newStringTable()
+    # NOT ``osproc.startProcess``: on Windows it creates the child with
+    # ``bInheritHandles = TRUE`` and no handle list, so the daemon -- which
+    # outlives this process -- received every inheritable handle we held,
+    # including the write end of whatever pipe our caller reads our output
+    # from. A caller reading to EOF (CMake's try_compile, a test runner) then
+    # waited for as long as the daemon lived. ``spawnWithOwnStdio`` passes
+    # exactly NUL and the log, which is ``launchWithFork``'s guarantee.
+    var env = newStringTable(modeCaseInsensitive)
     for key, value in envPairs():
-      if key != ReproTestRunnerOwnerTokenEnv:
+      if cmpIgnoreCase(key, ReproTestRunnerOwnerTokenEnv) != 0:
         env[key] = value
     if launchConfig.processOwnerToken.len > 0:
       env[ReproTestRunnerOwnerTokenEnv] = launchConfig.processOwnerToken
     env["REPRO_DAEMON_ENDPOINT"] = launchConfig.endpoint
     env["REPRO_DAEMON_STATE_DIR"] = launchConfig.stateDir
-    let process = startProcess(exe,
-      args = daemonProcessArgs(launchConfig),
-      env = env,
-      options = {poUsePath, poDaemon})
-    process.close()
+    var envPairsForChild: seq[(string, string)] = @[]
+    for key, value in env:
+      envPairsForChild.add((key, value))
+    let pid = spawnWithOwnStdio(exe, daemonProcessArgs(launchConfig),
+      envPairsForChild, inheritEnvironment = false,
+      logPath = launchConfig.logPath)
+    logLine(launchConfig.logPath,
+      "launch requested backend=windows-handle-list pid=" & $pid)
   waitForUserDaemonStatus(launchConfig.endpoint)
 
 proc stopUserDaemon*(endpoint = defaultUserDaemonEndpoint()) =
