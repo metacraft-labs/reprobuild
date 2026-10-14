@@ -2,6 +2,10 @@
   description = "Reprobuild development environment";
 
   inputs = {
+    # Keep the shipped SIP replacements available when a child has an empty PATH.
+    stackable-hooks-macos-tools = {
+      url = "github:metacraft-labs/stackable-hooks-macos-tools/1ad378d58776ec9b6cc73e1c27b8e53c15676f03";
+    };
     nixos-modules.url = "github:metacraft-labs/devops-modules";
     # This module input supplies the toolchain, not another Repro release.
     # Follow this flake itself so consumers retain one Reprobuild pin while
@@ -208,7 +212,7 @@
         # identity where it touches the descriptor instead of once per record,
         # and the Linux close hook lets a tracee's close of a replaced
         # descriptor number reach the kernel.
-      url = "github:metacraft-labs/io-mon/2a354db93e60f165e2d9feb86396b7e3950aae65";
+      url = "github:metacraft-labs/io-mon/6e7d2cf28c6bceec5ec0174fd829524770b17ad7";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -346,7 +350,7 @@
       # 600f2a8 additionally carries caller/target Windows injection diagnostics.
       # Keep this pin aligned with the synced, published workspace dependency;
       # the pre-push gate rejects a pin that lags that checkout.
-      url = "github:metacraft-labs/nim-stackable-hooks/600f2a80c9e582e860d36be20c04b9c74263458d";
+      url = "github:metacraft-labs/nim-stackable-hooks/3af63afc5c0b55a27fc5e0a26f3a32833caf8873";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -1141,6 +1145,11 @@
               nimcryptoSrc = nimcrypto-src;
               bearsslSrc = bearssl-src;
               stackableHooksSrc = nim-stackable-hooks-src;
+              macosTools =
+                if pkgs.stdenv.isDarwin then
+                  inputs.stackable-hooks-macos-tools.packages.${system}.default
+                else
+                  null;
               ctTraceFormatSrc = ct-trace-format-src;
               ioMonSrc = io-mon-src;
               shmGsetSrc = nim-shm-gset-src;
@@ -1962,6 +1971,11 @@
           };
 
           devShells.default = pkgs.mkShell {
+            STACKABLE_HOOKS_BUILT_TOOLS_DIR =
+              if pkgs.stdenv.isDarwin then
+                "${inputs.stackable-hooks-macos-tools.packages.${system}.default}"
+              else
+                "";
             # Framework regression uses a real GCC without putting its cc ahead
             # of the shell's clang. /usr/bin/gcc on Darwin is Apple clang.
             REPRO_TEST_DARWIN_GCC = if pkgs.stdenv.isDarwin

@@ -12283,13 +12283,16 @@ when defined(macosx):
     ##    ``<shell> -c "umask 022 && <argv> > out 2> err"`` — plain POSIX that
     ##    bash, dash, ash and zsh all honour.
     ##
-    ## Returns ``""`` when only SIP-protected shells are available — the caller
+    ## 3. The shared propagation resolver uses configured or build-embedded
+    ##    shipped tools when the caller has no shell on PATH.
+    ##
+    ## Returns ``""`` when no valid replacement is available — the caller
     ## then enforces the Monitor-Hook-Shim.md:501 fail-safe for monitored
     ## actions (injection failure MUST fail the action / make it non-cacheable).
     let sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
     if sandboxDir.len > 0:
       let dropInSh = sip_propagation.rewriteSipPath("/bin/sh", sandboxDir)
-      if fileExists(dropInSh) or symlinkExists(dropInSh):
+      if sip_propagation.resolveSipReplacement("/bin/sh") == dropInSh:
         return dropInSh
     let pathEnv = getEnv("PATH")
     for name in nonSipShellCandidateNames:
@@ -12297,11 +12300,12 @@ when defined(macosx):
         if entry.len == 0:
           continue
         let candidate = entry / name
-        if not fileExists(candidate):
-          continue
-        if sip_propagation.isSipProtected(candidate):
+        if not sip_propagation.isValidSipReplacement(candidate):
           continue
         return candidate
+    let replacement = sip_propagation.resolveSipReplacement("/bin/sh")
+    if replacement != "/bin/sh":
+      return replacement
     ""
 
   proc nonSipShellSearchReport*(): string =
@@ -12330,6 +12334,7 @@ when defined(macosx):
         let candidate = entry / name
         if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
           rejected.add(candidate)
+    parts.add("shipped tools=" & sip_propagation.StackableHooksBuiltToolsDir)
     parts.add("searched " & $pathDirs & " PATH dir(s) for " &
       nonSipShellCandidateNames.join("/"))
     if rejected.len == 0:

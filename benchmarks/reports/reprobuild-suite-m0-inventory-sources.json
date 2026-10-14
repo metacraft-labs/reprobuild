@@ -1,6 +1,6 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 31,
+    "graphOwnedHelperArtifacts": 32,
     "nimTestBinaries": 2059,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
@@ -1318,6 +1318,12 @@
         "kind": "test-fixture",
         "output": "dynamic",
         "source": "dynamic"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.macos_no_bundle_launch",
+        "kind": "test-fixture",
+        "output": "build/test-fixtures/macos-no-bundle/no_bundle_launch",
+        "source": "tests/fixtures/macos-no-bundle-launch/no_bundle_launch.nim"
       },
       {
         "actionId": "reprobuild.test_fixtures.monitor_shim",
@@ -8105,7 +8111,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
