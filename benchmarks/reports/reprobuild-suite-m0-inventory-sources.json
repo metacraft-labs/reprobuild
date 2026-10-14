@@ -3900,7 +3900,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFixtureProvider",
           "executedVariables": [],
-          "line": 36,
+          "line": 52,
           "path": "tests/integration/t_dev_env_artifact.nim",
           "patterns": [
             "repro-extract-interface"
@@ -3916,7 +3916,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFixtureProvider",
           "executedVariables": [],
-          "line": 38,
+          "line": 54,
           "path": "tests/integration/t_dev_env_artifact.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -7741,14 +7741,13 @@
       "localDependencyShape": [
         "io_mon",
         "repro_build_engine",
-        "repro_local_store",
         "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28480,7 +28479,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_dev_env_artifact.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

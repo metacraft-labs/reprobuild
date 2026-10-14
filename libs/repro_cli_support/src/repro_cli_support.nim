@@ -14135,14 +14135,18 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   ## The PATH contribution that makes a dev-env activation PROVIDE the
   ## toolchain its recipe declares, rather than merely name it.
   ##
-  ## Before this, `uses: "rustc >=1.92"` reached an activated shell as a
-  ## `toolProfiles` entry with an EMPTY `realizedPrefix`: the artifact knew
-  ## which packages the project wanted and even carried an execution-profile
-  ## identity for each, but nothing realized them and nothing put them on
-  ## PATH. `rustc` in that shell was whatever the host happened to have
-  ## installed — which is the property a declared toolchain exists to remove,
-  ## and the reason projects kept a second, imperative provisioning system
-  ## (an `env.ps1`, a flake dev shell) beside their recipe.
+  ## Before this, `uses: "rustc >=1.92"` reached an activated shell only as a
+  ## `toolProfiles` entry: the artifact knew which packages the project
+  ## wanted and even carried an execution-profile identity for each, but
+  ## nothing realized them and nothing put them on PATH. (That entry's
+  ## `policyPath`, once misnamed `realizedPrefix`, is the `uses:` nesting
+  ## path and is empty for a top-level entry; it never records a prefix.
+  ## The artifact is produced before any tool is realized, so the realized
+  ## prefix lives only in the PATH this proc contributes.) `rustc` in that
+  ## shell was whatever the host happened to have installed — which is the
+  ## property a declared toolchain exists to remove, and the reason projects
+  ## kept a second, imperative provisioning system (an `env.ps1`, a flake dev
+  ## shell) beside their recipe.
   ##
   ## `repro develop` has realized tools since the beginning, through exactly
   ## the call below. What was missing was not the capability but its reach:
