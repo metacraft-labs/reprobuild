@@ -44232,7 +44232,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_build_report_attribution.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
