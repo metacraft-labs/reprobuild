@@ -64,8 +64,10 @@ export compile.rbpiBytesFromJson
 export compile.writeBytesAtomic
 export compile.readBytes
 export compile.rbpiEnvelopeIsValid
-export compile.stageProfileConfig
-export compile.unstageProfileConfig
+export compile.StagedProfilePackageName
+export compile.StagedProfilePackageFile
+export compile.stageProfileFiles
+export compile.unstageProfileFiles
 export compile.startProfileNim
 export compile.finishProfileNim
 # Target platforms and the platform probe (GM3).
