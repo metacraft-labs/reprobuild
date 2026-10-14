@@ -314,7 +314,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -10336,6 +10336,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if warnedRunQuotaBypass or not enabled:
       return
     if not usesRunQuotaBypass(runResult):
+      return
+    # ONLY WHEN THE BYPASS WAS NOT ASKED FOR. The sentence below asserts a
+    # CAUSE — "runquotad is not reachable" — and names a remedy for it, which
+    # was true while an unreachable daemon was the only way to reach this
+    # bypass. It is not any more: a `--no-runquota` build, and a `--dry-run`
+    # (which implies it), bypass by POLICY, and on a host whose daemon is
+    # answering perfectly this line would blame the daemon and tell the
+    # operator to start one that is already running. A policy bypass is not
+    # unreported either way — the RunQuota authority header
+    # (`runQuotaAuthorityHeaderLine`) states it for the whole invocation,
+    # including the invocations that launch nothing.
+    if bypassRunQuota:
       return
     warnedRunQuotaBypass = true
     logSummary("repro build: WARNING runquotad is not reachable; using " &
@@ -23860,6 +23872,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
+  # Whether `--runquota` was passed, as opposed to the default simply leaving
+  # RunQuota on. Only the explicit request outranks the bypass a `--dry-run`
+  # implies; see the derivation after the flag loop.
+  var runQuotaRequestedExplicitly = false
   # In-Process-Monitor-Hosting P1(b): the operator surface for
   # ``BuildEngineConfig.monitorHosting``. Same shape as ``--daemon`` above —
   # an environment default (``REPROBUILD_MONITOR_HOSTING``) that the flag
@@ -24055,8 +24071,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       restoreCachedOutputs = false
     elif arg == "--no-runquota":
       bypassRunQuota = true
+      runQuotaRequestedExplicitly = false
     elif arg == "--runquota":
       bypassRunQuota = false
+      # Recorded as a REQUEST, not only as its effect on `bypassRunQuota`,
+      # because a dry run's implied bypass is applied after this loop and
+      # has to be able to tell "the default left it on" from "the operator
+      # asked for the handshake". See the derivation below the loop.
+      runQuotaRequestedExplicitly = true
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       monitorHosting = parseMonitorHostingMode(
         valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
@@ -24168,6 +24190,64 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       "--soft-rebuild, --rebuild-host-bound or --hard-rebuild")
     return 2
   setRebuildSelection(rebuildClass, rebuildOnly)
+
+  # A DRY RUN IMPLIES `--no-runquota` (`reprobuild-pm/spec/CLI/build.md`
+  # §"Dry Run").
+  #
+  # The scheduler completes every action it reaches as `asWouldRun` without a
+  # lease, a process or an output, so a dry run has nothing to admit against
+  # a machine budget. Requiring the daemon anyway ended the one command whose
+  # entire output is a plan with `runquotad did not become reachable`, on
+  # precisely the host `--dry-run` is most wanted on: one whose environment is
+  # not working yet. `--no-runquota` was then the only way through, which is
+  # a workaround an operator has to be told about, in a command that exists
+  # to be the thing you try first.
+  #
+  # DERIVED HERE, after the flag loop, rather than inside
+  # `startAutoRunQuotaIfNeeded`: `bypassRunQuota` decides three separate
+  # things — whether that spawn happens, whether the PROVIDER COMPILE takes a
+  # lease (`effectiveProviderCompileRunQuotaBypass`, reached through
+  # `bypassRunQuotaExplicit`, and planning DOES reach the provider compile),
+  # and what a `--list-targets` pass is handed. One derivation above all
+  # three keeps them from disagreeing about what a dry run needs.
+  #
+  # An explicit `--runquota` still wins: it is the flag whose only job is to
+  # ask for the handshake. That is why this is not spelled `bypassRunQuota =
+  # bypassRunQuota or dryRun`, and why the flag loop records the request and
+  # not only its effect on `bypassRunQuota`.
+  #
+  # AND THE DECISION HAS TO REACH THE STEPS THAT READ ONLY THE ENVIRONMENT.
+  # `REPROBUILD_NO_RUNQUOTA` is the documented full-bypass switch every
+  # internal build step honours (`runQuotaBypassedByEnv`, and the engine's own
+  # `launchChildEnv`), and planning reaches two of them through code paths
+  # that take no flag: the hidden lock's solve under `--strategy`
+  # (`solverInputsFromCompiledProvider`, which starts a daemon of its own) and
+  # the `--list-targets` inspection's provider compile (which reads the
+  # variable to decide whether to open an inline session). Without exporting
+  # the decision, `repro build --dry-run --strategy lowest` still died with
+  # `runquotad did not become reachable` from inside that solve — and the
+  # sentence this change puts in the spec would be false.
+  #
+  # RESTORED ON THE WAY OUT, because callers keep running in the same process
+  # after this returns. `repro test --dry-run` forwards the flag here and then
+  # EXECUTES the tests in that same process; `bench`, `lint`, `run` and the
+  # top-level dispatch are the same shape. A dry run must not leave the rest
+  # of such a session bypassed. (A daemon-hosted build runs in a FORKED worker
+  # whose environment is its own, so the daemon and its sibling workers are
+  # unaffected either way.)
+  let inheritedNoRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA")
+  let hadInheritedNoRunQuota = existsEnv("REPROBUILD_NO_RUNQUOTA")
+  var exportedDryRunRunQuotaBypass = false
+  defer:
+    if exportedDryRunRunQuotaBypass:
+      if hadInheritedNoRunQuota:
+        putEnv("REPROBUILD_NO_RUNQUOTA", inheritedNoRunQuota)
+      else:
+        delEnv("REPROBUILD_NO_RUNQUOTA")
+  if dryRun and not runQuotaRequestedExplicitly:
+    bypassRunQuota = true
+    exportedDryRunRunQuotaBypass = true
+    putEnv("REPROBUILD_NO_RUNQUOTA", "1")
 
   # ----------------------------------------------------------------
   # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE

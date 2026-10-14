@@ -15848,6 +15848,35 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace
+  proc noteRunQuotaBypassPolicy() =
+    ## RA-13, the POLICY half of the statement the build header and the run
+    ## report make. `runQuotaBypassed` is otherwise set only where a LAUNCH
+    ## falls outside RunQuota, which left an invocation that bypasses by
+    ## POLICY and launches nothing — a `--dry-run`, or a build served
+    ## entirely from cache — reporting `runQuota: active (lease authority)`
+    ## and `concurrentInvocationsSafe: true` for an authority that governed
+    ## none of it. Understating that is the one direction this line must
+    ## never fail in: it exists to say when resource limits are
+    ## locally-enforced-only.
+    ##
+    ## `config.bypassRunQuota` ALONE, and not `effectiveBypassRunQuota`,
+    ## which ORs in `REPROBUILD_NO_RUNQUOTA`. That variable is not only an
+    ## operator switch: `launchChildEnv` forces it into the environment of
+    ## every action child, so a build NESTED inside an action inherits it
+    ## with nobody having declared anything. Keying on it made such a build
+    ## claim a bypass it was not asked for —
+    ## `t_runquota_bypass_is_reported_in_build_header_and_report`'s
+    ## "active-RunQuota build does not claim bypass" case fails exactly
+    ## there, and only when the variable is set, which is the configuration
+    ## the suite itself runs in. The operator-set spelling is not lost: the
+    ## `build` command reads the variable when it parses its flags and
+    ## arrives here as `config.bypassRunQuota`.
+    ##
+    ## Called at BOTH exits, and after the fast-noop path has assigned
+    ## `runResult` wholesale — a flag set before that assignment is dropped
+    ## by it, on exactly the warm path that most needs it.
+    if config.bypassRunQuota:
+      runResult.runQuotaBypassed = true
   # STAGE 2 census — count, do not change. Taken over the graph as it
   # will actually be scheduled, after dependency inference, so the number
   # describes the build that runs rather than the graph as authored.
@@ -17182,6 +17211,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finishStat("repro scheduler total", totalStart)
     finishChildCpuStat()
     runResult.stats = stats
+    noteRunQuotaBypassPolicy()
     return runResult
 
   # THE FALL-THROUGH. Everything below is the scheduler, and reaching it means
@@ -17441,6 +17471,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let effectiveBypassRunQuota =
     config.bypassRunQuota or
     (getEnv("REPROBUILD_NO_RUNQUOTA").normalize in ["1", "true", "yes", "on"])
+  # The scheduler's exit. The fast-noop path above has its own call — see
+  # `noteRunQuotaBypassPolicy`, which is declared beside `runResult` for
+  # exactly that reason.
+  noteRunQuotaBypassPolicy()
 
   proc launchBypassesRunQuota(): bool =
     if effectiveBypassRunQuota:

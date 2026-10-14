@@ -1205,6 +1205,7 @@ tests/integration/t_develop_selectors_compose_in_fixed_order.nim	nim	1
 tests/integration/t_develop_set_is_union_of_all_backends.nim	nim	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
 tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	nim	2
+tests/integration/t_dry_run_plans_without_a_reachable_runquotad.nim	nim	3
 tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim	nim	12
 tests/integration/t_e2e_cross_compilation_aarch64.nim	nim	2
 tests/integration/t_e2e_engine_shim_removed.nim	nim	2

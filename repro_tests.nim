@@ -10791,6 +10791,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_dry_run_plans_without_a_reachable_runquotad.nim",
+    binary: "build/test-bin/t_dry_run_plans_without_a_reachable_runquotad",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim",
     binary: "build/test-bin/t_e2e_authenticated_inference_local_and_cloud",
     defines: @["reproAttestSoftwareRootTestTrust"],
