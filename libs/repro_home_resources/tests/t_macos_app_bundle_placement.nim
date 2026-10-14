@@ -234,6 +234,40 @@ when defined(macosx):
       check dirExists(dir / "Fixture.app")
       check entries(dir) == @["Fixture.app"]
 
+    test "bundles staged together are committed or discarded without " &
+        "touching their targets until committed":
+      # Rollback stages every bundle it re-places before it renames any of
+      # them into place, so one refusal changes none.
+      let otherId = FixtureId & ".other"
+      let other = makeFixtureApp(root / "other", "Other", otherId, "1.0.0")
+      let dir = root / "staged" / "Applications"
+      discard placeAppBundle(app, dir, "Fixture.app", expectation(), Relaxed)
+      let v2 = stageAppBundle(appV2, dir, "Fixture.app",
+        expectation("2.0.0"), Relaxed, managedPrior = true)
+      let o = stageAppBundle(other, dir, "Other.app",
+        expectation(bundleId = otherId), Relaxed)
+      check v2.identity.shortVersion == "2.0.0"
+      # Staged, not placed: the target still holds v1, the other target is
+      # empty.
+      check plistValue(dir / "Fixture.app", "CFBundleShortVersionString") ==
+        "1.0.0"
+      check not dirExists(dir / "Other.app")
+      discard commitStagedAppBundle(v2)
+      discardStagedAppBundle(o)
+      check plistValue(dir / "Fixture.app", "CFBundleShortVersionString") ==
+        "2.0.0"
+      check entries(dir) == @["Fixture.app"]
+      # Discarding everything staged into an Applications directory the
+      # staging created removes that directory again.
+      let fresh = root / "staged-fresh" / "Applications"
+      let a = stageAppBundle(app, fresh, "Fixture.app", expectation(),
+        Relaxed)
+      let b = stageAppBundle(other, fresh, "Other.app",
+        expectation(bundleId = otherId), Relaxed)
+      discardStagedAppBundle(b)
+      discardStagedAppBundle(a)
+      check not dirExists(fresh)
+
     test "removal removes only the bundle":
       let dir = root / "remove" / "Applications"
       discard placeAppBundle(app, dir, "Fixture.app", expectation(), Relaxed)
