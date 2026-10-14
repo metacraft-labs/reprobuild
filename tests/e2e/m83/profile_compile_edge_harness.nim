@@ -243,16 +243,20 @@ type
       ## `nim check` per target platform).
 
 proc runRepro*(sb: ProfileSandbox; args: openArray[string];
-               host = DefaultSandboxHost): ReproRun =
+               host = DefaultSandboxHost;
+               extraEnv: openArray[(string, string)] = []): ReproRun =
   ## One `repro <args>` against the sandbox with stdout and stderr captured
   ## SEPARATELY (a command whose stdout is a document must not have
   ## diagnostics mixed into it). Both pipes are drained concurrently by
   ## `runProgramSplit`, so a chatty stderr cannot fill its pipe while the
-  ## parent is still reading stdout.
+  ## parent is still reading stdout. `extraEnv` adds variables on top of the
+  ## sandbox's isolated environment (e.g. the apply gates' package seams).
   let before = sb.nimSpawnCount()
   let compilesBefore = sb.nimSpawnCount("c")
-  let res = runProgramSplit(reproBinary(), args, cwd = sb.root,
-    env = sb.sandboxEnv(host))
+  let env = sb.sandboxEnv(host)
+  for (k, v) in extraEnv:
+    env[k] = v
+  let res = runProgramSplit(reproBinary(), args, cwd = sb.root, env = env)
   result.exitCode = res.code
   result.stdout = res.stdout
   result.stderr = res.stderr
@@ -307,3 +311,26 @@ proc treeFingerprint*(root: string; excludePrefixes: openArray[string] = []):
         $getLastModificationTime(path).toUnixFloat & "\t" &
         $hash(readFile(path))
   result.sort()
+
+proc fixturePackageEnv*(sb: ProfileSandbox; names: openArray[string]):
+    seq[(string, string)] =
+  ## Bind each package in `names` to a trivial fixture executable through
+  ## the documented test seams: `REPRO_TEST_PACKAGE_SOURCE` (the binding the
+  ## real `path` realization then installs into the sandbox's store) and
+  ## `REPRO_HOME_PACKAGE_CATALOG` (the names `repro home add` accepts).
+  ## Pass the result as `extraEnv` to `runRepro`. Used by the GM4 data-file
+  ## gates, which plan and apply real packages without network access.
+  let ext = when defined(windows): ".cmd" else: ""
+  let dir = sb.root / "fixture-pkgs"
+  createDir(extendedPath(dir))
+  var bindings: seq[string]
+  for name in names:
+    let exe = dir / (name & ext)
+    when defined(windows):
+      writeFile(extendedPath(exe), "@echo off\r\nexit /b 0\r\n")
+    else:
+      writeFile(exe, "#!/bin/sh\nexit 0\n")
+      setFilePermissions(exe, {fpUserExec, fpUserWrite, fpUserRead})
+    bindings.add name & "=" & exe
+  @[("REPRO_TEST_PACKAGE_SOURCE", bindings.join(";")),
+    ("REPRO_HOME_PACKAGE_CATALOG", @names.join(","))]

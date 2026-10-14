@@ -7,6 +7,7 @@
 import std/[os, unittest]
 from repro_core/paths import extendedPath
 
+import blake3
 import repro_home_generations
 from repro_test_support import testCaseScratchSlug
 
@@ -106,6 +107,46 @@ suite "Home-generations smoke":
     check decoded.files[0].content == fileA.content
     check decoded.files[1].path == "helpers.nim"
     check decoded.files[1].content.len == 0
+
+  test "GM4: data files carry a role; a source-only snapshot stays version 1":
+    let source = IntentFileEntry(path: "home.nim", content: @[byte('p')])
+    let sourceOnly = IntentSnapshot(files: @[source])
+    let v1 = encodeSnapshot(sourceOnly)
+    # Version 1 framing, no role byte: the bytes (and so the generation id of
+    # a profile without data files) are what they were before GM4.
+    check v1[4] == 1'u8 and v1[5] == 0'u8
+    check encodedVersion(sourceOnly) == SnapshotSourceOnlyVersion
+    let data = IntentFileEntry(path: "data/apps.toml",
+      content: @[byte('['), byte('[')], role: ifrData)
+    let withData = IntentSnapshot(files: @[source, data])
+    let v2 = encodeSnapshot(withData)
+    check v2[4] == 2'u8 and v2[5] == 0'u8
+    let decoded = decodeSnapshotBytes(v2)
+    check decoded.schemaVersion == 2'u16
+    check decoded.files.len == 2
+    check decoded.files[0].role == ifrSource
+    check decoded.files[1].role == ifrData
+    check decoded.files[1].path == "data/apps.toml"
+    check decoded.files[1].content == data.content
+    # Different data bytes, different snapshot digest (and generation id).
+    var edited = withData
+    edited.files[1].content = @[byte('#')]
+    check snapshotDigest(edited) != snapshotDigest(withData)
+    # An unknown role is corruption, not a source file.
+    var corrupt = v2
+    let roleAt = 10 + 4 + 4 + "home.nim".len
+    check corrupt[roleAt] == 0'u8
+    corrupt[roleAt] = 7'u8
+    let bodyEnd = corrupt.len - 32
+    let checksum = blake3.digest(corrupt[0 ..< bodyEnd])
+    for i in 0 ..< 32:
+      corrupt[bodyEnd + i] = checksum[i]
+    var field = ""
+    try:
+      discard decodeSnapshotBytes(corrupt)
+    except EIntentSnapshotCorrupt as e:
+      field = e.field
+    check field == "files[0].role"
 
   test "state-dir resolution honours REPRO_HOME_STATE_DIR":
     let probe = SmokeDir / "state"

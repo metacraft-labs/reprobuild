@@ -28,15 +28,23 @@
 ## relative state directory reaching the daemon unchanged would put the
 ## daemon's state in the wrong place, which the test checks for as well.
 ##
-## Windows only. On POSIX a process's working directory does not stop the
-## directory from being removed, and on Linux and macOS `startUserDaemon`
-## prefers the platform service manager, which a test must not register units
-## with.
+## Windows and Linux. POSIX does not refuse to remove a directory that is
+## some process's working directory, so on Linux the case reads the daemon's
+## working directory from `/proc/<pid>/cwd` and requires it not to be the
+## starter's. `startUserDaemon` prefers `systemd --user` there, which a test
+## must not register units with, so the fixture runs WITHOUT
+## `$XDG_RUNTIME_DIR` and `$DBUS_SESSION_BUS_ADDRESS`: the real
+## `systemd-run --user` declines and the production fork fallback
+## (`launchWithFork`, which chdirs to `daemonWorkingDirectory`) starts the
+## daemon; the case checks the daemon's log names that backend. Nothing is
+## mocked. macOS would register a launchd job, so the case is skipped there
+## with that reason.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_daemon_core
 from repro_test_support import reproBinaryPath, requireBinary
+import repro_test_support/reasoned_skip
 
 const FixtureFlag = "--start-daemon-in-cwd-fixture"
 
@@ -65,10 +73,88 @@ if paramCount() == 5 and paramStr(1) == FixtureFlag:
 
 import repro_test_support/reasoned_skip
 
-when not defined(windows):
+when defined(linux):
+  import std/[posix, strtabs]
+
+  proc withoutUserBus(): StringTableRef =
+    ## This process's environment minus what `systemd-run --user` needs to
+    ## reach the user manager (see the header).
+    result = newStringTable(modeCaseSensitive)
+    for key, value in envPairs():
+      if key notin ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]:
+        result[key] = value
+
   suite "auto-started daemon working directory":
     test "the daemon does not hold its starter's working directory":
-      skip("Windows-only test; auto-started daemon working directory is Windows-specific")
+      let engine = requireBinary(reproBinaryPath(stem = "reprobuild"),
+        "reprobuild.apps.reprobuild")
+      let root = createTempDir("repro-daemon-cwd-", "")
+      let scratch = root / "scratch"
+      let stateDir = root / "state" / "daemon"
+      let pidFile = root / "daemon.pid"
+      createDir(scratch)
+      let endpoint = root / "d.sock"
+      var daemonPid = 0
+      try:
+        let starter = startProcess(getAppFilename(),
+          workingDir = scratch,
+          args = [FixtureFlag, engine, endpoint, ".." / "state" / "daemon",
+            pidFile],
+          env = withoutUserBus(), options = {poParentStreams})
+        let starterExit = starter.waitForExit(120_000)
+        starter.close()
+        let report = if fileExists(pidFile): readFile(pidFile).strip else: ""
+        if starterExit != 0:
+          echo "the starter failed: ", report
+        check starterExit == 0
+        if report.len > 0 and report.allCharsInSet(Digits):
+          daemonPid = parseInt(report)
+        check daemonPid > 0
+        # The relative state directory was resolved against the STARTER's
+        # directory, as the caller meant it.
+        check dirExists(stateDir / "logs")
+        check not dirExists(root / "state" / "state")
+        # The daemon came from the fork fallback, not from a unit.
+        let logPath = stateDir / "logs" / "repro-daemon.log"
+        check fileExists(logPath) and
+          readFile(logPath).contains("backend=posix-fork")
+        # THE PROPERTY. POSIX does not refuse to delete a directory that is
+        # some process's working directory, so the Linux form of the defect
+        # is the daemon keeping it (and its file system) busy: read the
+        # daemon's working directory from /proc.
+        var daemonCwd = ""
+        try:
+          daemonCwd = expandSymlink("/proc/" & $daemonPid & "/cwd")
+        except OSError as err:
+          echo "cannot read the daemon's working directory: ", err.msg
+        checkpoint("daemon cwd: " & daemonCwd)
+        check daemonCwd.len > 0
+        check daemonCwd != expandFilename(scratch)
+        check not daemonCwd.startsWith(expandFilename(scratch) & "/")
+        removeDir(scratch)
+        check not dirExists(scratch)
+        # ...and the daemon is still serving.
+        check queryUserDaemonStatus(endpoint).running
+      finally:
+        putEnv("REPRO_DAEMON_STATE_DIR", stateDir)
+        try:
+          stopUserDaemon(endpoint)
+        except CatchableError:
+          discard
+        sleep(500)
+        if daemonPid > 0:
+          discard posix.kill(Pid(daemonPid), SIGKILL)
+        delEnv("REPRO_DAEMON_STATE_DIR")
+        try:
+          removeDir(root)
+        except CatchableError:
+          discard
+elif not defined(windows):
+  suite "auto-started daemon working directory":
+    test "the daemon does not hold its starter's working directory":
+      skip("macOS: startUserDaemon would register a launchd job, which a " &
+        "test must not do; the fork fallback runs in this case on Linux " &
+        "(home-pc) and the Windows launch on eli-pc")
 else:
   import std/winlean
 

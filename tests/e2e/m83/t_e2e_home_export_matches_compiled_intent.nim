@@ -30,6 +30,14 @@
 ## overrides, and `provenance.compile.target` / `probe`). The
 ## intent is rendered by the shared ProfileIntent encoder, so an encoder
 ## change fails here instead of silently changing the published schema.
+## GM4 filled `provenance.dataFiles` (reserved, empty, since version 1) and
+## carries data rows expanded into ordinary activity elements: the second
+## case, "the data-file fields are the documented schema", pins the entry
+## shape (`path`, `blake3`, `rows`), that a profile with a `data:` section
+## exports the same `intent` key set (no `dataFiles` key — the rows are
+## already expanded), and that its package and resource rows have the
+## existing element and resource shapes.
+## Those are compatible additions, so `schemaVersion` stays 2.
 ##
 ## Vacuity guards: the intent has four activities, a config override, two
 ## hosts entries and one resource; every selected activity contributes at
@@ -335,3 +343,59 @@ profile "gm2Other":
       generations.join(", "))
     check generations.len == 0
     check readCurrentGenerationId(sb.stateDir).len == 0
+
+  test "the data-file fields are the documented schema":
+    let sb = newProfileSandbox("gm2-export-data", """
+import repro_profile
+
+profile "gm2ExportData":
+  data:
+    "data/apps.toml"
+
+  activity default:
+    ripgrep
+""")
+    defer: sb.dispose()
+    sb.writeProfileFile("data/apps.toml", """
+[[package]]
+name = "jq"
+activity = "default"
+
+[[package]]
+name = "ghostty"
+activity = "desktop"
+when = "macos"
+binaries = ["ghostty"]
+
+[[resource]]
+kind = "fs.userFile"
+when = "linux"
+hostFile = "~/gm2-data.conf"
+content = "x\n"
+""")
+    let (run, doc) = sb.exportFor(["--host", "alpha"])
+    require run.exitCode == 0
+    check doc["schemaVersion"].getInt == 2
+    check keysOf(doc["intent"]) == sorted(@["name", "activities",
+      "configOverrides", "hosts", "resources", "buildActions",
+      "adapterPreference"])
+    let files = doc["provenance"]["dataFiles"]
+    require files.len == 1
+    check keysOf(files[0]) == @["blake3", "path", "rows"]
+    check files[0]["path"].getStr == "data/apps.toml"
+    check files[0]["rows"].getInt == 3
+    # A resource row is an entry of the existing shape, its `when` the guard.
+    require doc["intent"]["resources"].len == 1
+    let resource = doc["intent"]["resources"][0]
+    check keysOf(resource) ==
+      @["address", "dependsOn", "fields", "guard", "kind"]
+    check resource["guard"].getStr == "linux"
+    for _, field in resource["fields"]:
+      check keysOf(field) == @["kind", "value"]
+    var shapes: seq[string]
+    for activity in doc["intent"]["activities"]:
+      check keysOf(activity) == @["body", "name"]
+      for element in activity["body"]:
+        shapes.add element["kind"].getStr & ":" & keysOf(element).join(",")
+    check shapes == @["packageRef:kind,name,version",
+      "packageRef:kind,name,version", "whenGuard:body,kind,predicate"]

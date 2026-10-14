@@ -22,6 +22,7 @@
 
 import std/[strutils, tables]
 from repro_core/paths import extendedPath
+from repro_profile/data_refs import dataFilePathProblem
 
 import ./errors
 import ./model
@@ -34,6 +35,7 @@ const
   HostsHeader = "hosts"
   ResourcesHeader = "resources"
   AdapterPreferenceHeader = "adapterPreference"
+  DataHeader = "data"
   WhenHeader = "when"
   IfHeader = "if"
   ElifHeader = "elif"
@@ -164,7 +166,7 @@ proc matchAnyHeader(line: string): tuple[ok: bool; keyword, rest: string;
   for kw in [ProfileHeader, ActivityHeader, WhenHeader, IfHeader,
              ElifHeader, ElseHeader,
              ConfigHeader, HostsHeader, ResourcesHeader,
-             AdapterPreferenceHeader]:
+             AdapterPreferenceHeader, DataHeader]:
     let m = matchHeader(line, kw)
     if m.matched:
       return (true, m.keyword, m.rest, m.indent)
@@ -1232,11 +1234,53 @@ proc parseAdapterPreferenceBlock(ctx: ParseCtx; idx, entryIndent: int):
     inc i
 
 # ---------------------------------------------------------------------------
+# data block parsing (GM4).
+#
+#   data:
+#     "data/apps.toml"
+#
+# One string literal per line, each a plan-time data file relative to the
+# profile directory -- the same shape the `profile` macro's `data:` section
+# accepts, validated by the same rule (`dataFilePathProblem`).
+# ---------------------------------------------------------------------------
+
+proc parseDataBlock(ctx: ParseCtx; idx, entryIndent: int): seq[string] =
+  let endIdx = lastStructuralIdx(ctx.lines, idx + 1, entryIndent)
+  var i = idx + 1
+  while i <= endIdx:
+    let line = ctx.lines[i]
+    if isBlankOrComment(line):
+      inc i; continue
+    let ind = countLeadingSpaces(line)
+    if ind != entryIndent:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & line.strip() & "' at indent " & $ind,
+        "a data-file path at indent " & $entryIndent)
+    let text = stripInlineComment(line).strip()
+    if text.len < 2 or text[0] != '"' or text[^1] != '"' or
+       text[1 ..< text.len - 1].contains('"'):
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & text & "' inside `data:`",
+        "a quoted data-file path such as \"data/apps.toml\"")
+    let path = text[1 ..< text.len - 1]
+    let problem = dataFilePathProblem(path)
+    if problem.len > 0:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "\"" & path & "\" inside `data:` (" & problem & ")",
+        "a data-file path relative to the profile directory")
+    if path in result:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "\"" & path & "\" declared twice", "each data file once")
+    result.add path
+    inc i
+
+# ---------------------------------------------------------------------------
 # Profile body.
 # ---------------------------------------------------------------------------
 
 proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
-                      outAdapterPreference: var OrderedTable[string, seq[string]]):
+                      outAdapterPreference: var OrderedTable[string, seq[string]];
+                      outDataFiles: var seq[string]):
     IntentNode =
   ## M2.5: also populates `outAdapterPreference` (empty table when no
   ## `adapterPreference:` block was present).
@@ -1257,6 +1301,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
   var sawHosts = false
   var sawResources = false
   var sawAdapterPreference = false
+  var sawData = false
   while i <= ctx.lines.high:
     let line = ctx.lines[i]
     if isBlankOrComment(line):
@@ -1283,7 +1328,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "'",
         "one of `activity <name>:`, `config:`, `hosts:`, " &
-        "`resources:`, or `adapterPreference:`")
+        "`resources:`, `adapterPreference:`, or `data:`")
     case hm.keyword
     of ActivityHeader:
       let blk = parseActivity(ctx, i, childIndent,
@@ -1335,11 +1380,22 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
       let endIdx = lastStructuralIdx(ctx.lines, i + 1, entryIndent)
       lastBodyIdx = endIdx
       i = max(endIdx + 1, i + 1)
+    of DataHeader:
+      if sawData:
+        raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+          "a second `data:` block",
+          "exactly one `data:` block per profile")
+      sawData = true
+      let entryIndent = childIndent + ctx.indentStep
+      outDataFiles = parseDataBlock(ctx, i, entryIndent)
+      let endIdx = lastStructuralIdx(ctx.lines, i + 1, entryIndent)
+      lastBodyIdx = endIdx
+      i = max(endIdx + 1, i + 1)
     else:
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "`" & hm.keyword & "` at the profile top level",
         "one of `activity <name>:`, `config:`, `hosts:`, " &
-        "`resources:`, or `adapterPreference:`")
+        "`resources:`, `adapterPreference:`, or `data:`")
   result.endLine = lastBodyIdx + 1
 
 # ---------------------------------------------------------------------------
@@ -1357,11 +1413,13 @@ proc parseProfile*(profilePath, source: string): Profile =
   let headerLine = findProfileHeader(ctx)
   ctx.indentStep = detectIndentStep(ctx.lines, headerLine)
   var adapterPreference = initOrderedTable[string, seq[string]]()
-  let root = parseProfileBody(ctx, headerLine - 1, adapterPreference)
+  var dataFiles: seq[string]
+  let root = parseProfileBody(ctx, headerLine - 1, adapterPreference,
+    dataFiles)
   result = Profile(path: profilePath, lines: ctx.lines,
     lineEnding: ending, hasTrailingNewline: trailingNewline,
     root: root, indentStep: ctx.indentStep,
-    adapterPreference: adapterPreference)
+    adapterPreference: adapterPreference, dataFileRefs: dataFiles)
 
 proc loadProfile*(profilePath: string): Profile =
   ## Read `profilePath` and parse it. `ENoProfile` and `EUnstructured`

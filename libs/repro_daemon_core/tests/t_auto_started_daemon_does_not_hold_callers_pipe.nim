@@ -24,15 +24,22 @@
 ## the case honest: EOF observed because the daemon had died would prove
 ## nothing.
 ##
-## Windows only. The POSIX launch (`launchWithFork`) already dup2s stdio onto
-## /dev/null and the log and closes every descriptor above 2, and on Linux and
-## macOS `startUserDaemon` prefers the platform service manager, which a test
-## must not register units with.
+## Windows and Linux. On Linux `startUserDaemon` prefers `systemd --user`,
+## which a test must not register units with, so the case starts its fixture
+## WITHOUT `$XDG_RUNTIME_DIR` and `$DBUS_SESSION_BUS_ADDRESS`: the real
+## `systemd-run --user` then cannot reach a user bus and declines, and the
+## production fallback, `launchWithFork` (dup2 stdio onto /dev/null and the
+## log, close every descriptor above 2), starts the daemon. That is the POSIX
+## form of the same guarantee, exercised through the same entry point; nothing
+## is mocked, and the case checks the daemon's log names the fork backend.
+## macOS would register a launchd job, so the case is skipped there with that
+## reason -- its fork fallback is the code the Linux case runs.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_daemon_core
 from repro_test_support import reproBinaryPath, requireBinary
+import repro_test_support/reasoned_skip
 
 const FixtureFlag = "--start-daemon-fixture"
 
@@ -59,10 +66,110 @@ if paramCount() == 4 and paramStr(1) == FixtureFlag:
 
 import repro_test_support/reasoned_skip
 
-when not defined(windows):
+when defined(linux):
+  import std/[monotimes, posix, strtabs, times]
+
+  type PipeState = enum
+    psEof, psOpen
+
+  proc nowMs(): int64 = getMonoTime().ticks div 1_000_000
+
+  proc drainUntilEof(fd: cint; timeoutMs: int;
+                     collected: var string): PipeState =
+    ## Read the pipe until every writer has closed it (`read` returns 0) or
+    ## `timeoutMs` passes with a writer still holding it. `poll` bounds every
+    ## wait, so a writer that never closes cannot block the test.
+    let deadline = nowMs() + timeoutMs
+    var buffer: array[4096, char]
+    while true:
+      let remaining = max(0'i64, deadline - nowMs())
+      var pfd = TPollfd(fd: fd, events: POLLIN)
+      let ready = posix.poll(addr pfd, 1, cint(min(remaining, 200'i64)))
+      if ready > 0:
+        let got = posix.read(fd, addr buffer[0], buffer.len)
+        if got == 0:
+          return psEof
+        if got > 0:
+          for i in 0 ..< got:
+            collected.add buffer[i]
+          continue
+        if errno != EINTR:
+          raiseOSError(osLastError(), "read on the starter's stdout")
+      if nowMs() >= deadline:
+        return psOpen
+
+  proc withoutUserBus(): StringTableRef =
+    ## This process's environment minus what `systemd-run --user` needs to
+    ## reach the user manager (see the header).
+    result = newStringTable(modeCaseSensitive)
+    for key, value in envPairs():
+      if key notin ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]:
+        result[key] = value
+
   suite "auto-started daemon stdio":
     test "the daemon does not hold its starter's output pipe open":
-      skip("Windows-only test; auto-started daemon pipe is Windows-specific")
+      let engine = requireBinary(reproBinaryPath(stem = "reprobuild"),
+        "reprobuild.apps.reprobuild")
+      let stateDir = createTempDir("repro-daemon-stdio-", "")
+      let endpoint = stateDir / "d.sock"
+      var daemonPid = 0
+      var output = ""
+      try:
+        let starter = startProcess(getAppFilename(),
+          args = [FixtureFlag, engine, endpoint, stateDir],
+          env = withoutUserBus(), options = {poStdErrToStdOut})
+        let fd = cint(outputHandle(starter))
+        # The starter must exit on its own: it only waits for the daemon's
+        # status handshake. Its output is drained meanwhile so a full pipe
+        # cannot be what holds it.
+        var state = psOpen
+        let exitDeadline = nowMs() + 120_000
+        while starter.running and nowMs() < exitDeadline:
+          state = drainUntilEof(fd, 200, output)
+          if state == psEof:
+            break
+        let starterExit = starter.waitForExit(5_000)
+        check starterExit == 0
+        for line in output.splitLines:
+          if line.startsWith("daemon-pid="):
+            daemonPid = parseInt(line["daemon-pid=".len .. ^1].strip)
+        check daemonPid > 0
+        # The daemon came from the fork fallback, not from a unit.
+        let logPath = stateDir / "logs" / "repro-daemon.log"
+        check fileExists(logPath) and
+          readFile(logPath).contains("backend=posix-fork")
+        # THE PROPERTY. The starter is gone; the only process that could still
+        # hold the write end is the daemon it started.
+        if state != psEof:
+          state = drainUntilEof(fd, 10_000, output)
+        if state != psEof:
+          echo "the starter exited but its stdout pipe never reached EOF; ",
+            "output so far:\n", output
+        check state == psEof
+        # ...and the daemon is still serving, so the EOF above is not the
+        # daemon having died.
+        check queryUserDaemonStatus(endpoint).running
+        starter.close()
+      finally:
+        putEnv("REPRO_DAEMON_STATE_DIR", stateDir)
+        try:
+          stopUserDaemon(endpoint)
+        except CatchableError:
+          discard
+        sleep(500)
+        if daemonPid > 0:
+          discard posix.kill(Pid(daemonPid), SIGKILL)
+        delEnv("REPRO_DAEMON_STATE_DIR")
+        try:
+          removeDir(stateDir)
+        except CatchableError:
+          discard
+elif not defined(windows):
+  suite "auto-started daemon stdio":
+    test "the daemon does not hold its starter's output pipe open":
+      skip("macOS: startUserDaemon would register a launchd job, which a " &
+        "test must not do; the fork fallback runs in this case on Linux " &
+        "(home-pc) and the Windows launch on eli-pc")
 else:
   import std/[monotimes, times, winlean]
 

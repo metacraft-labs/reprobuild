@@ -98,6 +98,16 @@ type
       ## absent. `macos` aliases canonicalize to `"darwin"`.
       ## Mirrors the text-form `Profile.adapterPreference` field so
       ## both parsers produce the same AST shape for the same input.
+    dataFiles*: seq[string]
+      ## GM4: the plan-time data files the profile's `data:` section
+      ## declares, as paths relative to the profile directory (forward
+      ## slashes, validated by the macro). REFERENCES ONLY: the profile
+      ## binary never reads them, so editing a data file does not
+      ## invalidate the profile compile. The planner reads and expands them
+      ## (`repro_profile_compile/data_expansion`); an expanded intent has
+      ## this list emptied and its rows merged into `activities`
+      ## (Gradual-Nix-To-Reprobuild-Migration.md §Declarative data files
+      ## read at plan time).
 
   ActivityElementKind* = enum
     aekPackageRef
