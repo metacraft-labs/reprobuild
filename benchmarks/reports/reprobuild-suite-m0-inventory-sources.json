@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 30,
-    "nimTestBinaries": 1965,
+    "nimTestBinaries": 1966,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 612,
     "staticallyDetectedRuntimeCompilerFlowTests": 112,
-    "testEntries": 1982
+    "testEntries": 1983
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1137,7 +1137,7 @@
     "classificationCounts": {
       "graph-fixture": 13,
       "integration": 1075,
-      "platform/destructive": 125,
+      "platform/destructive": 126,
       "pure unit": 612,
       "unclassified": 157
     },
@@ -1323,9 +1323,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1965,
+    "nimTestBinaryCount": 1966,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1982
+    "testEntryCount": 1983
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5472,7 +5472,6 @@
             "command",
             "endpoint",
             "grandchild",
-            "label",
             "ownerToken",
             "replacement",
             "repro",
@@ -9817,6 +9816,24 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_launchd_label",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_launchd_label.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
