@@ -1098,7 +1098,7 @@ proc selectionFailure(useDef: InterfaceToolUse; kind: RealizationKind;
     newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" has no " & $kind & " realization for " & describeTarget(target) &
-      ": " & choice.detail)
+      " requested by uses \"" & useDef.rawConstraint & "\": " & choice.detail)
 
 proc selectNixProvisioning*(useDef: InterfaceToolUse;
                             target = hostRealizationTarget()):
@@ -1852,7 +1852,7 @@ proc selectTarballProvisioning*(useDef: InterfaceToolUse;
   ## still beats a later catch-all of the same specificity, as before.
   let pin = requestedContributorPin(honorRequestedContributor)
   let choice = selectTarballRecord(useDef.tarballProvisioning, target, "",
-    pin)
+    pin, versionRange = requestedUsesVersionRange(useDef))
   case choice.status
   of kcSelected:
     useDef.tarballProvisioning[choice.index]
@@ -5402,7 +5402,8 @@ proc selectScoopProvisioning*(useDef: InterfaceToolUse;
   ## selectScoopRecord``, the selection a home profile makes for the same
   ## package (Provisioning-Contributions.md §"Profile Package References").
   let pin = requestedContributorPin()
-  let choice = selectScoopRecord(useDef.scoopProvisioning, target, "", pin)
+  let choice = selectScoopRecord(useDef.scoopProvisioning, target, "", pin,
+    versionRange = requestedUsesVersionRange(useDef))
   if choice.status != kcSelected:
     raise selectionFailure(useDef, rkScoop, choice, pin, target)
   useDef.scoopProvisioning[choice.index]
