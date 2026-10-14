@@ -69344,6 +69344,13 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         valueFromFlag(args, i, "--stats-groups"))
     elif arg == "--log" or arg.startsWith("--log="):
       result.buildFlags.add("--log=" & valueFromFlag(args, i, "--log"))
+    elif arg == "--action-output" or arg.startsWith("--action-output="):
+      # Forwarded verbatim like ``--log``; ``repro build`` validates the
+      # value. ``repro test`` builds in-process when it issues certificates,
+      # and that build prints what its actions wrote exactly as
+      # ``repro build --action-output`` does.
+      result.buildFlags.add("--action-output=" &
+        valueFromFlag(args, i, "--action-output"))
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       # In-Process-Monitor-Hosting P1(b): forwarded verbatim, like every
       # other value-taking build flag here, so `repro test`/`bench`/`lint`

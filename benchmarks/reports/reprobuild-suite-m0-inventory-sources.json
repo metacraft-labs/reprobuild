@@ -26160,7 +26160,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_build_action_output_all_passes_action_output_through.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
