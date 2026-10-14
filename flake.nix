@@ -1699,6 +1699,10 @@
           };
 
           devShells.default = pkgs.mkShell {
+            # Framework regression uses a real GCC without putting its cc ahead
+            # of the shell's clang. /usr/bin/gcc on Darwin is Apple clang.
+            REPRO_TEST_DARWIN_GCC = if pkgs.stdenv.isDarwin
+              then pkgs.lib.getExe pkgs.gcc else "";
             inputsFrom = [ pkgs.nix ];
             # repro_solver's clingo bindings dlopen libclingo.so at module init.
             # build_apps.sh clears NIX_LDFLAGS + LD_LIBRARY_PATH for every `nim c`

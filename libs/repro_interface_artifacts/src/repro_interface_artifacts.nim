@@ -3072,6 +3072,11 @@ const
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+/* Nim's std/sysrand includes this SDK framework header on Darwin. GCC can
+   compile the standard headers and still fail here, so test both. */
+#include <Security/SecRandom.h>
+#endif
 /* Nim generates C for THIS host's pointer width. A compiler for another
    target (e.g. an i386 gcc on an x86_64 host) links garbage, so refuse it
    here, where the message can say so, rather than three layers later. */
@@ -3095,7 +3100,12 @@ proc cCompilerIdentity(cc: string): string =
 
 proc cCompilerProbeMarkerName(identity: string): string =
   var h = 0xcbf29ce484222325'u64
-  for ch in identity.toLowerAscii():
+  # Darwin SDK paths and compiler-wrapper flags are case-sensitive inputs:
+  # -I and -i have different meanings even on a case-insensitive filesystem.
+  let markerIdentity =
+    when defined(macosx): identity
+    else: identity.toLowerAscii()
+  for ch in markerIdentity:
     h = (h xor uint64(ord(ch))) * 0x100000001b3'u64
   const hexDigits = "0123456789abcdef"
   result = newString(16)
@@ -3107,7 +3117,8 @@ proc probeCCompiler*(cc: string; cacheDir = "";
                      extraArgs: seq[string] = @[]): CCompilerProbe =
   ## Compile a trivial translation unit that includes the standard headers
   ## Nim's generated C needs, with the host's pointer width asserted, and
-  ## report whether ``cc`` can do it.
+  ## report whether ``cc`` can do it. On Darwin this includes the Security
+  ## framework header needed by Nim's std/sysrand.
   ##
   ## This is what turns "``capi.c:1: stddef.h: No such file or directory``"
   ## -- measured 2026-09-23 on a Windows host whose Machine PATH put FPC's
@@ -3116,7 +3127,7 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ##
   ## Verdicts are memoised per process, and a SUCCESS is also recorded as a
   ## marker in ``cacheDir`` (when given) keyed on the compiler's path, size
-  ## and mtime, so an activation that runs on every ``just`` recipe does not
+  ## and mtime (plus Darwin SDK and wrapper environment), so an activation that runs on every ``just`` recipe does not
   ## pay a compiler start-up each time. Failures are never cached: the fix is
   ## usually to the environment, and the next run must see it.
   ##
@@ -3124,6 +3135,14 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ## macOS bootstrap passes its ``-isysroot`` here, because that is how the
   ## recipe compile will run the compiler.
   var identity = cCompilerIdentity(cc)
+  when defined(macosx):
+    # Old success markers only tested standard headers. Never reuse them for
+    # the framework probe, or across changes to SDK/compiler-wrapper inputs.
+    identity.add("|darwin-framework-probe-v1")
+    for name in ["SDKROOT", "DEVELOPER_DIR", "NIX_CFLAGS_COMPILE",
+                 "NIX_CFLAGS_COMPILE_FOR_BUILD", "NIX_LDFLAGS",
+                 "NIX_LDFLAGS_FOR_BUILD"]:
+      identity.add("|" & name & "=" & getEnv(name))
   for arg in extraArgs:
     identity.add("|" & arg)
   if cachedCCompilerProbes.hasKey(identity):
@@ -3177,8 +3196,14 @@ proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
     detail = detail[0 ..< maxDetail] & " [...]"
   result = "the C compiler selected for compiling the recipe cannot " &
     "compile a trivial C file that includes <stddef.h>" &
+    (when defined(macosx): " and <Security/SecRandom.h>"
+     else: "") &
     "\n  compiler: " & probe.compiler &
     "\n  selected from: " & origin &
+    (when defined(macosx): "\n  SDKROOT: " &
+      getEnv("SDKROOT", "<unset>") &
+      "\n  " & bootstrapSdkRootEnv & ": " & getEnv(bootstrapSdkRootEnv, "<unset>")
+     else: "") &
     "\n  failure: " & detail.replace("\n", "\n    ") &
     "\n  remedy: " & cCompilerOverrideRemedy()
 

@@ -98,6 +98,8 @@ proc cCompilerOverrideRemedy*(): string =
     ", or unset it to use the pinned bootstrap compiler reprobuild " &
     "provisions into its tool store."
 
+proc cCompilerFamily*(cc: string): string
+
 when defined(macosx):
   # SIP prefixes, kept byte-identical to nim-stackable-hooks'
   # `propagation.sipProtectedPrefixes` (the population io-mon itself uses via
@@ -142,6 +144,21 @@ when defined(macosx):
         return candidate
     ""
 
+  proc firstNonSipClangOnPath(): string =
+    ## Darwin's Nim runtime needs SDK framework headers. An implicit GCC cc
+    ## cannot find them even with SDKROOT set, while a clang wrapper can.
+    ## Keep SIP avoidance: a system clang cannot carry the monitor shim.
+    for name in ["cc", "clang"]:
+      for dir in getEnv("PATH").split(PathSep):
+        if dir.len == 0:
+          continue
+        let candidate = absolutePath(dir / name)
+        if fileExists(extendedPath(candidate)) and
+            not isSipProtectedCompiler(candidate) and
+            cCompilerFamily(candidate) == "clang":
+          return candidate
+    ""
+
   proc preferNonSipCompiler(candidate: string): string =
     ## When `candidate` is a SIP-protected compiler, substitute a non-SIP one
     ## if PATH offers it; otherwise keep `candidate` (best effort).
@@ -182,10 +199,15 @@ proc fallbackCCompiler*(): string =
   ## The C compiler when the environment names none explicitly, or "":
   ##
   ## 3. `cc` on `PATH` (POSIX only; Windows has no system `cc`; on macOS a
-  ##    SIP-protected one is swapped as in `explicitCCompiler`).
+  ##    SIP-protected one is swapped as in `explicitCCompiler`). Darwin first
+  ##    prefers a non-SIP clang-family cc/clang for SDK framework support.
   ## 4. `BuiltCCompilerPath`, the compiler `repro` was built with, when it
   ##    still exists (POSIX only). This is the arm an installed Nix package
   ##    reaches in a clean environment.
+  when defined(macosx):
+    let clang = firstNonSipClangOnPath()
+    if clang.len > 0:
+      return clang
   when not defined(windows):
     let runtimeCC = uncontrolledFindExe("cc")
     if runtimeCC.len > 0 and isAbsolute(runtimeCC) and

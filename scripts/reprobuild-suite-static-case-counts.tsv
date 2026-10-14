@@ -321,7 +321,7 @@ libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim	nim	1
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
-libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim	nim	8
+libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim	nim	12
 libs/repro_interface_artifacts/tests/t_repro_lib_fingerprint_memo.nim	nim	4
 libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	8
 libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	nim	9
