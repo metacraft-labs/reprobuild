@@ -15246,6 +15246,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_tpm_quote_comes_from_the_tpm.nim",
+    binary: "build/test-bin/t_tpm_quote_comes_from_the_tpm",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_tpm_quote_verifies.nim",
     binary: "build/test-bin/t_tpm_quote_verifies",
     defines: @[],

@@ -1700,6 +1700,7 @@ tests/integration/t_tpm2_driver_composes_and_refuses.nim	nim	19
 tests/integration/t_tpm2_evidence_composite_roundtrip.nim	nim	14
 tests/integration/t_tpm2_evidence_rejects_malformed.nim	nim	23
 tests/integration/t_tpm2_structure_vectors.nim	nim	2
+tests/integration/t_tpm_quote_comes_from_the_tpm.nim	nim	4
 tests/integration/t_tpm_quote_verifies.nim	nim	7
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	nim	15
 tests/integration/t_tsm_report_transport.nim	nim	39

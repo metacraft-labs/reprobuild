@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1989,
+    "nimTestBinaries": 1990,
     "pureUnitConsolidationGroups": 54,
     "pureUnitTests": 617,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 2007
+    "testEntries": 2008
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1164,7 +1164,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 15,
-      "integration": 1090,
+      "integration": 1091,
       "platform/destructive": 126,
       "pure unit": 617,
       "unclassified": 159
@@ -1357,9 +1357,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1989,
+    "nimTestBinaryCount": 1990,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2007
+    "testEntryCount": 2008
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -37184,6 +37184,25 @@
       "source": "tests/integration/t_tpm2_structure_vectors.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tpm_quote_comes_from_the_tpm",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_agent",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm_quote_comes_from_the_tpm.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
