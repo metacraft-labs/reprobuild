@@ -238,9 +238,19 @@ const
                  "t_e2e_data_file_rollback_restores_rows",
                  "t_e2e_data_file_validation",
                  "t_e2e_home_add_appends_data_row",
-                 "t_e2e_home_export_expands_data_files"]:
+                 "t_e2e_home_export_expands_data_files",
+                 "t_e2e_profile_compile_clang_first_run_published"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
+    # The clang first-run gate's positive control compiles through a "clang"
+    # that drops `-fno-temp-file` (`tests/e2e/m83/exec_without_arg.nim`); a
+    # compiled program for the reason `nim_spy` is one, so the control runs
+    # on macOS as well as Linux.
+    rows.add TestGraphArtifacts(
+      source: "tests/e2e/m83/" &
+        "t_e2e_profile_compile_clang_first_run_published.nim",
+      artifacts: @[TestGraphArtifact(path: "build/test-bin/exec_without_arg",
+        actionId: "reprobuild.test_helpers.exec_without_arg")])
     rows
 
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
@@ -2469,6 +2479,17 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/nim_spy",
       actionId = "reprobuild.test_helpers.nim_spy"))
+
+    # The clang first-run gate's argument-dropping compiler wrapper (see the
+    # row in ``profileCompileNimSpyConsumers``): standard library only.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/e2e/m83/exec_without_arg.nim",
+      binary = "build/test-bin/exec_without_arg",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/exec_without_arg",
+      actionId = "reprobuild.test_helpers.exec_without_arg"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "tools/test-runner/repro_test_runner.nim",

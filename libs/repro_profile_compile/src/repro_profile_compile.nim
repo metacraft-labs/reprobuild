@@ -53,6 +53,7 @@ export compile.ProfileNimCompilerEnvVar
 export compile.resolveProfileNimCompiler
 export compile.resolveProfileCCompiler
 export compile.NimDefaultCCompilerExe
+export compile.profileCompileCFlags
 export compile.requireReprobuildSources
 export compile.profileCompileChildEnv
 export compile.profileCompileArgv

@@ -435,7 +435,7 @@ libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_module_imports.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	nim	11
 libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	89
-libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	26
+libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	28
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	32
@@ -997,6 +997,7 @@ tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim	nim	1
 tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim	nim	3
 tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim	nim	4
 tests/e2e/m83/t_e2e_phase_g_action_edges.nim	nim	4
+tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5
 tests/e2e/m83/t_e2e_profile_compile_path_with_spaces.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim	nim	1

@@ -8919,6 +8919,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
+    binary: "build/test-bin/t_e2e_profile_compile_clang_first_run_published",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim",
     binary: "build/test-bin/t_e2e_profile_compile_nim_path_closure",
     defines: @[],
