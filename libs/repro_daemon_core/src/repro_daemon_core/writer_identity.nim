@@ -29,12 +29,10 @@
 ## LIVE and never reclaims. A record that lingers costs a deferred restart; a
 ## record reclaimed out from under its writer corrupts a build.
 ##
-## BOOT ENCODING MATCHES `shm_gset`, DELIBERATELY. It is the same notion of
-## boot already deciding action-index staleness (`action_index.nim`: "a chain
-## whose creator boot id does not match the current boot is STALE"), so this
-## introduces no second encoding for the boot. Writer probes verify the
-## authoritative source themselves: the shard fallback is not exact enough
-## to reclaim a writer safely.
+## Boot provenance is part of new identities. Legacy triples used boot sources
+## that changed across releases (including a wall-clock fallback on Darwin),
+## so their boot values cannot prove death. They require process interrogation.
+## Only a recognized version and native source permit a boot-only shortcut.
 
 import std/[options, strutils]
 
@@ -45,6 +43,7 @@ type
   WriterIdentity* = object
     ## Enough to recognise one process for as long as it runs. Empty
     ## `startStamp` means "not established"; see `wlUnknown`.
+    bootSource*: string  ## Empty for an unversioned legacy triple.
     bootId*: uint64
     pid*: int
     startStamp*: string
@@ -59,10 +58,14 @@ type
 
   WriterLiveness* = enum
     wlLive        ## the recorded writer is running right now
-    wlDead        ## provably gone: different boot, absent pid, or reused pid
+    wlDead        ## provably gone: comparable boot differs, absent or reused pid
     wlUnknown     ## identity could not be established; callers MUST assume live
 
 const WriterIdentityFieldSep = ':'
+const NativeWriterBootSource =
+  when defined(macosx): "darwin-kern-boottime-us-or1"
+  elif defined(linux): "linux-boot-uuid-fnv1a64-or1"
+  else: "unsupported"
 
 when defined(macosx):
   # `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)` yields `kinfo_proc`, whose
@@ -179,15 +182,21 @@ proc currentWriterIdentity*(): WriterIdentity =
   let pid = when defined(posix): int(getpid()) else: 0
   let boot = exactWriterBootId()
   if boot.isNone: return WriterIdentity()
-  WriterIdentity(bootId: boot.get(), pid: pid, startStamp: processStartStamp(pid))
+  WriterIdentity(bootSource: NativeWriterBootSource, bootId: boot.get(),
+    pid: pid, startStamp: processStartStamp(pid))
 
 proc encodeWriterIdentity*(identity: WriterIdentity): string =
-  ## `<bootId>:<pid>:<startStamp>`; "" when the start stamp is unknown, so an
+  ## `v1:<source>:<bootId>:<pid>:<startStamp>` for a current identity;
+  ## preserve legacy triples when encoding a decoded legacy identity.
+  ## "" when the start stamp is unknown, so an
   ## unestablished identity is stored as absent rather than as a partial
   ## triple that later reads as authoritative.
   if identity.startStamp.len == 0:
     return ""
-  $identity.bootId & WriterIdentityFieldSep & $identity.pid &
+  let prefix = if identity.bootSource.len > 0:
+    "v1:" & identity.bootSource & ":"
+  else: ""
+  prefix & $identity.bootId & WriterIdentityFieldSep & $identity.pid &
     WriterIdentityFieldSep & identity.startStamp
 
 proc canonicalDecimalInRange(text: string; minimum, maximum: uint64): bool =
@@ -215,17 +224,25 @@ proc canonicalStartStamp(stamp: string): bool =
     false
 
 proc decodeWriterIdentity*(encoded: string): Option[WriterIdentity] =
-  ## `none` for anything that is not a whole triple with a canonical native
+  ## Accept a recognized v1 record or a legacy triple with a canonical native
   ## start stamp. A partially parsable
   ## value is NOT repaired into a usable identity: half an identity answers
   ## the liveness question wrongly, and `none` answers it `wlUnknown`.
   if encoded.len == 0:
     return none(WriterIdentity)
-  let parts = encoded.split(WriterIdentityFieldSep, maxsplit = 2)
+  var parts = encoded.split(WriterIdentityFieldSep)
+  var source = ""
+  if parts.len == 5:
+    # Unknown versions or sources cannot borrow this version's comparison
+    # rules. Older daemons similarly reject v1 rather than reclaiming it.
+    if parts[0] != "v1" or parts[1] != NativeWriterBootSource:
+      return none(WriterIdentity)
+    source = parts[1]
+    parts = parts[2 .. 4]
   if parts.len != 3 or not canonicalStartStamp(parts[2]):
     return none(WriterIdentity)
   try:
-    some(WriterIdentity(bootId: parseBiggestUInt(parts[0]),
+    some(WriterIdentity(bootSource: source, bootId: parseBiggestUInt(parts[0]),
       pid: parseInt(parts[1]), startStamp: parts[2]))
   except ValueError:
     none(WriterIdentity)
@@ -239,14 +256,15 @@ proc writerLiveness*(encoded: string): WriterLiveness =
   if parsed.isNone:
     return wlUnknown
   let identity = parsed.get()
-  let currentBoot = exactWriterBootId()
-  if currentBoot.isNone: return wlUnknown
-  if identity.bootId != currentBoot.get():
-    # A DIFFERENT BOOT. Nothing recorded before this boot can still be
-    # running, so this is the one case that needs no process probe at all --
-    # and it is the case a pid-only rule gets wrong most often after a
-    # reboot recycles every pid from 1.
-    return wlDead
+  if identity.bootSource == NativeWriterBootSource:
+    let currentBoot = exactWriterBootId()
+    if currentBoot.isNone: return wlUnknown
+    if identity.bootId != currentBoot.get():
+      # Provenance makes these numbers comparable. A legacy mismatch might
+      # only mean that a different release chose a different source.
+      return wlDead
+  # Legacy identities never need the current boot probe: the PID and native
+  # stamp can establish liveness even if that boot probe is unavailable.
   let probe = probeProcessStart(identity.pid)
   case probe.status
   of pssUnknown: wlUnknown

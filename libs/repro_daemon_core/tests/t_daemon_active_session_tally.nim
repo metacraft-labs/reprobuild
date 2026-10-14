@@ -45,7 +45,7 @@
 ## work. `resetTallyAsIfRestarted` reproduces that by clearing the in-memory
 ## state and re-asking, which is what a fresh daemon process does.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles, times, unittest]
 when defined(posix):
   import std/posix
 
@@ -243,6 +243,33 @@ suite "abandoned sessions are reclaimed, and only provably dead ones":
     check activeSessionTallyFor(config) == 0
     writeSessionRecord(config, running)
     let path = root / "sessions" / "padded-writer.session"
+    let original = readFile(path)
+    check "state=running" in original
+    check reclaimAbandonedSessions(config) == 0
+    check readFile(path) == original
+    check countActiveSessionRecordsFromDisk(config) == 1
+    check activeSessionTallyFor(config) == 1
+    resetTallyAsIfRestarted(config)
+    check activeSessionTallyFor(config) == 1
+    check countActiveSessionRecordsFromDisk(config) == 1
+    check readFile(path) == original
+
+  test "a legacy writer survives a boot-source migration and daemon restart":
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    var identity = currentWriterIdentity()
+    require writerLiveness(encodeWriterIdentity(identity)) == wlLive
+    let legacyBoot = uint64(getTime().toUnix()) or 1
+    require legacyBoot != identity.bootId
+    var running = session("legacy-writer", "running")
+    running.writer = $legacyBoot & ":" & $identity.pid & ":" & identity.startStamp
+    require running.writer.len > 0
+    # Prime before writing so both explicit reclamation and restart priming
+    # encounter the same genuine running record rather than an empty tally.
+    check activeSessionTallyFor(config) == 0
+    writeSessionRecord(config, running)
+    let path = root / "sessions" / "legacy-writer.session"
     let original = readFile(path)
     check "state=running" in original
     check reclaimAbandonedSessions(config) == 0

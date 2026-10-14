@@ -182,13 +182,13 @@ libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
 libs/repro_core/tests/t_source_root_installed_layout.nim	nim	9
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
-libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	20
+libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	21
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
 libs/repro_daemon_core/tests/t_daemon_launchd_label.nim	nim	12
 libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim	nim	7
-libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	14
+libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	18
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	12
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2

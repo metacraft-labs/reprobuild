@@ -28,7 +28,7 @@
 ## before and after it exits, and pids that cannot exist. A fake process table
 ## would decide by fiat the one thing under test.
 
-import std/[options, os, osproc, strutils, streams, json, unittest]
+import std/[options, os, osproc, strutils, streams, json, times, unittest]
 
 import repro_daemon_core/writer_identity
 import shm_gset
@@ -70,10 +70,48 @@ suite "writer identity recognises a live writer and only a dead one":
     check encoded.len > 0
     check writerLiveness(encoded) == wlLive
 
+  test "a live legacy writer survives a boot-source migration":
+    let me = currentWriterIdentity()
+    require processStartStamp(me.pid) == me.startStamp
+    # The old packaged Darwin source recorded wall-clock seconds. This raw
+    # persisted triple deliberately bypasses the current encoder.
+    let legacyBoot = uint64(getTime().toUnix()) or 1'u64
+    require legacyBoot != me.bootId
+    let legacy = $legacyBoot & ":" & $me.pid & ":" & me.startStamp
+    checkpoint("legacy=" & legacy & " current boot=" & $me.bootId)
+    check writerLiveness(legacy) == wlLive
+
+  test "legacy process interrogation decides live absent and reused writers":
+    let me = currentWriterIdentity()
+    for boot in [me.bootId, me.bootId - 1]:
+      let prefix = $boot & ":"
+      check writerLiveness(prefix & $me.pid & ":" & me.startStamp) == wlLive
+      check writerLiveness(prefix & "999999:" & me.startStamp) == wlDead
+      let reused = when defined(macosx): "1.1" else: "1"
+      require reused != me.startStamp
+      check writerLiveness(prefix & $me.pid & ":" & reused) == wlDead
+
+  test "unknown or malformed provenance cannot establish death":
+    let me = currentWriterIdentity()
+    let encoded = encodeWriterIdentity(me)
+    require encoded.startsWith("v1:")
+    let fields = encoded.split(':')
+    require fields.len == 5
+    for prefix in ["v2:" & fields[1], "v1:unknown", "v1:", "v0:" & fields[1]]:
+      let unsupported = prefix & ":1:999999:" & me.startStamp
+      checkpoint(unsupported)
+      check decodeWriterIdentity(unsupported).isNone
+      check writerLiveness(unsupported) == wlUnknown
+    for malformed in [encoded & ":extra", "v1:" & fields[1] & ":1:999999",
+        "v1:" & fields[1] & ":1:999999:0" & me.startStamp]:
+      check decodeWriterIdentity(malformed).isNone
+      check writerLiveness(malformed) == wlUnknown
+
   test "the encoding round-trips":
     let me = currentWriterIdentity()
     let decoded = decodeWriterIdentity(encodeWriterIdentity(me))
     check decoded.isSome
+    check decoded.get().bootSource == me.bootSource
     check decoded.get().bootId == me.bootId
     check decoded.get().pid == me.pid
     check decoded.get().startStamp == me.startStamp
@@ -154,8 +192,9 @@ suite "writer identity recognises a live writer and only a dead one":
     let childPid = child.processID
     let stamp = processStartStamp(childPid)
     check stamp.len > 0
+    let me = currentWriterIdentity()
     let encoded = encodeWriterIdentity(WriterIdentity(
-      bootId: currentWriterIdentity().bootId, pid: childPid,
+      bootSource: me.bootSource, bootId: me.bootId, pid: childPid,
       startStamp: stamp))
     check writerLiveness(encoded) == wlLive
     child.terminate()
@@ -241,6 +280,36 @@ suite "writer identity recognises a live writer and only a dead one":
         check status == 0
         check "injected EPERM" in output
         check output.strip().endsWith("wlUnknown")
+
+  when defined(macosx):
+    test "legacy writers survive denied boot probes and retain denied process probes":
+      let me = currentWriterIdentity()
+      let legacy = $(me.bootId - 1) & ":" & $me.pid & ":" & me.startStamp
+      for denyBoot in [false, true]:
+        let oldPid = os.getEnv("DENIED_PID")
+        let oldBoot = os.getEnv("DENIED_BOOT")
+        if denyBoot:
+          delEnv("DENIED_PID")
+          putEnv("DENIED_BOOT", "1")
+        else:
+          putEnv("DENIED_PID", $me.pid)
+          delEnv("DENIED_BOOT")
+        let child = startProcess(getAppFilename(), args = @["--probe-writer", legacy],
+          options = {poStdErrToStdOut})
+        if oldPid.len == 0: delEnv("DENIED_PID")
+        else: putEnv("DENIED_PID", oldPid)
+        if oldBoot.len == 0: delEnv("DENIED_BOOT")
+        else: putEnv("DENIED_BOOT", oldBoot)
+        let output = child.outputStream.readAll()
+        let status = child.waitForExit()
+        child.close()
+        checkpoint("denyBoot=" & $denyBoot & " output=" & output)
+        check status == 0
+        if denyBoot:
+          check output.strip() == "wlLive"
+        else:
+          check "injected EPERM" in output
+          check output.strip().endsWith("wlUnknown")
 
   test "packaged boot source pin and CI source pin stay aligned":
     let root = currentSourcePath().parentDir.parentDir.parentDir.parentDir
