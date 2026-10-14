@@ -22,12 +22,15 @@ from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
   installedLayoutPackageTrees
 from repro_core/ambient_execution import uncontrolledFindExe
 from repro_core/c_compiler import CCompilerUnusableError, explicitCCompiler,
-  fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags
+  fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags,
+  cCompilerAcceptsFlags, cCompilerFamily
 
 import repro_profile
 import repro_profile_intent
 
 import ./sources
+
+const nullDevice = when defined(windows): "NUL" else: "/dev/null"
 
 # ---------------------------------------------------------------------------
 # Errors.
@@ -130,7 +133,7 @@ proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
   ## `resolveProfileCCompiler`), or Nim's default (`NimDefaultCCompilerExe`
   ## on `PATH`) when that is "".
   ##
-  ## Today one flag: clang's `-fno-temp-file`
+  ## Clang's `-fno-temp-file`
   ## (`repro_core/c_compiler.clangNoTempFileCFlags`). Without it clang calls
   ## `arc4random` to name the temporary file it renames onto each `-o`
   ## object, io-mon reports the call, and this edge -- which carries no
@@ -151,7 +154,20 @@ proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
   let effective =
     if cCompiler.len > 0: cCompiler
     else: uncontrolledFindExe(NimDefaultCCompilerExe)
-  clangNoTempFileCFlags(effective, scratchDir)
+  result = clangNoTempFileCFlags(effective, scratchDir)
+  # Apple clang uses a second random temporary for -MF, even when object
+  # output is direct. Route the unused report to the null device instead,
+  # which clang writes directly. Empty filenames are unsafe here: Nim and
+  # compiler wrappers can drop an empty argument and make cc1 consume the
+  # next option as a report path. The action's monitor owns header freshness.
+  if cCompilerFamily(effective) == "clang":
+    let noDeps = @["-Xclang", "-dependency-file", "-Xclang", nullDevice]
+    # Probe exactly the dependency-producing shape (upstream clang requires
+    # a target), retaining direct object output so the probe itself does not
+    # introduce the entropy the real compile is being changed to avoid.
+    if cCompilerAcceptsFlags(effective,
+        result & @["-MD", "-MT", "repro-profile-probe"] & noDeps, scratchDir):
+      result.add "-Xclang -dependency-file -Xclang " & nullDevice
 
 proc requireReprobuildSources*(repoRoot: string) =
   ## Refuse a source root that holds no reprobuild libs, naming the
@@ -205,7 +221,10 @@ proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
   ## linker Nim uses (`nimCCompilerFlags`); "" leaves Nim's default.
   ## `cFlags` (from `profileCompileCFlags`) each become one `--passC:`,
   ## applied to every C compile and not to the link.
-  result = @[nimExe, "c", "--hints:off", "--warnings:off",
+  # The action cache supplies the incremental boundary. On an executed
+  # edge, force C compilation so headers are both current and observed,
+  # including {.compile.} sources when no compiler depfile was produced.
+  result = @[nimExe, "c", "--hints:off", "--warnings:off", "--forceBuild:on",
     "--nimcache:" & nimcacheDir,
     "--out:" & outBinary]
   result.add nimCCompilerFlags(cCompiler)

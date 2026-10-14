@@ -46,11 +46,78 @@ proc featureSet(flags: string): seq[string] =
     if item.len > 0:
       result.add(item)
 
-proc requireDaemonFeatures(features, required: openArray[string]) =
+proc missingUserDaemonFeatures*(advertisedFlags: string;
+                                required: openArray[string]): seq[string] =
+  ## The names in ``required`` that ``advertisedFlags`` (the hello-ack's
+  ## comma-separated feature list) does not carry, in the order required and
+  ## without duplicates. Names are matched whole: ``build-events`` does not
+  ## satisfy ``build``.
+  ##
+  ## ALL of them, not the first: a client refused for one feature used to
+  ## learn of the next one only after the restart that fixed the first.
+  let advertised = featureSet(advertisedFlags)
   for needed in required:
-    if features.find(needed) < 0:
-      raise newException(UserDaemonClientError,
-        "user daemon does not advertise required feature: " & needed)
+    if advertised.find(needed) < 0 and result.find(needed) < 0:
+      result.add(needed)
+
+proc imagePathText(identity: BinaryIdentity): string =
+  # An identity the handshake did not fill in (an older daemon, a platform
+  # that could not answer ``getAppFilename``) is said to be unknown rather
+  # than printed as an empty field, which reads as a blank, not a gap.
+  if identity.path.len > 0: identity.path else: "<unknown>"
+
+proc versionText(identity: BinaryIdentity): string =
+  if identity.version.len > 0: identity.version else: "<unknown>"
+
+proc unsupportedDaemonMessage*(missing: openArray[string];
+                               daemon, client: BinaryIdentity): string =
+  ## The unsupported-daemon error ``connectUserDaemon`` raises when the
+  ## daemon does not advertise a feature the request requires
+  ## (spec/Local-Daemons-And-Control-Plane.md, *Protocol Compatibility*:
+  ## "report a clear unsupported-daemon error under `require`").
+  ##
+  ## WHY IT SAYS SO MUCH (reprobuild-pm issue 2026-10-13). The case that
+  ## reaches this is almost always a daemon still running an older image
+  ## than the client -- a nix-store build serving a locally built CLI, say
+  ## -- and the two report the SAME version string, because that string is
+  ## the package version and every build between two bumps shares it. A
+  ## reader holding "does not advertise required feature: X" next to two
+  ## identical versions concludes the daemon is current and looks elsewhere.
+  ## So the message names every missing feature and what it is for, puts
+  ## the two IMAGE PATHS side by side (the field that actually
+  ## discriminates), says outright that equal versions are not evidence,
+  ## and gives the one-command remedy.
+  ##
+  ## The first line keeps the original wording -- with one missing feature
+  ## it is byte-for-byte the line this error always raised -- so anything
+  ## matching on it keeps working. Pure, so it is testable without a
+  ## socket.
+  let noun = if missing.len == 1: "feature" else: "features"
+  result = "user daemon does not advertise required " & noun & ": " &
+    missing.join(", ")
+  for name in missing:
+    result.add("\n  - " & name & ": " & userDaemonFeatureDescription(name))
+  result.add("\ndaemon image: " & imagePathText(daemon) & " (version " &
+    versionText(daemon) & ")")
+  result.add("\nclient image: " & imagePathText(client) & " (version " &
+    versionText(client) & ")")
+  result.add("\nthe same version string does not mean the same features: " &
+    "two builds of one release can differ, so compare the image paths " &
+    "above, not the versions.")
+  result.add("\nremedy: run `repro daemon restart` with this client to " &
+    "relaunch the daemon from the current image.")
+
+proc requireDaemonFeatures*(advertisedFlags: string;
+                            required: openArray[string];
+                            daemon, client: BinaryIdentity) =
+  ## Raise ``UserDaemonClientError`` carrying ``unsupportedDaemonMessage``
+  ## when ``advertisedFlags`` lacks any of ``required``; return quietly
+  ## otherwise. ``daemon`` is the identity from the hello-ack and ``client``
+  ## the one this process sent in its hello.
+  let missing = missingUserDaemonFeatures(advertisedFlags, required)
+  if missing.len > 0:
+    raise newException(UserDaemonClientError,
+      unsupportedDaemonMessage(missing, daemon, client))
 
 proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
                         clientName = "repro";
@@ -100,7 +167,16 @@ proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
     raise newException(UserDaemonClientError,
       "user daemon protocol mismatch: client major " &
       $UserDaemonProtocolMajor & ", daemon major " & $parsed.major)
-  requireDaemonFeatures(parsed.featureFlags.featureSet(), requiredFeatures)
+  # ``parsed.daemon`` is the daemon's own identity from the hello-ack; it is
+  # what lets the refusal name the image that lacks the feature. Close the
+  # connection before raising: the caller never receives it on this path,
+  # so nobody else could.
+  try:
+    requireDaemonFeatures(parsed.featureFlags, requiredFeatures,
+      parsed.daemon, client)
+  except UserDaemonClientError:
+    result.closeIpcConn()
+    raise
 
 proc queryUserDaemonStatus*(endpoint = defaultUserDaemonEndpoint()):
     UserDaemonStatus =

@@ -21,6 +21,52 @@ const
   FrameMagic = "RBUD"
   ReproTestRunnerOwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
 
+proc unknownUserDaemonFeatureDescription*(name: string): string =
+  ## The description `userDaemonFeatureDescription` gives a name it has no
+  ## entry for. Exported so the completeness test can tell "described"
+  ## from "fell through" without duplicating this wording.
+  ##
+  ## An unknown name reaches a refusal when a client is newer than this
+  ## table's copy in the image doing the describing, so the text says that
+  ## rather than pretending the feature does not exist.
+  "a daemon capability this build has no description for (" & name & ")"
+
+proc userDaemonFeatureDescription*(name: string): string =
+  ## The human-facing meaning of one wire feature name from
+  ## `UserDaemonFeatureFlags`, for diagnostics that refuse a daemon lacking
+  ## it (`unsupportedDaemonMessage` in `client.nim`).
+  ##
+  ## WHY THIS TABLE EXISTS. The wire names are terse protocol tokens, and
+  ## a refusal that says only `lease-registry` leaves the reader to guess
+  ## what they were trying to do that needed it. Two builds of one release
+  ## share a version string while differing in this list (reprobuild-pm
+  ## issue 2026-10-13), so the feature name is the only discriminator a
+  ## refused client can point to, and it has to be readable.
+  ##
+  ## EVERY FLAG IN `UserDaemonFeatureFlags` MUST HAVE AN ENTRY HERE;
+  ## `tests/t_daemon_missing_feature_diagnostic.nim` fails, naming the flag,
+  ## when one does not. Keep each description short and say what the
+  ## client asked the daemon to do, not how the daemon does it.
+  case name
+  of "lifecycle": "daemon lifecycle control (start, stop, restart)"
+  of "status": "status queries (`repro daemon status`)"
+  of "logs": "daemon log access (`repro daemon logs`)"
+  of "shutdown": "shutdown requests (`repro daemon stop`)"
+  of "sessions": "session listing (`repro daemon sessions`)"
+  of "build-routing": "running `repro build` inside the daemon"
+  of "build-events": "streaming build progress events back to the client"
+  of "watch-routing": "running `repro watch` inside the daemon"
+  of "watch-events": "streaming watch-session events back to the client"
+  of "watch-sessions":
+    "attaching to, detaching from and stopping watch sessions"
+  of "dev-self-restart":
+    "dev-mode self-restart onto a rebuilt daemon image (`--dev`)"
+  of "substitute-routing":
+    "binary-cache substitution served by the daemon (multi-user mode)"
+  of "lease-registry":
+    "the ephemeral-state lease registry (lease renewals)"
+  else: unknownUserDaemonFeatureDescription(name)
+
 proc sanitizeUserDaemonRequestEnvironment*(
     environment: openArray[string]): seq[string] =
   ## Remove the test runner's private process-ownership marker at every daemon

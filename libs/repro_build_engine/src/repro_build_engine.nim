@@ -1084,9 +1084,8 @@ type
     origin*: EntropyCallerOrigin
     image*: string
       ## The IMAGE OF THE PROCESS THAT EMITTED THE RECORD, resolved from the
-      ## record's `osPid` against the capture's own `mrProcessExec` records --
-      ## or the EMPTY STRING when no exec record in this capture names that
-      ## pid.
+      ## record's `osPid` against successful exec records and initial child
+      ## images from spawn records, or EMPTY when this capture cannot name it.
       ##
       ## WHY IT IS HERE. `BuildAction.nonDeterminism` is action-scoped and the
       ## evidence is process-tree-scoped; see `repro_core/entropy_blessings`
@@ -4709,8 +4708,8 @@ type
     monitorDirectoryEnumerations*: HashSet[string]
 
     execImageByPid*: Table[uint64, string]
-      ## pid -> the image that pid was last observed EXEC'ing, built from the
-      ## capture's own `mrProcessExec` records and read by the
+      ## pid -> its initial spawn image or its most recent observed exec, built from the
+      ## capture's successful exec/spawn records and read by the
       ## `mrNonDeterministic` arm to attribute an entropy read to the program
       ## that made it. See `EntropyObservation.image`.
       ##
@@ -7415,6 +7414,20 @@ proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
   # requires (`monitorEvidenceRequirement`).
   mesUnknownScopeLoss
 
+proc observeSpawnImage(record: MonitorRecord;
+                       images: var Table[uint64, string]) =
+  ## Canonical captures sort by PID, not wall time. Spawn metadata must be
+  ## read before the child's stream regardless of which PID sorts first.
+  ## Conflicting paths for a recycled child PID cannot establish its initial
+  ## image: keep an empty binding until an explicit exec supplies one.
+  if record.kind != mrProcessSpawn or record.result != 0 or
+      record.childOsPid == 0 or not record.path.isAbsolute:
+    return
+  if not images.hasKey(record.childOsPid):
+    images[record.childOsPid] = record.path
+  elif images[record.childOsPid] != record.path:
+    images[record.childOsPid] = ""
+
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
                                  seen: var EvidenceSeenSets;
@@ -7475,6 +7488,10 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
   try:
+    seen.execImageByPid.clear()
+    for record in streamMonitorDepFileRecords(path,
+        defaultMonitorDepFileReaderOptions()):
+      observeSpawnImage(record, seen.execImageByPid)
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
@@ -7541,6 +7558,9 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   result = mesComplete
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
+  seen.execImageByPid.clear()
+  for record in records:
+    observeSpawnImage(record, seen.execImageByPid)
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
@@ -7766,7 +7786,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       else:
         blocking.add(observation.source & " from " &
           (if observation.image.len > 0: observation.image
-           else: "an unattributed process (no `mrProcessExec` record in " &
+           else: "an unattributed process (no unambiguous exec or spawn image in " &
                  "this capture names its pid)") & ", " &
           describeEntropyOrigin(observation.origin))
         if observation.image.len > 0:
@@ -10145,7 +10165,7 @@ func interestConsumer*(category: EventCategory): string =
   of ecPathProbes: "monitorProbes / monitorDirectoryEnumerations"
   of ecFileWrites: "monitorWrites (and undeclaredSurvivingWrites)"
   of ecProcessTree:
-    "seen.execImageByPid (pid->image attribution) and the mrProcessExec " &
+    "seen.execImageByPid (exec/spawn pid->image attribution) and the mrProcessExec " &
       "content-dependency arm of the fold"
   of ecLibraryLoads: "the mrLibraryLoad arm of the fold (monitorReads)"
   of ecEnvReads: "cacheEnvInputs — the ACTION CACHE KEY"
