@@ -1255,6 +1255,7 @@ tests/integration/t_da6_tool_capture_breadth_declarations.nim	nim	10
 tests/integration/t_daemon_accept_loop_survives_probe.nim	nim	3
 tests/integration/t_daemon_idle_does_not_reread_its_image.nim	nim	1
 tests/integration/t_daemon_parent_prewarm_e2e.nim	nim	2
+tests/integration/t_dangling_symlink_in_observed_directory_does_not_abort.nim	nim	5
 tests/integration/t_declared_daemon_ipc_trust.nim	nim	17
 tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
@@ -1343,6 +1344,7 @@ tests/integration/t_health_fix_remediates_safe_issues_only.nim	nim	2
 tests/integration/t_health_names_the_binary_skew_and_does_not_propose_an_older_ensure.nim	nim	1
 tests/integration/t_health_push_gateway_check_reports_observed_state.nim	nim	5
 tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.nim	nim	1
+tests/integration/t_health_reports_a_malformed_repo_fragment.nim	nim	1
 tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim	nim	3
 tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	6
 tests/integration/t_health_vcs_hooks_digest_output.nim	nim	1
@@ -1473,6 +1475,8 @@ tests/integration/t_m9r21_4_hardware_e2e.nim	nim	3
 tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
 tests/integration/t_macho_runtime_audit.nim	nim	15
 tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim	nim	3
+tests/integration/t_malformed_settings_file_is_an_error.nim	nim	1
+tests/integration/t_malformed_state_file_is_reported_accurately.nim	nim	1
 tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	nim	1
 tests/integration/t_managed_hooks_gate_every_worktree_of_a_repo.nim	nim	4
 tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim	nim	1
@@ -1594,6 +1598,7 @@ tests/integration/t_provision_roundtrip.nim	nim	8
 tests/integration/t_provisioning_contributions.nim	nim	6
 tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim	nim	2
 tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim	nim	2
+tests/integration/t_push_gateway_opt_out_is_a_settings_key.nim	nim	1
 tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim	nim	1
 tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2

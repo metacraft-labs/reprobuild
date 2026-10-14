@@ -27,22 +27,25 @@
 ##
 ## THE TWO DELIBERATE DIVERGENCES, both asserted below:
 ##
-##   dangling symlink   retired: ffkMissing(0, 0)   now: ffkRegular(link's
-##                      own size and mtime)
+##   dangling symlink   retired: ffkMissing(0, 0)   now: ffkUnresolvedSymlink
+##                      (link's own size and mtime)
 ##   FIFO / socket      retired: ffkMissing(0, 0)   now: ffkOther, and
 ##                      therefore not a recorded input at all
 ##
 ## Both follow the branch that was kept, and both are argued in the code
 ## comment beside it. The consequences run in the last two suites: what the
 ## new classification BUYS (a dangling link retargeted to another absent
-## target now invalidates) and what it COSTS (a dangling link whose target
-## appears no longer does). The cost is pinned by a test on purpose, so it is
-## a known hole rather than a surprise.
+## target now invalidates) and what it USED TO COST: while a dangling link was
+## classified `ffkRegular`, its target appearing did not invalidate. That cost
+## was pinned by a test on purpose, as a known hole with a stated way to close
+## it; the dangling link now has a kind of its own (`ffkUnresolvedSymlink`),
+## the hole is closed, and the same test now asserts the invalidation.
 
 import std/[os, posix, sets, tempfiles, times, unittest]
 
 import repro_hash
 import repro_local_store
+import repro_test_support/reasoned_skip
 
 proc weakFor(text: string): ContentDigest =
   var payload = newSeq[byte](text.len)
@@ -134,8 +137,10 @@ suite "fingerprintMetadata classifies every POSIX entity":
 
       # -- divergence 1: a dangling symlink ---------------------------------
       # It IS an entity, `lstat` describes it, and its own size and mtime are
-      # real facts. The retired branch called it absent.
-      check kindOf(t.root / "dangling") == ffkRegular
+      # real facts. The retired branch called it absent. It is not a regular
+      # file either: it has no content, and calling it one is what made its
+      # target appearing invisible (see the last suite).
+      check kindOf(t.root / "dangling") == ffkUnresolvedSymlink
       check metadataOf(t.root / "dangling").sizeBytes ==
         uint64((t.root / "never-created.txt").len)
       check metadataOf(t.root / "dangling").mtimeNs > 0'u64
@@ -162,7 +167,7 @@ suite "fingerprintMetadata classifies every POSIX entity":
       # DISAGREEMENT, both directions stated explicitly.
       let dangling = t.root / "dangling"
       check retiredGenericBranch(dangling) == FileMetadata(kind: ffkMissing)
-      check metadataOf(dangling).kind == ffkRegular
+      check metadataOf(dangling).kind == ffkUnresolvedSymlink
       check metadataOf(dangling) != retiredGenericBranch(dangling)
 
       let fifo = t.root / "fifo"
@@ -227,9 +232,10 @@ suite "what the dangling-symlink classification buys and costs":
         link)
       check not hotMetadataRecordInputsUnchanged([record])
 
-  test "COSTS: a dangling link whose target appears does NOT invalidate":
+  test "a dangling link whose target appears invalidates":
     when not defined(posix):
-      skip()
+      skip("symlinks and lstat(2) are POSIX; this case observes a POSIX " &
+        "dangling link")
     else:
       let t = makeTree()
       defer: removeDir(t.root)
@@ -239,26 +245,16 @@ suite "what the dangling-symlink classification buys and costs":
       check hotMetadataRecordInputsUnchanged([record])
 
       # The target appears. `lstat` of the LINK is byte-identical before and
-      # after -- same size, same mtime, same kind -- so this transition is
-      # invisible. It was invisible on Linux before this change and is now
-      # invisible on macOS too. The retired macOS classifier DID see it
-      # (ffkMissing -> ffkRegular), and that is the one thing lost.
-      #
-      # This test asserts the hole ON PURPOSE. Closing it needs a recorded
-      # link target for INPUTS; Incremental-Invalidation.md already requires
-      # one for outputs (`OutputWitness.linkTarget`) and `FileFingerprint` has
-      # no equivalent field, so it is a record-format change, not a
-      # classification change. If a future change adds that witness, this
-      # expectation flips and the assertion below is where it says so.
+      # after -- same size, same mtime -- so while the dangling link was
+      # classified `ffkRegular` this transition was invisible, and this test
+      # asserted the hole on purpose ("COSTS: ... does NOT invalidate"),
+      # naming the change that would close it. That change is the
+      # `ffkUnresolvedSymlink` kind: the link's kind moves from unresolved to
+      # regular, so the record no longer describes the filesystem.
       writeFile(t.root / "never-created.txt", "appeared\n")
       check fileExists(t.root / "never-created.txt")
-      check hotMetadataRecordInputsUnchanged([record])
-
-      # And the compensating fact: the link is still classified as an entity,
-      # so it is still being compared at all. Under ffkMissing it would have
-      # been compared as "absent", and the appearance above is exactly the
-      # transition an absent-path probe exists to catch.
       check metadataOf(link).kind == ffkRegular
+      check not hotMetadataRecordInputsUnchanged([record])
 
   test "a symlink to a file tracks the LINK, not the file it points at":
     when not defined(posix):
