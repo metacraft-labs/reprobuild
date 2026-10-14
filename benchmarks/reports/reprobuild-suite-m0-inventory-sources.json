@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 30,
-    "nimTestBinaries": 1955,
+    "nimTestBinaries": 1960,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 611,
     "staticallyDetectedRuntimeCompilerFlowTests": 111,
-    "testEntries": 1972
+    "testEntries": 1977
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1136,7 +1136,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 13,
-      "integration": 1068,
+      "integration": 1073,
       "platform/destructive": 123,
       "pure unit": 611,
       "unclassified": 157
@@ -1323,9 +1323,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1955,
+    "nimTestBinaryCount": 1960,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1972
+    "testEntryCount": 1977
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32365,6 +32365,92 @@
       "source": "tests/integration/t_post_merge_hook_reconciles_local_state.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_commit_gate_ignores_the_record_store_lock",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_pre_commit_gate_ignores_the_record_store_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_commit_gate_is_advisory_when_the_dispatcher_is_displaced",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_pre_commit_gate_is_advisory_when_the_dispatcher_is_displaced.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_commit_gate_judges_the_index_being_committed",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_pre_commit_gate_judges_the_index_being_committed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_commit_gate_names_the_re_pin_as_the_cause",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_commit_gate_names_the_re_pin_as_the_cause.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_commit_gate_stands_down_during_replay",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_pre_commit_gate_stands_down_during_replay.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

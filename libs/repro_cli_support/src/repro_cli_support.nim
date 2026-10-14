@@ -15884,6 +15884,15 @@ const
   # before the commit carrying it."
   VcsHookNames = ["pre-commit", "pre-push", "post-commit", "post-merge",
                   "post-checkout"]
+  PreCommitGatePhaseArg* = "--repro-phase=certificate-gate"
+    ## TC-8g — the argument the `pre-commit` dispatcher hands its managed body
+    ## to ask for the certificate-gate phase rather than the lock refresh. Git
+    ## passes `pre-commit` no arguments, so a leading argument cannot collide
+    ## with one of git's.
+  PreCommitDisplacedArg* = "--repro-dispatcher-displaced"
+    ## TC-8g — follows ``PreCommitGatePhaseArg`` as ``=1`` when the dispatcher
+    ## is running as ``pre-commit.legacy`` under another hook manager, ``=0``
+    ## otherwise.
 
 type
   HookActionKind = enum
@@ -17017,6 +17026,23 @@ proc vcsDispatcherContent(hookName: string): string =
       "export " & InternalHookContextEnv &
       "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\"; " &
       "exec \"$MANAGED_HOOK\" \"$@\") || exit $?; fi\n")
+    if hookName == "pre-commit":
+      # TC-8g — the THIRD phase: the certificate gate. It runs after every
+      # step of the commit that can change the index — the chained user hook
+      # and the managed lock refresh above — because the content it judges is
+      # the index the commit will record (test-certificates Standard §5.1: a
+      # pre-commit gate "MUST run after every step of the commit that changes
+      # the index"). It is the same managed body, asked for a different phase
+      # by a leading argument git never passes to `pre-commit` (the hook takes
+      # none). Whether this dispatcher was displaced travels with it: running
+      # as `<hook>.legacy`, the framework that displaced it runs its own hooks
+      # AFTER this one, so the gate cannot know it is last and only reports.
+      result.add("if [ -x \"$MANAGED_HOOK\" ]; then " &
+        "(unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
+        "export " & InternalHookContextEnv &
+        "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\"; " &
+        "exec \"$MANAGED_HOOK\" " & PreCommitGatePhaseArg & " " &
+        PreCommitDisplacedArg & "=$RUNNING_AS_LEGACY) || exit $?; fi\n")
   result.add("exit 0\n")
 
 const ManagedHookRefusalRecordSchemaId* =
@@ -17520,6 +17546,23 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("  *) REPROBUILD_CAPTURED_GIT_INDEX_FILE=" &
       "\"$REPO_ROOT/$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" ;;\n")
     result.add("esac\n")
+    # TC-8g — which phase the dispatcher asked for. Without a leading phase
+    # argument this is the lock refresh, exactly as before; the dispatcher's
+    # third phase asks for the certificate gate and says whether it was
+    # displaced. Both are forwarded to `repro` as dispatch FLAGS (before the
+    # `--`), never as hook arguments, so the hook's own argv stays git's.
+    result.add("REPRO_HOOK_PHASE=refresh\n")
+    result.add("REPRO_HOOK_DISPLACED=0\n")
+    result.add("if [ \"${1:-}\" = " & quoteShellPosix(PreCommitGatePhaseArg) &
+      " ]; then\n")
+    result.add("  REPRO_HOOK_PHASE=certificate-gate\n")
+    result.add("  shift\n")
+    result.add("  case \"${1:-}\" in\n")
+    result.add("    " & PreCommitDisplacedArg & "=1) REPRO_HOOK_DISPLACED=1; " &
+      "shift ;;\n")
+    result.add("    " & PreCommitDisplacedArg & "=*) shift ;;\n")
+    result.add("  esac\n")
+    result.add("fi\n")
   # Resolve the invoking checkout first: Git's hook environment is the source
   # of truth for a linked worktree's root. Only the managed child boundary is
   # scrubbed; the dispatcher has already invoked a preserved user hook with
@@ -17586,6 +17629,10 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       "--require=2 --hook-contract=" & hookContract & " 2>&1) || " &
       "REPRO_PROBE_STATUS=$?\n")
     result.add("  if [ \"$REPRO_PROBE_STATUS\" -ne 0 ]; then\n")
+    if hookName == "pre-commit":
+      # The refresh phase of this same commit has already printed (and
+      # recorded) the refusal; saying it twice per commit adds nothing.
+      result.add("    [ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
     result.add("    repro_contract_refusal\n")
     result.add("    exit 0\n")
     result.add("  fi\n")
@@ -17601,8 +17648,14 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       if hookName == "pre-commit":
         HookGitIndexFileEnv & "=\"$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" "
       else: ""
+    let phaseFlags =
+      if hookName == "pre-commit":
+        " --phase=\"$REPRO_HOOK_PHASE\" " &
+          "--dispatcher-displaced=\"$REPRO_HOOK_DISPLACED\""
+      else: ""
     result.add("  " & indexHandover & "\"$REPRO_CMD\" hooks dispatch " &
-      hookName & " --repo-root \"$REPO_ROOT\" -- \"$@\" || REPRO_STATUS=$?\n")
+      hookName & " --repo-root \"$REPO_ROOT\"" & phaseFlags &
+      " -- \"$@\" || REPRO_STATUS=$?\n")
   if hookName == "pre-push":
     # The gate's verdict is attributed whichever way it went. A PASS names its
     # build too: "repro check: OK" from an interpreter nobody can identify is
@@ -17619,6 +17672,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("echo \"repro hooks: hook protocol mismatch; run 'repro hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
     result.add("exit 1\n")
   else:
+    if hookName == "pre-commit":
+      # Said once per commit, by the refresh phase.
+      result.add("[ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
     result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
       hookName & "\" >&2\n")
     result.add("exit 0\n")
@@ -19258,6 +19314,10 @@ proc runPostCommitLockCommand*(args: openArray[string]): int
 # beside `runPostCommitLockCommand` because it shares that path's argv parser,
 # workspace resolution and stand-down gate.
 proc runPreCommitLockCommand*(args: openArray[string]): int
+# TC-8g: the `pre-commit` certificate-gate phase. Declared here for the
+# dispatcher; the body sits after the client pre-push `certificateGate`, whose
+# store lookup and coverage evaluation it shares.
+proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 
@@ -19311,6 +19371,8 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
   var repoRoot = ""
   var refsFile = ""
   var protocol = 0
+  var phase = "refresh"
+  var displaced = false
   var hookArgs: seq[string]
   var i = 1
   while i < args.len:
@@ -19329,6 +19391,13 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
         raise newException(ValueError,
           "unsupported managed-hook protocol " & raw & " (required: 2)")
       protocol = 2
+    elif arg == "--phase" or arg.startsWith("--phase="):
+      # TC-8g — `pre-commit` only: `refresh` (the lock refresh, the default)
+      # or `certificate-gate` (the dispatcher's third phase).
+      phase = valueFromFlag(args, i, "--phase")
+    elif arg == "--dispatcher-displaced" or
+        arg.startsWith("--dispatcher-displaced="):
+      displaced = valueFromFlag(args, i, "--dispatcher-displaced") == "1"
     inc i
   case hookName
   of "pre-commit":
@@ -19352,6 +19421,18 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # same commit moments later and already re-asserts the hook set; doing it
     # twice would put a second full hook reconciliation on the blocking half of
     # every commit for no additional coverage.
+    case phase
+    of "refresh": discard
+    of "certificate-gate":
+      # TC-8g — the third dispatcher phase, after the chained user hook and
+      # the refresh above have both had their chance to change the index.
+      return runPreCommitCertificateGate(
+        if repoRoot.len > 0: absolutePath(repoRoot) else: getCurrentDir(),
+        displaced)
+    else:
+      raise newException(ValueError,
+        "unsupported pre-commit phase: " & phase &
+          " (expected: refresh, certificate-gate)")
     var preArgs: seq[string]
     if repoRoot.len > 0:
       preArgs.add("--current-repo=" & repoRoot)
@@ -34363,7 +34444,8 @@ proc reflogActionSuggestsOperation*(subject: string): bool =
   firstWord in InFlightGitReflogActions
 
 proc probeGitOperationInProgress*(identity: GitToolIdentity;
-                                  repoPath: string): GitOperationProbe =
+                                  repoPath: string;
+                                  consultReflog = true): GitOperationProbe =
   ## Is git in the middle of a multi-step operation in this checkout?
   ##
   ## Every path is resolved with ``git rev-parse --git-path`` rather than
@@ -34426,6 +34508,17 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       result.marker = name
       return
 
+  # TC-8g — ``consultReflog = false`` is for a caller that runs only while a
+  # commit is being FORMED (the pre-commit certificate gate). Git creates the
+  # state paths above before it replays anything, so every replayed commit
+  # finds them; the reflog tail below would instead keep saying "rebase" on
+  # the first ordinary commit after a rebase FINISHED (its last entry is
+  # `rebase (finish)`), and a gate that stood down there would let that
+  # commit through unjudged.
+  if not consultReflog:
+    result.state = gosIdle
+    return
+
   # No state directory — which does NOT yet mean idle. See
   # ``InFlightGitReflogActions``: the am-backend rebase's rewind fires this
   # hook before its state directory exists.
@@ -34453,7 +34546,8 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       return
   result.state = gosIdle
 
-proc managedHookStandDown*(hookName, repoPath: string):
+proc managedHookStandDown*(hookName, repoPath: string;
+                           consultReflog = true):
     tuple[standDown: bool; report: string; loud: bool] =
   ## The gate every managed ``post-*`` hook passes through before it touches
   ## anything.
@@ -34482,7 +34576,7 @@ proc managedHookStandDown*(hookName, repoPath: string):
       "operation is in progress in " & repoPath & " — git is not " &
       "resolvable (" & err.msg & "); nothing was inspected or modified",
       true)
-  let probe = probeGitOperationInProgress(identity, repoPath)
+  let probe = probeGitOperationInProgress(identity, repoPath, consultReflog)
   case probe.state
   of gosIdle:
     (false, "", false)
@@ -48140,6 +48234,42 @@ proc appendPreCommitLog(workspaceRoot, line: string) =
   except CatchableError:
     discard
 
+proc preCommitRepinMarkerPath(workspaceRoot, repoRoot: string): string =
+  ## TC-8g — where the `pre-commit` refresh phase notes a lock it re-pinned
+  ## and staged, for the certificate-gate phase of the same commit to read.
+  ##
+  ## The two phases are separate processes (the dispatcher runs the managed
+  ## body once per phase), so the fact has to cross a process boundary. It
+  ## goes into the commit hooks' own report directory, under a name keyed by
+  ## the checkout, never into the repository: the gate must leave the index
+  ## and the working tree exactly as it found them. "" when the hooks may not
+  ## write here at all.
+  let dir = commitHookReportDir(workspaceRoot)
+  if dir.len == 0 or repoRoot.len == 0:
+    return ""
+  dir / ("pre-commit-repin-" &
+    content_id.sha256Hex(absolutePath(repoRoot))[0 ..< 16] & ".txt")
+
+proc notePreCommitRepin(workspaceRoot, repoRoot, lockPath: string) =
+  ## Record that this commit's refresh wrote and staged ``lockPath``. One line
+  ## per lock: its path relative to the checkout, TAB, the sha256 of the bytes
+  ## staged. The gate names the re-pin only when the index it judges still
+  ## holds exactly those bytes, so a note a crashed or skipped gate left
+  ## behind can never be misread as describing a later commit. Never raises.
+  try:
+    let marker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+    if marker.len == 0 or not fileExists(lockPath):
+      return
+    let relative = relativePath(absolutePath(lockPath),
+      absolutePath(repoRoot)).replace(DirSep, '/')
+    createDir(marker.parentDir)
+    var f: File
+    if open(f, marker, fmAppend):
+      f.writeLine(relative & "\t" & content_id.sha256Hex(readFile(lockPath)))
+      f.close()
+  except CatchableError:
+    discard
+
 proc emitPostCommitWarning(tag, diagnostic, workspaceRoot: string) =
   ## M19b — one line to stderr for any post-commit run that did not end with a
   ## published lock record and is not the designed local-only steady state.
@@ -50070,6 +50200,7 @@ proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
       let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath)
       if staged.ok:
         line.add("; staged into this commit")
+        notePreCommitRepin(workspaceRoot, repoRoot, plan.lockPath)
       else:
         line.add("; NOT STAGED: " & staged.diagnostic)
         stderr.writeLine("repro pre-commit: repro.lock was re-pinned but " &
@@ -50124,6 +50255,13 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # to observe, so there is nothing to record. Same ruling RA-10 makes for
     # `post-commit`, for the same reason.
     return 0
+  # TC-8g — a re-pin note describes ONE commit. Whatever an earlier commit
+  # left behind (its gate phase never ran) is dropped before this one's
+  # refresh can add its own.
+  let repinMarker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+  if repinMarker.len > 0:
+    try: removeFile(repinMarker)
+    except CatchableError: discard
 
   # (1) History rewriting, the half that is NOT handled by content-conditional
   # writing. `git commit --amend` fires this hook with nothing in flight and
@@ -50240,6 +50378,7 @@ proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
     let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath)
     if staged.ok:
       line.add("; staged into this commit")
+      notePreCommitRepin(workspaceRoot, repoRoot, result.lockPath)
     else:
       # Said out loud on BOTH channels. A refreshed-but-unstaged lock is the
       # one outcome that looks like success in the log and behaves like the
@@ -54652,6 +54791,257 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
         evidence: "unverifiable: " & detail,
         source: ""))
       report.exitCode = 2
+
+# ============================================================================
+# TC-8g — the pre-commit certificate gate: the dispatcher's third phase.
+#
+# Because a certificate is bound to CONTENT, the question "do trusted
+# certificates cover this?" can be asked before a commit exists, about the
+# index the commit is about to record (test-certificates Standard §5.1,
+# Content-Id §5). The answer is EARLY FEEDBACK: `git commit --no-verify`
+# skips it, and the push gate and the receiving side remain the enforcement
+# points. Its value is that a refusal arrives while the work is still in hand.
+#
+# The phase runs LAST among the commit's hooks, after the chained user hook
+# (prek, a formatter) and the managed lock refresh, because §5.1 requires a
+# pre-commit gate to "run after every step of the commit that changes the
+# index": a hook that restages a rewritten file after the gate looked
+# produces a commit the gate never saw.
+#
+# Where things come from:
+#   * the CONTENT is ``git write-tree`` over the index being committed — the
+#     ``GIT_INDEX_FILE`` git hands the hook for ``commit -a`` and
+#     ``commit <paths>``, carried across the managed body's environment scrub
+#     as ``REPROBUILD_HOOK_GIT_INDEX_FILE``. It is computed over a COPY of
+#     that index, with optional locks off: the user's index is never written;
+#   * the CANDIDATES come from the standard local certificate store, both
+#     roots, under that content id — never from notes (operator decision D2).
+#     The store is per user and keyed by content only, so a certificate issued
+#     from another clone or worktree of the same content counts;
+#   * each candidate is VERIFIED through the same evaluator as every other
+#     client gate (TC-8b: registered signature, content match, reprobuild's
+#     lock step), for each required platform;
+#   * the MODE is ``commit_gate``, which defaults to ``gate_mode`` (D7). Until
+#     the shared branch policy exists (TC-9b/TC-9c) the requirement is the
+#     project's ``[certificates]`` table, which has no ``commit_gate`` key, so
+#     the default always applies. TC-9c changes the input, not this logic.
+#
+# A record-store project's lock is not part of the content (D8): the gate
+# passes on the certificate alone and never looks the lock record up. The
+# record is written after the commit, at pre-push.
+# ============================================================================
+
+proc commitGateMode*(policy: CertificatePolicy): CertificateGateMode =
+  ## The pre-commit gate's mode for ``policy`` (operator decision D7):
+  ## ``commit_gate``, defaulting to ``gate_mode``. The ``[certificates]``
+  ## table this reads today has no ``commit_gate`` key, so this is
+  ## ``gate_mode``; the shared branch policy (TC-9c) will supply both.
+  policy.gateMode
+
+proc consumePreCommitRepinNotes(workspaceRoot, repoRoot: string):
+    seq[tuple[path, digest: string]] =
+  ## Read and REMOVE the re-pin notes this commit's refresh phase left
+  ## (``notePreCommitRepin``). Removed whatever is found, so no later commit
+  ## can inherit them. Never raises.
+  let marker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+  if marker.len == 0 or not fileExists(marker):
+    return
+  try:
+    for line in readFile(marker).splitLines():
+      let tab = line.find('\t')
+      if tab > 0 and tab < line.len - 1:
+        result.add((path: line[0 ..< tab], digest: line[tab + 1 .. ^1]))
+  except CatchableError:
+    discard
+  try: removeFile(marker)
+  except CatchableError: discard
+
+proc hookIndexFile(repoRoot: string): string =
+  ## The index the commit in flight is built from: the managed body's private
+  ## carrier, else git's own ``GIT_INDEX_FILE`` (a hook that dispatches
+  ## directly, without the managed body's scrub), else "" — the repository's
+  ## default index. A relative value is resolved against the checkout, which
+  ## is where git interprets it for a hook.
+  result = getEnv(HookGitIndexFileEnv)
+  if result.len == 0:
+    result = getEnv("GIT_INDEX_FILE")
+  if result.len > 0 and not result.isAbsolute:
+    result = repoRoot / result
+
+proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
+  ## ``repro hooks dispatch pre-commit --phase=certificate-gate`` routes here.
+  ##
+  ## Returns 1 — git refuses the commit — only under ``commit_gate =
+  ## required``, from a canonical (not displaced) dispatcher, when the
+  ## index being committed is not covered or its coverage cannot be
+  ## established. Every other outcome returns 0: ``advisory`` reports,
+  ## ``off`` does nothing, a replay stands down, and a fault in the gate's
+  ## own inputs (no workspace, a manifest that does not resolve) is logged
+  ## and is not a reason to reject a developer's work — the push gate meets
+  ## the same fault and is the enforcement point.
+  let timestamp = isoTimestampNow()
+  let workspaceRoot = resolvePostCommitWorkspaceRoot(repoRoot, "")
+  if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
+    return 0
+  let repinNotes = consumePreCommitRepinNotes(workspaceRoot, repoRoot)
+  template log(line: string) =
+    appendPreCommitLog(workspaceRoot, timestamp & " certificate-gate " & line)
+
+  var resolved: ResolvedProject
+  var workspaceLocal: Option[WorkspaceLocal]
+  try:
+    (resolved, workspaceLocal) = resolveWorkspaceProjectShared(workspaceRoot,
+      "", "the pre-commit certificate gate")
+  except CatchableError as err:
+    log("not-evaluated: the workspace project did not resolve: " & err.msg)
+    return 0
+  let policy = resolved.certificatePolicy
+  let configured = commitGateMode(policy)
+  if configured == cgmOff:
+    return 0
+  if policy.requiredPlatforms.len == 0:
+    # Same reading as the push gate: no required platform, nothing to attest.
+    log("not-gated: the policy sets no required_platforms")
+    return 0
+
+  # Only a repository the project declares carries the project's
+  # certificates; a commit anywhere else (the manifest repository itself, an
+  # unrelated checkout under the workspace root) is not this policy's to judge.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    log("not-evaluated: git is not resolvable: " & err.msg)
+    return 0
+  let match = resolveRepoWorktreeMatch(identity, workspaceRoot,
+    resolved.repos, repoRoot)
+  if not match.found:
+    log("not-gated: " & repoRoot & " is not a repository of project '" &
+      resolved.projectName & "'" &
+      (if match.diagnostic.len > 0: " (" & match.diagnostic & ")" else: ""))
+    return 0
+  let repoName = resolved.repos[match.repoIndex].name
+
+  # A replay (rebase, cherry-pick, `am`) re-creates commits that already
+  # exist; judging each one again would stop the operation half way through
+  # for content the push gate judges anyway. Logged, so a gate that stood
+  # down is distinguishable from one that never ran.
+  let standDown = managedHookStandDown("pre-commit", repoRoot,
+    consultReflog = false)
+  if standDown.standDown:
+    log((if standDown.loud: "inert" else: "stood-down") & ": " &
+      standDown.report)
+    if standDown.loud:
+      stderr.writeLine("repro " & standDown.report)
+    return 0
+
+  # Displaced, the dispatcher runs as `pre-commit.legacy` and the manager that
+  # displaced it runs its own hooks AFTER it. Those may still change the
+  # index, so this gate cannot know it judged the final content: it reports
+  # and does not refuse.
+  let mode =
+    if displaced and configured == cgmRequired: cgmAdvisory else: configured
+  let prefix = "repro pre-commit: certificate gate: "
+
+  # The content id is computed by `git` children of this process, so the
+  # index being committed is named to them through the environment. This
+  # process is the gate alone and exits right after, and the variable is
+  # removed again before anything else runs.
+  let indexFile = hookIndexFile(repoRoot)
+  let hadIndexEnv = existsEnv("GIT_INDEX_FILE")
+  let savedIndexEnv = getEnv("GIT_INDEX_FILE")
+  if indexFile.len > 0:
+    putEnv("GIT_INDEX_FILE", indexFile)
+  var lookup: LocalStoreLookup
+  var verdict: ReprobuildCoverageVerdict
+  var repinned: seq[string]
+  try:
+    let state = indexUnderEvaluation(repoRoot, repoName)
+    lookup = findCertificatesInLocalStore(state)
+    # D8: a project whose lock lives in an out-of-tree record store has no
+    # lock in this content, and `reprobuildLockVerdict` does not consult the
+    # store for a state that is not a commit. The records directory is
+    # therefore not even resolved here.
+    let recordStore = pickRecordStoreRoot(
+      WorkspaceLockArgs(workspaceRoot: workspaceRoot), workspaceLocal)
+    let lockSource =
+      if recordStore.len > 0: recordStoreLockSource("")
+      else: committedLockSource()
+    let keys = readRegisteredKeyStoreChecked(
+      registeredKeyStorePath(workspaceRoot))
+    verdict = evaluateReprobuildCoverage(lookup.found, state,
+      policy.requiredPlatforms, policy.requiredTargets, keys, lockSource,
+      (if lookup.searchFailed: lookup.problems else: @[]))
+    if verdict.outcome != voCovered:
+      for note in repinNotes:
+        let staged = readContentFile(repoRoot, note.path, state.content)
+        if staged.status == cfsPresent and
+            content_id.sha256Hex(staged.bytes) == note.digest:
+          repinned.add(note.path)
+  finally:
+    if hadIndexEnv: putEnv("GIT_INDEX_FILE", savedIndexEnv)
+    else: delEnv("GIT_INDEX_FILE")
+
+  let content =
+    if lookup.contentIds.len > 0: lookup.contentIds.join(", ")
+    else: "the index being committed"
+  if verdict.outcome == voCovered:
+    log("covered: " & content & " for " & policy.requiredPlatforms.join(", ") &
+      " x [" & policy.requiredTargets.join(", ") & "]")
+    return 0
+
+  let refuses = mode == cgmRequired
+  let verdictTag =
+    if verdict.outcome == voUnverifiable: "unverifiable" else: "not-covered"
+  log((if refuses: "refused " else: "reported ") & verdictTag & ": " &
+    content & ": " & describeCoverageVerdict(verdict) &
+    (if displaced: " (dispatcher displaced)" else: "") &
+    (if repinned.len > 0: " (re-pinned: " & repinned.join(", ") & ")"
+     else: ""))
+  for problem in lookup.problems:
+    stderr.writeLine(prefix & "certificate store: " & problem)
+  if verdict.outcome == voUnverifiable:
+    stderr.writeLine(prefix & "coverage of the content being committed (" &
+      content & ") could not be established: " &
+      describeCoverageVerdict(verdict))
+    stderr.writeLine(prefix & "fix what is named (an unreadable key store " &
+      "or certificate store, an algorithm this reprobuild cannot compute); " &
+      "re-running the tests changes nothing")
+  else:
+    let searched =
+      if lookup.found.len == 0 and lookup.searched.len > 0:
+        " (no certificate in the local store; searched " &
+          lookup.searched.join(", ") & ")"
+      else: ""
+    stderr.writeLine(prefix & "no trusted certificate covers the content " &
+      "being committed (" & content & "): " &
+      describeCoverageVerdict(verdict) & searched)
+    if repinned.len > 0:
+      # HL-10 depends on this naming: the refresh, not the developer, moved
+      # the content away from what was tested.
+      stderr.writeLine(prefix & "cause: this commit's lock refresh re-pinned " &
+        "and staged " & repinned.join(", ") & ", so the content being " &
+        "committed is not the content the tests ran on")
+    stderr.writeLine(prefix & "remedy: run 'repro certify' on exactly what " &
+      "you are committing (on each required platform: " &
+      policy.requiredPlatforms.join(", ") & "), then commit again")
+  if displaced:
+    stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
+      "pre-commit.legacy under another hook manager, whose hooks run after " &
+      "this gate and may still change the index, so this gate cannot refuse. " &
+      "Restore it with 'repro hooks ensure --vcs " & repoRoot & "'")
+  if refuses:
+    stderr.writeLine(prefix & "the commit is REFUSED (commit_gate = " &
+      "required). This is early feedback, which `git commit " &
+      "--no-verify` skips; it is not the enforcement point: the push " &
+      "gate checks the pushed content again (test-certificates Standard " &
+      "§5.1)")
+    return 1
+  stderr.writeLine(prefix & "advisory: the commit proceeds. This is early " &
+    "feedback, which `git commit --no-verify` skips; it is not the " &
+    "enforcement point: the push gate checks the pushed " &
+    "content again (test-certificates Standard §5.1)")
+  0
 
 # ============================================================================
 # TC-6 — Receiving-side enforcement: the local push gateway.
