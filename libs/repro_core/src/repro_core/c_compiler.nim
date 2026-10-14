@@ -303,9 +303,10 @@ const clangNoTempFileFlag* = "-fno-temp-file"
 
 var cachedFlagAcceptance = initTable[string, bool]()
 
-proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
+proc cCompilerAcceptsFlags*(cc: string; flags: openArray[string];
+                            scratchDir: string): bool =
   ## Whether `cc` compiles a trivial C translation unit to an object file
-  ## when given `flag`. A real compile, not a version comparison: what
+  ## when given the paired `flags`. A real compile, not a version comparison: what
   ## matters is that THIS binary accepts the flag, and vendor builds (Apple
   ## clang) do not map onto upstream version numbers. Any failure -- the
   ## compiler rejects the flag, is missing, cannot write its output -- answers
@@ -317,10 +318,10 @@ proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
   ## pass a directory the edge ignores as an input (its nimcache), so the
   ## probe's own files never become part of the edge's key.
   ##
-  ## Memoised per (compiler path, flag) for the life of the process.
-  if cc.len == 0 or flag.len == 0:
+  ## Memoised per (compiler path, flags) for the life of the process.
+  if cc.len == 0 or flags.len == 0:
     return false
-  let key = cc & "\0" & flag
+  let key = cc & "\0" & flags.join("\0")
   if cachedFlagAcceptance.hasKey(key):
     return cachedFlagAcceptance[key]
   result = false
@@ -332,8 +333,11 @@ proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
     writeFile(extendedPath(src), "int repro_cc_flag_probe(void) { return 0; }\n")
     if fileExists(extendedPath(obj)):
       removeFile(extendedPath(obj))
-    let (_, exitCode) = uncontrolledExecCmdEx(quoteShell(cc) & " " &
-      quoteShell(flag) & " -c " & quoteShell(src) & " -o " & quoteShell(obj))
+    var command = quoteShell(cc)
+    for flag in flags:
+      command.add " " & quoteShell(flag)
+    let (_, exitCode) = uncontrolledExecCmdEx(command &
+      " -c " & quoteShell(src) & " -o " & quoteShell(obj))
     result = exitCode == 0 and fileExists(extendedPath(obj))
   except CatchableError, OSError:
     result = false
@@ -342,6 +346,12 @@ proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
   except CatchableError, OSError:
     discard
   cachedFlagAcceptance[key] = result
+
+proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
+  ## Single-flag convenience wrapper; paired cc1 options must be probed as
+  ## one argv, since accepting either half alone says nothing about the pair.
+  if flag.len > 0:
+    result = cCompilerAcceptsFlags(cc, [flag], scratchDir)
 
 proc clangNoTempFileCFlags*(cc, scratchDir: string): seq[string] =
   ## `@[clangNoTempFileFlag]` when `cc` is a clang (`cCompilerFamily`) that

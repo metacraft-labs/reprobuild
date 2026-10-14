@@ -13,7 +13,7 @@
 ## strangers. `packages/sh.nim` refuses to carry one for exactly that reason.
 ##
 ## THE MECHANISM. `repro_build_engine` resolves each entropy record's
-## `MonitorRecord.osPid` against the capture's own `mrProcessExec` records --
+## `MonitorRecord.osPid` against the capture's successful exec and spawn records --
 ## which name every pid's image -- and asks THIS table whether that image's own
 ## CLI spec blesses it. A blessing then says "this TOOL's randomness is
 ## benign", which is a claim the tool's author can actually make, instead of
@@ -92,7 +92,7 @@ import std/[options, strutils]
 type
   EntropyBlessedTool* = object
     ## One tool whose own CLI spec states that its randomness cannot reach its
-    ## output, keyed by the IMAGE NAME an `mrProcessExec` record would carry.
+    ## output, keyed by the IMAGE NAME an exec or spawn record would carry.
     image*: string
       ## The executable's base name, without any platform suffix: `mktemp`,
       ## `git`. Matched against the base name of the resolved image, with a

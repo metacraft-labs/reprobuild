@@ -82,6 +82,8 @@ template extraResources*(targetResources: var seq[ResourceIntent]) =
 # Profile-root resolution.
 # ---------------------------------------------------------------------------
 
+const nullDevice = when defined(windows): "NUL" else: "/dev/null"
+
 suite "M83 Phase C: profile-root resolution":
 
   test "resolveProfileRoot prefers explicit path over directory probes":
@@ -495,6 +497,11 @@ suite "installed repro: profile compile source root and compiler":
   # end-to-end proof that it makes a clang-driven compile publish on its
   # first run is `tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim`.
 
+  test "executed profiles force C compilation rather than reuse opaque Nim objects":
+    let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+      "/c/out", "/r")
+    check "--forceBuild:on" in argv
+
   test "C flags reach nim as --passC, before the profile":
     let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
       "/c/out", "/r", "/cc/bin/clang", [clangNoTempFileFlag])
@@ -527,7 +534,8 @@ suite "installed repro: profile compile source root and compiler":
       checkpoint("clang: " & clangExe)
       check cCompilerAcceptsFlag(clangExe, clangNoTempFileFlag, scratch)
       check clangNoTempFileCFlags(clangExe, scratch) == @[clangNoTempFileFlag]
-      check profileCompileCFlags(clangExe, scratch) == @[clangNoTempFileFlag]
+      check profileCompileCFlags(clangExe, scratch) ==
+        @[clangNoTempFileFlag, "-Xclang -dependency-file -Xclang " & nullDevice]
       check not cCompilerAcceptsFlag(clangExe, "-fno-repro-no-such-flag",
         scratch)
     if gccExe.len > 0:
