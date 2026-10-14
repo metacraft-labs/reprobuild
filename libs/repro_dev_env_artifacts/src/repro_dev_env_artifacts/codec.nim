@@ -80,7 +80,10 @@ type
     logicalName: SszText
     packageIdentity: SszText
     executionProfileId: Digest32
-    realizedPrefix: SszText
+    # Renamed from `realizedPrefix` without a schema bump: SSZ encodes fields
+    # by position, not by name, so the wire bytes, and the artifactId hashed
+    # over them, are unchanged and previously stored artifacts still decode.
+    policyPath: SszText
     activityRequirements: SszStringList
 
   DevEnvTaskSummarySsz = object
@@ -324,7 +327,7 @@ proc toSsz(value: DevEnvToolProfileRef): DevEnvToolProfileRefSsz =
     logicalName: toSszText(value.logicalName),
     packageIdentity: toSszText(value.packageIdentity),
     executionProfileId: value.executionProfileId,
-    realizedPrefix: toSszText(value.realizedPrefix),
+    policyPath: toSszText(value.policyPath),
     activityRequirements: toSszStringList(value.activityRequirements))
 
 proc fromSsz(value: DevEnvToolProfileRefSsz): DevEnvToolProfileRef =
@@ -332,7 +335,7 @@ proc fromSsz(value: DevEnvToolProfileRefSsz): DevEnvToolProfileRef =
     logicalName: fromSszText(value.logicalName),
     packageIdentity: fromSszText(value.packageIdentity),
     executionProfileId: value.executionProfileId,
-    realizedPrefix: fromSszText(value.realizedPrefix),
+    policyPath: fromSszText(value.policyPath),
     activityRequirements: fromSszStringList(value.activityRequirements))
 
 proc toSsz(value: DevEnvTaskSummary): DevEnvTaskSummarySsz =
@@ -769,7 +772,7 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
       logicalName: tool.logicalName,
       packageIdentity: tool.packageSelector,
       executionProfileId: digestBytes(identityPayload),
-      realizedPrefix: tool.policyPath.join(":"),
+      policyPath: tool.policyPath.join(":"),
       activityRequirements: tool.activityRequirements))
   for task in devEnv.tasks:
     result.tasks.add(DevEnvTaskSummary(

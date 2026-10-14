@@ -14259,14 +14259,18 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   ## The PATH contribution that makes a dev-env activation PROVIDE the
   ## toolchain its recipe declares, rather than merely name it.
   ##
-  ## Before this, `uses: "rustc >=1.92"` reached an activated shell as a
-  ## `toolProfiles` entry with an EMPTY `realizedPrefix`: the artifact knew
-  ## which packages the project wanted and even carried an execution-profile
-  ## identity for each, but nothing realized them and nothing put them on
-  ## PATH. `rustc` in that shell was whatever the host happened to have
-  ## installed — which is the property a declared toolchain exists to remove,
-  ## and the reason projects kept a second, imperative provisioning system
-  ## (an `env.ps1`, a flake dev shell) beside their recipe.
+  ## Before this, `uses: "rustc >=1.92"` reached an activated shell only as a
+  ## `toolProfiles` entry: the artifact knew which packages the project
+  ## wanted and even carried an execution-profile identity for each, but
+  ## nothing realized them and nothing put them on PATH. (That entry's
+  ## `policyPath`, once misnamed `realizedPrefix`, is the `uses:` nesting
+  ## path and is empty for a top-level entry; it never records a prefix.
+  ## The artifact is produced before any tool is realized, so the realized
+  ## prefix lives only in the PATH this proc contributes.) `rustc` in that
+  ## shell was whatever the host happened to have installed — which is the
+  ## property a declared toolchain exists to remove, and the reason projects
+  ## kept a second, imperative provisioning system (an `env.ps1`, a flake dev
+  ## shell) beside their recipe.
   ##
   ## `repro develop` has realized tools since the beginning, through exactly
   ## the call below. What was missing was not the capability but its reach:
@@ -36459,6 +36463,74 @@ const stateFileWording = "`.repro/workspace-state.toml` (or the older " &
   ## How diagnostics name the per-checkout state file while both names are
   ## read (Workspace-Settings-Files.md §8 step 1).
 
+type
+  NoActiveProjectSetError* = object of ValueError
+    ## A verb needed a project and the workspace has no active project set
+    ## recorded (and the caller named none). ``msg`` is the full one-line
+    ## refusal INCLUDING its remedy; ``diagnosis`` is the same text without
+    ## the remedy, for a caller that prints the remedy on a line of its own
+    ## (``repro health``'s ``remedy:`` row) and would otherwise say it twice.
+    diagnosis*: string
+
+const noProjectSetRemedyCommand* = "repro workspace enable <project>"
+  ## The command that WRITES the state file ``stateFileWording`` names --
+  ## CLI/workspace.md, "The Two Axes: Membership and Definition": ``enable``
+  ## is the membership verb, and the active project set it records is what
+  ## every verb below reads when no ``<project>`` is given.
+
+proc noProjectSetError*(workspaceRoot, opLabel: string;
+                        acceptsProjectArgument: bool):
+    ref NoActiveProjectSetError =
+  ## Interactive-UX-And-Progress.md Principle 2 ("Every failure teaches the
+  ## remedy") -- the ONE builder for "``opLabel`` found no recorded project
+  ## set at ``workspaceRoot``". Every site that refuses for that reason calls
+  ## it, so the diagnosis and the remedy cannot drift apart between verbs.
+  ##
+  ## WHY IT EXISTS. Five sites raised the first sentence below on their own
+  ## and stopped there: it named the file that was missing and never the
+  ## command that creates it. In the field (reprobuild-pm issue
+  ## ``2026-09-20-workspace-toml-errors-do-not-name-remedy``) the refusal came
+  ## from the pre-push gate, the answer had to be dug out of a migration note
+  ## in another repository, and the workaround within reach was
+  ## ``git push --no-verify`` -- exactly the routing-around Principle 2 exists
+  ## to prevent.
+  ##
+  ## THE FIRST SENTENCE IS UNCHANGED, byte for byte, for both shapes it had:
+  ## other suites match on it, and the diagnosis was never wrong, only
+  ## incomplete. The remedy is APPENDED on the same line, ``-- remedy:``
+  ## style, rather than on a new one: this text is also embedded whole into
+  ## one-line records -- the post-commit lock log
+  ## (``<timestamp> no-lock-failed NO lock written: <msg>``) and
+  ## ``repro health``'s ``detail`` column -- which a newline would split.
+  ##
+  ## ``acceptsProjectArgument`` decides whether the one-off route is offered.
+  ## ``repro branch`` / ``repro switch`` take no ``<project>`` (the project is
+  ## deliberately not a positional there, M13), so advising one would be a
+  ## remedy that fails when followed; for them the alternative is phrased as
+  ## "a project name recoverable from" the state file, as it always was.
+  ##
+  ## NOT FOR THE RECORD STORE. ``noNameableProjectError`` routes a bare
+  ## manifests clone to its own diagnostic BEFORE this one, because there
+  ## recording a project set is the forbidden route inference
+  ## (Unified-Locking-And-Hooks.md §10), not a remedy.
+  let diagnosis =
+    if acceptsProjectArgument:
+      opLabel & " requires either " & stateFileWording & " or a <project> " &
+        "argument; neither was present at " & workspaceRoot
+    else:
+      opLabel & " requires either " & stateFileWording & " or a project " &
+        "name recoverable from one; neither was present at " & workspaceRoot
+  let oneOff =
+    if acceptsProjectArgument:
+      "; or pass <project> to this command to run it once without " &
+        "recording a set"
+    else: ""
+  result = newException(NoActiveProjectSetError, diagnosis &
+    " -- remedy: `" & noProjectSetRemedyCommand & "` records the active " &
+    "project set (`repro workspace projects list` names the projects)" &
+    oneOff)
+  result.diagnosis = diagnosis
+
 proc findBootstrapConfigPath(workspaceRoot: string): string =
   ## Locate the workspace settings file: ``REPRO_WORKSPACE_CONFIG`` when set,
   ## else ``repro-workspace.toml`` — or, until the old name is retired, the
@@ -38386,12 +38458,23 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   except CatchableError:
     return ""
 
-proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
+proc noNameableProjectError(workspaceRoot, opLabel: string;
+                            acceptsProjectArgument = true): ref ValueError =
   ## Interactive-UX-And-Progress.md Principle 2 -- the ONE diagnostic for
   ## "``opLabel`` could name no project at ``workspaceRoot``". Shared by the
-  ## MO-9 ladder below and by ``repro workspace lock``'s own copy of the same
-  ## dispatch, so the two cannot drift into two different pieces of advice
-  ## about the same directory.
+  ## MO-9 ladder below, by ``repro workspace lock``'s own copy of the same
+  ## dispatch, and by the ``repro workspace list`` / ``repro branch`` /
+  ## ``repro switch`` resolvers, so none of them can drift into a different
+  ## piece of advice about the same directory. (Those last three used to
+  ## raise the original sentence by hand; routing them here is what keeps the
+  ## record store from being told to record a project set by them, now that
+  ## the original sentence carries that remedy.)
+  ##
+  ## ``acceptsProjectArgument`` is false for ``branch`` / ``switch``, which
+  ## take no ``<project>``: it selects the "recoverable from one" wording of
+  ## the original sentence and drops the store diagnostic's sentence about
+  ## passing a ``<project>``, which those verbs cannot do. With it true (the
+  ## default) both diagnostics are byte-identical to what they were.
   ##
   ## WHAT WAS WRONG WITH THE ONE MESSAGE. It named the two things that were
   ## ABSENT -- "requires either `.repro/workspace.toml` or a <project>
@@ -38441,11 +38524,22 @@ proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
   ## never looks at the file at all, so without this check it could reach
   ## this message and assert the absence of a ``repro.lock`` sitting right
   ## there in the root it is naming.
+  ##
+  ## The original sentence, where it stands, now carries its remedy -- the
+  ## command that records a project set -- via ``noProjectSetError``, the
+  ## builder every other no-project-set site shares. The store branch below
+  ## deliberately does NOT: recording a set there is the very claim it warns
+  ## against.
   let manifest = standaloneMembershipManifestCheckout(workspaceRoot)
   if manifest.len == 0 or hasCommittedLockWorkspaceMarker(workspaceRoot):
-    return newException(ValueError,
-      opLabel & " requires either " & stateFileWording & " or a <project> " &
-        "argument; neither was present at " & workspaceRoot)
+    return noProjectSetError(workspaceRoot, opLabel, acceptsProjectArgument)
+  let projectArgumentSentence =
+    if acceptsProjectArgument:
+      "Passing a <project> does not get past this either -- it only makes " &
+        "this command operate on the store as though it were the workspace, " &
+        "doing its work inside THIS repo instead of inside the workspace " &
+        "these records describe. "
+    else: ""
   newException(ValueError,
     opLabel & ": found membership manifest data at " & workspaceRoot &
       " (" & manifest & ") with no `.repro/` workspace shell beside it and " &
@@ -38457,10 +38551,7 @@ proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
       "not open here either. Do NOT hand-create a `.repro/` state file " &
       "here: that makes this checkout claim to BE the workspace it " &
       "describes, which Unified-Locking-And-Hooks.md section 10 forbids. " &
-      "Passing a <project> does not get past this either -- it only makes " &
-      "this command operate on the store as though it were the workspace, " &
-      "doing its work inside THIS repo instead of inside the workspace " &
-      "these records describe. If this is the " &
+      projectArgumentSentence & "If this is the " &
       "record store, " & opLabel & " does not apply to it -- run it from " &
       "the workspace that consumes these records. If you meant THIS " &
       "directory to become a workspace, `repro workspace init <project> " &
@@ -45075,6 +45166,11 @@ type
     project*: string
     workspaceRoot*: string
     flavor*: string
+    dryRun*: bool
+      ## CLI/sync.md §`--dry-run` with `--mainline`: the document is a PLAN.
+      ## Each entry's ``outcome`` is the planner's verdict and ``action`` the
+      ## step a real run would take, but nothing ran, so ``headAfter`` equals
+      ## ``headBefore`` and ``exitCode`` is 0.
     repos*: seq[MainlineSyncEntry]
     exitCode*: int
 
@@ -45083,6 +45179,7 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["mainline"] = %true
+  result["dryRun"] = %report.dryRun
   result["flavor"] = %report.flavor
   var repos = newJArray()
   for e in report.repos:
@@ -45106,8 +45203,23 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
   var counts = initOrderedTable[string, int]()
   for e in report.repos:
     counts[e.outcome] = counts.getOrDefault(e.outcome, 0) + 1
+    # CLI/sync.md §`--dry-run` with `--mainline`: a dry run names every repo
+    # with a PENDING action as "would <action>", routine or not — a planned
+    # fast-forward is the very thing the operator asked to preview, and
+    # printing the planner's past-tense verdict alone ("fast_forwarded") read
+    # as if it had happened. Repos with no pending action (up to date, or a
+    # refusal) render exactly as in a real run.
+    let pending = report.dryRun and e.action.len > 0 and e.action != "none"
     let isRoutine = e.outcome in ["up_to_date", "fast_forwarded"]
-    if verbose or not isRoutine:
+    if pending:
+      var line = "workspace sync: " & e.path & " would " & e.action &
+        " (" & e.outcome & ")"
+      if e.branch.len > 0 and e.mainlineBranch.len > 0:
+        line.add(" " & e.branch & " <- " & e.mainlineBranch)
+      if e.diagnostic.len > 0:
+        line.add(" (" & e.diagnostic & ")")
+      result.add(line)
+    elif verbose or not isRoutine:
       var line = "workspace sync: " & e.path & " " & e.outcome
       if e.branch.len > 0 and e.mainlineBranch.len > 0:
         line.add(" " & e.branch & " <- " & e.mainlineBranch)
@@ -45117,7 +45229,11 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
   var parts: seq[string]
   for tag, n in counts:
     parts.add($n & " " & tag)
-  result.add("workspace sync --mainline: " & parts.join(", ") &
+  # Same "(dry-run)" marker the ordinary sync's summary carries.
+  let summaryPrefix =
+    if report.dryRun: "workspace sync --mainline (dry-run): "
+    else: "workspace sync --mainline: "
+  result.add(summaryPrefix & parts.join(", ") &
     " (" & $report.repos.len & " repo(s))")
 
 proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
@@ -45127,8 +45243,18 @@ proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
   of msfMerge: "merge"
 
 proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
+  ## Run (or, under ``--dry-run``, only plan) a mainline sync.
+  ##
+  ## CLI/sync.md §`--dry-run` with `--mainline`: a dry run reads refs and
+  ## predicts conflicts, and does nothing else. Every phase that writes is
+  ## gated on ``args.dryRun`` below — the receipt directory, the fetch phase,
+  ## the clone-action construction (whose shared-bare refresh is itself a
+  ## fetch into the clone cache), and the ff/rebase/merge steps — so the plan
+  ## is computed against whatever remote-tracking refs the last fetch left.
+  ## A stale preview is acceptable; a preview that moves refs is not.
   result.workspaceRoot = args.workspaceRoot
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
+  result.dryRun = args.dryRun
 
   var resolveArgs = args
   if args.scopeProjects.len > 0:
@@ -45155,8 +45281,16 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   var fetchActions: seq[BuildAction]
   var fetchIdByPath = initTable[string, string]()
   let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
-  createDir(receiptDir)
-  for idx, repo in resolved.repos:
+  # A dry run creates no receipts and does not fetch: no receipt directory,
+  # and no fetch actions, so the engine (and its cache root) never runs.
+  # ``reposToFetch`` is empty under a dry run, which leaves ``fetchActions``
+  # empty and ``fetchFailure`` with no entries.
+  if not args.dryRun:
+    createDir(receiptDir)
+  let reposToFetch =
+    if args.dryRun: newSeq[ResolvedRepo]()
+    else: resolved.repos
+  for idx, repo in reposToFetch:
     if not dirExists(args.workspaceRoot / repo.path / ".git"):
       continue
     let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
@@ -45223,8 +45357,17 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     # split commit-graph chain prints a warning on stderr and nothing on
     # stdout, which merged read as one dirty line and made this gatherer
     # report a pristine sibling as dirty.
-    obs.isClean = gitRunPlainQuery(identity,
-      ["-C", repoAbs, "status", "--porcelain"]).output.strip().len == 0
+    #
+    # Under ``--dry-run`` the query also passes ``--no-optional-locks``:
+    # ``git status`` otherwise opportunistically rewrites the index to record
+    # refreshed stat data, which is a write to the checkout a preview must not
+    # make (https://git-scm.com/docs/git#Documentation/git.txt---no-optional-locks).
+    let statusArgs =
+      if args.dryRun:
+        @["--no-optional-locks", "-C", repoAbs, "status", "--porcelain"]
+      else:
+        @["-C", repoAbs, "status", "--porcelain"]
+    obs.isClean = gitRunPlainQuery(identity, statusArgs).output.strip().len == 0
     if obs.mainlineBranch.len > 0:
       obs.mainlineTip = revParse(identity, repoAbs,
         "refs/remotes/" & gitRemoteNameFor(repo) & "/" & obs.mainlineBranch)
@@ -45265,10 +45408,15 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     sharedBareForClone[fetchUrl] = reference
     reference
 
+  # Not even CONSTRUCTED under a dry run: building a clone action calls
+  # ``cloneReferenceFor``, whose ``refreshSharedBare`` clones or fetches the
+  # shared bare into the clone cache — a network fetch and a cache write
+  # before any clone runs. The plan's ``clone`` verdict comes from
+  # ``decisions`` alone.
   var cloneActions: seq[BuildAction]
   var cloneActionRepoIdx = initTable[string, int]()
   for i, decision in decisions:
-    if decision.action == msaClone:
+    if decision.action == msaClone and not args.dryRun:
       let repo = resolved.repos[i]
       let idSeg = safeRepoIdSegment(repo.name) & "-" & $i
       let receiptRel = ".repro" / "workspace" / "receipts" /
@@ -45411,8 +45559,13 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
             stderr.writeLine("workspace sync: [" & (if isRebase: "rebased" else: "merged") & "] " & repo.path)
     result.repos.add(entry)
 
+  # CLI/sync.md §`--dry-run` with `--mainline`: "The exit code is `0` whatever
+  # the verdicts: a dry run is informational, and the refusal and failure
+  # codes describe a run that happened." The verdicts themselves stay in the
+  # entries, so a script still reads which repos would be refused.
   result.exitCode =
-    if anyFailure: 1
+    if args.dryRun: 0
+    elif anyFailure: 1
     elif anyRefusal: 2
     else: 0
 
@@ -45424,8 +45577,13 @@ proc writeMainlineSyncReport(report: MainlineSyncReport; destination: string) =
 
 proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
   let report = executeMainlineSync(parsed)
-  writeMainlineSyncReport(report,
-    reportDestination(parsed.report, report.workspaceRoot, "sync"))
+  # A dry run persists no report, even under ``--write-report``: there is
+  # nothing to record about a run that did not happen, and the plan reaches
+  # the operator on stdout below (CLI/sync.md §`--dry-run` with `--mainline`;
+  # the ordinary path in ``runWorkspaceSyncCommand`` does the same).
+  if not parsed.dryRun:
+    writeMainlineSyncReport(report,
+      reportDestination(parsed.report, report.workspaceRoot, "sync"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -45457,7 +45615,9 @@ execution:
   --jobs N, -j N        default parallelism for fetch and checkout
   --jobs-network N      parallel fetches (default 8)
   --jobs-checkout N     parallel checkouts (default: CPU count)
-  --dry-run             print the plan and exit; mutates nothing
+  --dry-run             print the plan and exit 0; mutates nothing (no
+                        fetch, so --mainline plans against the current
+                        remote-tracking refs)
   --json                one machine-readable document on stdout
   --write-report[=PATH] persist the report as sync-report.json
   --verbose, -v         include raw per-repo tool output
@@ -45478,7 +45638,9 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ##     projects' repos); an unknown name errors clearly. No positional =
   ##     the whole workspace.
   ##   - The plan (which repos / what action) is ANNOUNCED before acting;
-  ##     ``--dry-run`` prints the plan and exits WITHOUT mutating.
+  ##     ``--dry-run`` prints the plan and exits WITHOUT mutating. That holds
+  ##     under ``--mainline`` too (``executeMainlineSync``): no fetch, clone,
+  ##     integration, receipt or report, and exit 0 whatever the verdicts.
   ##   - Per-repo live progress is emitted to stderr (suppressed under
   ##     ``--json``); the run ends with a scannable per-repo summary digest.
   ##   - ``--json`` emits the machine surface (plan + per-repo results +
@@ -63193,10 +63355,8 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
       # i.e. the union of the active project set (deduplicated by path).
       return extendWithActiveProjectSet(parsed.workspaceRoot,
         resolveWorkspaceListProject(withProject))
-    raise newException(ValueError,
-      "`repro workspace list` requires either " & stateFileWording & " " &
-        "or a <project> argument; neither was present at " &
-        parsed.workspaceRoot)
+    raise noNameableProjectError(parsed.workspaceRoot,
+      "`repro workspace list`")
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" /
     (parsed.projectName & ".toml")
@@ -64072,6 +64232,21 @@ proc gatherHealthChecks(parsed: HealthArgs):
         detail: "project '" & ctx.resolved.projectName & "' resolved (" &
           $ctx.resolved.repos.len & " repos)",
         remedy: "", fixKind: hfNone))
+    except NoActiveProjectSetError as err:
+      # Principle 2: ``workspace sync`` -- the generic remedy below -- refuses
+      # on this root with the very error being reported, so it is no remedy.
+      # What is missing is the recorded project set, and ``workspace enable``
+      # is what records it. ``diagnosis`` keeps the detail column free of the
+      # remedy the error's own message carries, which the ``remedy:`` row
+      # states instead.
+      ctx.resolvedOk = false
+      checks.add(HealthCheck(
+        name: "manifest",
+        status: hsFail,
+        detail: "manifest unresolved: " & err.diagnosis,
+        remedy: self & " workspace enable <project>   (records the active " &
+          "project set; `" & self & " workspace projects list` names them)",
+        fixKind: hfNone))
     except CatchableError as err:
       ctx.resolvedOk = false
       checks.add(HealthCheck(
@@ -66466,10 +66641,11 @@ proc resolveBranchProject(parsed: BranchArgs):
     except WorkspaceManifestParseError:
       discard
   if projectName.len == 0:
-    raise newException(ValueError,
-      "`repro branch <name>` requires either " & stateFileWording & " " &
-        "or a project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
+    # Principle 2 -- see ``noNameableProjectError``: the diagnosis plus the
+    # command that records a project set (or, at a bare manifests clone, the
+    # explanation that this command does not apply there).
+    raise noNameableProjectError(parsed.workspaceRoot,
+      "`repro branch <name>`", acceptsProjectArgument = false)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
@@ -67310,10 +67486,10 @@ proc resolveSwitchProject(parsed: SwitchArgs):
     except WorkspaceManifestParseError:
       discard
   if projectName.len == 0:
-    raise newException(ValueError,
-      "this command requires either " & stateFileWording & " " &
-        "or a project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
+    # Principle 2 -- see ``noNameableProjectError`` (and the same raise in
+    # ``resolveBranchProject``).
+    raise noNameableProjectError(parsed.workspaceRoot, "this command",
+      acceptsProjectArgument = false)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")

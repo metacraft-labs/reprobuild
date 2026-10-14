@@ -9522,6 +9522,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim",
+    binary: "build/test-bin/t_e2e_profile_compile_ignores_ancestor_membership",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim",
     binary: "build/test-bin/t_e2e_profile_compile_nim_path_closure",
     defines: @[],
@@ -13565,6 +13574,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_nix_tool_realizations_are_gc_rooted.nim",
     binary: "build/test-bin/t_nix_tool_realizations_are_gc_rooted",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_no_project_set_errors_name_the_remedy.nim",
+    binary: "build/test-bin/t_no_project_set_errors_name_the_remedy",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

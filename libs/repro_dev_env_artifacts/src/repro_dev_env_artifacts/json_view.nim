@@ -43,7 +43,7 @@ proc toolProfileJson(profile: DevEnvToolProfileRef): string =
   "{\"logicalName\":" & q(profile.logicalName) &
     ",\"packageIdentity\":" & q(profile.packageIdentity) &
     ",\"executionProfileId\":" & digestJson(profile.executionProfileId) &
-    ",\"realizedPrefix\":" & q(profile.realizedPrefix) &
+    ",\"policyPath\":" & q(profile.policyPath) &
     ",\"activityRequirements\":" & stringsJson(profile.activityRequirements) & "}"
 
 proc taskJson(task: DevEnvTaskSummary): string =
