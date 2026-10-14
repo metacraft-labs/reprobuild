@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1985,
+    "nimTestBinaries": 1986,
     "pureUnitConsolidationGroups": 54,
     "pureUnitTests": 616,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 2003
+    "testEntries": 2004
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1163,7 +1163,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 15,
-      "integration": 1088,
+      "integration": 1089,
       "platform/destructive": 126,
       "pure unit": 616,
       "unclassified": 158
@@ -1356,9 +1356,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1985,
+    "nimTestBinaryCount": 1986,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2003
+    "testEntryCount": 2004
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14765,8 +14765,8 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 89,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 95,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24837,6 +24837,23 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim",
       "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_planner_refuses_system_scope_resource",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_home_planner_refuses_system_scope_resource.nim",
+      "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"

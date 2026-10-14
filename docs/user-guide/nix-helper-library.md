@@ -96,9 +96,10 @@ intent = reprobuild.lib.readIntent {
 ```
 
 `evaluation` is what `repro home export --host m1 --target aarch64-darwin`
-prints as `evaluation`, with two differences: packages are sorted by name, and
-a resource of a kind the home planner does not handle (a system-scope kind)
-is kept rather than silently left out.
+prints as `evaluation`, with one difference: packages are sorted by name. A
+home profile that declares a resource the home planner does not apply (a
+system-scope kind such as `fsSystemFile`) is refused by `repro home export`,
+so an export never carries one.
 
 **Two ways to get the document**, with the same result:
 
@@ -193,7 +194,8 @@ entries on that host. A disabled category reports nothing: you have left it
 to Reprobuild. What the module
 does not recognise is always `unmapped`, whatever categories you enabled: a
 resource kind it does not know (one newer than your reprobuild flake, or a
-system-scope kind in a home profile) and a field of a mapped kind it does
+system-scope kind in a document `repro home export` did not produce) and a
+field of a mapped kind it does
 not know (the entry is not applied without it).
 
 `reprobuild.intent.evaluation` holds the evaluated intent, for your own

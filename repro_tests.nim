@@ -8946,6 +8946,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_home_planner_refuses_system_scope_resource.nim",
+    binary: "build/test-bin/t_e2e_home_planner_refuses_system_scope_resource",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim",
     binary: "build/test-bin/t_e2e_home_set_writes_guarded_config",
     defines: @[],
