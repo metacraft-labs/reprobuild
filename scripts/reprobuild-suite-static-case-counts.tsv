@@ -316,6 +316,7 @@ libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.ni
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
+libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim	nim	1
@@ -427,6 +428,7 @@ libs/repro_platform/tests/test_msvc_env_merge.nim	nim	9
 libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	18
 libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	137
 libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2
+libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	1
@@ -997,6 +999,8 @@ tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim	nim	2
 tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim	nim	1
 tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim	nim	3
 tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim	nim	4
+tests/e2e/m83/t_e2e_nix_reads_data_like_profile.nim	nim	1
+tests/e2e/m83/t_e2e_nix_reads_intent_like_export.nim	nim	1
 tests/e2e/m83/t_e2e_phase_g_action_edges.nim	nim	4
 tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5

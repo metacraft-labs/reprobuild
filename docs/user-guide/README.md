@@ -37,6 +37,10 @@ rest of the implementation documentation.
 - **Feeding your home profile to another tool (Nix, scripts, CI)?** See
   [Exporting a home profile](home-export.md) for `repro home export`, its
   JSON schema, and `--check` for committed snapshots.
+- **Configuring the same machines with Nix?** See
+  [Reading a home profile from Nix](nix-helper-library.md) for
+  `reprobuild.lib` (`readData`, `readIntent`, `nixRealizationOf`) and the
+  Home Manager module that applies a profile one category at a time.
 - **Need a specific reprobuild version?** See
   [Pinning reprobuild itself](pinning-reprobuild-itself.md). It is an
   ordinary `uses:` dependency plus a committed lock entry — several versions

@@ -568,6 +568,31 @@
       url = "github:nim-lang/nimony/bbfb21529845567c55b67d176354daef0e7d6c29";
       flake = false;
     };
+    # The Nix provisioning contribution catalog. `reprobuild.lib`
+    # (nix/lib/realizations.nix, `nixRealizationOf`) reads the contribution
+    # records it publishes as data -- `provisioning-contributions.json`,
+    # generated from its `repro.nim` and kept current by its own tests -- so a
+    # Nix module consuming a profile's intent maps canonical package names to
+    # nixpkgs attributes from ONE pinned catalog (reprobuild-pm spec
+    # Gradual-Nix-To-Reprobuild-Migration.md §The Nix helper library).
+    #
+    # A flake input of THIS flake, not of each consumer: the library is what
+    # reads the catalog, and the catalog revision is part of what
+    # `reprobuild.lib` means, so consumers inherit one pin through the one
+    # reprobuild pin they already have (devops-modules -> reprobuild), and
+    # `follows` it only to test a catalog change. It is not a second
+    # reprobuild pin -- the catalog is a separate repository, which pins no
+    # reprobuild in any flake (it has no flake.nix). `flake = false`: only the
+    # published JSON is read, nothing is built from it. Because the catalog has
+    # no flake.nix, `.envrc`'s auto-override arm does not reach a
+    # `../reprobuild-nix-packages` sibling (declared in
+    # scripts/dev-shell-pinned-siblings.tsv); try a catalog change with
+    # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
+    # Move the pin when the catalog's records change.
+    reprobuild-nix-packages-src = {
+      url = "github:metacraft-labs/reprobuild-nix-packages/842fd4718fa2381e17f32b1b4eeeec1735538d3c";
+      flake = false;
+    };
   };
 
   outputs =
@@ -591,9 +616,31 @@
       nim-results-src,
       nim-checksums-src,
       nim-nimony-src,
+      reprobuild-nix-packages-src,
       bundlers,
       ...
     }:
+    let
+      # The Nix helper library (milestone GM5; docs/user-guide/nix-helper-library.md),
+      # exported as `lib` and tested by the `lib-*` checks below.
+      # System-independent: the IFD derivation of `readIntent` is built for
+      # whichever system the CALLER names as the evaluator (`buildSystem`),
+      # with that system's nixpkgs and `packages.<system>.repro`.
+      reprobuildLibFor =
+        catalogs:
+        import ./nix/lib {
+          inherit catalogs;
+          pkgsFor = system: inputs.nixpkgs.legacyPackages.${system};
+          reproFor = system: inputs.self.packages.${system}.repro;
+        };
+      reprobuildLib = reprobuildLibFor [
+        {
+          name = "reprobuild-nix-packages";
+          records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+        }
+      ];
+      intentHomeManagerModule = import ./nix/modules/home-manager-intent.nix { inherit reprobuildLib; };
+    in
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [
         "x86_64-linux"
@@ -633,6 +680,8 @@
           };
         in
         {
+          lib = reprobuildLib;
+
           nixosModules = {
             reprobuild = reprobuildModules.nixos;
             repro-binary-cache = reproBinaryCacheModule;
@@ -651,6 +700,9 @@
           };
 
           homeManagerModules = {
+            # Applies a profile's evaluated intent (`repro home export`)
+            # through Home Manager, one category at a time.
+            intent = intentHomeManagerModule;
             reprobuild = reprobuildModules.homeManager;
             reprobuild-legacy-option-names = reprobuildModules.legacyOptionNames;
             default = reprobuildModules.homeManager;
@@ -1267,7 +1319,27 @@
                                           done
                                         else
                                           case "$candidate" in
-                                            ${reprobuild}/lib/*|${reprobuild}/bin/.*-wrapped)
+                                            ${reprobuild}/bin/.*-wrapped)
+                                              # A wrapper target may be an interpreter
+                                              # script (`reprobuild-nix-daemon` is Python):
+                                              # it has no RPATH to carry, but its
+                                              # interpreter must be an executable in the
+                                              # store, never one found on the host.
+                                              interpreter=$(head -n 1 "$candidate" | sed -n 's|^#! *\([^ ]*\).*|\1|p')
+                                              case "$interpreter" in
+                                                /nix/store/*)
+                                                  if test ! -x "$interpreter"; then
+                                                    echo "wrapper target's interpreter is not executable: $candidate -> $interpreter" >&2
+                                                    exit 1
+                                                  fi
+                                                  ;;
+                                                *)
+                                                  echo "non-ELF wrapper target without a store interpreter: $candidate" >&2
+                                                  exit 1
+                                                  ;;
+                                              esac
+                                              ;;
+                                            ${reprobuild}/lib/*)
                                               echo "non-ELF installed binary/library role: $candidate" >&2
                                               exit 1
                                               ;;
@@ -1550,7 +1622,12 @@
           # (non-flake) activation; keep the two lists in step.
           conventionTestToolchains =
             let
-              available = pkgs.lib.filter (p: pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform p);
+              # `availableOn` checks meta.platforms only; a package nixpkgs
+              # marks broken on this platform (fpc on x86_64-darwin) is just as
+              # unusable, and evaluating it refuses the whole dev shell.
+              available = pkgs.lib.filter (
+                p: pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform p && !(p.meta.broken or false)
+              );
               toolchains = available (
                 [
                   pkgs.go
@@ -1641,11 +1718,25 @@
 
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
+          # The name the Nix helper library and its consumers use
+          # (`reprobuild.packages.<system>.repro`, spec §The Nix helper
+          # library): the same package, whose wrapper already makes the
+          # installed `repro` compile profiles with no checkout and no
+          # consumer-side environment (GM1/GM1l). `readIntent`'s IFD derivation
+          # runs it in the build sandbox as is; `checks.lib-intent-ifd` is
+          # the proof.
+          packages.repro = reprobuild;
           # The Nim fork toolchain, exposed for standalone build/verification.
           packages.nim-fork = nimFork;
           packages.repro-binary-cache = reproBinaryCache;
           # Self-contained, /nix/store-free `repro` (see `reproPortable`).
-          packages.repro-portable = reproPortable;
+          # Linux only: the bundle runs the closure in a user-namespace chroot
+          # (`nix-user-chroot`, whose meta.platforms is Linux), so on darwin
+          # the output could not even be evaluated, and `nix flake check
+          # --all-systems` stopped there. A dynamic attribute whose name is
+          # `null` is omitted, which keeps the output out of the darwin
+          # package sets instead of declaring one that throws.
+          packages.${if pkgs.stdenv.hostPlatform.isLinux then "repro-portable" else null} = reproPortable;
 
           checks = {
             inherit pre-commit-check;
@@ -1687,6 +1778,45 @@
                   mkdir -p "$out"
                 '';
             packaged-runtime-compile = packagedRuntimeCompileCheck;
+
+            # ── The Nix helper library (GM5) ──────────────────────────────
+            # `lib-tests` and `lib-home-manager` are decided at EVALUATION
+            # time (the derivation exists only when every case passes), so
+            # `nix flake check --all-systems` checks them for every system,
+            # darwin included, from a Linux evaluator and vice versa.
+            lib-tests =
+              let
+                result = import ./nix/tests/lib.nix {
+                  inherit (pkgs) lib;
+                  inherit reprobuildLib;
+                  libFor = reprobuildLibFor;
+                  root = ./.;
+                };
+              in
+              if result.failures == [ ] then
+                pkgs.writeText "reprobuild-lib-tests" (builtins.toJSON result.counts)
+              else
+                throw "reprobuild lib-tests: ${toString (builtins.length result.failures)} failure(s):\n${builtins.toJSON result.failures}";
+            lib-home-manager = import ./nix/tests/home-manager.nix {
+              inherit pkgs system;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
+              intentModule = intentHomeManagerModule;
+              root = ./.;
+            };
+            # readIntent's IFD mode: the packaged `repro` exports the fixture
+            # profiles inside the build sandbox, on the EVALUATOR's system
+            # (`builtins.currentSystem` under `--impure`, else this check's
+            # own system), and the result must say what the committed
+            # snapshots say, evaluated for this check's target system. Under
+            # `nix flake check --impure --all-systems` on Linux the darwin
+            # checks therefore evaluate an export Linux produced -- the
+            # non-native evaluator case.
+            lib-intent-ifd = import ./nix/tests/intent-ifd.nix {
+              inherit pkgs system reprobuildLib;
+              buildSystem = builtins.currentSystem or system;
+              root = ./.;
+            };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''

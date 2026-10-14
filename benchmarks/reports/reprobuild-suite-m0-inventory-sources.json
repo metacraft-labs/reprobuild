@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1976,
-    "pureUnitConsolidationGroups": 53,
-    "pureUnitTests": 613,
+    "nimTestBinaries": 1980,
+    "pureUnitConsolidationGroups": 54,
+    "pureUnitTests": 614,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 1993
+    "testEntries": 1997
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -231,6 +231,19 @@
       "sources": [
         "libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim",
         "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "sources": [
+        "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
+        "libs/repro_interface_artifacts/tests/t_contribution_records.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1148,10 +1161,10 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 14,
-      "integration": 1083,
+      "graph-fixture": 15,
+      "integration": 1085,
       "platform/destructive": 126,
-      "pure unit": 613,
+      "pure unit": 614,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1342,9 +1355,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1976,
+    "nimTestBinaryCount": 1980,
     "pythonTestFileCount": 17,
-    "testEntryCount": 1993
+    "testEntryCount": 1997
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12529,6 +12542,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_contribution_records",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_contribution_records.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_installed_layout_source_roots",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -14493,6 +14523,24 @@
       "source": "libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_builtin_predicate_fixtures",
+      "class": "graph-fixture",
+      "classificationReason": "fixture path or fixture-oriented test",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_intent",
+        "repro_profile_compile"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24770,6 +24818,38 @@
       "source": "tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_nix_reads_data_like_profile",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_nix_reads_data_like_profile.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_nix_reads_intent_like_export",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile_compile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_nix_reads_intent_like_export.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

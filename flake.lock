@@ -2450,6 +2450,23 @@
         "type": "github"
       }
     },
+    "reprobuild-nix-packages-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791989213,
+        "narHash": "sha256-YgmMv7qcRdKClHQwsMxozwICrYEjPZrO+NQ31KOPWeQ=",
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-nix-packages",
+        "rev": "842fd4718fa2381e17f32b1b4eeeec1735538d3c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-nix-packages",
+        "rev": "842fd4718fa2381e17f32b1b4eeeec1735538d3c",
+        "type": "github"
+      }
+    },
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
@@ -2495,6 +2512,7 @@
           "nixpkgs-unstable"
         ],
         "reprobuild-ct-test-runner-src": "reprobuild-ct-test-runner-src",
+        "reprobuild-nix-packages-src": "reprobuild-nix-packages-src",
         "reprobuild-test-adapters-src": "reprobuild-test-adapters-src",
         "runquota-src": "runquota-src"
       }

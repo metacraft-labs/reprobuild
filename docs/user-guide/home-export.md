@@ -252,6 +252,9 @@ config override is `{"pkg":…,"key":…,"value":{…},"guard":…}`.
 
 - [Home-profile walkthrough](home-profile-walkthrough.md) — authoring
   `home.nim` and applying it.
+- [Reading a home profile from Nix](nix-helper-library.md) — the flake's
+  `reprobuild.lib.readIntent` reads this document (snapshot or
+  import-from-derivation) and its Home Manager module applies it.
 - Exit codes: `0` printed or current, `1` stale snapshot or the export
   failed, `2` usage, `3` the export cannot describe the `--target` platform.
 - `repro home export --help` — the flags in brief.

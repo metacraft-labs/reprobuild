@@ -1,0 +1,9 @@
+{
+  "description": "A package selected by several rows takes the metadata of the row the planner meets first (activities in first-appearance order, then file order); e2e_nix_reads_data_like_profile compares the metadata, not only the names.",
+  "hosts": { "both": ["cli", "ide"], "ide-only": ["ide"] },
+  "evaluations": [
+    { "host": "both", "system": "x86_64-linux", "packages": ["jdk", "ripgrep"] },
+    { "host": "ide-only", "system": "x86_64-linux", "packages": ["jdk"] },
+    { "host": "nobody", "system": "x86_64-linux", "packages": [] }
+  ]
+}

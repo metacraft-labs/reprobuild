@@ -239,6 +239,8 @@ const
                  "t_e2e_data_file_validation",
                  "t_e2e_home_add_appends_data_row",
                  "t_e2e_home_export_expands_data_files",
+                 "t_e2e_nix_reads_data_like_profile",
+                 "t_e2e_nix_reads_intent_like_export",
                  "t_e2e_profile_compile_clang_first_run_published"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])

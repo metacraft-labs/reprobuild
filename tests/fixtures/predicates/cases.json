@@ -1,0 +1,491 @@
+{
+  "description": "Shared cases for the built-in predicate grammar; see README.md.",
+  "systems": [
+    "x86_64-linux",
+    "aarch64-linux",
+    "x86_64-darwin",
+    "aarch64-darwin",
+    "x86_64-windows",
+    "aarch64-windows"
+  ],
+  "evaluations": [
+    {
+      "predicate": "linux",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ]
+    },
+    {
+      "predicate": "macos",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-darwin",
+        "aarch64-darwin"
+      ]
+    },
+    {
+      "predicate": "windows",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "bsd",
+      "host": "h",
+      "holdsOn": [],
+      "description": "no target system is a BSD"
+    },
+    {
+      "predicate": "wsl",
+      "host": "h",
+      "holdsOn": [],
+      "description": "wsl is false for every target"
+    },
+    {
+      "predicate": "x86_64",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "x86_64-darwin",
+        "x86_64-windows"
+      ]
+    },
+    {
+      "predicate": "arm64",
+      "host": "h",
+      "holdsOn": [
+        "aarch64-linux",
+        "aarch64-darwin",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "arm32",
+      "host": "h",
+      "holdsOn": []
+    },
+    {
+      "predicate": "true",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "false",
+      "host": "h",
+      "holdsOn": []
+    },
+    {
+      "predicate": "MacOS",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-darwin",
+        "aarch64-darwin"
+      ],
+      "description": "built-in identifiers are case-insensitive"
+    },
+    {
+      "predicate": "linux()",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ],
+      "description": "the call form of a built-in predicate"
+    },
+    {
+      "predicate": "macos and arm64",
+      "host": "h",
+      "holdsOn": [
+        "aarch64-darwin"
+      ]
+    },
+    {
+      "predicate": "macos or linux",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin"
+      ]
+    },
+    {
+      "predicate": "not windows",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin"
+      ]
+    },
+    {
+      "predicate": "not not linux",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ]
+    },
+    {
+      "predicate": "not linux and macos",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-darwin",
+        "aarch64-darwin"
+      ],
+      "description": "not binds tighter than and"
+    },
+    {
+      "predicate": "not (linux and x86_64)",
+      "host": "h",
+      "holdsOn": [
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "linux or macos and arm64",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "aarch64-darwin"
+      ],
+      "description": "and binds tighter than or"
+    },
+    {
+      "predicate": "(linux or macos) and arm64",
+      "host": "h",
+      "holdsOn": [
+        "aarch64-linux",
+        "aarch64-darwin"
+      ]
+    },
+    {
+      "predicate": "macos and not arm64 or windows and arm64",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-darwin",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "  linux\n and\tx86_64  ",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux"
+      ],
+      "description": "whitespace is insignificant"
+    },
+    {
+      "predicate": "host == \"m1\"",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "host == \"m1\"",
+      "host": "home-pc",
+      "holdsOn": []
+    },
+    {
+      "predicate": "host != \"m1\"",
+      "host": "home-pc",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "host != \"m1\"",
+      "host": "m1",
+      "holdsOn": []
+    },
+    {
+      "predicate": "host in [\"home-pc\", \"m1\"]",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "host in [\"home-pc\", \"m1\"]",
+      "host": "server",
+      "holdsOn": []
+    },
+    {
+      "predicate": "host in []",
+      "host": "m1",
+      "holdsOn": []
+    },
+    {
+      "predicate": "\"m1\" == host",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ],
+      "description": "a string literal may be on the left"
+    },
+    {
+      "predicate": "HOST == \"m1\"",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "host() == \"m1\"",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "not host == \"m1\"",
+      "host": "m1",
+      "holdsOn": [],
+      "description": "a comparison binds tighter than not"
+    },
+    {
+      "predicate": "\"a\" == \"a\"",
+      "host": "h",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "\"a\" != \"a\"",
+      "host": "h",
+      "holdsOn": []
+    },
+    {
+      "predicate": "host == \"a\\\"b\"",
+      "host": "a\"b",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ],
+      "description": "a backslash escapes the next character in a string literal"
+    },
+    {
+      "predicate": "host in [(host)]",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ],
+      "description": "a list item is an atom, and a parenthesised atom is one"
+    },
+    {
+      "predicate": "host == \"m1\" and wsl()",
+      "host": "m1",
+      "holdsOn": []
+    },
+    {
+      "predicate": "linux and host in [\"home-pc\"] or macos and host == \"m1\"",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-darwin",
+        "aarch64-darwin"
+      ]
+    },
+    {
+      "predicate": "linux and host in [\"home-pc\"] or macos and host == \"m1\"",
+      "host": "home-pc",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ]
+    },
+    {
+      "predicate": "host == \"m1",
+      "host": "m1",
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ],
+      "description": "current behaviour: an unterminated string literal runs to the end of the predicate (issues/2026-10-14-predicate-lexer-accepts-an-unterminated-string.md)"
+    }
+  ],
+  "rejections": [
+    {
+      "predicate": "headless",
+      "error": "unknown-identifier",
+      "identifier": "headless",
+      "description": "a profile-side helper, not built in"
+    },
+    {
+      "predicate": "onBattery",
+      "error": "unknown-identifier",
+      "identifier": "onBattery"
+    },
+    {
+      "predicate": "linux and headless",
+      "error": "unknown-identifier",
+      "identifier": "headless"
+    },
+    {
+      "predicate": "headless == \"x\"",
+      "error": "unknown-identifier",
+      "identifier": "headless"
+    },
+    {
+      "predicate": "&",
+      "error": "unknown-identifier",
+      "identifier": "&",
+      "description": "an unknown character is a one-character identifier"
+    },
+    {
+      "predicate": "linux && macos",
+      "error": "invalid"
+    },
+    {
+      "predicate": "linux AND macos",
+      "error": "invalid"
+    },
+    {
+      "predicate": "host",
+      "error": "invalid",
+      "description": "host is a string; it must be compared"
+    },
+    {
+      "predicate": "linux == \"x\"",
+      "error": "invalid",
+      "description": "a boolean is not a string operand"
+    },
+    {
+      "predicate": "x86_64 == host",
+      "error": "invalid"
+    },
+    {
+      "predicate": "true == \"x\"",
+      "error": "invalid"
+    },
+    {
+      "predicate": "\"x\"",
+      "error": "invalid"
+    },
+    {
+      "predicate": "[\"a\"]",
+      "error": "invalid"
+    },
+    {
+      "predicate": "host in \"a\"",
+      "error": "invalid"
+    },
+    {
+      "predicate": "host in [linux]",
+      "error": "invalid"
+    },
+    {
+      "predicate": "host in [[\"a\"]]",
+      "error": "invalid"
+    },
+    {
+      "predicate": "host in [\"a\", ]",
+      "error": "invalid"
+    },
+    {
+      "predicate": "linux and",
+      "error": "invalid"
+    },
+    {
+      "predicate": "(linux",
+      "error": "invalid"
+    },
+    {
+      "predicate": "linux)",
+      "error": "invalid"
+    },
+    {
+      "predicate": "linux macos",
+      "error": "invalid"
+    },
+    {
+      "predicate": "host = \"x\"",
+      "error": "invalid"
+    },
+    {
+      "predicate": "",
+      "error": "invalid"
+    },
+    {
+      "predicate": "not",
+      "error": "invalid"
+    },
+    {
+      "predicate": "linux(1)",
+      "error": "invalid"
+    },
+    {
+      "predicate": "64",
+      "error": "invalid"
+    },
+    {
+      "predicate": "host == \"a\" == \"b\"",
+      "error": "invalid"
+    }
+  ]
+}
