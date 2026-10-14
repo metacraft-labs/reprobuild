@@ -767,11 +767,19 @@ proc applyServiceConverge*(registry: var ServiceInstanceRegistry;
       # Refused rather than registered without a process. An instance
       # entry naming no process would be recovered by every later
       # rebuild as "live, liveness unknown" and never stop.
+      #
+      # When converge found a record whose process had DIED, the refusal
+      # names that pid: a resolver asking for a shared instance it cannot
+      # start is otherwise told only that nothing runs, with no hint that
+      # something did and exited.
       return DaemonServiceConvergeResponse(ok: false,
         outcome: outcomeWord(scoMaterialise),
         address: decision.address,
         diagnostic: "no instance is running at `" & decision.address &
-          "` and the request carried no command to materialise one with")
+          "` and the request carried no command to materialise one with" &
+          (if decision.droppedDeadPid != 0:
+             "; " & decision.droppedDeadDetail
+           else: ""))
     let started = startForConverge(registry, key, request, startGraceMs)
     if started.failure.len > 0:
       return DaemonServiceConvergeResponse(ok: false,

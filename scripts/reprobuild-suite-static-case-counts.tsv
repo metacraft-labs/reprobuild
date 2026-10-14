@@ -135,6 +135,8 @@ libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced
 libs/repro_cli_support/tests/t_dss10_early_attribute_read_refuses_by_name.nim	nim	8
 libs/repro_cli_support/tests/t_dss72_external_registrar_protocol.nim	nim	18
 libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim	nim	16
+libs/repro_cli_support/tests/t_dss73_the_instance_attribute_reaches_the_argv.nim	nim	21
+libs/repro_cli_support/tests/t_dss73_the_registrar_answer_reports_the_instance.nim	nim	15
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
 libs/repro_cli_support/tests/t_f5_the_session_minted_record_merges_without_losing_rows.nim	nim	7
 libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim	nim	4
@@ -555,11 +557,13 @@ libs/repro_project_dsl/tests/test_depends_on_macro.nim	nim	3
 libs/repro_project_dsl/tests/test_library_macro.nim	nim	12
 libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
+libs/repro_resources/tests/t_converge_does_not_attach_to_a_dead_instance.nim	nim	6
 libs/repro_resources/tests/t_dss10_readiness_edge_orders_the_registration.nim	nim	24
 libs/repro_resources/tests/t_dss11_converge_response_carries_the_instances_points.nim	nim	7
 libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim	nim	21
 libs/repro_resources/tests/t_dss72_registrar_provenance_is_marked_and_refusable.nim	nim	16
 libs/repro_resources/tests/t_dss72_reuse_is_keyed_on_the_registrar.nim	nim	7
+libs/repro_resources/tests/t_dss73_the_instance_attribute_is_durable_and_replaced.nim	nim	18
 libs/repro_resources/tests/t_f5_the_durable_row_carries_its_provenance.nim	nim	7
 libs/repro_resources/tests/t_l1_state_store.nim	nim	6
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	5
@@ -1229,6 +1233,7 @@ tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
 tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	nim	2
 tests/integration/t_dss11_cross_process_contribution_reaches_the_instance.nim	nim	4
 tests/integration/t_dss72_the_registrar_reaches_a_services_argv.nim	nim	4
+tests/integration/t_dss73_the_issuer_url_reaches_a_consuming_services_argv.nim	nim	4
 tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim	nim	12
 tests/integration/t_e2e_cross_compilation_aarch64.nim	nim	2
 tests/integration/t_e2e_engine_shim_removed.nim	nim	2

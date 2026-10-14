@@ -11,6 +11,7 @@ import repro_project_dsl                 # ServiceIdentityDef / ServiceScope
 import repro_resources/service_identity  # the (identity, scope, environment) key
 import repro_resources/service_registry  # the snapshot codec + lease words
 import repro_resources/readiness_edge    # D-SS10 (§7.1): the edge's own names
+import repro_cli_support/service_registrar  # §7.3: the env var a refusal names
 import repro_cli_support/watch
 
 type
@@ -762,6 +763,55 @@ const
     ## future rename to `@minted-by-issuer:` would silently make every
     ## such token look like an embedded `@minted:` and be refused for
     ## the wrong reason.
+  InstanceAttributeTokenPrefix* = "@instance-attribute:"
+    ## Shared-Development-Services §7.3 — THE TOKEN A CONSUMER WRITES
+    ## FOR A COMPUTED ATTRIBUTE OF THE RUNNING INSTANCE.
+    ##
+    ## §9.3's corrected worked example:
+    ##
+    ## ```nim
+    ## args "--issuer",    "@instance-attribute:issuer@"
+    ##      "--client-id", "@issuer-minted:isonim-site@"
+    ## ```
+    ##
+    ## A SIBLING OF `@issuer-minted:`, DELIBERATELY ON THE SAME LANE.
+    ## §9.3 originally wrote `sso.issuer`, a member on the lifted handle,
+    ## and §7.3 corrected it rather than implementing it: the handle is
+    ## resolved at EXPANSION, and the issuer URL does not exist then --
+    ## it is a property of a running instance, which port it bound and
+    ## which hostname the selected environment gave it. "A field on an
+    ## expansion-time value would have to be either empty or a guess,
+    ## and §7.2 already settles what to do with a value that cannot be
+    ## known yet: refuse."
+    ##
+    ## The second half of that argument is why this is not a NEW
+    ## mechanism either: "The minted client id is exactly the same kind
+    ## of thing and already has a lane ... Giving the issuer a second,
+    ## different mechanism would mean two ways to carry one class of
+    ## value, and the one that looked simpler would be the one that
+    ## cannot work." So this token is resolved by the same proc, out of
+    ## the same session document, read back from the same durable
+    ## instance record across sessions.
+    ##
+    ## PREFIX NON-CONTAINMENT, as load-bearing here as it is for
+    ## `@issuer-minted:`: `@instance-attribute:` contains neither
+    ## `@minted:` nor `@issuer-minted:`, and neither of them contains
+    ## it, so the substring test that catches an EMBEDDED token cannot
+    ## confuse the three families. A test pins all six directions,
+    ## because a rename that broke one would refuse a token for the
+    ## wrong reason rather than fail to compile.
+    ##
+    ## IT REQUIRES THE `issuer` PROVENANCE AND HAS NO PERMISSIVE
+    ## SPELLING, which is the one place it diverges from the minted
+    ## pair. `@minted:` exists beside `@issuer-minted:` because §7.2
+    ## keeps the offline path working: a locally derived client id is a
+    ## real, usable development credential. There is no offline
+    ## counterpart of an issuer URL -- an issuer either exists at some
+    ## address or it does not, and a guessed one is not a degraded
+    ## version of the real thing but a wrong answer that fails
+    ## elsewhere. So a consumer that asks for an instance attribute is
+    ## asking about the world, and the answer is the running instance's
+    ## or it is a refusal.
   SharedInstanceMintedFile* = "shared-instance-registrations.json"
   SharedInstanceMintedSchemaId* =
     "reprobuild.dev-session.shared-instance-registrations.v1"
@@ -778,24 +828,61 @@ proc sharedInstanceMintedPath*(outDir: string): string =
   ## responsibility.
   outDir.sessionDir / SharedInstanceMintedFile
 
+type
+  SharedInstanceAttributeRow* = tuple[serviceName, name, value,
+                                      registrar: string;
+                                      provenance: RegistrarProvenance]
+    ## Shared-Development-Services §7.3 — one row of the session
+    ## document's `instanceAttributes`.
+    ##
+    ## `serviceName` is the SHARED SERVICE the attribute belongs to, not
+    ## the consuming one, exactly as it is on a minted row: a session may
+    ## resolve two shared services and both may report an `issuer`, and
+    ## the qualified key is what tells them apart.
+
 proc writeSharedInstanceMinted*(outDir: string;
     entries: openArray[tuple[serviceName, member, mintedId: string;
-                             provenance: RegistrarProvenance]]) =
-  ## Record what the instance minted, WITH the provenance of each row.
+                             provenance: RegistrarProvenance]];
+    attributes: openArray[SharedInstanceAttributeRow] = []) =
+  ## Record what the instance minted, WITH the provenance of each row,
+  ## and what it reported about ITSELF (§7.3).
   ##
   ## §7.2: the mark travels with the value. This file is the only thing
   ## standing between `repro up`'s registrar and the supervisor child's
   ## argv, so a row written here without its stamp is a value that
   ## arrives at the point of use indistinguishable from an issuer's --
   ## the defect §7.2 names, at the one hop where it would be invisible.
+  ##
+  ## ONE DOCUMENT FOR BOTH ROW SETS, and the argument is
+  ## `mergeSharedInstanceMinted`': "A second file would mean two readers
+  ## at the point of use, and `substituteMintedAttributes` takes ONE
+  ## table; the one that happened to be read first would silently win a
+  ## member both held." §7.3's attributes are the same class of value on
+  ## the same lane, so a second file for them would reintroduce exactly
+  ## that, one row set over.
+  ##
+  ## `attributes` DEFAULTS TO EMPTY, AND THIS PROC WRITES WHAT IT IS
+  ## GIVEN. A caller that passes none writes none, which is what the
+  ## owner's converge wants: the file is rewritten unconditionally on
+  ## every `repro up` precisely so a previous run's rows cannot resolve
+  ## a token the recipe no longer declares, and §7.3's anti-staleness
+  ## rule needs that to be true of an issuer URL too. A caller that
+  ## wants to ADD rows to what is on disk uses
+  ## `mergeSharedInstanceMinted`, which is the F5 cross-session path.
   createDir(extendedPath(outDir.sessionDir))
   var rows = newJArray()
   for entry in entries:
     rows.add(%*{"serviceName": entry.serviceName, "member": entry.member,
       "mintedId": entry.mintedId,
       MintedProvenanceField: $entry.provenance})
+  var attrRows = newJArray()
+  for attr in attributes:
+    attrRows.add(%*{"serviceName": attr.serviceName, "name": attr.name,
+      "value": attr.value, "registrar": attr.registrar,
+      MintedProvenanceField: $attr.provenance})
   let doc = %*{"schemaId": SharedInstanceMintedSchemaId}
   doc["registrations"] = rows
+  doc[InstanceAttributesField] = attrRows
   writeFile(extendedPath(outDir.sharedInstanceMintedPath), $doc & "\n")
 
 proc writeSharedInstanceMinted*(outDir: string;
@@ -825,27 +912,40 @@ type
     value*: string
     provenance*: RegistrarProvenance
 
-proc readSharedInstanceMintedRows*(outDir: string):
-    seq[tuple[serviceName, member, mintedId: string;
-              provenance: RegistrarProvenance]] =
-  ## The file's rows AS WRITTEN, in file order, with the stamp decoded.
+  InstanceAttribute* = object
+    ## Shared-Development-Services §7.3 — one computed attribute of the
+    ## running instance, as a consumer sees it at the point of use.
+    ##
+    ## `MintedAttribute` WITH THE REGISTRAR'S NAME, and the extra field
+    ## is the difference between a usable refusal and a puzzling one. A
+    ## minted id that fails the provenance question is refused with the
+    ## session event log named as the place that says which registrar
+    ## ran; an attribute's refusal can do better, because the row itself
+    ## records who reported it -- and "the issuer URL you were given came
+    ## from `external:/path/to/script`" is the sentence that ends the
+    ## investigation.
+    value*: string
+    provenance*: RegistrarProvenance
+    registrar*: string
+
+proc readSharedInstanceRecord*(outDir: string):
+    tuple[registrations: seq[tuple[serviceName, member, mintedId: string;
+                                   provenance: RegistrarProvenance]];
+          attributes: seq[SharedInstanceAttributeRow]] =
+  ## THE ONE PARSE of this document: both row sets, as written, in file
+  ## order, with their stamps decoded.
   ##
-  ## THE ONE PARSE of this document.
-  ## `readSharedInstanceMintedAttributes` folds these rows into the
-  ## lookup table and `readSharedInstanceMinted` drops the stamp from
-  ## that; neither parses the file a second time, because two readings
-  ## of one document are two things that can disagree, and the
-  ## disagreement that matters here -- one reader seeing a stamp and the
-  ## other not -- is the whole defect.
-  ##
-  ## IT EXISTS AS A SEPARATE SURFACE BECAUSE THE TABLE IS LOSSY. The
-  ## table keys on `<serviceName>:<member>` and on the bare `<member>`,
-  ## and drops the bare key when two services disagree -- so a caller
-  ## that has to REWRITE the file (L9 F5's resolver, merging what
-  ## another project's instance minted into this session's rows) cannot
-  ## reconstruct the rows from it. A merge built on the table would
-  ## quietly re-attribute every row to whichever service sorted first.
-  result = @[]
+  ## Every other reader here is a projection of this one.
+  ## `readSharedInstanceMintedRows` takes the registrations,
+  ## `readSharedInstanceAttributeRows` the attributes, the two table
+  ## folds derive from those, and `readSharedInstanceMinted` drops the
+  ## stamp from one of the folds. None of them parses the file a second
+  ## time, because two readings of one document are two things that can
+  ## disagree, and the disagreements that matter here -- one reader
+  ## seeing a stamp and the other not, one reader seeing an attribute
+  ## row and the other not -- are the whole defect.
+  result.registrations = @[]
+  result.attributes = @[]
   let path = outDir.sharedInstanceMintedPath
   if not fileExists(extendedPath(path)):
     return
@@ -859,6 +959,36 @@ proc readSharedInstanceMintedRows*(outDir: string):
       "the shared-instance registration record at " & path &
       " carries schemaId `" & doc{"schemaId"}.getStr("") &
       "`; this build reads `" & SharedInstanceMintedSchemaId & "` only")
+  # §7.3's rows, read BEFORE the registrations' early return, so a
+  # document with attributes and no `registrations` key does not drop
+  # them. The schema id is NOT bumped for this field, for the reason
+  # the durable record's `provenance` was not: this document is
+  # session-local and rewritten by every `repro up` before the
+  # supervisor starts, so there is no older writer to be compatible
+  # with -- and an absent key reads as "this instance reported none",
+  # which is the truth about a file an older build wrote.
+  let attrRows = doc{InstanceAttributesField}
+  if not attrRows.isNil and attrRows.kind == JArray:
+    for row in attrRows:
+      if row.kind != JObject:
+        continue
+      let name = row{"name"}.getStr("")
+      let value = row{"value"}.getStr("")
+      # A ROW WITH NO NAME OR NO VALUE IS SKIPPED, not refused, and the
+      # asymmetry with the DURABLE record (which refuses both) is
+      # deliberate: this document's rows are skipped the same way a
+      # minted row with no `member` is skipped three screens down,
+      # because the point of use refuses by name for the attribute the
+      # RECIPE asked for. Refusing the whole file here would turn one
+      # malformed row into a session that cannot start for a service
+      # that never asked for an attribute.
+      if name.len == 0 or value.len == 0:
+        continue
+      result.attributes.add((serviceName: row{"serviceName"}.getStr(""),
+        name: name, value: value,
+        registrar: row{"registrar"}.getStr(""),
+        provenance: parseRegistrarProvenance(
+          row{MintedProvenanceField}.getStr(""))))
   let rows = doc{"registrations"}
   if rows.isNil or rows.kind != JArray:
     return
@@ -874,10 +1004,67 @@ proc readSharedInstanceMintedRows*(outDir: string):
     # PARSE FAILURE -- `parseRegistrarProvenance`, the ONE decode, which
     # the durable registration record shares. See its own comment for
     # why `issuer` is the one answer it must not reach for.
-    result.add((serviceName: serviceName, member: member,
+    result.registrations.add((serviceName: serviceName, member: member,
       mintedId: mintedId,
       provenance: parseRegistrarProvenance(
         row{MintedProvenanceField}.getStr(""))))
+
+proc readSharedInstanceAttributeRows*(outDir: string):
+    seq[SharedInstanceAttributeRow] =
+  ## §7.3's rows AS WRITTEN. A projection of `readSharedInstanceRecord`.
+  ##
+  ## IT EXISTS AS A SEPARATE SURFACE for `readSharedInstanceMintedRows`'
+  ## reason: the fold below is lossy (it drops a bare name two services
+  ## disagree about), so the cross-session merge -- which has to REWRITE
+  ## the file -- cannot reconstruct the rows from it.
+  readSharedInstanceRecord(outDir).attributes
+
+proc readSharedInstanceAttributes*(outDir: string):
+    Table[string, InstanceAttribute] =
+  ## §7.3's attributes, keyed `<serviceName>:<name>` and also by the
+  ## bare `<name>`.
+  ##
+  ## BOTH KEYS AND THE SAME AMBIGUITY RULE as the minted fold, because
+  ## the reason is the same one: a consuming service writes the NAME it
+  ## needs (`@instance-attribute:issuer@`) and does not generally know
+  ## which shared service reported it, while a session that resolved TWO
+  ## shared services each reporting an `issuer` must not have one of
+  ## them silently chosen for it. Two disagreeing services drop the bare
+  ## key, so the token refuses and the author qualifies it.
+  result = initTable[string, InstanceAttribute]()
+  var ambiguous: seq[string] = @[]
+  for row in readSharedInstanceAttributeRows(outDir):
+    let attr = InstanceAttribute(value: row.value,
+      provenance: row.provenance, registrar: row.registrar)
+    result[row.serviceName & ":" & row.name] = attr
+    if row.name in result and result[row.name] != attr:
+      ambiguous.add(row.name)
+    else:
+      result[row.name] = attr
+  for name in ambiguous:
+    result.del(name)
+
+proc readSharedInstanceMintedRows*(outDir: string):
+    seq[tuple[serviceName, member, mintedId: string;
+              provenance: RegistrarProvenance]] =
+  ## The file's minted rows AS WRITTEN, in file order, with the stamp
+  ## decoded. A projection of `readSharedInstanceRecord`, which is
+  ## THE ONE PARSE of this document.
+  ## `readSharedInstanceMintedAttributes` folds these rows into the
+  ## lookup table and `readSharedInstanceMinted` drops the stamp from
+  ## that; neither parses the file, because two readings of one document
+  ## are two things that can disagree, and the disagreement that matters
+  ## here -- one reader seeing a stamp and the other not -- is the whole
+  ## defect.
+  ##
+  ## IT EXISTS AS A SEPARATE SURFACE BECAUSE THE TABLE IS LOSSY. The
+  ## table keys on `<serviceName>:<member>` and on the bare `<member>`,
+  ## and drops the bare key when two services disagree -- so a caller
+  ## that has to REWRITE the file (L9 F5's resolver, merging what
+  ## another project's instance minted into this session's rows) cannot
+  ## reconstruct the rows from it. A merge built on the table would
+  ## quietly re-attribute every row to whichever service sorted first.
+  readSharedInstanceRecord(outDir).registrations
 
 proc readSharedInstanceMintedAttributes*(outDir: string):
     Table[string, MintedAttribute] =
@@ -899,7 +1086,8 @@ proc readSharedInstanceMintedAttributes*(outDir: string):
 
 proc mergeSharedInstanceMinted*(outDir: string;
     entries: openArray[tuple[serviceName, member, mintedId: string;
-                             provenance: RegistrarProvenance]]) =
+                             provenance: RegistrarProvenance]];
+    attributes: openArray[SharedInstanceAttributeRow] = []) =
   ## Add rows to this session's minted record, keeping what is already
   ## there and REPLACING a row with the same `(serviceName, member)`.
   ##
@@ -920,7 +1108,15 @@ proc mergeSharedInstanceMinted*(outDir: string;
   ## leave two rows whose values the fold then has to choose between,
   ## and the fold's rule would delete the bare key — turning a
   ## re-resolution into a refusal.
-  var rows = readSharedInstanceMintedRows(outDir)
+  ##
+  ## §7.3'S ATTRIBUTE ROWS MERGE BY `(serviceName, name)`, on the same
+  ## rule and for the same reason. The one thing this proc must not do is
+  ## read the file, ignore one of its two row sets, and write it back:
+  ## that is a silent drop with a merge's name on it, and it is the shape
+  ## the registration half already had to be careful about. Both row sets
+  ## are read, both are merged, both are written.
+  let record = readSharedInstanceRecord(outDir)
+  var rows = record.registrations
   for entry in entries:
     var replaced = false
     for i in 0 ..< rows.len:
@@ -931,7 +1127,18 @@ proc mergeSharedInstanceMinted*(outDir: string;
         break
     if not replaced:
       rows.add(entry)
-  writeSharedInstanceMinted(outDir, rows)
+  var attrRows = record.attributes
+  for attr in attributes:
+    var replaced = false
+    for i in 0 ..< attrRows.len:
+      if attrRows[i].serviceName == attr.serviceName and
+         attrRows[i].name == attr.name:
+        attrRows[i] = attr
+        replaced = true
+        break
+    if not replaced:
+      attrRows.add(attr)
+  writeSharedInstanceMinted(outDir, rows, attrRows)
 
 proc readSharedInstanceMinted*(outDir: string): Table[string, string] =
   ## The minted table, keyed `<serviceName>:<member>` and also by the
@@ -955,10 +1162,13 @@ proc readSharedInstanceMinted*(outDir: string): Table[string, string] =
 
 proc substituteMintedAttributes*(serviceName: string;
                                  command: seq[string];
-                                 minted: Table[string, MintedAttribute]):
+                                 minted: Table[string, MintedAttribute];
+                                 attributes =
+                                   initTable[string, InstanceAttribute]()):
                                  seq[string] =
-  ## Replace every `@minted:<member>@` and `@issuer-minted:<member>@`
-  ## token in `command` with what the instance minted for that member.
+  ## Replace every `@minted:<member>@`, `@issuer-minted:<member>@` and
+  ## `@instance-attribute:<name>@` token in `command` with what the
+  ## instance minted for that member or reported about itself.
   ##
   ## WHOLE-TOKEN ONLY, not a substring rewrite, and that is deliberate:
   ## a flag written `--client-id=@minted:x@` is a shape this does NOT
@@ -974,7 +1184,111 @@ proc substituteMintedAttributes*(serviceName: string;
   ## decision reads the row's PROVENANCE and never the shape of the
   ## identifier: a consumer that pattern-matched an issuer's client id
   ## would be wrong the first time that issuer changed its format.
+  ## §7.3: AND THIS IS WHERE THE INSTANCE ATTRIBUTE LANDS, beside the
+  ## minted id and not on a mechanism of its own. "So the issuer is
+  ## delivered as an instance attribute in argv, beside the minted id,
+  ## and §9.3's `sso.issuer` spelling is corrected rather than
+  ## implemented. Both values are concretized late." An absent attribute
+  ## REFUSES by name -- which attribute, which instance, and what would
+  ## supply it -- because §7.2's prohibition applies with its full force
+  ## to a URL: an empty `--issuer` fails at authentication time,
+  ## somewhere else, with nothing pointing back here.
   for token in command:
+    # §7.3's token, handled FIRST and on its own, because it resolves
+    # from a different table and asks a different question. It is a
+    # whole-argument token under the same rule as the other two.
+    if token.startsWith(InstanceAttributeTokenPrefix) and
+       token.endsWith(MintedAttributeTokenSuffix) and
+       token.len > InstanceAttributeTokenPrefix.len +
+         MintedAttributeTokenSuffix.len - 1:
+      let name = token[InstanceAttributeTokenPrefix.len ..
+        token.len - MintedAttributeTokenSuffix.len - 1]
+      let qualified = serviceName & ":" & name
+      var attr: InstanceAttribute
+      var found = false
+      if attributes.hasKey(qualified):
+        attr = attributes[qualified]
+        found = true
+      elif attributes.hasKey(name):
+        attr = attributes[name]
+        found = true
+      if not found:
+        var known: seq[string] = @[]
+        for key in attributes.keys:
+          if ':' notin key:
+            known.add(key)
+        known.sort()
+        # THE REFUSAL NAMES THE ATTRIBUTE, THE INSTANCE AND WHAT WOULD
+        # SUPPLY IT, which is what §7.1 asks of an early read and what
+        # §7.3 needs of an absent one. The available names are listed
+        # because the overwhelmingly common cause is a MISSPELLING, and
+        # a refusal that says `issuer` is unavailable while the instance
+        # reported `issuerUrl` has already answered the question if it
+        # prints both.
+        raise newException(ValueError,
+          "service `" & serviceName & "`: the instance attribute `" &
+          name & "` is NOT AVAILABLE, so the argument `" & token &
+          "` cannot be concretized. An instance attribute is a property " &
+          "of a RUNNING instance (Shared-Development-Services.md §7.3) " &
+          "-- for `" & IssuerAttributeName & "`, which address it bound " &
+          "and which hostname the selected environment gave it -- so it " &
+          "does not exist at expansion and is not a field on the " &
+          "service handle. It is reported by the REGISTRAR that spoke " &
+          "to the instance, in its `" &
+          InstanceAttributesField & "` answer, and recorded on the " &
+          "instance's own registration record. Attributes this session " &
+          "has: " & (if known.len == 0: "(none)" else: known.join(", ")) &
+          ". " &
+          (if known.len == 0:
+             "NONE AT ALL means either that no registrar reported any " &
+             "-- reprobuild's own development registrar reports none, " &
+             "because it speaks to no issuer and so knows no issuer " &
+             "URL -- or that this session never resolved the shared " &
+             "service that owns this attribute. Declare the owning " &
+             "project's registrar in `" &
+             ServiceRegistrarProgramEnvVar & "` and converge again."
+           else:
+             "A name that is not in that list is usually a misspelling " &
+             "of one that is.") &
+          " Leaving the token verbatim or substituting an empty string " &
+          "would reach the service as an issuer address it cannot use: " &
+          "an empty string is indistinguishable from a legitimately " &
+          "empty value, which is the one answer " &
+          "Shared-Development-Services.md D-SS10 forbids, and the " &
+          "verbatim token would be a URL nobody wrote.")
+      if attr.provenance != rprIssuer:
+        # §7.2's QUESTION, ASKED OF AN ATTRIBUTE. The clause is written
+        # about a minted identifier, and an issuer URL is not minted --
+        # but a WRONG one is just as silent, and the silence is the
+        # defect rather than the minting. There is deliberately no
+        # permissive spelling of this token (see
+        # `InstanceAttributeTokenPrefix`): an issuer either exists at
+        # some address or it does not, so there is nothing for a
+        # development answer to be a usable degraded version OF.
+        raise newException(ValueError,
+          "service `" & serviceName & "`: the argument `" & token &
+          "` reads the instance attribute `" & name &
+          "`, and the recorded value carries provenance `" &
+          $attr.provenance & "` instead of `" & $rprIssuer & "`. " &
+          "It was reported by registrar `" &
+          (if attr.registrar.len == 0: "(none recorded)"
+           else: attr.registrar) &
+          "`. An instance attribute says where a RUNNING instance can " &
+          "be reached, and a value no registrar that spoke to the " &
+          "instance claimed is a guess -- delivered, it would point " &
+          "this service at an issuer that may not be the one serving " &
+          "here, and the failure would arrive later as an " &
+          "authentication error with nothing pointing back " &
+          "(Shared-Development-Services.md §7.2, §7.3). Unlike `" &
+          MintedAttributeTokenPrefix & "<member>" &
+          MintedAttributeTokenSuffix & "` there is no offline spelling " &
+          "of this token, because a guessed issuer URL is not a usable " &
+          "development credential. Install the registrar supplied by " &
+          "the project that OWNS this service (`" &
+          ServiceRegistrarProgramEnvVar & "`), which is what " &
+          "reports this attribute.")
+      result.add(attr.value)
+      continue
     var requireIssuer = false
     var member = ""
     var isToken = false
@@ -1000,15 +1314,32 @@ proc substituteMintedAttributes*(serviceName: string;
       # and testing only the shorter prefix would let it through as
       # literal text -- a consumer launched with the token itself as its
       # client id, which is the silent form of this refusal.
-      for prefix in [IssuerMintedAttributeTokenPrefix,
+      # §7.3's prefix is tested here too, and it has to be: an argument
+      # written `--issuer=@instance-attribute:issuer@` is the same
+      # authoring mistake, and omitting it from this list would let the
+      # literal token text reach the service as its issuer URL. That is
+      # not a hypothetical shape -- it is exactly what reprobuild did
+      # with this token before §7.3 was implemented at all, for every
+      # position: the token matched no prefix, so it was passed through
+      # verbatim, and a consuming service received the text
+      # `@instance-attribute:issuer@` as its `--issuer`.
+      for prefix in [InstanceAttributeTokenPrefix,
+                     IssuerMintedAttributeTokenPrefix,
                      MintedAttributeTokenPrefix]:
         if token.contains(prefix):
           raise newException(ValueError,
             "service `" & serviceName & "`: the argument `" & token &
-            "` embeds a minted-attribute token inside a larger " &
+            "` embeds " &
+            (if prefix == InstanceAttributeTokenPrefix:
+               "an instance-attribute" else: "a minted-attribute") &
+            " token inside a larger " &
             "argument. The token is resolved as a WHOLE argument only, " &
-            "so write it as its own `args` element (`\"--client-id\", " &
-            "\"" & prefix & "<member>" &
+            "so write it as its own `args` element (`\"" &
+            (if prefix == InstanceAttributeTokenPrefix: "--issuer"
+             else: "--client-id") & "\", " &
+            "\"" & prefix &
+            (if prefix == InstanceAttributeTokenPrefix: "<name>"
+             else: "<member>") &
             MintedAttributeTokenSuffix & "\"`). Rewriting inside an " &
             "argument would guess at text the author may have meant.")
       result.add(token)
@@ -1088,7 +1419,9 @@ proc substituteMintedAttributes*(serviceName: string;
 
 proc substituteMintedAttributes*(serviceName: string;
                                  command: seq[string];
-                                 minted: Table[string, string]):
+                                 minted: Table[string, string];
+                                 attributes =
+                                   initTable[string, InstanceAttribute]()):
                                  seq[string] =
   ## The PROVENANCE-BLIND spelling, for a caller that holds only
   ## identifiers.
@@ -1099,14 +1432,24 @@ proc substituteMintedAttributes*(serviceName: string;
   ## an unstamped row for the issuer's, is the one answer §7.2 forbids,
   ## and it would be reached by every caller that simply had not been
   ## updated.
+  ##
+  ## IT IS PROVENANCE-BLIND ABOUT THE MINTED TABLE ONLY. §7.3's
+  ## attributes pass through with their own stamps intact, because this
+  ## overload exists for a caller that holds a bare identifier table and
+  ## not for one that wants the attribute question blurred -- and
+  ## `@instance-attribute:` requires `issuer`, so stamping the
+  ## attributes `unstamped` here would make every such token refuse for
+  ## a reason the caller did not choose.
   var stamped = initTable[string, MintedAttribute]()
   for key, value in minted:
     stamped[key] = MintedAttribute(value: value, provenance: rprUnstamped)
-  substituteMintedAttributes(serviceName, command, stamped)
+  substituteMintedAttributes(serviceName, command, stamped, attributes)
 
 proc serviceSpecFromSummary*(projectRoot: string;
                              service: DevEnvServiceSummary;
-                             minted = initTable[string, MintedAttribute]()):
+                             minted = initTable[string, MintedAttribute]();
+                             attributes =
+                               initTable[string, InstanceAttribute]()):
                              ServiceSpec =
   result.name = service.name
   result.readinessKind = "none"
@@ -1165,7 +1508,7 @@ proc serviceSpecFromSummary*(projectRoot: string;
   # reconciled -- which happened in `repro up` before the supervisor was
   # launched, i.e. before this runs.
   result.command = substituteMintedAttributes(service.name,
-    result.command, minted)
+    result.command, minted, attributes)
   # Shared-Development-Services L9: `cwd` falls back to the typed
   # `workingDirectory`, through ONE relative-path resolution against the
   # project root rather than two. `sharedServiceInstanceLaunch` reuses
@@ -1426,7 +1769,9 @@ proc serviceStartOrder(services: openArray[ServiceSpec]): seq[ServiceSpec] =
     visitService(i, services, temporary, permanent, result)
 
 proc serviceSpecsFromArtifact(artifact: DevEnvArtifact;
-                              minted = initTable[string, MintedAttribute]()):
+                              minted = initTable[string, MintedAttribute]();
+                              attributes =
+                                initTable[string, InstanceAttribute]()):
                               seq[ServiceSpec] =
   ## Shared-Development-Services L7 (§4.5): a service that declares an
   ## `instance` block is NOT started by this session. It is materialised
@@ -1446,7 +1791,7 @@ proc serviceSpecsFromArtifact(artifact: DevEnvArtifact;
     if sharedServiceInstanceOf(service).declared:
       continue
     specs.add(serviceSpecFromSummary(artifact.projectRoot, service,
-      minted))
+      minted, attributes))
   serviceStartOrder(specs)
 
 proc reconcileResources(state: var SessionState; specs: openArray[ServiceSpec]) =
@@ -2434,7 +2779,13 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   var specs: seq[ServiceSpec]
   try:
     specs = serviceSpecsFromArtifact(artifact,
-      readSharedInstanceMintedAttributes(config.outDir))
+      readSharedInstanceMintedAttributes(config.outDir),
+      # §7.3: the SECOND row set of the same document, read at the same
+      # point and passed down the same call chain. Read here rather than
+      # inside `serviceSpecFromSummary` for the reason the minted table
+      # is: one read per session, so every service in the session sees
+      # one answer, and a test can hand the pair in directly.
+      readSharedInstanceAttributes(config.outDir))
     state.reconcileResources(specs)
   except CatchableError as err:
     state.recordStartFailure("", err.msg)

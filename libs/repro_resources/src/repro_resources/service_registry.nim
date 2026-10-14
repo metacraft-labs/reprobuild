@@ -332,6 +332,19 @@ type
     holdersKnown*: seq[string]
       ## The holders the registry CAN name, sorted. On the rule-1 path
       ## this is §4.5's "naming the holders it does know".
+    droppedDeadPid*: int
+      ## Non-zero when an instance WAS registered at this key but its
+      ## process probed `silDead`, so converge dropped the record and
+      ## decided `scoMaterialise` as if nothing were there. The pid is
+      ## carried so a caller that cannot materialise -- a resolver's
+      ## command-less request -- can name the process that died instead
+      ## of only saying that nothing is running.
+    droppedDeadDetail*: string
+      ## The sentence saying so, empty exactly when `droppedDeadPid` is 0.
+      ## A field of its own rather than `diagnostic`, because
+      ## `diagnostic` is asserted EMPTY for `scoMaterialise`: a
+      ## materialise that replaces a dead record still has nothing to
+      ## refuse or warn about, it only has something to report.
 
   ServiceReleaseOutcome* = enum
     ## The outcomes of `repro down`.
@@ -959,6 +972,9 @@ proc convergeServiceInstance*(registry: var ServiceInstanceRegistry;
   ##
   ## ORDER OF DECISION, and it is not interchangeable:
   ##
+  ##   0. an instance is registered but its process probes `silDead` ->
+  ##      the record is dropped and this is step 1. See the note at the
+  ##      probe below.
   ##   1. no instance present -> `scoMaterialise`. `--replace` does NOT
   ##      refuse here and does not need to: there is nothing to take
   ##      over, and refusing would make `repro up --replace` unusable as
@@ -989,6 +1005,42 @@ proc convergeServiceInstance*(registry: var ServiceInstanceRegistry;
     result.hadInstance = false
     return
   let entry = found.get
+  # IS THERE A PROCESS TO ATTACH TO. Asked before `--replace` and before
+  # `attachDecision`, through the registry's injected probe -- the same
+  # one the rebuild uses -- and not through a `kill -0` of our own. The
+  # daemon spawns instances detached and never waits on them, so a dead
+  # instance is an unreaped ZOMBIE: its pid, `/proc/<pid>/stat` and start
+  # time are all still there and `kill -0` succeeds on it. Only the real
+  # probe's `waitpid(WNOHANG)` step can tell, and it reaps the corpse as
+  # it answers.
+  #
+  # Without this, liveness was re-evaluated only by a REBUILD, so for the
+  # rest of a daemon's lifetime a dead shared instance kept answering
+  # `AttachSilently` and the consumer waited out the service's whole
+  # declared readiness timeout. See reprobuild-pm issue
+  # `2026-10-13-attach-succeeds-against-a-shared-instance-whose-process-
+  # is-a-zombie.md`.
+  #
+  # Only `silDead` drops the record. `silUnknown` proceeds exactly as
+  # `silLive` does, for the asymmetry the rebuild keeps: declaring a live
+  # instance dead would make this converge materialise a second one.
+  #
+  # The drop applies with or without `--replace`: there is nothing left
+  # to take over, so decision step 1's reasoning ("no instance present")
+  # is the one that holds.
+  if registry.probeLiveness(entry.record.process.processIdentity) ==
+      silDead:
+    registry.forgetServiceInstance(address)
+    result.outcome = scoMaterialise
+    result.diagnostic = ""
+    result.hadInstance = false
+    result.droppedDeadPid = entry.record.process.pid
+    # Worded to follow "no instance is running at `<address>`", which is
+    # where the daemon's command-less refusal appends it.
+    result.droppedDeadDetail =
+      "the instance registered there (pid " & $entry.record.process.pid &
+      ") had exited, and its record was dropped"
+    return
   result.hadInstance = true
   result.holderRecovery = entry.holderRecovery
   result.holdersKnown = entry.holdersOf()
@@ -1426,6 +1478,13 @@ const
     ## `shared-instance-registrations.json`. One spelling, bound here,
     ## for `RegistrationAddressSuffix`'s reason -- an invariant
     ## maintained by a sentence is not an invariant.
+  InstanceAttributesField* = "instanceAttributes"
+    ## Shared-Development-Services §7.3 -- the key the INSTANCE's own
+    ## computed attributes live under, in the same two documents, for the
+    ## same reason. §7.3's decision is that the issuer URL "travels the
+    ## SAME lane as the minted id", and a lane is a store record, a
+    ## session document and a point of use; this is the key it occupies
+    ## in the first two.
 
 type
   RegistrarProvenance* = enum
@@ -1538,10 +1597,59 @@ type
       ## still resolves it and `@issuer-minted:` refuses it, so the
       ## fail-closed direction is the one an older record takes.
 
+  ServiceInstanceAttribute* = object
+    ## Shared-Development-Services §7.3 — ONE COMPUTED ATTRIBUTE OF THE
+    ## RUNNING INSTANCE, with the same stamp its minted identifiers
+    ## carry.
+    ##
+    ## WHY IT IS STAMPED AT ALL, when an attribute is not "minted". §7.2
+    ## reasons about a substituted *identifier*; an issuer URL is not
+    ## minted by anybody, so the obvious reading is that provenance does
+    ## not apply. It does, and for §7.2's own reason transposed: a WRONG
+    ## issuer URL is exactly as silent as a development client id. A
+    ## consumer pointed at an issuer that is not the one the instance is
+    ## serving fails at authentication time, somewhere else, with
+    ## nothing pointing back here. So the question "who told us this"
+    ## has to be answerable at the point of use, which means the fact
+    ## travels with the value — the same move, the same field.
+    ##
+    ## STALENESS IS CLOSED STRUCTURALLY AND NOT BY THE STAMP, because
+    ## the stamp cannot see time. `reconcileServiceInstanceAttributes`
+    ## REPLACES this set wholesale on every converge with what the
+    ## currently installed registrar answered, so an attribute survives
+    ## only as long as something keeps re-reporting it. That is the
+    ## opposite rule from a registration's mint-once reuse, and the
+    ## difference is in the values: a client id must be byte-stable
+    ## across restarts or last week's configuration breaks, while an
+    ## issuer URL legitimately MOVES when the instance rebinds. Reusing
+    ## a stored URL would be the `dev-server.sh` descriptor defect L9's
+    ## review measured — a registrar answering from the previous run.
+    name*: string
+    value*: string
+    registrar*: string
+      ## The `name` of the registrar that reported it. In a refusal this
+      ## is the half that says WHO.
+    provenance*: RegistrarProvenance
+    recordedAtUnix*: int64
+
   ServiceRegistrationSet* = object
     address*: string
       ## `<instance address>/registrations`.
     registrations*: seq[ServiceRegistration]
+    attributes*: seq[ServiceInstanceAttribute]
+      ## §7.3's INSTANCE-level attributes, on the same record as the
+      ## per-member rows.
+      ##
+      ## THE SAME RECORD, and that is §7.3's decision rather than a
+      ## convenience: "Giving the issuer a second, different mechanism
+      ## would mean two ways to carry one class of value, and the one
+      ## that looked simpler would be the one that cannot work." One
+      ## record means one read for a consumer in another session, one
+      ## codec refusal, and one place `repro down` can leave behind.
+      ##
+      ## A SECOND ROW SET RATHER THAN A FIELD ON EACH REGISTRATION, for
+      ## the reason `IssuerAttributeName`'s own comment gives: the value
+      ## is a property of the instance, not of a member.
 
   ServiceRegistrationMinter* =
     proc (member, contributor: string): string {.closure.}
@@ -1571,8 +1679,24 @@ proc encodeServiceRegistrations*(value: ServiceRegistrationSet): string =
       "mintedAtUnix": reg.mintedAtUnix,
       "registrar": reg.registrar,
       MintedProvenanceField: $reg.provenance})
+  var attrs = newJArray()
+  for attr in value.attributes:
+    attrs.add(%*{
+      "name": attr.name,
+      "value": attr.value,
+      "registrar": attr.registrar,
+      MintedProvenanceField: $attr.provenance,
+      "recordedAtUnix": attr.recordedAtUnix})
   let node = %*{"attrsTypeId": ServiceRegistrationsAttrsTypeId}
   node["registrations"] = rows
+  # EMITTED EVEN WHEN EMPTY, unlike a key a writer could simply omit. An
+  # absent key and an empty array decode the same here, so the choice is
+  # about what the document SAYS: `"instanceAttributes": []` states that
+  # this instance reported none, which is the fact a reader diffing two
+  # runs needs when an attribute disappears. An omitted key would make
+  # "the registrar stopped reporting it" and "this record predates the
+  # field" the same bytes.
+  node[InstanceAttributesField] = attrs
   $node
 
 proc decodeServiceRegistrations*(address, attrsTypeId, attrsJson: string):
@@ -1600,6 +1724,44 @@ proc decodeServiceRegistrations*(address, attrsTypeId, attrsJson: string):
       "service registration set at `" & address &
       "` has non-object attrs")
   result.address = address
+  # §7.3's attribute rows, decoded BEFORE the early return below. A
+  # record whose `registrations` key is absent -- an instance that has
+  # attributes and no members, which is every instance whose consumers
+  # have all withdrawn -- would otherwise drop them, and a dropped
+  # attribute is the silent half of this document's defect class: the
+  # token at the point of use would refuse for the wrong reason, naming
+  # an uncomputed attribute when the record holds one.
+  let attrRows = node{InstanceAttributesField}
+  if not attrRows.isNil and attrRows.kind == JArray:
+    for row in attrRows:
+      if row.kind != JObject:
+        raise newException(ValueError,
+          "service registration set at `" & address &
+          "` has a non-object " & InstanceAttributesField & " row")
+      let name = row{"name"}.getStr("")
+      if name.len == 0:
+        raise newException(ValueError,
+          "service registration set at `" & address & "` has an " &
+          InstanceAttributesField & " row with no `name`, so nothing " &
+          "can ask for it by name and nothing can replace it on the " &
+          "next converge")
+      let value = row{"value"}.getStr("")
+      if value.len == 0:
+        raise newException(ValueError,
+          "service registration set at `" & address & "` has the " &
+          InstanceAttributesField & " row `" & name &
+          "` with an EMPTY `value`. Shared-Development-Services.md " &
+          "§7.2: \"a nil or an empty string is the one answer that " &
+          "must not be chosen\" -- an empty attribute would reach a " &
+          "consuming service's argv as an empty argument and fail at " &
+          "the issuer rather than here.")
+      result.attributes.add(ServiceInstanceAttribute(
+        name: name,
+        value: value,
+        registrar: row{"registrar"}.getStr(""),
+        provenance: parseRegistrarProvenance(
+          row{MintedProvenanceField}.getStr("")),
+        recordedAtUnix: row{"recordedAtUnix"}.getBiggestInt(0)))
   let rows = node{"registrations"}
   if rows.isNil or rows.kind != JArray:
     return
@@ -1767,9 +1929,103 @@ proc reconcileServiceRegistrations*(
     if not stillAsked:
       outcomes.add((member: reg.member, outcome: sroWithdrawn))
   result.set = ServiceRegistrationSet(
-    address: serviceRegistrationsAddress(key), registrations: kept)
+    address: serviceRegistrationsAddress(key), registrations: kept,
+    # §7.3's attribute rows are CARRIED FORWARD, never rewritten here.
+    # This proc's whole write is `result.set`, so a set built without
+    # them would ERASE every instance attribute on every converge --
+    # the silent drop, inside the fix for one. The attributes are
+    # `reconcileServiceInstanceAttributes`' to decide, and the two procs
+    # are separate precisely so that neither can quietly clear the
+    # other's rows: this one cannot touch attributes, and that one
+    # cannot touch registrations.
+    attributes: existing.attributes)
   result.outcomes = outcomes
   writeServiceRegistrations(storeRoot, key, result.set, now)
+
+proc reconcileServiceInstanceAttributes*(
+    storeRoot: string;
+    key: ServiceInstanceKey;
+    attributes: openArray[tuple[name, value: string]];
+    registrar = "";
+    provenance = rprUnstamped;
+    now: Time = getTime()): ServiceRegistrationSet =
+  ## Shared-Development-Services §7.3 — RECORD WHAT THE RUNNING INSTANCE
+  ## REPORTED ABOUT ITSELF, and nothing else.
+  ##
+  ## `attributes` is the WHOLE SET as of this converge. Whatever was
+  ## stored is replaced by it, which is the anti-staleness rule stated in
+  ## `ServiceInstanceAttribute`'s own comment: an attribute survives only
+  ## while something keeps re-reporting it. Three cases fall out of that
+  ## one rule, and all three are the behaviour §7.3 needs:
+  ##
+  ##   * the instance rebound to a different port -- the new URL replaces
+  ##     the old one, because the registrar that just spoke to it
+  ##     answered the new one;
+  ##   * the workspace converged OFFLINE this time, with the development
+  ##     registrar and no issuer -- the development registrar reports no
+  ##     attributes, so the previous run's issuer URL is REMOVED rather
+  ##     than served to a consumer as if it were this instance's. That is
+  ##     the `dev-server.sh` descriptor defect, closed by construction;
+  ##   * the registrar stopped reporting one attribute of several -- that
+  ##     one is removed and the others are not.
+  ##
+  ## IT DOES NOT MERGE, and the rejected alternative is worth naming: a
+  ## merge would keep an attribute nobody re-reported, which is exactly
+  ## the row a consumer must not receive. "Keep what we had" is the
+  ## comfortable answer and it is the one that delivers last week's
+  ## issuer.
+  ##
+  ## `registrar` AND `provenance` ARE THE REPORTER'S, applied to every
+  ## row this call writes. Unlike `reconcileServiceRegistrations` there
+  ## is no reuse and so no re-stamping question: every row here is
+  ## written by the registrar installed right now, so every row carries
+  ## that registrar's claim and no row carries an older one.
+  ##
+  ## IT DEFAULTS TO `rprUnstamped` for `reconcileServiceRegistrations`'
+  ## reason: a caller that names no provenance has made no claim, and
+  ## `unstamped` is the only answer that is not a guess.
+  var seen = initTable[string, string]()
+  var rows: seq[ServiceInstanceAttribute] = @[]
+  for attr in attributes:
+    if attr.name.len == 0:
+      raise newException(ServiceRegistryError,
+        "an instance attribute of `" & serviceInstanceAddress(key) &
+        "` was reported with an EMPTY name. A nameless attribute " &
+        "cannot be asked for by `@instance-attribute:<name>@` and " &
+        "cannot be replaced on the next converge, so it is refused " &
+        "rather than stored where nothing can reach it.")
+    if attr.value.len == 0:
+      raise newException(ServiceRegistryError,
+        "the instance attribute `" & attr.name & "` of `" &
+        serviceInstanceAddress(key) & "` was reported with an EMPTY " &
+        "value. Shared-Development-Services.md §7.2: \"a nil or an " &
+        "empty string is the one answer that must not be chosen\". An " &
+        "empty value is indistinguishable from a legitimately empty " &
+        "one, so it would reach a consuming service's argv as an empty " &
+        "argument and fail at the issuer instead of here. A reporter " &
+        "that could not determine an attribute must omit it, which is " &
+        "a REFUSAL at the point of use naming that attribute.")
+    if seen.hasKey(attr.name):
+      raise newException(ServiceRegistryError,
+        "the instance attribute `" & attr.name & "` of `" &
+        serviceInstanceAddress(key) & "` was reported twice, as `" &
+        seen[attr.name] & "` and `" & attr.value & "`. Refused rather " &
+        "than last-writer-wins: the two rows are two claims about one " &
+        "property of one running instance and nothing here can choose " &
+        "between them.")
+    seen[attr.name] = attr.value
+    rows.add(ServiceInstanceAttribute(
+      name: attr.name, value: attr.value, registrar: registrar,
+      provenance: provenance, recordedAtUnix: now.toUnix()))
+  let existing = readServiceRegistrations(storeRoot, key)
+  result = ServiceRegistrationSet(
+    address: serviceRegistrationsAddress(key),
+    # The REGISTRATIONS are carried forward untouched, the mirror image
+    # of `reconcileServiceRegistrations` carrying the attributes
+    # forward. Neither proc may clear the other's rows.
+    registrations: existing.registrations,
+    attributes: rows)
+  writeServiceRegistrations(storeRoot, key, result, now)
 
 # ---------------------------------------------------------------------------
 # Shared-Development-Services D-SS11 (§4.6) — THE CROSS-PROCESS

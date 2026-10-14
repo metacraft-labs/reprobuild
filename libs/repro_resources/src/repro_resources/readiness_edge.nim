@@ -121,7 +121,12 @@ import repro_resources/service_registry  # the ONE registrations-suffix definiti
 # other module's constant is what makes "ONE definition" structural
 # rather than a sentence.
 export RegistrarProvenance,   # the three words come with the type
-  parseRegistrarProvenance, MintedProvenanceField
+  parseRegistrarProvenance, MintedProvenanceField,
+  # §7.3's row type and the ONE spelling of the key it lives under, for
+  # the same reason the three words above travel with the type: the
+  # registrar protocol and the dev session both carry these, and both
+  # already import this module.
+  ServiceInstanceAttribute, InstanceAttributesField
 
 type
   ReadinessEdgeError* = object of CatchableError
@@ -164,6 +169,35 @@ const
     ## §7's worked attribute: "a per-consumer OIDC client identifier does
     ## not exist until the instance has registered the application
     ## against a running issuer".
+
+  IssuerAttributeName* = "issuer"
+    ## §7.3's attribute: the issuer URL, as a computed attribute OF THE
+    ## INSTANCE.
+    ##
+    ## > **The decision: the issuer URL is a computed attribute OF THE
+    ## > INSTANCE, reached by the same mechanism as the minted client id.
+    ## > It does not become a field on the handle.**
+    ##
+    ## PER-INSTANCE AND NOT PER-MEMBER, which is the one way it differs
+    ## from `ClientIdAttributeName`: every member of one instance is
+    ## issued by the same issuer, so the value is keyed by the instance
+    ## alone. That is why it travels in a SECOND row set on the same
+    ## durable record rather than as a third column on the registration
+    ## rows -- a per-member column would be N copies of one fact, and N
+    ## copies of one fact is N things that can disagree.
+    ##
+    ## THE NAME IS NOT A WHITELIST. `@instance-attribute:<name>@` carries
+    ## whatever name the recipe wrote and whatever names the registrar
+    ## answered; this constant exists so the ONE name §7.3 works through
+    ## is spelled once, not so that other names are refused. A registrar
+    ## that answers `issuerUrl` is not rejected here -- the CONSUMER's
+    ## token is refused at the point of use, naming what is available,
+    ## which is the diagnostic that points at the typo.
+    ##
+    ## DISTINCT FROM `rprIssuer`, whose string value is also `"issuer"`.
+    ## One is an attribute name, the other a provenance word; they are
+    ## compared against different things and must not be substituted for
+    ## each other.
 
   RegistrarInstalledEventKind* = "registrar.installed"
     ## §7.2: "Which registrar is installed must appear in the session's
