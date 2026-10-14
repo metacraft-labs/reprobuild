@@ -27,6 +27,7 @@ import ./repro_profile_compile/helper
 import ./repro_profile_compile/platforms
 import ./repro_profile_compile/adapter_home
 import ./repro_profile_compile/adapter_system
+import ./repro_profile_compile/data_expansion
 import ./repro_profile_compile/infra_apply_broker
 import ./repro_profile_compile/apply_build_actions
 
@@ -106,6 +107,14 @@ export helper.runProfilePlatformProbeHelper
 export adapter_home.profileIntentToHomeProfile
 export adapter_system.profileIntentToSystemProfile
 export adapter_system.renderSystemProfileToText
+
+# GM4: plan-time expansion of the profile's data files.
+export data_expansion.ExpandedHomeIntent
+export data_expansion.dataRowElement
+export data_expansion.mergeDataRows
+export data_expansion.expandProfileData
+export data_expansion.toLoadedDataFiles
+export data_expansion.expandedHomeProfile
 
 # Phase E CLI seam: build the engine's ``brokerSpawn`` closure that
 # wires ``BuildEngineConfig.brokerSpawn`` to

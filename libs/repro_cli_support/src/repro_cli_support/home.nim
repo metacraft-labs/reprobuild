@@ -36,6 +36,7 @@
 import std/[json, options, os, osproc, sets, streams, strutils, tables, times]
 from repro_core/paths import extendedPath
 from repro_core/process_streams import drainStream
+from repro_profile/data_refs import dataFilePathProblem
 
 import blake3
 import repro_home_intent
@@ -246,8 +247,12 @@ proc defaultProfileCompileOptionsFor(profileRoot: string;
 
 type
   CompileAdaptOutcome* = object
-    profile*: Profile           ## nil when the compile failed
+    profile*: Profile           ## nil when the compile or the data failed
     compileError*: string
+    dataError*: string
+      ## GM4: the profile compiled, but a plan-time data file it declares
+      ## could not be read or holds a row its schema refuses. Reported as
+      ## such, never as a compile failure.
     cacheHit*: bool             ## informational
 
 proc compileAndAdaptHomeProfile*(profilePath: string;
@@ -262,14 +267,20 @@ proc compileAndAdaptHomeProfile*(profilePath: string;
   ## On compile failure: `result.profile` is nil and
   ## `result.compileError` carries the diagnostic. Apply-path callers
   ## propagate as a hard error via `formatProfileCompileError`.
+  ##
+  ## GM4: the profile's plan-time data files are read and expanded HERE,
+  ## after the compile edge (`expandedHomeProfile`), so a data edit
+  ## re-plans without recompiling. A data-file failure sets `dataError`.
   result = CompileAdaptOutcome()
   let opts = defaultProfileCompileOptionsFor(profilePath, stateDir)
   try:
     let artifact = compileProfileToRbpi(profilePath, opts)
     let intent = decodeRbpi(artifact.rbpiBytes)
-    result.profile = profileIntentToHomeProfile(intent, profilePath)
+    result.profile = expandedHomeProfile(intent, profilePath)
   except ProfileCompileError as err:
     result.compileError = err.msg
+  except EDataFile as err:
+    result.dataError = err.msg
   except CatchableError as err:
     result.compileError = err.msg
 
@@ -297,6 +308,17 @@ proc formatProfileCompileError*(commandName, profilePath,
       "specification set for the Phase A migration recipe.\n" &
     "  hint: run `" & plan & "` to see whether the issue is profile " &
       "syntax vs. an apply-side problem."
+
+proc formatCompileAdaptFailure*(commandName, profilePath: string;
+                                outcome: CompileAdaptOutcome): string =
+  ## The diagnostic for a failed `compileAndAdaptHomeProfile`: a data-file
+  ## problem names the file, row and key; anything else is a compile failure.
+  if outcome.dataError.len > 0:
+    return commandName & ": " & outcome.dataError &
+      "\n  hint: fix the row, or the profile's `data:` section in " &
+      profilePath
+  formatProfileCompileError(commandName, profilePath, outcome.compileError,
+    planCommand = "repro home plan")
 
 # ---------------------------------------------------------------------------
 # Apply-pipeline plumbing (M63).
@@ -344,10 +366,8 @@ proc runApplyInline*(commandName: string;
     let stateDir = resolveStateDir()
     let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
     if outcomeCompile.profile == nil:
-      stderr.writeLine(formatProfileCompileError(
-        "repro home " & commandName, profilePath,
-        outcomeCompile.compileError,
-        planCommand = "repro home plan"))
+      stderr.writeLine(formatCompileAdaptFailure(
+        "repro home " & commandName, profilePath, outcomeCompile))
       return 1
     opts.preLoadedProfile = outcomeCompile.profile
     let outcome = runApply(opts)
@@ -475,27 +495,108 @@ proc splitToolAtVersion(spec: string):
     return (spec, "", false)
   (spec[0 ..< at], spec[at + 1 .. ^1], true)
 
+proc runHomeAddDataRow(pkg, version, activity: string;
+                       pred: PredicateSpec; dataFile: string;
+                       noApply: bool): int =
+  ## GM4: `repro home add --data FILE` — the structural editor targets a
+  ## plan-time data file instead of `home.nim`. The row is validated exactly
+  ## as the planner reads it (`appendPackageRow`): a canonical package from
+  ## the catalog, an activity name, a `when` in the built-in predicate
+  ## grammar. FILE must be declared in the profile's `data:` section; a row
+  ## in an undeclared file would never apply. `home.nim` is not touched.
+  if pred.given and pred.keyword == ckIf:
+    stderr.writeLine("repro home add: --if is not accepted with --data; a " &
+      "data row's guard is its `when` field (use --when)")
+    return 2
+  let pathProblem = dataFilePathProblem(dataFile)
+  if pathProblem.len > 0:
+    stderr.writeLine("repro home add: --data " & dataFile & ": " &
+      pathProblem)
+    return 2
+  if pred.given:
+    try:
+      discard validateBuiltinPredicate(pred.text, "--when")
+    except EUnknownPredicate as e:
+      stderr.writeLine("repro home add: --when " & pred.text & ": '" &
+        e.identifier & "' is not a built-in predicate; data rows accept " &
+        "only windows, macos, linux, bsd, wsl, x86_64, arm64, arm32 and " &
+        "host ==/!=/in, combined with and/or/not")
+      return 2
+    except EUnstructured as e:
+      stderr.writeLine("repro home add: --when " & pred.text & ": " &
+        e.seen & "; expected " & e.expected)
+      return 2
+  try:
+    let profilePath = loadProfilePath()
+    let prof = loadProfile(profilePath)
+    if dataFile notin prof.dataFileRefs:
+      stderr.writeLine("repro home add: " & dataFile & " is not declared " &
+        "in the `data:` section of " & profilePath &
+        (if prof.dataFileRefs.len > 0:
+           " (declared: " & prof.dataFileRefs.join(", ") & ")"
+         else: " (it has none)"))
+      stderr.writeLine("  hint: add `data:` with the line \"" & dataFile &
+        "\" to the profile; rows in an undeclared file are never read")
+      return 1
+    if not packageInCatalog(pkg):
+      printUnknownPackage(profilePath, pkg)
+      return 1
+    let row = DataPackageRow(name: pkg, activity: activity,
+      whenPredicate: (if pred.given: pred.text else: ""), version: version)
+    let outcome = appendPackageRow(profilePath, profilePath.parentDir,
+      dataFile, row)
+    case outcome
+    of aroAlreadyPresent:
+      echo "repro home add: " & dataFile & " already has this row (" & pkg &
+        " in activity " & activity & "); unchanged"
+    of aroCreated:
+      echo "repro home add: created " & dataFile & " with " & pkg &
+        " in activity " & activity
+    of aroAppended:
+      echo "repro home add: added " & pkg & " to " & dataFile &
+        " (activity " & activity & ")"
+  except ENoProfile as e:
+    printNoProfile(e); return 1
+  except EUnstructured as e:
+    printUnstructured(e); return 1
+  except EDataFile as e:
+    stderr.writeLine("repro home add: " & e.msg)
+    return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home add: error: " & e.msg)
+    return 1
+  if noApply:
+    return 0
+  return runApplyInline("add")
+
 proc runHomeAdd(args: openArray[string]): int =
   if args.len == 0:
     stderr.writeLine("usage: repro home add <package>[@<version>|@latest] " &
-      "[--activity NAME] [--when PRED | --if PRED] [--no-apply] " &
-      "[--catalog=<list>]")
+      "[--activity NAME] [--when PRED | --if PRED] [--data FILE] " &
+      "[--no-apply] [--catalog=<list>]")
     stderr.writeLine("  examples:")
     stderr.writeLine("    repro home add git              # bare reference")
     stderr.writeLine("    repro home add jdk@21.0.5       # pin to a concrete version")
     stderr.writeLine("    repro home add jdk@latest       # resolve to the highest-SemVer")
     stderr.writeLine("                                    #   slice at edit time and write")
     stderr.writeLine("                                    #   the concrete pinned literal")
+    stderr.writeLine("    repro home add ghostty --activity desktop_apps " &
+      "--when macos --data data/apps.toml")
+    stderr.writeLine("                                    # append a row to a " &
+      "data file the profile's `data:` section declares")
     return 2
   var pkgSpec = ""
   var activity = "default"
   var pred = emptyPredicate()
   var noApply = false
+  var dataFile = ""
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--activity" or a.startsWith("--activity="):
       activity = parseFlagValue(args, i, "--activity")
+    elif a == "--data" or a.startsWith("--data="):
+      dataFile = parseFlagValue(args, i, "--data")
     elif a == "--when" or a.startsWith("--when="):
       pred.text = parseFlagValue(args, i, "--when")
       pred.keyword = ckWhen
@@ -548,6 +649,8 @@ proc runHomeAdd(args: openArray[string]): int =
           offered.join(", "))
       return 1
     version = latest.get
+  if dataFile.len > 0:
+    return runHomeAddDataRow(pkg, version, activity, pred, dataFile, noApply)
   try:
     let profilePath = loadProfilePath()
     if not packageInCatalog(pkg):
@@ -579,10 +682,62 @@ proc activityNames(p: Profile): seq[string] =
     if ch.kind == nkActivity:
       result.add ch.activityName
 
+proc runHomeRemoveDataRows(pkg, version, activity: string;
+                           pred: PredicateSpec; dataFile: string;
+                           noApply: bool): int =
+  ## GM4: `repro home remove <pkg> --data FILE` — remove the package rows
+  ## naming `pkg` from a plan-time data file the profile declares
+  ## (`removePackageRows`: only those rows' lines go, every other byte
+  ## stays). `--activity`, `--when` and `@<version>` narrow the match; `--if`
+  ## is refused (a row's guard is its `when` field). No matching row is an
+  ## error (exit 1) and leaves the file unchanged. `home.nim` is not touched.
+  if pred.given and pred.keyword == ckIf:
+    stderr.writeLine("repro home remove: --if is not accepted with --data; " &
+      "a data row's guard is its `when` field (use --when)")
+    return 2
+  let pathProblem = dataFilePathProblem(dataFile)
+  if pathProblem.len > 0:
+    stderr.writeLine("repro home remove: --data " & dataFile & ": " &
+      pathProblem)
+    return 2
+  try:
+    let profilePath = loadProfilePath()
+    let prof = loadProfile(profilePath)
+    if dataFile notin prof.dataFileRefs:
+      stderr.writeLine("repro home remove: " & dataFile & " is not " &
+        "declared in the `data:` section of " & profilePath)
+      return 1
+    let removed = removePackageRows(profilePath, profilePath.parentDir,
+      dataFile, pkg, activity = activity,
+      predicate = (if pred.given: pred.text else: ""), version = version)
+    if removed == 0:
+      stderr.writeLine("repro home remove: " & dataFile & " has no row " &
+        "for " & pkg & (if activity.len > 0: " in activity " & activity
+                        else: "") &
+        (if pred.given: " under when " & pred.text else: "") &
+        "; unchanged")
+      return 1
+    echo "repro home remove: removed " & $removed & " row(s) for " & pkg &
+      " from " & dataFile
+  except ENoProfile as e:
+    printNoProfile(e); return 1
+  except EUnstructured as e:
+    printUnstructured(e); return 1
+  except EDataFile as e:
+    stderr.writeLine("repro home remove: " & e.msg)
+    return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home remove: error: " & e.msg)
+    return 1
+  if noApply:
+    return 0
+  return runApplyInline("remove")
+
 proc runHomeRemove(args: openArray[string]): int =
   if args.len == 0:
     stderr.writeLine("usage: repro home remove <package>[@<version>] " &
-      "[--activity NAME] [--when PRED | --if PRED] [--no-apply]")
+      "[--activity NAME] [--when PRED | --if PRED] [--data FILE] " &
+      "[--no-apply]")
     stderr.writeLine("  examples:")
     stderr.writeLine("    repro home remove git              # strip every git reference")
     stderr.writeLine("    repro home remove jdk@21.0.5       # strip ONLY the pinned line")
@@ -593,12 +748,15 @@ proc runHomeRemove(args: openArray[string]): int =
   var activityGiven = false
   var pred = emptyPredicate()
   var noApply = false
+  var dataFile = ""
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--activity" or a.startsWith("--activity="):
       activitySpec = parseFlagValue(args, i, "--activity")
       activityGiven = true
+    elif a == "--data" or a.startsWith("--data="):
+      dataFile = parseFlagValue(args, i, "--data")
     elif a == "--when" or a.startsWith("--when="):
       pred.text = parseFlagValue(args, i, "--when")
       pred.keyword = ckWhen
@@ -628,6 +786,9 @@ proc runHomeRemove(args: openArray[string]): int =
     stderr.writeLine("repro home remove: missing <package> name in '" &
       pkgSpec & "'")
     return 2
+  if dataFile.len > 0:
+    return runHomeRemoveDataRows(pkg, version,
+      (if activityGiven: activitySpec else: ""), pred, dataFile, noApply)
   try:
     let profilePath = loadProfilePath()
     # Default semantics (no flags): remove every occurrence across all
@@ -927,6 +1088,7 @@ type
     activity: string
     predicate: string     ## "" if directly in the activity body
     keyword: CondKeyword
+    dataFile: string      ## GM4: the data file the row is in; "" for home.nim
 
 proc collectPackageOrigins(prof: Profile;
                           host: string): OrderedTable[string, seq[PackageOrigin]] =
@@ -954,6 +1116,17 @@ proc collectPackageOrigins(prof: Profile;
             result[pkgRef.packageName] = @[]
           result[pkgRef.packageName].add origin
       else: discard
+  # GM4: rows of the plan-time data files the profile declares. `list` and
+  # `why` read the profile as text, so they read the data files through the
+  # same reader the planner uses (`readDataFile`): a row the planner would
+  # refuse makes them fail too, instead of being left out of the listing.
+  for reference in prof.dataFileRefs:
+    let file = readDataFile(prof.path, prof.path.parentDir, reference)
+    for row in file.rows:
+      if row.name notin result:
+        result[row.name] = @[]
+      result[row.name].add PackageOrigin(activity: row.activity,
+        predicate: row.whenPredicate, keyword: ckWhen, dataFile: reference)
 
 proc runHomeList(args: openArray[string]): int =
   var hostOverride = ""
@@ -988,12 +1161,16 @@ proc runHomeList(args: openArray[string]): int =
           else:
             let kw = if s.keyword == ckWhen: "when " else: "if "
             "  " & kw & s.predicate
-        echo prefix & pkg & "  activity=" & s.activity & predStr
+        let dataStr = if s.dataFile.len > 0: "  data=" & s.dataFile else: ""
+        echo prefix & pkg & "  activity=" & s.activity & predStr & dataStr
     return 0
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnstructured as e:
     printUnstructured(e); return 1
+  except EDataFile as e:
+    stderr.writeLine("repro home list: " & e.msg)
+    return 1
   except CatchableError as e:
     stderr.writeLine("repro home list: error: " & e.msg)
     return 1
@@ -1047,8 +1224,11 @@ proc runHomeWhy(args: openArray[string]): int =
         if activityActive: "ENABLED on host `" & host & "`"
         else: "NOT enabled on host `" & host &
           "` (not in hosts: entry, not `default`)"
+      let dataStr =
+        if s.dataFile.len > 0: " (row in data file " & s.dataFile & ")"
+        else: ""
       echo "repro home why: package `" & pkg & "` <- activity `" &
-        s.activity & "`" & predStr & " [" & activityState & "]"
+        s.activity & "`" & predStr & dataStr & " [" & activityState & "]"
       if activityActive: inc hitActive
     if hitActive == 0:
       echo "repro home why: `" & pkg & "` is declared but NOT active on `" &
@@ -1059,6 +1239,9 @@ proc runHomeWhy(args: openArray[string]): int =
     printNoProfile(e); return 1
   except EUnstructured as e:
     printUnstructured(e); return 1
+  except EDataFile as e:
+    stderr.writeLine("repro home why: " & e.msg)
+    return 1
   except CatchableError as e:
     stderr.writeLine("repro home why: error: " & e.msg)
     return 1
@@ -1100,11 +1283,32 @@ proc runHomeHistory(args: openArray[string]): int =
       echo "repro home history: no generations yet at " & stateDir
       return 0
     echo "repro home history: state-dir=" & stateDir
+    var store: Store
+    var storeOpen = false
+    defer:
+      if storeOpen:
+        try: store.close() except CatchableError: discard
     for rec in records:
       let marker = if rec.isActive: "  [active]" else: "          "
       echo "  " & shortGenerationId(rec.generationId) & "  " &
         formatTimestamp(rec.activationTimestamp) & "  host=" &
         rec.envelope.hostIdentity & marker
+      # GM4: the plan-time data files this generation was planned from, as
+      # recorded in its intent snapshot (never the live files).
+      try:
+        if not storeOpen:
+          store = openStore(resolveStoreRoot())
+          storeOpen = true
+        var key: PrefixIdBytes
+        for i in 0 ..< 32:
+          key[i] = rec.envelope.intentSnapshotDigest[i]
+        let snapshot = decodeSnapshotBytes(readCasBlob(store, key))
+        for entry in snapshot.files:
+          if entry.role == ifrData:
+            echo "      data " & entry.path & " blake3=" &
+              blake3.toHex(blake3.digest(entry.content))
+      except CatchableError as e:
+        echo "      data (intent snapshot unreadable: " & e.msg & ")"
     return 0
   except EStateDirInvalid as e:
     stderr.writeLine("repro home history: " & e.msg)
@@ -1158,10 +1362,8 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
     let stateDir = resolveStateDir()
     let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
     if outcomeCompile.profile == nil:
-      stderr.writeLine(formatProfileCompileError(
-        "repro home apply --plan", profilePath,
-        outcomeCompile.compileError,
-        planCommand = "repro home plan"))
+      stderr.writeLine(formatCompileAdaptFailure(
+        "repro home apply --plan", profilePath, outcomeCompile))
       return 1
     opts.preLoadedProfile = outcomeCompile.profile
     let preview = runApplyPlan(opts)
@@ -2860,10 +3062,8 @@ proc runHomePlan(args: openArray[string]): int =
     # parser is no longer consulted as an apply-path fallback.
     let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
     if outcomeCompile.profile == nil:
-      stderr.writeLine(formatProfileCompileError(
-        "repro home plan", profilePath,
-        outcomeCompile.compileError,
-        planCommand = "repro home plan"))
+      stderr.writeLine(formatCompileAdaptFailure(
+        "repro home plan", profilePath, outcomeCompile))
       return 1
     let prof = outcomeCompile.profile
     let desired = composeDesiredResources(prof, homeDir, currentHost())

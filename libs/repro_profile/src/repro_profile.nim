@@ -21,6 +21,7 @@ import repro_profile/disk_tools
 import repro_profile/disk_identity
 import repro_profile/disk_apply
 import repro_profile/build_actions
+import repro_profile/data_refs
 
 export types
 export predicates
@@ -35,3 +36,4 @@ export disk_tools
 export disk_identity
 export disk_apply
 export build_actions
+export data_refs

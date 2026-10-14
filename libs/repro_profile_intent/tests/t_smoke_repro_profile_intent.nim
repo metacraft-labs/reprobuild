@@ -14,7 +14,7 @@
 ##    on encode, so identical inputs must produce byte-identical
 ##    output and reversed input order must produce the same wire.
 
-import std/[tables, unittest]
+import std/[strutils, tables, unittest]
 
 import repro_profile
 import repro_profile_intent
@@ -464,3 +464,21 @@ suite "encodeRbpi / decodeRbpi convenience":
       check e.field == "custom"
       check e.detail == "diagnostic message"
     check raised
+
+  test "GM4: data-file references round-trip and are absent when empty":
+    var p = ProfileIntent(name: "gm4")
+    p.activities.add ActivityIntent(name: "default",
+      body: @[ActivityElement(kind: aekPackageRef, pkgName: "jq")])
+    let without = encodeRbpi(p)
+    check decodeRbpi(without).dataFiles.len == 0
+    p.dataFiles = @["data/apps.toml", "data/cli.toml"]
+    let with = encodeRbpi(p)
+    check decodeRbpi(with).dataFiles == @["data/apps.toml", "data/cli.toml"]
+    # The key is optional on the wire: present only with references.
+    check without != with
+    # The JSON form carries them too, and omits the key when empty.
+    check emitProfileIntentJson(p).contains("\"dataFiles\":[\"data/apps.toml\"")
+    check parseProfileIntentJson(emitProfileIntentJson(p)).dataFiles ==
+      p.dataFiles
+    p.dataFiles = @[]
+    check not emitProfileIntentJson(p).contains("dataFiles")

@@ -255,6 +255,13 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   result.add "]"
   result.add ",\"adapterPreference\":" &
     encodeAdapterPreference(p.adapterPreference)
+  # GM4: the plan-time data-file references, only when the profile
+  # declares any. An expanded intent (what `repro home export` prints) has
+  # none: its rows are already merged into `activities`, so a consumer can
+  # never expand them twice, and the key set of a profile without a
+  # `data:` section is unchanged.
+  if p.dataFiles.len > 0:
+    result.add ",\"dataFiles\":" & encodeStringArray(p.dataFiles)
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -387,6 +394,10 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
       for it in chainNode:
         chain.add it.getStr()
       result.adapterPreference[osKey] = chain
+  # GM4: optional; absent when the profile declares no data files.
+  if root.hasKey("dataFiles"):
+    for it in root["dataFiles"]:
+      result.dataFiles.add it.getStr()
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.

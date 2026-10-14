@@ -242,7 +242,17 @@ proc buildHomeExport*(intent: ProfileIntent;
   ## Assemble the export document (schema version `HomeExportSchemaVersion`)
   ## from a compiled intent. Field order is fixed so the rendered bytes are
   ## stable for an unchanged input.
-  let selection = hostSelection(intent, profilePath, host)
+  ##
+  ## GM4: `intent` is the compiled intent with its data-file REFERENCES;
+  ## the document carries it EXPANDED (`expandProfileData`, the planner's own
+  ## expansion), so a consumer reads every row as an ordinary activity
+  ## element and never needs the data files, and `--check` sees a data edit
+  ## as an intent change. The references move to `provenance.dataFiles`
+  ## with the digests of the bytes expanded. The platform comparison uses
+  ## the unexpanded intent: the probe evaluates the compile, and the rows
+  ## are platform-neutral data (their guards are evaluated per target).
+  let expanded = expandProfileData(intent, profilePath)
+  let selection = hostSelection(expanded.intent, profilePath, host)
   let inputs = profileInputs(profilePath.parentDir, artifact.observedInputs)
   let digest = profileDigest(inputs)
 
@@ -257,6 +267,11 @@ proc buildHomeExport*(intent: ProfileIntent;
   var probeNode = newJObject()
   for (system, why) in dependence.diagnostics:
     probeNode[system] = %why
+  var dataFilesNode = newJArray()
+  for f in expanded.dataFiles:
+    dataFilesNode.add %*{"path": f.path,
+      "blake3": blake3.toHex(blake3.digest(f.content)),
+      "rows": f.rows.len + f.resources.len}
 
   result = newJObject()
   result["format"] = %HomeExportFormat
@@ -266,7 +281,7 @@ proc buildHomeExport*(intent: ProfileIntent;
     "hostDeclared": selection.hostDeclared,
     "activities": stringArray(selection.activities),
     "unknownActivities": stringArray(selection.unknownActivities)}
-  result["intent"] = parseJson(emitProfileIntentJson(intent))
+  result["intent"] = parseJson(emitProfileIntentJson(expanded.intent))
   result["platforms"] = platformsNode
   result["provenance"] = %*{
     "repro": {
@@ -277,7 +292,7 @@ proc buildHomeExport*(intent: ProfileIntent;
       "root": profilePath.extractFilename,
       "digest": (if digest.len > 0: %digest else: newJNull()),
       "inputs": inputsNode},
-    "dataFiles": newJArray(),
+    "dataFiles": dataFilesNode,
     "compile": {
       "target": compilingPlatformSystem(),
       "os": hostOS,
@@ -465,7 +480,7 @@ proc provenanceNotes*(snapshot, fresh: JsonNode): seq[string] =
         return nil
       result = result[key]
   for path in [@["repro", "version"], @["repro", "sourceRevision"],
-               @["profile", "digest"], @["compile", "target"],
+               @["profile", "digest"], @["dataFiles"], @["compile", "target"],
                @["compile", "os"], @["compile", "cpu"]]:
     let a = at(snapshot, @["provenance"] & path)
     let b = at(fresh, @["provenance"] & path)
@@ -553,6 +568,13 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
   let rootNode = docAt(doc, ["provenance", "profile", "root"])
   let root = if rootNode.isNil: "home.nim" else: rootNode.getStr
   let intent = parseProfileIntentJson($doc["intent"])
+  # An export's intent is always expanded (`buildHomeExport`). One that
+  # still names data files was not produced by `repro home export`, and
+  # evaluating it would silently omit their rows.
+  if intent.dataFiles.len > 0:
+    raise newException(ValueError, "the document's intent still names " &
+      "data files (" & intent.dataFiles.join(", ") & "); an export carries " &
+      "them expanded — re-export")
   let profile = profileIntentToHomeProfile(intent, root)
   let ctx = targetHostContext(ProfileTargetPlatforms[index], selectedHost)
 

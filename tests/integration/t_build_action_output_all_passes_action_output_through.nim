@@ -22,6 +22,8 @@
 ##     summary;
 ##   * the flag is presentation only: an action built without it is served
 ##     from cache when rebuilt with it, i.e. it did not enter the action key;
+##   * `repro test` forwards it to the in-process build it runs to issue
+##     certificates;
 ##   * an unknown value is rejected with the vocabulary.
 ##
 ## stdout and stderr are captured SEPARATELY here, unlike the merged
@@ -81,8 +83,8 @@ type BuildRun = object
   stdoutText: string
   stderrText: string
 
-proc runBuild(project: string; extra: openArray[string]): BuildRun =
-  var args = @["build"]
+proc runRepro(project, verb: string; extra: openArray[string]): BuildRun =
+  var args = @[verb]
   for arg in extra:
     args.add(arg)
   args.add(["--tool-provisioning=path", "--daemon=off", "--no-runquota",
@@ -103,6 +105,9 @@ proc runBuild(project: string; extra: openArray[string]): BuildRun =
   result.exitCode = res.exitCode
   result.stdoutText = res.output
   result.stderrText = readFile(stderrPath)
+
+proc runBuild(project: string; extra: openArray[string]): BuildRun =
+  runRepro(project, "build", extra)
 
 proc explain(run: BuildRun): string =
   "exit=" & $run.exitCode & "\n--- stdout ---\n" & run.stdoutText &
@@ -176,6 +181,21 @@ suite "repro build --action-output":
           keyedLine = line
       check keyedLine.len > 0
       check "launched=false" in keyedLine
+
+  test "repro test forwards the flag to its in-process build":
+    # ``repro test`` issues certificates, so it always builds in-process to
+    # observe each action's outcome. That build must still print what its
+    # actions wrote when asked, as ``repro build`` does.
+    if not fileExists(reproBin) or findExe("sh").len == 0:
+      skip("needs " & reproBin & " (run `just build`) and `sh` on PATH")
+    else:
+      let run = runRepro(project, "test", ["chatty", "--action-output=all",
+        "--log=quiet"])
+      checkpoint(explain(run))
+      check run.exitCode == 0
+      check StdoutMarker in run.stdoutText
+      check StderrMarker in run.stdoutText
+      check StderrMarker notin run.stderrText
 
   test "an unknown value is rejected with the vocabulary":
     if not fileExists(reproBin) or findExe("sh").len == 0:
