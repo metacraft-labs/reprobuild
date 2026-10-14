@@ -1010,6 +1010,7 @@ tests/e2e/m83/t_e2e_nix_reads_data_like_profile.nim	nim	1
 tests/e2e/m83/t_e2e_nix_reads_intent_like_export.nim	nim	1
 tests/e2e/m83/t_e2e_phase_g_action_edges.nim	nim	4
 tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim	nim	2
+tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5
 tests/e2e/m83/t_e2e_profile_compile_path_with_spaces.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim	nim	1
