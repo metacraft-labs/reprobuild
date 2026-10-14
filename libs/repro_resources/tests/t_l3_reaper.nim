@@ -19,7 +19,7 @@
 ## provider binary just to destroy) is HEAVY (an RP1 provider build per
 ## test) and lives in
 ## `tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim`,
-## which drives a real launched provider — that is where the §4.4 "a session
+## which drives a real launched provider — that is where the §4.5 "a session
 ## reap needs no attrs codec in the reaping process" property is proven
 ## end-to-end. Here the core selection predicate, reverse-topo, crash-safety,
 ## idempotency, the `repro reap` seam, and (case 18) WHICH transport requires
@@ -735,7 +735,7 @@ suite "L3: crash-safe reaper":
     check report.unreadable.len == 0
 
   test "(18) the attrs codec is required IN-PROCESS and not over a SESSION":
-    ## The transport asymmetry §4.4 settles, pinned in both directions against
+    ## The transport asymmetry §4.5 settles, pinned in both directions against
     ## ONE record in ONE process, so neither arm can drift into the other's
     ## contract without a red case.
     ##

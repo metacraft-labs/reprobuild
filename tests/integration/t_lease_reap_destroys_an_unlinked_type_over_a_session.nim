@@ -1,4 +1,4 @@
-## Ephemeral-State-Leases.md §4.4 — a reap over the PROVIDER SESSION needs no
+## Ephemeral-State-Leases.md §4.5 — a reap over the PROVIDER SESSION needs no
 ## attrs codec in the reaping process.
 ##
 ## §4.2 gives the daemon a provider-session destroy transport precisely so it
