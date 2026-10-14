@@ -1,4 +1,4 @@
-## Shared-Development-Services L3 codec round-trip: encode a v21
+## Shared-Development-Services L3 codec round-trip: encode a v23
 ## ``ProjectInterfaceArtifact`` carrying non-empty ``publicServices`` and
 ## ``publicActivities`` seqs, decode them back, and assert every field
 ## survives byte-identically. Also verifies:
@@ -112,7 +112,7 @@ proc samplePi(): ProjectInterface =
   result.publicServices = sampleServices()
   result.publicActivities = @[sampleActivity()]
 
-suite "interface-artifact codec L3 (v21) publicServices/publicActivities":
+suite "interface-artifact codec L3 (v23) publicServices/publicActivities":
 
   test "publicServices and publicActivities round-trip":
     let pi = samplePi()
@@ -185,7 +185,7 @@ suite "interface-artifact codec L3 (v21) publicServices/publicActivities":
     check decoded.projectInterface.publicLibraries.len == 1
     check decoded.projectInterface.publicLibraries[0].name == "libinfra"
 
-  test "a corrupted v21 envelope fails closed":
+  test "a corrupted v23 envelope fails closed":
     let encoded = encodeProjectInterfaceArtifact(artifactFor(samplePi()))
     var corrupted = encoded
     corrupted[^2] = corrupted[^2] xor 0xff'u8

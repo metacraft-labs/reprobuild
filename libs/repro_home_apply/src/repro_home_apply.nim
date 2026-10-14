@@ -28,7 +28,11 @@ import repro_home_apply/errors
 import repro_home_apply/home_producer_consumer_map
 import repro_home_apply/plan
 import repro_home_apply/package_catalog
+import repro_home_apply/catalog_projection
 import repro_home_apply/realize
+import repro_home_apply/macos_archives
+import repro_home_apply/app_activation
+import repro_home_apply/home_lock
 import repro_home_apply/materialize_files
 import repro_home_apply/materialize_managed_blocks
 import repro_home_apply/materialize_launchers
@@ -46,7 +50,11 @@ export errors
 export home_producer_consumer_map
 export plan
 export package_catalog
+export catalog_projection
 export realize
+export macos_archives
+export app_activation
+export home_lock
 export materialize_files
 export materialize_managed_blocks
 export materialize_launchers

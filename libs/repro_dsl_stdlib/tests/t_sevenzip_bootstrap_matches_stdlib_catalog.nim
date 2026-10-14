@@ -11,6 +11,10 @@
 ## cannot depend on the stdlib. This pins the copies to the catalog, so
 ## re-harvesting either package without updating the bootstrap fails here
 ## rather than leaving two versions of an extractor in the store.
+##
+## GM4b: 7-Zip's stdlib realizations are ``tarball`` statements of ``package
+## sevenzip`` (the retired ``sevenzipCatalog`` record), read here through the
+## same projection the zstd case uses.
 
 import std/[strutils, unittest]
 
@@ -33,15 +37,14 @@ proc stdlibToolUse(packageName, executableName: string): InterfaceToolUse =
 suite "7-Zip extractor bootstrap":
   test "the bootstrap pins the catalog's Windows x86_64 MSI":
     var catalogUrl, catalogSha256, catalogVersion: string
-    for entry in sevenzipCatalog:
-      for platform in entry.platforms:
-        if platform.os == poWindows and platform.cpu == pcX86_64:
-          catalogUrl = platform.url
-          catalogSha256 = platform.sha256
-          catalogVersion = entry.version
-      if catalogUrl.len > 0:
+    for arm in stdlibToolUse("sevenzip", "7z").tarballProvisioning:
+      if arm.os == "windows" and arm.cpu == "x86_64":
+        catalogUrl = arm.url
+        catalogSha256 = arm.sha256
+        catalogVersion = arm.detail.version
         break
     check catalogUrl.endsWith(".msi")
+    check catalogVersion.len > 0
 
     let use = bootstrapSevenZipToolUse()
     check use.packageSelector == "7zip@" & catalogVersion

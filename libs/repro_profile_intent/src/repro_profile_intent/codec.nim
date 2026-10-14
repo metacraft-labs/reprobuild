@@ -49,6 +49,11 @@ const
     ## (cached before this codec extension) has no entry and decodes
     ## with an empty ``buildActions`` seq, so existing profile-compile
     ## fixtures survive the codec bump without a re-encode.
+  KeyDataFiles    = "dataFiles"
+    ## GM4: the plan-time data-file references a profile's `data:` section
+    ## declares (`ProfileIntent.dataFiles`). Optional; omitted when empty,
+    ## so a profile without data files encodes exactly as before. Envelope
+    ## schema 5.
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -70,6 +75,10 @@ const
     ## M69: the literal version pin from `package(<id>, "<version>")`.
     ## Optional; omitted from the CBOR map when empty so existing
     ## pre-M69 RBPI artifacts round-trip unchanged.
+  KeyGuard        = "guard"
+    ## GM3: the runtime predicate a ResourceIntent / ConfigOverride
+    ## applies under (`ResourceIntent.guard`). Optional; omitted when the
+    ## element applies on every host. Envelope schema 4.
   KeyBinaries     = "binaries"
     ## 2026-06-09: the explicit binary names a package installs, used
     ## by the path-based catalog adapter when the package name
@@ -183,9 +192,12 @@ proc encodeActivity(a: ActivityIntent): DynamicValue =
             entry(KeyBody, encodeActivityElementSeq(a.body))])
 
 proc encodeConfigOverride(c: ConfigOverride): DynamicValue =
-  cborMap(@[entry(KeyPkg, cborText(c.pkg)),
-            entry(KeyKey, cborText(c.key)),
-            entry(KeyValue, encodeConfigValue(c.value))])
+  var fields = @[entry(KeyPkg, cborText(c.pkg)),
+                 entry(KeyKey, cborText(c.key)),
+                 entry(KeyValue, encodeConfigValue(c.value))]
+  if c.guard.expr.len > 0:
+    fields.add entry(KeyGuard, cborText(c.guard.expr))
+  cborMap(fields)
 
 proc encodeResource(r: ResourceIntent): DynamicValue =
   var fieldEntries: seq[DynamicMapEntry] = @[]
@@ -197,10 +209,13 @@ proc encodeResource(r: ResourceIntent): DynamicValue =
   var deps: seq[DynamicValue] = @[]
   for d in r.dependsOn:
     deps.add encodeResourceAddress(d)
-  cborMap(@[entry(KeyKind, cborText(r.kind)),
-            entry(KeyAddress, cborText(r.address)),
-            entry(KeyFields, cborMap(fieldEntries)),
-            entry(KeyDependsOn, cborArray(deps))])
+  var fields = @[entry(KeyKind, cborText(r.kind)),
+                 entry(KeyAddress, cborText(r.address)),
+                 entry(KeyFields, cborMap(fieldEntries)),
+                 entry(KeyDependsOn, cborArray(deps))]
+  if r.guard.expr.len > 0:
+    fields.add entry(KeyGuard, cborText(r.guard.expr))
+  cborMap(fields)
 
 proc encodeHosts(h: Table[string, seq[string]]): DynamicValue =
   var hostEntries: seq[DynamicMapEntry] = @[]
@@ -264,14 +279,17 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var bas: seq[DynamicValue] = @[]
   for b in p.buildActions:
     bas.add encodeBuildAction(b)
-  cborMap(@[entry(KeyName, cborText(p.name)),
+  var entries = @[entry(KeyName, cborText(p.name)),
             entry(KeyActivities, cborArray(acts)),
             entry(KeyConfigOverrides, cborArray(cfgs)),
             entry(KeyHosts, encodeHosts(p.hosts)),
             entry(KeyResources, cborArray(ress)),
             entry(KeyBuildActions, cborArray(bas)),
             entry(KeyAdapterPreference,
-              encodeAdapterPreference(p.adapterPreference))])
+              encodeAdapterPreference(p.adapterPreference))]
+  if p.dataFiles.len > 0:
+    entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
+  cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
   ## CBOR-encode the `ProfileIntent`. Deterministic: same input bytes
@@ -408,12 +426,19 @@ proc decodeActivity(v: DynamicValue): ActivityIntent =
   result.body = decodeActivityElementSeq(expectArray(
     lookup(entries, KeyBody, "ActivityIntent"), KeyBody))
 
+proc decodeGuard(entries: seq[DynamicMapEntry]): PredicateExpr =
+  var found = false
+  let v = lookupOpt(entries, KeyGuard, found)
+  if found:
+    result.expr = expectText(v, KeyGuard)
+
 proc decodeConfigOverride(v: DynamicValue): ConfigOverride =
   let entries = expectMap(v, "ConfigOverride")
   ConfigOverride(
     pkg: expectText(lookup(entries, KeyPkg, "ConfigOverride"), KeyPkg),
     key: expectText(lookup(entries, KeyKey, "ConfigOverride"), KeyKey),
-    value: decodeConfigValue(lookup(entries, KeyValue, "ConfigOverride")))
+    value: decodeConfigValue(lookup(entries, KeyValue, "ConfigOverride")),
+    guard: decodeGuard(entries))
 
 proc decodeResource(v: DynamicValue): ResourceIntent =
   let entries = expectMap(v, "ResourceIntent")
@@ -428,6 +453,7 @@ proc decodeResource(v: DynamicValue): ResourceIntent =
   for d in expectArray(
       lookup(entries, KeyDependsOn, "ResourceIntent"), KeyDependsOn):
     result.dependsOn.add decodeResourceAddress(d)
+  result.guard = decodeGuard(entries)
 
 proc decodeHosts(v: DynamicValue): Table[string, seq[string]] =
   let entries = expectMap(v, "hosts")
@@ -523,6 +549,13 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
     result.adapterPreference = decodeAdapterPreference(apNode)
   else:
     result.adapterPreference = initOrderedTable[string, seq[string]]()
+  # GM4: data-file references are OPTIONAL on the wire (absent when the
+  # profile declares none).
+  var dfFound = false
+  let dfNode = lookupOpt(entries, KeyDataFiles, dfFound)
+  if dfFound:
+    for it in expectArray(dfNode, KeyDataFiles):
+      result.dataFiles.add expectText(it, KeyDataFiles)
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

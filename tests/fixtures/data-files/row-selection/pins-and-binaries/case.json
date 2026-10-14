@@ -1,0 +1,8 @@
+{
+  "description": "version and binaries ride along; a package selected by two rows is one package.",
+  "hosts": { "dev-box": ["dev"] },
+  "evaluations": [
+    { "host": "dev-box", "system": "x86_64-linux", "packages": ["jdk", "ripgrep"] },
+    { "host": "other", "system": "x86_64-linux", "packages": ["ripgrep"] }
+  ]
+}

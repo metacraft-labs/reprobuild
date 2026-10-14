@@ -273,14 +273,16 @@ proc lapsedInstanceRecordWith(address, attrsTypeId, attrsJson: string;
   ## deadline is in the past, folded by the REAL `mergeHolderDeadlines`
   ## so the record's `holders` map and `effectiveDeadline` are the ones
   ## the registry's own write funnel would have produced.
-  let merged = mergeHolderDeadlines(initTable[string, Time](),
+  let merged = mergeHolderDeadlines(none(ResourceStateRecord),
     holderRenewals(address,
       @[ServiceInstanceHolder(consumerId: "holder:lapsed",
         deadline: some(lapsedAt))], lapsedAt), lapsedAt)
   ResourceStateRecord(address: address, typeId: ServiceInstanceTypeId,
     determinism: rdVolatile, attrsTypeId: attrsTypeId,
     attrsJson: attrsJson, dependsOn: @[], identity: "x", present: true,
-    holders: merged.holders, effectiveDeadline: merged.effective,
+    holders: merged.holders, keepHolders: merged.keepHolders,
+    keepHoldersKnown: merged.keepHoldersKnown,
+    effectiveDeadline: merged.effective,
     lastRenewed: lapsedAt)
 
 # ---------------------------------------------------------------------------
@@ -664,18 +666,46 @@ suite "L7 §4.5 — a restarted daemon rebuilds the registry from the store":
       discard decodeServiceInstanceAttrs(serviceInstanceAddress(key),
         ServiceInstanceAttrsTypeId, encodeServiceInstanceAttrs(record))
 
+proc downgradeToPreV4(storeRoot: string; key: ServiceInstanceKey) =
+  ## Rewrite the instance's record as a PRE-STATE-RECORD-v4 build left it:
+  ## the keep holders' names taken out and `keepHoldersKnown` false.
+  ##
+  ## THIS IS NOT A FABRICATION, AND THE DISTINCTION IS THE WHOLE REASON
+  ## THE HELPER EXISTS. It reads the REAL record the real store wrote and
+  ## removes exactly the two fields v4 added -- which is byte for byte
+  ## what is on disk in any workspace whose last run predates v4. Rule 1's
+  ## unrecoverable path can no longer be reached by taking a `keep` lease
+  ## and restarting, because `fix(resources): persist keep lease holders in
+  ## the state record` made that case RECOVERABLE; this is the shape that
+  ## still reaches it, so this is how rule 1 keeps being measured.
+  let store = openStateStore(storeRoot)
+  var rec = readStateRecord(store, serviceInstanceAddress(key))
+  doAssert rec.keepHolders.len > 0,
+    "fixture drift: expected a keep-held v4 record to downgrade"
+  doAssert rec.keepHoldersKnown,
+    "fixture drift: expected the record to claim a complete keep set"
+  rec.keepHolders = @[]
+  rec.keepHoldersKnown = false
+  writeStateRecord(store, rec)
+
 suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
   teardown:
     # Runs whether the case passed or raised -- see the first suite.
     reapEverySpawnedInstance()
 
-  test "the `keep` default is fully counted in memory and lossy across a restart":
-    ## D-SS5 chose `keep` as the default, and §4.5 rule 3 records the
-    ## consequence: "a `keep` holder's consumer id is written nowhere, so
-    ## `effectiveDeadline == none` represents two distinct states". Both
-    ## halves are asserted here, against a record written by the REAL
-    ## store through the REAL `mergeHolderDeadlines` — which is what
-    ## rule 3 requires of a test of rule 1.
+  test "the `keep` default is fully counted in memory AND across a restart":
+    ## D-SS5 chose `keep` as the default, and §4.5 rule 3 used to record
+    ## the consequence: "a `keep` holder's consumer id is written nowhere,
+    ## so `effectiveDeadline == none` represents two distinct states".
+    ##
+    ## STATE-RECORD v4 ENDED THAT, and this case asserts the new
+    ## behaviour: `keepHolders` names them on disk and `keepHoldersKnown`
+    ## says the list is complete, so the restart recovers the whole set
+    ## and rule 1's refusal is never reached -- `--replace` is decided by
+    ## L6's `replaceDecision`, which refuses while NAMING all three. The
+    ## case below ("rule 1 still refuses...") carries what is left of the
+    ## unrecoverable path. Measured against a record written by the REAL
+    ## store through the REAL `mergeHolderDeadlines`, as rule 3 requires.
     let storeRoot = throwawayRoot("keep-store")
     let keyRoot = throwawayRoot("keep-keyroot")
     let key = keyFor("l6AttBase", keyRoot)
@@ -691,12 +721,70 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
       # the daemon is running".
       check registry.holderNames(key) == sorted(holders)
       check registry.lookupServiceInstance(key).get.holderRecovery == hrTotal
-    # ON DISK the names are gone. Measured on the record the real store
+    # ON DISK the names are KEPT. Measured on the record the real store
     # wrote, not on a constructed one.
     let state = readStateRecord(openStateStore(storeRoot),
       serviceInstanceAddress(key))
+    # Still not DATED holders -- a keep holder pins with no expiry and is
+    # deliberately absent from `holders`, which is unchanged by v4...
     check state.holders.len == 0
     check state.effectiveDeadline.isNone
+    # ...and that is now accompanied by their names, and by the record
+    # saying the list is COMPLETE rather than merely what it happened to
+    # have.
+    check sorted(state.keepHolders) == sorted(holders)
+    check state.keepHoldersKnown
+    let reopened = openServiceInstanceRegistryReporting(storeRoot,
+      serviceInstanceLivenessProbe())
+    var registry = reopened.registry
+    check reopened.report.recovered == 1
+    # No risk to report: nothing was lost.
+    check reopened.report.unnamedKeepHolderRisks == 0
+    let entry = registry.lookupServiceInstance(key).get
+    check entry.holderRecovery == hrTotal
+    check entry.instance.holders.len == 3
+    check sorted(registry.holderNames(key)) == sorted(holders)
+    # Every recovered holder is a keep holder: no deadline, always live.
+    for holder in entry.instance.holders:
+      check holder.deadline.isNone
+    # The instance itself is recovered and running.
+    check entry.liveness == silLive
+
+    # RULE 1 IS NOT REACHED, because the set is recoverable. `--replace`
+    # goes to L6's `replaceDecision`, which refuses and names all three
+    # -- a strictly better answer than the old "can name NO holder".
+    let refusal = convergeServiceInstance(registry, key,
+      snapshotOf("l6AttBase"), holderIdFor("taker"),
+      freshLiftForThisSuite(), keep(), getTime(), replace = true)
+    check refusal.outcome == scoRefuseOtherHolders
+    check refusal.holdersKnown.len == 3
+    check sorted(refusal.holdersKnown) == sorted(holders)
+    check sorted(refusal.replace.blockingHolders) == sorted(holders)
+    check not refusal.diagnostic.contains("can name NO holder")
+    for holder in holders:
+      check refusal.diagnostic.contains(holder)
+    # And the instance is untouched.
+    check registry.registeredServiceInstances().len == 1
+    check entry.liveness == silLive
+    reapEverySpawnedInstance()
+
+  test "rule 1 still refuses an UNRECOVERABLE set, which is now a pre-v4 record":
+    ## Rule 1 did not go away with the fix; the only way INTO it did. A
+    ## record written before state-record v4 carries no keep-holder names
+    ## and does not claim to, so a daemon reading it genuinely cannot
+    ## enumerate the holders -- and must say so rather than conclude there
+    ## are none. Both rule 1 (refuse) and rule 2 (force, with the
+    ## uncertainty named) are asserted on that record.
+    let storeRoot = throwawayRoot("prev4-store")
+    let keyRoot = throwawayRoot("prev4-keyroot")
+    let key = keyFor("l6AttBase", keyRoot)
+    block firstDaemon:
+      var registry = freshRegistry(storeRoot)
+      for label in ["a", "b", "c"]:
+        discard convergeOne(registry, key, "l6AttBase", holderIdFor(label),
+          keyRoot, policy = keep())
+    downgradeToPreV4(storeRoot, key)
+
     let reopened = openServiceInstanceRegistryReporting(storeRoot,
       serviceInstanceLivenessProbe())
     var registry = reopened.registry
@@ -723,7 +811,6 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
     # `replaceDecision` was NOT consulted, so nothing claims a set this
     # path could not compute.
     check refusal.replace.blockingHolders.len == 0
-    # And the instance is untouched.
     check registry.registeredServiceInstances().len == 1
     check entry.liveness == silLive
 
@@ -780,6 +867,10 @@ suite "L7 §4.5 rule 1 — an unrecoverable holder set is a REFUSAL":
       var registry = freshRegistry(storeRoot)
       discard convergeOne(registry, key, "l6AttBase", holder, keyRoot,
         policy = keep())
+    # A keep holder alone is no longer unrecoverable -- state-record v4
+    # names it -- so the set is made unrecoverable the only way that is
+    # still real: a record from before v4. See `downgradeToPreV4`.
+    downgradeToPreV4(storeRoot, key)
     var registry = freshRegistry(storeRoot)
     let process = registry.lookupServiceInstance(key).get.record.process
     let decision = releaseServiceInstance(registry, key, holder)

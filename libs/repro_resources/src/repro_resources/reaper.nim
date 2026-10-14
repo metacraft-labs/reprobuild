@@ -10,13 +10,16 @@
 ##
 ## The SELECTION PREDICATE (the L2 reap-safety property, verified here):
 ##
-##   * `effectiveDeadline == none`  -> NEVER reap. `none` means "no dated
-##     holder / a `keep` holder pins it": there is NO reap deadline. This
-##     is deliberately an `Option`, not an epoch-0/PAST sentinel — a PAST
-##     sentinel would make the natural `deadline < now` gate destroy a
-##     pinned state. A `none` record is unconditionally skipped.
+##   * `effectiveDeadline == none`  -> NEVER reap. `none` means "a `keep`
+##     holder pins it" (named in `keepHolders`), "no dated holder", or — for
+##     a pre-v4 record (`keepHoldersKnown == false`) — "maybe an anonymous
+##     keep pin": there is NO reap deadline. This is deliberately an
+##     `Option`, not an epoch-0/PAST sentinel — a PAST sentinel would make
+##     the natural `deadline < now` gate destroy a pinned state. A `none`
+##     record is unconditionally skipped.
 ##   * `effectiveDeadline == some(t)` with `t <= now` AND no LIVE holder ->
-##     reap. A holder is LIVE if its own deadline is still in the future
+##     reap. A holder is LIVE if it is a recorded `keep` holder (no expiry)
+##     or its own deadline is still in the future
 ##     (`holders[c] > now`); a live holder keeps the state even if the
 ##     folded `effectiveDeadline` looks passed (defense in depth — normally
 ##     `effectiveDeadline == max(holders)`, so a live holder already lifts
@@ -148,6 +151,15 @@ type
     reaped*: seq[ReapEvent]        ## destroyed (or already-absent) records removed, in order
     skipped*: seq[string]          ## addresses inspected but kept (still leased / never-reap)
     failed*: seq[ReapFailure]      ## selected but NOT reaped — see `ReapFailure`
+    # Records the sweep could not even READ (`scanStateRecords`). They have no
+    # decodable address, so `onlyAddresses` cannot filter them and they are
+    # always reported.
+    foreign*: seq[ForeignStateRecord]
+      ## written by a NEWER repro: left untouched, never reaped
+    quarantined*: seq[QuarantinedStateRecord]
+      ## corrupt: moved into the store's `quarantine/` dir by this sweep
+    unreadable*: seq[UnreadableStateRecord]
+      ## could neither be decoded nor quarantined; still in place
 
 proc inProcessTransport*(): ReapTransport =
   ReapTransport(kind: rtInProcess)
@@ -212,9 +224,15 @@ proc registeredReapHandlerIds*(): seq[string] =
 # ---------------------------------------------------------------------------
 
 proc hasLiveHolder*(rec: ResourceStateRecord; now: Time): bool =
-  ## A holder is LIVE if its own recorded deadline is still in the future.
-  ## A live holder keeps the state regardless of the folded
-  ## `effectiveDeadline`.
+  ## A holder is LIVE if it is a recorded `keep` holder — it pins with no
+  ## expiry, so it is live at every `now` — or its own recorded deadline is
+  ## still in the future. A live holder keeps the state regardless of the
+  ## folded `effectiveDeadline`. (The merge never writes a keep holder next
+  ## to a dated effective deadline; checking it here is the same defense in
+  ## depth as the dated check: the gate re-reads the holders it can see
+  ## rather than trusting the fold alone.)
+  if rec.keepHolders.len > 0:
+    return true
   for _, deadline in rec.holders:
     if deadline > now:
       return true
@@ -225,15 +243,17 @@ proc isReapable*(rec: ResourceStateRecord; now: Time; force = false): bool =
   ##
   ##   * `force`                     -> reap iff the record is still present
   ##     (ignore deadline + holder liveness — the `--hard-rebuild` path).
-  ##   * `effectiveDeadline.isNone`  -> NEVER reap (keep / no dated holder).
-  ##   * a live holder (`holders[c] > now`) -> NEVER reap (still in use).
+  ##   * `effectiveDeadline.isNone`  -> NEVER reap (a keep holder, possibly
+  ##     an anonymous pre-v4 one, or no dated holder).
+  ##   * a live holder (a recorded keep holder, or `holders[c] > now`) ->
+  ##     NEVER reap (still pinned / in use).
   ##   * otherwise reap iff `effectiveDeadline.get <= now`.
   if force:
     return rec.present
   if rec.effectiveDeadline.isNone:
     return false                       # never-reap: keep dominates
   if hasLiveHolder(rec, now):
-    return false                       # a live holder keeps it
+    return false                       # a keep or unexpired holder keeps it
   rec.effectiveDeadline.get <= now
 
 proc selectReapable*(records: seq[ResourceStateRecord]; now: Time;
@@ -406,11 +426,20 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   ## HELD as `rfkBlocked` and left alone. Because the iteration order is
   ## reverse-topo, a record's dependencies always come AFTER it, so marking
   ## forward in one pass is sufficient.
+  ##
+  ## …AND ONE UNDECODABLE RECORD MUST NOT ABORT IT EITHER. The listing is
+  ## `scanStateRecords`, which never raises per record: a newer repro's record
+  ## comes back as `foreign` (never reaped — it is not ours to interpret), a
+  ## corrupt one is quarantined, and both are carried into the report.
   result.reaped = @[]
   result.skipped = @[]
   result.failed = @[]
 
-  var all = listStateRecords(store)
+  let scan = scanStateRecords(store)
+  result.foreign = scan.foreign
+  result.quarantined = scan.quarantined
+  result.unreadable = scan.unreadable
+  var all = scan.records
   if onlyAddresses.len > 0:
     var wanted = initHashSet[string]()
     for a in onlyAddresses: wanted.incl(a)
@@ -564,14 +593,34 @@ proc runReapCli*(args: seq[string];
     emit("  - " & ev.address & " (" & ev.typeId & ")" &
          (if ev.wasPresent: "" else: " [already-absent]"))
   emit("kept: " & $report.skipped.len)
+  # A newer repro's record is healthy, just not ours: said so (an operator
+  # would otherwise wonder why it never goes), but it does not fail the verb.
+  if report.foreign.len > 0:
+    emit("foreign: " & $report.foreign.len)
+    for f in report.foreign:
+      emit("  - " & f.path & " (written by a newer repro, version " &
+           $f.version & "; left untouched)")
+  # Corrupt state was found. The sweep moved it aside and carried on, but the
+  # resource that record described may now be leaked with nothing holding its
+  # address, so an operator has to look: exit non-zero, name the evidence.
+  if report.quarantined.len > 0:
+    emit("quarantined: " & $report.quarantined.len)
+    for q in report.quarantined:
+      emit("  - " & q.path & " -> " & q.quarantinePath & ": " & q.reason)
+  if report.unreadable.len > 0:
+    emit("unreadable: " & $report.unreadable.len)
+    for u in report.unreadable:
+      emit("  - " & u.path & ": " & u.reason)
   # A selected record the sweep could NOT reap is reported, never swallowed:
   # dropping it here would reproduce, at the CLI, the same invisibility that
   # let the daemon's tick fail for 60 days unnoticed. It is also why the exit
   # code is non-zero — `repro reap` was asked to destroy this state and did
   # not, and an operator (or CI) scripting the verb has to be able to tell.
-  if report.failed.len == 0:
-    return 0
-  emit("unreapable: " & $report.failed.len)
-  for f in report.failed:
-    emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
-  1
+  if report.failed.len > 0:
+    emit("unreapable: " & $report.failed.len)
+    for f in report.failed:
+      emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
+  if report.failed.len > 0 or report.quarantined.len > 0 or
+      report.unreadable.len > 0:
+    return 1
+  0

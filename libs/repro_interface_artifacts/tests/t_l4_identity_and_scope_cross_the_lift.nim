@@ -1,14 +1,14 @@
 ## Shared-Development-Services L4 — the DECLARED identity and scope cross
-## the interface boundary with the service, the v22 envelope carries
-## them, a v21 artifact still decodes, and the interface fingerprint
+## the interface boundary with the service, the v24 envelope carries
+## them, a v23 artifact still decodes, and the interface fingerprint
 ## moves for a change to either and NOT for a change to the
 ## implementation.
 ##
 ## MOCK POLICY — NO MOCKS ARE USED IN THIS FILE, AND NONE MAY BE ADDED.
 ## The producers are real ``package`` blocks in ``l4_lift_fixtures.nim``
 ## expanded by the real DSL macro; the fingerprints are the real
-## ``interfaceFingerprint`` over the real codec; the v21 envelope is
-## written by the real encoder at version 21 rather than hand-typed.
+## ``interfaceFingerprint`` over the real codec; the v23 envelope is
+## written by the real encoder at version 23 rather than hand-typed.
 ##
 ## WHICH DISCRIMINATOR IS LOAD-BEARING, PER SUITE.
 ##
@@ -55,22 +55,28 @@ proc addU32Le(outp: var seq[byte]; value: uint32) =
   outp.add(byte((value shr 16) and 0xff'u32))
   outp.add(byte((value shr 24) and 0xff'u32))
 
-proc encodeV21ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
-  ## A v21 envelope: the service rows carry no identity block, so the v22
+proc encodeV23ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
+  ## A v23 envelope: the service rows carry no identity block, so the v24
   ## reader must default all three fields. Written by the CURRENT codec at
-  ## version 21, exactly as ``encodeV20ProjectInterfaceArtifact`` is in
+  ## version 23, exactly as ``encodeV20ProjectInterfaceArtifact`` is in
   ## the L3 codec test and ``encodeV11…`` in RP4's — a hand-typed byte
-  ## string would be a guess about what v21 was.
-  var payload = encodeInterfacePayload(pi, 21'u16)
+  ## string would be a guess about what v23 was.
+  ##
+  ## v23 and NOT v21: the identity block moved from v22 to v24 when this
+  ## branch merged ``agents``, which had published v21/v22 for the
+  ## tarball archive detail. A v21 envelope now carries no service rows
+  ## AT ALL, so it could not express "rows without an identity block" --
+  ## see ``EnvelopeVersion``'s note on the numbering.
+  var payload = encodeInterfacePayload(pi, 23'u16)
   let fingerprint = blake3DomainDigest(
-    encodeInterfacePayload(pi, 21'u16, forFingerprint = true),
+    encodeInterfacePayload(pi, 23'u16, forFingerprint = true),
     hdMetadataEnvelope)
   payload.add(byte(ord(fingerprint.algorithm)))
   payload.add(byte(ord(fingerprint.domain)))
   payload.add(fingerprint.bytes)
   payload.add(if pi.standardBuildEligible: 1'u8 else: 0'u8)
   result.add([byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))])
-  result.addU16Le(21'u16)
+  result.addU16Le(23'u16)
   result.addU16Le(101'u16)
   result.addU32Le(uint32(payload.len))
   result.add(payload)
@@ -238,7 +244,7 @@ suite "L4 — identity and scope live on the SERVICE row, by design":
       return
     check false
 
-suite "L4 — the v22 envelope round-trips identity and scope":
+suite "L4 — the v24 envelope round-trips identity and scope":
 
   test "every (mode, scope) pairing survives encode + decode":
     var pi: ProjectInterface
@@ -267,12 +273,12 @@ suite "L4 — the v22 envelope round-trips identity and scope":
         expected[i].identityStableId
       check decoded.publicServices[i].scope == expected[i].scope
 
-  test "a v21 envelope decodes with §4's defaults, not with a failure":
+  test "a v23 envelope decodes with §4's defaults, not with a failure":
     var pi: ProjectInterface
     pi.projectName = "infra"
     pi.packageName = "infra"
     # A stable id and a wide scope are SET on the way in, so the test can
-    # tell "the v21 reader defaulted them" from "the v21 writer happened
+    # tell "the v23 reader defaulted them" from "the v23 writer happened
     # to be handed defaults".
     pi.publicServices = @[InterfaceService(
       name: "zitadel", activityName: "sso", handleType: "H",
@@ -280,7 +286,7 @@ suite "L4 — the v22 envelope round-trips identity and scope":
       scope: issWorkspace,
       location: SourceLocation(file: "repro.nim", line: 9))]
     let decoded = decodeProjectInterfaceArtifact(
-      encodeV21ProjectInterfaceArtifact(pi))
+      encodeV23ProjectInterfaceArtifact(pi))
     check decoded.projectInterface.publicServices.len == 1
     check decoded.projectInterface.publicServices[0].name == "zitadel"
     check decoded.projectInterface.publicServices[0].identityMode ==
@@ -312,7 +318,7 @@ suite "L4 — the interface fingerprint discriminates on identity and scope":
     # immaterial. NOTE ON DIRECTION: this assertion also passes at the
     # base commit, where nothing about a service's identity reaches the
     # interface. It is here as the pair's other half, and as the guard
-    # that the v22 rows did not start carrying the implementation.
+    # that the v24 rows did not start carrying the implementation.
     check interfaceFingerprint(namesNormalised("l4SigBaseline")) ==
       interfaceFingerprint(namesNormalised("l4SigSameImpl"))
 

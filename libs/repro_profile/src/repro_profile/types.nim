@@ -89,14 +89,25 @@ type
       ## common case — profiles that don't declare action edges leave
       ## the apply driver's build-graph path inactive.
     adapterPreference*: OrderedTable[string, seq[string]]
-      ## M2.5: per-OS adapter preference parsed from the macro form
+      ## The profile's selection policy (GM4b), parsed from the macro form
       ## `adapterPreference:` block. Keys are canonical OS tags
       ## (`"windows"`, `"linux"`, `"darwin"`); values are the ordered
-      ## adapter chain (each entry drawn from the closed set
-      ## `{"builtin", "scoop", "nix", "path"}`). Empty table when the
-      ## block is absent. `macos` aliases canonicalize to `"darwin"`.
+      ## realization kinds (each drawn from the closed set
+      ## `{"tarball", "builtin", "scoop", "nix", "path"}`; `builtin` is the
+      ## former spelling of `tarball`). Empty table when the block is
+      ## absent. `macos` aliases canonicalize to `"darwin"`.
       ## Mirrors the text-form `Profile.adapterPreference` field so
       ## both parsers produce the same AST shape for the same input.
+    dataFiles*: seq[string]
+      ## GM4: the plan-time data files the profile's `data:` section
+      ## declares, as paths relative to the profile directory (forward
+      ## slashes, validated by the macro). REFERENCES ONLY: the profile
+      ## binary never reads them, so editing a data file does not
+      ## invalidate the profile compile. The planner reads and expands them
+      ## (`repro_profile_compile/data_expansion`); an expanded intent has
+      ## this list emptied and its rows merged into `activities`
+      ## (Gradual-Nix-To-Reprobuild-Migration.md §Declarative data files
+      ## read at plan time).
 
   ActivityElementKind* = enum
     aekPackageRef
@@ -148,6 +159,14 @@ type
     pkg*: string
     key*: string
     value*: ConfigValue
+    guard*: PredicateExpr
+      ## The runtime predicate under which this override applies; an empty
+      ## `guard.expr` means "on every host". Set by a `when <pred>:` around
+      ## the entry in `config:` (or by `guarded(...)` in a helper) and
+      ## evaluated by the planner against the target host, exactly like an
+      ## activity body's `aekWhenGuard`. Carried as predicate TEXT, so an
+      ## export describes every platform's overrides whatever platform
+      ## compiled the profile.
 
   FieldValueKind* = enum
     fvkString
@@ -241,6 +260,14 @@ type
     address*: string      ## optional named address; empty if unset
     fields*: Table[string, FieldValue]
     dependsOn*: seq[ResourceAddress]
+    guard*: PredicateExpr
+      ## The runtime predicate under which this resource is declared; an
+      ## empty `guard.expr` means "on every host". Set by a `when <pred>:`
+      ## around the constructor in `resources:` (or by `guarded(...)` in a
+      ## helper template) and evaluated by the planner against the target
+      ## host. Two resources may share an address when their guards select
+      ## different hosts; the planner rejects a duplicate only among the
+      ## resources a host actually gets.
 
   PredicateExpr* = object
     expr*: string         ## canonical-stringified predicate; apply-

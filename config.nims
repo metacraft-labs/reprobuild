@@ -914,10 +914,17 @@ if not useSystemHashLibs:
     "blake3" / "vendor"
   let vendoredXxhashInc = reproRepoRoot / "libs" / "xxh3" / "src" /
     "xxh3" / "vendor"
+  #
+  # Quoted: Nim splices `passC` text into the C compiler command line verbatim,
+  # so an unquoted root containing a space -- an installed release unpacked
+  # under `C:\Users\<First Last>\...`, whose `share\repro\source` carries this
+  # file -- came apart into a stray `vendor` linker input and every profile
+  # compile failed in gcc (measured 2026-10-13, Gradual-Nix-To-Reprobuild-
+  # Migration GM1w).
   if fileExists(vendoredBlake3Inc / "blake3.h"):
-    switch("passC", "-I" & vendoredBlake3Inc)
+    switch("passC", "-I" & quoteShell(vendoredBlake3Inc))
   if fileExists(vendoredXxhashInc / "xxhash.h"):
-    switch("passC", "-I" & vendoredXxhashInc)
+    switch("passC", "-I" & quoteShell(vendoredXxhashInc))
 else:
   let blake3Prefix = block:
     let direct = firstExistingPrefix(

@@ -78,14 +78,14 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "4aa8892844a43ac59d4be74a4f992161b09491fe";
-    hash = "sha256-YaTqCD29nafQiGMs65Nhsw0DsvCCD/eM4ALhUhI1EPA=";
+    rev = "c6602ce6866b8c5ef6a9201cb7d90b920268e8d0";
+    hash = "sha256-YP/KI1pFRWMwcxQUIVfJarRpZLcSUnf4ygr4g+rzfHE=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "7b8b587c72ec31f6825ae124ab89ad7954f6dca7";
-    hash = "sha256-VCiyNGJXQzYtAaNAlwW7e2Bs6182QKPt991VD+NIzNA=";
+    rev = "808ffdb4507634c3aba0661d96cbc353420ed856";
+    hash = "sha256-ZKkKNbi9AGJmqPwv6MjbR2EoJm8ytfCikub7r7iAnSg=";
   },
   # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
   # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
@@ -105,8 +105,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "0b0476ad55e97f1f96a77367f205fae5fac47a16";
-    hash = "sha256-/Ag6oHtUwYZYWcKEywy4FjMYxDWFrRZbFMADAlm01SI=";
+    rev = "295a2e518325440698de013663dab8deeef1dc19";
+    hash = "sha256-Ra6qEQfxHnYgPGTjz/0wZbSfLdnHy/B/HFdSvw8d+7I=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -123,8 +123,8 @@
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
-    rev = "f8781d4b5514ee9bbcdee0de701dc4bd8090a061";
-    hash = "sha256-QtdGgLaIq6GAtBkf/+0jATeKDP187dCDamQlwvuUZmo=";
+    rev = "222a4a0099115066ba331817e94a3ac9f2293290";
+    hash = "sha256-PQrTUAkAZpRMXZlHIRy4tcwEIB6dDnj5hSDqA0OnBiI=";
   },
   ctTestRunnerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -135,8 +135,8 @@
   testAdaptersSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild-test-adapters";
-    rev = "360cd50767e548556a0a7510d879f28c87eb3e34";
-    hash = "sha256-mj1z79GUGcOOVzADqIo9toLwM0k5xIHaLstKl4a9u64=";
+    rev = "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24";
+    hash = "sha256-bDuj7DYj2nZtvG0em05EMy6/hK/RWIE917GHHZPq62Y=";
   },
   # Source only. reprobuild compiles `runquota_client`/`_codec`/`_core`/`_ipc`/
   # `_process`/`_protocol` out of this tree; it does not build or ship
@@ -145,8 +145,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "3590066e9c9dc82ca758ff2d7918f3b6f8304f35";
-    hash = "sha256-KD47AShW5Y8trE9vY4WrPtk/ot6qagq3p4vhPw/mQBU=";
+    rev = "86bf4711f6ad4800d739b3e2c402ae657fdc6033";
+    hash = "sha256-2Eeklpwigtf/MnbBPIQqIDUg9BjEUgsd/sl/yPSb5vU=";
   },
 }:
 let

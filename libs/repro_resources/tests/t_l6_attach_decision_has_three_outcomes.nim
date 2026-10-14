@@ -915,8 +915,9 @@ suite "L6 — the holder set round-trips through a REAL state store":
     let deps = @[
       leased(base.address, Requester, delayed(minutes = 30)),
       leased(base.address, OtherDelayed, delayed(minutes = 30))]
-    let merged = mergeHolderDeadlines(initTable[string, Time](), deps, now)
-    check not merged.hasKeep
+    let merged = mergeHolderDeadlines(none(ResourceStateRecord), deps, now)
+    check merged.keepHolders.len == 0
+    check merged.keepHoldersKnown
     check merged.effective == some(now + initDuration(minutes = 30))
 
     let root = getTempDir() / ("repro-l6-store-" & $getCurrentProcessId())
@@ -948,28 +949,29 @@ suite "L6 — the holder set round-trips through a REAL state store":
     check decision.outcome == sroRefuseOtherHolders
     check decision.blockingHolders == @[OtherDelayed]
 
-  test "a KEEP holder is pinned but UNNAMED on disk, and that is reported":
-    # `mergeHolderDeadlines` deliberately `del`s a keep holder from
-    # `holders` -- "it pins with no expiry ... rather than storing a
-    # bogus deadline" -- and records only `effectiveDeadline = none`. So
-    # a persisted record alone CANNOT name a keep holder, and D-SS5
-    # expects a `stable`, state-owning service to default to `keep`.
+  test "a KEEP holder is pinned and NAMED on disk since state-record v4":
+    # This case used to assert the opposite, and the change is upstream's
+    # `fix(resources): persist keep lease holders in the state record`.
+    # `mergeHolderDeadlines` still keeps a keep holder OUT of `holders`
+    # -- "it pins with no expiry ... rather than storing a bogus
+    # deadline" -- but it now also returns `keepHolders`, naming them,
+    # and `keepHoldersKnown` saying the list is complete. So a persisted
+    # record alone CAN name a keep holder, which is exactly the second of
+    # the two ways out that L6's own finding named ("a keep-holder list
+    # in the record"); the first, L7's registry holding the set, remains
+    # how a LIVE daemon answers.
     #
-    # `holdersFromStateRecord` reports that rather than guessing a name,
-    # and this case is the evidence for the finding L6 hands to L7:
-    # naming a blocking holder needs the holder set the registry will
-    # hold, or a keep-holder list in the record. The flag is deliberately
-    # "MAY have": `effectiveDeadline == none` is also what a record with
-    # no holders at all carries, and nothing in the record separates the
-    # two -- which the next case pins so the weaker claim cannot quietly
-    # be strengthened.
+    # D-SS5 expects a `stable`, state-owning service to default to
+    # `keep`, so this is the case that used to lose the most and now
+    # loses nothing.
     let now = leaseNow()
     let base = runningFrom("l6AttBase")
     let deps = @[leased(base.address, OtherKeep, keep())]
-    let merged = mergeHolderDeadlines(initTable[string, Time](), deps, now)
-    check merged.hasKeep
+    let merged = mergeHolderDeadlines(none(ResourceStateRecord), deps, now)
+    check merged.keepHolders == @[OtherKeep]
+    check merged.keepHoldersKnown
     check merged.effective.isNone
-    check merged.holders.len == 0          # the keep holder's NAME is gone
+    check merged.holders.len == 0          # not a dated holder, by design
 
     let root = getTempDir() / ("repro-l6-keep-" & $getCurrentProcessId())
     removeDir(root)
@@ -980,30 +982,44 @@ suite "L6 — the holder set round-trips through a REAL state store":
     writeStateRecord(store, ResourceStateRecord(
       address: base.address, typeId: "l6.service", determinism: rdVolatile,
       identity: base.key.identity, present: true,
-      holders: merged.holders, effectiveDeadline: merged.effective,
+      holders: merged.holders, keepHolders: merged.keepHolders,
+      keepHoldersKnown: merged.keepHoldersKnown,
+      effectiveDeadline: merged.effective,
       lastRenewed: now))
 
     let back = holdersFromStateRecord(readStateRecord(store, base.address))
-    check back.holders.len == 0
-    check back.mayHaveUnnamedKeepHolder
-    # And the consequence, stated as an assertion rather than a comment:
-    # a replace decided from the RECORD alone would proceed, while the
-    # same decision taken from the LeasedDep set refuses. L7 is what
-    # closes that, by holding the holder set.
+    # The keep holder came back BY NAME, with no deadline -- the shape
+    # `holderIsLive` reads as "pins with no expiry".
+    check back.holders.len == 1
+    check back.holders[0].consumerId == OtherKeep
+    check back.holders[0].deadline.isNone
+    # ...and the record is no longer ambiguous, so the flag is down.
+    check not back.mayHaveUnnamedKeepHolder
+    # And the consequence, stated as an assertion rather than a comment,
+    # INVERTED by the fix: a replace decided from the RECORD alone now
+    # refuses exactly as one decided from the LeasedDep set does. The two
+    # sources agree, which is what the old comment said only L7's
+    # registry could achieve.
     let fromRecord = runningServiceInstance(base.key, base.interfaceSnapshot,
       back.holders)
-    check replaceDecision(fromRecord, Requester, now).outcome == sroReplace
+    check replaceDecision(fromRecord, Requester, now).outcome ==
+      sroRefuseOtherHolders
+    check replaceDecision(fromRecord, Requester, now).blockingHolders ==
+      @[OtherKeep]
     let fromLeases = runningServiceInstance(base.key, base.interfaceSnapshot,
       holdersFromLeasedDeps(deps, now))
     check replaceDecision(fromLeases, Requester, now).outcome ==
       sroRefuseOtherHolders
 
-  test "an EMPTY record flags the same way, which is why it says MAY":
-    # The imprecision, pinned. A record with no holders and no dated
-    # deadline is indistinguishable from one pinned by an unnamed `keep`
-    # holder, so the flag cannot be read as "there is a keep holder" --
-    # and a `--replace` must not refuse on it alone, which the assertion
-    # below states.
+  test "an empty PRE-v4 record still flags, which is why it says MAY":
+    # The imprecision, pinned to the only records that still have it.
+    # `keepHoldersKnown` defaults to false, which is exactly a record
+    # written before state-record v4: no holders, no dated deadline, and
+    # no way to tell it from one pinned by a keep holder whose name was
+    # never written down. So the flag cannot be read as "there is a keep
+    # holder" and a `--replace` must not refuse on it alone, which the
+    # assertion below states. A v4 record answers exactly -- the previous
+    # case -- so this is the residue, not the rule.
     let now = leaseNow()
     let base = runningFrom("l6AttBase")
     let root = getTempDir() / ("repro-l6-empty-" & $getCurrentProcessId())

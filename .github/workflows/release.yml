@@ -169,6 +169,11 @@ jobs:
       # names every action in full and times it, which turns "the leg timed out"
       # into "this action took N minutes" or "this action never finished".
       REPROBUILD_PROGRESS: simple-lines
+      # The commit the release images are built from (the checkout below is
+      # `github.sha`). The `.#release` engine edge embeds it as
+      # `ReprobuildSourceRevision`, so a shipped `repro` can name its source
+      # revision (e.g. in `repro home export` provenance).
+      REPROBUILD_SOURCE_REVISION: ${{ github.sha }}
     strategy:
       # fail-fast stays false so ONE broken leg still lets the others report.
       # That is a diagnostics choice only -- it no longer affects what gets
@@ -572,17 +577,6 @@ jobs:
             Remove-Item -LiteralPath $orchestrator -Force -ErrorAction SilentlyContinue
           }
 
-      # Re-stage after `.#release`: that build rewrites build\bin, so the DLLs
-      # staged above may not survive into the packaged tree. Idempotent -- it
-      # re-copies from the runner toolchain sources (cheap) and skips the pinned
-      # downloads when a DLL is already present. This is the state the packaging
-      # step zips and scripts/verify_release.sh asserts against.
-      - name: Stage Windows runtime DLLs into the release tree
-        if: matrix.os-name == 'windows'
-        shell: pwsh
-        run: |
-          & ./windows/stage-release-dlls.ps1
-
       # Package the artifacts preserving the bin/ and lib/ structures.
       #
       # The archive name is derived here the same way `plan` derives the expected
@@ -621,39 +615,29 @@ jobs:
             echo "PKG_NAME=${pkg_name}" >> "$GITHUB_ENV"
           '
 
+      # ONE script assembles the Windows archive: it re-stages the runtime DLLs
+      # into build\bin (`.#release` rewrites build\bin, so the DLLs staged
+      # before it may not survive; stage-release-dlls.ps1 is idempotent and
+      # skips the pinned downloads when a DLL is already present), copies bin/
+      # and lib/, stages the installed-compile sources into share\repro with
+      # Git for Windows' bash (never WSL's -- v0.2.0 shipped without them and
+      # every `repro exec` from the unpacked zip died at its first compile:
+      # cannot open file: repro_interface_artifacts), and zips the tree. The
+      # GM1w gate tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim runs
+      # the same script, so the archive it tests is the archive shipped here.
+      # The siblings resolve from the checkouts setup-dev-env cloned beside
+      # this repository (and ../nim-bearssl, cloned above).
       - name: Package release assets (Windows)
         if: matrix.os-name == 'windows'
         shell: pwsh
         run: |
-          $version = (Get-Content reprobuild.nimble | Select-String -Pattern 'version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
-          $pkg_name = "reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
-
-          New-Item -ItemType Directory -Force -Path "${pkg_name}\bin"
-          New-Item -ItemType Directory -Force -Path "${pkg_name}\lib"
-          Copy-Item -Path "build\bin\*" -Destination "${pkg_name}\bin\" -Recurse
-          Copy-Item -Path "build\lib\*" -Destination "${pkg_name}\lib\" -Recurse
+          $out = @(./scripts/release/package_windows_release.ps1 -Zip `
+            -Platform "${{ matrix.platform }}" -Arch "${{ matrix.arch }}")
+          $pkg_name = Split-Path -Leaf $out[0]
+          $asset = Split-Path -Leaf $out[1]
           Add-Content -Path $env:GITHUB_ENV -Value "PKG_NAME=${pkg_name}"
-
-      # The sources an installed reprobuild compiles every project against
-      # (share\repro\source + share\repro\src). v0.2.0 shipped without them,
-      # and every `repro exec` / `dev-exec` from the unpacked zip died at its
-      # first compile: cannot open file: repro_interface_artifacts. The siblings
-      # resolve from the checkouts setup-dev-env cloned beside this repository
-      # (and ../nim-bearssl, cloned above). A `shell: bash` step rather than
-      # `bash` from pwsh, so it is Git for Windows' bash and never WSL's.
-      - name: Stage installed-compile sources (Windows)
-        if: matrix.os-name == 'windows'
-        shell: bash
-        run: bash scripts/release/stage_release_sources.sh "${PKG_NAME}"
-
-      - name: Compress release archive (Windows)
-        if: matrix.os-name == 'windows'
-        shell: pwsh
-        run: |
-          $pkg_name = $env:PKG_NAME
-          Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
-          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
-          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_NAME=${pkg_name}.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${asset}"
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_NAME=${asset}"
 
       # Smoke-tests the PACKAGED archive, not the build tree: on Windows it
       # asserts the runtime-DLL manifest and runs the binary with PATH scrubbed

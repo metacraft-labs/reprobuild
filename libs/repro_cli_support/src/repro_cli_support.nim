@@ -23,6 +23,7 @@ import repro_core/relocation
 # lint at every probe site.
 import repro_core/ambient_execution
 import repro_core/cli_images
+import repro_core/source_root
 import repro_build_engine
 import repro_cmake_trycompile
 import repro_dev_env_activation
@@ -327,9 +328,11 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
+          programName &
+      " certificates list|plan [SELECTOR...] [--no-certify] [--json]\n       " &
           programName &
       " bench [build options]\n       " &
           programName &
@@ -516,6 +519,8 @@ proc renderInternalUsage*(programName: string): string =
       "helper (alias of __repro-extract-interface)\n" &
     "  compile-profile …                           profile-compile helper " &
       "(alias of __repro-compile-profile)\n" &
+    "  probe-profile-platforms …                   profile platform-probe " &
+      "helper (alias of __repro-probe-profile-platforms)\n" &
     "  dev-env-introspect …                        dev-env introspection " &
       "helper (alias of __repro-dev-env-introspect)\n" &
     "  render-dev-env-shell …                      dev-env shell renderer " &
@@ -1933,27 +1938,16 @@ proc reprobuildLibraryWorkDir*(): string =
   ## its OWN checkout while resolving the monitor shim, or else the checkout
   ## the engine was compiled from. So a dev environment compiled every
   ## recipe against the engine's libs whatever the override said.
-  proc hasReprobuildLibs(root: string): bool =
-    dirExists(extendedPath(root / "libs" / "repro_project_dsl" / "src"))
-
-  let libsDir = getEnv("REPROBUILD_LIBS_DIR")
-  if libsDir.len > 0 and hasReprobuildLibs(libsDir.parentDir):
-    return libsDir.parentDir
-  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
-  if repoRoot.len > 0 and hasReprobuildLibs(repoRoot):
-    return repoRoot
-  let envRoot = getEnv("REPROBUILD_SOURCE_ROOT")
-  if envRoot.len > 0 and hasReprobuildLibs(envRoot):
-    return envRoot
-  let cwd = getCurrentDir()
-  if hasReprobuildLibs(cwd):
-    return cwd
-  var sourceRoot = parentDir(currentSourcePath())
-  for _ in 0 ..< 3:
-    sourceRoot = parentDir(sourceRoot)
-  if hasReprobuildLibs(sourceRoot):
-    return sourceRoot
-  cwd
+  ##
+  ## The resolution itself is `repro_core/source_root`'s
+  ## `resolveReprobuildSourceRoot`, shared with the profile compile so the two
+  ## cannot answer differently (Gradual-Nix-To-Reprobuild-Migration GM1). This
+  ## proc keeps its historical last resort, the current directory, for
+  ## callers that use the answer only as a working directory.
+  let resolved = resolveReprobuildSourceRoot()
+  if resolved.len > 0:
+    return resolved
+  getCurrentDir()
 
 proc resolveMonitorShimLibPath(): string =
   ## Develop-mode improvement: locate ``librepro_monitor_shim.{dll,so,dylib}``
@@ -2076,7 +2070,8 @@ proc capabilitiesJson*(): JsonNode =
     "runquota-execution",
     "cmake-regeneration-edge",
     "provider-cache-priming",
-    "build-report-json-inspection"])
+    "build-report-json-inspection",
+    "build-action-output"])
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
@@ -4686,6 +4681,12 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ## binding whose ``contentIdentity`` is a digest of ``revision`` + ``integrity``
   ## (a refreshed pin shifts the consumer cache key; an unchanged pin does not).
   ##
+  ## Since 2026-10-12 (§4.3, scoped rule) these identities are folded only into
+  ## actions whose reads nothing observes (``readsAreKeyed`` false); a
+  ## monitored action is keyed on what it read under the producer root plus
+  ## the producer's realized directories (``producerChannelIdentity``). See
+  ## ``foldProducerSourceIdentities``.
+  ##
   ## Empty for a build that consumes no cross-repo producer, so a no-producer
   ## action's cache key is byte-identical to today
   ## (``foldOverridesIntoFingerprint`` returns the weak fingerprint unchanged
@@ -4973,49 +4974,99 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
   verifyRevisionIntegrity()
   checkoutRoot
 
+proc producerChannelIdentity*(selector: string): string =
+  ## Cross-Repo-Source-Consumption §4.3 (2026-10-12) — what a consuming action
+  ## is handed for producer ``selector`` WITHOUT reading anything: the realized
+  ## directories the splice puts on its command line and environment (``bin``
+  ## dirs on ``PATH``, C/C++ dirs on the search variables, Nim source roots on
+  ## ``nim c --path:``). Their CONTENT is not here — it reaches the key through
+  ## the files the action reads — but the directories themselves are part of
+  ## what the action runs, so they are part of its weak fingerprint.
+  ##
+  ## Stable across a source change and across a lock refresh for a producer
+  ## consumed from a workspace checkout (the directories do not move). A
+  ## producer fetched at its pin lives in a revision-keyed directory
+  ## (``fetchLockPinnedProducer``), so for it a new pin IS a new directory and
+  ## every action handed that directory misses: there the path is the only
+  ## thing that distinguishes the new content from the old, which is still on
+  ## disk unchanged.
+  var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
+  template addDirs(tag: string; dirs: seq[string]) =
+    for dir in dirs:
+      payload.add(tag)
+      payload.add(dir)
+      payload.add('\x00')
+  if producerMaterializedBinDirs.hasKey(selector):
+    addDirs("bin:", producerMaterializedBinDirs[selector])
+  if producerMaterializedAuxPaths.hasKey(selector):
+    let aux = producerMaterializedAuxPaths[selector]
+    addDirs("include:", aux.includeDirs)
+    addDirs("lib:", aux.libDirs)
+    addDirs("pkgconfig:", aux.pkgConfigDirs)
+    addDirs("cmake:", aux.cmakePrefixDirs)
+    addDirs("nimpath:", aux.nimPathDirs)
+  digestHex(blake3DomainDigest(payload.bytesOf(), hdActionFingerprint))
+
 proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ## Cross-Repo-Source-Consumption SC-4 (§4.3): after the consumer graph is
-  ## lowered, fold each materialized cross-repo producer's SOURCE identity into
-  ## the ``weakFingerprint`` of every consumer action that names the producer
-  ## via ``toolIdentityRefs``. This is the SOURCE-content arm of invalidation —
-  ## the complement of SC-2/SC-3's build-PRODUCT ``foldProducerActionHashes``.
+  ## lowered, make each materialized cross-repo producer's SOURCE reach the
+  ## cache key of every consumer action that names it via ``toolIdentityRefs``
+  ## — the SOURCE-content arm of invalidation, the complement of SC-2/SC-3's
+  ## build-PRODUCT ``foldProducerActionHashes``.
   ##
-  ## The fold is driven by ``foldOverridesIntoFingerprint``
-  ## (``override_resolution.nim:349-380``) — the fold that until SC-4 was called
-  ## ONLY from ``t_workspace_override_shadows_upstream_in_resolver.nim``, never
-  ## from the engine. Activating it HERE, at the splice seam, IS the SC-4
-  ## invalidation hook the spec calls for: a change to a develop-overridden
-  ## sibling producer's source (a new local-path root mtime -> a new
-  ## ``computeOverrideContentIdentity`` -> a new binding ``contentIdentity``)
-  ## shifts the consumer action's weak fingerprint so the consumer rebuilds. In
-  ## lock-pinned mode the source identity is the producer ``LockedDep``'s
-  ## pinned ``revision`` + ``integrity`` (``lockPinnedSourceBinding``), projected
-  ## onto the SAME fold.
+  ## WHICH ACTIONS CARRY THE PRODUCER'S IDENTITY (owner decision 2026-10-12,
+  ## §4.3). The producer's source identity — a develop override's
+  ## ``contentIdentity`` (sibling root path + mtime), a lock pin's
+  ## ``revision`` + ``integrity`` — is folded ONLY into an action whose reads
+  ## are not otherwise keyed (``readsAreKeyed`` false: a process whose
+  ## dependencies come from a recognised format or a converter alone). For
+  ## every other action the producer's content reaches the key through the
+  ## files it actually reads: the observed reads and probes under the
+  ## producer's root are revalidated on every lookup, so editing a module an
+  ## action imported misses that action, and an action that read nothing there
+  ## keeps its key. Folding the identity into it as well is what made one
+  ## ``repro lock refresh`` of ``nim-stackable-hooks`` (or a touch of its
+  ## root) miss all ~1,900 test compiles: ``attachProducerAuxRefs`` names every
+  ## Nim-source producer on every action.
   ##
-  ## An action that names NO materialized producer (or whose named producers all
-  ## resolved to non-``rpbkOverride`` bindings) keeps its ``weakFingerprint``
-  ## byte-for-byte: ``foldOverridesIntoFingerprint`` returns the input digest
-  ## unchanged when no ``rpbkOverride`` binding participates
-  ## (``override_resolution.nim:375-379``). When ``producerSourceBindings`` is
-  ## empty (the common case — no cross-repo producer), this is a whole-graph
-  ## no-op, so a no-producer action's cache key is byte-identical to today.
+  ## What such an action IS handed without reading — the realized directories
+  ## on its command line and environment — is folded instead
+  ## (``producerChannelIdentity``): a ``--path:`` that appears or moves can
+  ## change which module a compile resolves, and a cached record from a build
+  ## without it says nothing about that.
+  ##
+  ## An action that names NO materialized producer keeps its
+  ## ``weakFingerprint`` byte-for-byte, and with ``producerSourceBindings``
+  ## empty (no cross-repo producer) this is a whole-graph no-op.
   if producerSourceBindings.len == 0:
     return
   for action in actions.mitems:
     if action.toolIdentityRefs.len == 0:
       continue
-    # Collect the source bindings for this action's producer refs in the
-    # action's own ref order (stable), so the fold is deterministic. Only
-    # ``rpbkOverride`` bindings actually shift the fingerprint; the collection
-    # follows the ref order the SC-2 build-product fold already relies on.
-    var bindings: seq[ResolvedPackageBinding] = @[]
+    # Collect in the action's own ref order (stable), so the fold is
+    # deterministic — the order the SC-2 build-product fold relies on too.
+    var selectors: seq[string] = @[]
     for refName in action.toolIdentityRefs:
       if producerSourceBindings.hasKey(refName):
-        bindings.add(producerSourceBindings[refName])
-    if bindings.len == 0:
+        selectors.add(refName)
+    if selectors.len == 0:
       continue
-    action.weakFingerprint =
-      foldOverridesIntoFingerprint(action.weakFingerprint, bindings)
+    if action.readsAreKeyed:
+      var payload = "cross-repo-producer-channel-fold.v1\x00" &
+        digestHex(action.weakFingerprint) & "\x00"
+      for selector in selectors:
+        payload.add(selector)
+        payload.add('=')
+        payload.add(producerChannelIdentity(selector))
+        payload.add('\x00')
+      action.weakFingerprint =
+        blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+    else:
+      var bindings: seq[ResolvedPackageBinding] = @[]
+      for selector in selectors:
+        bindings.add(producerSourceBindings[selector])
+      action.weakFingerprint =
+        foldOverridesIntoFingerprint(action.weakFingerprint, bindings)
 
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
@@ -7879,6 +7930,18 @@ type
     blmSummary
     blmQuiet
 
+  BuildActionOutputMode* = enum
+    ## ``--action-output``: which actions' captured stdout/stderr a build
+    ## prints. Independent of ``--log``, which governs the status lines: a
+    ## caller that parses compiler output (a CMake try_compile) wants the
+    ## output with no status lines around it.
+    baoFailed
+      ## The default: only a failed action's output, inside its failure
+      ## summary on stderr.
+    baoAll
+      ## Every action that ran and produced output, failed ones included, on
+      ## stdout, the way Ninja and Make pass a command's output through.
+
   BuildDaemonMode = enum
     bdmAuto
     bdmRequire
@@ -7898,6 +7961,54 @@ type
     actionCommands: Table[string, string]
     activeActions: seq[string]
     completedActions: HashSet[string]
+
+  ExecutedActionRecord* = object
+    ## One action of a finished build, as certificate issuance reads it
+    ## (Test-Certificates TC-8e): what the engine scheduled, how it settled,
+    ## and whether THIS run launched it. Issuance needs exactly this and
+    ## nothing the build report adds: a certificate records the argument
+    ## vectors a run actually executed (Standard §3.3), in execution order,
+    ## and certifies a node only when its whole closure settled successfully.
+    id*: string
+      ## The engine's action id (the public name after target aliasing).
+    kind*: BuildActionKind
+    argv*: seq[string]
+      ## The argument vector the engine launched, unshelled, after forwarded
+      ## arguments were appended. Empty for a builtin action.
+    status*: ActionStatus
+    launched*: bool
+      ## True when this run executed the action. A cache hit or an
+      ## up-to-date action settled without executing anything.
+    cacheDecision*: CacheDecision
+      ## ``cdHit`` / ``cdHybridCutoff`` when an action-cache record whose
+      ## key matched this run's inputs answered the action.
+    cacheRecordObservedHere*: bool
+      ## The record that answered the action came from an execution this
+      ## host observed (``ActionResult.cacheRecordObservedHere``). False for
+      ## a record installed from a LAN peer and for every reuse the engine
+      ## cannot attribute.
+    cacheRecordInputs*: seq[string]
+      ## What the execution behind that record was observed reading.
+    keyCoversObservedReads*: bool
+      ## The action's cache key covers every input the monitor observed it
+      ## reading: a cacheable process action under a monitored dependency
+      ## policy with no ignored input prefix (``cacheInputPaths`` keys the
+      ## observed reads; only content-addressed tool roots, which are in the
+      ## weak fingerprint, and declared ignore prefixes are elided).
+    exitCode*: int
+    monitorDepfile*: string
+      ## The io-mon depfile the action's monitored launch wrote ("" when it
+      ## was not launched under the monitor).
+    startOrder*: int
+      ## Position in the order the scheduler STARTED actions (0-based), or -1
+      ## when it never started this one. Parallel actions have no other total
+      ## order; the start order is the one the run itself imposed.
+
+  BuildActionOutcomeSink* = proc(records: seq[ExecutedActionRecord])
+    ## Receives the per-action outcome of an engine pass that ran a lowered
+    ## graph. Only an in-process build can deliver it: a daemon-hosted build
+    ## reports an exit code and diagnostics, so a caller that installs a sink
+    ## gets a direct build (``runBuildCommand``).
 
   BuildCommandOutcome = object
     exitCode: int
@@ -8194,6 +8305,16 @@ proc parseBuildLogMode(value: string): BuildLogMode =
   else:
     raise newException(ValueError,
       "unsupported --log=" & value & " (expected actions, summary, or quiet)")
+
+proc parseBuildActionOutputMode*(value: string): BuildActionOutputMode =
+  case value.toLowerAscii()
+  of "failed":
+    baoFailed
+  of "all":
+    baoAll
+  else:
+    raise newException(ValueError,
+      "unsupported --action-output=" & value & " (expected failed or all)")
 
 proc configuredBuildLogMode(): BuildLogMode =
   let configured = getEnv("REPROBUILD_LOG", "")
@@ -8826,21 +8947,106 @@ proc tryRenderDaemonProgress(renderer: var BuildProgressRenderer;
   renderer.renderProgress(event)
   true
 
+proc emitActionOutputs(buildResult: BuildRunResult;
+                       eventSink: BuildCommandEventSink;
+                       renderer: var BuildProgressRenderer) =
+  ## ``--action-output=all``: write each action's captured stdout and then its
+  ## stderr to OUR stdout, in result order, succeeded and failed alike.
+  ##
+  ## One stream, because that is what the build tools this stands in for do:
+  ## Ninja captures a command's stdout and stderr through one pipe and prints
+  ## it on its own stdout, and a CMake try_compile merges both streams of the
+  ## build tool anyway. The consumer that needs this is that try_compile:
+  ## CMake learns a compiler's implicit include and link directories by
+  ## parsing the compiler's ``-v`` output (stderr) out of the build tool's
+  ## output, and a build that prints only status lines leaves them empty.
+  ##
+  ## An action served from cache or found up to date did not run and has no
+  ## output to print, as with Ninja for an up-to-date edge. Nothing is
+  ## printed between actions: a header line would be one more line for
+  ## CMake's link-line regex to consider.
+  for item in buildResult.results:
+    for text in [item.stdout, item.stderr]:
+      if text.len == 0:
+        continue
+      let chunk = if text.endsWith("\n"): text else: text & "\n"
+      if eventSink != nil:
+        eventSink("diagnostic", chunk, "{\"stream\":\"stdout\"}")
+      else:
+        renderer.clearProgressLine()
+        stdout.write(chunk)
+        stdout.flushFile()
+
+proc recordActionStarts(config: var BuildEngineConfig;
+                        started: ref seq[string]) =
+  ## Prepare an engine pass for certificate issuance. Wrap the engine's
+  ## progress callback so every action the scheduler starts is appended to
+  ## ``started``, in start order, before the existing callback (if any) sees
+  ## the event; the scheduling loop emits these events itself, so the order
+  ## is the one it imposed. And ask the engine for each reused action's
+  ## record provenance (``recordCacheHitProvenance``), which issuance judges
+  ## a reused test command by. That keeps the run off the whole-graph no-op
+  ## fast path, which answers without per-action records.
+  config.recordCacheHitProvenance = true
+  let inner = config.progressCallback
+  config.progressCallback = proc(event: BuildProgressEvent) =
+    if event.kind == bpkActionStarted:
+      started[].add(event.actionId)
+    if inner != nil:
+      inner(event)
+
+proc executedActionRecords(actions: openArray[BuildAction];
+                           run: BuildRunResult;
+                           started: seq[string]): seq[ExecutedActionRecord] =
+  ## Join the scheduled actions with the engine's per-action results and the
+  ## recorded start order. An action the engine reported no result for is
+  ## left out, so a reader that needs it finds it missing rather than
+  ## pending.
+  var order = initTable[string, int]()
+  for i, id in started:
+    if not order.hasKey(id):
+      order[id] = i
+  var byId = initTable[string, int]()
+  for i, action in actions:
+    byId[action.id] = i
+  for item in run.results:
+    var record = ExecutedActionRecord(id: item.id, status: item.status,
+      launched: item.launched, cacheDecision: item.cacheDecision,
+      cacheRecordObservedHere: item.cacheRecordObservedHere,
+      cacheRecordInputs: item.cacheRecordInputs, exitCode: item.exitCode,
+      monitorDepfile: item.monitorDepfilePath,
+      startOrder: order.getOrDefault(item.id, -1))
+    if byId.hasKey(item.id):
+      let action = actions[byId[item.id]]
+      record.kind = action.kind
+      record.argv = action.argv
+      record.keyCoversObservedReads = action.cacheable and
+        action.kind == bakProcess and
+        action.dependencyPolicy.kind in MonitorPolicyKinds and
+        action.dependencyPolicy.ignoredInputPrefixes.len == 0
+    result.add(record)
+
 proc emitFailedActionSummaries(buildResult: BuildRunResult;
                                eventSink: BuildCommandEventSink;
-                               renderer: var BuildProgressRenderer) =
+                               renderer: var BuildProgressRenderer;
+                               outputAlreadyShown = false) =
   ## Surface each failed action's id, exit code, and stderr to the terminal.
   ## Otherwise the only failure signal is a non-zero exit code (and, over the
   ## daemon protocol, the generic "daemon-hosted build failed" line), which
   ## forces the user to open build-report.json to learn what actually broke.
+  ##
+  ## ``outputAlreadyShown``: ``--action-output=all`` printed every action's
+  ## output already, so the summary keeps only its header and notes rather
+  ## than print the same compiler diagnostics a second time.
   for item in buildResult.results:
     if item.status != asFailed:
       continue
     var summary = "repro build: action failed: " & item.id &
       " (exit code " & $item.exitCode & ")"
     if item.stderr.len > 0:
-      summary.add('\n')
-      summary.add(strip(item.stderr, leading = false))
+      if not outputAlreadyShown:
+        summary.add('\n')
+        summary.add(strip(item.stderr, leading = false))
       # A child that died in the dynamic loader names the two libraries the
       # loader was reconciling, and neither is the one automatic monitoring
       # injected — see `repro_core/injected_libraries`. We are the only party
@@ -8858,7 +9064,7 @@ proc emitFailedActionSummaries(buildResult: BuildRunResult;
     # build-failure-report.json. Surface the TAIL of stdout too: bounded, because
     # a large C compile's stdout is megabytes of ``CC:`` lines and only the final
     # lines carry the error.
-    if item.stdout.len > 0:
+    if item.stdout.len > 0 and not outputAlreadyShown:
       let outLines = strip(item.stdout, leading = false).splitLines()
       let tailStart = max(0, outLines.len - 200)
       summary.add('\n')
@@ -9350,10 +9556,12 @@ proc recipeCompileOutputDir(kind, identity: string): string =
   ## (`recordOutputsNotOwnedBy`) at any location, and a hit restores there.
   ##
   ## Two computations with one identity (same recipe bytes and variant,
-  ## different sibling or ancestor content) share the directory. Each edge
-  ## holds the directory's lock from execution until the CLI has copied the
-  ## outputs to the caller's own paths (`extractInterfaceEdge`), and a lookup
-  ## whose bytes on disk are another record's restores its own.
+  ## different sibling or ancestor content, or a different observed
+  ## environment) share the directory. Each edge holds the directory's lock
+  ## from execution until the CLI has copied the outputs to the caller's own
+  ## paths (`extractInterfaceEdge`), and a lookup whose bytes on disk are
+  ## another record's restores its own from the record's payloads (the
+  ## extraction edge runs in the restore configuration for that reason).
   absolutePath(currentActionCacheRoot() / "recipe-compiles" / kind / identity)
 
 proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
@@ -9428,6 +9636,141 @@ proc publishIfChanged(path, content: string) =
   let staged = path & ".tmp." & $getCurrentProcessId()
   writeFile(extendedPath(staged), content)
   moveFile(extendedPath(staged), extendedPath(path))
+
+type
+  RecipeRelativeProviderCompile = object
+    ## The recipe-relative provider-compile edge for one caller
+    ## (`runProviderCompileEdge`). Inactive: the location-bound edge runs.
+    active: bool
+    recipeDir: string
+    anchors: seq[string]
+    edgePlan: ProviderCompilePlan
+      ## The plan as the edge keys it: recipe-relative identities, the
+      ## binary under `recipeCompileOutputDir("provider", ...)`.
+    edgeArtifactPath: string
+
+proc planRecipeRelativeProviderCompile(callerPlan: ProviderCompilePlan;
+    modulePath, helperCliPath, workDir, providerRoot: string):
+    RecipeRelativeProviderCompile =
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles", stage 2 (owner decision 2026-10-11, "relative on the wire"):
+  ## the provider compile runs IN the recipe's directory, is keyed by
+  ## identities that name what lies beside the recipe relative to it, and
+  ## produces a binary that records the recipe's source sites relative to
+  ## the recipe. The provider is launched with its working directory at the
+  ## recipe (`providerRoot`, the project root it evaluates), so those names
+  ## resolve to the copy it runs beside, and the engine resolves the ones in
+  ## its responses there (Provider-Runtime-Protocol-v1.md, "Paths in
+  ## responses"). A byte-identical recipe at another path, in another
+  ## worktree or under another work root is then served by one compile.
+  ##
+  ## Only where that holds: a recipe that is the project root its provider
+  ## runs in, and an edge that can publish (a monitor-injectable compiler).
+  let recipeDir = parentDir(absolutePath(modulePath))
+  if helperCliPath.len == 0 or not providerCompileCacheable(callerPlan) or
+      not recipeRelativeCompilePossible(recipeDir, providerRoot):
+    return
+  result.active = true
+  result.recipeDir = recipeDir
+  result.anchors = effectiveAnchors(recipeDir,
+    recipeCompileRelocationAnchors(workDir, helperCliPath,
+      callerPlan.compilerCommand))
+  # Derived from the caller's plan, whose sources and fingerprints are this
+  # recipe's. The identities do not depend on the output path (`--out:` is
+  # output-location noise), so the outputs are placed afterwards in the
+  # directory the key names.
+  let keyed = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
+    callerPlan.outputBinaryPath, result.anchors)
+  let edgeDir = recipeCompileOutputDir("provider",
+    toHex(keyed.providerCompileActionKey.bytes).toLowerAscii)
+  result.edgePlan = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
+    edgeDir / "provider" / "project-provider", result.anchors)
+  doAssert result.edgePlan.providerCompileActionKey ==
+    keyed.providerCompileActionKey
+  result.edgeArtifactPath = edgeDir / "provider-compile.rbsz"
+
+proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
+    modulePath, helperCliPath, workDir: string): BuildAction =
+  ## The recipe-relative twin of `providerCompileBuildAction`. Its argv names
+  ## the recipe by file name and everything else by a location-independent
+  ## path (the reprobuild checkout, the action-cache root); its outputs and
+  ## scratch live under the action-cache root, so the recipe's tree is never
+  ## written; its record names what the compile observed beside the recipe
+  ## relative to it (`relocatable`).
+  let edgeDir = parentDir(edge.edgeArtifactPath)
+  let scratchDir = edgeDir / "work"
+  createDir(extendedPath(scratchDir))
+  createDir(extendedPath(parentDir(edge.edgePlan.outputBinaryPath)))
+  var command = @[
+    helperCliPath,
+    "__repro-compile-provider",
+    "--recipe-relative",
+    "--module", extractFilename(modulePath),
+    "--out", edge.edgePlan.outputBinaryPath,
+    "--artifact", edge.edgeArtifactPath,
+    "--interface-fingerprint",
+      encodeInterfaceFingerprintArg(edge.edgePlan.interfaceFingerprint),
+    "--work-dir", workDir,
+    "--scratch-dir", scratchDir]
+  for anchor in edge.anchors:
+    command.add("--anchor")
+    command.add(anchor)
+  var inputs: seq[string] = @[]
+  for source in edge.edgePlan.inputSources:
+    inputs.add(relocatableName(source, edge.recipeDir, edge.anchors))
+  action(ProviderCompileActionId, command,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = edge.recipeDir,
+    inputs = inputs,
+    # No freshness sidecar: the caller's artifact and sidecar are written by
+    # the CLI from the caller's plan (`publishRecipeRelativeProviderCompile`).
+    outputs = @[edge.edgePlan.outputBinaryPath, edge.edgeArtifactPath],
+    commandStatsId = "repro provider compile edge",
+    cacheable = true,
+    weakFingerprint = edge.edgePlan.providerCompileActionKey,
+    # A copy of the recipe carries new mtimes; HYBRID compares its content
+    # when the metadata moved, which is what lets that copy be served.
+    actionCachePolicy = ffpHybrid,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
+    env = providerCompileLaunchEnv(scratchDir / "home"),
+    isolateHostEnvironment = true,
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      providerCompileIgnoredInputPrefixes(scratchDir)),
+    relocatable = true,
+    relocationAnchors = edge.anchors)
+
+proc runProviderCompileEdge(plan: ProviderCompilePlan;
+    modulePath, interfacePath, artifactPath, helperCliPath, workDir,
+    scratchDir, providerRoot: string; config: BuildEngineConfig):
+    BuildRunResult =
+  ## Run the provider-compile edge for `plan` (the caller's plan: its binary
+  ## and artifact paths are the caller's) and leave the caller's binary,
+  ## artifact and freshness sidecar in place. Recipe-relative where
+  ## `planRecipeRelativeProviderCompile` allows it, location-bound
+  ## (`providerCompileBuildAction`) otherwise. `providerRoot` is the project
+  ## root the caller will launch the provider in.
+  let edge = planRecipeRelativeProviderCompile(plan, modulePath,
+    helperCliPath, workDir, providerRoot)
+  if not edge.active:
+    return runBuild(graph([providerCompileBuildAction(plan, modulePath,
+      interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
+      config)
+  # Every copy of the recipe shares the edge's outputs; hold them from
+  # execution until this caller has its own copy.
+  var edgeLock = acquireInterfaceArtifactLock(edge.edgeArtifactPath)
+  try:
+    result = runBuild(graph([recipeRelativeProviderCompileAction(edge,
+      modulePath, helperCliPath, workDir)]), config)
+    if not result.hasFailedActions() and not config.dryRun and
+        fileExists(extendedPath(edge.edgeArtifactPath)) and
+        fileExists(extendedPath(edge.edgePlan.outputBinaryPath)):
+      discard publishRecipeRelativeProviderCompile(plan,
+        edge.edgeArtifactPath, artifactPath, modulePath, workDir)
+  finally:
+    releaseInterfaceArtifactLock(edgeLock)
 
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
@@ -9695,11 +10038,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     maxParallelism: 1'u32,
     stdoutLimit: 1024 * 1024,
     stderrLimit: 1024 * 1024,
-    # Outputs stay in place, metadata-only records — for the recipe-relative
-    # edge too: its outputs live at ONE path for every copy of the recipe
-    # (`recipeCompileOutputDir`), so a hit at a new location finds them where
-    # the record says and nothing needs restoring. Storing their bytes in the
-    # CAS would also write payloads into a cache configured not to hold any.
+    # The location-bound edge writes the caller's own paths: outputs stay in
+    # place and records are metadata-only. The recipe-relative edge is
+    # switched to the restore configuration below.
     rebuildMissingOutputsOnCacheHit: true,
     deferLocalOutputBlobs: true,
     bypassRunQuota: bypassRunQuota,
@@ -9720,6 +10061,27 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     skipCacheHitEvidence: skipCacheHitEvidence,
     cancelCallback: cancelCheck)
   edgeConfig.statsEnabled = statsEnabled
+  if relocatable:
+    # The recipe-relative edge's outputs live in ONE directory per identity
+    # (`recipeCompileOutputDir`), and that identity cannot name what the
+    # compile observes from its environment: the monitor records it only
+    # when the edge runs. Two runs of one recipe whose observed environments
+    # differ — `t_e2e_codetracer_in_place_project_file`'s PATH variants also
+    # differ in the `C_INCLUDE_PATH`/`LIBRARY_PATH` gcc reads, and the recipe
+    # resolves `sh`, `find`, `sort` through `PATH` — are two records over the
+    # same output paths. With metadata-only records the second run's outputs
+    # replaced the first's, so switching back found the first record's inputs
+    # unchanged, its outputs another record's, and re-ran the whole
+    # extraction (every switch, six recipes, thousands of seconds).
+    #
+    # So each record carries its outputs' bytes (a few hundred KB: the
+    # interface artifact, its stub and its input manifest; the scratch tree
+    # under `work/` is derived state and is not stored), and a hit on a
+    # record whose outputs are not the ones on disk restores ITS bytes into
+    # the directory (`enableCachedOutputRestore`, gated on the monitor seeing
+    # no undeclared surviving write). A hit whose outputs are already in
+    # place restores nothing and keeps their mtimes.
+    edgeConfig.enableCachedOutputRestore()
   # The recipe-relative outputs are shared by every caller of this edge for
   # this recipe; the caller's own copy is its own.
   var edgeLock =
@@ -9881,6 +10243,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         measureSet: MeasureSet = DefaultMeasureSet;
                         reportPersistence = BuildReportPersistence();
                         logMode = blmActions;
+                        actionOutput = baoFailed;
                         diagnosticsPath = "";
                         prepareOnly = false;
                         dryRun = false;
@@ -9904,8 +10267,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCacheFetcher: PeerCacheActionFetcher = nil;
                         peerCachePublisher: PeerCacheActionPublisher = nil;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
-                          nil):
+                          nil;
+                        actionOutcomeSink: BuildActionOutcomeSink = nil):
     BuildCommandOutcome =
+  ## ``actionOutcomeSink`` receives the per-action outcome of the engine pass
+  ## this invocation runs over its lowered graph (``ExecutedActionRecord``),
+  ## for certificate issuance. It is not called when no graph ran.
+  ##
   ## ``wantsInputEvidencePaths`` — does the CALLER intend to read
   ## ``BuildCommandOutcome.inputEvidencePaths``? Only ``repro watch`` does;
   ## it arms its filesystem watcher over that set and is blind without it.
@@ -10187,6 +10555,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     if not usesRunQuotaBypass(runResult):
       return
+    # ONLY WHEN THE BYPASS WAS NOT ASKED FOR. The sentence below asserts a
+    # CAUSE — "runquotad is not reachable" — and names a remedy for it, which
+    # was true while an unreachable daemon was the only way to reach this
+    # bypass. It is not any more: a `--no-runquota` build, and a `--dry-run`
+    # (which implies it), bypass by POLICY, and on a host whose daemon is
+    # answering perfectly this line would blame the daemon and tell the
+    # operator to start one that is already running. A policy bypass is not
+    # unreported either way — the RunQuota authority header
+    # (`runQuotaAuthorityHeaderLine`) states it for the whole invocation,
+    # including the invocations that launch nothing.
+    if bypassRunQuota:
+      return
     warnedRunQuotaBypass = true
     logSummary("repro build: WARNING runquotad is not reachable; using " &
       "RunQuota bypass for " &
@@ -10412,6 +10792,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         })
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
+    # TC-8e: certificate issuance needs the order the actions started in.
+    let startedActions = new(seq[string])
+    if actionOutcomeSink != nil:
+      recordActionStarts(engineConfig, startedActions)
     let engineStart = statStart(statsEnabled)
     # Cross-Repo-Source-Consumption SC-2/SC-3 (§4.2 points 3-4): attach each
     # materialized LIBRARY-channel producer as a tool ref on the consumer
@@ -10424,11 +10808,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     appendForwardedArgs(scheduledActions, selectedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
-    # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
-    # producer's SOURCE identity (develop ``contentIdentity`` / lock-pinned
-    # ``revision``+``integrity``) into the consumer actions that name it, so a
-    # producer SOURCE change rebuilds the consumer. No-op when nothing was
-    # materialized (byte-identical to today).
+    # Cross-Repo-Source-Consumption SC-4 (§4.3): a producer SOURCE change
+    # rebuilds the consumer actions that READ it. Actions whose reads are
+    # keyed (monitored, or built-in) get only the producer's realized
+    # directories folded; the rest get its source identity (develop
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
+    # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
@@ -10470,9 +10855,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       actionLogStart)
     buildResult.stats = buildStats
     collectInputEvidence(buildResult)
+    if actionOutcomeSink != nil:
+      actionOutcomeSink(executedActionRecords(scheduledActions, buildResult,
+        startedActions[]))
     recordStatsForBuildRun(buildResult)
+    if actionOutput == baoAll:
+      emitActionOutputs(buildResult, eventSink, progressRenderer)
     if buildResult.hasFailedActions():
-      emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
+      emitFailedActionSummaries(buildResult, eventSink, progressRenderer,
+        outputAlreadyShown = actionOutput == baoAll)
       persistFailureReport(buildResult, lowered.actions)
     let statsRenderStart = statStart(statsEnabled)
     emitMeasurements(buildResult)
@@ -11056,6 +11447,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           measureSet = measureSet,
           reportPersistence = reportPersistence,
           logMode = logMode,
+          actionOutput = actionOutput,
           diagnosticsPath = "",
           # Preparing the requested consumer still has to materialize source
           # tools. Otherwise the parent records the recipe as resolved while
@@ -11357,6 +11749,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             measureSet = measureSet,
             reportPersistence = reportPersistence,
             logMode = logMode,
+            actionOutput = actionOutput,
             diagnosticsPath = "",
             prepareOnly = false,
             dryRun = dryRun,
@@ -11582,10 +11975,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       provider = cachedProvider.get()
     else:
       invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-      let providerCompileAction = providerCompileBuildAction(providerPlan,
-        modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
-        compileScratchDir)
       var providerCompileConfig = BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
@@ -11639,8 +12028,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # stale daemon) is visibly attributed to the launch path rather
       # than the cache-freshness check above.
       progressRenderer.renderPhase("running provider compile")
-      providerCompileResult = runBuild(graph([providerCompileAction]),
-        providerCompileConfig)
+      providerCompileResult = runProviderCompileEdge(providerPlan,
+        modulePath, interfacePath, providerArtifactPath,
+        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        compileScratchDir, result.projectRoot, providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
       warnRunQuotaBypassIfUsed(providerCompileResult,
         enabled = fallbackToRunQuotaBypass)
@@ -12039,6 +12430,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         })
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
+    # TC-8e: certificate issuance needs the order the actions started in.
+    let startedActions = new(seq[string])
+    if actionOutcomeSink != nil:
+      recordActionStarts(engineConfig, startedActions)
     let engineStart = statStart(statsEnabled)
     # Cross-Repo-Source-Consumption SC-2/SC-3 (§4.2 points 3-4): attach each
     # materialized LIBRARY-channel producer as a tool ref on the consumer
@@ -12051,11 +12446,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     appendForwardedArgs(scheduledActions, forwardedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
-    # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
-    # producer's SOURCE identity (develop ``contentIdentity`` / lock-pinned
-    # ``revision``+``integrity``) into the consumer actions that name it, so a
-    # producer SOURCE change rebuilds the consumer. No-op when nothing was
-    # materialized (byte-identical to today).
+    # Cross-Repo-Source-Consumption SC-4 (§4.3): a producer SOURCE change
+    # rebuilds the consumer actions that READ it. Actions whose reads are
+    # keyed (monitored, or built-in) get only the producer's realized
+    # directories folded; the rest get its source identity (develop
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
+    # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
@@ -12110,10 +12506,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       actionLogStart)
     buildResult.stats = buildStats
     collectInputEvidence(buildResult)
+    if actionOutcomeSink != nil:
+      actionOutcomeSink(executedActionRecords(scheduledActions, buildResult,
+        startedActions[]))
     result.inputEvidencePaths = collectedInputEvidence
     recordStatsForBuildRun(buildResult)
+    if actionOutput == baoAll:
+      emitActionOutputs(buildResult, eventSink, progressRenderer)
     if buildResult.hasFailedActions():
-      emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
+      emitFailedActionSummaries(buildResult, eventSink, progressRenderer,
+        outputAlreadyShown = actionOutput == baoAll)
       persistFailureReport(buildResult, scheduledActions)
       for item in buildResult.results:
         if item.status == asFailed:
@@ -12350,26 +12752,44 @@ proc runProviderCompileHelper(args: openArray[string]): int =
   let interfacePath = valueAfterFlag(args, "--interface")
   let workDir = valueAfterFlag(args, "--work-dir")
   let scratchDir = valueAfterFlag(args, "--scratch-dir")
+  let interfaceFingerprintArg = valueAfterFlag(args, "--interface-fingerprint")
+  # A recipe-relative compile (`recipeRelativeProviderCompileAction`) runs
+  # with its cwd at the recipe, names the recipe by file name, and takes the
+  # interface fingerprint itself rather than the caller's interface artifact.
+  let recipeRelative = "--recipe-relative" in args
+  var anchors: seq[string] = @[]
+  for i in 0 ..< args.len - 1:
+    if args[i] == "--anchor" and args[i + 1].len > 0:
+      anchors.add(args[i + 1])
   for (name, value) in [
     ("--module", modulePath),
     ("--out", outputPath),
     ("--artifact", artifactPath),
-    ("--interface", interfacePath),
+    ("--interface",
+      if interfaceFingerprintArg.len > 0: interfaceFingerprintArg
+      else: interfacePath),
     ("--work-dir", workDir)
   ]:
     if value.len == 0:
       stderr.writeLine("repro provider compile: missing " & name)
       return 2
   try:
-    let interfaceArtifact = readInterfaceArtifact(interfacePath)
+    let interfaceFingerprint =
+      if interfaceFingerprintArg.len > 0:
+        decodeInterfaceFingerprintArg(interfaceFingerprintArg)
+      else:
+        readInterfaceArtifact(interfacePath).interfaceFingerprint
     # ``useFreshnessCache = false``: reaching this process at all means the
     # engine already decided the edge must run, from monitored evidence that
     # sees more than the recipe's import closure. Re-asking the narrower
     # text-closure key here would veto that decision and re-publish the stale
     # binary the edge was re-run to replace.
-    discard compileProviderBinary(modulePath, outputPath,
-      interfaceArtifact.interfaceFingerprint, artifactPath, workDir,
-      scratchDir, useFreshnessCache = false)
+    discard compileProviderBinary(absolutePath(modulePath),
+      absolutePath(outputPath), interfaceFingerprint,
+      absolutePath(artifactPath), absolutePath(workDir),
+      (if scratchDir.len > 0: absolutePath(scratchDir) else: ""),
+      useFreshnessCache = false, recipeRelative = recipeRelative,
+      relocationAnchors = anchors)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
@@ -12506,7 +12926,9 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   if not fileExists(extendedPath(responsePath)):
     raise newException(IOError, "provider did not write response: " &
       responsePath)
-  readProviderResponseFile(responsePath)
+  result = readProviderResponseFile(responsePath)
+  # Provider-Runtime-Protocol-v1.md, "Paths in responses".
+  result.resolveRelativeResponsePaths(cwd)
 
 const DevelopOverridesEnvVar = "REPRO_DEVELOP_OVERRIDES_FILE"
   ## The env var naming the develop-override document. One spelling, because
@@ -14193,7 +14615,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil): int
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil): int
 
 type
   RunTargetResolution = object
@@ -17151,6 +17574,15 @@ const
   # before the commit carrying it."
   VcsHookNames = ["pre-commit", "pre-push", "post-commit", "post-merge",
                   "post-checkout"]
+  PreCommitGatePhaseArg* = "--repro-phase=certificate-gate"
+    ## TC-8g — the argument the `pre-commit` dispatcher hands its managed body
+    ## to ask for the certificate-gate phase rather than the lock refresh. Git
+    ## passes `pre-commit` no arguments, so a leading argument cannot collide
+    ## with one of git's.
+  PreCommitDisplacedArg* = "--repro-dispatcher-displaced"
+    ## TC-8g — follows ``PreCommitGatePhaseArg`` as ``=1`` when the dispatcher
+    ## is running as ``pre-commit.legacy`` under another hook manager, ``=0``
+    ## otherwise.
 
 type
   HookActionKind = enum
@@ -18284,6 +18716,23 @@ proc vcsDispatcherContent(hookName: string): string =
       "export " & InternalHookContextEnv &
       "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\"; " &
       "exec \"$MANAGED_HOOK\" \"$@\") || exit $?; fi\n")
+    if hookName == "pre-commit":
+      # TC-8g — the THIRD phase: the certificate gate. It runs after every
+      # step of the commit that can change the index — the chained user hook
+      # and the managed lock refresh above — because the content it judges is
+      # the index the commit will record (test-certificates Standard §5.1: a
+      # pre-commit gate "MUST run after every step of the commit that changes
+      # the index"). It is the same managed body, asked for a different phase
+      # by a leading argument git never passes to `pre-commit` (the hook takes
+      # none). Whether this dispatcher was displaced travels with it: running
+      # as `<hook>.legacy`, the framework that displaced it runs its own hooks
+      # AFTER this one, so the gate cannot know it is last and only reports.
+      result.add("if [ -x \"$MANAGED_HOOK\" ]; then " &
+        "(unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
+        "export " & InternalHookContextEnv &
+        "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\"; " &
+        "exec \"$MANAGED_HOOK\" " & PreCommitGatePhaseArg & " " &
+        PreCommitDisplacedArg & "=$RUNNING_AS_LEGACY) || exit $?; fi\n")
   result.add("exit 0\n")
 
 const ManagedHookRefusalRecordSchemaId* =
@@ -18787,6 +19236,23 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("  *) REPROBUILD_CAPTURED_GIT_INDEX_FILE=" &
       "\"$REPO_ROOT/$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" ;;\n")
     result.add("esac\n")
+    # TC-8g — which phase the dispatcher asked for. Without a leading phase
+    # argument this is the lock refresh, exactly as before; the dispatcher's
+    # third phase asks for the certificate gate and says whether it was
+    # displaced. Both are forwarded to `repro` as dispatch FLAGS (before the
+    # `--`), never as hook arguments, so the hook's own argv stays git's.
+    result.add("REPRO_HOOK_PHASE=refresh\n")
+    result.add("REPRO_HOOK_DISPLACED=0\n")
+    result.add("if [ \"${1:-}\" = " & quoteShellPosix(PreCommitGatePhaseArg) &
+      " ]; then\n")
+    result.add("  REPRO_HOOK_PHASE=certificate-gate\n")
+    result.add("  shift\n")
+    result.add("  case \"${1:-}\" in\n")
+    result.add("    " & PreCommitDisplacedArg & "=1) REPRO_HOOK_DISPLACED=1; " &
+      "shift ;;\n")
+    result.add("    " & PreCommitDisplacedArg & "=*) shift ;;\n")
+    result.add("  esac\n")
+    result.add("fi\n")
   # Resolve the invoking checkout first: Git's hook environment is the source
   # of truth for a linked worktree's root. Only the managed child boundary is
   # scrubbed; the dispatcher has already invoked a preserved user hook with
@@ -18853,6 +19319,10 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       "--require=2 --hook-contract=" & hookContract & " 2>&1) || " &
       "REPRO_PROBE_STATUS=$?\n")
     result.add("  if [ \"$REPRO_PROBE_STATUS\" -ne 0 ]; then\n")
+    if hookName == "pre-commit":
+      # The refresh phase of this same commit has already printed (and
+      # recorded) the refusal; saying it twice per commit adds nothing.
+      result.add("    [ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
     result.add("    repro_contract_refusal\n")
     result.add("    exit 0\n")
     result.add("  fi\n")
@@ -18868,8 +19338,14 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       if hookName == "pre-commit":
         HookGitIndexFileEnv & "=\"$REPROBUILD_CAPTURED_GIT_INDEX_FILE\" "
       else: ""
+    let phaseFlags =
+      if hookName == "pre-commit":
+        " --phase=\"$REPRO_HOOK_PHASE\" " &
+          "--dispatcher-displaced=\"$REPRO_HOOK_DISPLACED\""
+      else: ""
     result.add("  " & indexHandover & "\"$REPRO_CMD\" hooks dispatch " &
-      hookName & " --repo-root \"$REPO_ROOT\" -- \"$@\" || REPRO_STATUS=$?\n")
+      hookName & " --repo-root \"$REPO_ROOT\"" & phaseFlags &
+      " -- \"$@\" || REPRO_STATUS=$?\n")
   if hookName == "pre-push":
     # The gate's verdict is attributed whichever way it went. A PASS names its
     # build too: "repro check: OK" from an interpreter nobody can identify is
@@ -18886,6 +19362,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("echo \"repro hooks: hook protocol mismatch; run 'repro hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
     result.add("exit 1\n")
   else:
+    if hookName == "pre-commit":
+      # Said once per commit, by the refresh phase.
+      result.add("[ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
     result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
       hookName & "\" >&2\n")
     result.add("exit 0\n")
@@ -20525,6 +21004,10 @@ proc runPostCommitLockCommand*(args: openArray[string]): int
 # beside `runPostCommitLockCommand` because it shares that path's argv parser,
 # workspace resolution and stand-down gate.
 proc runPreCommitLockCommand*(args: openArray[string]): int
+# TC-8g: the `pre-commit` certificate-gate phase. Declared here for the
+# dispatcher; the body sits after the client pre-push `certificateGate`, whose
+# store lookup and coverage evaluation it shares.
+proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 
@@ -20578,6 +21061,8 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
   var repoRoot = ""
   var refsFile = ""
   var protocol = 0
+  var phase = "refresh"
+  var displaced = false
   var hookArgs: seq[string]
   var i = 1
   while i < args.len:
@@ -20596,6 +21081,13 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
         raise newException(ValueError,
           "unsupported managed-hook protocol " & raw & " (required: 2)")
       protocol = 2
+    elif arg == "--phase" or arg.startsWith("--phase="):
+      # TC-8g — `pre-commit` only: `refresh` (the lock refresh, the default)
+      # or `certificate-gate` (the dispatcher's third phase).
+      phase = valueFromFlag(args, i, "--phase")
+    elif arg == "--dispatcher-displaced" or
+        arg.startsWith("--dispatcher-displaced="):
+      displaced = valueFromFlag(args, i, "--dispatcher-displaced") == "1"
     inc i
   case hookName
   of "pre-commit":
@@ -20619,6 +21111,18 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # same commit moments later and already re-asserts the hook set; doing it
     # twice would put a second full hook reconciliation on the blocking half of
     # every commit for no additional coverage.
+    case phase
+    of "refresh": discard
+    of "certificate-gate":
+      # TC-8g — the third dispatcher phase, after the chained user hook and
+      # the refresh above have both had their chance to change the index.
+      return runPreCommitCertificateGate(
+        if repoRoot.len > 0: absolutePath(repoRoot) else: getCurrentDir(),
+        displaced)
+    else:
+      raise newException(ValueError,
+        "unsupported pre-commit phase: " & phase &
+          " (expected: refresh, certificate-gate)")
     var preArgs: seq[string]
     if repoRoot.len > 0:
       preArgs.add("--current-repo=" & repoRoot)
@@ -25181,7 +25685,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil): int =
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -25201,6 +25706,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var showExplicit = false
   var reportPersistence = BuildReportPersistence()
   var logMode = configuredBuildLogMode()
+  var actionOutput = baoFailed
   var diagnosticsPath = ""
   var benchmarkPath = ""
   var statsCapture = StatsCaptureConfig()
@@ -25243,6 +25749,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
+  # Whether `--runquota` was passed, as opposed to the default simply leaving
+  # RunQuota on. Only the explicit request outranks the bypass a `--dry-run`
+  # implies; see the derivation after the flag loop.
+  var runQuotaRequestedExplicitly = false
   # In-Process-Monitor-Hosting P1(b): the operator surface for
   # ``BuildEngineConfig.monitorHosting``. Same shape as ``--daemon`` above —
   # an environment default (``REPROBUILD_MONITOR_HOSTING``) that the flag
@@ -25386,6 +25896,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     elif arg == "--log" or arg.startsWith("--log="):
       logMode = parseBuildLogMode(valueFromFlag(args, i, "--log"))
       logModeExplicit = true
+    elif arg == "--action-output" or arg.startsWith("--action-output="):
+      actionOutput = parseBuildActionOutputMode(
+        valueFromFlag(args, i, "--action-output"))
     elif arg == "-v" or arg == "--verbose":
       logMode = blmSummary
       logModeExplicit = true
@@ -25435,8 +25948,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       restoreCachedOutputs = false
     elif arg == "--no-runquota":
       bypassRunQuota = true
+      runQuotaRequestedExplicitly = false
     elif arg == "--runquota":
       bypassRunQuota = false
+      # Recorded as a REQUEST, not only as its effect on `bypassRunQuota`,
+      # because a dry run's implied bypass is applied after this loop and
+      # has to be able to tell "the default left it on" from "the operator
+      # asked for the handshake". See the derivation below the loop.
+      runQuotaRequestedExplicitly = true
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       monitorHosting = parseMonitorHostingMode(
         valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
@@ -25548,6 +26067,64 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       "--soft-rebuild, --rebuild-host-bound or --hard-rebuild")
     return 2
   setRebuildSelection(rebuildClass, rebuildOnly)
+
+  # A DRY RUN IMPLIES `--no-runquota` (`reprobuild-pm/spec/CLI/build.md`
+  # §"Dry Run").
+  #
+  # The scheduler completes every action it reaches as `asWouldRun` without a
+  # lease, a process or an output, so a dry run has nothing to admit against
+  # a machine budget. Requiring the daemon anyway ended the one command whose
+  # entire output is a plan with `runquotad did not become reachable`, on
+  # precisely the host `--dry-run` is most wanted on: one whose environment is
+  # not working yet. `--no-runquota` was then the only way through, which is
+  # a workaround an operator has to be told about, in a command that exists
+  # to be the thing you try first.
+  #
+  # DERIVED HERE, after the flag loop, rather than inside
+  # `startAutoRunQuotaIfNeeded`: `bypassRunQuota` decides three separate
+  # things — whether that spawn happens, whether the PROVIDER COMPILE takes a
+  # lease (`effectiveProviderCompileRunQuotaBypass`, reached through
+  # `bypassRunQuotaExplicit`, and planning DOES reach the provider compile),
+  # and what a `--list-targets` pass is handed. One derivation above all
+  # three keeps them from disagreeing about what a dry run needs.
+  #
+  # An explicit `--runquota` still wins: it is the flag whose only job is to
+  # ask for the handshake. That is why this is not spelled `bypassRunQuota =
+  # bypassRunQuota or dryRun`, and why the flag loop records the request and
+  # not only its effect on `bypassRunQuota`.
+  #
+  # AND THE DECISION HAS TO REACH THE STEPS THAT READ ONLY THE ENVIRONMENT.
+  # `REPROBUILD_NO_RUNQUOTA` is the documented full-bypass switch every
+  # internal build step honours (`runQuotaBypassedByEnv`, and the engine's own
+  # `launchChildEnv`), and planning reaches two of them through code paths
+  # that take no flag: the hidden lock's solve under `--strategy`
+  # (`solverInputsFromCompiledProvider`, which starts a daemon of its own) and
+  # the `--list-targets` inspection's provider compile (which reads the
+  # variable to decide whether to open an inline session). Without exporting
+  # the decision, `repro build --dry-run --strategy lowest` still died with
+  # `runquotad did not become reachable` from inside that solve — and the
+  # sentence this change puts in the spec would be false.
+  #
+  # RESTORED ON THE WAY OUT, because callers keep running in the same process
+  # after this returns. `repro test --dry-run` forwards the flag here and then
+  # EXECUTES the tests in that same process; `bench`, `lint`, `run` and the
+  # top-level dispatch are the same shape. A dry run must not leave the rest
+  # of such a session bypassed. (A daemon-hosted build runs in a FORKED worker
+  # whose environment is its own, so the daemon and its sibling workers are
+  # unaffected either way.)
+  let inheritedNoRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA")
+  let hadInheritedNoRunQuota = existsEnv("REPROBUILD_NO_RUNQUOTA")
+  var exportedDryRunRunQuotaBypass = false
+  defer:
+    if exportedDryRunRunQuotaBypass:
+      if hadInheritedNoRunQuota:
+        putEnv("REPROBUILD_NO_RUNQUOTA", inheritedNoRunQuota)
+      else:
+        delEnv("REPROBUILD_NO_RUNQUOTA")
+  if dryRun and not runQuotaRequestedExplicitly:
+    bypassRunQuota = true
+    exportedDryRunRunQuotaBypass = true
+    putEnv("REPROBUILD_NO_RUNQUOTA", "1")
 
   # ----------------------------------------------------------------
   # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE
@@ -25790,6 +26367,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         measureSet = measureSet,
         reportPersistence = reportPersistence,
         logMode = logMode,
+        actionOutput = actionOutput,
         diagnosticsPath = diagnosticsPath,
         prepareOnly = prepareOnly,
         dryRun = dryRun,
@@ -25821,7 +26399,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         forwardedActionArgs = forwardedActionArgs,
         peerCacheFetcher = peerCacheBuildWiring.fetcher,
         peerCachePublisher = peerCacheBuildWiring.publisher,
-        peerCacheInstaller = peerCacheBuildWiring.installer).exitCode
+        peerCacheInstaller = peerCacheBuildWiring.installer,
+        actionOutcomeSink = actionOutcomeSink).exitCode
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -25914,7 +26493,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     updateBenchmarkDaemonConnection(benchmarkPath, daemonResult.connectionUs)
     daemonResult.exitCode
 
-  if forceDirect or daemonMode == bdmOff:
+  # A caller that needs the per-action outcome (certificate issuance) gets a
+  # direct build: the daemon protocol carries an exit code and diagnostics,
+  # not the engine's per-action results.
+  if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil:
     return runDirectBuild()
   try:
     return runDaemonBuild()
@@ -26433,10 +27015,6 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     result.providerCompileCacheHit = true
   else:
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-    let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
-      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -26459,8 +27037,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       forceRebuild: forceRefresh,
       suppressTrace: true,
       skipCacheHitEvidence: true)
-    let providerCompileResult = runBuild(graph([providerCompileAction]),
-      providerCompileConfig)
+    let providerCompileResult = runProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
@@ -26474,7 +27054,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # already-present outputs against a revalidated action-cache record
     # (``asUpToDate``). Either way no compile ran.
     for item in providerCompileResult.results:
-      if item.id == providerCompileAction.id:
+      if item.id == ProviderCompileActionId:
         result.providerCompileCacheHit = item.status in {asCacheHit, asUpToDate}
     if not fileExists(extendedPath(providerArtifactPath)):
       raise newException(IOError,
@@ -26537,6 +27117,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   # Metadata consumers do not need tool resolution or a lowered action graph.
   result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
+  # A recipe-relative provider names its recipe's files relative to the
+  # project root it ran in (Provider-Runtime-Protocol-v1.md, "Paths in
+  # responses"); the listing names them where they are.
+  for entry in result.targetExportTable.entries.mitems:
+    entry.sourceFile = rebasedName(entry.sourceFile, projectRoot)
   for fragment in refresh.snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkMetadata and
@@ -26645,10 +27230,6 @@ proc refreshRecipeProviderSnapshot(target: string;
     provider = cachedProvider.get()
   else:
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
-    let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
-      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -26668,8 +27249,10 @@ proc refreshRecipeProviderSnapshot(target: string;
       forceRebuild: false,
       suppressTrace: true,
       skipCacheHitEvidence: true)
-    let providerCompileResult = runBuild(graph([providerCompileAction]),
-      providerCompileConfig)
+    let providerCompileResult = runProviderCompileEdge(providerPlan,
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
     # logged (in `executeBuildTarget`) can report the invocation rather
@@ -27051,6 +27634,400 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
         echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
           entry.name & "  " & source
   0
+
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9a — named certificates in the build graph.
+#
+# ``certificate "<name>", <handle>`` in a ``repro.nim`` marks a node as
+# producing a named certificate (Test-Certificates.md §"Marking a node"). The
+# provider records the markings in each package fragment's
+# ``reprobuild.certificate-export-table.v1`` metadata node; this section reads
+# them back from the stored graph and answers the question HL-10 (the
+# lock-update node) and TC-8e (issuance) ask of a plan: which
+# certificate-producing nodes does it materialize, and in which repository?
+# Nothing here issues or signs a certificate.
+# ---------------------------------------------------------------------------
+
+const certificateExportTableStableName* =
+  "reprobuild.certificate-export-table.v1"
+
+proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot):
+    CertificateExportTable =
+  ## Union every package fragment's certificate-export table. A fragment
+  ## without the node marks nothing. Static metadata: it is read from the
+  ## stored graph and never runs the provider.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == certificateExportTableStableName:
+        let perPackage =
+          decodeCertificateExportTablePayload(toBytes(node.payload))
+        for entry in perPackage.entries:
+          result.entries.add(entry)
+
+type
+  CertificatePlanPart* = object
+    ## One repository's share of a plan: the stored graph of the project the
+    ## plan builds there, and the action ids (as the provider declared them,
+    ## before target aliasing) the plan materializes from it.
+    repository*: string
+    certificates*: CertificateExportTable
+    targets*: Table[string, BuildTargetDef]
+    materialized*: HashSet[string]
+    actionDeps*: Table[string, seq[string]]
+      ## Every declared action's dependencies (after inference), so a reader
+      ## can walk a marked node's closure (TC-8e issuance).
+
+  CertificatePlan* = object
+    ## A plan as the certificate query sees it. ``noCertify`` is
+    ## ``--no-certify``: it removes every marking from the plan.
+    parts*: seq[CertificatePlanPart]
+    noCertify*: bool
+
+  CertificatePlanNode* = object
+    ## One certificate-producing node a plan materializes.
+    name*: string
+    owningPackage*: string
+    nodeKind*: CertificateNodeKind
+    node*: string
+    implicit*: bool
+    repository*: string
+    sourceFile*: string
+    sourceLine*: int
+
+proc certificateRepositoryRoot*(projectRoot: string): string =
+  ## The repository a project belongs to: the nearest ancestor of
+  ## ``projectRoot`` (itself included) carrying a ``.git`` entry, which is a
+  ## directory in a main checkout and a file in a linked worktree or a
+  ## submodule. A project outside any repository is its own root.
+  let start = absolutePath(projectRoot)
+  var dir = start
+  while dir.len > 0:
+    if dirExists(extendedPath(dir / ".git")) or
+        fileExists(extendedPath(dir / ".git")):
+      return dir
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  start
+
+proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
+                          projectRoot: string;
+                          selectors: openArray[string]):
+    CertificatePlanPart =
+  ## Resolve ``selectors`` against ``snapshot`` and record the actions their
+  ## union materializes, by the rules ``lowerProviderSnapshot`` applies: a
+  ## qualified ``<package>:<name>``, an action id, a build-target name, then
+  ## an implicit or explicit export name; a target selects the closure of
+  ## its members, an action the closure of its dependencies. An unknown or
+  ## ambiguous selector raises the same errors ``repro build`` reports.
+  result.repository = certificateRepositoryRoot(projectRoot)
+  result.certificates = aggregateCertificateExportTable(snapshot)
+  result.targets = initTable[string, BuildTargetDef]()
+  var declared: seq[BuildActionDef] = @[]
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        declared.add(decodeBuildActionPayload(toBytes(node.payload)))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        result.targets[target.name] = target
+  var byId = initTable[string, BuildActionDef]()
+  for action in inferDeclaredActionDeps(declared, projectRoot):
+    byId[action.id] = action
+  let exportTable = aggregateTargetExportTable(snapshot)
+
+  proc resolveRoot(selector: string; targets: Table[string, BuildTargetDef]):
+      string =
+    for entry in exportTable.entries:
+      if entry.owningPackage & ":" & entry.name == selector:
+        return entry.actionId
+    if byId.hasKey(selector) or targets.hasKey(selector):
+      return selector
+    var owners: seq[string] = @[]
+    var chosen = ""
+    for entry in exportTable.entries:
+      if entry.name == selector:
+        if owners.find(entry.owningPackage) < 0:
+          owners.add(entry.owningPackage)
+        chosen = entry.actionId
+    if owners.len > 1:
+      var candidates: seq[string] = @[]
+      for owner in owners:
+        candidates.add(owner & ":" & selector)
+      candidates.sort()
+      var err = newException(BuildTargetAmbiguousError,
+        "target '" & selector & "' is exported by multiple packages: " &
+          candidates.join(", ") &
+          " — re-run with the qualified <package>:<name> form")
+      err.selectorName = selector
+      err.candidates = candidates
+      raise err
+    if owners.len == 1:
+      return chosen
+    var known: seq[string] = @[]
+    for id in byId.keys:
+      known.add(id)
+    for name in targets.keys:
+      known.add(name)
+    for entry in exportTable.entries:
+      if known.find(entry.name) < 0:
+        known.add(entry.name)
+    var err = newException(BuildTargetUnknownError,
+      "unknown build target: " & selector)
+    err.selectorName = selector
+    err.suggestions = topLevenshteinCandidates(selector, known)
+    raise err
+
+  var materialized = initHashSet[string]()
+  var expanded = initHashSet[string]()
+  proc includeAction(actionId: string) =
+    if materialized.contains(actionId) or not byId.hasKey(actionId):
+      return
+    materialized.incl(actionId)
+    for dep in byId[actionId].deps:
+      includeAction(dep)
+  proc includeTarget(name: string; targets: Table[string, BuildTargetDef]) =
+    if expanded.contains(name) or not targets.hasKey(name):
+      return
+    expanded.incl(name)
+    for nested in targets[name].targets:
+      includeTarget(nested, targets)
+    for actionId in targets[name].actions:
+      includeAction(actionId)
+  for selector in selectors:
+    if selector.len == 0:
+      continue
+    let root = resolveRoot(selector, result.targets)
+    if result.targets.hasKey(root):
+      includeTarget(root, result.targets)
+    else:
+      includeAction(root)
+  result.materialized = materialized
+  for id, action in byId:
+    result.actionDeps[id] = action.deps
+
+proc certificateNodeMembers*(part: CertificatePlanPart;
+                             nodeKind: CertificateNodeKind;
+                             node: string): seq[string] =
+  ## The edges a marked node names directly, as provider action ids: the
+  ## edge itself for a marked edge; every edge a marked target groups,
+  ## nested targets included, for a marked target. These are the node's test
+  ## commands; everything else in its closure builds what they need.
+  case nodeKind
+  of cnkAction:
+    result = @[node]
+  of cnkTarget:
+    var seen = initHashSet[string]()
+    var pending = @[node]
+    while pending.len > 0:
+      let name = pending.pop()
+      if seen.contains(name) or not part.targets.hasKey(name):
+        continue
+      seen.incl(name)
+      for nested in part.targets[name].targets:
+        pending.add(nested)
+      for actionId in part.targets[name].actions:
+        if result.find(actionId) < 0:
+          result.add(actionId)
+
+proc certificateNodeClosure*(part: CertificatePlanPart;
+                             members: openArray[string]): seq[string] =
+  ## ``members`` and every action they depend on, transitively, as provider
+  ## action ids. A marked node passes only when all of these settle
+  ## successfully (Test-Certificates.md §"Marking a node": "it passes when it
+  ## and its whole closure materialize").
+  var seen = initHashSet[string]()
+  var pending = @members
+  while pending.len > 0:
+    let id = pending.pop()
+    if seen.containsOrIncl(id):
+      continue
+    result.add(id)
+    for dep in part.actionDeps.getOrDefault(id):
+      pending.add(dep)
+
+proc certificateNodeMaterialized(part: CertificatePlanPart;
+                                 entry: CertificateExportEntry): bool =
+  ## A marked edge is materialized when the plan builds it. A marked target
+  ## is materialized when the plan builds every edge the target groups,
+  ## nested targets included: it "passes when it and its whole closure
+  ## materialize" (Test-Certificates.md §"Marking a node"), so a plan that
+  ## builds only some of its members does not contain it. A target that
+  ## groups no edge is never materialized.
+  let members = certificateNodeMembers(part, entry.nodeKind, entry.node)
+  if members.len == 0:
+    return false
+  for actionId in members:
+    if not part.materialized.contains(actionId):
+      return false
+  true
+
+proc planCertificateNodes*(plan: CertificatePlan): seq[CertificatePlanNode] =
+  ## Test-Certificates TC-9a: the certificate-producing nodes ``plan``
+  ## materializes, each with the repository it belongs to, in plan-part and
+  ## declaration order. Empty for a ``--no-certify`` plan. HL-10 adds the
+  ## lock-update node to a plan for which this is non-empty; TC-8e issues one
+  ## certificate per returned name when its node passes.
+  if plan.noCertify:
+    return @[]
+  for part in plan.parts:
+    for entry in part.certificates.entries:
+      if certificateNodeMaterialized(part, entry):
+        result.add(CertificatePlanNode(
+          name: entry.name,
+          owningPackage: entry.owningPackage,
+          nodeKind: entry.nodeKind,
+          node: entry.node,
+          implicit: entry.implicit,
+          repository: part.repository,
+          sourceFile: entry.sourceFile,
+          sourceLine: entry.sourceLine))
+
+proc certificateNodeKindText(kind: CertificateNodeKind): string =
+  case kind
+  of cnkAction: "action"
+  of cnkTarget: "target"
+
+proc runCertificatesCommand*(args: openArray[string];
+                             publicCliPath: string): int =
+  ## ``repro certificates list [--json]`` prints the certificate names the
+  ## current project declares and the node each marks, implicit ``test``
+  ## marking included. ``repro certificates plan [SELECTOR...] [--no-certify]
+  ## [--json]`` prints the certificate-producing nodes the plan for
+  ## ``SELECTOR...`` materializes (``test`` when none is given, as for
+  ## ``repro test``), with their repositories. Both read the project's stored
+  ## graph; neither builds, runs a test or issues a certificate.
+  const usage = "usage: repro certificates list [--json] " &
+    "[--tool-provisioning=MODE] [--no-runquota]\n" &
+    "       repro certificates plan [SELECTOR...] [--no-certify] [--json] " &
+    "[--tool-provisioning=MODE] [--no-runquota]"
+  if args.len == 0 or args[0] in ["-h", "--help", "help"]:
+    stderr.writeLine(usage)
+    return (if args.len == 0: 2 else: 0)
+  let sub = args[0]
+  if sub notin ["list", "plan"]:
+    stderr.writeLine("repro certificates: unknown subcommand: " & sub)
+    stderr.writeLine(usage)
+    return 2
+  var asJson = false
+  var noCertify = false
+  var bypassRunQuota = false
+  var mode = tpmPathOnly
+  var selectors: seq[string] = @[]
+  for i in 1 ..< args.len:
+    let arg = args[i]
+    if arg == "--json":
+      asJson = true
+    elif arg == "--no-certify" and sub == "plan":
+      noCertify = true
+    elif arg == "--no-runquota":
+      bypassRunQuota = true
+    elif arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(arg["--tool-provisioning=".len .. ^1])
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro certificates " & sub & ": unknown flag: " & arg)
+      return 2
+    elif sub == "plan":
+      selectors.add(arg)
+    else:
+      stderr.writeLine("repro certificates list: unexpected argument: " & arg)
+      return 2
+  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
+  try:
+    if sub == "list":
+      let info = prepareBuildGraphInspection(".", mode, publicCliPath,
+        selectDefaultAction = false, lowerGraph = false)
+      let table = aggregateCertificateExportTable(info.snapshot)
+      if asJson:
+        var arr = newJArray()
+        for entry in table.entries:
+          arr.add(%*{
+            "name": entry.name,
+            "package": entry.owningPackage,
+            "nodeKind": certificateNodeKindText(entry.nodeKind),
+            "node": entry.node,
+            "implicit": entry.implicit,
+            "source-file": entry.sourceFile,
+            "source-line": entry.sourceLine
+          })
+        echo $(%*{
+          "schemaId": "reprobuild.certificates-list.v1",
+          "projectRoot": info.projectRoot,
+          "certificates": arr
+        })
+      elif table.entries.len == 0:
+        echo "repro certificates list: this project declares no certificate"
+      else:
+        for entry in table.entries:
+          echo entry.name & "  " &
+            (if entry.implicit: "implicit" else: "declared") & "  " &
+            entry.owningPackage & "  " &
+            certificateNodeKindText(entry.nodeKind) & " " & entry.node &
+            "  " & entry.sourceFile & ":" & $entry.sourceLine
+      return 0
+    # ``plan``: resolve the selectors the way ``repro build`` does, so a
+    # ``<sibling>:<name>`` selector plans the sibling project.
+    if selectors.len == 0:
+      selectors = @["test"]
+    let resolved = parseAndResolveSelectors(selectors,
+      "repro certificates plan")
+    # The anchor carries the first name as its fragment: ``.#<name>`` for
+    # this project, ``<sibling project file>#<name>`` for a sibling.
+    let anchorName = splitTarget(resolved.target).fragment
+    var names: seq[string] = @[]
+    if anchorName.len > 0:
+      names.add(anchorName)
+    for name in resolved.extraNameSelectors:
+      if names.find(name) < 0:
+        names.add(name)
+    let info = prepareBuildGraphInspection(resolved.target, mode,
+      publicCliPath, selectDefaultAction = false, lowerGraph = false)
+    let plan = CertificatePlan(
+      parts: @[certificatePlanPart(info.snapshot, info.projectRoot, names)],
+      noCertify: noCertify)
+    let nodes = planCertificateNodes(plan)
+    if asJson:
+      var arr = newJArray()
+      for node in nodes:
+        arr.add(%*{
+          "name": node.name,
+          "package": node.owningPackage,
+          "nodeKind": certificateNodeKindText(node.nodeKind),
+          "node": node.node,
+          "implicit": node.implicit,
+          "repository": node.repository
+        })
+      echo $(%*{
+        "schemaId": "reprobuild.certificate-plan.v1",
+        "selectors": names,
+        "noCertify": noCertify,
+        "nodes": arr
+      })
+    elif nodes.len == 0:
+      echo "repro certificates plan: the plan contains no " &
+        "certificate-producing node" &
+        (if noCertify: " (--no-certify)" else: "")
+    else:
+      for node in nodes:
+        echo node.name & "  " &
+          (if node.implicit: "implicit" else: "declared") & "  " &
+          certificateNodeKindText(node.nodeKind) & " " & node.node & "  " &
+          node.repository
+    return 0
+  except BuildTargetUnknownError as err:
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetAmbiguousError as err:
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro certificates " & sub & ": error: " & err.msg)
+    return 1
 
 proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode =
   let action = requireAction(info.actions, focus)
@@ -35225,7 +36202,8 @@ proc reflogActionSuggestsOperation*(subject: string): bool =
   firstWord in InFlightGitReflogActions
 
 proc probeGitOperationInProgress*(identity: GitToolIdentity;
-                                  repoPath: string): GitOperationProbe =
+                                  repoPath: string;
+                                  consultReflog = true): GitOperationProbe =
   ## Is git in the middle of a multi-step operation in this checkout?
   ##
   ## Every path is resolved with ``git rev-parse --git-path`` rather than
@@ -35288,6 +36266,17 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       result.marker = name
       return
 
+  # TC-8g — ``consultReflog = false`` is for a caller that runs only while a
+  # commit is being FORMED (the pre-commit certificate gate). Git creates the
+  # state paths above before it replays anything, so every replayed commit
+  # finds them; the reflog tail below would instead keep saying "rebase" on
+  # the first ordinary commit after a rebase FINISHED (its last entry is
+  # `rebase (finish)`), and a gate that stood down there would let that
+  # commit through unjudged.
+  if not consultReflog:
+    result.state = gosIdle
+    return
+
   # No state directory — which does NOT yet mean idle. See
   # ``InFlightGitReflogActions``: the am-backend rebase's rewind fires this
   # hook before its state directory exists.
@@ -35315,7 +36304,8 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       return
   result.state = gosIdle
 
-proc managedHookStandDown*(hookName, repoPath: string):
+proc managedHookStandDown*(hookName, repoPath: string;
+                           consultReflog = true):
     tuple[standDown: bool; report: string; loud: bool] =
   ## The gate every managed ``post-*`` hook passes through before it touches
   ## anything.
@@ -35344,7 +36334,7 @@ proc managedHookStandDown*(hookName, repoPath: string):
       "operation is in progress in " & repoPath & " — git is not " &
       "resolvable (" & err.msg & "); nothing was inspected or modified",
       true)
-  let probe = probeGitOperationInProgress(identity, repoPath)
+  let probe = probeGitOperationInProgress(identity, repoPath, consultReflog)
   case probe.state
   of gosIdle:
     (false, "", false)
@@ -49002,6 +49992,42 @@ proc appendPreCommitLog(workspaceRoot, line: string) =
   except CatchableError:
     discard
 
+proc preCommitRepinMarkerPath(workspaceRoot, repoRoot: string): string =
+  ## TC-8g — where the `pre-commit` refresh phase notes a lock it re-pinned
+  ## and staged, for the certificate-gate phase of the same commit to read.
+  ##
+  ## The two phases are separate processes (the dispatcher runs the managed
+  ## body once per phase), so the fact has to cross a process boundary. It
+  ## goes into the commit hooks' own report directory, under a name keyed by
+  ## the checkout, never into the repository: the gate must leave the index
+  ## and the working tree exactly as it found them. "" when the hooks may not
+  ## write here at all.
+  let dir = commitHookReportDir(workspaceRoot)
+  if dir.len == 0 or repoRoot.len == 0:
+    return ""
+  dir / ("pre-commit-repin-" &
+    content_id.sha256Hex(absolutePath(repoRoot))[0 ..< 16] & ".txt")
+
+proc notePreCommitRepin(workspaceRoot, repoRoot, lockPath: string) =
+  ## Record that this commit's refresh wrote and staged ``lockPath``. One line
+  ## per lock: its path relative to the checkout, TAB, the sha256 of the bytes
+  ## staged. The gate names the re-pin only when the index it judges still
+  ## holds exactly those bytes, so a note a crashed or skipped gate left
+  ## behind can never be misread as describing a later commit. Never raises.
+  try:
+    let marker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+    if marker.len == 0 or not fileExists(lockPath):
+      return
+    let relative = relativePath(absolutePath(lockPath),
+      absolutePath(repoRoot)).replace(DirSep, '/')
+    createDir(marker.parentDir)
+    var f: File
+    if open(f, marker, fmAppend):
+      f.writeLine(relative & "\t" & content_id.sha256Hex(readFile(lockPath)))
+      f.close()
+  except CatchableError:
+    discard
+
 proc emitPostCommitWarning(tag, diagnostic, workspaceRoot: string) =
   ## M19b — one line to stderr for any post-commit run that did not end with a
   ## published lock record and is not the designed local-only steady state.
@@ -50932,6 +51958,7 @@ proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
       let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath)
       if staged.ok:
         line.add("; staged into this commit")
+        notePreCommitRepin(workspaceRoot, repoRoot, plan.lockPath)
       else:
         line.add("; NOT STAGED: " & staged.diagnostic)
         stderr.writeLine("repro pre-commit: repro.lock was re-pinned but " &
@@ -50986,6 +52013,13 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # to observe, so there is nothing to record. Same ruling RA-10 makes for
     # `post-commit`, for the same reason.
     return 0
+  # TC-8g — a re-pin note describes ONE commit. Whatever an earlier commit
+  # left behind (its gate phase never ran) is dropped before this one's
+  # refresh can add its own.
+  let repinMarker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+  if repinMarker.len > 0:
+    try: removeFile(repinMarker)
+    except CatchableError: discard
 
   # (1) History rewriting, the half that is NOT handled by content-conditional
   # writing. `git commit --amend` fires this hook with nothing in flight and
@@ -51102,6 +52136,7 @@ proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
     let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath)
     if staged.ok:
       line.add("; staged into this commit")
+      notePreCommitRepin(workspaceRoot, repoRoot, result.lockPath)
     else:
       # Said out loud on BOTH channels. A refreshed-but-unstaged lock is the
       # one outcome that looks like success in the log and behaves like the
@@ -55514,6 +56549,257 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
         evidence: "unverifiable: " & detail,
         source: ""))
       report.exitCode = 2
+
+# ============================================================================
+# TC-8g — the pre-commit certificate gate: the dispatcher's third phase.
+#
+# Because a certificate is bound to CONTENT, the question "do trusted
+# certificates cover this?" can be asked before a commit exists, about the
+# index the commit is about to record (test-certificates Standard §5.1,
+# Content-Id §5). The answer is EARLY FEEDBACK: `git commit --no-verify`
+# skips it, and the push gate and the receiving side remain the enforcement
+# points. Its value is that a refusal arrives while the work is still in hand.
+#
+# The phase runs LAST among the commit's hooks, after the chained user hook
+# (prek, a formatter) and the managed lock refresh, because §5.1 requires a
+# pre-commit gate to "run after every step of the commit that changes the
+# index": a hook that restages a rewritten file after the gate looked
+# produces a commit the gate never saw.
+#
+# Where things come from:
+#   * the CONTENT is ``git write-tree`` over the index being committed — the
+#     ``GIT_INDEX_FILE`` git hands the hook for ``commit -a`` and
+#     ``commit <paths>``, carried across the managed body's environment scrub
+#     as ``REPROBUILD_HOOK_GIT_INDEX_FILE``. It is computed over a COPY of
+#     that index, with optional locks off: the user's index is never written;
+#   * the CANDIDATES come from the standard local certificate store, both
+#     roots, under that content id — never from notes (operator decision D2).
+#     The store is per user and keyed by content only, so a certificate issued
+#     from another clone or worktree of the same content counts;
+#   * each candidate is VERIFIED through the same evaluator as every other
+#     client gate (TC-8b: registered signature, content match, reprobuild's
+#     lock step), for each required platform;
+#   * the MODE is ``commit_gate``, which defaults to ``gate_mode`` (D7). Until
+#     the shared branch policy exists (TC-9b/TC-9c) the requirement is the
+#     project's ``[certificates]`` table, which has no ``commit_gate`` key, so
+#     the default always applies. TC-9c changes the input, not this logic.
+#
+# A record-store project's lock is not part of the content (D8): the gate
+# passes on the certificate alone and never looks the lock record up. The
+# record is written after the commit, at pre-push.
+# ============================================================================
+
+proc commitGateMode*(policy: CertificatePolicy): CertificateGateMode =
+  ## The pre-commit gate's mode for ``policy`` (operator decision D7):
+  ## ``commit_gate``, defaulting to ``gate_mode``. The ``[certificates]``
+  ## table this reads today has no ``commit_gate`` key, so this is
+  ## ``gate_mode``; the shared branch policy (TC-9c) will supply both.
+  policy.gateMode
+
+proc consumePreCommitRepinNotes(workspaceRoot, repoRoot: string):
+    seq[tuple[path, digest: string]] =
+  ## Read and REMOVE the re-pin notes this commit's refresh phase left
+  ## (``notePreCommitRepin``). Removed whatever is found, so no later commit
+  ## can inherit them. Never raises.
+  let marker = preCommitRepinMarkerPath(workspaceRoot, repoRoot)
+  if marker.len == 0 or not fileExists(marker):
+    return
+  try:
+    for line in readFile(marker).splitLines():
+      let tab = line.find('\t')
+      if tab > 0 and tab < line.len - 1:
+        result.add((path: line[0 ..< tab], digest: line[tab + 1 .. ^1]))
+  except CatchableError:
+    discard
+  try: removeFile(marker)
+  except CatchableError: discard
+
+proc hookIndexFile(repoRoot: string): string =
+  ## The index the commit in flight is built from: the managed body's private
+  ## carrier, else git's own ``GIT_INDEX_FILE`` (a hook that dispatches
+  ## directly, without the managed body's scrub), else "" — the repository's
+  ## default index. A relative value is resolved against the checkout, which
+  ## is where git interprets it for a hook.
+  result = getEnv(HookGitIndexFileEnv)
+  if result.len == 0:
+    result = getEnv("GIT_INDEX_FILE")
+  if result.len > 0 and not result.isAbsolute:
+    result = repoRoot / result
+
+proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
+  ## ``repro hooks dispatch pre-commit --phase=certificate-gate`` routes here.
+  ##
+  ## Returns 1 — git refuses the commit — only under ``commit_gate =
+  ## required``, from a canonical (not displaced) dispatcher, when the
+  ## index being committed is not covered or its coverage cannot be
+  ## established. Every other outcome returns 0: ``advisory`` reports,
+  ## ``off`` does nothing, a replay stands down, and a fault in the gate's
+  ## own inputs (no workspace, a manifest that does not resolve) is logged
+  ## and is not a reason to reject a developer's work — the push gate meets
+  ## the same fault and is the enforcement point.
+  let timestamp = isoTimestampNow()
+  let workspaceRoot = resolvePostCommitWorkspaceRoot(repoRoot, "")
+  if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
+    return 0
+  let repinNotes = consumePreCommitRepinNotes(workspaceRoot, repoRoot)
+  template log(line: string) =
+    appendPreCommitLog(workspaceRoot, timestamp & " certificate-gate " & line)
+
+  var resolved: ResolvedProject
+  var workspaceLocal: Option[WorkspaceLocal]
+  try:
+    (resolved, workspaceLocal) = resolveWorkspaceProjectShared(workspaceRoot,
+      "", "the pre-commit certificate gate")
+  except CatchableError as err:
+    log("not-evaluated: the workspace project did not resolve: " & err.msg)
+    return 0
+  let policy = resolved.certificatePolicy
+  let configured = commitGateMode(policy)
+  if configured == cgmOff:
+    return 0
+  if policy.requiredPlatforms.len == 0:
+    # Same reading as the push gate: no required platform, nothing to attest.
+    log("not-gated: the policy sets no required_platforms")
+    return 0
+
+  # Only a repository the project declares carries the project's
+  # certificates; a commit anywhere else (the manifest repository itself, an
+  # unrelated checkout under the workspace root) is not this policy's to judge.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    log("not-evaluated: git is not resolvable: " & err.msg)
+    return 0
+  let match = resolveRepoWorktreeMatch(identity, workspaceRoot,
+    resolved.repos, repoRoot)
+  if not match.found:
+    log("not-gated: " & repoRoot & " is not a repository of project '" &
+      resolved.projectName & "'" &
+      (if match.diagnostic.len > 0: " (" & match.diagnostic & ")" else: ""))
+    return 0
+  let repoName = resolved.repos[match.repoIndex].name
+
+  # A replay (rebase, cherry-pick, `am`) re-creates commits that already
+  # exist; judging each one again would stop the operation half way through
+  # for content the push gate judges anyway. Logged, so a gate that stood
+  # down is distinguishable from one that never ran.
+  let standDown = managedHookStandDown("pre-commit", repoRoot,
+    consultReflog = false)
+  if standDown.standDown:
+    log((if standDown.loud: "inert" else: "stood-down") & ": " &
+      standDown.report)
+    if standDown.loud:
+      stderr.writeLine("repro " & standDown.report)
+    return 0
+
+  # Displaced, the dispatcher runs as `pre-commit.legacy` and the manager that
+  # displaced it runs its own hooks AFTER it. Those may still change the
+  # index, so this gate cannot know it judged the final content: it reports
+  # and does not refuse.
+  let mode =
+    if displaced and configured == cgmRequired: cgmAdvisory else: configured
+  let prefix = "repro pre-commit: certificate gate: "
+
+  # The content id is computed by `git` children of this process, so the
+  # index being committed is named to them through the environment. This
+  # process is the gate alone and exits right after, and the variable is
+  # removed again before anything else runs.
+  let indexFile = hookIndexFile(repoRoot)
+  let hadIndexEnv = existsEnv("GIT_INDEX_FILE")
+  let savedIndexEnv = getEnv("GIT_INDEX_FILE")
+  if indexFile.len > 0:
+    putEnv("GIT_INDEX_FILE", indexFile)
+  var lookup: LocalStoreLookup
+  var verdict: ReprobuildCoverageVerdict
+  var repinned: seq[string]
+  try:
+    let state = indexUnderEvaluation(repoRoot, repoName)
+    lookup = findCertificatesInLocalStore(state)
+    # D8: a project whose lock lives in an out-of-tree record store has no
+    # lock in this content, and `reprobuildLockVerdict` does not consult the
+    # store for a state that is not a commit. The records directory is
+    # therefore not even resolved here.
+    let recordStore = pickRecordStoreRoot(
+      WorkspaceLockArgs(workspaceRoot: workspaceRoot), workspaceLocal)
+    let lockSource =
+      if recordStore.len > 0: recordStoreLockSource("")
+      else: committedLockSource()
+    let keys = readRegisteredKeyStoreChecked(
+      registeredKeyStorePath(workspaceRoot))
+    verdict = evaluateReprobuildCoverage(lookup.found, state,
+      policy.requiredPlatforms, policy.requiredTargets, keys, lockSource,
+      (if lookup.searchFailed: lookup.problems else: @[]))
+    if verdict.outcome != voCovered:
+      for note in repinNotes:
+        let staged = readContentFile(repoRoot, note.path, state.content)
+        if staged.status == cfsPresent and
+            content_id.sha256Hex(staged.bytes) == note.digest:
+          repinned.add(note.path)
+  finally:
+    if hadIndexEnv: putEnv("GIT_INDEX_FILE", savedIndexEnv)
+    else: delEnv("GIT_INDEX_FILE")
+
+  let content =
+    if lookup.contentIds.len > 0: lookup.contentIds.join(", ")
+    else: "the index being committed"
+  if verdict.outcome == voCovered:
+    log("covered: " & content & " for " & policy.requiredPlatforms.join(", ") &
+      " x [" & policy.requiredTargets.join(", ") & "]")
+    return 0
+
+  let refuses = mode == cgmRequired
+  let verdictTag =
+    if verdict.outcome == voUnverifiable: "unverifiable" else: "not-covered"
+  log((if refuses: "refused " else: "reported ") & verdictTag & ": " &
+    content & ": " & describeCoverageVerdict(verdict) &
+    (if displaced: " (dispatcher displaced)" else: "") &
+    (if repinned.len > 0: " (re-pinned: " & repinned.join(", ") & ")"
+     else: ""))
+  for problem in lookup.problems:
+    stderr.writeLine(prefix & "certificate store: " & problem)
+  if verdict.outcome == voUnverifiable:
+    stderr.writeLine(prefix & "coverage of the content being committed (" &
+      content & ") could not be established: " &
+      describeCoverageVerdict(verdict))
+    stderr.writeLine(prefix & "fix what is named (an unreadable key store " &
+      "or certificate store, an algorithm this reprobuild cannot compute); " &
+      "re-running the tests changes nothing")
+  else:
+    let searched =
+      if lookup.found.len == 0 and lookup.searched.len > 0:
+        " (no certificate in the local store; searched " &
+          lookup.searched.join(", ") & ")"
+      else: ""
+    stderr.writeLine(prefix & "no trusted certificate covers the content " &
+      "being committed (" & content & "): " &
+      describeCoverageVerdict(verdict) & searched)
+    if repinned.len > 0:
+      # HL-10 depends on this naming: the refresh, not the developer, moved
+      # the content away from what was tested.
+      stderr.writeLine(prefix & "cause: this commit's lock refresh re-pinned " &
+        "and staged " & repinned.join(", ") & ", so the content being " &
+        "committed is not the content the tests ran on")
+    stderr.writeLine(prefix & "remedy: run 'repro certify' on exactly what " &
+      "you are committing (on each required platform: " &
+      policy.requiredPlatforms.join(", ") & "), then commit again")
+  if displaced:
+    stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
+      "pre-commit.legacy under another hook manager, whose hooks run after " &
+      "this gate and may still change the index, so this gate cannot refuse. " &
+      "Restore it with 'repro hooks ensure --vcs " & repoRoot & "'")
+  if refuses:
+    stderr.writeLine(prefix & "the commit is REFUSED (commit_gate = " &
+      "required). This is early feedback, which `git commit " &
+      "--no-verify` skips; it is not the enforcement point: the push " &
+      "gate checks the pushed content again (test-certificates Standard " &
+      "§5.1)")
+    return 1
+  stderr.writeLine(prefix & "advisory: the commit proceeds. This is early " &
+    "feedback, which `git commit --no-verify` skips; it is not the " &
+    "enforcement point: the push gate checks the pushed " &
+    "content again (test-certificates Standard §5.1)")
+  0
 
 # ============================================================================
 # TC-6 — Receiving-side enforcement: the local push gateway.
@@ -61998,6 +63284,7 @@ type
     name*: string
     status*: HealthStatus
     detail*: string
+    fullDetail*: string
     remedy*: string
     fixKind*: HealthFixKind
 
@@ -62006,6 +63293,7 @@ type
     projectName: string
     json: bool
     fix: bool
+    verbose: bool
 
   HealthContext = object
     ## Resolved facts the gatherer shares across checks so it only
@@ -62031,6 +63319,8 @@ proc parseHealthArgs(args: openArray[string]): HealthArgs =
       result.json = true
     elif arg == "--fix":
       result.fix = true
+    elif arg == "--verbose" or arg == "-v":
+      result.verbose = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro health` flag: " & arg)
@@ -62714,6 +64004,14 @@ proc gatherHealthChecks(parsed: HealthArgs):
     # population: "4 wired" means nothing without "of 5 present in 1 repo".
     let census = $okCount & " managed hook(s) wired across " &
       $reposInspected & " participating repo(s)"
+    proc formatHookList(items: openArray[string]; verbose: bool; maxShown = 5): string =
+      if verbose or items.len <= maxShown:
+        items.join(", ")
+      else:
+        let shown = items[0 ..< maxShown]
+        let elided = items.len - maxShown
+        shown.join(", ") & " (+" & $elided & " more)"
+
     if enumerated.mode != "workspace":
       checks.add(HealthCheck(
         name: "vcs-hooks",
@@ -62727,45 +64025,73 @@ proc gatherHealthChecks(parsed: HealthArgs):
       # mismatch is live is how the diagnostic gets deleted instead of the
       # defect. Whatever else is wrong is NAMED here, in the same detail, so
       # nothing is dropped by taking this arm.
+      let fullStaleDetail = $stale.len & " managed hook(s) STALE — present, carrying " &
+        "every marker a generated body carries, and demanding a contract " &
+        "THIS build does not generate, so each fire refuses (pre-push) or " &
+        "fails open in silence (the four observational hooks): " &
+        stale.join(", ") & ". " & census &
+        (if writers.len > 0:
+          ". The installed bodies name their writer(s): " &
+            writers.join(" | ") &
+            " — compare STORE PATHS, not versions"
+        else: "") &
+        (if shadowed.len > 0:
+          ". Also " & $shadowed.len & " SHADOWED: " & shadowed.join(", ")
+        else: "") &
+        (if missing.len > 0:
+          ". Also " & $missing.len & " missing: " & missing.join(", ")
+        else: "") &
+        ". See the hook-interpreter row for whether this host's shells " &
+        "even agree about which 'repro' runs them."
+      let staleDetail = $stale.len & " managed hook(s) STALE — present, carrying " &
+        "every marker a generated body carries, and demanding a contract " &
+        "THIS build does not generate, so each fire refuses (pre-push) or " &
+        "fails open in silence (the four observational hooks): " &
+        formatHookList(stale, parsed.verbose) & ". " & census &
+        (if writers.len > 0:
+          ". The installed bodies name their writer(s): " &
+            writers.join(" | ") &
+            " — compare STORE PATHS, not versions"
+        else: "") &
+        (if shadowed.len > 0:
+          ". Also " & $shadowed.len & " SHADOWED: " & formatHookList(shadowed, parsed.verbose)
+        else: "") &
+        (if missing.len > 0:
+          ". Also " & $missing.len & " missing: " & formatHookList(missing, parsed.verbose)
+        else: "") &
+        ". See the hook-interpreter row for whether this host's shells " &
+        "even agree about which 'repro' runs them."
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
-        detail: $stale.len & " managed hook(s) STALE — present, carrying " &
-          "every marker a generated body carries, and demanding a contract " &
-          "THIS build does not generate, so each fire refuses (pre-push) or " &
-          "fails open in silence (the four observational hooks): " &
-          stale.join(", ") & ". " & census &
-          (if writers.len > 0:
-            ". The installed bodies name their writer(s): " &
-              writers.join(" | ") &
-              " — compare STORE PATHS, not versions"
-          else: "") &
-          (if shadowed.len > 0:
-            ". Also " & $shadowed.len & " SHADOWED: " & shadowed.join(", ")
-          else: "") &
-          (if missing.len > 0:
-            ". Also " & $missing.len & " missing: " & missing.join(", ")
-          else: "") &
-          ". See the hook-interpreter row for whether this host's shells " &
-          "even agree about which 'repro' runs them.",
+        detail: staleDetail,
+        fullDetail: if staleDetail != fullStaleDetail: fullStaleDetail else: "",
         # NOT ``hooks ensure``, and NOT auto-fixable. See the block comment.
         remedy: "direnv reload   # then, only once hook-interpreter agrees: " &
           remedy,
         fixKind: hfNone))
     elif shadowed.len > 0:
+      let fullShadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
+        "installer and not running: " & shadowed.join(", ") & ". " & census
+      let shadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
+        "installer and not running: " & formatHookList(shadowed, parsed.verbose) & ". " & census
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
-        detail: $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
-          "installer and not running: " & shadowed.join(", ") & ". " & census,
+        detail: shadowedDetail,
+        fullDetail: if shadowedDetail != fullShadowedDetail: fullShadowedDetail else: "",
         remedy: remedy,
         fixKind: hfEnsureVcsHooks))
     elif missing.len > 0:
+      let fullMissingDetail = $missing.len & " managed hook(s) missing across " &
+        $reposInspected & " participating repo(s): " & missing.join(", ")
+      let missingDetail = $missing.len & " managed hook(s) missing across " &
+        $reposInspected & " participating repo(s): " & formatHookList(missing, parsed.verbose)
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
-        detail: $missing.len & " managed hook(s) missing across " &
-          $reposInspected & " participating repo(s): " & missing.join(", "),
+        detail: missingDetail,
+        fullDetail: if missingDetail != fullMissingDetail: fullMissingDetail else: "",
         remedy: remedy,
         fixKind: hfEnsureVcsHooks))
     else:
@@ -63232,7 +64558,9 @@ proc toJsonNode*(check: HealthCheck): JsonNode =
   result = newJObject()
   result["name"] = %check.name
   result["status"] = %($check.status)
-  result["detail"] = %check.detail
+  result["detail"] = %(if check.fullDetail.len > 0: check.fullDetail else: check.detail)
+  if check.fullDetail.len > 0:
+    result["digest"] = %check.detail
   result["remedy"] = %check.remedy
   result["fixable"] = %(check.fixKind != hfNone)
 
@@ -70164,6 +71492,13 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         valueFromFlag(args, i, "--stats-groups"))
     elif arg == "--log" or arg.startsWith("--log="):
       result.buildFlags.add("--log=" & valueFromFlag(args, i, "--log"))
+    elif arg == "--action-output" or arg.startsWith("--action-output="):
+      # Forwarded verbatim like ``--log``; ``repro build`` validates the
+      # value. ``repro test`` builds in-process when it issues certificates,
+      # and that build prints what its actions wrote exactly as
+      # ``repro build --action-output`` does.
+      result.buildFlags.add("--action-output=" &
+        valueFromFlag(args, i, "--action-output"))
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       # In-Process-Monitor-Hosting P1(b): forwarded verbatim, like every
       # other value-taking build flag here, so `repro test`/`bench`/`lint`
@@ -71097,6 +72432,547 @@ proc fixtureSelectors(opts: ReproTestShardOpts): seq[string] =
   except CatchableError:
     discard
 
+proc issuancePreconditionLabel(kind: IssuancePreconditionKind): string =
+  ## The short reason a refused precondition prints after "no certificate —".
+  case kind
+  of ipDirty: "a develop-mode sibling's working tree is dirty"
+  of ipUnpublished: "dependency has unpushed commits"
+  of ipOffLock: "repo not at the locked revision"
+  of ipNoWorkspace: "not a workspace"
+  of ipNoContentId: "the tested state has no content id"
+  of ipNoLockInContent: "the tested content carries no usable lock"
+  of ipGateError: "workspace gate error"
+  of ipOk: ""
+
+proc reportRefusedPreconditions(pre: IssuancePreconditions) =
+  stderr.writeLine("repro test: no certificate — " &
+    issuancePreconditionLabel(pre.kind) &
+    (if pre.offender.len > 0: " (" & pre.offender & ")" else: "") &
+    (if pre.remedy.len > 0: " — " & pre.remedy else: ""))
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-8e — issuance on the real ``repro test`` path.
+#
+# A plain ``repro test [SELECTOR...]`` is ``repro build test`` (or the given
+# selectors): the build engine runs every test edge as an ordinary action,
+# under the filesystem monitor. Issuance therefore reads the engine's own
+# per-action outcome (``ExecutedActionRecord``) — how each action settled,
+# whether this run launched it, its argv and its monitor capture — and needs
+# nothing from an external test runner.
+#
+# One certificate per certificate-producing node the plan materializes
+# (``planCertificateNodes``, TC-9a) and platform, with ``targets = [<name>]``:
+#
+#   * the node PASSES when every action in its closure settled successfully;
+#     a failed or blocked action, or one the run reported nothing for, leaves
+#     its name uncertified while other passing nodes are still certified
+#     (Standard §8, partial coverage is normal);
+#   * its test commands are the edges it names directly (the marked edge, or
+#     every edge a marked target groups). Each one either EXECUTED in this run
+#     or was answered by an action-cache record the producer may attest
+#     (Standard §6.2.1, decision D16 of Test-Certificates.milestones.org):
+#     a key-matched record of an action whose key covers what the monitor
+#     observed it reading, produced by an execution this host observed
+#     (``reusedResultRefusal``). A record from a LAN peer, or one whose origin
+#     is not recorded, is a caller-supplied claim (Standard §6.2); a name that
+#     rests on one is withheld with the remedy ``repro certify <name>``.
+#     ``repro certify`` is incremental like ``repro test``; when a name rests
+#     on such a record it re-executes that name's test commands (a hard
+#     rebuild scoped to them) and judges the name again from that run;
+#   * ``[[certificate.command]]`` lists their argv in dependency order,
+#     reused ones before executed ones where both are free to go, executed
+#     ones in the order the scheduler started them;
+#   * the TC-8d preconditions, the before/after content id, the sibling
+#     re-observation and the untracked-inputs judgement apply unchanged. The
+#     read set is the union of the monitor captures of every action in the
+#     node's closure that this run executed and of the recorded reads of
+#     every one it reused — the monitored path TC-8d's "read-set" mode was
+#     waiting for;
+#   * signing happens only here, after the observed passing run (Standard
+#     §6.2); the certificate goes to the local store's user root and, until
+#     the carrier switch, also onto the shared notes ref under its tree.
+#
+# Withholding never changes the exit code: the build's own is returned.
+# ---------------------------------------------------------------------------
+
+type
+  CertificateNodeRun = object
+    node: CertificatePlanNode
+    members: seq[string]
+      ## The node's test commands, as engine action ids.
+    closure: seq[string]
+      ## The members and everything they depend on, as engine action ids.
+    memberDeps: Table[string, seq[string]]
+      ## For each member, the other members it depends on, transitively.
+
+  CertificateNodeVerdict = object
+    ## Did a node pass in this build, and which commands does its claim rest
+    ## on? See ``certificateNodeVerdict``.
+    passed: bool
+    problem, remedy: string
+    refused: seq[string]
+      ## Members answered by the cache with a result that cannot be attested
+      ## (``reusedResultRefusal``); ``repro certify`` re-executes their node.
+    commands: seq[seq[string]]
+    depfiles: seq[string]
+      ## Monitor captures of the closure's executed actions.
+    recordedReads: seq[string]
+      ## What the records of the closure's reused actions say their
+      ## executions read, from ``recordedSources`` records.
+    recordedSources: int
+
+proc reusedResultRefusal(record: ExecutedActionRecord): string =
+  ## Why a test command the action cache answered may NOT be attested, or
+  ## ``""`` when it may (test-certificates Standard §6.2.1, decision D16 of
+  ## Test-Certificates.milestones.org). All three of the standard's
+  ## conditions:
+  ##
+  ##   * the record covers the inputs: a key-matched record answered it
+  ##     (``cdHit`` / ``cdHybridCutoff``, so every keyed input is byte- or
+  ##     metadata-identical now), and the action's key is one that covers
+  ##     what the monitor observed it reading (``keyCoversObservedReads``);
+  ##   * the record came from an execution this host observed
+  ##     (``cacheRecordObservedHere``). Reprobuild has no record signed by a
+  ##     project-registered key today, so that second arm of the standard is
+  ##     never available and every other record is refused;
+  ##   * the record reports success: the engine publishes a record only for
+  ##     an action that succeeded, so a reused failure cannot reach here, and
+  ##     a member that failed in this run is refused before this is asked.
+  if record.cacheDecision notin {cdHit, cdHybridCutoff}:
+    return "reported up to date without a matching cache record"
+  if not record.keyCoversObservedReads:
+    return "its cache key does not cover every input the monitor observed " &
+      "it reading"
+  if not record.cacheRecordObservedHere:
+    return "its cache record is not one this host observed executing (a " &
+      "LAN peer's, or one whose origin is not recorded)"
+  ""
+
+proc certificateNodeVerdict(run: CertificateNodeRun;
+    records: Table[string, ExecutedActionRecord]): CertificateNodeVerdict =
+  ## Did ``run.node`` pass in this build, and which commands does the claim
+  ## rest on? Pure over the engine's records: it runs and signs nothing.
+  ## ``depfiles`` are the monitor captures of the closure's executed actions;
+  ## ``recordedReads`` are what the records of its reused actions say their
+  ## executions read, so the untracked-inputs rule sees a reused test's reads
+  ## too.
+  var failed, missing, refusals: seq[string]
+  for id in run.closure:
+    if not records.hasKey(id):
+      missing.add(id)
+      continue
+    let record = records[id]
+    if record.status notin {asSucceeded, asCacheHit, asUpToDate}:
+      failed.add(id & " (" & $record.status &
+        (if record.status == asFailed: ", exit code " & $record.exitCode
+         else: "") & ")")
+    elif record.launched:
+      if record.monitorDepfile.len > 0:
+        result.depfiles.add(record.monitorDepfile)
+    elif record.cacheDecision in {cdHit, cdHybridCutoff}:
+      inc result.recordedSources
+      for path in record.cacheRecordInputs:
+        result.recordedReads.add(path)
+  if failed.len > 0:
+    result.problem = "it did not pass: " & failed.join(", ")
+    result.remedy = "fix the failing actions and re-run"
+    return
+  if missing.len > 0:
+    result.problem = "the build reported no outcome for " & missing.join(", ")
+    result.remedy = "re-run; a certificate is never issued for an action " &
+      "whose result is unknown"
+    return
+  # The claim rests on every test command, executed or reused (Standard
+  # §6.2.1: "a reused command is not marked differently").
+  var attested: seq[string]
+  for id in run.members:
+    let record = records[id]
+    if not record.launched:
+      let refusal = reusedResultRefusal(record)
+      if refusal.len > 0:
+        result.refused.add(id)
+        refusals.add(id & " (" & refusal & ")")
+        continue
+    if record.argv.len > 0:
+      attested.add(id)
+  if refusals.len > 0:
+    result.problem = $refusals.len & " of its " & $run.members.len &
+      " test command(s) were answered by the action cache with a result " &
+      "that cannot be attested: " & refusals.join(", ")
+    result.remedy = "run 'repro certify " & run.node.name & "', which " &
+      "re-executes them"
+    return
+  # Order: a member never precedes a member it depends on; among those free
+  # to go next, a reused one (it settled without starting) precedes the
+  # executed ones, which keep the order the scheduler started them in, and
+  # the node's member order breaks the remaining ties.
+  proc key(id: string): tuple[start, index: int] =
+    let record = records[id]
+    ((if record.launched: record.startOrder else: -1), run.members.find(id))
+  var pending = attested
+  while pending.len > 0:
+    var best = -1
+    for i, id in pending:
+      var ready = true
+      for dep in run.memberDeps.getOrDefault(id):
+        if pending.find(dep) >= 0:
+          ready = false
+      if ready and (best < 0 or key(id) < key(pending[best])):
+        best = i
+    if best < 0:
+      # A dependency cycle cannot come out of a validated graph; fall back
+      # to the plain key order rather than loop.
+      pending.sort(proc(a, b: string): int = cmp(key(a), key(b)))
+      best = 0
+    result.commands.add(records[pending[best]].argv)
+    pending.delete(best)
+  if result.commands.len == 0:
+    result.problem = "it executed no command to attest"
+    result.remedy = "mark a node whose closure runs a test command"
+    return
+  result.passed = true
+
+proc readSetFromMonitorDepFiles(paths: openArray[string];
+                                recordedReads: openArray[string] = [];
+                                recordedSources = 0): CapturedReadSet =
+  ## The union of several monitor captures and of what ``recordedSources``
+  ## reused cache records say their executions read (``recordedReads``,
+  ## already absolute). A capture that cannot be read contributes nothing,
+  ## but what the others observed WAS read: the set counts as captured when
+  ## at least one capture or record was read, and ``source`` names the
+  ## captures that were not. With none, nothing was captured.
+  var seen = initHashSet[string]()
+  var read, unreadable: seq[string]
+  for path in paths:
+    let one = readSetFromMonitorDepFile(path)
+    if not one.captured:
+      unreadable.add(path)
+      continue
+    read.add(path)
+    for p in one.paths:
+      if not seen.containsOrIncl(p):
+        result.paths.add(p)
+  for p in recordedReads:
+    if not seen.containsOrIncl(p):
+      result.paths.add(p)
+  result.captured = read.len > 0 or recordedSources > 0
+  let recorded =
+    if recordedSources > 0:
+      " and the cache records of " & $recordedSources & " reused action(s)"
+    else: ""
+  result.source =
+    if paths.len == 0 and recordedSources == 0:
+      "no action in the node's closure was executed under the monitor"
+    elif paths.len == 0:
+      "the cache records of " & $recordedSources & " reused action(s)"
+    elif unreadable.len == 0:
+      "the monitor captures of " & $read.len & " executed action(s)" &
+        recorded
+    else:
+      "the monitor captures of " & $read.len & " of " & $paths.len &
+        " executed action(s)" & recorded & "; unreadable: " &
+        unreadable.join(", ")
+
+proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
+    commands: seq[seq[string]]; readSet: CapturedReadSet;
+    workspaceRoot, certificateOut: string): bool =
+  ## Confirm the tested state for one passing node, then build, sign, deliver
+  ## and note its certificate. Returns true when one was issued; every
+  ## refusal is printed with its remedy.
+  let tested = confirmTestedState(pre, readSet)
+  if tested.reason != tswNone:
+    stderr.writeLine("repro test: no certificate for '" & name & "' — " &
+      $tested.reason & ": " & tested.message & " — " & tested.remedy)
+    return false
+  if tested.note.len > 0:
+    stderr.writeLine("repro test: " & tested.note)
+  var confirmed = pre
+  confirmed.untracked = tested.untracked
+  var cert = issueCertificate(confirmed, @[name], commands,
+    "repro-test@" & issuerHostTag())
+  try:
+    signCertificateOnIssuance(cert, reproSigningKeyId(),
+      reproSigningKeyPath(workspaceRoot))
+  except CertificateSigningError as err:
+    stderr.writeLine("repro test: no certificate for '" & name & "' — the " &
+      "daemon could not sign it (" & err.msg & "); the attestation is " &
+      "withheld")
+    return false
+  let delivered = publishCertificateToLocalStore(cert, pre.repository)
+  if delivered.error.len > 0:
+    stderr.writeLine("repro test: no certificate for '" & name & "' — it " &
+      "was issued but could not be written to the local certificate store: " &
+      delivered.error)
+    return false
+  if delivered.retentionProblem.len > 0:
+    stderr.writeLine("repro test: " & delivered.retentionProblem)
+  for problem in delivered.pruned.errors:
+    stderr.writeLine("repro test: local certificate store prune: " & problem)
+  # Until the carrier switch (D12), the certificate also travels as a note on
+  # the shared ref, keyed by the tree its content names; a certificate
+  # already noted there is not appended twice.
+  let gitBin = findExe("git")
+  let noteKey = certificateNoteKey(cert.vcs.content)
+  if gitBin.len == 0 or not noteKey.ok:
+    stderr.writeLine("repro test: certificate for '" & name & "' is in the " &
+      "local store but was not noted: " &
+      (if gitBin.len == 0: "git not found on PATH" else: noteKey.problem))
+  else:
+    var alreadyNoted = false
+    for existing in readAttachedCertificates(gitBin, pre.repository,
+        noteKey.oid):
+      if existing.signature.value == cert.signature.value:
+        alreadyNoted = true
+    if not alreadyNoted:
+      let att = attachCertificate(gitBin, pre.repository, cert)
+      if not att.ok:
+        stderr.writeLine("repro test: certificate for '" & name & "' is in " &
+          "the local store but attaching it as a git note failed: " &
+          att.diagnostic)
+  if certificateOut.len > 0:
+    writeCertificateFile(cert, certificateOut)
+  stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
+    " for '" & name & "' on " & cert.platform & " for content " &
+    cert.vcs.content &
+    (if cert.vcs.base.len > 0: " (base " & cert.vcs.base & ")"
+     else: " (unborn branch: no base)") & " → " & delivered.path &
+    (if certificateOut.len > 0: " (copy: " & certificateOut & ")" else: "") &
+    " (signed " & certificateSignatureAlgorithm & ", key_id=" & cert.keyId &
+    ", " & $cert.commands.len & " command(s))")
+  true
+
+proc plainTestBuild(buildArgs, selectors: seq[string];
+                    publicCliPath: string): int =
+  ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
+  var args = buildArgs
+  for sel in (if selectors.len == 0: @["test"] else: selectors):
+    args.add(sel)
+  runBuildCommand(args, publicCliPath)
+
+proc reportUnselectedCertificates(unselected: seq[string]) =
+  ## The one line naming the project's marked nodes this run did not select.
+  if unselected.len > 0:
+    stderr.writeLine("repro test: not certified by this run: " &
+      unselected.join(", ") & " (declared by the project, not selected; " &
+      "'repro certify' produces them)")
+
+type ActionOutcomeCollector = ref object
+  ## What the build's ``actionOutcomeSink`` delivered.
+  delivered: bool
+  records: Table[string, ExecutedActionRecord]
+
+proc collectorSink(collector: ActionOutcomeCollector): BuildActionOutcomeSink =
+  ## A sink that stores every delivered record in ``collector``, by id.
+  result = proc(batch: seq[ExecutedActionRecord]) =
+    collector.delivered = true
+    for record in batch:
+      collector.records[record.id] = record
+
+proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
+                            publicCliPath: string): int =
+  ## TC-8e: ``repro test`` / ``repro certify`` on the build-engine path, with
+  ## issuance for the certificate-producing nodes the plan materializes (see
+  ## the block comment above). ``buildArgs`` are the ``repro build``
+  ## arguments without selectors.
+  let mode =
+    if opts.toolProvisioning == tpmUnspecified: tpmPathOnly
+    else: opts.toolProvisioning
+  var workRoot = ""
+  for flag in opts.buildFlags:
+    if flag.startsWith("--work-root="):
+      workRoot = flag["--work-root=".len .. ^1]
+  var selectors = opts.selectors
+
+  # 1. The plan: the stored graph, as ``repro certificates plan`` reads it.
+  var info: BuildGraphInspection
+  var part: CertificatePlanPart
+  var names: seq[string]
+  try:
+    var autoRunQuota = startAutoRunQuotaIfNeeded(
+      "--no-runquota" in opts.buildFlags)
+    defer: releaseAutoRunQuotaProcess(autoRunQuota)
+    if selectors.len == 0 and opts.certifyExplicit:
+      # ``repro certify`` with no names materializes every declared
+      # certificate-producing node. (Once the shared branch policy exists it
+      # will be the names the current branch's rule requires instead.)
+      let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
+        selectDefaultAction = false, workRoot = workRoot, lowerGraph = false)
+      for entry in aggregateCertificateExportTable(declared.snapshot).entries:
+        if selectors.find(entry.name) < 0:
+          selectors.add(entry.name)
+      if selectors.len == 0:
+        stderr.writeLine("repro certify: this project declares no " &
+          "certificate-producing node (see 'repro certificates list'); " &
+          "nothing to certify")
+        return 2
+    let resolved = parseAndResolveSelectors(
+      (if selectors.len == 0: @["test"] else: selectors), "repro test")
+    let anchorName = splitTarget(resolved.target).fragment
+    if anchorName.len > 0:
+      names.add(anchorName)
+    for name in resolved.extraNameSelectors:
+      if names.find(name) < 0:
+        names.add(name)
+    info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
+      selectDefaultAction = false, workRoot = workRoot, lowerGraph = false)
+    part = certificatePlanPart(info.snapshot, info.projectRoot, names)
+  except BuildTargetUnknownError, BuildTargetAmbiguousError:
+    # The build reports the same selector error in its ordinary form.
+    return plainTestBuild(buildArgs, selectors, publicCliPath)
+  except CatchableError as err:
+    stderr.writeLine("repro test: no certificate — the plan's " &
+      "certificate-producing nodes could not be read (" & err.msg & ")")
+    return plainTestBuild(buildArgs, selectors, publicCliPath)
+  let nodes = planCertificateNodes(CertificatePlan(parts: @[part]))
+  var unselected: seq[string]
+  for entry in part.certificates.entries:
+    var planned = false
+    for node in nodes:
+      if node.name == entry.name: planned = true
+    if not planned and unselected.find(entry.name) < 0:
+      unselected.add(entry.name)
+  if nodes.len == 0:
+    let code = plainTestBuild(buildArgs, selectors, publicCliPath)
+    reportUnselectedCertificates(unselected)
+    return code
+
+  # 2. The issuance preconditions (TC-8d) for the repository the plan builds.
+  let currentRepo =
+    if opts.certCurrentRepo.len > 0: absolutePath(opts.certCurrentRepo)
+    else: part.repository
+  let workspaceRoot =
+    if opts.certWorkspaceRoot.len > 0: absolutePath(opts.certWorkspaceRoot)
+    else: enclosingWorkspaceRoot(currentRepo)
+  var pre: IssuancePreconditions
+  if workspaceRoot.len == 0:
+    pre = IssuancePreconditions(kind: ipNoWorkspace, offender: currentRepo,
+      remedy: "run inside an initialized reprobuild workspace, or pass " &
+        "--workspace-root=PATH")
+  else:
+    pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+
+  # 3. The incremental no-op, per name: a name the local store already
+  # certifies for this content on this platform is not issued again. When
+  # every selector is such a name, nothing runs at all.
+  var covered: seq[string]
+  if pre.kind == ipOk:
+    let algorithmName = parseContentId(pre.content).algorithmName
+    let existing = findCertificatesInLocalStore(stateWithKnownContent(
+      [KnownContentId(algorithm: algorithmName, id: pre.content)]))
+    for node in nodes:
+      if certificateNoOpDecision(existing.certificates, pre, @[node.name],
+          opts.certTraceDir, info.projectRoot,
+          defaultCachePath(info.projectRoot)):
+        covered.add(node.name)
+    var allCovered = covered.len > 0
+    for name in names:
+      if covered.find(name) < 0:
+        allCovered = false
+    if allCovered:
+      stderr.writeLine("repro test: re-certify is a no-op — the local " &
+        "certificate store (" & existing.searched.join(", ") & ") already " &
+        "covers [" & covered.join(", ") & "] for content " & pre.content &
+        " on " & pre.platform & " (no relevant change; tests not re-run)")
+      reportUnselectedCertificates(unselected)
+      return 0
+    for name in covered:
+      stderr.writeLine("repro test: '" & name & "' is already certified " &
+        "for content " & pre.content & " on " & pre.platform &
+        "; not issued again")
+
+  # 4. Each remaining node's test commands and closure, in engine ids, and
+  # which of its members each member depends on (for the command order).
+  var aliases = DirectTargetAliases(byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  for target in part.targets.values:
+    considerDirectAlias(aliases, target)
+  var runs: seq[CertificateNodeRun]
+  for node in nodes:
+    if covered.find(node.name) >= 0:
+      continue
+    let members = certificateNodeMembers(part, node.nodeKind, node.node)
+    var run = CertificateNodeRun(node: node)
+    for id in members:
+      run.members.add(aliases.byAction.getOrDefault(id, id))
+    for id in certificateNodeClosure(part, members):
+      run.closure.add(aliases.byAction.getOrDefault(id, id))
+    for id in members:
+      var above: seq[string]
+      for dep in certificateNodeClosure(part, [id]):
+        if dep != id and members.find(dep) >= 0:
+          above.add(aliases.byAction.getOrDefault(dep, dep))
+      run.memberDeps[aliases.byAction.getOrDefault(id, id)] = above
+    runs.add(run)
+
+  # 5. The build, in-process so its per-action outcome is observable. It
+  # keeps the action cache: a reused test result counts when it may be
+  # attested (D16, ``reusedResultRefusal``).
+  proc certifyingBuild(extra: seq[string]):
+      tuple[code: int; delivered: bool;
+            records: Table[string, ExecutedActionRecord]] =
+    var args = buildArgs & extra
+    for name in names:
+      args.add(name)
+    let collector = ActionOutcomeCollector()
+    result.code = runBuildCommand(args, publicCliPath,
+      actionOutcomeSink = collectorSink(collector))
+    result.delivered = collector.delivered
+    result.records = collector.records
+
+  var outcome = certifyingBuild(@[])
+  var verdicts: seq[CertificateNodeVerdict]
+  if pre.kind == ipOk and outcome.delivered:
+    for run in runs:
+      verdicts.add(certificateNodeVerdict(run, outcome.records))
+    # ``repro certify`` is the remedy for a reused result that cannot be
+    # attested: it re-executes the test commands of every name that rests on
+    # one (a hard rebuild scoped to them) and judges the names again from
+    # that run. A plain ``repro test`` reports the remedy instead.
+    if opts.certifyExplicit:
+      var rerun: seq[string]
+      for i, run in runs:
+        if verdicts[i].refused.len > 0:
+          for id in run.members:
+            if rerun.find(id) < 0:
+              rerun.add(id)
+      if rerun.len > 0:
+        stderr.writeLine("repro certify: re-executing " & $rerun.len &
+          " test command(s) whose cached results cannot be attested: " &
+          rerun.join(", "))
+        var extra = @["--hard-rebuild"]
+        for id in rerun:
+          extra.add("--only=" & id)
+        outcome = certifyingBuild(extra)
+        verdicts.setLen(0)
+        if outcome.delivered:
+          for run in runs:
+            verdicts.add(certificateNodeVerdict(run, outcome.records))
+  let code = outcome.code
+
+  # 6. Issue for each passing node.
+  if pre.kind != ipOk:
+    reportRefusedPreconditions(pre)
+  elif not outcome.delivered:
+    stderr.writeLine("repro test: no certificate — the build reported no " &
+      "per-action outcome to certify from" &
+      (if code != 0: " (it failed before running its graph)" else: ""))
+  else:
+    let copyOut = if runs.len == 1: opts.certificateOut else: ""
+    if opts.certificateOut.len > 0 and runs.len != 1:
+      stderr.writeLine("repro test: --certificate-out names one file and " &
+        "this run certifies " & $runs.len & " names; no copy is written")
+    for i, run in runs:
+      let verdict = verdicts[i]
+      if not verdict.passed:
+        stderr.writeLine("repro test: no certificate for '" & run.node.name &
+          "' — " & verdict.problem & " — " & verdict.remedy)
+        continue
+      discard issueForCertificateNode(pre, run.node.name, verdict.commands,
+        readSetFromMonitorDepFiles(verdict.depfiles, verdict.recordedReads,
+          verdict.recordedSources), workspaceRoot, copyOut)
+  reportUnselectedCertificates(unselected)
+  code
+
 proc runReproTestCommand*(args: openArray[string];
                           publicCliPath: string): int =
   ## ``repro test`` entry point with the CI-sharding flag surface from
@@ -71179,6 +73055,17 @@ proc runReproTestCommand*(args: openArray[string];
       buildArgs.add(opts.lockFlag)
     if opts.peerCacheSpec.len > 0:
       buildArgs.add("--peer-cache=" & opts.peerCacheSpec)
+    # TC-8e: a run that executes tests issues a certificate for each
+    # certificate-producing node it materializes. ``--no-certify`` opts out,
+    # and a run that executes nothing (a dry run, a listing, a solved-graph
+    # print, a prepare-only pass) has nothing to attest.
+    var executesTests = opts.certify
+    for flag in opts.buildFlags:
+      if flag in ["--dry-run", "--prepare-only", "--list-targets",
+          "--list-targets-json", "--print-solved-graph"]:
+        executesTests = false
+    if executesTests:
+      return runCertifyingTestBuild(opts, buildArgs, publicCliPath)
     if opts.selectors.len == 0:
       buildArgs.add("test")
     else:
@@ -71258,19 +73145,7 @@ proc runReproTestCommand*(args: openArray[string];
     let code = runFixtureModeShard(opts, peer, outcome)
     # Decide issuance from the REAL outcome + preconditions.
     if pre.kind != ipOk:
-      let label =
-        case pre.kind
-        of ipDirty: "a develop-mode sibling's working tree is dirty"
-        of ipUnpublished: "dependency has unpushed commits"
-        of ipOffLock: "repo not at the locked revision"
-        of ipNoWorkspace: "not a workspace"
-        of ipNoContentId: "the tested state has no content id"
-        of ipNoLockInContent: "the tested content carries no usable lock"
-        of ipGateError: "workspace gate error"
-        of ipOk: ""
-      stderr.writeLine("repro test: no certificate — " & label &
-        (if pre.offender.len > 0: " (" & pre.offender & ")" else: "") &
-        (if pre.remedy.len > 0: " — " & pre.remedy else: ""))
+      reportRefusedPreconditions(pre)
     elif not outcome.allPassed:
       stderr.writeLine("repro test: no certificate — the run did not pass " &
         "(result is not 'passed'); fix the failing targets and re-run")
@@ -71340,7 +73215,15 @@ proc runReproTestCommand*(args: openArray[string];
         " (signed " & certificateSignatureAlgorithm & ", key_id=" &
         cert.keyId & ")")
     return code
-  return runWorkspaceModeShard(opts, peer, publicCliPath)
+  # A sharded run hands its test edges to the external test runner, which
+  # does not report a per-node outcome or the commands it executed, so this
+  # path issues nothing. Say so when a certificate was asked for explicitly.
+  let shardCode = runWorkspaceModeShard(opts, peer, publicCliPath)
+  if opts.certifyExplicit:
+    stderr.writeLine("repro test: no certificate — a sharded run (--shard, " &
+      "--emit-partition-plan, --plan-from) does not issue certificates yet; " &
+      "run 'repro certify' without shard flags")
+  return shardCode
 
 const checkSetTarget* = "pre-commit"
   ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
@@ -72377,10 +74260,20 @@ proc tryLoadDurableSolverProviderArtifacts(
       providerArtifactPath, modulePath, providerBinaryPath,
       interfaceArtifact.interfaceFingerprint, compileWorkDir)
     if provider.isNone:
-      let providerAction = providerCompileBuildAction(plan,
-        modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
-        outDir / "provider-work")
+      # The edge the build ran: recipe-relative where it could be
+      # (`runProviderCompileEdge`), whose record is keyed by the recipe-relative
+      # plan, not by the caller's.
+      let helperCliPath = internalReproHelperCliPath(publicCliPath)
+      let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
+        helperCliPath, compileWorkDir, projectRootForModule(modulePath))
+      let providerAction =
+        if relocated.active:
+          recipeRelativeProviderCompileAction(relocated, modulePath,
+            helperCliPath, compileWorkDir)
+        else:
+          providerCompileBuildAction(plan,
+            modulePath, interfacePath, providerArtifactPath,
+            helperCliPath, compileWorkDir, outDir / "provider-work")
       let validation = runBuild(graph([providerAction]), BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
@@ -72547,10 +74440,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
         let plan = providerCompilePlan(modulePath, providerBinaryPath,
           artifact.interfaceFingerprint, compileWorkDir, scratchDir)
         invalidateStaleProviderCompileArtifact(plan, providerArtifactPath)
-        let compileAction = providerCompileBuildAction(plan,
+        # The provider runs below with its cwd at the project directory.
+        let providerRoot =
+          if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
+        let compiled = runProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
-          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir)
-        let compiled = runBuild(graph([compileAction]), BuildEngineConfig(
+          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir,
+          providerRoot, BuildEngineConfig(
           cacheRoot: cacheRoot,
           actionCacheRoot: currentActionCacheRoot(),
           runQuotaCliPath: publicCliPath,
@@ -74125,6 +76021,7 @@ const internalHelperAliases = {
   "compile-provider": "__repro-compile-provider",
   "extract-interface": "__repro-extract-interface",
   "compile-profile": "__repro-compile-profile",
+  "probe-profile-platforms": "__repro-probe-profile-platforms",
   "dev-env-introspect": "__repro-dev-env-introspect",
   "render-dev-env-shell": "__repro-render-dev-env-shell",
   "direnv-activate": "__repro-direnv-activate",
@@ -81129,6 +83026,13 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runProfileCompileHelper(helperArgs)
+  if args.len > 0 and args[0] == "__repro-probe-profile-platforms":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runProfilePlatformProbeHelper(helperArgs)
   if args.len > 0 and args[0] == "__repro-dev-env-introspect":
     let helperArgs =
       if args.len > 1:
@@ -81350,6 +83254,10 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro test: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len > 0 and args[0] == "certificates":
+    # TC-9a: list the project's named certificates, or the
+    # certificate-producing nodes a plan materializes.
+    return runCertificatesCommand(args[1 .. ^1], publicCliPath)
   if programName == "repro" and args.len > 0 and args[0] == "certify":
     # TC-1: ``repro certify`` is the explicit "run the full required set to
     # obtain a certificate" form — an alias for ``repro test --certify``

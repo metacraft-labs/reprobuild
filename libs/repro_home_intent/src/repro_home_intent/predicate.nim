@@ -578,6 +578,16 @@ proc evaluateBool*(n: PredNode; ctx: HostContext;
           return true
     else: discard
 
+proc predicateHolds*(n: PredNode; ctx: HostContext;
+                     userPredicate: UserPredicateEvaluator = nil): bool =
+  ## Whether a guard admits `ctx`: a nil AST (no guard) always does.
+  ## THE guard rule for every intent element -- activity-body `when`
+  ## blocks, guarded resources and guarded config overrides -- so the
+  ## planner and `repro home export --target` cannot disagree on it.
+  if n == nil:
+    return true
+  evaluateBool(n, ctx, userPredicate)
+
 # ---------------------------------------------------------------------------
 # Predicate validation (resolve unknown identifiers to user modules).
 # ---------------------------------------------------------------------------
@@ -614,3 +624,80 @@ proc validatePredicate*(profilePath: string; line: int; n: PredNode;
     let known = if userLookup != nil: userLookup(id) else: false
     if not known:
       raiseUnknownPredicate(profilePath, id, line, 0, searchedModules)
+
+# ---------------------------------------------------------------------------
+# Built-in-only validation (GM4: `when` fields in plan-time data files).
+# ---------------------------------------------------------------------------
+
+proc builtinShapeProblem(n: PredNode; wantBool: bool): string =
+  ## Why `n` is not a well-typed expression of the built-in grammar, or ""
+  ## when it is. `wantBool` is the position's type: a boolean condition, or
+  ## (false) a string operand of `==` / `!=` / `in`. Mirrors exactly what
+  ## `evaluateBool` accepts, so a predicate that passes cannot raise when
+  ## it is evaluated, on any host.
+  case n.kind
+  of pnBoolLit:
+    if not wantBool: return "a boolean literal is not a string operand"
+  of pnIdent:
+    let id = n.ident.toLowerAscii()
+    if id == StandardHostIdent:
+      if wantBool:
+        return "`host` is a string; compare it (`host == \"name\"`)"
+    elif id in StandardPlatformIdents or id in StandardArchIdents:
+      if not wantBool:
+        return "`" & n.ident & "` is a boolean, not a string operand"
+    else:
+      return "unknown predicate identifier '" & n.ident & "'"
+  of pnStrLit:
+    if wantBool: return "a string literal cannot stand alone as a condition"
+  of pnList:
+    return "a list literal is only allowed on the right of `in`"
+  of pnAnd, pnOr:
+    if not wantBool: return "a boolean expression is not a string operand"
+    for op in n.operands:
+      let p = builtinShapeProblem(op, true)
+      if p.len > 0: return p
+  of pnNot:
+    if not wantBool: return "a boolean expression is not a string operand"
+    return builtinShapeProblem(n.operand, true)
+  of pnEq, pnNe:
+    if not wantBool: return "a comparison is not a string operand"
+    let l = builtinShapeProblem(n.lhs, false)
+    if l.len > 0: return l
+    return builtinShapeProblem(n.rhs, false)
+  of pnIn:
+    if not wantBool: return "a comparison is not a string operand"
+    let l = builtinShapeProblem(n.lhs, false)
+    if l.len > 0: return l
+    if n.rhs.kind != pnList:
+      return "the right-hand side of `in` must be a list literal"
+    for item in n.rhs.items:
+      let p = builtinShapeProblem(item, false)
+      if p.len > 0: return p
+  ""
+
+proc validateBuiltinPredicate*(source: string; filePath = "";
+                               line = 0): PredNode =
+  ## Parse `source` and require it to be a well-typed predicate of the
+  ## BUILT-IN grammar only: `windows`, `macos`, `linux`, `bsd`, `wsl`,
+  ## `x86_64`, `arm64`, `arm32`, `host ==` / `!=` / `in [...]`, `true`,
+  ## `false`, combined with `and`, `or`, `not` and parentheses. A
+  ## user-defined predicate is rejected: places that carry predicate TEXT
+  ## outside a profile's Nim code (the `when` field of a plan-time data
+  ## file, GM4) have no user-predicate evaluator, and a Nix consumer of
+  ## the same file can evaluate only this grammar
+  ## (Gradual-Nix-To-Reprobuild-Migration.md §Declarative data files read
+  ## at plan time; Core-Invariants.md §Unrecognised Input Is Rejected, Not
+  ## Skipped). Raises `EUnstructured` for a malformed expression,
+  ## `EUnknownPredicate` for a non-built-in identifier, and `EUnstructured`
+  ## for a mistyped one (`host` alone, `linux == "x"`).
+  result = parsePredicate(filePath, source, line)
+  var unknown = initHashSet[string]()
+  collectIdents(result, unknown)
+  for id in unknown:
+    # No user-predicate module is consulted, so nothing was searched.
+    raiseUnknownPredicate(filePath, id, line, 0, @[])
+  let problem = builtinShapeProblem(result, true)
+  if problem.len > 0:
+    raiseUnstructured(filePath, line, 0, "`" & source & "` (" & problem & ")",
+      "a predicate of the built-in grammar")

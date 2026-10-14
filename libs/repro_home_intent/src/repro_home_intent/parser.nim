@@ -22,6 +22,7 @@
 
 import std/[strutils, tables]
 from repro_core/paths import extendedPath
+from repro_profile/data_refs import dataFilePathProblem
 
 import ./errors
 import ./model
@@ -34,8 +35,11 @@ const
   HostsHeader = "hosts"
   ResourcesHeader = "resources"
   AdapterPreferenceHeader = "adapterPreference"
+  DataHeader = "data"
   WhenHeader = "when"
   IfHeader = "if"
+  ElifHeader = "elif"
+  ElseHeader = "else"
 
   KnownAdapterPreferenceOs* = ["windows", "linux", "darwin", "macos"]
     ## M2.5: the closed set of OS keys recognized inside an
@@ -43,10 +47,13 @@ const
     ## is canonicalized to `"darwin"` at parse time so resolve-time
     ## lookups use a single canonical key.
 
-  KnownAdapterPreferenceAdapters* = ["builtin", "scoop", "nix", "path"]
-    ## M2.5: the closed set of adapter names recognized inside an
-    ## `adapterPreference:` chain list. Any entry outside this set
-    ## raises a structured parse error.
+  KnownAdapterPreferenceAdapters* = ["tarball", "builtin", "scoop", "nix",
+    "path"]
+    ## The closed set of realization kinds recognized inside an
+    ## `adapterPreference:` list — the profile's selection policy (GM4b,
+    ## Provisioning-Contributions.md §"Selection policy"). `builtin` is the
+    ## former spelling of `tarball`. Any entry outside this set raises a
+    ## structured parse error.
 
   KnownResourceKinds* = ["env.userPath", "fs.managedBlock",
     "shell.integration", "env.userVariable", "windows.registryValue",
@@ -157,8 +164,9 @@ proc matchAnyHeader(line: string): tuple[ok: bool; keyword, rest: string;
   ## match-first is unnecessary because the keywords are all unique
   ## prefixes of distinct identifiers).
   for kw in [ProfileHeader, ActivityHeader, WhenHeader, IfHeader,
+             ElifHeader, ElseHeader,
              ConfigHeader, HostsHeader, ResourcesHeader,
-             AdapterPreferenceHeader]:
+             AdapterPreferenceHeader, DataHeader]:
     let m = matchHeader(line, kw)
     if m.matched:
       return (true, m.keyword, m.rest, m.indent)
@@ -543,6 +551,155 @@ proc parseActivity(ctx: ParseCtx; idx, parentIndent,
     indent: parentIndent, activityName: m.rest,
     activityHeaderLine: idx + 1, activityChildren: bodyChildren)
 
+# ---------------------------------------------------------------------------
+# Guard chains in `config:` and `resources:` (GM3).
+# ---------------------------------------------------------------------------
+#
+# A compiled profile guards `config:` entries and `resources:` declarations
+# with a runtime `when <pred>:` chain (`elif <pred>:` / `else:` branches,
+# nesting allowed); the profile macro gives each branch its predicate
+# conjoined with the negation of every earlier branch, so exactly one branch
+# applies on any host (`lowerWhenChain` in `repro_profile/macros.nim`). The
+# inspector reads the same chain into `nkCondBlock`s carrying that effective
+# guard, so the structural editor knows each guarded element's extent and
+# the guard walkers (`applicableConfigEntries`, `applicableConfigPackages`,
+# `applicableResourceEntries`) select from a parsed profile exactly what
+# the planner selects from the compiled one.
+
+type
+  GuardLeafParser = proc (ctx: ParseCtx; idx, indent: int): IntentNode
+    {.nimcall.}
+    ## Parses the element (config entry, config package block, resource
+    ## entry) whose first line is `idx`; the returned node's `endLine` is
+    ## its last line (1-based), i.e. the 0-based index of the next line.
+
+  GuardSection = object
+    ## What a guard chain may hold, for diagnostics and for the keyword set.
+    name: string          ## e.g. "a `config:` package block"
+    allowIf: bool         ## `if <pred>:` accepted as a chain head
+    leaf: GuardLeafParser
+
+  GuardChain = object
+    ## The chain being read at one nesting level. `open` while the previous
+    ## sibling was a `when` / `if` / `elif` branch, so an `elif` / `else`
+    ## may follow; `priors` are that chain's branch predicates so far.
+    open: bool
+    priors: seq[PredNode]
+
+proc effectiveGuard(pred: PredNode; priors: seq[PredNode]): PredNode =
+  ## `pred and not p1 and not p2 ...` -- the guard `lowerWhenChain` gives a
+  ## branch. `pred` is nil for `else:`.
+  var ops: seq[PredNode]
+  if not pred.isNil:
+    ops.add pred
+  for prior in priors:
+    ops.add PredNode(kind: pnNot, operand: prior)
+  if ops.len == 1: ops[0]
+  else: PredNode(kind: pnAnd, operands: ops)
+
+proc guardKeyword(text: string): CondKeyword =
+  case text
+  of WhenHeader: ckWhen
+  of IfHeader: ckIf
+  of ElifHeader: ckElif
+  else: ckElse
+
+proc parseGuardedChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
+                          childIndent: int;
+                          section: GuardSection): seq[IntentNode]
+
+proc parseGuardBranch(ctx: ParseCtx; idx, indent: int; keywordText: string;
+                      chain: var GuardChain;
+                      section: GuardSection): IntentNode =
+  ## One branch of a guard chain whose header (`when` / `if` / `elif` /
+  ## `else`) is line `idx`. Its body holds `section`'s elements and nested
+  ## chains. A branch the editor cannot evaluate is refused, never skipped:
+  ## a compile-time `when defined(...)` is decided by the compiling host,
+  ## so no guard the inspector could record describes it.
+  let keyword = guardKeyword(keywordText)
+  let m = matchHeader(ctx.lines[idx], keywordText)
+  if not m.matched:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "'" & ctx.lines[idx].strip() & "'",
+      "a `" & keywordText & "` branch header ending in `:`")
+  if keyword in {ckElif, ckElse} and not chain.open:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "`" & keywordText & "` without a preceding `when <pred>:` branch",
+      "a `when <pred>:` branch before `" & keywordText & "` in " &
+        section.name)
+  if keyword == ckIf and not section.allowIf:
+    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+      "`if " & m.rest & ":` in " & section.name,
+      "`when <pred>:` (the profile macro accepts only `when` chains here)")
+  var pred: PredNode = nil
+  if keyword == ckElse:
+    if m.rest.len != 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & m.rest & "' after `else`", "`else:` with no predicate")
+  else:
+    if m.rest.len == 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "an empty predicate",
+        "a predicate expression after `" & keywordText & "`")
+    if m.rest.startsWith("defined(") or m.rest.startsWith("defined ") or
+       m.rest.contains(" defined("):
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "a compile-time `" & keywordText & " " & m.rest & ":` in " &
+          section.name,
+        "a runtime predicate guard such as `when linux():` -- a " &
+        "`when defined(...)` branch is decided by the compiling host and " &
+        "is not machine-editable; edit it by hand")
+    pred = parsePredicate(ctx.profilePath, m.rest, idx + 1)
+  if keyword in {ckWhen, ckIf}:
+    chain.priors = @[]
+  let guard = effectiveGuard(pred, chain.priors)
+  if keyword == ckElse:
+    chain.open = false
+  else:
+    chain.open = true
+    chain.priors.add pred
+  let childIndent = indent + ctx.indentStep
+  let endIdx = lastStructuralIdx(ctx.lines, idx + 1, childIndent)
+  let body =
+    if endIdx >= idx + 1:
+      parseGuardedChildren(ctx, idx + 1, endIdx + 1, childIndent, section)
+    else:
+      @[]
+  result = IntentNode(kind: nkCondBlock,
+    startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
+    indent: indent, keyword: keyword,
+    predicateSource: m.rest, predicateAst: guard,
+    canonicalPredicate: renderPredicate(normalizeAst(guard)),
+    condHeaderLine: idx + 1, condChildren: body)
+
+proc parseGuardedChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
+                          childIndent: int;
+                          section: GuardSection): seq[IntentNode] =
+  ## Lines [startIdx, endIdxExclusive) at `childIndent`: `section`'s
+  ## elements, or guard chains holding them.
+  var chain = GuardChain()
+  var i = startIdx
+  while i < endIdxExclusive:
+    let raw = ctx.lines[i]
+    if isBlankOrComment(raw):
+      inc i; continue
+    let lineIndent = countLeadingSpaces(raw)
+    if lineIndent != childIndent:
+      raiseUnstructured(ctx.profilePath, i + 1, lineIndent + 1,
+        "'" & raw.strip() & "' at indent " & $lineIndent,
+        "content at indent " & $childIndent)
+    let m = matchAnyHeader(raw)
+    if m.ok and m.keyword in [WhenHeader, IfHeader, ElifHeader, ElseHeader]:
+      let blk = parseGuardBranch(ctx, i, childIndent, m.keyword, chain,
+        section)
+      result.add blk
+      i = blk.endLine
+    else:
+      chain = GuardChain()
+      let node = section.leaf(ctx, i, childIndent)
+      result.add node
+      i = node.endLine
+
 proc parseConfigEntry(ctx: ParseCtx; idx: int; entryIndent: int): IntentNode =
   let raw = ctx.lines[idx]
   let trimmed = trimTrailing(raw)
@@ -560,7 +717,8 @@ proc parseConfigEntry(ctx: ParseCtx; idx: int; entryIndent: int): IntentNode =
   if i >= trimmed.len or trimmed[i] != '=':
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "'" & trimmed[indent .. ^1] & "'",
-      "a `<key> = <value>` configurable assignment")
+      "a `<key> = <value>` configurable assignment, or a " &
+      "`when <pred>:` / `elif <pred>:` / `else:` guard around assignments")
   inc i
   while i < trimmed.len and trimmed[i] in {' ', '\t'}:
     inc i
@@ -572,6 +730,13 @@ proc parseConfigEntry(ctx: ParseCtx; idx: int; entryIndent: int): IntentNode =
     startLine: idx + 1, endLine: idx + 1, indent: entryIndent,
     configKey: key, configValueSource: rhs, configEntryLine: idx + 1)
 
+proc parseConfigEntryLeaf(ctx: ParseCtx; idx, indent: int): IntentNode =
+  parseConfigEntry(ctx, idx, indent)
+
+const ConfigEntrySection = GuardSection(name: "a `config:` package block",
+  allowIf: false,
+  leaf: parseConfigEntryLeaf)
+
 proc parseConfigPackage(ctx: ParseCtx; idx, pkgIndent,
                         entryIndent: int): IntentNode =
   let raw = ctx.lines[idx]
@@ -580,50 +745,43 @@ proc parseConfigPackage(ctx: ParseCtx; idx, pkgIndent,
   if not body.endsWith(":"):
     raiseUnstructured(ctx.profilePath, idx + 1, pkgIndent + 1,
       "'" & body & "'",
-      "a `<package>:` header inside `config:`")
+      "a `<package>:` header inside `config:`, or a `when <pred>:` / " &
+      "`elif <pred>:` / `else:` guard around package blocks")
   let pkgName = body[0 ..< body.len - 1].strip()
   for c in pkgName:
     if not (c.isAlphaAscii() or c.isDigit() or c in {'_', '-'}):
       raiseUnstructured(ctx.profilePath, idx + 1, pkgIndent + 1,
         "'" & pkgName & "' as a `config:` package name",
-        "a package identifier")
+        "a package identifier, or a `when <pred>:` / `elif <pred>:` / " &
+        "`else:` guard around package blocks")
   let endIdx = lastStructuralIdx(ctx.lines, idx + 1, entryIndent)
-  var entries: seq[IntentNode]
-  var i = idx + 1
-  while i <= endIdx:
-    let line = ctx.lines[i]
-    if isBlankOrComment(line):
-      inc i; continue
-    let ind = countLeadingSpaces(line)
-    if ind != entryIndent:
-      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
-        "'" & line.strip() & "' at indent " & $ind,
-        "content at indent " & $entryIndent)
-    entries.add parseConfigEntry(ctx, i, entryIndent)
-    inc i
+  let entries =
+    if endIdx >= idx + 1:
+      parseGuardedChildren(ctx, idx + 1, endIdx + 1, entryIndent,
+        ConfigEntrySection)
+    else:
+      @[]
   result = IntentNode(kind: nkConfigPackage,
     startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
     indent: pkgIndent, configPackageName: pkgName,
     configPackageHeaderLine: idx + 1, configEntries: entries)
 
+proc parseConfigPackageLeaf(ctx: ParseCtx; idx, indent: int): IntentNode =
+  parseConfigPackage(ctx, idx, indent, indent + ctx.indentStep)
+
+const ConfigPackageSection = GuardSection(name: "`config:`",
+  allowIf: false,
+  leaf: parseConfigPackageLeaf)
+
 proc parseConfigBlock(ctx: ParseCtx; idx, parentIndent,
                       pkgIndent: int): IntentNode =
   let endIdx = lastStructuralIdx(ctx.lines, idx + 1, pkgIndent)
-  var packages: seq[IntentNode]
-  var i = idx + 1
-  while i <= endIdx:
-    let line = ctx.lines[i]
-    if isBlankOrComment(line):
-      inc i; continue
-    let ind = countLeadingSpaces(line)
-    if ind != pkgIndent:
-      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
-        "'" & line.strip() & "' at indent " & $ind,
-        "content at indent " & $pkgIndent)
-    let blk = parseConfigPackage(ctx, i, pkgIndent,
-      pkgIndent + ctx.indentStep)
-    packages.add blk
-    i = blk.endLine
+  let packages =
+    if endIdx >= idx + 1:
+      parseGuardedChildren(ctx, idx + 1, endIdx + 1, pkgIndent,
+        ConfigPackageSection)
+    else:
+      @[]
   result = IntentNode(kind: nkConfigBlock,
     startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
     indent: parentIndent, configHeaderLine: idx + 1,
@@ -923,73 +1081,20 @@ proc parseResourceEntry(ctx: ParseCtx; idx, entryIndent,
     indent: entryIndent, resourceKind: kind, resourceAddress: address,
     resourceHeaderLine: idx + 1, resourceAttrs: attrs)
 
-proc parseResourceConditional(ctx: ParseCtx; startIdx, indent: int;
-                              keyword: CondKeyword;
-                              childIndent: int): IntentNode
+proc parseResourceEntryLeaf(ctx: ParseCtx; idx, indent: int): IntentNode =
+  parseResourceEntry(ctx, idx, indent, indent + ctx.indentStep)
+
+const ResourceSection = GuardSection(name: "`resources:`",
+  # The M78 text grammar accepted `if <pred>:` here; kept.
+  allowIf: true, leaf: parseResourceEntryLeaf)
 
 proc parseResourceChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
                            childIndent: int): seq[IntentNode] =
   ## Parse lines [startIdx, endIdxExclusive) as children of a
-  ## `resources:` block (or of a nested `when`/`if` block inside it).
-  ## Children are `<kind> <address>:` resource entries OR conditional
-  ## blocks.
-  var i = startIdx
-  while i < endIdxExclusive:
-    let raw = ctx.lines[i]
-    if isBlankOrComment(raw):
-      inc i; continue
-    let lineIndent = countLeadingSpaces(raw)
-    if lineIndent != childIndent:
-      raiseUnstructured(ctx.profilePath, i + 1, lineIndent + 1,
-        "'" & raw.strip() & "' at indent " & $lineIndent,
-        "content at indent " & $childIndent)
-    let m = matchAnyHeader(raw)
-    if m.ok and m.keyword == WhenHeader:
-      let blk = parseResourceConditional(ctx, i, childIndent, ckWhen,
-        childIndent + ctx.indentStep)
-      result.add blk
-      i = blk.endLine
-    elif m.ok and m.keyword == IfHeader:
-      let blk = parseResourceConditional(ctx, i, childIndent, ckIf,
-        childIndent + ctx.indentStep)
-      result.add blk
-      i = blk.endLine
-    else:
-      let entry = parseResourceEntry(ctx, i, childIndent,
-        childIndent + ctx.indentStep)
-      result.add entry
-      i = entry.endLine
-
-proc parseResourceConditional(ctx: ParseCtx; startIdx, indent: int;
-                              keyword: CondKeyword;
-                              childIndent: int): IntentNode =
-  ## Parse a `when <pred>:` / `if <pred>:` block whose body holds
-  ## resource entries. The predicate is parsed and normalized just
-  ## like an activity-body conditional.
-  let raw = ctx.lines[startIdx]
-  let m = matchHeader(raw, if keyword == ckWhen: WhenHeader else: IfHeader)
-  if not m.matched:
-    raiseUnstructured(ctx.profilePath, startIdx + 1, indent + 1,
-      "'" & raw.strip() & "'",
-      "a `when <pred>:` or `if <pred>:` header")
-  if m.rest.len == 0:
-    raiseUnstructured(ctx.profilePath, startIdx + 1, indent + 1,
-      "an empty predicate",
-      "a predicate expression after `" & m.keyword & "`")
-  let predAst = parsePredicate(ctx.profilePath, m.rest, startIdx + 1)
-  let canon = renderPredicate(normalizeAst(predAst))
-  let endIdx = lastStructuralIdx(ctx.lines, startIdx + 1, childIndent)
-  let bodyChildren =
-    if endIdx >= startIdx + 1:
-      parseResourceChildren(ctx, startIdx + 1, endIdx + 1, childIndent)
-    else:
-      @[]
-  result = IntentNode(kind: nkCondBlock,
-    startLine: startIdx + 1, endLine: max(endIdx + 1, startIdx + 1),
-    indent: indent, keyword: keyword,
-    predicateSource: m.rest, predicateAst: predAst,
-    canonicalPredicate: canon, condHeaderLine: startIdx + 1,
-    condChildren: bodyChildren)
+  ## `resources:` block: `<kind> <address>:` resource entries or guard
+  ## chains (`when` / `if` / `elif` / `else`) holding them.
+  parseGuardedChildren(ctx, startIdx, endIdxExclusive, childIndent,
+    ResourceSection)
 
 proc parseResourcesBlock(ctx: ParseCtx; idx, parentIndent,
                          entryIndent: int): IntentNode =
@@ -1011,16 +1116,16 @@ proc parseResourcesBlock(ctx: ParseCtx; idx, parentIndent,
 # Surface syntax:
 #
 #   adapterPreference:
-#     windows: [scoop, builtin, path]
-#     linux:   [nix, builtin, path]
+#     windows: [scoop, tarball, path]
+#     linux:   [nix, tarball, path]
 #     darwin:  [nix, path]
 #
-# Per-OS keys with chain-list values. The OS keys are the closed set
-# `KnownAdapterPreferenceOs`; chain entries are the closed set
-# `KnownAdapterPreferenceAdapters`. Unknown OS keys or unknown adapter
-# names raise EUnstructured. An empty list (e.g. `windows: []`) is
-# accepted; resolve-time falls back to the M65 platform default for
-# that OS when the seq is empty.
+# Per-OS keys with realization-kind lists: the profile's selection policy
+# (GM4b). The OS keys are the closed set `KnownAdapterPreferenceOs`; entries
+# are the closed set `KnownAdapterPreferenceAdapters`. Unknown OS keys or
+# unknown kinds raise EUnstructured. An empty list (e.g. `windows: []`) is
+# accepted; resolution uses the default selection policy for that OS when
+# the seq is empty.
 
 proc canonicalizeOsKey(rawOsKey: string): string =
   ## `macos` is an alias for `darwin`. Both canonicalize to `"darwin"`
@@ -1129,11 +1234,53 @@ proc parseAdapterPreferenceBlock(ctx: ParseCtx; idx, entryIndent: int):
     inc i
 
 # ---------------------------------------------------------------------------
+# data block parsing (GM4).
+#
+#   data:
+#     "data/apps.toml"
+#
+# One string literal per line, each a plan-time data file relative to the
+# profile directory -- the same shape the `profile` macro's `data:` section
+# accepts, validated by the same rule (`dataFilePathProblem`).
+# ---------------------------------------------------------------------------
+
+proc parseDataBlock(ctx: ParseCtx; idx, entryIndent: int): seq[string] =
+  let endIdx = lastStructuralIdx(ctx.lines, idx + 1, entryIndent)
+  var i = idx + 1
+  while i <= endIdx:
+    let line = ctx.lines[i]
+    if isBlankOrComment(line):
+      inc i; continue
+    let ind = countLeadingSpaces(line)
+    if ind != entryIndent:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & line.strip() & "' at indent " & $ind,
+        "a data-file path at indent " & $entryIndent)
+    let text = stripInlineComment(line).strip()
+    if text.len < 2 or text[0] != '"' or text[^1] != '"' or
+       text[1 ..< text.len - 1].contains('"'):
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & text & "' inside `data:`",
+        "a quoted data-file path such as \"data/apps.toml\"")
+    let path = text[1 ..< text.len - 1]
+    let problem = dataFilePathProblem(path)
+    if problem.len > 0:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "\"" & path & "\" inside `data:` (" & problem & ")",
+        "a data-file path relative to the profile directory")
+    if path in result:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "\"" & path & "\" declared twice", "each data file once")
+    result.add path
+    inc i
+
+# ---------------------------------------------------------------------------
 # Profile body.
 # ---------------------------------------------------------------------------
 
 proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
-                      outAdapterPreference: var OrderedTable[string, seq[string]]):
+                      outAdapterPreference: var OrderedTable[string, seq[string]];
+                      outDataFiles: var seq[string]):
     IntentNode =
   ## M2.5: also populates `outAdapterPreference` (empty table when no
   ## `adapterPreference:` block was present).
@@ -1154,6 +1301,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
   var sawHosts = false
   var sawResources = false
   var sawAdapterPreference = false
+  var sawData = false
   while i <= ctx.lines.high:
     let line = ctx.lines[i]
     if isBlankOrComment(line):
@@ -1180,7 +1328,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "'",
         "one of `activity <name>:`, `config:`, `hosts:`, " &
-        "`resources:`, or `adapterPreference:`")
+        "`resources:`, `adapterPreference:`, or `data:`")
     case hm.keyword
     of ActivityHeader:
       let blk = parseActivity(ctx, i, childIndent,
@@ -1232,11 +1380,22 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
       let endIdx = lastStructuralIdx(ctx.lines, i + 1, entryIndent)
       lastBodyIdx = endIdx
       i = max(endIdx + 1, i + 1)
+    of DataHeader:
+      if sawData:
+        raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+          "a second `data:` block",
+          "exactly one `data:` block per profile")
+      sawData = true
+      let entryIndent = childIndent + ctx.indentStep
+      outDataFiles = parseDataBlock(ctx, i, entryIndent)
+      let endIdx = lastStructuralIdx(ctx.lines, i + 1, entryIndent)
+      lastBodyIdx = endIdx
+      i = max(endIdx + 1, i + 1)
     else:
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "`" & hm.keyword & "` at the profile top level",
         "one of `activity <name>:`, `config:`, `hosts:`, " &
-        "`resources:`, or `adapterPreference:`")
+        "`resources:`, `adapterPreference:`, or `data:`")
   result.endLine = lastBodyIdx + 1
 
 # ---------------------------------------------------------------------------
@@ -1254,11 +1413,13 @@ proc parseProfile*(profilePath, source: string): Profile =
   let headerLine = findProfileHeader(ctx)
   ctx.indentStep = detectIndentStep(ctx.lines, headerLine)
   var adapterPreference = initOrderedTable[string, seq[string]]()
-  let root = parseProfileBody(ctx, headerLine - 1, adapterPreference)
+  var dataFiles: seq[string]
+  let root = parseProfileBody(ctx, headerLine - 1, adapterPreference,
+    dataFiles)
   result = Profile(path: profilePath, lines: ctx.lines,
     lineEnding: ending, hasTrailingNewline: trailingNewline,
     root: root, indentStep: ctx.indentStep,
-    adapterPreference: adapterPreference)
+    adapterPreference: adapterPreference, dataFileRefs: dataFiles)
 
 proc loadProfile*(profilePath: string): Profile =
   ## Read `profilePath` and parse it. `ENoProfile` and `EUnstructured`

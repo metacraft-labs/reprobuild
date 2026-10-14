@@ -842,10 +842,86 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  TarballArchiveDetail* = object
+    ## GM4b: the archive-realization metadata a ``tarball`` realization
+    ## carries beyond "download, verify, extract". These are the fields the
+    ## retired ``VersionedProvisioning`` catalog records held
+    ## (Provisioning-Contributions.md §"Profile Package References"); every
+    ## record moved into a ``tarball`` realization of its canonical
+    ## definition, so a realization has exactly one representation.
+    ##
+    ## Grouped in one object so the four places that serialize a tarball
+    ## record (the in-package and contribution literal emitters, the
+    ## thin-interface stub emitter and the interface-artifact codec) add one
+    ## field, not seventeen, and cannot drift on any of these.
+    ##
+    ## Every field is a string, a ``seq[string]`` or a ``bool`` on purpose:
+    ## at macro time the string fields hold the EXPRESSION SOURCE the
+    ## emitters splice (as every other ``TarballProvisioningDef`` field does),
+    ## and the structured entries (``preInstall``, ``launcherEmit``) are
+    ## encoded strings produced by ``packages_schema.preInstallAction`` /
+    ## ``launcherEmitSpec`` and decoded by the realizer.
+    ##
+    ## An all-empty detail is the plain archive every pre-GM4b ``tarball``
+    ## realization is: ``installMethod`` empty means ``extract``.
+    version*: string
+      ## Upstream version this archive realizes. Version-pinned profile
+      ## references (``package(jdk, "21.0.5")``) select on it; an unpinned
+      ## reference takes the first eligible realization in declaration
+      ## order, so a package lists its default version first.
+    sha512*: string
+      ## Alternative digests for upstreams that publish no SHA-256. Exactly
+      ## the precedence the catalog records had: sha256, then sha512, then
+      ## the weak sha1.
+    sha1*: string
+    installMethod*: string
+      ## ``extract`` (or empty), ``installer-msi``, ``installer-nsis``,
+      ## ``installer-nsis-bundle``, ``installer-inno-setup``,
+      ## ``installer-silent``, ``msys2-pacman`` or ``source-bootstrap``.
+      ## Validated against ``TarballInstallMethods`` at authoring time; a
+      ## realizer that cannot honour a method refuses the record.
+    extractPath*: string
+      ## Inner directory flattened to the prefix root after extraction.
+    extraExecutables*: seq[string]
+      ## Prefix-relative executables exported beside ``executablePath``.
+    installerArgs*: seq[string]
+    pacmanPackages*: seq[string]
+    bootstrapArgv*: seq[string]
+    env*: seq[string]
+      ## ``NAME=value`` bindings; ``${prefix}`` is substituted with the
+      ## realized prefix.
+    nested7z*: bool
+    msiAdminInstall*: bool
+    preInstall*: seq[string]
+      ## Encoded by ``packages_schema.preInstallAction``.
+    preInstallUnrecognized*: seq[string]
+    launcherEmit*: seq[string]
+      ## Encoded by ``packages_schema.launcherEmitSpec``.
+    cpuLevel*: string
+      ## Microarchitecture floor (``x86-64-v3``), empty for none.
+    cpuFeatures*: string
+      ## Extra CPU features beyond the floor, comma separated.
+    appBundle*: string
+      ## GM4c: the macOS application bundle the archive delivers -- its path
+      ## inside the archive (``Ghostty.app``; a component naming a flat
+      ## ``.pkg`` is expanded and the path continues inside it). Set with
+      ## ``installMethod = "app-bundle"`` (and on the two declared-only macOS
+      ## installer shapes, ``pkg-install`` and ``installer-silent``).
+      ## Store-And-Installation-Layout.md § macOS Application Bundles.
+    bundleId*: string
+      ## GM4c: the bundle's ``CFBundleIdentifier``; checked before the bundle
+      ## is published to the store and again before it is activated.
+    teamId*: string
+      ## GM4c: the Apple team identifier that signs the bundle. Required with
+      ## ``appBundle``: the realization proves the signature chains to an
+      ## Apple Developer ID certificate of this team.
+
   TarballProvisioningDef* = object
     url*: string
     mirrors*: seq[string]
     sha256*: string
+    detail*: TarballArchiveDetail
+      ## GM4b archive-realization metadata; see ``TarballArchiveDetail``.
     archiveType*: string
     executablePath*: string
     executableAlias*: string
@@ -1165,9 +1241,9 @@ type
       ## a default for those — an undeclared package resolves exactly as it
       ## did before PMC-1. PMC-1 did ship an "infer from whichever arms
       ## exist" helper here, but it had no caller and could not see the
-      ## harvested ``VersionedProvisioning`` catalogs where most of the
-      ## platform truth lives, so it was removed rather than left as a trap
-      ## for PMC-5's catalog-wide lint to fall into.
+      ## harvested archive realizations (then separate catalog records; since
+      ## GM4b ``tarball`` realizations of the package), so it was removed
+      ## rather than left as a trap for PMC-5's lint to fall into.
     platformsMessage*: string
       ## PMC-1: optional author-supplied reason, Spack's ``msg=``. Reproduced
       ## verbatim in the unavailable-package diagnostic. The whole point is
@@ -2065,6 +2141,39 @@ type
       ## The producing edge of a watched build output. ``stkChangeOutput``
       ## only.
     actions*: seq[ServiceTriggerAction]
+
+  CertificateNodeKind* = enum
+    ## Test-Certificates TC-9a: what a ``certificate "<name>", <handle>``
+    ## marking points at. The byte is positional in the certificate-export
+    ## table payload; append new values, never insert.
+    cnkAction  ## a single build edge (``BuildActionDef.id``)
+    cnkTarget  ## a build target: ``target``, ``aggregate`` or ``collect``
+               ## (``BuildTargetDef.name``)
+
+  CertificateExportEntry* = object
+    ## Test-Certificates TC-9a: one row of a package's certificate-export
+    ## table (Test-Certificates.md §"Marking a node"). The name is also a
+    ## row of the target-export table, so ``repro build <name>`` selects
+    ## the node; this table records that the node PRODUCES a named
+    ## certificate, which the target-export table cannot express.
+    name*: string
+      ## The certificate name. It maps onto the test-certificate standard
+      ## as a ``targets`` entry.
+    owningPackage*: string
+    nodeKind*: CertificateNodeKind
+    node*: string
+      ## ``cnkAction``: the action id. ``cnkTarget``: the build-target name.
+    implicit*: bool
+      ## True for the marking the DSL applies, with no ``certificate
+      ## "test", ...`` declaration, to the node a plain ``repro test``
+      ## builds: the one the selector ``test`` resolves to (D15).
+    sourceFile*: string
+    sourceLine*: int
+      ## The declaration site. For an implicit row, the site of the
+      ## ``test`` target or export row when one was recorded.
+
+  CertificateExportTable* = object
+    entries*: seq[CertificateExportEntry]
 
   StateGroupDef* = object
     ## Named-Runnable-Edges N0 (spec §3.3): a named resource subgraph —

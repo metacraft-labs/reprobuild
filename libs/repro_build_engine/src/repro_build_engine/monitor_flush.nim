@@ -121,6 +121,8 @@
 
 import std/[os, strutils]
 
+from repro_core/paths import extendedPath
+
 import ./worker_pool
 
 type
@@ -208,27 +210,33 @@ proc publishOneFlush(node: FlushNode): string {.gcsafe.} =
   ## rename has nothing to publish — rather than a mock: everything downstream
   ## sees exactly what a genuine ENOSPC would produce.
   let actionId = $enginePoolJobKey(addr node.base)
+  # Both paths sit under the engine's cache root, which a CMake TryCompile
+  # nests deep enough to pass Windows' ``MAX_PATH``; every file-system call
+  # below therefore goes through ``extendedPath``. The messages keep the
+  # ordinary spelling.
   let tempPath = $node.tempPath
   let destPath = $node.destPath
+  let tempFsPath = extendedPath(tempPath)
+  let destFsPath = extendedPath(destPath)
   let failSubstring = $node.failSubstring
   if failSubstring.len > 0 and actionId.contains(failSubstring):
     try:
-      removeFile(tempPath)
+      removeFile(tempFsPath)
     except CatchableError:
       discard
     return "injected monitor depfile flush failure " &
       "(REPROBUILD_MONITOR_FLUSH_FAIL) for " & actionId
-  if not fileExists(tempPath):
+  if not fileExists(tempFsPath):
     return "monitor depfile flush: io-mon wrote no depfile at " & tempPath
   try:
     # ``moveFile`` is ``rename`` on POSIX and ``MoveFileEx`` with
     # ``MOVEFILE_REPLACE_EXISTING`` on Windows; both replace the destination
     # atomically WITHIN a filesystem, which is what ``monitorFlushTempPath``
     # guarantees.
-    moveFile(tempPath, destPath)
+    moveFile(tempFsPath, destFsPath)
   except CatchableError as err:
     try:
-      removeFile(tempPath)
+      removeFile(tempFsPath)
     except CatchableError:
       discard
     return "monitor depfile flush failed for " & actionId & ": " & err.msg

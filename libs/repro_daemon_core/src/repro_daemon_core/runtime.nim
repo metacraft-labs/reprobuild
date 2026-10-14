@@ -2,6 +2,7 @@ import std/[algorithm, net, options, os, osproc, sets, strtabs, strutils,
   tables, times]
 
 import repro_core
+from repro_core/source_root import declareRunningImageSource
 import blake3
 
 import ./client
@@ -10,6 +11,8 @@ import ./protocol
 import ./stats_store
 import ./lease_registry
 import ./instance_registry
+when defined(windows):
+  import ./windows_detached_spawn
 
 const ReproTestRunnerOwnerTokenEnv =
   "REPRO_TEST_RUNNER_OWNER_TOKEN"
@@ -418,6 +421,69 @@ proc absoluteNormalized(path: string): string =
     os.normalizedPath(path)
   else:
     os.normalizedPath(getCurrentDir() / path)
+
+proc anchoredToCurrentDir(path: string): string =
+  ## ``path`` made absolute against THIS process's working directory. An
+  ## absolute path, and "", are returned byte-for-byte: the endpoint string is
+  ## also an identity (the systemd unit name and launchd label are derived
+  ## from it), so only a path that would otherwise change meaning is touched.
+  if path.len == 0 or path.isAbsolute: path
+  else: os.normalizedPath(getCurrentDir() / path)
+
+proc withAnchoredDaemonPaths(config: UserDaemonConfig): UserDaemonConfig =
+  ## ``config`` with every path the daemon process will read made absolute
+  ## here, against the caller's working directory.
+  ##
+  ## Required because the daemon does NOT start in the caller's working
+  ## directory (``daemonWorkingDirectory``): a relative ``--state-dir`` or
+  ## ``--log`` handed to it would be resolved against its state directory
+  ## instead, and a relative staged image path would not even execute. Also
+  ## applied by the daemon to its own flags, so that a daemon started by hand
+  ## with relative flags passes absolute ones to its dev self-restart.
+  result = config
+  if endpointKindOf(config.endpoint) == ekUnixSocket:
+    result.endpoint = anchoredToCurrentDir(config.endpoint)
+  result.stateDir = anchoredToCurrentDir(config.stateDir)
+  result.logPath = anchoredToCurrentDir(config.logPath)
+  result.daemonExe = anchoredToCurrentDir(config.daemonExe)
+  result.sourceExe = anchoredToCurrentDir(config.sourceExe)
+  result.stagedGenerationDir = anchoredToCurrentDir(config.stagedGenerationDir)
+  result.previousStagedGenerationDir =
+    anchoredToCurrentDir(config.previousStagedGenerationDir)
+  result.leaseStoreRoot = anchoredToCurrentDir(config.leaseStoreRoot)
+
+proc daemonWorkingDirectory(config: UserDaemonConfig): string =
+  ## The directory a daemon that ``repro`` starts on a caller's behalf runs
+  ## in: its STATE DIRECTORY, never the caller's working directory.
+  ##
+  ## WHY NOT THE CALLER'S. The daemon outlives the ``repro`` that started it,
+  ## so it must keep nothing of that invocation. On Windows a process's
+  ## current directory cannot be deleted while the process lives, so a daemon
+  ## auto-started by a CMake ``try_compile`` made that ``TryCompile-<id>``
+  ## scratch directory undeletable until it exited (reprobuild-specs issue
+  ## 2026-10-14). On POSIX the deletion succeeds, but the daemon keeps the
+  ## file system busy (no unmount) and serves from a deleted directory.
+  ##
+  ## WHY THE STATE DIRECTORY, rather than ``/`` or the home directory. It is
+  ## the one directory the daemon owns: every launch site creates it before
+  ## the daemon starts, it is private to the daemon instance (a test's private
+  ## daemon gets a private one), and the daemon already depends on it for its
+  ## whole life -- its lock file, session records and dev-mode staged image
+  ## live there -- so nobody can remove it under a running daemon without
+  ## breaking that daemon anyway. Pinning it as the current directory takes
+  ## nothing away from anyone else.
+  ##
+  ## Nothing in the daemon resolves a path against its own working directory
+  ## on the request path: build and watch requests carry ``workingDir`` and
+  ## the executors enter it for the request's duration (and come back here
+  ## afterwards), and every path in ``daemonProcessArgs`` is absolute
+  ## (``withAnchoredDaemonPaths``).
+  ##
+  ## Used by the two launches that inherit the starter's directory: Windows'
+  ## ``spawnWithOwnStdio`` and POSIX's ``launchWithFork``. The systemd and
+  ## launchd launches never did; their manager starts the unit in its own
+  ## default directory.
+  config.stateDir
 
 proc companionFullCliPath(imagePath: string): string =
   ## After the single-`repro` consolidation there is no separate `repro-full`
@@ -2490,13 +2556,18 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   # process.close(); the new daemon then dies of SIGPIPE on the first
   # write to stderr — the listener never binds, the test polls
   # 'daemon status' for 20 s, and the restart appears to time out.
+  # On Windows the same guarantee comes from ``spawnWithOwnStdio``: the new
+  # daemon inherits only NUL and its log, never a handle of this process.
+  # Both start it in ``daemonWorkingDirectory``, as the first launch did.
   when defined(posix):
     launchWithFork(staged.imagePath, nextConfig)
   else:
-    let process = startProcess(staged.imagePath,
-      args = daemonProcessArgs(nextConfig),
-      options = {poUsePath, poDaemon})
-    process.close()
+    let pid = spawnWithOwnStdio(staged.imagePath,
+      daemonProcessArgs(nextConfig), [], inheritEnvironment = true,
+      logPath = nextConfig.logPath,
+      workingDir = daemonWorkingDirectory(nextConfig))
+    logLine(config.logPath, "dev restart launched backend=windows-handle-list " &
+      "pid=" & $pid)
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
   true
 
@@ -2545,10 +2616,14 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ##
   ## A record the sweep could not reap comes back in ``report.failed`` rather
   ## than as a raise — see ``reapOnce``'s "one unhandleable record must not
-  ## abort the sweep". The ``except`` below therefore now catches only a
-  ## WHOLE-SWEEP failure (an undecodable record aborting ``listStateRecords``,
-  ## an unreadable store root), which is equally unfixable-by-retrying and so
-  ## is deduplicated on the same terms.
+  ## abort the sweep". So does a record the sweep could not even DECODE: the
+  ## listing (``scanStateRecords``) reports a newer repro's record as foreign
+  ## and quarantines a corrupt one instead of raising, and those come back
+  ## through ``leaseReapFindings`` too — logged even on a tick that reaped
+  ## nothing, since the findings loop does not depend on ``reaped``. The
+  ## ``except`` below therefore now catches only a WHOLE-SWEEP failure (an
+  ## unreadable store root), which is equally unfixable-by-retrying and so is
+  ## deduplicated on the same terms.
   ##
   ## Shared-Development-Services L7 (§4.5): "an instance is reaped when its
   ## last lease lapses". A shared service INSTANCE record lives in THIS store
@@ -2581,7 +2656,10 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
     uninstallServiceInstanceReapHandler()
 
 proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
-  var config = initialConfig
+  # A daemon started by hand may have been given relative flags; its dev
+  # self-restart starts the successor in the state directory, where they
+  # would mean something else.
+  var config = withAnchoredDaemonPaths(initialConfig)
   config.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
   # The OS keeps the exec-time environment used by the test runner to identify
   # this process. Remove the live entry before handling requests so daemon
@@ -2589,6 +2667,13 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # self-restarts use only the private config copy above.
   if existsEnv(ReproTestRunnerOwnerTokenEnv):
     delEnv(ReproTestRunnerOwnerTokenEnv)
+  # A dev-mode daemon runs a staged COPY of its source image
+  # (`stageDevDaemonBinary`). Reprobuild's sources are found relative to the
+  # image -- the checkout it runs from, or `<prefix>/share/repro/source`
+  # beside an installed one -- so resolve them from the source image, not
+  # from the copy under `<state>/dev-bin`. Before any request is served.
+  if config.devMode and config.sourceExe.len > 0:
+    declareRunningImageSource(absoluteNormalized(config.sourceExe))
 
   # Named-pipe endpoints live under the kernel ``\\.\pipe\`` namespace
   # which is NOT a filesystem directory; ``createDir`` on its
@@ -2764,11 +2849,51 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
     result.add("--state-root")
     result.add(config.leaseStoreRoot)
 
-proc launchdLabel(config: UserDaemonConfig): string =
+proc endpointNameDigest(config: UserDaemonConfig): string =
+  ## The digest that makes a service-manager name identify the WHOLE
+  ## endpoint: 16 hex characters (64 bits) of blake3 over the endpoint string
+  ## VERBATIM. Shared by ``launchdLabel`` and ``systemdUnitName`` so the two
+  ## platforms cannot drift apart; ``systemdUnitName``'s docstring carries the
+  ## reasoning for each of those choices.
+  blake3.digest(config.endpoint).toHex()[0 ..< 16]
+
+proc legacyLaunchdLabel(config: UserDaemonConfig): string =
+  ## The label binaries before the endpoint-keyed naming registered: the
+  ## endpoint's basename alone. Kept only so the launcher and the cleanup can
+  ## find a job such a binary left behind -- see ``bootoutLegacyLaunchdJob``.
   "org.reprobuild.repro-daemon." &
     safePathSegment(config.endpoint.extractFilename, "user")
 
-proc launchdPlistPath(config: UserDaemonConfig): string =
+proc launchdLabel*(config: UserDaemonConfig): string =
+  ## The launchd label the daemon for ``config.endpoint`` is registered under.
+  ##
+  ## KEYED ON THE WHOLE ENDPOINT PATH, NOT ON ITS LAST COMPONENT, for the
+  ## reason ``systemdUnitName`` gives: a label is a per-user GLOBAL namespace
+  ## while endpoints are not unique by basename (every one of them is some
+  ## directory's ``d.sock``). The basename stays in front of the digest
+  ## because the label is also what ``launchctl list`` shows.
+  ##
+  ## On launchd a shared label cost more than the fallback it cost on
+  ## systemd. Measured on macOS 2026-10-14: a second ``launchctl bootstrap``
+  ## of a loaded label fails with ``Bootstrap failed: 5: Input/output
+  ## error``, but ``launchWithLaunchd`` boots out any prior job under its
+  ## label first, and ``bootout`` SIGTERMs a running job -- so launching the
+  ## second daemon KILLED the first, and
+  ## ``cleanupPlatformBackgroundRegistration`` for one endpoint stopped
+  ## whichever daemon held the label.
+  ##
+  ## The result is bounded and legal: an AF_UNIX endpoint is at most 104
+  ## bytes on macOS (``sun_path``), and ``safePathSegment`` produces only
+  ## ``[A-Za-z0-9._-]`` (characters a label and a file name both accept), so
+  ## ``<label>.plist`` stays well under the 255-byte file-name limit.
+  ##
+  ## Exported so a second derivation -- a test teardown -- asks for the name
+  ## instead of restating it.
+  legacyLaunchdLabel(config) & "-" & endpointNameDigest(config)
+
+proc launchdPlistPath*(config: UserDaemonConfig): string =
+  ## Where the launcher writes the plist for ``launchdLabel(config)``; it
+  ## moves with the label.
   config.stateDir / "launchd" / (launchdLabel(config) & ".plist")
 
 proc processOwnerTokenForLaunch(config: UserDaemonConfig): string =
@@ -2851,6 +2976,62 @@ proc quoteCommand(args: openArray[string]): string =
     parts.add(quoteShell(arg))
   parts.join(" ")
 
+proc launchdJobServesEndpoint(serviceTarget, endpoint: string): bool =
+  ## Does the launchd job ``serviceTarget`` (``gui/<uid>/<label>``) run with
+  ## ``--endpoint <endpoint>`` among its program arguments?
+  ##
+  ## Read from ``launchctl print``, which lists them one per line between
+  ## ``arguments = {`` and ``}``. There is no structured form of that output;
+  ## it is the same tool the launcher and the cleanup already drive. A job
+  ## that is not loaded, or whose output does not parse, answers false: the
+  ## caller only acts on a positive match.
+  when defined(macosx):
+    let res = execCmdEx(quoteCommand(["launchctl", "print", serviceTarget]))
+    if res.exitCode != 0:
+      return false
+    var inArguments = false
+    var arguments: seq[string] = @[]
+    for line in res.output.splitLines():
+      let stripped = line.strip()
+      if not inArguments:
+        if stripped == "arguments = {":
+          inArguments = true
+      elif stripped == "}":
+        break
+      else:
+        arguments.add(stripped)
+    for i in 0 ..< arguments.len - 1:
+      if arguments[i] == "--endpoint" and arguments[i + 1] == endpoint:
+        return true
+    false
+  else:
+    false
+
+proc bootoutLegacyLaunchdJob(config: UserDaemonConfig) =
+  ## Boot out a job a binary from before ``launchdLabel`` was keyed on the
+  ## whole endpoint registered for ``config.endpoint`` under the basename-only
+  ## ``legacyLaunchdLabel``. Nothing else will ever boot that label out, and a
+  ## finished ``KeepAlive=false`` job stays loaded under it until logout.
+  ##
+  ## The legacy label is shared by every endpoint with this basename, so the
+  ## job is booted out only when launchd confirms it serves THIS endpoint --
+  ## otherwise this would stop another endpoint's daemon, the very collision
+  ## the new label removes.
+  when defined(macosx):
+    let legacyTarget = "gui/" & $currentUid() & "/" &
+      legacyLaunchdLabel(config)
+    if launchdJobServesEndpoint(legacyTarget, config.endpoint):
+      discard execCmdEx(quoteCommand(["launchctl", "bootout", legacyTarget]))
+      let legacyPlist = config.stateDir / "launchd" /
+        (legacyLaunchdLabel(config) & ".plist")
+      if fileExists(legacyPlist):
+        try:
+          removeFile(legacyPlist)
+        except OSError:
+          discard
+  else:
+    discard
+
 proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
   when defined(macosx):
     try:
@@ -2883,6 +3064,9 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
       # job simply means there was nothing to remove.
       discard execCmdEx(quoteCommand(["launchctl", "bootout",
         serviceTarget & "/" & launchdLabel(config)]))
+      # The same for a job an older binary left for this endpoint under the
+      # basename-only label: the bootout above no longer reaches it.
+      bootoutLegacyLaunchdJob(config)
       let bootstrap = execCmdEx(quoteCommand(["launchctl", "bootstrap",
         serviceTarget, plistPath]))
       if bootstrap.exitCode == 0:
@@ -2939,7 +3123,7 @@ proc systemdUnitName*(config: UserDaemonConfig): string =
   ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
   ## ``sun_path`` (108 bytes).
   "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
-    "-" & blake3.digest(config.endpoint).toHex()[0 ..< 16] & ".service"
+    "-" & endpointNameDigest(config) & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =
@@ -3037,12 +3221,22 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
     let cenv = allocCStringArray(environment)
     let exeCString = cstring(exe)
     let logPathCString = cstring(config.logPath)
+    # Prepared before the fork: the child may only make async-signal-safe
+    # calls, and ``chdir`` is one, allocating a C string is not.
+    let workingDir = daemonWorkingDirectory(config)
+    let workingDirCString = cstring(workingDir)
     let pid = fork()
     if pid < 0:
       raise newException(UserDaemonRuntimeError,
         "failed to fork repro-daemon")
     if pid == 0:
       discard setsid()
+      # Not the caller's working directory: the daemon outlives the caller,
+      # and would keep that directory's file system busy and serve from it
+      # after it was deleted (``daemonWorkingDirectory``). ``/`` is the
+      # conventional fallback when the state directory cannot be entered.
+      if posix.chdir(workingDirCString) != 0:
+        discard posix.chdir(cstring("/"))
       let devNull = posix.open(cstring("/dev/null"), O_RDONLY)
       if devNull >= 0:
         discard dup2(devNull, 0)
@@ -3058,7 +3252,16 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
     logLine(config.logPath, "launch requested backend=posix-fork pid=" &
       $pid)
 
-proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
+proc cleanupPlatformBackgroundRegistration*(requested: UserDaemonConfig) =
+  ## Deregister the daemon for ``requested.endpoint`` from the platform
+  ## service manager (launchd job / systemd transient unit).
+  ##
+  ## The paths are anchored first, exactly as ``startUserDaemon`` anchors them
+  ## before it launches: the name the manager knows the daemon by is derived
+  ## from the endpoint string, and the launcher registered it under the
+  ## ABSOLUTE one. A caller passing ``--endpoint`` relative to its working
+  ## directory would otherwise ask for a name nothing was registered under.
+  let config = withAnchoredDaemonPaths(requested)
   when defined(macosx):
     discard execCmdEx(quoteCommand(["launchctl", "bootout",
       "gui/" & $currentUid() & "/" & launchdLabel(config)]))
@@ -3067,6 +3270,7 @@ proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
         removeFile(launchdPlistPath(config))
       except OSError:
         discard
+    bootoutLegacyLaunchdJob(config)
   elif defined(linux):
     discard execCmdEx(quoteCommand(["systemctl", "--user", "stop",
       systemdUnitName(config)]))
@@ -3082,8 +3286,11 @@ proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
   raise newException(UserDaemonRuntimeError,
     "timed out waiting for repro-daemon at " & endpoint)
 
-proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
-    UserDaemonStatus =
+proc startUserDaemon*(publicCliPath: string;
+                      requestedConfig: UserDaemonConfig): UserDaemonStatus =
+  # Absolute before anything is derived from it: the daemon starts in its
+  # state directory, not ours (``daemonWorkingDirectory``).
+  let config = withAnchoredDaemonPaths(requestedConfig)
   let sourceExe =
     # Executable-Consolidation M2: the user daemon IS the `repro` image, run as
     # `repro daemon serve …` (see `daemonProcessArgs`). Self-spawn the current
@@ -3187,19 +3394,33 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
           "the platform manager started a daemon that never became ready")
         launchWithFork(exe, launchConfig)
   else:
-    var env = newStringTable()
+    # NOT ``osproc.startProcess``: on Windows it creates the child with
+    # ``bInheritHandles = TRUE`` and no handle list, so the daemon -- which
+    # outlives this process -- received every inheritable handle we held,
+    # including the write end of whatever pipe our caller reads our output
+    # from. A caller reading to EOF (CMake's try_compile, a test runner) then
+    # waited for as long as the daemon lived. ``spawnWithOwnStdio`` passes
+    # exactly NUL and the log, which is ``launchWithFork``'s guarantee. It
+    # also starts the daemon in its state directory, not in ours, which
+    # Windows would otherwise refuse to delete while the daemon lives.
+    createDir(launchConfig.stateDir)
+    var env = newStringTable(modeCaseInsensitive)
     for key, value in envPairs():
-      if key != ReproTestRunnerOwnerTokenEnv:
+      if cmpIgnoreCase(key, ReproTestRunnerOwnerTokenEnv) != 0:
         env[key] = value
     if launchConfig.processOwnerToken.len > 0:
       env[ReproTestRunnerOwnerTokenEnv] = launchConfig.processOwnerToken
     env["REPRO_DAEMON_ENDPOINT"] = launchConfig.endpoint
     env["REPRO_DAEMON_STATE_DIR"] = launchConfig.stateDir
-    let process = startProcess(exe,
-      args = daemonProcessArgs(launchConfig),
-      env = env,
-      options = {poUsePath, poDaemon})
-    process.close()
+    var envPairsForChild: seq[(string, string)] = @[]
+    for key, value in env:
+      envPairsForChild.add((key, value))
+    let pid = spawnWithOwnStdio(exe, daemonProcessArgs(launchConfig),
+      envPairsForChild, inheritEnvironment = false,
+      logPath = launchConfig.logPath,
+      workingDir = daemonWorkingDirectory(launchConfig))
+    logLine(launchConfig.logPath,
+      "launch requested backend=windows-handle-list pid=" & $pid)
   waitForUserDaemonStatus(launchConfig.endpoint)
 
 proc stopUserDaemon*(endpoint = defaultUserDaemonEndpoint()) =

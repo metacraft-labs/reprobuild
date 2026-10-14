@@ -1,51 +1,39 @@
-## VersionedProvisioning schema (M63 — first milestone of the
-## ``Builtin-Catalog-And-Home-Profile-Provisioning`` campaign).
+## Archive-realization schema: platforms, microarchitecture, install methods.
 ##
-## Each ``packages/<tool>.nim`` may expose, alongside its existing
-## ``package <tool>:`` block, a top-level
-## ``<tool>Catalog: seq[VersionedProvisioning]`` literal carrying one
-## record per coexisting version (e.g. JDK 21.0.5, 17.0.13, 11.0.25 in a
-## single ``packages/jdk.nim``). The records are **purely declarative**:
-## M63 ships the field shape only; the M64 ``cakBuiltin`` adapter is the
-## first consumer.
+## History: M63 (Builtin-Catalog-And-Home-Profile-Provisioning) introduced
+## ``VersionedProvisioning`` / ``PlatformBinary`` records, exposed by each
+## ``packages/<tool>.nim`` as a ``let <tool>Catalog*`` literal beside its
+## ``package`` block and read by the home-apply adapter chain. GM4b of the
+## Gradual-Nix-To-Reprobuild-Migration plan retired both: every record became
+## a ``tarball`` realization of the canonical package (the DSL record carries
+## the archive detail as ``repro_project_dsl.TarballArchiveDetail``), and
+## profiles resolve through the selection a recipe's ``uses:`` makes
+## (``repro_tool_profiles/realization_selection``). See
+## Provisioning-Contributions.md §"Profile Package References".
 ##
-## **Per-platform variant shape.** A single ``VersionedProvisioning``
-## carries the cross-platform metadata (``version``, ``archive_format``,
-## ``bin_relpath``, ``install_method``, ``env``) at the top level and a
-## ``platforms: seq[PlatformBinary]`` slice for the per-(cpu, os)
-## download URL + digest + inner-dir flatten path. This shape:
+## What this module still owns:
 ##
-##   * matches the JDK case (same archive format + binary relpath across
-##     ``x86_64-windows`` and ``aarch64-windows``, different URLs +
-##     SHA-256s + extract paths);
-##   * keeps the common case compact (one record per version);
-##   * lets a downstream realize loop iterate ``platforms`` to pick the
-##     entry whose ``cpu`` / ``os`` matches the current host (M64);
-##   * mirrors the spec's permissive guidance ("Pick a shape …") with
-##     the simplest design that supports M64 without locking the
-##     campaign into a Table API.
+## * the platform vocabulary every selector shares — ``PlatformCpu``,
+##   ``PlatformOs``, ``MicroarchLevel``, ``CpuFeature``, ``PlatformTarget``,
+##   ``PackageAvailability`` and their token parsers — and the host facts
+##   (``detectHostCpu``, ``detectHostOs``, ``baselineMicroarchLevel``);
+## * arm selection (``selectArm``): "which artifact for this target", run over
+##   ``PlatformBinary`` arms, which the realization selector builds from
+##   ``tarball`` records;
+## * the archive and install-method vocabulary (``ArchiveFormat``,
+##   ``InstallMethod``, ``PreInstallAction``, ``LauncherEmitSpec``) and its
+##   codec for ``tarball`` records (``preInstallAction`` /
+##   ``launcherEmitSpec`` and their decoders);
+## * ``VersionedProvisioning`` itself, as the catalog harvester's in-memory
+##   PARSE model and as the shape the arm-selection tests describe. No
+##   checked-in package carries one: it is never persisted and never
+##   consulted for resolution.
 ##
 ## **SHA validation.** Exactly one of ``sha256`` / ``sha512`` / ``sha1``
-## is required per ``PlatformBinary``. ``validateVersionedProvisioning``
-## (called from the M63 unit tests; will also be called from the M64
-## realize loop) returns a structured error list rather than raising,
-## so the harvester (M66) can batch-validate the whole catalog and
-## emit a single diagnostic report. M1 (Realize-Closure spec) extended
-## the schema to accept ``sha1`` as a *weak* hash — the harvester emits
-## ``HHashAlgorithmWeak`` for it and the realize loop emits
-## ``WSha1HashAccepted`` to stderr. ``sha1`` is accepted only because a
-## handful of Scoop manifests (notably ``freepascal``) ship nothing
-## stronger; operators should bump to ``sha256``/``sha512`` when the
-## upstream manifest is upgraded. ``md5`` remains rejected.
-##
-## **Honest scope.** M63 ships the data types + a runtime validator
-## only. No realize logic, no harvester, no DSL macro integration with
-## ``repro_project_dsl``. ``packages/<tool>.nim`` files declare the
-## catalog as an ordinary ``let <tool>Catalog* = @[...]`` literal next
-## to the existing ``package`` block — both coexist without
-## modification. The M67/M68 bulk-populate milestones will add catalog
-## entries to every existing ``packages/*.nim``; in M63 only
-## ``packages/jdk.nim`` carries a real entry (as the M49 reference).
+## is required per ``PlatformBinary`` (and per ``tarball`` realization).
+## ``sha1`` is accepted only because a handful of upstreams (notably
+## Free Pascal) publish nothing stronger; the realizer warns when it runs.
+## ``md5`` remains rejected.
 
 import std/[strutils, tables]
 
@@ -89,7 +77,7 @@ type
       ## tarball. The canonical MSYS2 pacman package format
       ## (``mingw-w64-<arch>-<name>-<version>-<rel>-any.pkg.tar.zst``) and
       ## an increasingly common upstream tarball shape (rustup, Arch
-      ## Linux packages, ...). The cakBuiltin realize loop extracts via a
+      ## Linux packages, ...). The archive realizer extracts via a
       ## three-strategy discovery (catalog ``7zip`` prefix → host ``tar
       ## --zstd`` → host ``zstd | tar``) — see ``extractTarZst`` in
       ## builtin_adapter.nim.
@@ -98,6 +86,15 @@ type
     afInstallerNsis = "installer-nsis"
     afInstallerMsi = "installer-msi"
     afRaw = "raw"
+    afDmg = "dmg"
+      ## GM4c: a macOS disk image (UDIF; HFS+ or APFS volume). Attached
+      ## read-only, copied from, detached; realized only with
+      ## ``imAppBundle``. Store-And-Installation-Layout.md § macOS
+      ## Application Bundles.
+    afPkg = "pkg"
+      ## GM4c: a macOS flat installer package (xar). Expanded with
+      ## ``pkgutil --expand-full`` (its scripts are never run) and copied
+      ## from; realized only with ``imAppBundle``.
 
   InstallMethod* = enum
     ## How the realize loop turns the verified artifact into a usable
@@ -116,7 +113,7 @@ type
     ##     NSIS shell via 7z + dark, then per-MSI dark-extract + merge.
     ##   * ``imInstallerNsis`` — plain NSIS installer whose payload is a
     ##     bona-fide file tree (NOT a Burn outer wrapping inner MSIs).
-    ##     The cakBuiltin realize hook dispatches via the discovered
+    ##     The archive realizer's hook dispatches via the discovered
     ##     full ``7z.exe`` directly (which transparently understands the
     ##     modern NSIS installer format). M11 (Realize-Closure-And-
     ##     Catalog-Expansion spec) added this variant after the M8 live
@@ -157,6 +154,19 @@ type
     imInstallerNsisBundle = "installer-nsis-bundle"
     imInstallerNsis = "installer-nsis"
     imInstallerInnoSetup = "installer-inno-setup"
+    imAppBundle = "app-bundle"
+      ## GM4c: a macOS application. The declared bundle (``appBundle``) is
+      ## copied out of the archive into the prefix root, verified (bundle
+      ## id, version, signature, Developer ID team, notarization) before the
+      ## prefix is published, and activated by copying it into
+      ## ``~/Applications``. Store-And-Installation-Layout.md § macOS
+      ## Application Bundles.
+    imPkgInstall = "pkg-install"
+      ## GM4c: a macOS installer package that must be RUN as root (its
+      ## scripts and privileged components are what install the product:
+      ## Karabiner-Elements' DriverKit extension). System scope; declared so
+      ## a contribution can pin the vendor artifact, and refused by the home
+      ## archive realizer -- no system-scope package realizer exists yet.
 
   PlatformCpu* = enum
     ## The CPU **family** axis. Matches the ``cpu_arch`` tokens the
@@ -474,7 +484,7 @@ type
 
   PreInstallActionKind* = enum
     ## M3: a closed set of ``pre_install`` PowerShell shapes the
-    ## cakBuiltin realize loop recognizes and replays programmatically
+    ## archive realizer recognizes and replays programmatically
     ## (NOT via exec'ing PowerShell — that surface is too broad). The
     ## harvester translates matching ``pre_install`` lines into these
     ## actions; unmatched lines are captured verbatim in
@@ -500,7 +510,7 @@ type
 
   LauncherEmitKind* = enum
     ## M5 (Realize-Closure-And-Catalog-Expansion spec): closed-set
-    ## launcher-synthesis shapes the cakBuiltin realize loop emits AFTER
+    ## launcher-synthesis shapes the archive realizer emits AFTER
     ## the extract / install_method dispatch completes. Each kind names a
     ## wrap pattern Scoop's ``pre_install`` PowerShell idiomatically
     ## synthesizes (composer's ``& php $dir\composer.phar @args`` shim,
@@ -557,11 +567,11 @@ type
     literal*: string         ## Set-Content -Value literal
 
   VersionedProvisioning* = object
-    ## One coexisting version of a tool. The campaign author writes
-    ## newest-first so the LAST entry in ``<tool>Catalog`` is the
-    ## ``defaultVersion`` (M64 may surface an explicit
-    ## ``defaultVersion`` selector — for M63 the array order is the
-    ## convention).
+    ## One coexisting version of a tool, as the catalog harvester parses it
+    ## (GM4b: a transient parse model, emitted as ``tarball`` realizations
+    ## and never persisted). ``selectDefault`` keeps the M63 convention that
+    ## the LAST entry of a list is the default; a package's ``tarball``
+    ## realizations instead list their default version FIRST.
     version*: string                  ## semver pin, e.g. "21.0.5"
     archive_format*: ArchiveFormat
     install_method*: InstallMethod
@@ -1055,7 +1065,7 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
       result.add("install_method=imMsys2Pacman requires at least one " &
         "pacman_packages entry (the harvested MSYS2 package name, e.g. " &
         "'mingw-w64-x86_64-ocaml')")
-    # M6: the M6 cakBuiltin realize hook downloads + extracts the
+    # M6: the M6 archive-realizer hook downloads + extracts the
     # ``.pkg.tar.zst`` and verifies bin_relpath against the realized
     # prefix — same shape as imExtract. Require at least one bin_relpath
     # entry so the post-extract sanity check has something to assert.
@@ -1078,6 +1088,13 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
     if vp.bin_relpath.len == 0:
       result.add("install_method=" & $vp.install_method &
         " requires at least one bin_relpath entry")
+  of imAppBundle, imPkgInstall:
+    # GM4c: macOS application shapes are authored as `tarball` records
+    # (`appBundle` / `bundleId` / `teamId`), never harvested into this parse
+    # model; the catalog harvester has no source that produces them.
+    result.add("install_method=" & $vp.install_method &
+      " is authored as a tarball realization with appBundle / bundleId / " &
+      "teamId, not as a VersionedProvisioning record")
   # M5: when launcher_emit is non-empty, every spec's launcher_name must
   # appear in bin_relpath as a .ps1 / .cmd entry. The sanity check
   # confirms the catalog declares the emitted launchers as the tool's
@@ -1152,7 +1169,7 @@ proc validateCatalogEx*(entries: openArray[VersionedProvisioning];
 
 proc validateCatalog*(entries: openArray[VersionedProvisioning]):
     seq[string] =
-  ## Validate a whole ``<tool>Catalog`` array. Each error is prefixed
+  ## Validate a list of parsed versions (a harvest). Each error is prefixed
   ## with the entry's version so the diagnostic locates the bad slice.
   ## Warnings are routed to ``logSchemaWarning`` (stderr); use
   ## ``validateCatalogEx`` to capture them as a list.
@@ -1639,9 +1656,16 @@ proc armPreferenceTier(pb: PlatformBinary;
   elif pb.cpu == pcAny and pb.os == poAny: 3
   else: -1
 
-proc selectPlatformBinaryEx*(vp: VersionedProvisioning;
-                             target: PlatformTarget; os: PlatformOs):
-    PlatformSelection =
+proc selectArm*(arms: openArray[PlatformBinary];
+                target: PlatformTarget; os: PlatformOs):
+    tuple[index: int; selection: PlatformSelection] =
+  ## GM4b: arm selection over a bare list of arms, returning the INDEX of the
+  ## selected arm (``-1`` when none). This is the algorithm below, lifted off
+  ## ``VersionedProvisioning`` so the realization selector
+  ## (``repro_tool_profiles/realization_selection``) runs the same selection
+  ## over ``tarball`` records — one implementation of "which arm for this
+  ## target", whichever representation the arms came from.
+  ##
   ## PMC-2 deliverable 3: selection as "filter to what the host can run,
   ## then take the highest floor".
   ##
@@ -1684,13 +1708,14 @@ proc selectPlatformBinaryEx*(vp: VersionedProvisioning;
   ## requirements neither of which contains the other (v3+avx512f vs
   ## v3+avx512vnni) rank EQUAL and fall to step 4.
   let provided = providedFeatures(target)
-  result.hostLevel = target.level
-  result.providedFeatures = provided
-  result.requiredLevel = mlNone
+  result.index = -1
+  result.selection.hostLevel = target.level
+  result.selection.providedFeatures = provided
+  result.selection.requiredLevel = mlNone
   var bestTier = high(int)
   var bestRank = 0
   var haveBest = false
-  for pb in vp.platforms:
+  for i, pb in arms:
     let tier = armPreferenceTier(pb, target.family, os)
     if tier < 0:
       continue
@@ -1698,16 +1723,15 @@ proc selectPlatformBinaryEx*(vp: VersionedProvisioning;
     if not satisfiesFeatures(provided, required):
       # Applicable coordinate, unreachable capability. Remember the NEAREST
       # such arm — fewest missing features — so the diagnostic can name the
-      # smallest gap the reader could actually close. For nested floors that
-      # is PMC-2's "lowest floor" exactly; ``<`` rather than ``<=`` keeps the
-      # first-declared arm on a tie, as PMC-2's did.
+      # smallest gap the reader could actually close. ``<`` rather than
+      # ``<=`` keeps the first-declared arm on a tie.
       let missing = missingFeatures(provided, required)
-      if not result.refusedForLevel or
-         card(missing) < card(result.missingFeatures):
-        result.requiredLevel = pb.cpu_level
-        result.requiredFeatures = required
-        result.missingFeatures = missing
-      result.refusedForLevel = true
+      if not result.selection.refusedForLevel or
+         card(missing) < card(result.selection.missingFeatures):
+        result.selection.requiredLevel = pb.cpu_level
+        result.selection.requiredFeatures = required
+        result.selection.missingFeatures = missing
+      result.selection.refusedForLevel = true
       continue
     let rank = armCapabilityRank(pb)
     if not haveBest or tier < bestTier or
@@ -1715,15 +1739,25 @@ proc selectPlatformBinaryEx*(vp: VersionedProvisioning;
       haveBest = true
       bestTier = tier
       bestRank = rank
-      result.binary = pb
-  result.found = haveBest
+      result.index = i
+      result.selection.binary = pb
+  result.selection.found = haveBest
   if haveBest:
     # Something selected, so this is not a shortfall — clear the refusal so
     # a caller cannot render a warning about an arm it did not need.
-    result.refusedForLevel = false
-    result.requiredLevel = mlNone
-    result.requiredFeatures = {}
-    result.missingFeatures = {}
+    result.selection.refusedForLevel = false
+    result.selection.requiredLevel = mlNone
+    result.selection.requiredFeatures = {}
+    result.selection.missingFeatures = {}
+
+proc selectPlatformBinaryEx*(vp: VersionedProvisioning;
+                             target: PlatformTarget; os: PlatformOs):
+    PlatformSelection =
+  ## PMC-2 deliverable 3. The selection algorithm and its rationale are
+  ## documented on ``selectArm``, which implements it.
+  # GM4b: the algorithm lives in ``selectArm``; this signature is kept for
+  # the arm-selection tests that describe it over a ``VersionedProvisioning``.
+  selectArm(vp.platforms, target, os).selection
 
 proc describeMicroarchShortfall*(sel: PlatformSelection): string =
   ## PMC-2 deliverable 4: the shortfall sentence —
@@ -1954,6 +1988,8 @@ proc archiveFormatIdent(af: ArchiveFormat): string =
   of afInstallerNsis: "afInstallerNsis"
   of afInstallerMsi: "afInstallerMsi"
   of afRaw: "afRaw"
+  of afDmg: "afDmg"
+  of afPkg: "afPkg"
 
 proc launcherEmitKindIdent*(lek: LauncherEmitKind): string =
   case lek
@@ -1991,6 +2027,8 @@ proc installMethodIdent(im: InstallMethod): string =
   of imInstallerNsisBundle: "imInstallerNsisBundle"
   of imInstallerNsis: "imInstallerNsis"
   of imInstallerInnoSetup: "imInstallerInnoSetup"
+  of imAppBundle: "imAppBundle"
+  of imPkgInstall: "imPkgInstall"
 
 proc serializePlatformBinary(pb: PlatformBinary): string =
   # Field order: sha256, sha512, sha1 — sha1 last to make it
@@ -2135,3 +2173,185 @@ proc serializeAsCode*(vp: VersionedProvisioning): string =
       result.add("\n")
     result.add("  ]")
   result.add(")")
+
+# ---------------------------------------------------------------------------
+# GM4b — the tarball archive-detail codec
+# ---------------------------------------------------------------------------
+#
+# Every realization the retired ``<tool>Catalog`` records held is now a
+# ``tarball`` realization of the canonical package definition
+# (Provisioning-Contributions.md §"Profile Package References"). The DSL
+# record (``repro_project_dsl.TarballArchiveDetail``) keeps every field a
+# string, a ``seq[string]`` or a ``bool`` so the macro can carry expression
+# source for it; the two structured entries — pre-install actions and
+# launcher-emit specs — are therefore ENCODED strings. The encoders below are
+# what a package module calls in its ``tarball`` statement
+# (``preInstall = preInstallAction("move-item", "$dir\\a", "$dir\\b")``) and
+# the decoders are what the archive realizer calls. One codec, both ends.
+#
+# The separator is ASCII Unit Separator (0x1F): it cannot appear in a path,
+# a manifest literal or a command name, and an encoder refuses a field that
+# carries one rather than producing an entry that decodes differently.
+
+const ArchiveDetailFieldSeparator = '\x1f'
+
+proc requireNoSeparator(field, what: string) =
+  if ArchiveDetailFieldSeparator in field:
+    raise newException(ValueError, what & " must not contain the 0x1F " &
+      "field separator: " & field.escape())
+
+proc parsePreInstallActionKindToken*(token: string):
+    tuple[ok: bool; kind: PreInstallActionKind] =
+  for kind in PreInstallActionKind:
+    if $kind == token:
+      return (true, kind)
+  (false, piaNewItemDir)
+
+proc preInstallAction*(kind: string; source: string; target = "";
+                       recurse = false; literal = ""): string =
+  ## Encode one allowlisted pre-install action (``PreInstallAction``) for a
+  ## ``tarball preInstall = ...`` argument. ``kind`` is the
+  ## ``PreInstallActionKind`` token (``move-item``, ``copy-item``,
+  ## ``expand-7z``, ...); an unknown token is refused here, at module
+  ## initialization, rather than turning into a no-op at realization.
+  if not parsePreInstallActionKindToken(kind).ok:
+    raise newException(ValueError, "unknown pre-install action kind '" &
+      kind & "'")
+  for (field, what) in [(source, "pre-install source"),
+                        (target, "pre-install target"),
+                        (literal, "pre-install literal")]:
+    requireNoSeparator(field, what)
+  kind & ArchiveDetailFieldSeparator & source & ArchiveDetailFieldSeparator &
+    target & ArchiveDetailFieldSeparator & (if recurse: "1" else: "0") &
+    ArchiveDetailFieldSeparator & literal
+
+proc decodePreInstallAction*(encoded: string): PreInstallAction =
+  ## Inverse of ``preInstallAction``. Raises ``ValueError`` on a malformed
+  ## entry: a pre-install step the realizer cannot read is refused, never
+  ## skipped (Core-Invariants §Unrecognised Input Is Rejected).
+  let parts = encoded.split(ArchiveDetailFieldSeparator)
+  if parts.len != 5:
+    raise newException(ValueError, "malformed pre-install action entry " &
+      encoded.escape() & " (expected 5 fields, got " & $parts.len & ")")
+  let kind = parsePreInstallActionKindToken(parts[0])
+  if not kind.ok:
+    raise newException(ValueError, "unknown pre-install action kind '" &
+      parts[0] & "'")
+  PreInstallAction(kind: kind.kind, source: parts[1], target: parts[2],
+    recurse: parts[3] == "1", literal: parts[4])
+
+proc parseLauncherEmitKindToken*(token: string):
+    tuple[ok: bool; kind: LauncherEmitKind] =
+  for kind in LauncherEmitKind:
+    if $kind == token:
+      return (true, kind)
+  (false, lekScript)
+
+proc launcherEmitSpec*(kind, target, interpreterPackage,
+                       launcherName: string): string =
+  ## Encode one ``LauncherEmitSpec`` for a ``tarball launcherEmit = ...``
+  ## argument (``phar`` / ``jar`` / ``script``).
+  if not parseLauncherEmitKindToken(kind).ok:
+    raise newException(ValueError, "unknown launcher-emit kind '" & kind &
+      "'")
+  for (field, what) in [(target, "launcher target"),
+                        (interpreterPackage, "launcher interpreter package"),
+                        (launcherName, "launcher name")]:
+    requireNoSeparator(field, what)
+  kind & ArchiveDetailFieldSeparator & target & ArchiveDetailFieldSeparator &
+    interpreterPackage & ArchiveDetailFieldSeparator & launcherName
+
+proc decodeLauncherEmitSpec*(encoded: string): LauncherEmitSpec =
+  ## Inverse of ``launcherEmitSpec``; refuses a malformed entry.
+  let parts = encoded.split(ArchiveDetailFieldSeparator)
+  if parts.len != 4:
+    raise newException(ValueError, "malformed launcher-emit entry " &
+      encoded.escape() & " (expected 4 fields, got " & $parts.len & ")")
+  let kind = parseLauncherEmitKindToken(parts[0])
+  if not kind.ok:
+    raise newException(ValueError, "unknown launcher-emit kind '" &
+      parts[0] & "'")
+  LauncherEmitSpec(kind: kind.kind, target: parts[1],
+    interpreter_package_id: parts[2], launcher_name: parts[3])
+
+proc parseInstallMethodToken*(token: string):
+    tuple[ok: bool; installMethod: InstallMethod] =
+  ## A ``tarball installMethod`` token. Empty means ``extract`` — the
+  ## behaviour of every ``tarball`` realization before GM4b.
+  if token.len == 0:
+    return (true, imExtract)
+  for im in InstallMethod:
+    if $im == token:
+      return (true, im)
+  (false, imExtract)
+
+proc parseArchiveFormatToken*(token: string):
+    tuple[ok: bool; format: ArchiveFormat] =
+  ## A ``tarball archiveType`` token in the ``ArchiveFormat`` vocabulary.
+  ## The ``uses:`` realizer's own spellings of the same formats (``tgz``,
+  ## ``txz``, ``tbz``, ``msi``, ``7z.exe``) are accepted too, so a record
+  ## authored for either realizer reads the same.
+  case token.toLowerAscii()
+  of "tgz": return (true, afTarGz)
+  of "txz": return (true, afTarXz)
+  of "tbz", "tbz2": return (true, afTarBz2)
+  of "tzst", "pkg.tar.zst": return (true, afTarZst)
+  of "msi": return (true, afInstallerMsi)
+  of "7z.exe": return (true, afSevenZipSfx)
+  else: discard
+  for af in ArchiveFormat:
+    if $af == token.toLowerAscii():
+      return (true, af)
+  (false, afRaw)
+
+# ---------------------------------------------------------------------------
+# Host platform facts (moved from repro_home_apply/package_catalog by GM4b)
+# ---------------------------------------------------------------------------
+#
+# The realization selector (repro_tool_profiles/realization_selection) and the
+# home-apply resolver must name the host identically, and only this module is
+# imported by both.
+
+proc detectHostCpu*(): PlatformCpu =
+  ## Map the Nim `hostCPU` token to the schema's `PlatformCpu` enum.
+  ## Unknown CPUs fall through to `pcAny` (the realize loop will then
+  ## look for an arch-independent slice; if none exists,
+  ## `selectPlatformBinary` reports `found=false`).
+  when defined(amd64) or defined(x86_64):
+    pcX86_64
+  elif defined(arm64) or defined(aarch64):
+    pcAArch64
+  elif defined(i386) or defined(i686) or defined(x86):
+    pcX86
+  else:
+    pcAny
+
+proc detectHostOs*(): PlatformOs =
+  when defined(windows):
+    poWindows
+  elif defined(linux):
+    poLinux
+  elif defined(macosx) or defined(osx):
+    poMacos
+  else:
+    poAny
+
+proc baselineMicroarchLevel*(family: PlatformCpu): MicroarchLevel =
+  ## The level a CPU family provides BY DEFINITION, with no probing.
+  ##
+  ## ``x86_64`` is exactly ``x86-64-v1``: v1 is the psABI baseline every
+  ## amd64 chip implements, so claiming it needs no detection. Anything
+  ## above it does — v2/v3/v4 are feature-set questions and host FEATURE
+  ## DETECTION is PMC-3's named deliverable, not this one's. Until then a
+  ## host that can run more says so through
+  ## ``REPRO_HOST_MICROARCH_LEVEL``.
+  ##
+  ## Defaulting low rather than high is the same decision Package-Model.md
+  ## §"Two hazards specific to this project" reaches for the cache: Spack
+  ## optimises for the build host and its binaries famously do not run
+  ## elsewhere. A conservative floor costs peak performance and buys cache
+  ## entries that are actually reusable across a fleet.
+  case family
+  of pcX86_64: mlX86_64_v1
+  of pcAny, pcAArch64, pcX86: mlNone
+

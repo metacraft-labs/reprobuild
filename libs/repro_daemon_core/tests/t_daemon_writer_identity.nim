@@ -18,14 +18,49 @@
 ## this daemon" misclassifies a long build that spans a daemon restart. The
 ## reused-pid case is the one that proves the start stamp is load-bearing.
 ##
-## MOCK POLICY: no mocks, and none may be added. Liveness is a question about
+## MOCK POLICY: the process table is never mocked. macOS error cases use a
+## native syscall interposer to inject EPERM for one real process probe (or
+## boot probe), since ordinary kernel permissions do not reliably deny these
+## sysctls. Every other syscall and the recorded identity remain real.
+## This fault injection exercises the error boundary rather than inventing
+## a process lifetime. Liveness is a question about
 ## real processes, so the cases interrogate this process, a real spawned child
 ## before and after it exits, and pids that cannot exist. A fake process table
 ## would decide by fiat the one thing under test.
 
-import std/[options, os, osproc, strutils, unittest]
+import std/[options, os, osproc, strutils, streams, json, unittest]
 
 import repro_daemon_core/writer_identity
+import shm_gset
+
+when defined(macosx):
+  {.emit: """
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+int sysctl(int *mib, unsigned n, void *p, size_t *len, void *np, size_t nl) {
+  if (getenv("DENIED_PID") && n == 4 && mib[0] == CTL_KERN && mib[1] == KERN_PROC &&
+      mib[2] == KERN_PROC_PID && mib[3] == atoi(getenv("DENIED_PID"))) {
+    fprintf(stderr, "injected EPERM\n"); errno = EPERM; return -1;
+  }
+  int (*real)(int *, unsigned, void *, size_t *, void *, size_t) = dlsym(RTLD_NEXT, "sysctl");
+  return real(mib, n, p, len, np, nl);
+}
+int sysctlbyname(const char *name, void *p, size_t *len, void *np, size_t nl) {
+  if (getenv("DENIED_BOOT") && strcmp(name, "kern.boottime") == 0) {
+    fprintf(stderr, "injected EPERM\n"); errno = EPERM; return -1;
+  }
+  int (*real)(const char *, void *, size_t *, void *, size_t) = dlsym(RTLD_NEXT, "sysctlbyname");
+  return real(name, p, len, np, nl);
+}
+""".}
+  if paramCount() == 2 and paramStr(1) == "--probe-writer":
+    echo writerLiveness(paramStr(2))
+    quit(0)
 
 suite "writer identity recognises a live writer and only a dead one":
   test "this process is live under its own recorded identity":
@@ -123,3 +158,50 @@ suite "writer identity recognises a live writer and only a dead one":
       # of this suite executes the case above and reports it; on any other
       # platform this line records that it remains unverified rather than
       # letting the suite pass vacuously.
+
+  test "a live identity survives advancing wall clock seconds":
+    let me = currentWriterIdentity()
+    let boot = bootId()
+    let encoded = encodeWriterIdentity(me)
+    require encoded.len > 0
+    check boot == me.bootId
+    sleep(2200)
+    check bootId() == boot
+    check writerLiveness(encoded) == wlLive
+
+  when defined(macosx):
+    test "a denied process or boot probe is unknown and never dead":
+      let identity = currentWriterIdentity()
+      let encoded = encodeWriterIdentity(identity)
+      require encoded.len > 0
+      # Positive control: the unmodified child can interrogate this live parent.
+      let control = execCmdEx(quoteShell(getAppFilename()) &
+        " --probe-writer " & quoteShell(encoded))
+      check control.exitCode == 0
+      check control.output.strip() == "wlLive"
+      for denyBoot in [false, true]:
+        let oldPid = os.getEnv("DENIED_PID")
+        let oldBoot = os.getEnv("DENIED_BOOT")
+        putEnv("DENIED_PID", if denyBoot: "0" else: $identity.pid)
+        if denyBoot: putEnv("DENIED_BOOT", "1")
+        let child = startProcess(getAppFilename(), args = @["--probe-writer", encoded],
+          options = {poStdErrToStdOut})
+        putEnv("DENIED_PID", oldPid)
+        if oldBoot.len == 0: delEnv("DENIED_BOOT")
+        else: putEnv("DENIED_BOOT", oldBoot)
+        let output = child.outputStream.readAll()
+        let status = child.waitForExit()
+        child.close()
+        checkpoint("denyBoot=" & $denyBoot & " output=" & output)
+        check status == 0
+        check "injected EPERM" in output
+        check output.strip().endsWith("wlUnknown")
+
+  test "packaged boot source pin and CI source pin stay aligned":
+    let root = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+    let node = parseJson(readFile(root / "flake.lock"))["nodes"]["nim-shm-gset-src"]
+    let rev = node["locked"]["rev"].getStr()
+    check rev == node["original"]["rev"].getStr()
+    check rev != "c646982b354cb5b1fa8734f94b951a660419d75c"
+    check ("github:metacraft-labs/nim-shm-gset/" & rev) in readFile(root / "flake.nix")
+    check ("nim-shm-gset=" & rev) in readFile(root / ".github" / "sibling-repos")

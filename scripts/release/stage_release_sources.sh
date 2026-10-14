@@ -15,6 +15,7 @@
 # LAYOUT (Distribution-And-Packaging §5; identical to the native packages):
 #
 #   <pkg>/share/repro/source/libs/...        reprobuild's libs/, tests excluded
+#   <pkg>/share/repro/source/config.nims     the profile compile includes it
 #   <pkg>/share/repro/src/<input>/...        one tree per source-only input
 #   <pkg>/share/repro/reprobuild-packages/   the pinned catalog's interfaces
 #
@@ -47,12 +48,27 @@ src_root="$pkg/share/repro/src"
 rm -rf "$pkg/share/repro"
 mkdir -p "$source_root" "$src_root"
 
+# Copy the files named on stdin (NUL-separated, relative to <from>) into <to>,
+# keeping their relative paths. One tar pair for the whole list, not a
+# `mkdir` + `cp` per file: on Windows every process spawn costs tens of
+# milliseconds in Git for Windows' bash, and the per-file loop this replaces
+# took the better part of an hour to stage one archive (measured 2026-10-13 on
+# eli-pc: ~1 file/s). The archive's file set is unchanged -- the lists are
+# produced exactly as before. Both GNU tar and bsdtar read a NUL-separated
+# name list with `--null -T -`; the archive itself goes through a pipe, so no
+# `-C <drive>:\...` argument is ever parsed as a remote host.
+copy_listed() {
+  local from=$1 to=$2 to_abs
+  mkdir -p "$to"
+  to_abs=$(cd "$to" && pwd)
+  (cd "$from" && tar --null -T - -cf -) | (cd "$to_abs" && tar -xf -)
+}
+
 # Copy <from> to <to>, keeping only what a `nim c` reads: Nim sources and
 # configs, the C/C++ sources and headers `{.compile.}`/`-I` name, and licence
 # files. Build products, VCS metadata and test trees are dropped.
 copy_tree() {
-  local from=$1 to=$2 f
-  mkdir -p "$to"
+  local from=$1 to=$2
   (cd "$from" && find . \
       \( -name .git -o -name build -o -name nimcache -o -name .repro \
          -o -name tests -o -name node_modules \) -prune -o \
@@ -61,28 +77,33 @@ copy_tree() {
         -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' \
         -o -name '*.cpp' -o -name '*.inc' -o -name '*.S' -o -name '*.s' \
         -o -name '*.asm' -o -name 'LICENSE*' -o -name 'COPYING*' \) \
-      -print) |
-  while IFS= read -r f; do
-    mkdir -p "$to/$(dirname "$f")"
-    cp "$from/$f" "$to/$f"
-  done
+      -print0) | copy_listed "$from" "$to"
   # Store paths are read-only; the archive tree must stay removable.
   chmod -R u+w "$to"
 }
 
 # ---- reprobuild's own libs ---------------------------------------------------
 # Every tracked file outside tests/: some lib modules read data files at compile
-# time (`staticRead` of recipe templates), so no extension filter here.
+# time (`staticRead` of recipe templates), so no extension filter here. The
+# filter loop uses only shell builtins, so it spawns nothing per file.
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git ls-files -z -- libs | while IFS= read -r -d '' f; do
     case "/$f/" in */tests/*) continue ;; esac
     [[ -f "$f" ]] || continue
-    mkdir -p "$source_root/$(dirname "$f")"
-    cp "$f" "$source_root/$f"
-  done
+    printf '%s\0' "$f"
+  done | copy_listed . "$source_root"
 else
   copy_tree libs "$source_root/libs"
 fi
+# The root config.nims, beside libs/. The profile compile (`repro home apply`,
+# `repro infra apply`) includes `<source root>/config.nims` from a wrapper it
+# stages next to the profile; that file turns the `*_SRC` roots into search
+# paths (nimcrypto, bearssl, io-mon, ...) and points the C compiler at the
+# vendored hash headers. Without it the archive's profile compile saw only
+# `libs/*/src` and failed with `cannot open file: nimcrypto/sha2`
+# (Gradual-Nix-To-Reprobuild-Migration GM1w, measured 2026-10-13). The Nix
+# package's source root is the whole tree and has always carried it.
+cp config.nims "$source_root/config.nims"
 
 # ---- source-only inputs ------------------------------------------------------
 # stage <ENV_VAR> <dest under share/repro/src> <marker> <candidate>...

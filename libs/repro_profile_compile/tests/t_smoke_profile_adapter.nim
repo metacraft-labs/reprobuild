@@ -6,7 +6,7 @@
 ## equivalent text. The adapters are pure functions; these tests do
 ## NOT touch the filesystem, run a build engine, or invoke `nim c`.
 
-import std/[options, tables, unittest]
+import std/[options, strutils, tables, unittest]
 
 import repro_home_intent
 import repro_infra
@@ -455,6 +455,20 @@ suite "M83 Phase D: system adapter":
   test "empty ProfileIntent -> empty SystemProfile":
     let sp = profileIntentToSystemProfile(ProfileIntent(name: "empty"))
     check sp.resources.len == 0
+
+  test "GM4: a system profile declaring plan-time data files is refused":
+    # Data rows expand into activities, which system scope does not have;
+    # dropping the `data:` section silently would leave its rows declared
+    # but never applied (Core-Invariants.md §Unrecognised Input Is
+    # Rejected, Not Skipped).
+    var message = ""
+    try:
+      discard profileIntentToSystemProfile(ProfileIntent(name: "sys",
+        dataFiles: @["data/apps.toml"]))
+    except ValueError as e:
+      message = e.msg
+    check message.contains("data/apps.toml")
+    check message.contains("system profiles do not read plan-time data files")
 
   test "windows.capability resource maps to srkWindowsCapability":
     var intent = ProfileIntent(name: "sys")

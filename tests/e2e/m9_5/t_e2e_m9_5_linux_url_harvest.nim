@@ -1,8 +1,11 @@
-## M9.5 — Linux URL harvester pass gate.
+## M9.5 → GM4b — Linux URL harvester pass gate.
 ##
-## Asserts that every catalog file the M9.5 milestone graduated carries
-## BOTH a Windows AND a Linux platform slice, and that the Linux slice
-## has a non-empty URL and a non-empty sha256 digest. The M9 canary's
+## Asserts that every package the M9.5 milestone graduated carries BOTH a
+## Windows AND a Linux archive realization, and that the Linux one has a
+## non-empty URL and digest. GM4b: the per-platform catalog slices are now
+## `tarball` realizations of each package definition (one record per
+## (version, platform)), read here through `profileToolUse` — the same
+## projection a profile reference resolves against. The M9 canary's
 ## per-tool classification matrix covers the resolver-side contract;
 ## this test covers the catalog-side contract (the slice set has the
 ## right shape).
@@ -25,8 +28,7 @@
 
 import std/[options, strutils, tables, unittest]
 
-import repro_dsl_stdlib/catalog_registry
-import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 import repro_home_apply/package_catalog
 
 type
@@ -95,161 +97,87 @@ const M9_5GraduatedTools = @[
     expectedBinSubstring: "gradle"),
 ]
 
-proc selectLinuxBinary(vp: VersionedProvisioning):
-    tuple[found: bool; binary: PlatformBinary] =
-  for pb in vp.platforms:
-    if pb.os == poLinux and pb.cpu == pcX86_64:
-      return (true, pb)
-  (false, PlatformBinary())
+proc archivesOf(spec: LinuxSliceExpectation):
+    seq[InterfaceTarballProvisioning] =
+  ## The package's archive realizations at the spec's version.
+  for r in profileToolUse(spec.tool).useDef.tarballProvisioning:
+    if r.detail.version.startsWith(spec.versionPrefix):
+      result.add(r)
 
-proc selectWindowsBinary(vp: VersionedProvisioning):
-    tuple[found: bool; binary: PlatformBinary] =
-  for pb in vp.platforms:
-    if pb.os == poWindows and (pb.cpu == pcX86_64 or pb.cpu == pcAny):
-      return (true, pb)
-  (false, PlatformBinary())
+proc linuxArchive(spec: LinuxSliceExpectation):
+    tuple[found: bool; record: InterfaceTarballProvisioning] =
+  for r in archivesOf(spec):
+    if r.os == "linux" and r.cpu == "x86_64":
+      return (true, r)
 
-suite "M9.5 e2e: Linux URL harvester pass":
+proc windowsArchive(spec: LinuxSliceExpectation):
+    tuple[found: bool; record: InterfaceTarballProvisioning] =
+  for r in archivesOf(spec):
+    if r.os == "windows" and r.cpu in ["x86_64", "", "any"]:
+      return (true, r)
 
-  test "every graduated catalog file has Windows AND Linux slices":
+proc executables(r: InterfaceTarballProvisioning): seq[string] =
+  @[r.executablePath] & r.detail.extraExecutables
+
+suite "M9.5/GM4b e2e: Linux URL harvester pass":
+
+  test "every graduated package has Windows AND Linux archives":
     for spec in M9_5GraduatedTools:
       checkpoint("tool=" & spec.tool & " version~" & spec.versionPrefix)
-      let cat = getCatalog(spec.tool)
-      check cat.isSome
-      let entries = cat.get
-      check entries.len > 0
-      # Locate the version-matching entry.
-      var matched: VersionedProvisioning
-      var foundVersion = false
-      for vp in entries:
-        if vp.version.startsWith(spec.versionPrefix):
-          matched = vp
-          foundVersion = true
-          break
-      check foundVersion
-      if not foundVersion:
-        continue
-      # Windows slice present (the pre-M9.5 baseline).
-      let win = selectWindowsBinary(matched)
-      check win.found
-      # Linux slice present (the M9.5 addition).
-      let lin = selectLinuxBinary(matched)
-      check lin.found
+      check archivesOf(spec).len > 0
+      check windowsArchive(spec).found
+      check linuxArchive(spec).found
 
-  test "every Linux slice carries a non-empty URL and sha256":
+  test "every Linux archive carries a non-empty URL and digest":
     for spec in M9_5GraduatedTools:
       checkpoint("tool=" & spec.tool & " version~" & spec.versionPrefix)
-      let cat = getCatalog(spec.tool)
-      check cat.isSome
-      var matched: VersionedProvisioning
-      var foundVersion = false
-      for vp in cat.get:
-        if vp.version.startsWith(spec.versionPrefix):
-          matched = vp
-          foundVersion = true
-          break
-      check foundVersion
-      if not foundVersion:
-        continue
-      let lin = selectLinuxBinary(matched)
+      let lin = linuxArchive(spec)
       check lin.found
       if not lin.found:
         continue
-      # Non-empty URL.
-      check lin.binary.url.len > 0
-      # Non-empty digest: per the M9.5 spec note about maven (which
-      # uses Apache's canonical sha512 sidecar), accept either sha256
-      # or sha512 — both are strong digests. sha1 is M1's weak-hash
-      # fallback and is acceptable too but no M9.5 tool uses it.
-      check (lin.binary.sha256.len > 0) or
-            (lin.binary.sha512.len > 0) or
-            (lin.binary.sha1.len > 0)
-      # URL contains the expected marker (defends against accidental
-      # copy-paste of the Windows URL into the Linux slice).
-      check spec.expectedUrlMarker in lin.binary.url
+      check lin.record.url.len > 0
+      # maven uses Apache's canonical sha512 sidecar; accept any digest.
+      check (lin.record.sha256.len > 0) or
+            (lin.record.detail.sha512.len > 0) or
+            (lin.record.detail.sha1.len > 0)
+      # Defends against a Windows URL copy-pasted into the Linux record.
+      check spec.expectedUrlMarker in lin.record.url
 
-  test "Linux bin_relpath_override (when set) names the linux binary":
-    ## The M9.5 schema extension promoted bin_relpath_override onto
-    ## PlatformBinary. When set, it carries the platform-specific
-    ## binary name (no ``.exe`` suffix on Linux). The default
-    ## (empty seq) falls back to the parent VersionedProvisioning's
-    ## bin_relpath.
+  test "Linux executables name the linux binary":
     for spec in M9_5GraduatedTools:
       checkpoint("tool=" & spec.tool & " version~" & spec.versionPrefix)
-      let cat = getCatalog(spec.tool)
-      check cat.isSome
-      var matched: VersionedProvisioning
-      var foundVersion = false
-      for vp in cat.get:
-        if vp.version.startsWith(spec.versionPrefix):
-          matched = vp
-          foundVersion = true
-          break
-      check foundVersion
-      if not foundVersion:
-        continue
-      let lin = selectLinuxBinary(matched)
+      let lin = linuxArchive(spec)
       check lin.found
       if not lin.found:
         continue
-      # The effective bin_relpath for Linux: override if set; else
-      # the VP's. At least one entry should contain the tool's
-      # canonical Linux binary name.
-      let effective =
-        if lin.binary.bin_relpath_override.len > 0:
-          lin.binary.bin_relpath_override
-        else:
-          matched.bin_relpath
       var sawTool = false
-      for b in effective:
+      for b in executables(lin.record):
         if spec.expectedBinSubstring in b:
           sawTool = true
-          break
-      check sawTool
-      # No Linux entry should carry the ``.exe`` suffix (windows-only).
-      for b in effective:
         check ".exe" notin b
+      check sawTool
 
-  test "resolveBuiltinPackage on Linux returns Linux URL for graduated tools":
-    ## End-to-end resolver smoke: the chain-level test covers
-    ## chainResolvePackage; this test exercises the inner
-    ## resolveBuiltinPackage directly so we surface schema bugs
-    ## (e.g. a malformed Linux slice) earlier in the call chain.
+  test "a pinned reference on x86_64-linux selects the Linux archive":
+    ## Resolver smoke: the selection a profile makes (exact version pin,
+    ## so multi-version tools resolve the spec's version, not the default).
+    let target = realizationTargetFor(pcX86_64, poLinux, mlX86_64_v1)
     for spec in M9_5GraduatedTools:
       checkpoint("tool=" & spec.tool & " version~" & spec.versionPrefix)
-      let cat = getCatalog(spec.tool)
-      check cat.isSome
-      if cat.isNone:
+      let lin = linuxArchive(spec)
+      check lin.found
+      if not lin.found:
         continue
-      # Pass an exact version pin so multi-version tools (zig, gradle)
-      # resolve the slice that matches the spec, not the catalog's
-      # default-last entry.
-      var pin = ""
-      for vp in cat.get:
-        if vp.version.startsWith(spec.versionPrefix):
-          pin = vp.version
-          break
-      let res = resolveBuiltinPackage(spec.tool, cat.get,
-        version = pin, hostCpu = pcX86_64, hostOs = poLinux)
-      check res.found
-      if not res.found:
-        echo "resolveBuiltinPackage failed for ", spec.tool, ": ",
-             res.error, " (", res.errorDetail, ")"
-        continue
-      check spec.expectedUrlMarker in res.resolution.urlUsed
-      # The resolution's binRelpath should be the Linux variant (no
-      # .exe suffix).
-      for b in res.resolution.binRelpath:
+      let res = resolveProfilePackage(spec.tool, target, @[rkTarball],
+        requestedVersion = lin.record.detail.version)
+      check res.selection.kind == rkTarball
+      check spec.expectedUrlMarker in res.selection.tarball.url
+      for b in executables(res.selection.tarball):
         check ".exe" notin b
 
-  test "count: 15 catalog files gained a poLinux slice":
-    ## A meta-assertion: M9.5 graduated EXACTLY 15 catalog files,
-    ## with two of them (zig + gradle) carrying the Linux slice
-    ## across MULTIPLE versions for a total of 17 graduated slices.
-    ## A reviewer adding more should update both this count and the
-    ## M9 canary's ExpectedBuiltinResolvedOnLinux.
+  test "count: 15 packages gained a Linux archive":
+    ## M9.5 graduated EXACTLY 15 packages, two of them (zig + gradle)
+    ## across MULTIPLE versions — 17 archive-level expectations.
     check M9_5GraduatedTools.len == 17
-    # Distinct file-level count (collapsing zig + gradle to one each).
     var files = initTable[string, int]()
     for spec in M9_5GraduatedTools:
       files.mgetOrPut(spec.tool, 0).inc

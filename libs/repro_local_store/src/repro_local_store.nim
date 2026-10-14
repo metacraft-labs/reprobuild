@@ -244,6 +244,21 @@ type
       ## cache key (so a relabel from `weak` to `strong` does not invalidate
       ## existing entries) — it is metadata that gates HOW the cached bytes
       ## are used."
+    observedExecution*: bool
+      ## WRITE-side: true on the record `recordActionResult` returns, because
+      ## THIS cache root saw the execution that produced it; a write of a
+      ## container whose records all say so leaves the execution-observation
+      ## sidecar (`ObservedExecutionFileExt`) beside it.
+      ## `appendActionResultRecord` (the LAN peer install) clears it. A
+      ## record read back from disk does NOT carry it -- lookups stay off the
+      ## sidecar -- so a reader asks `observedExecutionOf` instead.
+      ##
+      ## Read by certificate issuance, which may attest a reused result only
+      ## when it came from an execution the producer trusts
+      ## (test-certificates Standard §6.2.1). It is a LOCAL fact: it is not in
+      ## the RBAR frame, so it never travels in a peer bundle, a binary-cache
+      ## manifest or the daemon's shared-memory slot, and a remote producer
+      ## cannot claim it. Not part of either fingerprint.
 
   EnvResolver* = proc(name: string): tuple[present: bool, value: string]
     {.gcsafe, raises: [].}
@@ -2362,6 +2377,73 @@ proc decodeDeterminism(raw: openArray[byte]):
     return (0'u64, EntryDeterminism())
 
 # ---------------------------------------------------------------------------
+# Execution-observation sidecar (`ActionResultRecord.observedExecution`).
+#
+# Says "the execution behind this `.rec` happened here": it is written only
+# when every record in the container was produced by `recordActionResult` in
+# this cache root (or re-written from such a record, as a hybrid cut-off
+# does), and it names the container's write sequence and the host that
+# observed the execution (`hostFingerprint`), so a copy of the cache root on
+# another machine does not carry it. Unlike the witness and
+# determinism sidecars it is NEVER carried forward: any other write of the
+# `.rec` (a peer install, a legacy migration, a republish of a record decoded
+# from a plain frame) moves the sequence and voids it, and the writer removes
+# it. Absence therefore means "not known to have run here", which is the
+# fail-closed reading for the one consumer, certificate issuance.
+# ---------------------------------------------------------------------------
+
+const
+  ObservedExecutionMagic = "RBOX"
+  ObservedExecutionVersion = 1'u16
+  ObservedExecutionFileExt* = ".obs"
+    ## Not `.rec`, `.octime`, `.det` or `.acc`, so every older reader of an
+    ## edge directory ignores it.
+
+proc observedExecutionFileName*(strongHex: string): string =
+  strongHex & ObservedExecutionFileExt
+
+proc encodeObservedExecution(recordWriteSequence: uint64;
+                              host: string): seq[byte] =
+  ## `host` is the writer's `hostFingerprint()`. It is not a secret and not a
+  ## defence against someone who can write the cache root (they can forge a
+  ## `.rec` too); it stops a mark from travelling with a COPY of the root --
+  ## a CI cache restore, an rsync from another machine -- since a copied
+  ## sidecar names the host that observed the execution, not this one.
+  for i in 0 ..< 4:
+    result.add(byte(ord(ObservedExecutionMagic[i])))
+  result.writeU16Le(ObservedExecutionVersion)
+  result.writeU64Le(recordWriteSequence)
+  result.writeU32Le(uint32(host.len))
+  for ch in host:
+    result.add(byte(ord(ch)))
+
+proc observedExecutionNames(raw: openArray[byte];
+                            recordWriteSequence: uint64;
+                            host: string): bool =
+  ## Does this sidecar name the container written at `recordWriteSequence`,
+  ## on this host (`host`, the reader's `hostFingerprint()`)? False on any
+  ## problem: a sidecar that cannot be read is one that is not there.
+  if raw.len != 18 + host.len or recordWriteSequence == 0'u64:
+    return false
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(ObservedExecutionMagic[i])):
+      return false
+  try:
+    var pos = 4
+    if readU16Le(raw, pos) != ObservedExecutionVersion:
+      return false
+    if readU64Le(raw, pos) != recordWriteSequence:
+      return false
+    if int(readU32Le(raw, pos)) != host.len:
+      return false
+    for i in 0 ..< host.len:
+      if raw[pos + i] != byte(ord(host[i])):
+        return false
+    true
+  except EnvelopeError, CatchableError:
+    false
+
+# ---------------------------------------------------------------------------
 # Input-access sidecar (Cache-Scope P3.4b).
 #
 # The third sidecar, for the reason the other two exist: the RBAR frame cannot
@@ -2892,6 +2974,24 @@ proc outputStateMismatch*(record: ActionResultRecord;
   result = outputStateMismatchImpl(record, outputRoot)
   inc outputStateCheckCalls
   outputStateCheckNanos += (getMonoTime() - started).inNanoseconds
+
+proc payloadlessOutputsInPlace(record: ActionResultRecord;
+                               outputRoot: string): bool =
+  ## Whether a record WITHOUT output payloads still describes the outputs on
+  ## disk: it names at least one output, recorded every one of them as
+  ## present, and each still matches (`outputStateMismatch`, Step 3.3).
+  ## `outputStateMismatch` alone skips outputs recorded as missing, so a
+  ## record that describes nothing would answer "matching" vacuously.
+  ##
+  ## Only for a caller that says where the outputs are: without an
+  ## `outputRoot` a relative output would be resolved against this process's
+  ## working directory.
+  if outputRoot.len == 0 or record.outputs.len == 0:
+    return false
+  for output in record.outputs:
+    if output.metadata.kind == ffkMissing:
+      return false
+  outputStateMismatch(record, outputRoot).len == 0
 
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
@@ -3789,6 +3889,9 @@ proc decodeRecContainer(dirPath, fileName: string;
           decoded.records[i].determinism = det.meta
     except OSError, IOError, EnvelopeError:
       discard
+  # The execution-observation sidecar is deliberately NOT read here: this is
+  # every lookup's hot path, and only certificate issuance asks the question
+  # (`observedExecutionOf`).
   RecContainer(ok: true, writeSequence: decoded.writeSequence,
     strongHex: strongHex, records: decoded.records)
 
@@ -4092,6 +4195,33 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
       try: removeFile(extendedPath(detPath))
       except OSError: discard
 
+    # The execution-observation sidecar: written when every record in the
+    # container says it was executed here, otherwise removed. Never carried
+    # forward (see its section): a peer record re-using a local record's name
+    # must not inherit the local record's provenance.
+    let obsPath = dirPath / observedExecutionFileName(finalName.splitFile.name)
+    var observedHere = true
+    for record in records:
+      if not record.observedExecution:
+        observedHere = false
+    if observedHere:
+      let obsTmp = tmpPath & ObservedExecutionFileExt
+      try:
+        writeFile(extendedPath(obsTmp),
+          byteString(encodeObservedExecution(writeSequence,
+            hostFingerprint())))
+        moveFile(extendedPath(obsTmp), extendedPath(obsPath))
+      except OSError, IOError:
+        # Unwritten means unmarked, which only costs a re-run.
+        if fileExists(extendedPath(obsTmp)):
+          try: removeFile(extendedPath(obsTmp))
+          except OSError: discard
+    elif fileExists(extendedPath(obsPath)):
+      # A stale sidecar names the previous sequence and could not mark this
+      # record anyway; removing it keeps the directory honest.
+      try: removeFile(extendedPath(obsPath))
+      except OSError: discard
+
 proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
     {.discardable.} =
   ## Bound the per-edge directory: keep at most `MaxRecFilesPerEdge` `.rec`
@@ -4133,7 +4263,8 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
   for kind, path in walkDir(extendedPath(dirPath)):
     if kind == pcFile and
         (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt) or
-         path.endsWith(InputAccessFileExt)):
+         path.endsWith(InputAccessFileExt) or
+         path.endsWith(ObservedExecutionFileExt)):
       let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
       if not fileExists(extendedPath(owner)):
         try:
@@ -4160,7 +4291,9 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
                       entries[i].path.parentDir /
                         determinismFileName(entries[i].strongHex),
                       entries[i].path.parentDir /
-                        inputAccessFileName(entries[i].strongHex)]:
+                        inputAccessFileName(entries[i].strongHex),
+                      entries[i].path.parentDir /
+                        observedExecutionFileName(entries[i].strongHex)]:
         if fileExists(extendedPath(sidecar)):
           try:
             removeFile(extendedPath(sidecar))
@@ -4600,6 +4733,39 @@ proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
         return (found: true, record: hotMetadataRecord(records[i]))
     return (found: false, record: ActionResultRecord())
 
+proc observedExecutionOf*(cache: ActionCache;
+                          record: ActionResultRecord): bool =
+  ## Was `record`, as this cache root stores it now, produced by an execution
+  ## this cache root observed? True only when its container's
+  ## execution-observation sidecar names the container's CURRENT write
+  ## sequence, i.e. no other writer (a peer install, a migration) has
+  ## rewritten the `.rec` since `recordActionResult` wrote it, and names this
+  ## host (a cache root copied from another machine is not marked). False on any
+  ## problem: the one consumer, certificate issuance, then re-executes.
+  ##
+  ## A query rather than a field stapled on at decode, because only issuance
+  ## asks it and the decode is every lookup's hot path. It reads the small
+  ## sidecar and the container's sequence trailer.
+  let dirPath = cache.perEdgeDirPath(record.weakFingerprint)
+  # A record served by the hot-metadata path carries no strong fingerprint;
+  # it is a function of the weak fingerprint and the recorded inputs, so
+  # recompute it. A wrong recomputation finds no sidecar: fail-closed.
+  var strong = record.strongFingerprint
+  if strong == ContentDigest():
+    strong = computeStrongFingerprint(record.weakFingerprint, record.inputs,
+      record.envInputs)
+  let recName = recFileNameForStrong(strong)
+  let obsPath = dirPath / observedExecutionFileName(recName.splitFile.name)
+  if not fileExists(extendedPath(obsPath)):
+    return false
+  try:
+    let sequence = scanPerEdgeFileWriteSequence(
+      bytes(readFile(extendedPath(dirPath / recName))))
+    observedExecutionNames(bytes(readFile(extendedPath(obsPath))), sequence,
+      hostFingerprint())
+  except OSError, IOError, EnvelopeError:
+    false
+
 proc appendActionResultRecord*(cache: var ActionCache;
                                record: ActionResultRecord) {.gcsafe.} =
   ## Public bridge so the peer-cache reader can install a peer-fetched
@@ -4607,8 +4773,15 @@ proc appendActionResultRecord*(cache: var ActionCache;
   ## (temp + atomic rename), never an append. Idempotency is bounded by
   ## `MaxRecordsPerWeakFingerprint`; re-installing an identical record
   ## leaves the file's record set unchanged.
+  ##
+  ## The installed record is NOT marked as executed here
+  ## (`observedExecution`), whatever the caller's copy says: it came from
+  ## another machine, and installing it voids the mark of a local record it
+  ## replaces.
+  var installed = record
+  installed.observedExecution = false
   {.cast(gcsafe).}:
-    cache.writePerEdgeRecord(record)
+    cache.writePerEdgeRecord(installed)
 
 proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
     seq[ActionResultRecord] =
@@ -5047,6 +5220,9 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
       changeTimeNs: observed.changeTimeNs, linkTarget: observed.linkTarget,
       treeDigest: observed.treeDigest,
       hasTreeDigest: observed.hasTreeDigest))
+  # This cache root is where the execution just happened: the one place the
+  # execution-observation mark is set (see `observedExecution`).
+  result.observedExecution = true
   cache.writePerEdgeRecord(result)
 
 proc recordActionResult*(cache: var ActionCache; cas: var Store;
@@ -5117,6 +5293,9 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
       changeTimeNs: observed.changeTimeNs, linkTarget: observed.linkTarget,
       treeDigest: observed.treeDigest,
       hasTreeDigest: observed.hasTreeDigest))
+  # This cache root is where the execution just happened: the one place the
+  # execution-observation mark is set (see `observedExecution`).
+  result.observedExecution = true
   cache.writePerEdgeRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
@@ -5298,14 +5477,25 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         continue
     if verifyOutputBlobs:
       if candidate.outputPayloadKind != opkCasBlobs:
-        return ActionCacheLookup(status: aclMissNoOutputPayload,
-          record: candidate,
-          message: "cache record does not contain output payloads")
-      try:
-        cas.verifyOutputs(candidate)
-      except CacheIntegrityError as err:
-        return ActionCacheLookup(status: aclRejectedCorruptOutput,
-          record: candidate, message: err.msg)
+        # A record without payloads cannot RESTORE, but nothing needs
+        # restoring when every output it describes is on disk exactly as
+        # recorded: that is the in-place hit the metadata-only configuration
+        # serves (Step 3.3 below), and the restore mode is that plus putting
+        # back what is no longer there. Refusing it re-ran every action whose
+        # record was published without payloads (the S7 gate, or a record
+        # from before an edge stored any) on EVERY build, outputs untouched —
+        # against Incremental-Invalidation.md §"Validation Criteria": "a warm
+        # re-run of an unchanged graph still executes zero actions".
+        if not payloadlessOutputsInPlace(candidate, outputRoot):
+          return ActionCacheLookup(status: aclMissNoOutputPayload,
+            record: candidate,
+            message: "cache record does not contain output payloads")
+      else:
+        try:
+          cas.verifyOutputs(candidate)
+        except CacheIntegrityError as err:
+          return ActionCacheLookup(status: aclRejectedCorruptOutput,
+            record: candidate, message: err.msg)
     elif allowMetadataOnlyHit:
       # In-place local reuse: the bytes stay at their declared paths, so the
       # CAS verification above is not what protects them. Revalidate the
@@ -5317,6 +5507,10 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         return ActionCacheLookup(status: aclRejectedCorruptOutput,
           record: candidate, message: outputMismatch)
     if hybridCutoff:
+      # The rewrite keeps an execution-observation mark the record already
+      # had: same strong fingerprint, and the refreshed inputs are this
+      # host's own observation of identical content.
+      candidate.observedExecution = cache.observedExecutionOf(record)
       cache.writePerEdgeRecord(candidate)
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
     return ActionCacheLookup(status: aclHit, record: candidate)
@@ -5584,7 +5778,8 @@ proc scanCacheEntries*(cache: ActionCache;
         strongHex: strongHex,
         recPath: path,
         recordBytes: fileSizeOrZero(path))
-      for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt]:
+      for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
+                  ObservedExecutionFileExt]:
         entry.recordBytes += fileSizeOrZero(edgeDir / (strongHex & ext))
       try:
         entry.mtimeUnix = toUnix(getLastModificationTime(extendedPath(path)))
@@ -5627,7 +5822,8 @@ proc removeEntry(entry: CacheEntryRef): bool =
   ## `.rec` that survives is a live cache entry, so only its removal decides
   ## success.
   let dir = entry.recPath.parentDir
-  for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt]:
+  for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
+              ObservedExecutionFileExt]:
     let sidecar = dir / (entry.strongHex & ext)
     if fileExists(extendedPath(sidecar)):
       try: removeFile(extendedPath(sidecar))

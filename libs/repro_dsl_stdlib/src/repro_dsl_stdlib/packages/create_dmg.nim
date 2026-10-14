@@ -25,8 +25,3 @@ package `create-dmg`:
         pos dmg is string
         pos src is string
         outputs dmg
-
-
-let create_dmgCatalog* = seq[VersionedProvisioning].default
-
-

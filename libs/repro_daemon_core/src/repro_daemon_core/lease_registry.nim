@@ -15,10 +15,12 @@
 ##     ``dlsSystem`` -> the system state dir (``/var/lib/repro/state`` or
 ##     ``$REPRO_SYSTEM_STATE_DIR``). A test throwaway root overrides both.
 ##   * ``applyLeaseRenew`` — the ``udkLeaseRenew`` handler body: load the
-##     record for the address, set ``holders[consumerId] =
-##     deadlineFrom(policy, now)`` (the L2 renewal primitive), recompute the
-##     reference-counted MAX ``effectiveDeadline`` (keep dominates ->
-##     ``none``), and persist atomically (L1 ``writeStateRecord``). Absent
+##     record for the address, apply the L2 renewal primitive
+##     (``applyHolderRenewal``: a dated policy sets ``holders[consumerId] =
+##     deadlineFrom(policy, now)``, ``keep`` records the consumer in
+##     ``keepHolders``), recompute the reference-counted MAX
+##     ``effectiveDeadline`` (keep dominates -> ``none``), and persist
+##     atomically (L1 ``writeStateRecord``). Absent
 ##     record => a best-effort no-op (``hadRecord == false``); the client
 ##     must not treat that as fatal (the no-daemon path already wrote the
 ##     record via the reconcile's in-process store, and a daemon that simply
@@ -202,38 +204,23 @@ proc ttlSecondsFromPolicy*(policy: LeasePolicy): int64 =
 
 proc renewHolder*(rec: var ResourceStateRecord; consumerId: string;
                   policy: LeasePolicy; now: Time) =
-  ## Apply ONE consumer's renewal to ``rec`` in place — the daemon-side
-  ## analog of reconcile's ``mergeHolderDeadlines`` for a single holder:
+  ## Apply ONE consumer's renewal to ``rec`` in place — the daemon side of
+  ## reconcile's ``mergeHolderDeadlines``, and deliberately the SAME
+  ## primitive (``repro_resources``' ``applyHolderRenewal``), so a renew that
+  ## reaches the daemon and the in-process store write of the same consume
+  ## cannot disagree about the record they produce:
   ##
-  ##   * ``deadlineFrom(policy, now)`` is the L2 primitive that maps the
-  ##     policy to this holder's deadline;
-  ##   * a ``keep``/``none`` policy DROPS the consumer from the dated map
-  ##     (it pins with no expiry) so it can never masquerade as an expiring
-  ##     holder;
-  ##   * ``effectiveDeadline`` is recomputed as the MAX over all remaining
-  ##     dated holders — but a ``keep`` holder makes it ``none`` (never
-  ##     reap), dominating every dated holder (§2.3).
-  let dl = deadlineFrom(policy, now)
-  if dl.isSome:
-    rec.holders[consumerId] = dl.get
-  else:
-    rec.holders.del(consumerId)
-  rec.lastRenewed = now
-
-  # keep-dominates: if THIS renewal pinned the state, effective is none.
-  # Otherwise fold the MAX over the remaining dated holders. (We treat a
-  # renew whose policy is keep as "this holder pins" — matching the L2
-  # reconcile rule; a prior dated holder does not re-expire a keep-pinned
-  # state within the same record because the pin is recorded as the absence
-  # of a dated entry AND the effective deadline going none here.)
-  if policy.kind == lkKeep:
-    rec.effectiveDeadline = none(Time)
-    return
-  var effective = none(Time)
-  for _, d in rec.holders:
-    if effective.isNone or d > effective.get:
-      effective = some(d)
-  rec.effectiveDeadline = effective
+  ##   * a dated policy sets ``holders[consumerId]`` to
+  ##     ``deadlineFrom(policy, now)`` and takes the consumer out of
+  ##     ``keepHolders``;
+  ##   * ``keep`` records the consumer BY NAME in ``keepHolders`` (and drops
+  ##     any dated entry for it), so the record can say who pins the state —
+  ##     the name a ``repro up --replace`` refusal must give, and the one a
+  ##     daemon rebuilding its registry from the store after a restart needs;
+  ##   * ``effectiveDeadline`` is the MAX over the dated holders, or ``none``
+  ##     while ANY keep holder is recorded — this renew's or an earlier one's
+  ##     (§2.3: keep dominates every dated holder).
+  applyHolderRenewal(rec, consumerId, policy, now)
 
 proc applyLeaseRenew*(request: DaemonLeaseRenewRequest;
                       overrideRoot = "";
@@ -262,6 +249,16 @@ proc applyLeaseRenew*(request: DaemonLeaseRenewRequest;
   var rec =
     try:
       readStateRecord(store, request.address)
+    except ForeignStateRecordError as err:
+      # A NEWER repro owns this record. Renewing would mean rewriting it in
+      # OUR format — downgrading it and dropping whatever the newer version
+      # added — so refuse and say why; the newer repro's own renew path (or
+      # daemon) is the one that may touch it.
+      result.ok = false
+      result.reason = "refusing to renew: the record for " & request.address &
+        " was written by a newer repro (state-record version " &
+        $err.version & "); renew it with that version"
+      return
     except CatchableError as err:
       result.ok = false
       result.reason = "failed to read record: " & err.msg
@@ -335,7 +332,28 @@ proc leaseReapFindings*(report: ReapReport):
   ## address + typeId + kind IS the finding: one record, and one reason it is
   ## stuck. A changed message about the same stuck record is the same finding,
   ## and its text is already on the line that was logged.
+  ##
+  ## Records the sweep could not DECODE have no address, so they are keyed on
+  ## their PATH: a second bad record is a new finding, not a repeat of the
+  ## first. A foreign record also keys on its version (a store upgraded again
+  ## is worth saying again). A quarantined record leaves the store, so its
+  ## finding cannot recur for that file — the path key matters for the NEXT
+  ## corrupt record, which must not be swallowed as already reported.
   result = @[]
+  for f in report.foreign:
+    result.add((
+      signature: "foreign\x00" & f.path & "\x00" & $f.version,
+      line: "leaving foreign record path=" & f.path & " version=" &
+        $f.version & ": written by a newer repro; not reaped, not touched"))
+  for q in report.quarantined:
+    result.add((
+      signature: "quarantined\x00" & q.path,
+      line: "quarantined undecodable record path=" & q.path & " -> " &
+        q.quarantinePath & ": " & q.reason))
+  for u in report.unreadable:
+    result.add((
+      signature: "unreadable\x00" & u.path,
+      line: "cannot read record path=" & u.path & ": " & u.reason))
   for f in report.failed:
     let verb =
       case f.kind

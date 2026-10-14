@@ -289,7 +289,8 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
   #     every member of the 22-member group does". Both halves are false once
   #     the scan follows LIBRARY imports and not only path imports:
   #     `repro_dsl_stdlib/packages/*` modules declare top-level `package`
-  #     blocks and arrive directly and through `catalog_registry`, so 5 of
+  #     blocks and arrive directly and through `catalog_registry` (now
+  #     `package_registry`), so 5 of
   #     the 13 taken reach one and 21 of the 22 rejected do. The groups
   #     differ in density (5/13 vs 21/22), not in kind. What licenses taking
   #     the 13 is the measurement — every member run standalone first, the
