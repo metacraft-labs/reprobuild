@@ -1,9 +1,9 @@
 ## Regression test for the M8 follow-up bug: the harvester silently
 ## emitted invalid Nim when an ``--app`` flag named a string that
 ## isn't a valid Nim identifier (e.g. ``--app 7zip`` produced a
-## ``packages/7zip.nim`` containing ``let 7zipCatalog* = @[...]``
-## which fails ``nim check`` because identifiers cannot start with
-## a digit).
+## ``packages/7zip.nim`` containing ``package 7zip:`` (originally
+## ``let 7zipCatalog* = @[...]``), which fails ``nim check`` because
+## identifiers cannot start with a digit).
 ##
 ## The fix lives in ``repro_catalog_harvester.nim`` —
 ## ``validateResolvedAppNames`` runs in ``main()`` AFTER CLI
@@ -23,7 +23,7 @@
 ##     the bucket clone)
 ##   * a digit-prefix name CAN be harvested when paired with a
 ##     correctly-shaped ``--app-alias`` (``7zip=sevenzip``); the
-##     emitted file uses the alias as the seq identifier
+##     emitted file uses the alias as the package name
 ##
 ## All cases invoke the harvester as a subprocess (the same way an
 ## operator invokes it). We deliberately do NOT call ``parseCli``
@@ -146,8 +146,7 @@ suite "M8 follow-up — output app name validation":
   test "test_harvester_accepts_valid_nim_identifier_app_name":
     # --app hello (the bucket-simple fixture's only manifest) is a
     # valid Nim identifier. The harvester proceeds past validation
-    # and emits packages/hello.nim. The emitted seq identifier is
-    # helloCatalog (valid Nim).
+    # and emits packages/hello.nim declaring `package hello:`.
     let outDir = tempOutDir("valid-name")
     let (rc, output) = runHarvester(@[
       "harvest",
@@ -160,10 +159,11 @@ suite "M8 follow-up — output app name validation":
     let emitted = outDir / "hello.nim"
     check fileExists(emitted)
     let body = readFile(emitted)
-    check "helloCatalog*" in body
+    check "\npackage hello:\n" in body
+    check "tarball url = " in body
     # Spot-check: emitted file is NOT the bug shape (no digit-prefix
     # identifier).
-    check (not body.contains("let 7"))
+    check (not body.contains("package 7"))
 
   test "test_harvester_accepts_app_alias_override":
     # --app 7zip --app-alias 7zip=sevenzip → resolved name is
@@ -191,7 +191,7 @@ suite "M8 follow-up — output app name validation":
   test "test_harvester_accepts_app_alias_override_emits_alias_identifier":
     # When the bucket actually carries a manifest under the
     # invalid-identifier source name, the alias's *target* drives
-    # both the output filename and the emitted seq identifier.
+    # both the output filename and the emitted package name.
     # We don't have a fixture with a digit-prefixed manifest name
     # (Scoop's convention rejects them too — that's why operators
     # name them e.g. '7zip19.00-helper'), so we exercise the
@@ -212,7 +212,8 @@ suite "M8 follow-up — output app name validation":
     let emitted = outDir / "greeter.nim"
     check fileExists(emitted)
     let body = readFile(emitted)
-    # The seq identifier is built from the alias target, NOT the
-    # source manifest name.
-    check "greeterCatalog*" in body
-    check (not body.contains("helloCatalog*"))
+    # The package name is the alias target, NOT the source manifest
+    # name.
+    check "\npackage greeter:\n" in body
+    check (not body.contains("package hello"))
+    check "packageId = \"greeter@" in body

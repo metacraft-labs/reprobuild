@@ -11,8 +11,10 @@
 ##   planner itself expands (`buildPlan` over the same intent and host:
 ##   the activities its planned packages come from), and equals the
 ##   hand-written expectation for each host;
-## * the export compiled through the normal edge: run after the plan, it is
-##   an action-cache hit and spawns no `nim`;
+## * the export compiled through the normal edge: run after the plan, the
+##   compile is an action-cache hit (no `nim c`); the export's platform probe
+##   runs once (one `nim dump`, one `nim check` per target platform), and the
+##   next export is answered from the cache for both edges (no `nim` at all);
 ## * nothing outside the compile cache is written: the state directory (minus
 ##   `profile-cache/`), the store root and `HOME` are byte-for-byte unchanged
 ##   across every export run, and no generation exists.
@@ -23,7 +25,9 @@
 ## would silently override is refused.
 ##
 ## Schema tripwire: the document's key sets, and the shapes of the activity
-## elements and resources in it, are the documented schema version 1. The
+## elements, config overrides and resources in it, are the documented schema
+## version 2 (GM3 added `platforms`, the `guard` of resources and config
+## overrides, and `provenance.compile.target` / `probe`). The
 ## intent is rendered by the shared ProfileIntent encoder, so an encoder
 ## change fails here instead of silently changing the published schema.
 ##
@@ -168,15 +172,19 @@ profile "gm2Export":
       # --- host alpha, selected with --host ------------------------------
       let (alphaRun, alpha) = sb.exportFor(["--host", "alpha"])
       require alphaRun.exitCode == 0
-      # Same edge, answered from the action cache the plan populated.
-      check alphaRun.nimSpawns == 0
+      # Same compile edge, answered from the action cache the plan
+      # populated: no `nim c`. The only `nim` processes are the platform
+      # probe's (a separate edge the plan does not run): one `nim dump` and
+      # one `nim check` per target platform.
+      check alphaRun.nimCompileSpawns == 0
+      check alphaRun.nimSpawns == 1 + ProfileTargetPlatforms.len
       check alpha["format"].getStr == "repro.home.export"
-      check alpha["schemaVersion"].getInt == 1
+      check alpha["schemaVersion"].getInt == 2
       check alpha["intent"] == plannerJson
       # The intent round-trips through the one ProfileIntent decoder.
       check emitProfileIntentJson(parseProfileIntentJson($alpha["intent"])) ==
         emitProfileIntentJson(plannerIntent)
-      # The document's shape is the documented schema version 1
+      # The document's shape is the documented schema version 2
       # (docs/user-guide/home-export.md). `intent` is rendered by the shared
       # ProfileIntent encoder, so a change to that encoder would otherwise
       # change this published schema without anyone bumping `schemaVersion`
@@ -184,7 +192,13 @@ profile "gm2Export":
       # field is compatible (document it and extend the set); a renamed or
       # reshaped one also bumps `HomeExportSchemaVersion`.
       check keysOf(alpha) == sorted(@["format", "schemaVersion", "selection",
-        "intent", "provenance"])
+        "intent", "platforms", "provenance"])
+      # Every target platform has a status; this profile selects platforms
+      # with runtime predicates only, so the document describes all of them.
+      check keysOf(alpha["platforms"]) == sorted(targetSystemNames())
+      for system, status in alpha["platforms"]:
+        checkpoint(system & ": " & $status)
+        check status.getStr == "same"
       check keysOf(alpha["selection"]) == sorted(@["host", "hostDeclared",
         "activities", "unknownActivities"])
       check keysOf(alpha["intent"]) == sorted(@["name", "activities",
@@ -196,7 +210,9 @@ profile "gm2Export":
         @["sourceRevision", "version"]
       check keysOf(alpha["provenance"]["profile"]) ==
         @["digest", "inputs", "root"]
-      check keysOf(alpha["provenance"]["compile"]) == @["cpu", "defines", "os"]
+      check keysOf(alpha["provenance"]["compile"]) ==
+        @["cpu", "defines", "os", "probe", "target"]
+      check alpha["provenance"]["compile"]["probe"].len == 0
       var elementShapes: seq[string]
       for activity in alpha["intent"]["activities"]:
         check keysOf(activity) == @["body", "name"]
@@ -209,8 +225,13 @@ profile "gm2Export":
         check shape in ["packageRef:kind,name,version",
           "packageRef:binaries,kind,name,version",
           "whenGuard:body,kind,predicate"]
+      for override in alpha["intent"]["configOverrides"]:
+        check keysOf(override) == @["guard", "key", "pkg", "value"]
+        check override["guard"].kind == JNull
       for resource in alpha["intent"]["resources"]:
-        check keysOf(resource) == @["address", "dependsOn", "fields", "kind"]
+        check keysOf(resource) ==
+          @["address", "dependsOn", "fields", "guard", "kind"]
+        check resource["guard"].kind == JNull
         for _, field in resource["fields"]:
           check keysOf(field) == @["kind", "value"]
 
@@ -242,11 +263,15 @@ profile "gm2Export":
       check prov["dataFiles"].len == 0
       check prov["compile"]["os"].getStr == hostOS
       check prov["compile"]["cpu"].getStr == hostCPU
+      check prov["compile"]["target"].getStr == compilingPlatformSystem()
       check prov["compile"]["defines"].kind == JArray
 
       # --- host beta: a different selection, the same intent ------------
       let (betaRun, beta) = sb.exportFor(["--host=beta"])
       require betaRun.exitCode == 0
+      # Both edges -- compile and platform probe -- answered from the cache.
+      check betaRun.nimSpawns == 0
+      check beta["platforms"] == alpha["platforms"]
       check beta["intent"] == plannerJson
       check strings(beta["selection"]["activities"]) ==
         @["default", "beta_tools"]

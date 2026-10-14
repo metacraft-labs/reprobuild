@@ -25,6 +25,11 @@ type
 
   CondKeyword* = enum
     ckWhen, ckIf
+    ckElif   ## an `elif <pred>:` branch of a `when` chain in `config:` /
+             ## `resources:`; its `predicateAst` is the branch predicate
+             ## conjoined with the negation of every earlier branch's
+    ckElse   ## the `else:` branch of such a chain; its `predicateAst` is
+             ## the conjunction of the negated earlier predicates
 
   IntentNode* = ref object
     ## Each node describes one structural item the parser recognized.
@@ -47,8 +52,14 @@ type
       keyword*: CondKeyword
       predicateSource*: string       ## the raw text between the
                                      ## keyword and the trailing `:`
-      predicateAst*: PredNode
-      canonicalPredicate*: string    ## normalized canonical form
+                                     ## (empty for `else:`)
+      predicateAst*: PredNode        ## the guard the block applies: for
+                                     ## `when` / `if` the parsed predicate,
+                                     ## for `elif` / `else` the effective
+                                     ## guard of that branch (see
+                                     ## `CondKeyword`)
+      canonicalPredicate*: string    ## normalized canonical form of
+                                     ## `predicateAst`
       condHeaderLine*: int
       condChildren*: seq[IntentNode]
     of nkPackageRef:
@@ -72,14 +83,32 @@ type
     of nkConfigBlock:
       configHeaderLine*: int
       configPackages*: seq[IntentNode]
+        ## `nkConfigPackage` blocks, and -- for a `when <pred>:` chain
+        ## around package blocks (GM3) -- `nkCondBlock`s whose
+        ## `condChildren` are further package blocks / guarded blocks.
+        ## Walk it with `applicableConfigPackages`, which evaluates the
+        ## guards; never read the packages directly.
     of nkConfigPackage:
       configPackageName*: string
       configPackageHeaderLine*: int
       configEntries*: seq[IntentNode]
+        ## `nkConfigEntry` lines, and `nkCondBlock`s whose
+        ## `condChildren` are the `nkConfigEntry`s (or nested guarded
+        ## blocks) a runtime guard selects (GM3: a `when <pred>:` chain
+        ## inside the package block, parsed from source or adapted from a
+        ## compiled `ProfileIntent`). Walk it with
+        ## `applicableConfigEntries`, which evaluates the guards; never
+        ## read the entries directly.
     of nkConfigEntry:
       configKey*: string
       configValueSource*: string     ## raw RHS bytes, no leading `=`
       configEntryLine*: int
+      configIntentOrdinal*: int
+        ## 1-based position of the `ConfigOverride` this entry was
+        ## adapted from in the compiled `ProfileIntent.configOverrides`;
+        ## 0 for an entry parsed from source text. Lets a consumer of the
+        ## planner's selection (`repro home export --target`) name the
+        ## intent element the planner chose.
     of nkHostsBlock:
       hostsHeaderLine*: int
       hostsEntries*: seq[IntentNode]
@@ -104,6 +133,10 @@ type
       resourceAddress*: string
       resourceHeaderLine*: int
       resourceAttrs*: seq[IntentNode]
+      resourceIntentOrdinal*: int
+        ## 1-based position of the `ResourceIntent` this entry was
+        ## adapted from in the compiled `ProfileIntent.resources`; 0 for
+        ## an entry parsed from source text (see `configIntentOrdinal`).
     of nkResourceAttr:
       ## A `<key> = <value>` payload line inside a resource entry.
       resourceAttrKey*: string
@@ -123,15 +156,16 @@ type
     root*: IntentNode                  ## the `profile <name>:` node
     indentStep*: int                   ## detected indent width (usually 2)
     adapterPreference*: OrderedTable[string, seq[string]]
-      ## M2.5: per-OS adapter preference parsed from a top-level
+      ## The profile's selection policy (GM4b), parsed from a top-level
       ## `adapterPreference:` block inside the `profile` body. Keys are
       ## canonical OS tags (`"windows"`, `"linux"`, `"darwin"`); values
-      ## are the ordered adapter chain (each entry drawn from the closed
-      ## set `{"builtin", "scoop", "nix", "path"}`). Empty table when
-      ## the block is absent — the realize / preview path then falls
-      ## back to the M65 platform default chain. A partial table (e.g.
-      ## only `"windows"` set) falls back to the M65 platform default
-      ## per missing OS at resolve time. `darwin` and `macos` are
+      ## are the ordered realization kinds (each drawn from the closed
+      ## set `{"tarball", "builtin", "scoop", "nix", "path"}`; `builtin`
+      ## is the former spelling of `tarball`). Empty table when the block
+      ## is absent — resolution then uses the default selection policy,
+      ## the same on every platform. A partial table (e.g. only
+      ## `"windows"` set) uses the default for each missing OS at resolve
+      ## time. `darwin` and `macos` are
       ## aliased at parse time to the canonical `"darwin"` key so a
       ## single lookup at resolve time suffices.
 

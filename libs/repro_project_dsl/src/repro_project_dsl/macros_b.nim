@@ -3759,33 +3759,11 @@ proc provisioningContributionLiteral(
   result.add("], tarballProvisioning: @[")
   for i, provisioning in contribution.tarballProvisioning:
     if i > 0: result.add(", ")
-    # Spliced verbatim — these fields hold emittable SOURCE. Kept in step with
-    # the identical emitter in ``macros_a.packageLiteral``; the two must agree,
-    # since a `provisioningFor` contribution and an in-package `provisioning:`
-    # block are the same declaration reached by different routes.
-    result.add("TarballProvisioningDef(url: " &
-      codeOrEmpty(provisioning.url) & ", mirrors: @[")
-    for j, mirror in provisioning.mirrors:
-      if j > 0: result.add(", ")
-      result.add(mirror)
-    result.add("], prunePaths: @[")
-    for j, prunePath in provisioning.prunePaths:
-      if j > 0: result.add(", ")
-      result.add(prunePath)
-    result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
-      ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
-      ", nonRedistributable: " & $provisioning.nonRedistributable &
-      ", launcher: " & codeOrEmpty(provisioning.launcher) &
-      ", closureManifest: " & codeOrEmpty(provisioning.closureManifest) &
-      ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
-      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
-      ", stripComponents: " & $provisioning.stripComponents &
-      ", packageId: " & codeOrEmpty(provisioning.packageId) &
-      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
-      ", cpu: " & codeOrEmpty(provisioning.cpu) &
-      ", os: " & codeOrEmpty(provisioning.os) &
-      ", sourceFile: " & escForCode(provisioning.sourceFile) &
-      ", sourceLine: " & $provisioning.sourceLine & ")")
+    # Spliced verbatim — these fields hold emittable SOURCE. The emitter is
+    # shared with ``macros_a.packageLiteral``: a `provisioningFor`
+    # contribution and an in-package `provisioning:` block are the same
+    # declaration reached by different routes.
+    result.add(tarballProvisioningLiteral(provisioning))
   result.add("], scoopProvisioning: @[")
   for i, provisioning in contribution.scoopProvisioning:
     if i > 0: result.add(", ")

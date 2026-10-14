@@ -1,22 +1,18 @@
-## M68 merge note (hand-edited): the auto-generated ``ghCatalog`` body
-## sits below the pre-existing ``package gh:`` Nix block. The Nix
-## block remains the source of truth for Nix-capable hosts; the
-## ``ghCatalog`` slice below is consumed by the M64 ``cakBuiltin``
-## adapter on Windows. Re-harvest emits ONLY the catalog half;
-## re-attach the Nix block by hand if you regenerate.
+## GM4b: every archive realization of ``gh`` is a ``tarball`` statement
+## in the ``provisioning:`` block below. The M68 ``ghCatalog``
+## (``VersionedProvisioning``) copy that once sat beside it was merged
+## into these statements and removed, so a home profile and a recipe's
+## ``uses:`` select from one set of records. The catalog harvester
+## emits ``tarball`` statements to merge here.
 ##
-## **M9.5 merge note (hand-edited):** added a ``(pcX86_64, poLinux)``
-## platform slice harvested via ``--source gh-releases:cli/cli
-## --asset-pattern 'gh_2\.93\.0_linux_amd64\.tar\.gz' --platform-os
-## linux``. The Linux tarball is ``afTarGz`` (vs. the Windows ``afZip``)
-## and the inner ``bin/gh`` binary nests under
-## ``gh_<ver>_linux_amd64/`` — both encoded via the M9.5 per-platform
-## overrides (``archive_format_override`` + ``bin_relpath_override``).
+## M9.5: the Linux realization was harvested via ``--source
+## gh-releases:cli/cli --asset-pattern 'gh_2\.93\.0_linux_amd64\.tar\.gz'
+## --platform-os linux``. The inner ``bin/gh`` binary nests under
+## ``gh_<ver>_linux_amd64/``, which ``stripComponents = 1`` removes.
 ## glibc floor: the gh upstream builds against the GoReleaser default
 ## (RHEL/CentOS 7 era, glibc 2.17+), satisfying the M9.5 spec's
 ## "glibc-2.17-compatible Linux tarballs" honest-scope target.
 
-import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
@@ -31,18 +27,16 @@ package gh:
     nixPackage "nixpkgs#gh", executablePath = "bin/gh",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
-    # Direct-download arms for PROJECT tool provisioning (`tarball` mode).
-    #
-    # The `ghCatalog` slice below does not serve this: it feeds the M64
-    # `cakBuiltin` adapter behind `repro home apply`, while a recipe's
-    # `uses: "gh >=2"` under `tarball` reads these arms. With only the nix
-    # arm, a Windows dev shell reported `package "gh" ... does not declare
-    # provisioning: tarball metadata` and gh was the one tool in the
-    # workspace dev-env floor it could not provide.
+    # Direct-download arms. A recipe's `uses: "gh >=2"` under `tarball`
+    # mode and a home profile's `package "gh"` both select from them
+    # (GM4b). With only the nix arm, a Windows dev shell reported
+    # `package "gh" ... does not declare provisioning: tarball metadata` and
+    # gh was the one tool in the workspace dev-env floor it could not
+    # provide.
     #
     # Digests are GitHub's own published asset digests for v2.93.0, checked
-    # by downloading each asset (2026-09-24); they agree with the catalog
-    # slice's. The Windows zip ships `bin/gh.exe` at the root; the Linux and
+    # by downloading each asset (2026-09-24); they agreed with the retired
+    # catalog record's. The Windows zip ships `bin/gh.exe` at the root; the Linux and
     # macOS archives nest it under `gh_2.93.0_<platform>/`, hence the strip.
     tarball url = "https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_windows_amd64.zip",
       sha256 = "77aa01ed7317295ad550de0ad04f3f276b1ef0e9272e3d002ac28dd99853d211",
@@ -51,7 +45,8 @@ package gh:
       packageId = "gh@2.93.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:gh@2.93.0:sha256:77aa01ed7317295ad550de0ad04f3f276b1ef0e9272e3d002ac28dd99853d211"
+      lockIdentity = "tarball:gh@2.93.0:sha256:77aa01ed7317295ad550de0ad04f3f276b1ef0e9272e3d002ac28dd99853d211",
+      version = "2.93.0"
     tarball url = "https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_windows_arm64.zip",
       sha256 = "1d2ab9d48f01a86c7156dae3008428743d6cd716a51fc50410078d51dec3dea4",
       archiveType = "zip",
@@ -59,7 +54,8 @@ package gh:
       packageId = "gh@2.93.0",
       cpu = "aarch64",
       os = "windows",
-      lockIdentity = "tarball:gh@2.93.0:windows-aarch64:sha256:1d2ab9d48f01a86c7156dae3008428743d6cd716a51fc50410078d51dec3dea4"
+      lockIdentity = "tarball:gh@2.93.0:windows-aarch64:sha256:1d2ab9d48f01a86c7156dae3008428743d6cd716a51fc50410078d51dec3dea4",
+      version = "2.93.0"
     tarball url = "https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_linux_amd64.tar.gz",
       sha256 = "02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0",
       archiveType = "tar.gz",
@@ -68,7 +64,8 @@ package gh:
       packageId = "gh@2.93.0",
       cpu = "x86_64",
       os = "linux",
-      lockIdentity = "tarball:gh@2.93.0:linux:sha256:02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0"
+      lockIdentity = "tarball:gh@2.93.0:linux:sha256:02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0",
+      version = "2.93.0"
     tarball url = "https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_macOS_arm64.zip",
       sha256 = "a86be4e0a86c26456cf71177d6572d6f1165cf1679e532b72f7f15918ee51fd2",
       archiveType = "zip",
@@ -77,30 +74,5 @@ package gh:
       packageId = "gh@2.93.0",
       cpu = "aarch64",
       os = "macos",
-      lockIdentity = "tarball:gh@2.93.0:macos-aarch64:sha256:a86be4e0a86c26456cf71177d6572d6f1165cf1679e532b72f7f15918ee51fd2"
-
-# ---------------------------------------------------------------------------
-# M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
-# Harvested from bucket: ScoopInstaller/Main
-# Versions (newest-first): 2.93.0
-# ---------------------------------------------------------------------------
-
-let ghCatalog* = @[
-  VersionedProvisioning(
-    version: "2.93.0",
-    archive_format: afZip,
-    install_method: imExtract,
-    bin_relpath: @["bin\\gh.exe"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_windows_amd64.zip", sha256: "77aa01ed7317295ad550de0ad04f3f276b1ef0e9272e3d002ac28dd99853d211", sha512: "", extract_path: ""),
-      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_windows_arm64.zip", sha256: "1d2ab9d48f01a86c7156dae3008428743d6cd716a51fc50410078d51dec3dea4", sha512: "", extract_path: ""),
-      # M9.5: Linux x86_64 slice. archive_format_override = afTarGz
-      # (Windows is afZip); bin_relpath_override = the linux tarball's
-      # nested ``gh_<ver>_linux_amd64/bin/gh`` path.
-      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://github.com/cli/cli/releases/download/v2.93.0/gh_2.93.0_linux_amd64.tar.gz", sha256: "02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0", sha512: "", sha1: "", extract_path: "", archive_format_override: afTarGz, has_archive_format_override: true, bin_relpath_override: @["gh_2.93.0_linux_amd64/bin/gh"])
-    ],
-    installer_args: @[],
-    pacman_packages: @[],
-    bootstrap_argv: @[],
-    env: initTable[string, string]())
-]
+      lockIdentity = "tarball:gh@2.93.0:macos-aarch64:sha256:a86be4e0a86c26456cf71177d6572d6f1165cf1679e532b72f7f15918ee51fd2",
+      version = "2.93.0"

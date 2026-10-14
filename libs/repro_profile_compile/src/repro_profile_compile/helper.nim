@@ -34,6 +34,7 @@ from repro_core/paths import extendedPath
 import repro_profile_intent
 
 import ./compile
+import ./platforms
 
 proc valueAfterFlag(args: openArray[string]; flag: string): string =
   var i = 0
@@ -112,3 +113,45 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
 
   writeBytesAtomic(rbpiPath, rbpiBytes)
   return 0
+
+proc runProfilePlatformProbeHelper*(args: openArray[string]): int =
+  ## Implementation of `repro __repro-probe-profile-platforms`: evaluate the
+  ## profile for every target platform (`runProfilePlatformProbes`) and write
+  ## the outcomes to `--out`. The body of the platform-probe edge
+  ## (`probeProfilePlatforms`), with the compile helper's contract: no
+  ## freshness check of its own, no depfile -- io-mon observes what the
+  ## checks read.
+  ##
+  ## Argv: `--profile <root.nim> --out <json> --nimcache <dir>
+  ## --repo-root <dir>`. Exits 0 when the document was written (whatever
+  ## each platform's outcome), 1 when the probe could not run at all, 2 on
+  ## a usage error.
+  let profileRoot = valueAfterFlag(args, "--profile")
+  let outPath = valueAfterFlag(args, "--out")
+  let nimcacheDir = valueAfterFlag(args, "--nimcache")
+  let repoRoot = valueAfterFlag(args, "--repo-root")
+  for (name, value) in [
+    ("--profile", profileRoot),
+    ("--out", outPath),
+    ("--nimcache", nimcacheDir),
+    ("--repo-root", repoRoot)
+  ]:
+    if value.len == 0:
+      stderr.writeLine("repro __repro-probe-profile-platforms: missing " & name)
+      return 2
+  if not fileExists(extendedPath(profileRoot)):
+    stderr.writeLine("repro __repro-probe-profile-platforms: profile root " &
+      "does not exist: " & profileRoot)
+    return 1
+  var outcomes: seq[ProbeOutcome]
+  try:
+    outcomes = runProfilePlatformProbes(profileRoot, nimcacheDir, repoRoot)
+  except CompileFailure as err:
+    stderr.writeLine("repro __repro-probe-profile-platforms: " & err.msg)
+    return 1
+  let text = encodeProbeOutcomes(outcomes)
+  var bytes = newSeq[byte](text.len)
+  for i, ch in text:
+    bytes[i] = byte(ord(ch))
+  writeBytesAtomic(outPath, bytes)
+  0

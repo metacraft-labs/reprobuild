@@ -78,9 +78,6 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifes
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	t_repro_https_cache_end_to_end	1
 libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	test_n48_apt_data_member_extracts_into_dirs_gnu_tar_would_unquote	2
 libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	test_n48_apt_data_member_extracts_under_an_absolute_windows_outdir	2
-libs/repro_home_apply/tests/t_adapter_chain.nim	cakNix in preference is skipped cleanly (placeholder branch)	1
-libs/repro_home_apply/tests/t_adapter_chain.nim	custom preference [scoop, builtin] respects ordering	1
-libs/repro_home_apply/tests/t_adapter_chain.nim	jdk resolves via cakBuiltin on the platform default chain	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	test_m3_nested_7z_disabled_keeps_inner_archives	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	test_m3_nested_7z_flatten_synthetic_gcc_winlibs_shape	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_basic_7z_still_works_erlang_shape	1

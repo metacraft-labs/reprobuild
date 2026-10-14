@@ -30,11 +30,15 @@
 ##      levelless catalog resolves the same on a v1 host, a v4 host and a host
 ##      that has stated nothing — which is what makes the whole existing
 ##      stdlib immune to whatever ``detectHostMicroarchLevel`` reports;
-##   3. every arm in every REGISTERED stdlib catalog declares ``mlNone``, so
-##      (1) and (2) actually cover the stdlib rather than covering a class it
-##      turns out not to be in;
-##   4. over every registered stdlib catalog, every version slice, and the full
-##      host matrix, the two implementations agree arm for arm;
+##   3. every ``tarball`` realization of every linked stdlib package declares
+##      no ``cpuLevel`` (GM4b: the former catalog records are now such
+##      realizations), so (1) and (2) actually cover the stdlib rather than
+##      covering a class it turns out not to be in;
+##   4. over every linked stdlib package, every version's realizations, and
+##      the full host matrix, the two implementations agree arm for arm — and
+##      the realization selection a recipe or profile actually runs
+##      (``realization_selection.selectTarballRecord``, version-pinned) picks
+##      the same record;
 ##   5. the pre-PMC-2 two-argument ``selectPlatformBinary`` overload is still
 ##      the same function it was, so callers that were never taught about
 ##      levels are unaffected.
@@ -51,10 +55,11 @@
 ## Hermetic: no network, no PATH, no host probing — the host matrix is
 ## synthetic and passed as parameters.
 
-import std/[options, unittest]
+import std/[options, sets, tables, unittest]
 
 import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
+import repro_dsl_stdlib/package_registry
+import repro_home_apply/package_catalog
 
 proc legacySelectPlatformBinary(vp: VersionedProvisioning;
                                 cpu: PlatformCpu; os: PlatformOs):
@@ -193,30 +198,58 @@ suite "PMC-2 — levelless catalog selection is unchanged":
       agreesEverywhere(fixture(@[anyCpu, anyCpuAgain, exact, anyAnyAgain,
         anyAny]), "duplicates-among-tiers")
 
-    # ---- (3) + (4) the real registry ------------------------------------
-    block realStdlibCatalogs:
-      var toolsSeen = 0
+    # ---- (3) + (4) the real stdlib ---------------------------------------
+    block realStdlibRealizations:
+      var packagesSeen = 0
       var armsSeen = 0
-      for tool in RegisteredTools:
-        let catOpt = getCatalog(tool)
-        if catOpt.isNone:
+      var pinnedComparisons = 0
+      for name in linkedPackageNames():
+        let records = profileToolUse(name).useDef.tarballProvisioning
+        if records.len == 0:
           continue
-        let cat = catOpt.get
-        if cat.len == 0:
-          continue
-        inc toolsSeen
-        for vp in cat:
-          for pb in vp.platforms:
-            inc armsSeen
-            # (3) the stdlib really is in the levelless class.
-            if pb.cpu_level != mlNone:
-              checkpoint tool & " " & vp.version & " declares cpu_level " &
-                describeMicroarchLevel(pb.cpu_level) &
-                " — this test's premise no longer holds for it"
-            check pb.cpu_level == mlNone
+        inc packagesSeen
+        # One "version slice" per declared version, in declaration order.
+        var byVersion = initOrderedTable[string, seq[int]]()
+        for i, r in records:
+          byVersion.mgetOrPut(r.detail.version, @[]).add(i)
+          inc armsSeen
+          # (3) the stdlib really is in the levelless class.
+          if r.detail.cpuLevel.len > 0:
+            checkpoint name & " " & r.url & " declares cpuLevel " &
+              r.detail.cpuLevel & " — this test's premise no longer holds"
+          check r.detail.cpuLevel == ""
+        for version, indices in byVersion:
+          var arms: seq[PlatformBinary] = @[]
+          var sliceRecords: seq[typeof(records[0])] = @[]
+          for i in indices:
+            let arm = tarballArm(records[i])
+            check arm.ok
+            # ``tarballArm`` carries only the coordinate and capability axes
+            # selection reads; the URL names the arm in the comparisons.
+            var named = arm.arm
+            named.url = records[i].url
+            arms.add(named)
+            sliceRecords.add(records[i])
+          let vp = fixture(arms)
           # (4) arm-for-arm agreement across the host matrix.
-          agreesEverywhere(vp, tool & "@" & vp.version)
-      # Guard against the loop silently covering nothing (an unimported
-      # registry, an empty HashSet) and reporting a vacuous pass.
-      check toolsSeen > 0
+          agreesEverywhere(vp, name & "@" & version)
+          # ...and the selection a caller runs picks the same record.
+          if version.len == 0:
+            continue
+          for cpu in [pcX86_64, pcAArch64]:
+            for os in [poWindows, poLinux, poMacos]:
+              let expected = legacySelectPlatformBinary(vp, cpu, os)
+              let choice = selectTarballRecord(records,
+                realizationTargetFor(cpu, os, baselineMicroarchLevel(cpu)),
+                version)
+              inc pinnedComparisons
+              if expected.found:
+                check choice.status == kcSelected
+                if choice.status == kcSelected:
+                  check records[choice.index].url == expected.binary.url
+              else:
+                check choice.status != kcSelected
+      # Guard against the loop silently covering nothing.
+      check packagesSeen > 0
       check armsSeen > 0
+      check pinnedComparisons > 0

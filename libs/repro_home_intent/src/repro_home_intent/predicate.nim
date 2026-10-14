@@ -578,6 +578,16 @@ proc evaluateBool*(n: PredNode; ctx: HostContext;
           return true
     else: discard
 
+proc predicateHolds*(n: PredNode; ctx: HostContext;
+                     userPredicate: UserPredicateEvaluator = nil): bool =
+  ## Whether a guard admits `ctx`: a nil AST (no guard) always does.
+  ## THE guard rule for every intent element -- activity-body `when`
+  ## blocks, guarded resources and guarded config overrides -- so the
+  ## planner and `repro home export --target` cannot disagree on it.
+  if n == nil:
+    return true
+  evaluateBool(n, ctx, userPredicate)
+
 # ---------------------------------------------------------------------------
 # Predicate validation (resolve unknown identifiers to user modules).
 # ---------------------------------------------------------------------------

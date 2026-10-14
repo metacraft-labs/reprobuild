@@ -41,7 +41,6 @@ import blake3
 import repro_home_intent
 import repro_home_generations
 import repro_home_apply
-import repro_home_apply/catalog_lookup
 import repro_home_resources
 import repro_home_rollback
 import repro_launch_plan
@@ -318,7 +317,8 @@ proc renderRecovered(rec: AbortedGenerationRecord): string =
 proc runApplyInline*(commandName: string;
                      mode: ApplyMode = amFull;
                      setOverrideKey: string = "";
-                     adoptAddresses: seq[string] = @[]): int =
+                     adoptAddresses: seq[string] = @[];
+                     relock = false): int =
   ## Shared apply-pipeline runner used by `repro home apply` and by
   ## the inline path of `add`/`remove`/`enable`/`disable`/`set`.
   ## Reports the new generation id on stdout and any diagnostics on
@@ -334,6 +334,7 @@ proc runApplyInline*(commandName: string;
     opts.applyMode = mode
     opts.setOverrideKey = setOverrideKey
     opts.adoptAddresses = adoptAddresses
+    opts.relock = relock
     # M83 Phase F3: the compile-then-adapt path is the ONLY apply path.
     # A profile compilation failure is a HARD ERROR — the legacy text
     # parser no longer auto-fills the gap.
@@ -532,14 +533,21 @@ proc runHomeAdd(args: openArray[string]): int =
       "`<tool>@<concrete-version>`")
     return 2
   if version == "latest":
-    let latest = latestCatalogVersion(pkg)
-    if not latest.found:
+    # GM4b: `@latest` materializes the version an unpinned reference
+    # resolves to on this host, so pinning it does not change the
+    # selection (Provisioning-Contributions.md §"Profile Package
+    # References").
+    let latest = unpinnedHostVersion(pkg)
+    if latest.isNone:
       stderr.writeLine("repro home add: cannot resolve `" & pkg &
-        "@latest`: no built-in catalog registered for '" & pkg & "'")
-      stderr.writeLine("  hint: registered tools: " &
-        registeredToolNames().join(", "))
+        "@latest`: no definition of '" & pkg & "' offers a versioned " &
+        "(tarball or scoop) realization for this host")
+      let offered = offeredVersions(pkg)
+      if offered.len > 0:
+        stderr.writeLine("  hint: versions offered for other platforms: " &
+          offered.join(", "))
       return 1
-    version = latest.version
+    version = latest.get
   try:
     let profilePath = loadProfilePath()
     if not packageInCatalog(pkg):
@@ -1118,7 +1126,9 @@ proc runHomeHistory(args: openArray[string]): int =
 # `repro home apply` (M63).
 # ---------------------------------------------------------------------------
 
-proc runHomeApplyPlan(allowDrift, reconcileDrift: bool): int =
+proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
+                      relock = false; targetPlatform = "";
+                      targetArch = ""): int =
   ## M72 Deliverable 2: `repro home apply --plan` — a non-mutating
   ## preview of the FULL apply (packages, stow, generated files,
   ## managed blocks, launchers, resources). Runs the planning half of
@@ -1129,6 +1139,18 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool): int =
   try:
     var opts: ApplyOptions
     opts.reconcileStowDrift = reconcileDrift
+    opts.relock = relock
+    if targetPlatform.len > 0 or targetArch.len > 0:
+      # GM4b: plan for another platform. Package references resolve for
+      # the named target (Provisioning-Contributions.md §"Profile Package
+      # References"); the host inventory is not consulted for it.
+      var ctx = currentHostContext()
+      if targetPlatform.len > 0:
+        ctx.platform = normalizeTargetPlatform(targetPlatform)
+      if targetArch.len > 0:
+        ctx.arch = normalizeTargetArch(targetArch)
+      opts.targetContext = ctx
+      opts.hasTargetContext = true
     # M83 Phase F3: same hard-error compile path as the real apply.
     let profilePath =
       if opts.profilePath.len > 0: opts.profilePath
@@ -1175,10 +1197,16 @@ proc runHomeApply(args: openArray[string]): int =
   var planMode = false
   var allowDrift = false
   var reconcileDrift = false
-  for a in args:
+  var relock = false
+  var targetPlatform = ""
+  var targetArch = ""
+  var i = 0
+  while i < args.len:
+    let a = args[i]
     if a == "--help" or a == "-h":
       echo "usage: repro home apply [--plan] [--allow-drift] " &
-        "[--reconcile-drift | --accept-overwrite]"
+        "[--reconcile-drift | --accept-overwrite] [--relock] " &
+        "[--target-platform linux|macos|windows] [--target-arch x86_64|arm64]"
       echo ""
       echo "Run the home-profile apply pipeline against the current"
       echo "intent (`home.nim`), producing a new generation and"
@@ -1194,6 +1222,13 @@ proc runHomeApply(args: openArray[string]): int =
       echo "  --accept-overwrite (alias of --reconcile-drift) instead of"
       echo "                     failing closed; records the prior"
       echo "                     content so rollback can restore it."
+      echo "  --relock           Ignore the selections pinned in home.lock"
+      echo "                     and re-select every package under the"
+      echo "                     current selection policy (with --plan:"
+      echo "                     show what that would select)."
+      echo "  --target-platform  With --plan: resolve packages for another"
+      echo "  --target-arch      platform / architecture (the host's PATH"
+      echo "                     and Scoop are not consulted for it)."
       return 0
     if a == "--no-apply":
       stderr.writeLine("repro home apply: --no-apply is meaningless on " &
@@ -1206,19 +1241,32 @@ proc runHomeApply(args: openArray[string]): int =
       allowDrift = true
     elif a == "--reconcile-drift" or a == "--accept-overwrite":
       reconcileDrift = true
+    elif a == "--relock":
+      relock = true
+    elif a == "--target-platform" or a.startsWith("--target-platform="):
+      targetPlatform = parseFlagValue(args, i, "--target-platform")
+    elif a == "--target-arch" or a.startsWith("--target-arch="):
+      targetArch = parseFlagValue(args, i, "--target-arch")
     elif a.startsWith("--"):
       stderr.writeLine("repro home apply: unknown flag: " & a)
       return 2
     else:
       stderr.writeLine("repro home apply: unexpected positional: " & a)
       return 2
+    inc i
+  if (targetPlatform.len > 0 or targetArch.len > 0) and not planMode:
+    stderr.writeLine("repro home apply: --target-platform / --target-arch " &
+      "plan for another platform and need --plan; a real apply for another " &
+      "host goes through `repro home enable <activity> --host NAME --now`")
+    return 2
   if planMode:
-    return runHomeApplyPlan(allowDrift, reconcileDrift)
+    return runHomeApplyPlan(allowDrift, reconcileDrift, relock,
+      targetPlatform, targetArch)
   # A real apply with --reconcile-drift threads the policy through the
   # apply pipeline so a drifted stow target can be replaced.
   if reconcileDrift:
     putEnv("REPRO_HOME_APPLY_RECONCILE_DRIFT", "1")
-  return runApplyInline("apply")
+  return runApplyInline("apply", relock = relock)
 
 # ---------------------------------------------------------------------------
 # `repro home __build-bundle` (M71 Phase A, internal).
@@ -2448,8 +2496,10 @@ proc printUnknownConfigurable(pkg, key, profilePath: string) =
     "$REPRO_HOME_CONFIGURABLE_SCHEMA for the gate seam).")
 
 proc runHomeSet(args: openArray[string]): int =
-  ## `repro home set <pkg>.<key> <value> [--no-apply]` — write the
-  ## given configurable into the profile's `config:` section through
+  ## `repro home set <pkg>.<key> <value> [--when PRED] [--no-apply]` —
+  ## write the given configurable into the profile's `config:` section
+  ## (under a `when PRED:` guard inside the package block when `--when` is
+  ## given) through
   ## the M60 structural editor, then run the M63 apply pipeline
   ## inline with the M58 incremental refinalize fast path
   ## (`applyMode = amSet`). Pre-validates that the package is enabled
@@ -2460,13 +2510,30 @@ proc runHomeSet(args: openArray[string]): int =
   var pkgDotKey = ""
   var value = ""
   var noApply = false
+  var whenPredicate = ""
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--no-apply":
       noApply = true
+    elif a == "--when" or a.startsWith("--when="):
+      try:
+        whenPredicate = parseFlagValue(args, i, "--when")
+      except ValueError as e:
+        stderr.writeLine("repro home set: " & e.msg)
+        return 2
+      if whenPredicate.strip().len == 0:
+        stderr.writeLine("repro home set: --when needs a predicate " &
+          "expression (e.g. `--when windows`)")
+        return 2
+    elif a == "--if" or a.startsWith("--if="):
+      # `config:` guards are `when` chains only: the profile macro rejects
+      # an `if` there, so the editor must not write one.
+      stderr.writeLine("repro home set: `--if` is not accepted; a " &
+        "`config:` entry is guarded with `--when <predicate>`")
+      return 2
     elif a == "--help" or a == "-h":
-      echo "usage: repro home set <pkg>.<key> <value> [--no-apply]"
+      echo "usage: repro home set <pkg>.<key> <value> [--when PRED] [--no-apply]"
       echo ""
       echo "Update a managed configurable in the profile's `config:`"
       echo "section. Runs apply inline by default; --no-apply skips"
@@ -2474,6 +2541,12 @@ proc runHomeSet(args: openArray[string]): int =
       echo "active activity and the key must be declared by the"
       echo "package's configurable schema; the edit is committed only"
       echo "AFTER both pre-validations succeed."
+      echo ""
+      echo "--when PRED guards the value with a runtime predicate (e.g."
+      echo "`windows`, `linux and arm64`): it is written into the package"
+      echo "block's `when PRED:` block (matched by normalized predicate,"
+      echo "created if absent). A new value that would overlap an"
+      echo "assignment of the same key under a different guard is refused."
       return 0
     elif a.startsWith("--"):
       stderr.writeLine("repro home set: unknown flag: " & a)
@@ -2487,8 +2560,20 @@ proc runHomeSet(args: openArray[string]): int =
       return 2
     inc i
   if pkgDotKey.len == 0 or value.len == 0:
-    stderr.writeLine("usage: repro home set <pkg>.<key> <value> [--no-apply]")
+    stderr.writeLine("usage: repro home set <pkg>.<key> <value> " &
+      "[--when PRED] [--no-apply]")
     return 2
+  # The guard's predicate is validated (repro_home_intent's predicate
+  # grammar) before the profile is read, so a malformed one is a usage
+  # error naming the flag rather than a profile diagnostic.
+  var guardAst: PredNode = nil
+  if whenPredicate.len > 0:
+    try:
+      guardAst = parsePredicate("--when", whenPredicate, 0)
+    except EUnstructured as e:
+      stderr.writeLine("repro home set: invalid --when predicate '" &
+        whenPredicate & "': saw " & e.seen & "; expected " & e.expected)
+      return 2
   let parts = splitPkgDotKey(pkgDotKey)
   if not parts.ok:
     stderr.writeLine("repro home set: invalid form: '" & pkgDotKey &
@@ -2503,9 +2588,20 @@ proc runHomeSet(args: openArray[string]): int =
     # override is "silently inert" in the apply pipeline — for `set`,
     # the CLI converts that into a structured diagnostic so the user
     # learns the override would have no effect BEFORE the edit lands.
+    #
+    # A guarded value (`--when`) is for the hosts its guard selects; when
+    # the guard does not hold here (or names a predicate this host cannot
+    # evaluate), the current host's package set says nothing about those
+    # hosts, so the check is skipped rather than refusing a valid edit.
     let ctx = currentHostContext()
+    var checkEnabledHere = true
+    if not guardAst.isNil:
+      try:
+        checkEnabledHere = predicateHolds(guardAst, ctx)
+      except ValueError:
+        checkEnabledHere = false
     let effective = resolveEffectiveConfig(prof, ctx.host, ctx)
-    if parts.pkg notin effective.enabledPackages:
+    if checkEnabledHere and parts.pkg notin effective.enabledPackages:
       printConfigurableInactive(parts.pkg, parts.key, profilePath)
       return 1
     # Pre-validation 2: the key must be declared by the package's
@@ -2523,13 +2619,17 @@ proc runHomeSet(args: openArray[string]): int =
     # schema would require `gcsafe` plumbing around the module-level
     # configured-schema set — and would duplicate the diagnostic we
     # already emitted.
-    setConfigurable(profilePath, pkgDotKey, value, nil)
+    setConfigurable(profilePath, pkgDotKey, value, nil,
+      predicate = whenPredicate)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnknownPredicate as e:
     printUnknownPredicate(e); return 1
   except EUnstructured as e:
     printUnstructured(e); return 1
+  except EOverlappingAssignment as e:
+    stderr.writeLine("repro home set: " & e.msg)
+    return 1
   except EUnknownConfigurable as e:
     printUnknownConfigurable(e.package, e.configurable, e.profilePath)
     return 1
@@ -2557,16 +2657,28 @@ proc lookupConfigurableInProfile(prof: Profile; pkg, key: string):
   ## resolved value under FULL evaluation of the `config:` overrides.
   ## Since fixture packages do not declare defaults at M65 (the
   ## defaults seam is M68), the override IS the resolved value.
-  let cfgOpt = findConfigBlock(prof)
-  if cfgOpt.isNone:
+  ##
+  ## Which assignment is "the" value is decided by
+  ## `effectiveConfigAssignments`, the effective-config resolver's rule:
+  ## guarded overrides (GM3) count only where their guard holds, and of
+  ## several applicable assignments the LAST wins. Those it overrides are
+  ## named on stderr (Configurable-System.md §Priorities And Contributions:
+  ## "last write wins (with a structured diagnostic listing both sites)").
+  let resolved = effectiveConfigAssignments(prof, currentHostContext())
+  if pkg notin resolved or key notin resolved[pkg]:
     return (false, "")
-  for pkgNode in cfgOpt.get.configPackages:
-    if pkgNode.configPackageName != pkg:
-      continue
-    for entry in pkgNode.configEntries:
-      if entry.configKey == key:
-        return (true, entry.configValueSource)
-  (false, "")
+  let assignment = resolved[pkg][key]
+  if assignment.overridden.len > 0:
+    let file = extractFilename(prof.path)
+    var sites: seq[string]
+    for entry in assignment.overridden:
+      sites.add file & ":" & $entry.configEntryLine
+    stderr.writeLine("repro home get: note: " & pkg & "." & key &
+      " is assigned " & $(assignment.overridden.len + 1) &
+      " times on this host; the last assignment (" & file & ":" &
+      $assignment.entry.configEntryLine & ") wins over " &
+      sites.join(", "))
+  (true, assignment.entry.configValueSource)
 
 proc unquoteValueDisplay(raw: string): string =
   ## Mirror of the pipeline's `unquoteValueSource`: strip a single
@@ -3355,26 +3467,37 @@ proc runHomeMigrateFromEnvScripts(args: openArray[string]): int =
 # ---------------------------------------------------------------------------
 
 const HomeExportUsage = """usage: repro home export [--profile-dir DIR] [--host NAME] [--format json]
-                          [--check FILE]
+                          [--target SYSTEM | --check FILE]
 
 Print the evaluated home-profile intent as JSON: the profile's activities,
 config overrides, hosts map and resources exactly as the planner consumes
-them, the activities the planner enables on the selected host, and the
-provenance of the document (repro version and source revision, the profile
-files the compile read with their digests, the compile platform).
+them (runtime `when` guards included, as predicate text), the activities the
+planner enables on the selected host, which target platforms the document
+describes, and the provenance of the document (repro version and source
+revision, the profile files the compile read with their digests, the compile
+platform).
 
-The profile is compiled through the normal profile-compile edge (an unchanged
-profile is an action-cache hit). Nothing is planned, applied or recorded.
+The profile is compiled through the normal profile-compile edge and evaluated
+for every target platform by the platform-probe edge (an unchanged profile is
+an action-cache hit for both). Nothing is planned, applied or recorded.
 
-  --host NAME     select NAME instead of the current host. $REPRO_HOST takes
-                  precedence over --host, as for every repro home command;
-                  passing both with different values is refused.
-  --format json   the output format (json is the only one).
-  --check FILE    compare FILE, a committed export, with a fresh export instead
-                  of printing. Exit 0 when the selection and intent agree, 1
-                  with a list of differences when they do not. Provenance
-                  (repro version, file digests, platform) is reported but never
-                  makes the check fail.
+  --host NAME      select NAME instead of the current host. $REPRO_HOST takes
+                   precedence over --host, as for every repro home command;
+                   passing both with different values is refused.
+  --format json    the output format (json is the only one).
+  --target SYSTEM  also evaluate the guards for platform SYSTEM (x86_64-linux,
+                   aarch64-linux, x86_64-darwin, aarch64-darwin, x86_64-windows,
+                   aarch64-windows) and the selected host, and add the result as
+                   `evaluation`. Refused (exit 3) when the profile's compile-time
+                   `when defined(...)` makes this export wrong for SYSTEM.
+  --check FILE     compare FILE, a committed export, with a fresh export instead
+                   of printing. Exit 0 when the selection, intent and platforms
+                   agree, 1 with a list of differences when they do not.
+                   Provenance (repro version, file digests, platform) is reported
+                   but never makes the check fail.
+
+Exit codes: 0 printed / current; 1 stale snapshot or export failed; 2 usage;
+3 the export cannot describe the --target platform.
 
 Schema: docs/user-guide/home-export.md in the Reprobuild documentation."""
 
@@ -3382,10 +3505,12 @@ proc runHomeExport(args: openArray[string]): int =
   ## `repro home export` — see `HomeExportUsage` and `home_export.nim`.
   ## Exit codes: 0 printed / snapshot current; 1 snapshot stale, or the
   ## profile could not be found or compiled; 2 usage error, including an
-  ## unreadable or non-JSON `--check` file.
+  ## unreadable or non-JSON `--check` file and an unknown `--target`; 3 the
+  ## export cannot describe the `--target` platform.
   var hostFlag = ""
   var format = "json"
   var checkFile = ""
+  var target = ""
   var i = 0
   try:
     while i < args.len:
@@ -3405,6 +3530,12 @@ proc runHomeExport(args: openArray[string]): int =
         if checkFile.len == 0:
           stderr.writeLine("repro home export: --check needs a file")
           return 2
+      elif a == "--target" or a.startsWith("--target="):
+        target = parseFlagValue(args, i, "--target")
+        if findTargetPlatform(target) < 0:
+          stderr.writeLine("repro home export: unknown --target '" & target &
+            "' (known: " & targetSystemNames().join(", ") & ")")
+          return 2
       elif a.startsWith("--"):
         stderr.writeLine("repro home export: unknown flag: " & a)
         return 2
@@ -3418,6 +3549,10 @@ proc runHomeExport(args: openArray[string]): int =
   if format != "json":
     stderr.writeLine("repro home export: unsupported --format '" & format &
       "' (supported: json)")
+    return 2
+  if target.len > 0 and checkFile.len > 0:
+    stderr.writeLine("repro home export: --target and --check do not " &
+      "combine (a snapshot is checked as exported, unevaluated)")
     return 2
 
   # Host identity, in the precedence every `repro home` command documents
@@ -3469,14 +3604,32 @@ proc runHomeExport(args: openArray[string]): int =
         stderr.writeLine(formatProfileCompileError("repro home export",
           profilePath, err.msg, planCommand = "repro home plan"))
         return 1
+    let probe =
+      try:
+        probeProfilePlatforms(profilePath, opts)
+      except ProfileCompileError as err:
+        stderr.writeLine("repro home export: the platform probe failed: " &
+          err.msg)
+        return 1
     let intent = decodeRbpi(artifact.rbpiBytes)
-    doc = buildHomeExport(intent, artifact, profilePath, host, hostSource)
+    doc = buildHomeExport(intent, artifact, probe, profilePath, host,
+      hostSource)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except CatchableError as e:
     stderr.writeLine("repro home export: error: " & e.msg)
     return 1
 
+  if target.len > 0:
+    try:
+      doc["evaluation"] = evaluateHomeExport(doc, target, host)
+    except HomeExportRefused as err:
+      stderr.writeLine("repro home export: " & err.msg)
+      return 3
+    except CatchableError as err:
+      stderr.writeLine("repro home export: cannot evaluate for " & target &
+        ": " & err.msg)
+      return 1
   if snapshot.isNil:
     stdout.write(renderHomeExport(doc))
     return 0

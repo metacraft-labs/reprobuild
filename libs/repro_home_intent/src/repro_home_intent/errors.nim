@@ -52,6 +52,25 @@ type
     ## `<pkg>.<configurable>` form.
     raw*: string
 
+  EOverlappingAssignment* = object of EHomeIntent
+    ## A structural edit would add a `config:` assignment that overlaps
+    ## another assignment of the same key whose guard differs: on a host
+    ## where both guards hold the later one wins, so the new assignment
+    ## would silently shadow a guarded one
+    ## or be shadowed itself. The editor refuses instead of guessing which
+    ## the user meant; `sites` are the other assignments (`file:line`
+    ## plus their guard, or "unguarded").
+    target*: string         ## `<pkg>.<key>`, e.g. `git.autocrlf`
+    sites*: seq[string]
+
+  EGuardedTarget* = object of EHomeIntent
+    ## A structural edit targets an element that exists only under a guard
+    ## the edit did not name (a resource declared inside a `when <pred>:`
+    ## chain). Editing it unguarded would either drop the guard or add an
+    ## unguarded duplicate, so the editor refuses.
+    target*: string
+    sites*: seq[string]
+
   EProfileWriteError* = object of EHomeIntent
     ## A write to the profile file failed at the filesystem level.
 
@@ -106,4 +125,24 @@ proc raiseInvalidConfigurable*(raw: string) {.noreturn.} =
     "configurable name '" & raw &
     "' is not in '<package>.<configurable>' form")
   e.raw = raw
+  raise e
+
+proc raiseOverlappingAssignment*(profilePath, target, reason: string;
+                                 sites: seq[string]) {.noreturn.} =
+  var e = newException(EOverlappingAssignment,
+    "refusing to add an assignment of '" & target & "': " & reason &
+    " (other assignments: " & sites.join("; ") & ")")
+  e.profilePath = profilePath
+  e.target = target
+  e.sites = sites
+  raise e
+
+proc raiseGuardedTarget*(profilePath, target, reason: string;
+                         sites: seq[string]) {.noreturn.} =
+  var e = newException(EGuardedTarget,
+    "refusing to edit '" & target & "': " & reason & " (declared at: " &
+    sites.join("; ") & ")")
+  e.profilePath = profilePath
+  e.target = target
+  e.sites = sites
   raise e

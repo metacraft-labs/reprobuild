@@ -1,7 +1,7 @@
 ## ``clingo`` -- the Potassco Answer Set Programming solver.
 ##
-## STATUS: SCAFFOLD. This entry is deliberately NOT imported by
-## ``catalog_registry.nim`` yet, so it does not participate in resolution. See
+## STATUS: SCAFFOLD. (The engine's package registry, ``package_registry.nim``,
+## links this module, so the definition is in scope for profile resolution.) See
 ## "Why this is not wired yet" below. Adding the import is the whole of the
 ## follow-up once the Windows source kind exists.
 ##

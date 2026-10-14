@@ -313,13 +313,20 @@ proc reprobuildWindowsOmittedVariables*(): seq[string] =
   ## WHAT THIS DOES **NOT** SETTLE is where a packaged Windows compile
   ## would find the VENDORED headers instead. ``config.nims``'s
   ## vendored branch resolves them against ``reproRepoRoot``, which is
-  ## the directory of the ``config.nims`` being evaluated, and the
-  ## package ships ``share/repro/source/libs`` with no ``config.nims``
-  ## beside it. So M1's gate item 4 — a packaged ``repro build`` — is
-  ## NOT discharged on Windows by this change and is recorded as a
-  ## residual. What the change does is stop the package from shipping
-  ## six values that name nothing, which is the defect the payload work
-  ## closed for Linux.
+  ## the directory of the ``config.nims`` being evaluated. The RELEASE
+  ## ARCHIVES ship one at ``share/repro/source/config.nims`` since
+  ## ``38a21947`` (``scripts/release/stage_release_sources.sh``), and so
+  ## do the ``.deb``/``.rpm`` that ``scripts/release/repro-build-packages.sh``
+  ## builds from them. The packages THIS layer describes do not: their
+  ## ``share/repro/source`` is staged by ``scripts/stage_payload_linux.sh``
+  ## and ``scripts/stage_payload_windows.sh``, which copy ``libs/`` and
+  ## nothing beside it. So M1's gate item 4 — a packaged ``repro build``
+  ## — is NOT discharged on Windows by this change and is recorded as a
+  ## residual; the same missing file also makes a profile compile from
+  ## these packages refuse, on every target, in
+  ## ``repro_profile_compile.requireReprobuildSources``. What the change
+  ## does is stop the package from shipping six values that name
+  ## nothing, which is the defect the payload work closed for Linux.
   @["BLAKE3_PREFIX", "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "REPROBUILD_NIX_DAEMON_BIN", "SQLITE_PREFIX", "XXHASH_PREFIX",
     "CLINGO_PREFIX"]

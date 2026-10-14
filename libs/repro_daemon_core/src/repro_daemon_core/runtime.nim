@@ -2,6 +2,7 @@ import std/[algorithm, net, options, os, osproc, sets, strtabs, strutils,
   tables, times]
 
 import repro_core
+from repro_core/source_root import declareRunningImageSource
 import blake3
 
 import ./client
@@ -2499,6 +2500,13 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # self-restarts use only the private config copy above.
   if existsEnv(ReproTestRunnerOwnerTokenEnv):
     delEnv(ReproTestRunnerOwnerTokenEnv)
+  # A dev-mode daemon runs a staged COPY of its source image
+  # (`stageDevDaemonBinary`). Reprobuild's sources are found relative to the
+  # image -- the checkout it runs from, or `<prefix>/share/repro/source`
+  # beside an installed one -- so resolve them from the source image, not
+  # from the copy under `<state>/dev-bin`. Before any request is served.
+  if config.devMode and config.sourceExe.len > 0:
+    declareRunningImageSource(absoluteNormalized(config.sourceExe))
 
   # Named-pipe endpoints live under the kernel ``\\.\pipe\`` namespace
   # which is NOT a filesystem directory; ``createDir`` on its

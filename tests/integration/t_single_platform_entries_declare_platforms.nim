@@ -29,34 +29,47 @@
 ## "we only harvested that platform" is not recoverable from the data.**
 ##
 ## So the lint asserts the property that IS checkable and does carry the
-## durability the milestone wanted: every single-OS entry appears in exactly
-## one of two hand-maintained lists — declared available, or explicitly
-## recorded as partially covered with a reason. A NEW single-OS entry belongs
-## to neither and fails here until a human decides which. That is the drift
-## protection, without a guess that breaks builds.
+## durability the milestone wanted: every single-OS entry is decided — either
+## its package declares ``platforms:``, or it is recorded in
+## ``PartialCatalogCoverage`` with a reason. A NEW single-OS entry is neither
+## and fails here until a human decides which. That is the drift protection,
+## without a guess that breaks builds.
+##
+## GM4b: the harvested catalogs are gone; their records are ``tarball``
+## realizations of the packages, and the four genuinely Windows-only entries
+## (wix3, innounp, lessmsi, sevenzip) declare ``platforms [windows]`` on the
+## package itself. The survey now covers the ``tarball`` realizations of EVERY
+## package the engine links (``package_registry``) — the set a home profile
+## resolves against — not just the former catalog registry, so a single-OS
+## package that never had a catalog is held to the same rule.
+##
+## Falsifiable: delete the ``platforms [windows]`` line of ``wix3.nim`` and the
+## Windows-only block and the lint both fail; delete a ``PartialCatalogCoverage``
+## row and the lint fails naming that package.
 
 import std/[options, sets, strutils, unittest]
 
 import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
+import repro_dsl_stdlib/package_registry
+import repro_home_apply/package_catalog
 
 proc singleOsTools(): seq[tuple[name: string; os: PlatformOs]] =
-  ## Every registered tool whose catalog arms name exactly one concrete OS.
-  ## `poAny` means "everywhere" and is not single-OS.
-  for tool in registeredToolSet():
-    let cat = getCatalog(tool)
-    if cat.isNone or cat.get.len == 0:
+  ## Every linked package whose ``tarball`` realizations name exactly one
+  ## concrete OS (an ``any``-OS realization covers every OS and excludes the
+  ## package from the survey).
+  for name in linkedPackageNames():
+    let records = profileToolUse(name).useDef.tarballProvisioning
+    if records.len == 0:
       continue
     var oses = initHashSet[PlatformOs]()
-    var arms = 0
-    for vp in cat.get:
-      for pb in vp.platforms:
-        inc arms
-        oses.incl(pb.os)
-    if arms == 0 or oses.len != 1 or poAny in oses:
+    for r in records:
+      let os = parsePlatformOsToken(r.os)
+      check os.ok
+      oses.incl(os.os)
+    if oses.len != 1 or poAny in oses:
       continue
     for o in oses:
-      result.add((name: tool, os: o))
+      result.add((name: name, os: o))
 
 proc isPartiallyCovered(name: string): bool =
   for pair in PartialCatalogCoverage:
@@ -101,7 +114,8 @@ suite "PMC-5 — single-OS entries are declared or explicitly excused":
     let g = platformDeclarationGuidance("demo-tool", "windows")
     check "demo-tool" in g
     check PlatformDeclarationSourceFile in g
-    check "HarvestedPlatformDeclarations" in g
+    # Option (a) is now a `platforms` line on the package itself.
+    check "platforms [windows]" in g
     check "PartialCatalogCoverage" in g
     # The asymmetry is the part a reader most needs and is most likely to skip.
     check "IF YOU ARE UNSURE, CHOOSE (b)" in g
@@ -109,15 +123,21 @@ suite "PMC-5 — single-OS entries are declared or explicitly excused":
     # It must say what the WRONG choice costs, not just what to type.
     check "UNAVAILABLE" in g
 
-  test "no entry is in BOTH lists":
-    # The two lists mean opposite things. An entry in both would be a package
-    # simultaneously declared Windows-only and recorded as existing elsewhere,
-    # and whichever one the resolver happened to read first would win.
-    for pair in HarvestedPlatformDeclarations:
-      check not isPartiallyCovered(pair[0])
+  test "no entry is both declared and excused":
+    # The two decisions mean opposite things. A package both declared
+    # platform-bound and recorded as existing elsewhere is self-contradictory,
+    # and whichever one a reader trusted would be wrong.
+    var checked = 0
+    for pair in PartialCatalogCoverage:
+      inc checked
+      checkpoint "package: " & pair[0]
+      check not packageAvailability(pair[0]).declared
+    check checked > 0
 
   test "the genuinely Windows-only entries resolve as declared":
-    for name in ["wix3", "innounp", "lessmsi", "7zip"]:
+    # GM4b: 7-Zip's canonical definition is ``package sevenzip`` (the package
+    # macro cannot declare a name starting with a digit).
+    for name in ["wix3", "innounp", "lessmsi", "sevenzip"]:
       let avail = packageAvailability(name)
       checkpoint "package: " & name
       check avail.declared
@@ -126,10 +146,9 @@ suite "PMC-5 — single-OS entries are declared or explicitly excused":
       # A declaration without a reason is a declaration nobody can audit.
       check avail.message.len > 0
 
-  test "chocolatey keeps its DSL declaration, not the harvested fallback":
-    # chocolatey declares `platforms:` in a real `package` block. If the
-    # fallback ever shadowed a DSL declaration, the generated-file table would
-    # start overriding hand-written source.
+  test "chocolatey keeps its DSL declaration":
+    # chocolatey declares `platforms:` in a real `package` block, with its
+    # own author message.
     let avail = packageAvailability("chocolatey")
     check avail.declared
     check avail.platforms[0].os == poWindows

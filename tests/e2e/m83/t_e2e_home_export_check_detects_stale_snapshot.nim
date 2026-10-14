@@ -13,7 +13,10 @@
 ##    fails it too.
 ##
 ## The documented provenance policy is pinned as well: `--check` compares
-## `format`, `schemaVersion`, `selection` and `intent`, never `provenance`.
+## `format`, `schemaVersion`, `selection`, `intent` and `platforms`, never
+## `provenance`. A snapshot whose `platforms` claims a platform the profile
+## does not describe fails the check (that claim is what a consumer refuses
+## or accepts a target on).
 ## A snapshot whose recorded repro version and profile digest were altered
 ## still passes (with a "not compared" note), and so does the snapshot after
 ## a comment-only edit of `home.nim`, which changes the profile digest but not
@@ -113,6 +116,16 @@ profile "gm2Check":
       check tamperedRun.exitCode == 0
       check tamperedRun.stderr.contains("not compared")
       check tamperedRun.stderr.contains("0.0.0-gm2-test")
+
+      # `platforms` is compared: a consumer decides on it.
+      var wrongPlatforms = parseJson(readFile(snapshot))
+      wrongPlatforms["platforms"]["x86_64-windows"] = %"differs"
+      let wrongPlatformsPath = sb.root / "wrong-platforms.json"
+      writeFile(wrongPlatformsPath, pretty(wrongPlatforms))
+      let platformsRun = sb.run(["--host", "alpha", "--check",
+        wrongPlatformsPath])
+      check platformsRun.exitCode == 1
+      check platformsRun.stderr.contains("platforms.x86_64-windows")
 
       # A comment-only edit changes the profile digest, not the intent.
       writeFile(sb.profilePath,

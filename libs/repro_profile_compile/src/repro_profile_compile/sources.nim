@@ -17,7 +17,9 @@
 
 import std/[algorithm, os, strutils]
 from repro_core/paths import extendedPath
-from repro_core/source_root import resolveReprobuildSourceRoot
+from repro_core/source_root import resolveReprobuildSourceRoot,
+  describeReprobuildSourceRootSearch, InstalledSourceRootSubdir,
+  ReprobuildSourceRootEnvVar, ReprobuildRepoRootEnvVar
 
 import repro_profile_intent/envelope as profile_envelope
 
@@ -53,9 +55,11 @@ proc reprobuildRepoRoot*(): string =
   ## (`repro_core/source_root.resolveReprobuildSourceRoot`, which
   ## `repro_cli_support.reprobuildLibraryWorkDir` also delegates to):
   ## `$REPROBUILD_LIBS_DIR` / `$REPROBUILD_REPO_ROOT`, then the installed
-  ## package's `$REPROBUILD_SOURCE_ROOT`, then the current directory, then the
-  ## checkout this binary was built in. Each arm counts only when it really
-  ## holds reprobuild's libs.
+  ## package's `$REPROBUILD_SOURCE_ROOT`, then `share/repro/source` beside the
+  ## running image's `bin/` (a release archive, GM1w), then the current
+  ## directory, then the checkout this binary was built in (only while it
+  ## runs from there). Each arm counts only when it really holds reprobuild's
+  ## libs.
   ##
   ## This used to read `$REPROBUILD_REPO_ROOT` alone and otherwise return
   ## `CompiledRepoRoot` — under Nix the build sandbox path, which does not
@@ -65,10 +69,26 @@ proc reprobuildRepoRoot*(): string =
   ##
   ## When nothing resolves, `CompiledRepoRoot` is still returned so callers
   ## see a concrete path; `compileProfileBinary` then refuses it with a
-  ## diagnostic naming the variables above.
+  ## diagnostic naming the variables above. `compileProfileToRbpi` does not
+  ## call this: it resolves directly and refuses with
+  ## `missingReprobuildSourcesMessage` instead of compiling against a guess.
   result = resolveReprobuildSourceRoot()
   if result.len == 0:
     result = CompiledRepoRoot
+
+proc missingReprobuildSourcesMessage*(): string =
+  ## The diagnostic for a profile compile that found no reprobuild sources:
+  ## where an installed `repro` keeps them, every candidate the resolver
+  ## tried (`describeReprobuildSourceRootSearch`, so this message and the
+  ## resolution cannot disagree), and the variables that select a tree.
+  "repro profile compile: no reprobuild sources to compile the profile " &
+    "against. An installed repro ships them in " &
+    InstalledSourceRootSubdir & " under its install prefix (beside bin/); " &
+    "a source checkout is found from the current directory. Looked at:\n" &
+    describeReprobuildSourceRootSearch() &
+    "Set $" & ReprobuildSourceRootEnvVar & " (or $" &
+    ReprobuildRepoRootEnvVar & ") to a reprobuild source tree, or " &
+    "reinstall repro with its share/ directory."
 
 proc profileNimPaths*(repoRoot: string): seq[string] =
   ## Every `<repoRoot>/libs/<name>/src` directory that exists, lex-sorted by

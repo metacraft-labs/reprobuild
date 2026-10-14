@@ -26,7 +26,7 @@ import repro_launch_plan
 # Runtime-library binding: `registeredRuntimeDeps` (the consumer half) and
 # `resolveRuntimeLibraryDirs` (the join with the producer half). The registry
 # these read is populated at module init by the `package` blocks in
-# `repro_dsl_stdlib/packages/*`, which `catalog_registry` already imports —
+# `repro_dsl_stdlib/packages/*`, which `package_registry` already imports —
 # so this adds no new link-time surface, only a use of what is already there.
 import repro_project_dsl
 
