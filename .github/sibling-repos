@@ -90,7 +90,9 @@ reprobuild-ct-test-runner=dev
 # The CodeTracer fixture also uses `shellcheck`, and
 # t_import_of_a_moved_stdlib_module_names_the_new_home compiles `uses:` of all
 # three lint tools against the real catalog, so the pin must be a revision
-# that defines them (they arrived in eed38ec).
+# that defines them (they arrived in eed38ec). t_e2e_home_profile_reaches_
+# catalog_apps resolves a home profile's `ghostty` and `iterm2` from the real
+# catalog and asserts their records, which arrived in 9f981af.
 #
 # Pinned to an exact revision, like io-mon above, so the catalog content the
 # suite asserts against does not move under a commit. It is not in repro.lock:
@@ -99,7 +101,7 @@ reprobuild-ct-test-runner=dev
 # "Catalog Lookup And Provisioning"). Nor is it a flake input: no Nix-sandboxed
 # build here compiles a recipe, and $REPROBUILD_PACKAGES_ROOT in the dev shell
 # would replace the fixture catalog the lookup test walks to.
-reprobuild-packages=eed38eccb797876e43517ac62c40fd1ea0b5b5c7
+reprobuild-packages=9f981af6c771ce062de810dcdd3affae21857f22
 
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim

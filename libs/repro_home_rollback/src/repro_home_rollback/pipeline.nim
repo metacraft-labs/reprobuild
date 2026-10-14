@@ -471,6 +471,56 @@ proc materializeLauncherFromTarget(stateDir, targetGenIdHex: string;
 # Public entry point.
 # ---------------------------------------------------------------------------
 
+# ---- GM4c: macOS application bundles ----
+
+proc appBundleSourceInGeneration(store: var Store;
+                                 target: ActivationManifest;
+                                 rec: ResourceBinding): string =
+  ## The store bundle a generation placed at ``rec``'s path: the generation
+  ## roots the prefix of the package the resource address names, and the
+  ## prefix holds the bundle at its root under the placed name.
+  let packageId = packageIdOfAppBundleAddress(rec.resourceAddress)
+  if packageId.len == 0:
+    raise newException(ValueError, "rollback: " & rec.resourceAddress &
+      " is not an application bundle address")
+  for pkg in target.realizedPackages:
+    if pkg.packageId != packageId:
+      continue
+    let lookup = store.lookupPrefix(digestToPrefixId(pkg.realizedPrefixId))
+    if not lookup.found:
+      break
+    return store.absolutePrefixPath(lookup.row.realizedPath) /
+      extractFilename(rec.realWorldIdentity)
+  raise newException(ValueError, "rollback: the target generation records " &
+    "no realized prefix for package " & packageId & ", whose bundle " &
+    rec.realWorldIdentity & " it placed")
+
+proc appBundleOpIsRemoval(op: ResourceOp): bool =
+  ## A target record with a zero post-write digest says the bundle is
+  ## ABSENT at the target generation (it destroyed it).
+  op.kind == rokRemoveResource or isZeroDigest(op.targetRecord.postWriteDigest)
+
+proc refuseUnmanagedAppBundleRestores(plan: RollbackPlan) =
+  ## Before any rollback op runs: a bundle the target generation would
+  ## re-place, at a path the CURRENT generation does not own, must not be
+  ## replaced (the same rule apply enforces).
+  for op in plan.resourceOps:
+    if op.kind notin {rokRestoreResource, rokUpdateResource}:
+      continue
+    if op.targetRecord.resourceKind != $rkMacosAppBundle or
+        appBundleOpIsRemoval(op):
+      continue
+    let owned = op.hasCurrentRecord and
+      not isZeroDigest(op.currentRecord.postWriteDigest)
+    let path = op.targetRecord.realWorldIdentity
+    if not owned and (symlinkExists(path) or fileExists(path) or
+        dirExists(path)):
+      var e = newException(EAppBundleCollision, "repro home rollback: " &
+        path.escape & " exists and was not placed by the current " &
+        "generation; refusing to replace it")
+      e.targetPath = path
+      raise e
+
 proc touchMtime(path: string; timestamp: int64) =
   if not dirExists(extendedPath(path)) and not fileExists(extendedPath(path)):
     return
@@ -516,6 +566,8 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
         result.driftedPaths = checkPlanForDrift(plan, opts.stateDir,
           activeIdHex)
 
+      refuseUnmanagedAppBundleRestores(plan)
+
       # ---- Step 7: execute ----
       # Files.
       for op in plan.fileOps:
@@ -558,6 +610,26 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
         let kindEnum =
           try: resourceKindFromString(rec.resourceKind)
           except ValueError: rkFsManagedBlock
+        if kindEnum == rkMacosAppBundle:
+          # GM4c: remove the bundle the current generation placed, or
+          # re-place the target generation's bundle from its store prefix,
+          # verified against the identity that generation recorded
+          # (Store-And-Installation-Layout.md § macOS Application Bundles,
+          # "Rollback").
+          if appBundleOpIsRemoval(op):
+            removeAppBundle(rec.realWorldIdentity)
+          else:
+            let source = appBundleSourceInGeneration(store, tgt.manifest,
+              rec)
+            discard placeAppBundle(source,
+              parentDir(rec.realWorldIdentity),
+              extractFilename(rec.realWorldIdentity),
+              AppBundleExpectation(), {},
+              managedPrior = op.hasCurrentRecord and
+                not isZeroDigest(op.currentRecord.postWriteDigest),
+              pinned = rec.payloadBytes)
+          inc result.resourceOpsApplied
+          continue
         case op.kind
         of rokRemoveResource:
           # The current generation had this resource; the target

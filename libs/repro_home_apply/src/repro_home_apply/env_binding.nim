@@ -46,6 +46,12 @@ proc prefixBinDirs*(record: RealizedRecord): seq[string] =
   var seen: HashSet[string]
   if record.prefixAbsolutePath.len == 0:
     return
+  # GM4c: an application bundle's `Contents/MacOS` holds the app and its
+  # helpers, not commands; it contributes no PATH entry (its launchers are
+  # the command-line surface). Store-And-Installation-Layout.md § macOS
+  # Application Bundles, "Command line".
+  if record.appBundle.storeBundlePath.len > 0:
+    return
   # The realized record's `resolvedExecutablePath` is the first
   # bin_relpath joined with the prefix. We get every bin dir by
   # walking the prefix tree the realizer placed under

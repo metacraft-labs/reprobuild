@@ -66,9 +66,11 @@ from repro_core/paths import extendedPath, tarOperand
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_home_resources/drivers/app_bundle
 
 import ./errors
 import ./junction_aware_remove
+import ./macos_archives
 import ./package_catalog
 
 type
@@ -240,6 +242,12 @@ type
       ## Tests-facing: when `imInstallerSilent` runs (mocked or real),
       ## the argv that was invoked is captured here so unit tests can
       ## assert the silent flag + target dir were composed correctly.
+    appBundlePath*: string
+      ## GM4c: for an `imAppBundle` realization, the verified bundle at the
+      ## prefix root (`<prefix>/<Name>.app`); "" otherwise.
+    appBundleIdentity*: seq[byte]
+      ## GM4c: `appBundleCanonicalBytes` of that bundle — what activation
+      ## pins the placed copy to.
 
 const
   SevenZipPackageNames* = ["sevenzip", "7zip"]
@@ -2545,10 +2553,46 @@ proc substituteEnv*(envIn: seq[tuple[name, value: string]];
 # The realize entry point
 # ---------------------------------------------------------------------------
 
+proc appArchiveKindOf(packageId: string; format: ArchiveFormat):
+    AppArchiveKind =
+  ## GM4c: which unpacking an ``imAppBundle`` archive gets.
+  case format
+  of afDmg: aakDmg
+  of afPkg: aakPkg
+  of afZip: aakZip
+  of afTarGz, afTarXz, afTarBz2: aakTar
+  else:
+    var e = newException(EBuiltinInstallMethodUnsupported,
+      "builtin adapter: package '" & packageId & "' declares installMethod " &
+      "app-bundle with archive type " & $format & "; an application bundle " &
+      "is delivered as dmg, pkg, zip, tar.gz, tar.xz or tar.bz2")
+    e.step = 7
+    e.stepName = "realize"
+    e.packageId = packageId
+    e.installMethod = $imAppBundle
+    raise e
+
+proc appBundleExpectationOf*(resolution: ArchiveRealization):
+    AppBundleExpectation =
+  ## GM4c: what the realized bundle must be — the record's declarations.
+  AppBundleExpectation(bundleId: resolution.bundleId,
+    version: resolution.builtinVersion, teamId: resolution.teamId)
+
+proc appBundleLeaf*(resolution: ArchiveRealization): string =
+  ## ``Ghostty.app`` for ``appBundle = "Ghostty.app"`` and for a bundle
+  ## nested in a package payload alike: the prefix holds it at its root.
+  resolution.appBundle.replace('\\', '/').split('/')[^1]
+
 proc realizeBuiltinPackage*(store: var Store;
-                            resolution: ArchiveRealization):
+                            resolution: ArchiveRealization;
+                            appTrust: AppTrustPolicy = {}):
     RealizeBuiltinResult =
   ## The M64 archive-realizer realize loop.  See module-level docs.
+  ##
+  ## GM4c: ``appTrust`` relaxes the Developer ID / notarization checks of
+  ## an ``imAppBundle`` realization. Only a test passes anything but the
+  ## strict ``{}`` (Store-And-Installation-Layout.md § macOS Application
+  ## Bundles, "Realization").
   doAssert resolution.urlUsed.len > 0,
     "realizeBuiltinPackage requires a populated urlUsed"
   doAssert resolution.digestValue.len > 0,
@@ -2591,6 +2635,35 @@ proc realizeBuiltinPackage*(store: var Store;
       (if a.recurse: "r" else: "n"))
   for line in resolution.preInstallUnrecognized:
     extra.add("piu:" & line)
+  # GM4c: the bundle a record delivers is part of what it realizes.
+  if resolution.appBundle.len > 0:
+    extra.add("app:" & resolution.appBundle)
+    extra.add("bundleId:" & resolution.bundleId)
+    extra.add("teamId:" & resolution.teamId)
+  if resolution.installMethod == imAppBundle and
+      resolution.digestAlgorithm != "sha256":
+    # The archive is attached (a disk image) or expanded before its bundle's
+    # signature can be checked, so its bytes are pinned by SHA-256 first.
+    var e = newException(EBuiltinInstallMethodUnsupported,
+      "builtin adapter: package '" & packageId & "' is a macOS " &
+      "application whose archive is pinned by " &
+      resolution.digestAlgorithm & "; an application archive must be " &
+      "pinned by sha256")
+    e.step = 7
+    e.stepName = "realize"
+    e.packageId = packageId
+    e.installMethod = $imAppBundle
+    raise e
+  when not defined(macosx):
+    if resolution.installMethod == imAppBundle:
+      var e = newException(EBuiltinInstallMethodUnsupported,
+        "builtin adapter: package '" & packageId & "' is a macOS " &
+        "application bundle; it is realized on a macOS host only")
+      e.step = 7
+      e.stepName = "realize"
+      e.packageId = packageId
+      e.installMethod = $imAppBundle
+      raise e
   let prefixId = computeRealizationHash(packageId, version,
     BuiltinAdapterName, lockIdentity, declaredExe,
     resolution.urlUsed, resolution.digestValue, extra)
@@ -2614,6 +2687,12 @@ proc realizeBuiltinPackage*(store: var Store;
       result.digestValue = resolution.digestValue
       result.archiveFormat = resolution.archiveFormat
       result.envBindings = substituteEnv(resolution.envSubstitutions, prefixAbs)
+      if resolution.installMethod == imAppBundle:
+        # The prefix was verified before it was published; activation
+        # verifies the placed copy again and pins it to this identity.
+        result.appBundlePath = prefixAbs / appBundleLeaf(resolution)
+        result.appBundleIdentity = appBundleCanonicalBytes(
+          readAppBundleIdentity(result.appBundlePath))
       return
 
   # Steps 2-7: genuine realization. Use the store's realizePrefix
@@ -2762,6 +2841,8 @@ proc realizeBuiltinPackage*(store: var Store;
       of afInstallerNsis: archiveExt = ".exe"
       of afInstallerMsi: archiveExt = ".msi"
       of afRaw: discard
+      of afDmg: archiveExt = ".dmg"
+      of afPkg: archiveExt = ".pkg"
       let downloadPath = downloadDir / ("artifact." & $getCurrentProcessId() &
         "." & $getTime().toUnix & archiveExt)
       downloadToFile(resolution.urlUsed, downloadPath, packageId)
@@ -2834,6 +2915,11 @@ proc realizeBuiltinPackage*(store: var Store;
           raiseExtractFailed(packageId, downloadPath, $resolution.archiveFormat,
             "imExtract is incompatible with installer archive_format; " &
             "use install_method=imInstallerSilent")
+        of afDmg, afPkg:
+          raiseExtractFailed(packageId, downloadPath, $resolution.archiveFormat,
+            "a disk image or installer package is realized only with " &
+            "install_method=app-bundle, which copies the declared bundle " &
+            "out of it")
         flattenExtractPath(packageId, stagingDir, resolution.extractPath)
         # M3: nested-7z recursive flatten (after the outer extract +
         # extract_path flatten so any inner .7z files surfaced by the
@@ -2954,6 +3040,30 @@ proc realizeBuiltinPackage*(store: var Store;
           rootDir = unpackDir / resolution.extractPath
         runSourceBootstrap(packageId, rootDir, stagingDir,
           resolution.bootstrapArgv, resolution.binRelpath)
+      of imAppBundle:
+        # GM4c (Store-And-Installation-Layout.md § macOS Application
+        # Bundles): copy the ONE declared bundle out of the archive to the
+        # prefix root, then refuse it unless it is the bundle the record
+        # declares, intact, signed by the declared team through an Apple
+        # Developer ID chain and notarized. A refusal raises out of this
+        # closure, so `realizePrefix` discards the staging directory and
+        # nothing is published.
+        let bundle = extractAppBundle(downloadPath,
+          appArchiveKindOf(packageId, resolution.archiveFormat),
+          resolution.appBundle, stagingDir, downloadDir / "unpack")
+        discard verifyAppBundle(bundle, appBundleExpectationOf(resolution),
+          appTrust)
+      of imPkgInstall:
+        var e = newException(EBuiltinInstallMethodUnsupported,
+          "builtin adapter: package '" & packageId & "' is an installer " &
+          "package run as root (install_method=pkg-install); the home " &
+          "archive realizer does not run installers, and " &
+          MacosPkgInstallRefusal)
+        e.step = 7
+        e.stepName = "realize"
+        e.packageId = packageId
+        e.installMethod = $imPkgInstall
+        raise e
       of imMsys2Pacman:
         # M6 (Realize-Closure-And-Catalog-Expansion spec): realize a
         # MSYS2 pacman package by extracting its ``.pkg.tar.zst`` payload
@@ -3042,6 +3152,10 @@ proc realizeBuiltinPackage*(store: var Store;
   result.resolvedExecutablePath = exePath
   result.envBindings = substituteEnv(resolution.envSubstitutions,
     outcome.absolutePath)
+  if resolution.installMethod == imAppBundle:
+    result.appBundlePath = outcome.absolutePath / appBundleLeaf(resolution)
+    result.appBundleIdentity = appBundleCanonicalBytes(
+      readAppBundleIdentity(result.appBundlePath))
   # M3: append pre_install Add-Path bindings (the action's `value` was
   # already substituted against the staging dir; rewrite to the final
   # realized prefix abs path so downstream consumers get a stable

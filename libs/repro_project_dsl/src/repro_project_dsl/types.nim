@@ -383,6 +383,20 @@ type
       ## Microarchitecture floor (``x86-64-v3``), empty for none.
     cpuFeatures*: string
       ## Extra CPU features beyond the floor, comma separated.
+    appBundle*: string
+      ## GM4c: the macOS application bundle the archive delivers -- its path
+      ## inside the archive (``Ghostty.app``; a component naming a flat
+      ## ``.pkg`` is expanded and the path continues inside it). Set with
+      ## ``installMethod = "app-bundle"`` (and on the two declared-only macOS
+      ## installer shapes, ``pkg-install`` and ``installer-silent``).
+      ## Store-And-Installation-Layout.md § macOS Application Bundles.
+    bundleId*: string
+      ## GM4c: the bundle's ``CFBundleIdentifier``; checked before the bundle
+      ## is published to the store and again before it is activated.
+    teamId*: string
+      ## GM4c: the Apple team identifier that signs the bundle. Required with
+      ## ``appBundle``: the realization proves the signature chains to an
+      ## Apple Developer ID certificate of this team.
 
   TarballProvisioningDef* = object
     url*: string
