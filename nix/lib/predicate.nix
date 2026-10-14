@@ -89,20 +89,23 @@ let
       tok = kind: text: { inherit kind text; };
       identEnd = j: if j < n && isIdentCont (at j) then identEnd (j + 1) else j;
       # A string literal runs to the next `"`; a backslash takes the next
-      # character literally; an unterminated literal runs to the end of the
-      # source (the Nim lexer's behaviour, pinned by the fixtures and filed as
-      # issues/2026-10-14-predicate-lexer-accepts-an-unterminated-string.md).
+      # character literally. A literal with no closing quote is not a string:
+      # it becomes an `unterminated` token (text: the literal as written,
+      # opening quote included) that no grammar position accepts, so the
+      # parser refuses it -- as predicate.nim's `tkUnterminatedStr` does.
       readString =
         j: acc:
         if j >= n then
           {
             text = acc;
             next = j;
+            terminated = false;
           }
         else if at j == "\"" then
           {
             text = acc;
             next = j + 1;
+            terminated = true;
           }
         else if at j == "\\" && j + 1 < n then
           readString (j + 2) (acc + at (j + 1))
@@ -136,7 +139,10 @@ let
             let
               s = readString (i + 1) "";
             in
-            [ (tok "str" s.text) ] ++ go s.next
+            if s.terminated then
+              [ (tok "str" s.text) ] ++ go s.next
+            else
+              [ (tok "unterminated" (substring i (n - i) src)) ] ++ go s.next
           else if isIdentStart c then
             let
               j = identEnd (i + 1);
@@ -249,6 +255,10 @@ let
             unexpected (tk r.pos) "')'"
         else if t.kind == "lbracket" then
           parseList p
+        else if t.kind == "unterminated" then
+          {
+            error = "saw the unterminated string literal ${t.text}; expected a closing '\"'";
+          }
         else
           unexpected t "an identifier, string literal, '(' expression, '[' list, true, or false";
 
