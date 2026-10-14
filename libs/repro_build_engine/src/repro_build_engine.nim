@@ -5744,10 +5744,14 @@ type
       ## a pid collision.
     dcoNoPeerCredentials
       ## Peer credentials are unavailable on this platform, or the connected
-      ## socket's kernel would not name a peer.
+      ## socket's kernel would not name a peer. Every non-Linux host is here
+      ## today, deliberately: `peerCredentialsOfSocket` answers `(0, 0)` there,
+      ## so the check is refused at this step and never reaches
+      ## `dcoNoKernelIdentity`.
     dcoNoKernelIdentity
       ## No `/proc/<pid>/stat` start time, so the trust could never be
-      ## re-validated. Every non-Linux host is here today, deliberately.
+      ## re-validated. Reached only where the kernel named a peer but will not
+      ## publish its start time (on Linux, a peer that exited after connect).
     dcoNothingAsserted
       ## The declaration named an endpoint and asserted nothing about the peer.
       ## Refused: "something is listening at this path" is not a check.
@@ -9106,6 +9110,36 @@ proc expandPolicyPath(action: BuildAction; path: string): string =
       result = result[0 ..< start] & value & result.substr(stop)
     start = result.find('$', start)
 
+proc canonicalPolicyPath(path: string): string =
+  ## Resolve symlinked spellings for policy comparisons, including absent
+  ## descendants: a missing probe or output still belongs to its existing
+  ## parent. Relative input-policy roots stay relative; only the restore
+  ## gate materializes them against the action's cwd before calling this.
+  if not path.isAbsolute:
+    return normalizeWriteRoot(path)
+  var ancestor = normalizeWriteRoot(path)
+  var suffix: seq[string] = @[]
+  while ancestor.len > 0:
+    try:
+      result = expandFilename(ancestor)
+      for i in countdown(suffix.high, 0):
+        result = result / suffix[i]
+      return normalizeWriteRoot(result)
+    except CatchableError:
+      let parent = parentDir(ancestor)
+      if parent.len == 0 or parent == ancestor:
+        break
+      suffix.add(extractFilename(ancestor))
+      ancestor = parent
+  # If no ancestor can be resolved, retain the original spelling rather
+  # than invent a relationship to an unrelated directory.
+  normalizeWriteRoot(path)
+
+proc canonicalPolicyRoots(roots: openArray[string]): seq[string] =
+  var seen = initHashSet[string]()
+  for root in roots:
+    result.addUnique(seen, canonicalPolicyPath(root))
+
 proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## Each ignored prefix, in BOTH the spelling the recipe wrote and the
   ## spelling the kernel reports, because those are routinely not the same
@@ -9126,11 +9160,10 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## it missed too. Measured: every one of those paths was recorded under
   ## `/private/tmp`, and not one under `/tmp`.
   ##
-  ## Resolved once per root rather than per observed path: there are a
-  ## handful of roots and tens of thousands of paths, and resolving the
-  ## latter would put a syscall on the hot comparison. A root that does not
-  ## exist yet simply contributes its literal spelling, which is what it
-  ## does today.
+  ## Keep both emitted spellings for callers of the prefix set. Policy
+  ## comparisons canonicalize both the roots and observed paths, so a
+  ## physical prefix also covers logical observations, including missing
+  ## descendants beneath an existing symlinked directory.
   ##
   ## Only an ABSOLUTE root is resolved. ``expandFilename`` resolves a relative
   ## path against THIS PROCESS's working directory, which is not the action's
@@ -9324,6 +9357,11 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
       return true
 
+proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool =
+  ## Roots have already been canonicalized once by the caller. Avoid any
+  ## filesystem resolution when the action has no ignored roots.
+  roots.len > 0 and canonicalPolicyPath(path).isUnderAnyRoot(roots)
+
 const
   MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
   CompilerWrapperScratchPrefixes = ["cc-params.", "ld-params."]
@@ -9459,7 +9497,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # self-written set applies to the ENUMERATION channel only — see
   # `enumerationIgnoredRoots` for the whole argument, and for the shipped
   # recipe that makes the difference load-bearing.
-  let ignoredRoots = action.ignoredInputRoots()
+  let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
   let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
@@ -9476,7 +9514,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9487,7 +9526,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9498,7 +9538,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9668,10 +9709,14 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
   ##   stays exempt through ``selfWrittenOutputKeys`` either way, so all
   ##   this costs is that its undeclared NEIGHBOURS are seen again.
   ##
+  ## Both sides of coverage resolve symlinks, including the existing parent
+  ## of an absent product. Comparing only the prefix's resolved spelling
+  ## would let it escape disqualification against a logical product path.
+  ##
   ## Note the asymmetry with ``ignoredInputRoots``' use in
   ## ``cacheInputPaths``: this side materializes the prefix against
-  ## ``action.cwd`` while the input side compares raw, so a RELATIVE prefix
-  ## is honoured here and inert there. That difference is deliberate and it
+  ## ``action.cwd`` while the input side leaves relative roots raw, so a
+  ## RELATIVE prefix is honoured here and inert there. That difference is deliberate and it
   ## is this side that is right — a recipe spells its scratch directory the
   ## way it spells its outputs, and a declaration the author wrote must not
   ## be honoured or ignored depending on whether they happened to write it
@@ -9696,7 +9741,7 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
     ## product?", where a MISSED match re-enables the exemption and loses
     ## the product. Folding is the fail-closed direction here and the
     ## strict spelling is the fail-closed direction there.
-    let normalized = normalizeWriteRoot(path)
+    let normalized = canonicalPolicyPath(path)
     when defined(windows): normalized.toLowerAscii()
     else: normalized
 
@@ -9710,8 +9755,9 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
     let normalized = coverageKey(materialPath(action.cwd, output))
     if normalized.len > 0:
       productFiles.add(normalized)
+  var seenPrefixes = initHashSet[string]()
   for raw in action.ignoredInputRoots():
-    let materialized = materialPath(action.cwd, raw)
+    let materialized = canonicalPolicyPath(materialPath(action.cwd, raw))
     let prefix = coverageKey(materialized)
     if prefix.len == 0:
       continue
@@ -9727,7 +9773,7 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
           break
     if covers:
       continue
-    result.add(materialized)
+    result.addUnique(seenPrefixes, materialized)
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -9794,7 +9840,7 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
     let path = materialPath(action.cwd, write)
     if selfWritten.contains(path.replace('\\', '/')):
       continue
-    if path.isUnderAnyRoot(derivedRoots):
+    if path.isUnderCanonicalPolicyRoot(derivedRoots):
       continue
     if dirExists(path) or not fileExists(path):
       continue
@@ -9811,7 +9857,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   ## one either, or the record would carry membership for something it does
   ## not record at all.
   let toolRoots = action.toolInputRoots()
-  let ignoredRoots = action.enumerationIgnoredRoots()
+  let ignoredRoots = canonicalPolicyRoots(action.enumerationIgnoredRoots())
   let selfWrittenDirs = action.selfWrittenDirectoryKeys()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
@@ -9823,7 +9869,8 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     if declaredMaterialized.contains(path.replace('\\', '/')):
       result.addUnique(seen, path)
       continue
-    if path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots):
+    if path.isUnderAnyRoot(toolRoots) or
+        path.isUnderCanonicalPolicyRoot(ignoredRoots):
       continue
     # The action's OWN output directory: its entry list changed because this
     # action added an entry to it, so the membership digest is derived state
@@ -15889,6 +15936,35 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace
+  proc noteRunQuotaBypassPolicy() =
+    ## RA-13, the POLICY half of the statement the build header and the run
+    ## report make. `runQuotaBypassed` is otherwise set only where a LAUNCH
+    ## falls outside RunQuota, which left an invocation that bypasses by
+    ## POLICY and launches nothing — a `--dry-run`, or a build served
+    ## entirely from cache — reporting `runQuota: active (lease authority)`
+    ## and `concurrentInvocationsSafe: true` for an authority that governed
+    ## none of it. Understating that is the one direction this line must
+    ## never fail in: it exists to say when resource limits are
+    ## locally-enforced-only.
+    ##
+    ## `config.bypassRunQuota` ALONE, and not `effectiveBypassRunQuota`,
+    ## which ORs in `REPROBUILD_NO_RUNQUOTA`. That variable is not only an
+    ## operator switch: `launchChildEnv` forces it into the environment of
+    ## every action child, so a build NESTED inside an action inherits it
+    ## with nobody having declared anything. Keying on it made such a build
+    ## claim a bypass it was not asked for —
+    ## `t_runquota_bypass_is_reported_in_build_header_and_report`'s
+    ## "active-RunQuota build does not claim bypass" case fails exactly
+    ## there, and only when the variable is set, which is the configuration
+    ## the suite itself runs in. The operator-set spelling is not lost: the
+    ## `build` command reads the variable when it parses its flags and
+    ## arrives here as `config.bypassRunQuota`.
+    ##
+    ## Called at BOTH exits, and after the fast-noop path has assigned
+    ## `runResult` wholesale — a flag set before that assignment is dropped
+    ## by it, on exactly the warm path that most needs it.
+    if config.bypassRunQuota:
+      runResult.runQuotaBypassed = true
   # STAGE 2 census — count, do not change. Taken over the graph as it
   # will actually be scheduled, after dependency inference, so the number
   # describes the build that runs rather than the graph as authored.
@@ -17241,6 +17317,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finishStat("repro scheduler total", totalStart)
     finishChildCpuStat()
     runResult.stats = stats
+    noteRunQuotaBypassPolicy()
     return runResult
 
   # THE FALL-THROUGH. Everything below is the scheduler, and reaching it means
@@ -17500,6 +17577,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let effectiveBypassRunQuota =
     config.bypassRunQuota or
     (getEnv("REPROBUILD_NO_RUNQUOTA").normalize in ["1", "true", "yes", "on"])
+  # The scheduler's exit. The fast-noop path above has its own call — see
+  # `noteRunQuotaBypassPolicy`, which is declared beside `runResult` for
+  # exactly that reason.
+  noteRunQuotaBypassPolicy()
 
   proc launchBypassesRunQuota(): bool =
     if effectiveBypassRunQuota:

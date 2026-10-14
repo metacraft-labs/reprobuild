@@ -143,7 +143,7 @@ require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_f
   '"CODETRACER_TRACE_FORMAT_NIM_SRC",'
 require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
   'let pinnedSource = getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")'
-require_contains tests/fixtures/codetracer-subset/config-17c111fb.nims \
+require_contains tests/fixtures/codetracer-subset/config-222a4a00.nims \
   'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
 
 # The incremental-test seam (``ct_incremental_adapter.nim``), for the same
@@ -237,9 +237,8 @@ require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-l
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''
-# The macOS benchmark leg uses capability labels. The Linux benchmark leg
-# retains its dedicated persistent benchmark runner requirement above.
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos", "arm64"]'\'''
+# Both measurement legs require dedicated benchmark runners.
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "darwin", "nix-darwin", "aarch64-darwin", "benchmark"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
 require_contains .github/workflows/benchmark.yml "ref: reprobuild"

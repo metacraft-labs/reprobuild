@@ -2540,26 +2540,56 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ## The store is on disk, so this is correct on the FIRST tick after a
   ## restart (an expired record left by a prior instance is reaped here).
   ##
-  ## A record the sweep could not reap comes back in ``report.failed`` rather
-  ## than as a raise — see ``reapOnce``'s "one unhandleable record must not
-  ## abort the sweep". The ``except`` below therefore now catches only a
-  ## WHOLE-SWEEP failure (an undecodable record aborting ``listStateRecords``,
-  ## an unreadable store root), which is equally unfixable-by-retrying and so
-  ## is deduplicated on the same terms.
+  ## A record the sweep could not reap comes back as a FINDING rather than as
+  ## a raise — see ``reapOnce``'s "one unhandleable record must not abort the
+  ## sweep". So does a record the sweep could not even DECODE: the listing
+  ## (``scanStateRecords``) reports a newer repro's record as foreign and
+  ## quarantines a corrupt one instead of raising, and those come back through
+  ## ``leaseReapFindings`` too — reported even on a tick that reaped nothing,
+  ## since the findings loop below does not depend on ``reapedCount``.
+  ## ``outcome.raised`` is therefore set only by a WHOLE-SWEEP failure (an
+  ## unreadable store root), which is equally unfixable-by-retrying and so is
+  ## deduplicated on the same terms.
+  ##
+  ## THE VERDICT IS RECORDED BY THE SWEEP, NOT BY THIS LOGGING.
+  ## ``runAndRecordLeaseReapTick`` runs the sweep and persists its verdict in
+  ## one step and returns only what to log, which is what makes a reaper that
+  ## is not working visible to ``repro health``. The de-duplication above is
+  ## precisely why that record is not optional: after the first report a
+  ## permanently stuck reaper says NOTHING at all, so the log stops being
+  ## evidence of its own state.
+  ##
+  ## Everything below is therefore best-effort reporting around an outcome
+  ## already decided and already on disk. Each logging call is individually
+  ## guarded, including the ``reportOnce`` calls — ``reportOnce`` writes to the
+  ## log too, so the arm that reports a failure can fail the same way, and this
+  ## proc is called from the startup sweep and from the event loop, neither of
+  ## which wraps it. An escape here would stop the daemon over a log write.
+  let outcome = runAndRecordLeaseReapTick(daemonLeaseScope(config),
+    overrideRoot = config.leaseStoreRoot)
   try:
-    let report = runLeaseReapTick(daemonLeaseScope(config),
-      overrideRoot = config.leaseStoreRoot)
-    if report.reaped.len > 0:
-      logLine(config.logPath, "lease reap tick reaped=" & $report.reaped.len &
-        " kept=" & $report.skipped.len &
-        " unreapable=" & $report.failed.len & " scope=" &
-        (if config.systemScope: "system" else: "user"))
-    for finding in leaseReapFindings(report):
-      reportOnce(state, config, finding.signature,
-        "lease reap tick (reported once per daemon run) " & finding.line)
-  except CatchableError as err:
-    reportOnce(state, config, "sweep\x00" & err.msg,
-      "lease reap tick error (reported once per daemon run): " & err.msg)
+    if outcome.raised:
+      reportOnce(state, config, "sweep\x00" & outcome.failure,
+        "lease reap tick error (reported once per daemon run): " &
+          outcome.failure)
+    else:
+      if outcome.reapedCount > 0:
+        logLine(config.logPath, "lease reap tick reaped=" &
+          $outcome.reapedCount & " kept=" & $outcome.keptCount &
+          " unreapable=" & $outcome.failedCount & " scope=" &
+          (if config.systemScope: "system" else: "user"))
+      for finding in outcome.findings:
+        reportOnce(state, config, finding.signature,
+          "lease reap tick (reported once per daemon run) " & finding.line)
+    if outcome.healthWriteError.len > 0:
+      reportOnce(state, config, "health-write\x00" & outcome.healthWriteError,
+        "lease reap tick health not recorded (reported once per daemon run): " &
+          outcome.healthWriteError)
+  except CatchableError:
+    # Nowhere left to report a reporting failure, and nothing depends on it:
+    # the tick's verdict is already written, and it is the thing
+    # ``repro health`` actually reads.
+    discard
 
 proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # A daemon started by hand may have been given relative flags; its dev
@@ -2740,11 +2770,51 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
     result.add("--state-root")
     result.add(config.leaseStoreRoot)
 
-proc launchdLabel(config: UserDaemonConfig): string =
+proc endpointNameDigest(config: UserDaemonConfig): string =
+  ## The digest that makes a service-manager name identify the WHOLE
+  ## endpoint: 16 hex characters (64 bits) of blake3 over the endpoint string
+  ## VERBATIM. Shared by ``launchdLabel`` and ``systemdUnitName`` so the two
+  ## platforms cannot drift apart; ``systemdUnitName``'s docstring carries the
+  ## reasoning for each of those choices.
+  blake3.digest(config.endpoint).toHex()[0 ..< 16]
+
+proc legacyLaunchdLabel(config: UserDaemonConfig): string =
+  ## The label binaries before the endpoint-keyed naming registered: the
+  ## endpoint's basename alone. Kept only so the launcher and the cleanup can
+  ## find a job such a binary left behind -- see ``bootoutLegacyLaunchdJob``.
   "org.reprobuild.repro-daemon." &
     safePathSegment(config.endpoint.extractFilename, "user")
 
-proc launchdPlistPath(config: UserDaemonConfig): string =
+proc launchdLabel*(config: UserDaemonConfig): string =
+  ## The launchd label the daemon for ``config.endpoint`` is registered under.
+  ##
+  ## KEYED ON THE WHOLE ENDPOINT PATH, NOT ON ITS LAST COMPONENT, for the
+  ## reason ``systemdUnitName`` gives: a label is a per-user GLOBAL namespace
+  ## while endpoints are not unique by basename (every one of them is some
+  ## directory's ``d.sock``). The basename stays in front of the digest
+  ## because the label is also what ``launchctl list`` shows.
+  ##
+  ## On launchd a shared label cost more than the fallback it cost on
+  ## systemd. Measured on macOS 2026-10-14: a second ``launchctl bootstrap``
+  ## of a loaded label fails with ``Bootstrap failed: 5: Input/output
+  ## error``, but ``launchWithLaunchd`` boots out any prior job under its
+  ## label first, and ``bootout`` SIGTERMs a running job -- so launching the
+  ## second daemon KILLED the first, and
+  ## ``cleanupPlatformBackgroundRegistration`` for one endpoint stopped
+  ## whichever daemon held the label.
+  ##
+  ## The result is bounded and legal: an AF_UNIX endpoint is at most 104
+  ## bytes on macOS (``sun_path``), and ``safePathSegment`` produces only
+  ## ``[A-Za-z0-9._-]`` (characters a label and a file name both accept), so
+  ## ``<label>.plist`` stays well under the 255-byte file-name limit.
+  ##
+  ## Exported so a second derivation -- a test teardown -- asks for the name
+  ## instead of restating it.
+  legacyLaunchdLabel(config) & "-" & endpointNameDigest(config)
+
+proc launchdPlistPath*(config: UserDaemonConfig): string =
+  ## Where the launcher writes the plist for ``launchdLabel(config)``; it
+  ## moves with the label.
   config.stateDir / "launchd" / (launchdLabel(config) & ".plist")
 
 proc processOwnerTokenForLaunch(config: UserDaemonConfig): string =
@@ -2827,6 +2897,62 @@ proc quoteCommand(args: openArray[string]): string =
     parts.add(quoteShell(arg))
   parts.join(" ")
 
+proc launchdJobServesEndpoint(serviceTarget, endpoint: string): bool =
+  ## Does the launchd job ``serviceTarget`` (``gui/<uid>/<label>``) run with
+  ## ``--endpoint <endpoint>`` among its program arguments?
+  ##
+  ## Read from ``launchctl print``, which lists them one per line between
+  ## ``arguments = {`` and ``}``. There is no structured form of that output;
+  ## it is the same tool the launcher and the cleanup already drive. A job
+  ## that is not loaded, or whose output does not parse, answers false: the
+  ## caller only acts on a positive match.
+  when defined(macosx):
+    let res = execCmdEx(quoteCommand(["launchctl", "print", serviceTarget]))
+    if res.exitCode != 0:
+      return false
+    var inArguments = false
+    var arguments: seq[string] = @[]
+    for line in res.output.splitLines():
+      let stripped = line.strip()
+      if not inArguments:
+        if stripped == "arguments = {":
+          inArguments = true
+      elif stripped == "}":
+        break
+      else:
+        arguments.add(stripped)
+    for i in 0 ..< arguments.len - 1:
+      if arguments[i] == "--endpoint" and arguments[i + 1] == endpoint:
+        return true
+    false
+  else:
+    false
+
+proc bootoutLegacyLaunchdJob(config: UserDaemonConfig) =
+  ## Boot out a job a binary from before ``launchdLabel`` was keyed on the
+  ## whole endpoint registered for ``config.endpoint`` under the basename-only
+  ## ``legacyLaunchdLabel``. Nothing else will ever boot that label out, and a
+  ## finished ``KeepAlive=false`` job stays loaded under it until logout.
+  ##
+  ## The legacy label is shared by every endpoint with this basename, so the
+  ## job is booted out only when launchd confirms it serves THIS endpoint --
+  ## otherwise this would stop another endpoint's daemon, the very collision
+  ## the new label removes.
+  when defined(macosx):
+    let legacyTarget = "gui/" & $currentUid() & "/" &
+      legacyLaunchdLabel(config)
+    if launchdJobServesEndpoint(legacyTarget, config.endpoint):
+      discard execCmdEx(quoteCommand(["launchctl", "bootout", legacyTarget]))
+      let legacyPlist = config.stateDir / "launchd" /
+        (legacyLaunchdLabel(config) & ".plist")
+      if fileExists(legacyPlist):
+        try:
+          removeFile(legacyPlist)
+        except OSError:
+          discard
+  else:
+    discard
+
 proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
   when defined(macosx):
     try:
@@ -2859,6 +2985,9 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
       # job simply means there was nothing to remove.
       discard execCmdEx(quoteCommand(["launchctl", "bootout",
         serviceTarget & "/" & launchdLabel(config)]))
+      # The same for a job an older binary left for this endpoint under the
+      # basename-only label: the bootout above no longer reaches it.
+      bootoutLegacyLaunchdJob(config)
       let bootstrap = execCmdEx(quoteCommand(["launchctl", "bootstrap",
         serviceTarget, plistPath]))
       if bootstrap.exitCode == 0:
@@ -2915,7 +3044,7 @@ proc systemdUnitName*(config: UserDaemonConfig): string =
   ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
   ## ``sun_path`` (108 bytes).
   "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
-    "-" & blake3.digest(config.endpoint).toHex()[0 ..< 16] & ".service"
+    "-" & endpointNameDigest(config) & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =
@@ -3044,7 +3173,16 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
     logLine(config.logPath, "launch requested backend=posix-fork pid=" &
       $pid)
 
-proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
+proc cleanupPlatformBackgroundRegistration*(requested: UserDaemonConfig) =
+  ## Deregister the daemon for ``requested.endpoint`` from the platform
+  ## service manager (launchd job / systemd transient unit).
+  ##
+  ## The paths are anchored first, exactly as ``startUserDaemon`` anchors them
+  ## before it launches: the name the manager knows the daemon by is derived
+  ## from the endpoint string, and the launcher registered it under the
+  ## ABSOLUTE one. A caller passing ``--endpoint`` relative to its working
+  ## directory would otherwise ask for a name nothing was registered under.
+  let config = withAnchoredDaemonPaths(requested)
   when defined(macosx):
     discard execCmdEx(quoteCommand(["launchctl", "bootout",
       "gui/" & $currentUid() & "/" & launchdLabel(config)]))
@@ -3053,6 +3191,7 @@ proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
         removeFile(launchdPlistPath(config))
       except OSError:
         discard
+    bootoutLegacyLaunchdJob(config)
   elif defined(linux):
     discard execCmdEx(quoteCommand(["systemctl", "--user", "stop",
       systemdUnitName(config)]))

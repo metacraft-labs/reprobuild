@@ -97,9 +97,10 @@ type
       ## CONSUMES a leased state sends this to advance the holder's lease
       ## in the daemon-hosted registry: ``{scope, address, consumerId,
       ## ttlSeconds}``. The daemon sets ``holders[consumerId] =
-      ## deadlineFrom(policy, now)``, recomputes the reference-counted MAX
-      ## ``effectiveDeadline`` (L2 semantics), and persists the record. The
-      ## daemon answers with ``udkLeaseRenewAck``.
+      ## deadlineFrom(policy, now)`` for a dated policy, or records the
+      ## consumer in ``keepHolders`` for ``keep``, recomputes the
+      ## reference-counted MAX ``effectiveDeadline`` (L2 semantics), and
+      ## persists the record. The daemon answers with ``udkLeaseRenewAck``.
     udkLeaseRenewAck = 21
       ## Reply for ``udkLeaseRenew``: whether a record existed + was
       ## renewed, and the resulting (optional) effective deadline.
@@ -882,7 +883,8 @@ type
     address*: string
       ## The leased state's resource address (the store record key).
     consumerId*: string
-      ## This consumer's stable holder id (the ``holders`` map key).
+      ## This consumer's stable holder id (the ``holders`` map key for a
+      ## dated policy, the ``keepHolders`` entry for ``keep``).
     ttlSeconds*: int64
       ## The policy, encoded per the scheme above.
 

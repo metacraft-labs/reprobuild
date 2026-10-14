@@ -90,17 +90,10 @@ import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
 import repro_core/source_root
+import repro_core/c_compiler
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
-
-proc sanitizeStaticExec(val: string): string =
-  var cleanLines: seq[string] = @[]
-  for line in val.splitLines:
-    let s = line.strip()
-    if s.len > 0 and not s.startsWith("io-mon:"):
-      cleanLines.add(s)
-  if cleanLines.len > 0: cleanLines[^1] else: ""
 
 # There is deliberately no build-time Nim compiler constant. The Nim that
 # compiles a recipe is the one the bootstrap provisions
@@ -112,14 +105,13 @@ proc sanitizeStaticExec(val: string): string =
 # every Windows build: ``staticExec`` runs no shell there, so ``command`` is
 # not found and the last output line is Nim's "Requested command not found".
 #
-# ``BuiltCCompilerPath`` has the same Windows defect and so is defined only
-# where its probe can work. Windows gets its recipe-compile C compiler from the
-# bootstrap or from ``REPRO_BOOTSTRAP_CC``, never from here.
-when defined(windows):
-  const BuiltCCompilerPath = ""
-else:
-  const BuiltCCompilerPath =
-    sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
+# ``BuiltCCompilerPath`` -- the C compiler ``repro`` was built with -- is
+# defined in ``repro_core/c_compiler`` with the rest of the C compiler
+# selection, which the profile compile shares. The names below used to be
+# defined here and are re-exported for the callers that import them from here.
+export c_compiler.CCompilerUnusableError, c_compiler.bootstrapCCompilerEnv,
+  c_compiler.bootstrapSdkRootEnv, c_compiler.bootstrapSysrootArgs,
+  c_compiler.cCompilerOverrideRemedy
 
 proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## Preserve source-only dependency roots from the environment that built
@@ -658,8 +650,13 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 21'u16
-    ## v21 (current): retains ``detail`` (``TarballArchiveDetail``) on
+  EnvelopeVersion = 22'u16
+    ## v22 (current): ``TarballArchiveDetail`` also retains the macOS
+    ##                application fields ``appBundle``, ``bundleId`` and
+    ##                ``teamId`` (GM4c), encoded after ``cpuFeatures``. v21
+    ##                payloads decode with them empty, which is a record
+    ##                that delivers no application bundle.
+    ## v21: retains ``detail`` (``TarballArchiveDetail``) on
     ##                tarball provisioning — the archive-realization metadata
     ##                the retired ``VersionedProvisioning`` catalog records
     ##                held (GM4b). Encoded after ``os``, before ``location``.
@@ -1079,8 +1076,9 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc writeTarballArchiveDetail(outp: var seq[byte];
-                               detail: TarballArchiveDetail) =
-  ## GM4b (v21). Field order is the declaration order of
+                               detail: TarballArchiveDetail;
+                               version: uint16) =
+  ## GM4b (v21), GM4c (v22). Field order is the declaration order of
   ## ``TarballArchiveDetail``; ``readTarballArchiveDetail`` mirrors it.
   outp.writeString(detail.version)
   outp.writeString(detail.sha512)
@@ -1099,9 +1097,13 @@ proc writeTarballArchiveDetail(outp: var seq[byte];
   outp.writeStringSeq(detail.launcherEmit)
   outp.writeString(detail.cpuLevel)
   outp.writeString(detail.cpuFeatures)
+  if version >= 22'u16:
+    outp.writeString(detail.appBundle)
+    outp.writeString(detail.bundleId)
+    outp.writeString(detail.teamId)
 
-proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int):
-    TarballArchiveDetail =
+proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
+                              version: uint16): TarballArchiveDetail =
   result.version = readString(bytes, pos)
   result.sha512 = readString(bytes, pos)
   result.sha1 = readString(bytes, pos)
@@ -1119,6 +1121,10 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int):
   result.launcherEmit = readStringSeq(bytes, pos)
   result.cpuLevel = readString(bytes, pos)
   result.cpuFeatures = readString(bytes, pos)
+  if version >= 22'u16:
+    result.appBundle = readString(bytes, pos)
+    result.bundleId = readString(bytes, pos)
+    result.teamId = readString(bytes, pos)
 
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
@@ -1148,7 +1154,7 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.cpu)
   outp.writeString(provisioning.os)
   if version >= 21'u16:
-    outp.writeTarballArchiveDetail(provisioning.detail)
+    outp.writeTarballArchiveDetail(provisioning.detail, version)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -1181,7 +1187,7 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     result.cpu = readString(bytes, pos)
     result.os = readString(bytes, pos)
   if version >= 21'u16:
-    result.detail = readTarballArchiveDetail(bytes, pos)
+    result.detail = readTarballArchiveDetail(bytes, pos, version)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -2512,7 +2518,10 @@ proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
     ", preInstallUnrecognized: " & listLit(detail.preInstallUnrecognized) &
     ", launcherEmit: " & listLit(detail.launcherEmit) &
     ", cpuLevel: " & escForCode(detail.cpuLevel) &
-    ", cpuFeatures: " & escForCode(detail.cpuFeatures) & ")"
+    ", cpuFeatures: " & escForCode(detail.cpuFeatures) &
+    ", appBundle: " & escForCode(detail.appBundle) &
+    ", bundleId: " & escForCode(detail.bundleId) &
+    ", teamId: " & escForCode(detail.teamId) & ")"
 
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =
@@ -3049,65 +3058,7 @@ proc ensureExecutable(path: string) =
     setFilePermissions(extendedPath(path), {fpUserRead, fpUserWrite, fpUserExec,
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
-when defined(macosx):
-  # SIP prefixes, kept byte-identical to nim-stackable-hooks'
-  # ``propagation.sipProtectedPrefixes`` (the population io-mon itself uses via
-  # ``isSipProtected`` / ``rewriteSipPath``) so the engine and the monitor agree
-  # on what counts as SIP-protected. Defined locally rather than imported to
-  # keep this foundational lib free of a new dependency edge; the values MUST
-  # track the shared population.
-  const macosSipCompilerPrefixes = ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]
-
-  proc isSipProtectedCompiler(path: string): bool =
-    for prefix in macosSipCompilerPrefixes:
-      if path.startsWith(prefix):
-        return true
-    false
-
-  proc firstNonSipCCompilerOnPath(): string =
-    ## macOS / Apple Silicon: the io-mon monitor shim
-    ## (``librepro_monitor_shim.dylib``, injected via ``DYLD_INSERT_LIBRARIES``)
-    ## cannot be carried into a SIP-protected, arm64e *system* binary. ``nim c``
-    ## shells the C back-end out to the compiler resolved here, so when that
-    ## compiler is one of the SIP binaries (``/usr/bin/cc``), the monitored
-    ## reprobuild provider / interface compile spawns an unmonitorable arm64e
-    ## child and dyld either refuses an arm64-only shim slice ("incompatible
-    ## architecture ... need arm64e") or the arm64e interpose path crashes the
-    ## child — the compile then fails with an opaque
-    ## "execution of an external program failed". A non-SIP compiler (the Nix /
-    ## Homebrew clang wrapper that ``nix develop`` puts on ``PATH``) takes the
-    ## arm64 shim slice cleanly and is fully monitorable. Prefer it, mirroring
-    ## the engine's ``resolveNonSipShell`` for the analogous ``/bin/sh`` case.
-    ## Returns "" when only SIP compilers are on ``PATH`` (e.g. a bare login
-    ## shell); the caller then falls back to the SIP compiler unchanged.
-    let pathEnv = getEnv("PATH")
-    for name in ["cc", "clang", "gcc"]:
-      for dir in pathEnv.split(PathSep):
-        if dir.len == 0:
-          continue
-        let candidate = dir / name
-        if not fileExists(extendedPath(candidate)):
-          continue
-        if isSipProtectedCompiler(candidate):
-          continue
-        return candidate
-    ""
-
-  proc preferNonSipCompiler(candidate: string): string =
-    ## When ``candidate`` is a SIP-protected compiler, substitute a non-SIP one
-    ## if PATH offers it; otherwise keep ``candidate`` (best effort).
-    if candidate.len == 0 or not isSipProtectedCompiler(candidate):
-      return candidate
-    let nonSip = firstNonSipCCompilerOnPath()
-    if nonSip.len > 0: nonSip else: candidate
-
 type
-  CCompilerUnusableError* = object of CatchableError
-    ## The C compiler selected for compiling a recipe -- its interface
-    ## extractor and its provider -- is missing or cannot compile a trivial C
-    ## translation unit. The message names the compiler, where it was selected
-    ## from, what failed, and how to point reprobuild at a different one.
-
   CCompilerProbe* = object
     compiler*: string
     usable*: bool
@@ -3116,23 +3067,16 @@ type
       ## could not run). Empty when ``usable``.
 
 const
-  bootstrapCCompilerEnv* = "REPRO_BOOTSTRAP_CC"
-    ## The one knob that names the recipe-compile C compiler. Set by
-    ## ``ensureBootstrapToolchainEnv`` to the pinned tool-store compiler, or by
-    ## the user to override it.
-  bootstrapSdkRootEnv* = "REPRO_BOOTSTRAP_SDKROOT"
-    ## macOS only: the SDK the bootstrap's Xcode Command Line Tools clang
-    ## compiles and links against. ``ensureBootstrapToolchainEnv`` sets it next
-    ## to ``REPRO_BOOTSTRAP_CC`` when it chose that clang and ``SDKROOT`` was
-    ## unset. It is passed to the compiler as ``-isysroot`` rather than exported
-    ## as ``SDKROOT``: the recipe compile's child actions inherit this process's
-    ## environment, and an ``SDKROOT`` there would redirect every package
-    ## action's compiler (a Nix clang wrapper included) to the Xcode SDK.
   cCompilerProbeSource = """
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+/* Nim's std/sysrand includes this SDK framework header on Darwin. GCC can
+   compile the standard headers and still fail here, so test both. */
+#include <Security/SecRandom.h>
+#endif
 /* Nim generates C for THIS host's pointer width. A compiler for another
    target (e.g. an i386 gcc on an x86_64 host) links garbage, so refuse it
    here, where the message can say so, rather than three layers later. */
@@ -3142,14 +3086,6 @@ int repro_probe(void) { return (int)(sizeof(size_t) + strlen("ok")); }
 """
 
 var cachedCCompilerProbes = initTable[string, CCompilerProbe]()
-
-proc bootstrapSysrootArgs*(): seq[string] =
-  ## The ``-isysroot`` pair for the recipe-compile C compiler, from
-  ## ``REPRO_BOOTSTRAP_SDKROOT``. Empty off macOS and when it is unset.
-  when defined(macosx):
-    let sdk = getEnv(bootstrapSdkRootEnv)
-    if sdk.len > 0:
-      result = @["-isysroot", sdk]
 
 proc cCompilerIdentity(cc: string): string =
   ## Path plus size plus mtime: what a probe verdict is keyed on. A replaced
@@ -3164,7 +3100,12 @@ proc cCompilerIdentity(cc: string): string =
 
 proc cCompilerProbeMarkerName(identity: string): string =
   var h = 0xcbf29ce484222325'u64
-  for ch in identity.toLowerAscii():
+  # Darwin SDK paths and compiler-wrapper flags are case-sensitive inputs:
+  # -I and -i have different meanings even on a case-insensitive filesystem.
+  let markerIdentity =
+    when defined(macosx): identity
+    else: identity.toLowerAscii()
+  for ch in markerIdentity:
     h = (h xor uint64(ord(ch))) * 0x100000001b3'u64
   const hexDigits = "0123456789abcdef"
   result = newString(16)
@@ -3176,7 +3117,8 @@ proc probeCCompiler*(cc: string; cacheDir = "";
                      extraArgs: seq[string] = @[]): CCompilerProbe =
   ## Compile a trivial translation unit that includes the standard headers
   ## Nim's generated C needs, with the host's pointer width asserted, and
-  ## report whether ``cc`` can do it.
+  ## report whether ``cc`` can do it. On Darwin this includes the Security
+  ## framework header needed by Nim's std/sysrand.
   ##
   ## This is what turns "``capi.c:1: stddef.h: No such file or directory``"
   ## -- measured 2026-09-23 on a Windows host whose Machine PATH put FPC's
@@ -3185,7 +3127,7 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ##
   ## Verdicts are memoised per process, and a SUCCESS is also recorded as a
   ## marker in ``cacheDir`` (when given) keyed on the compiler's path, size
-  ## and mtime, so an activation that runs on every ``just`` recipe does not
+  ## and mtime (plus Darwin SDK and wrapper environment), so an activation that runs on every ``just`` recipe does not
   ## pay a compiler start-up each time. Failures are never cached: the fix is
   ## usually to the environment, and the next run must see it.
   ##
@@ -3193,6 +3135,14 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ## macOS bootstrap passes its ``-isysroot`` here, because that is how the
   ## recipe compile will run the compiler.
   var identity = cCompilerIdentity(cc)
+  when defined(macosx):
+    # Old success markers only tested standard headers. Never reuse them for
+    # the framework probe, or across changes to SDK/compiler-wrapper inputs.
+    identity.add("|darwin-framework-probe-v1")
+    for name in ["SDKROOT", "DEVELOPER_DIR", "NIX_CFLAGS_COMPILE",
+                 "NIX_CFLAGS_COMPILE_FOR_BUILD", "NIX_LDFLAGS",
+                 "NIX_LDFLAGS_FOR_BUILD"]:
+      identity.add("|" & name & "=" & getEnv(name))
   for arg in extraArgs:
     identity.add("|" & arg)
   if cachedCCompilerProbes.hasKey(identity):
@@ -3238,14 +3188,6 @@ proc probeCCompiler*(cc: string; cacheDir = "";
       discard
   cachedCCompilerProbes[identity] = result
 
-proc cCompilerOverrideRemedy*(): string =
-  ## How to point reprobuild at a different recipe-compile C compiler.
-  "Set " & bootstrapCCompilerEnv & " to the absolute path of a working " &
-    (when defined(windows): "64-bit MinGW-w64 gcc.exe"
-     else: "C compiler for this host") &
-    ", or unset it to use the pinned bootstrap compiler reprobuild " &
-    "provisions into its tool store."
-
 proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
   ## The diagnostic for a compiler that failed ``probeCCompiler``.
   var detail = probe.detail
@@ -3254,8 +3196,14 @@ proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
     detail = detail[0 ..< maxDetail] & " [...]"
   result = "the C compiler selected for compiling the recipe cannot " &
     "compile a trivial C file that includes <stddef.h>" &
+    (when defined(macosx): " and <Security/SecRandom.h>"
+     else: "") &
     "\n  compiler: " & probe.compiler &
     "\n  selected from: " & origin &
+    (when defined(macosx): "\n  SDKROOT: " &
+      getEnv("SDKROOT", "<unset>") &
+      "\n  " & bootstrapSdkRootEnv & ": " & getEnv(bootstrapSdkRootEnv, "<unset>")
+     else: "") &
     "\n  failure: " & detail.replace("\n", "\n    ") &
     "\n  remedy: " & cCompilerOverrideRemedy()
 
@@ -3301,48 +3249,15 @@ when defined(windows):
     onPath
 
 proc hostCCompilerPath(): string =
-  # MR9 — `$REPRO_BOOTSTRAP_CC` is the bootstrap-resolved gcc absolute
-  # path published by `ensureBootstrapToolchainEnv` (tool_profiles.nim)
-  # before the interface-extract step runs. It outranks `$CC` because
-  # env.ps1 / inherited shells legitimately set `$CC` to a bare
-  # basename like ``gcc`` for use by Makefiles / autotools, and the
-  # `isAbsolute(ccEnv)` check below would discard that value and fall
-  # through to `BuiltCCompilerPath` (which, on a clean Windows host,
-  # rarely matches a usable 64-bit toolchain). Consulting the
-  # bootstrap pin first guarantees nim's `--gcc.exe:` flag points at
-  # the reprobuild-provisioned winlibs gcc instead of whatever
-  # PATH-resolution would pick (e.g. FPC's 32-bit-target gcc 2.95).
-  #
-  # A SET but unusable value is an error, not a reason to fall through: it
-  # is somebody's explicit choice of compiler, and silently compiling with a
-  # different one is how the wrong gcc went unnoticed.
-  let bootstrapCC = getEnv(bootstrapCCompilerEnv)
-  if bootstrapCC.len > 0:
-    if isAbsolute(bootstrapCC) and fileExists(extendedPath(bootstrapCC)):
-      return bootstrapCC
-    raise newException(CCompilerUnusableError,
-      bootstrapCCompilerEnv & "=" & bootstrapCC & " does not name an " &
-      "existing file by absolute path. " & cCompilerOverrideRemedy())
-  let ccEnv = getEnv("CC")
-  if ccEnv.len > 0 and isAbsolute(ccEnv):
-    when defined(macosx):
-      return preferNonSipCompiler(ccEnv)
-    else:
-      return ccEnv
-  when not defined(windows):
-    let runtimeCC = findExe("cc")
-    if runtimeCC.len > 0 and isAbsolute(runtimeCC) and
-        fileExists(extendedPath(runtimeCC)):
-      when defined(macosx):
-        return preferNonSipCompiler(runtimeCC)
-      else:
-        return runtimeCC
-  if BuiltCCompilerPath.len > 0 and fileExists(extendedPath(BuiltCCompilerPath)):
-    return BuiltCCompilerPath
+  ## The recipe compile's C compiler: the shared selection
+  ## (``c_compiler.resolveConfiguredCCompiler`` -- ``$REPRO_BOOTSTRAP_CC``,
+  ## an absolute ``$CC``, ``cc`` on PATH, the compiler ``repro`` was built
+  ## with), which the profile compile uses too. Windows, where the selection
+  ## can come back empty, adds the loud ``gcc.exe``-on-PATH last resort.
+  result = resolveConfiguredCCompiler()
   when defined(windows):
-    return pathCCompilerFallback()
-  else:
-    ""
+    if result.len == 0:
+      result = pathCCompilerFallback()
 
 const ReprobuildLibsOverrideEnvVars* = ["REPROBUILD_LIBS_DIR",
                                        "REPROBUILD_REPO_ROOT"]
@@ -3439,32 +3354,6 @@ proc recipeCCompilerPath*(): string =
   ## Raises ``CCompilerUnusableError`` where the compile itself would.
   hostCCompilerPath()
 
-var cachedHostCCompilerFamily = ""
-
-proc hostCCompilerFamily(cc: string): string =
-  ## Detect whether the provisioned C compiler is clang- or gcc-flavoured
-  ## so Nim's selected compiler *family* matches the actual binary.
-  ##
-  ## ``hostCCompilerFlags`` aliases BOTH ``--gcc.exe`` and ``--clang.exe``
-  ## to this single compiler but, historically, left the compiler family
-  ## at Nim's platform default (clang on macOS, gcc on Linux). When the
-  ## provisioned ``cc`` is gcc (e.g. the Nix gcc-wrapper used by path-mode
-  ## provisioning) but Nim still thinks it is clang, Nim emits clang-only
-  ## flags such as ``-ferror-limit=3`` (from ``clang.options.always``)
-  ## and the gcc binary rejects them, breaking interface extraction.
-  ## Pinning ``--cc`` to the detected family keeps the always-on flag set
-  ## consistent with the binary on every platform.
-  if cachedHostCCompilerFamily.len > 0:
-    return cachedHostCCompilerFamily
-  cachedHostCCompilerFamily = "gcc"
-  try:
-    let (output, exitCode) = execCmdEx(quoteShell(cc) & " --version")
-    if exitCode == 0 and "clang" in output.toLowerAscii:
-      cachedHostCCompilerFamily = "clang"
-  except CatchableError, OSError:
-    discard
-  cachedHostCCompilerFamily
-
 proc hostCCompilerFlags(): seq[string] =
   # Windows: bump the linked stack size for any binary the engine
   # compiles on its own behalf (interface-extract runner, per-project
@@ -3482,28 +3371,9 @@ proc hostCCompilerFlags(): seq[string] =
   when defined(windows):
     result.add("--passL:-Wl,--stack,16777216")
 
-  let cc = hostCCompilerPath()
-  if cc.len == 0:
-    return
-  # Match Nim's compiler family to the provisioned binary so the family's
-  # always-on flags (e.g. clang's -ferror-limit) are not handed to the
-  # wrong compiler. See hostCCompilerFamily for the failure this avoids.
-  result.add("--cc:" & hostCCompilerFamily(cc))
-  result.add("--gcc.exe:" & cc)
-  result.add("--gcc.linkerexe:" & cc)
-  result.add("--clang.exe:" & cc)
-  result.add("--clang.linkerexe:" & cc)
-  # macOS: the bootstrap's Xcode clang needs the SDK named (see
-  # ``bootstrapSdkRootEnv``, which only the bootstrap sets, and only for that
-  # compiler). A compiler the caller named finds its SDK the way it always did.
-  if cc == getEnv(bootstrapCCompilerEnv):
-    let sysroot = bootstrapSysrootArgs()
-    if sysroot.len == 2:
-      let sdk =
-        if ' ' in sysroot[1]: "\"" & sysroot[1] & "\""
-        else: sysroot[1]
-      result.add("--passC:-isysroot " & sdk)
-      result.add("--passL:-isysroot " & sdk)
+  # The compiler, its family, and (macOS bootstrap clang) its SDK: the
+  # flags the profile compile passes too (``c_compiler.nimCCompilerFlags``).
+  result.add(nimCCompilerFlags(hostCCompilerPath()))
 
 proc walkLibSrcPathsInto(libsRoot: string; sink: var seq[string]) =
   ## Walks ``<libsRoot>/<name>/src`` and appends every existing entry to

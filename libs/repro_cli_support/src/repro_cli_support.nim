@@ -314,7 +314,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -10445,6 +10445,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if warnedRunQuotaBypass or not enabled:
       return
     if not usesRunQuotaBypass(runResult):
+      return
+    # ONLY WHEN THE BYPASS WAS NOT ASKED FOR. The sentence below asserts a
+    # CAUSE — "runquotad is not reachable" — and names a remedy for it, which
+    # was true while an unreachable daemon was the only way to reach this
+    # bypass. It is not any more: a `--no-runquota` build, and a `--dry-run`
+    # (which implies it), bypass by POLICY, and on a host whose daemon is
+    # answering perfectly this line would blame the daemon and tell the
+    # operator to start one that is already running. A policy bypass is not
+    # unreported either way — the RunQuota authority header
+    # (`runQuotaAuthorityHeaderLine`) states it for the whole invocation,
+    # including the invocations that launch nothing.
+    if bypassRunQuota:
       return
     warnedRunQuotaBypass = true
     logSummary("repro build: WARNING runquotad is not reachable; using " &
@@ -24084,6 +24096,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
+  # Whether `--runquota` was passed, as opposed to the default simply leaving
+  # RunQuota on. Only the explicit request outranks the bypass a `--dry-run`
+  # implies; see the derivation after the flag loop.
+  var runQuotaRequestedExplicitly = false
   # In-Process-Monitor-Hosting P1(b): the operator surface for
   # ``BuildEngineConfig.monitorHosting``. Same shape as ``--daemon`` above —
   # an environment default (``REPROBUILD_MONITOR_HOSTING``) that the flag
@@ -24279,8 +24295,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       restoreCachedOutputs = false
     elif arg == "--no-runquota":
       bypassRunQuota = true
+      runQuotaRequestedExplicitly = false
     elif arg == "--runquota":
       bypassRunQuota = false
+      # Recorded as a REQUEST, not only as its effect on `bypassRunQuota`,
+      # because a dry run's implied bypass is applied after this loop and
+      # has to be able to tell "the default left it on" from "the operator
+      # asked for the handshake". See the derivation below the loop.
+      runQuotaRequestedExplicitly = true
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       monitorHosting = parseMonitorHostingMode(
         valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
@@ -24392,6 +24414,64 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       "--soft-rebuild, --rebuild-host-bound or --hard-rebuild")
     return 2
   setRebuildSelection(rebuildClass, rebuildOnly)
+
+  # A DRY RUN IMPLIES `--no-runquota` (`reprobuild-pm/spec/CLI/build.md`
+  # §"Dry Run").
+  #
+  # The scheduler completes every action it reaches as `asWouldRun` without a
+  # lease, a process or an output, so a dry run has nothing to admit against
+  # a machine budget. Requiring the daemon anyway ended the one command whose
+  # entire output is a plan with `runquotad did not become reachable`, on
+  # precisely the host `--dry-run` is most wanted on: one whose environment is
+  # not working yet. `--no-runquota` was then the only way through, which is
+  # a workaround an operator has to be told about, in a command that exists
+  # to be the thing you try first.
+  #
+  # DERIVED HERE, after the flag loop, rather than inside
+  # `startAutoRunQuotaIfNeeded`: `bypassRunQuota` decides three separate
+  # things — whether that spawn happens, whether the PROVIDER COMPILE takes a
+  # lease (`effectiveProviderCompileRunQuotaBypass`, reached through
+  # `bypassRunQuotaExplicit`, and planning DOES reach the provider compile),
+  # and what a `--list-targets` pass is handed. One derivation above all
+  # three keeps them from disagreeing about what a dry run needs.
+  #
+  # An explicit `--runquota` still wins: it is the flag whose only job is to
+  # ask for the handshake. That is why this is not spelled `bypassRunQuota =
+  # bypassRunQuota or dryRun`, and why the flag loop records the request and
+  # not only its effect on `bypassRunQuota`.
+  #
+  # AND THE DECISION HAS TO REACH THE STEPS THAT READ ONLY THE ENVIRONMENT.
+  # `REPROBUILD_NO_RUNQUOTA` is the documented full-bypass switch every
+  # internal build step honours (`runQuotaBypassedByEnv`, and the engine's own
+  # `launchChildEnv`), and planning reaches two of them through code paths
+  # that take no flag: the hidden lock's solve under `--strategy`
+  # (`solverInputsFromCompiledProvider`, which starts a daemon of its own) and
+  # the `--list-targets` inspection's provider compile (which reads the
+  # variable to decide whether to open an inline session). Without exporting
+  # the decision, `repro build --dry-run --strategy lowest` still died with
+  # `runquotad did not become reachable` from inside that solve — and the
+  # sentence this change puts in the spec would be false.
+  #
+  # RESTORED ON THE WAY OUT, because callers keep running in the same process
+  # after this returns. `repro test --dry-run` forwards the flag here and then
+  # EXECUTES the tests in that same process; `bench`, `lint`, `run` and the
+  # top-level dispatch are the same shape. A dry run must not leave the rest
+  # of such a session bypassed. (A daemon-hosted build runs in a FORKED worker
+  # whose environment is its own, so the daemon and its sibling workers are
+  # unaffected either way.)
+  let inheritedNoRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA")
+  let hadInheritedNoRunQuota = existsEnv("REPROBUILD_NO_RUNQUOTA")
+  var exportedDryRunRunQuotaBypass = false
+  defer:
+    if exportedDryRunRunQuotaBypass:
+      if hadInheritedNoRunQuota:
+        putEnv("REPROBUILD_NO_RUNQUOTA", inheritedNoRunQuota)
+      else:
+        delEnv("REPROBUILD_NO_RUNQUOTA")
+  if dryRun and not runQuotaRequestedExplicitly:
+    bypassRunQuota = true
+    exportedDryRunRunQuotaBypass = true
+    putEnv("REPROBUILD_NO_RUNQUOTA", "1")
 
   # ----------------------------------------------------------------
   # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE
@@ -61954,6 +62034,37 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
       "shell on the machine: " & rows.join(" | "),
     remedy: "", fixKind: hfNone)
 
+const HealthDigestMaxShown = 5
+  ## How many findings a digested `repro health` detail names in default text
+  ## mode. CLI/health.md §Modes fixes this at 5 for every row that reports a
+  ## finding list, so it is a constant rather than a per-call-site default:
+  ## two rows that digested at different widths would make the `(+N more)`
+  ## suffix unreadable as a convention.
+
+proc formatFindingList(items: openArray[string]; verbose: bool;
+                       maxShown = HealthDigestMaxShown): string =
+  ## Render a finding list for a `repro health` detail: in full when `verbose`
+  ## or short enough, otherwise the first `maxShown` plus `(+N more)`.
+  ##
+  ## Was `formatHookList`, nested inside `gatherHealthChecks`'s `hooksCheck`
+  ## block. It is file-level and renamed because it now has a second caller —
+  ## the `lease-reaper` row's stuck-record list — and nothing about it was ever
+  ## hook-specific. A second copy of a five-line formatter in the same proc is
+  ## what §Code Quality's "keep it DRY" exists to stop, and two copies would
+  ## also be free to drift apart on the one thing that has to be uniform: the
+  ## width at which a list becomes a digest.
+  ##
+  ## The CALLER still builds its detail twice — once through this and once
+  ## unabridged — and passes the pair as `detail` / `fullDetail`, so
+  ## `--json` and `--verbose` keep the full list (`toJsonNode` emits
+  ## `fullDetail` as `detail` and this digest as `digest`).
+  if verbose or items.len <= maxShown:
+    items.join(", ")
+  else:
+    let shown = items[0 ..< maxShown]
+    let elided = items.len - maxShown
+    shown.join(", ") & " (+" & $elided & " more)"
+
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
@@ -61976,9 +62087,13 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # 2. Daemon / privilege mode. Either the per-user store daemon is
   #    running, or we are on the single-user direct path. Both are
   #    healthy; we report WHICH so a no-sudo user understands the mode.
+  # Hoisted out of `daemonCheck` because the `lease-reaper` row below needs
+  # them: "records present but no reap verdict" is a FAULT when a daemon is up
+  # (its tick should have written one) and a configuration when none is, and
+  # that probe has already been paid for here.
+  var running = false
+  var endpoint = ""
   block daemonCheck:
-    var running = false
-    var endpoint = ""
     try:
       let status = queryUserDaemonStatus()
       running = status.running
@@ -62002,6 +62117,204 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         detail: "no user daemon; single-user direct mode",
         remedy: self & " daemon start",
         fixKind: hfStartDaemon))
+
+  # 2b. The lease reaper's wall-clock tick — is it actually reaping?
+  #
+  #     This row exists because of a measured two-month outage that NOTHING
+  #     surfaced (reprobuild-pm/issues/
+  #     2026-09-29-lease-reap-tick-has-never-once-succeeded.md). The per-user
+  #     daemon's reap tick raised on its first record on every one of 131,882
+  #     consecutive attempts over 57 days and reaped nothing, EVER, while the
+  #     daemon reported itself running and every command that depends on it
+  #     succeeded. The only evidence was a log line in a file nobody reads, on
+  #     a path whose whole purpose is to run unattended.
+  #
+  #     So the question this asks is deliberately not "is a daemon up" — the
+  #     ``daemon-mode`` row above answered that affirmatively throughout —
+  #     but "has the thing the daemon is for made progress". The §4.2 tick
+  #     leaves a standing verdict beside the store it sweeps
+  #     (``LeaseReapTickHealth``) and this row reads it.
+  #
+  #     USER SCOPE, AND THE DEFAULT ROOT. The row reads
+  #     ``leaseStoreRootForScope(dlsUser)`` with NO override, which has two
+  #     consequences worth stating rather than discovering:
+  #
+  #       * a system-scoped reaper is not reported. It runs under the system
+  #         daemon's state dir, which this process generally cannot read, and
+  #         an "unknown" on every developer machine would be noise;
+  #       * a daemon started with an explicit ``--state-root`` writes its
+  #         verdict beside THAT store, which this row does not look at. Such a
+  #         daemon reads here as "records present, no verdict" at most — and
+  #         the ``lrsHoldsRecords`` arm names that possibility in its detail,
+  #         so the operator is not left to infer it. CLI/health.md states the
+  #         same caveat beside the location.
+  #
+  #     NOT ``--fix``-ABLE, and that is a safety property rather than an
+  #     omission: clearing this finding means destroying real infrastructure
+  #     (an Incus container, a network) or deleting the record that still
+  #     names it. Neither is a remediation a doctor may perform unasked —
+  #     contrast ``direnv allow`` or cloning a missing sibling, which are
+  #     recoverable. The remedy therefore names the sweep for the operator to
+  #     run, and ``--fix`` describes it instead of doing it.
+  block leaseReaperCheck:
+    let health = readLeaseReapTickHealth(dlsUser)
+    let storeRoot = leaseStoreRootForScope(dlsUser)
+
+    # TWO ELISION LAYERS, AND BOTH HAVE TO BE VISIBLE. They mean different
+    # things and the next reader will want to collapse them, so: `elidedStuck`
+    # is "the VERDICT never recorded these" — the tick's own persistence cap,
+    # because an unbounded list is an unbounded write every 30 s — while the
+    # digest is "this LINE is not showing you all of what was recorded".
+    # Conflating them would let a digest claim completeness about a verdict
+    # that was already truncated, which is the same class of lie as a stuck
+    # store reading as a healthy one. A row that dropped entries at both
+    # layers says so at both layers.
+    #
+    # `verbose` and `--json` suppress only the DIGEST. Nothing can recover
+    # what the verdict did not record, which is exactly why that count is
+    # reported separately rather than folded into the `(+N more)`.
+    proc renderStuck(h: LeaseReapTickHealth; verbose: bool): string =
+      if h.stuck.len == 0 and h.elidedStuck == 0:
+        return ""
+      result = formatFindingList(h.stuck, verbose)
+      if h.elidedStuck > 0:
+        result.add(" (+" & $h.elidedStuck & " more not recorded by the tick)")
+
+    if health.isSome:
+      let h = health.get
+      let lastTick = "last tick " & $fromUnix(h.lastTickUnix)
+      # "has NEVER succeeded" is reachable in exactly one way — the first tick
+      # recorded against this store already failed and so has every tick since
+      # — because an IDLE tick counts as a success. That one way is the live
+      # daemon's case, which is why the wording is worth having: a reaper that
+      # has not completed a sweep ONCE is a wiring fault, while one that
+      # stopped completing them is a new obstruction, and a bare count cannot
+      # tell them apart.
+      let lastSuccess =
+        if h.lastSuccessUnix == 0: "has NEVER completed a sweep"
+        else: "last completed a sweep " & $fromUnix(h.lastSuccessUnix)
+      if leaseReapTickIsUnhealthy(h):
+        # Built twice — digested and unabridged — and handed over as the
+        # `detail` / `fullDetail` pair the row convention uses, so `--verbose`
+        # and `--json` keep every recorded finding.
+        proc unhealthyDetail(verbose: bool): string =
+          "the lease reaper has not completed a sweep in " &
+            $h.consecutiveUnsuccessful & " consecutive ticks and " &
+            lastSuccess & " (" & $h.totalTicks & " ticks recorded, " &
+            lastTick & ", store " & storeRoot &
+            "). Leased ephemeral state is therefore ACCUMULATING: every " &
+            "record the sweep cannot destroy stays in the store and stays " &
+            "in the world. Stuck: " & renderStuck(h, verbose)
+        let digested = unhealthyDetail(parsed.verbose)
+        let full = unhealthyDetail(true)
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsFail,
+          detail: digested,
+          fullDetail: if digested != full: full else: "",
+          remedy: self & " reap --once --state-root=" & storeRoot &
+            "   # then act on what it names",
+          fixKind: hfNone))
+      else:
+        # A sweep completing unobstructed is the healthy state, and an idle
+        # tick is one of those: `lastSuccessUnix` says when a sweep last
+        # finished with nothing left stuck, not when something was last
+        # destroyed.
+        proc healthyDetail(verbose: bool): string =
+          "lease reaper sweeping " & storeRoot & ": " &
+            $h.totalTicks & " ticks recorded, " & lastSuccess & ", " &
+            lastTick & ", " & $h.consecutiveUnsuccessful &
+            " consecutive unsuccessful (threshold " &
+            $LeaseReapUnhealthyTickThreshold & ")" &
+            (if h.stuck.len > 0 or h.elidedStuck > 0:
+              ". Currently stuck: " & renderStuck(h, verbose)
+            else: "")
+        let digestedOk = healthyDetail(parsed.verbose)
+        let fullOk = healthyDetail(true)
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsOk,
+          detail: digestedOk,
+          fullDetail: if digestedOk != fullOk: fullOk else: "",
+          remedy: "", fixKind: hfNone))
+    else:
+      # NO VERDICT, which is three different states and only one of them is
+      # healthy. Answering them alike is how this row would keep the defect it
+      # was added to remove: a reaper that is stuck AND cannot write its
+      # verdict (an unwritable root makes the write raise inside
+      # `runAndRecordLeaseReapTick`, which hands it back as `healthWriteError`
+      # for the daemon to report once per run) leaves nothing to
+      # read, and "no verdict therefore nothing leased here" would call that
+      # healthy without having looked. So look.
+      let store = probeLeaseStore(dlsUser)
+      case store.kind
+      of lrsAbsent:
+        # Genuinely nothing: no store, so nothing has ever been leased under
+        # this scope and there is nothing for a reaper to do.
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsOk,
+          detail: "no user-scoped lease store at " & storeRoot &
+            "; no leased ephemeral state has been materialized on this host",
+          remedy: "", fixKind: hfNone))
+      of lrsEmpty:
+        # The store exists but holds no records. Nothing is accumulating, so
+        # a reaper that has not reported is not costing anything yet.
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsOk,
+          detail: "lease store " & storeRoot &
+            " holds no resource records, and no reap tick has reported a " &
+            "verdict against it; nothing is accumulating",
+          remedy: "", fixKind: hfNone))
+      of lrsHoldsRecords:
+        # Records are present and NOTHING has reported a tick against them.
+        # Either no daemon is reaping this store, or a tick is running and
+        # cannot persist its verdict. The two differ in severity and the
+        # daemon probe above already told us which: a daemon that is up OUGHT
+        # to have written one, so its absence is a fault rather than a
+        # configuration.
+        let sharedDetail = "lease store " & storeRoot & " holds " &
+          $store.records & " resource record(s) and NO reap tick has " &
+          "reported a verdict against it, so whether any of them are being " &
+          "reaped is unknown"
+        if running:
+          checks.add(HealthCheck(
+            name: "lease-reaper",
+            status: hsFail,
+            detail: sharedDetail &
+              ". A user daemon IS running (" & endpoint & "), so its tick " &
+              "should have recorded one: either it is not ticking against " &
+              "this store (a daemon started with a different --state-root " &
+              "writes its verdict beside THAT store) or it cannot write " &
+              "the verdict file. Its log names the reason once per run.",
+            remedy: self & " reap --once --state-root=" & storeRoot,
+            fixKind: hfNone))
+        else:
+          # No daemon is a supported path (§4.3: the store, not the daemon,
+          # is the source of truth), so this is a WARN: the records are
+          # enforceable by hand and by the next reconcile. It is reported
+          # because an unreaped store is still state accumulating in the
+          # world, which is the thing nobody was told about for 57 days.
+          checks.add(HealthCheck(
+            name: "lease-reaper",
+            status: hsWarn,
+            detail: sharedDetail &
+              ". No user daemon is running, so nothing is sweeping it on a " &
+              "wall clock; the records stay until a sweep runs by hand or a " &
+              "reconcile reaps them.",
+            remedy: self & " reap --once --state-root=" & storeRoot,
+            fixKind: hfNone))
+      of lrsUnreadable:
+        checks.add(HealthCheck(
+          name: "lease-reaper",
+          status: hsFail,
+          detail: "lease store " & storeRoot &
+            " could not be read, so neither what it holds nor whether it is " &
+            "being reaped can be established: " & store.reason,
+          remedy: "ensure " & storeRoot &
+            " is readable by this user, then re-run " & self & " health",
+          fixKind: hfNone))
 
   # 3. Store health. The content-addressed store root must be present
   #    and readable.
@@ -62272,14 +62585,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     # population: "4 wired" means nothing without "of 5 present in 1 repo".
     let census = $okCount & " managed hook(s) wired across " &
       $reposInspected & " participating repo(s)"
-    proc formatHookList(items: openArray[string]; verbose: bool; maxShown = 5): string =
-      if verbose or items.len <= maxShown:
-        items.join(", ")
-      else:
-        let shown = items[0 ..< maxShown]
-        let elided = items.len - maxShown
-        shown.join(", ") & " (+" & $elided & " more)"
-
     if enumerated.mode != "workspace":
       checks.add(HealthCheck(
         name: "vcs-hooks",
@@ -62315,17 +62620,17 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         "every marker a generated body carries, and demanding a contract " &
         "THIS build does not generate, so each fire refuses (pre-push) or " &
         "fails open in silence (the four observational hooks): " &
-        formatHookList(stale, parsed.verbose) & ". " & census &
+        formatFindingList(stale, parsed.verbose) & ". " & census &
         (if writers.len > 0:
           ". The installed bodies name their writer(s): " &
             writers.join(" | ") &
             " — compare STORE PATHS, not versions"
         else: "") &
         (if shadowed.len > 0:
-          ". Also " & $shadowed.len & " SHADOWED: " & formatHookList(shadowed, parsed.verbose)
+          ". Also " & $shadowed.len & " SHADOWED: " & formatFindingList(shadowed, parsed.verbose)
         else: "") &
         (if missing.len > 0:
-          ". Also " & $missing.len & " missing: " & formatHookList(missing, parsed.verbose)
+          ". Also " & $missing.len & " missing: " & formatFindingList(missing, parsed.verbose)
         else: "") &
         ". See the hook-interpreter row for whether this host's shells " &
         "even agree about which 'repro' runs them."
@@ -62342,7 +62647,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       let fullShadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
         "installer and not running: " & shadowed.join(", ") & ". " & census
       let shadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
-        "installer and not running: " & formatHookList(shadowed, parsed.verbose) & ". " & census
+        "installer and not running: " & formatFindingList(shadowed, parsed.verbose) & ". " & census
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
@@ -62354,7 +62659,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       let fullMissingDetail = $missing.len & " managed hook(s) missing across " &
         $reposInspected & " participating repo(s): " & missing.join(", ")
       let missingDetail = $missing.len & " managed hook(s) missing across " &
-        $reposInspected & " participating repo(s): " & formatHookList(missing, parsed.verbose)
+        $reposInspected & " participating repo(s): " & formatFindingList(missing, parsed.verbose)
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
@@ -81944,6 +82249,31 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro gateway: error: " & err.msg &
         "; REJECTING (fail closed)")
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "reap":
+    # Ephemeral-State-Leases.md §4.3 fallback (b): `repro reap --once` — one
+    # lease sweep by hand, the always-available enforcer for a host with no
+    # daemon running and the diagnostic an operator reaches for when the
+    # `lease-reaper` health row goes red.
+    #
+    # `runReapCli` has existed and been tested since L3; nothing DISPATCHED
+    # it, so the command the spec promises exited 2 as an unknown
+    # subcommand. That is also why the health row above could not name a
+    # remedy before: a remedy that is not a command is not a remedy
+    # (Interactive-UX-And-Progress.md Principle 2).
+    #
+    # Default in-process transport. A sweep from the CLI reaps what this
+    # build links and REPORTS what it cannot, exiting non-zero — which is the
+    # diagnosis, not a failure of the command.
+    try:
+      let reapArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          newSeq[string]()
+      return runReapCli(reapArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro reap: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "health":
     # RA-30 — top-level `repro health` (the environment doctor) per

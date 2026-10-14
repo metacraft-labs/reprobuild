@@ -142,20 +142,17 @@ suite "the self-written set is derived from the output declaration":
     ## The two readings of `ignoredInputPrefixes` are not the same claim.
     ## `honouredDerivedPrefixes` answers "are the bytes under here NOT my
     ## product", and a declared write root is the opposite of that answer.
-    ## Feeding it the derived set would also be unsound by construction,
-    ## because the gate disqualifies a prefix by comparing it against
-    ## `declaredOutputs` in their DECLARED spelling, so the symlink-resolved
-    ## derived spelling would slip past the disqualification — which is why
-    ## the write root below is spelled through a symlinked parent where the
-    ## platform has one.
+    ## The restore gate reads only explicit ignored prefixes, even when the
+    ## enumeration set also contains derived write roots. Exercise that
+    ## separation through a symlinked parent: both directory spellings must
+    ## remain enumeration ignores without becoming restore exemptions.
     let destRoot = UnitRoot / "proj" / "build" / "out"
     let act = writeRootAction(destRoot)
     check act.honouredDerivedPrefixes().len == 0
 
     when not defined(windows):
-      # macOS: `/tmp` is a symlink to `/private/tmp`, so a root derived from
-      # a `/tmp` declaration carries BOTH spellings and only one of them can
-      # be matched against the declaration.
+      # macOS: a temporary directory can have both logical and physical
+      # spellings. The enumeration set retains both when they differ.
       let linked = createTempDir("repro-derived-gate-", "")
       defer: removeDir(linked)
       let resolved = expandFilename(linked)

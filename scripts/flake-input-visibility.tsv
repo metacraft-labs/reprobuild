@@ -66,6 +66,7 @@ metacraft-labs/nim-shm-lease	public
 metacraft-labs/nim-shm-queue	public
 metacraft-labs/nim-stackable-hooks	public
 metacraft-labs/reprobuild-ct-test-runner	public
+metacraft-labs/reprobuild-nix-packages	public
 metacraft-labs/reprobuild-test-adapters	public
 metacraft-labs/runquota	public
 mitchellh/zig-overlay	public

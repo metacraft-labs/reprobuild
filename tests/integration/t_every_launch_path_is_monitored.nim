@@ -1622,17 +1622,24 @@ proc renderEntropyObservations(observations: seq[EntropyObservation]):
     result.add observation.source & "@" & $observation.origin & "@" &
       observation.image
 
+proc renderEvidencePaths(name: string; paths: seq[string];
+                         subs: seq[(string, string)]): string =
+  ## Darwin records both lexical /tmp paths and canonical /private/tmp
+  ## companions. Compare the set of names after mapping both spellings.
+  var items: seq[string] = @[]
+  for p in paths:
+    var value = p
+    for sub in subs:
+      value = value.replace(sub[0], sub[1])
+    if value notin items:
+      items.add value
+  items.sort()
+  name & "=[" & items.join(" ") & "]"
+
 proc evidenceShape(res: ActionResult;
                    subs: seq[(string, string)]): string =
   proc render(name: string; paths: seq[string]): string =
-    var items: seq[string] = @[]
-    for p in paths:
-      var value = p
-      for sub in subs:
-        value = value.replace(sub[0], sub[1])
-      items.add value
-    items.sort()
-    name & "=[" & items.join(" ") & "]"
+    renderEvidencePaths(name, paths, subs)
 
   let ev = res.evidence
   @[
@@ -1767,13 +1774,19 @@ proc looksLikeSharedObject(path: string): bool =
 proc caseSubstitutions(tempRoot, caseDir, workRoot, marker,
                        outPath: string): seq[(string, string)] =
   ## Longest and most specific first — the absolute forms have to be
-  ## consumed before the directory prefixes they contain.
+  ## consumed before the directory prefixes they contain. Include canonical
+  ## companions for outputs and directories as well as inputs; otherwise a
+  ## recorded /private/tmp write becomes /private<out> instead of <out>.
   result = @[
     (expandFilename(marker), "<marker>"),
     (marker, "<marker>"),
+    (expandFilename(outPath), "<out>"),
     (outPath, "<out>"),
+    (expandFilename(workRoot), "<work>"),
     (workRoot, "<work>"),
+    (expandFilename(caseDir), "<case>"),
     (caseDir, "<case>"),
+    (expandFilename(tempRoot), "<temp>"),
     (tempRoot, "<temp>"),
     (marker.extractFilename, "<marker>"),
     (outPath.extractFilename, "<out>")
@@ -1886,6 +1899,35 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
       "requires monitor evidence but no iomon path is selected")
 
 suite "every_launch_path_is_monitored":
+
+  when defined(linux) or defined(macosx):
+    test "evidence shape folds aliases while retaining distinct and missing writes":
+      let root = createTempDir("repro-evidence-shape-", "", "/tmp")
+      defer: removeDir(root)
+      let actual = root / "actual"
+      let alias = root / "alias"
+      createDir(actual)
+      createSymlink(actual, alias)
+      let caseDir = alias / "case"
+      let workRoot = caseDir / "work"
+      createDir(workRoot)
+      let marker = workRoot / "marker.txt"
+      let output = workRoot / "out.txt"
+      writeFile(marker, "marker")
+      writeFile(output, "output")
+      let subs = caseSubstitutions(root, caseDir, workRoot, marker, output)
+      let shape = renderEvidencePaths("monitorWrites",
+        @[output, expandFilename(output)], subs)
+      check shape == "monitorWrites=[<out>]"
+      # An unrelated output with the same basename is still another write.
+      let extraDir = actual / "elsewhere"
+      createDir(extraDir)
+      let extra = extraDir / "out.txt"
+      writeFile(extra, "extra")
+      let extraShape = renderEvidencePaths("monitorWrites", @[output, extra], subs)
+      check shapeList(extraShape, "monitorWrites").len == 2
+      check extraShape != "monitorWrites=[<out>]"
+      check renderEvidencePaths("monitorWrites", @[], subs) == "monitorWrites=[]"
 
   test "the enumeration matches the engine source":
     ## A list nobody tested is not an enumeration. This re-derives the

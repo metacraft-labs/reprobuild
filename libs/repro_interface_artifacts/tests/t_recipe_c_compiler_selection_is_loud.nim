@@ -30,9 +30,11 @@
 ## `libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim`
 ## and, end to end, by `tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim`.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
+when defined(macosx):
+  import repro_core/c_compiler
 
 proc writeUnrunnableCompiler(dir: string): string =
   ## A file named like a compiler that is not a program at all: the portable
@@ -161,3 +163,98 @@ suite "selecting the recipe-compile C compiler":
           raised = true
           check "there is no gcc.exe on PATH" in err.msg
         check raised
+
+when defined(macosx):
+  suite "Darwin recipe compilers reach platform frameworks":
+    test "implicit selection prefers real clang over an earlier nixpkgs gcc cc":
+      # Real compiler aliases recreate the consumer's PATH ordering without
+      # replacing compiler behavior: GCC must actually fail on the framework
+      # header, and the selected compiler must actually compile it.
+      let gcc = getEnv("REPRO_TEST_DARWIN_GCC", findExe("gcc"))
+      let clang = findExe("clang")
+      doAssert gcc.len > 0 and cCompilerFamily(gcc) == "gcc",
+        "this regression requires a real GCC (run in the Nix dev shell)"
+      doAssert clang.len > 0 and cCompilerFamily(clang) == "clang"
+      let dir = createTempDir("repro-darwin-compiler-", "")
+      defer: removeDir(dir)
+      createDir(dir / "gcc-first")
+      createDir(dir / "clang-second")
+      createSymlink(gcc, dir / "gcc-first" / "cc")
+      createSymlink(clang, dir / "clang-second" / "clang")
+      let source = dir / "framework.c"
+      writeFile(source, "#include <Security/SecRandom.h>\nint repro_framework(void) { return 0; }\n")
+      let rejected = execCmdEx(quoteShell(gcc) & " -c " & quoteShell(source) &
+        " -o " & quoteShell(dir / "gcc.o"))
+      check rejected.exitCode != 0
+      check "Security/SecRandom.h" in rejected.output
+      withEnv([bootstrapCCompilerEnv, "CC", "PATH"]):
+        delEnv(bootstrapCCompilerEnv)
+        delEnv("CC")
+        putEnv("PATH", dir / "gcc-first" & $PathSep & dir / "clang-second" &
+          $PathSep & getEnv("PATH"))
+        let chosen = recipeCCompilerPath()
+        check cCompilerFamily(chosen) == "clang"
+        let compiled = execCmdEx(quoteShell(chosen) & " -c " & quoteShell(source) &
+          " -o " & quoteShell(dir / "clang.o"))
+        check compiled.exitCode == 0
+        check fileExists(dir / "clang.o")
+        putEnv(bootstrapCCompilerEnv, gcc)
+        check recipeCCompilerPath() == gcc
+        delEnv(bootstrapCCompilerEnv)
+        putEnv("CC", gcc)
+        check recipeCCompilerPath() == gcc
+        delEnv("CC")
+        putEnv("PATH", dir / "gcc-first")
+        check recipeCCompilerPath() == gcc
+
+    test "framework-incompatible GCC is refused with compiler SDK and remedy":
+      let gcc = getEnv("REPRO_TEST_DARWIN_GCC", findExe("gcc"))
+      doAssert gcc.len > 0 and cCompilerFamily(gcc) == "gcc"
+      let probe = probeCCompiler(gcc)
+      check not probe.usable
+      check "Security/SecRandom.h" in probe.detail
+      let diagnostic = cCompilerUnusableMessage(probe, "explicit compiler")
+      check gcc in diagnostic
+      check "SDKROOT" in diagnostic
+      check getEnv("SDKROOT") in diagnostic
+      check bootstrapCCompilerEnv in diagnostic
+
+    test "a cached clang success is invalidated when wrapper header flags change":
+      let clang = findExe("clang")
+      doAssert clang.len > 0 and cCompilerFamily(clang) == "clang"
+      let dir = createTempDir("repro-darwin-probe-cache-", "")
+      defer: removeDir(dir)
+      withEnv(["NIX_CFLAGS_COMPILE"]):
+        check probeCCompiler(clang, dir).usable
+        # This real wrapper flag makes C headers unavailable. A cached success
+        # from the previous environment must not conceal the compiler failure.
+        putEnv("NIX_CFLAGS_COMPILE", getEnv("NIX_CFLAGS_COMPILE") & " -nostdinc")
+        let invalid = probeCCompiler(clang, dir)
+        check not invalid.usable
+        check "stddef.h" in invalid.detail
+
+    test "disk probe markers preserve case-sensitive compiler flags":
+      let clang = findExe("clang")
+      doAssert clang.len > 0 and cCompilerFamily(clang) == "clang"
+      let dir = createTempDir("repro-darwin-probe-case-", "")
+      defer: removeDir(dir)
+      let includeDir = dir / "headers"
+      createDir(includeDir)
+      let cacheDir = dir / "cache"
+      withEnv(["NIX_CFLAGS_COMPILE"]):
+        let original = getEnv("NIX_CFLAGS_COMPILE")
+        putEnv("NIX_CFLAGS_COMPILE", original & " -I" & includeDir)
+        check probeCCompiler(clang, cacheDir).usable
+        var markers = 0
+        for kind, path in walkDir(cacheDir):
+          if kind == pcFile and path.endsWith(".ok"):
+            inc markers
+        check markers == 1
+        # -I is a valid include-directory flag; -i is an invalid clang option.
+        # The memo keys differ, so an incorrectly lowercased disk-marker name
+        # is the only way the second call can inherit the first call's success.
+        putEnv("NIX_CFLAGS_COMPILE", original & " -i" & includeDir)
+        let invalid = probeCCompiler(clang, cacheDir)
+        check not invalid.usable
+        check "unknown argument" in invalid.detail
+        check "-i" & includeDir in invalid.detail

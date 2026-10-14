@@ -696,6 +696,15 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
       "system profiles do not read plan-time data files (`data:` declares " &
       p.dataFiles.join(", ") & "); data rows expand into activities, " &
       "which only home profiles have")
+  # System profiles carry no package references yet, so there is nothing
+  # an imported contribution catalog could reach; accepting the section
+  # would make it look effective (Core-Invariants.md §Unrecognised Input Is
+  # Rejected, Not Skipped).
+  if p.catalogImports.len > 0:
+    raise newException(ValueError,
+      "system profiles do not import contribution catalogs (`catalogs:` " &
+      "declares " & p.catalogImports.join(", ") & "); catalogs serve " &
+      "package references, which only home profiles have")
   for r in p.resources:
     if not isSystemScopeResource(r.kind):
       continue

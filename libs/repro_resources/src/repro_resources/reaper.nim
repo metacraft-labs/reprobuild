@@ -5,18 +5,22 @@
 ## correct after a crash, across a fresh process, and without a running
 ## daemon (§4.3). Its inputs are a `StateStore` and a `now`; its effect is:
 ## reconstruct each reapable `ResourceInstance` from the persisted attrs
-## (L1 `reconstructInstance`), `observe` it, `apply(rakDestroy)`, and
-## `removeStateRecord` on success.
+## (L1 `reconstructInstance` on the in-process arm, `reconstructInstanceOpaque`
+## on the session arm — see `reconstructFor`), `observe` it,
+## `apply(rakDestroy)`, and `removeStateRecord` on success.
 ##
 ## The SELECTION PREDICATE (the L2 reap-safety property, verified here):
 ##
-##   * `effectiveDeadline == none`  -> NEVER reap. `none` means "no dated
-##     holder / a `keep` holder pins it": there is NO reap deadline. This
-##     is deliberately an `Option`, not an epoch-0/PAST sentinel — a PAST
-##     sentinel would make the natural `deadline < now` gate destroy a
-##     pinned state. A `none` record is unconditionally skipped.
+##   * `effectiveDeadline == none`  -> NEVER reap. `none` means "a `keep`
+##     holder pins it" (named in `keepHolders`), "no dated holder", or — for
+##     a pre-v4 record (`keepHoldersKnown == false`) — "maybe an anonymous
+##     keep pin": there is NO reap deadline. This is deliberately an
+##     `Option`, not an epoch-0/PAST sentinel — a PAST sentinel would make
+##     the natural `deadline < now` gate destroy a pinned state. A `none`
+##     record is unconditionally skipped.
 ##   * `effectiveDeadline == some(t)` with `t <= now` AND no LIVE holder ->
-##     reap. A holder is LIVE if its own deadline is still in the future
+##     reap. A holder is LIVE if it is a recorded `keep` holder (no expiry)
+##     or its own deadline is still in the future
 ##     (`holders[c] > now`); a live holder keeps the state even if the
 ##     folded `effectiveDeadline` looks passed (defense in depth — normally
 ##     `effectiveDeadline == max(holders)`, so a live holder already lifts
@@ -41,6 +45,33 @@
 ## already in this process's closure. The persisted `typeId` + attrs are
 ## transport-agnostic; the reaper picks the op path per record.
 ##
+## "WITHOUT LINKING ITS DRIVER" EXTENDS TO THE ATTRS CODEC. A session reap
+## re-marshals the persisted attrs box straight back out to the provider
+## process, so it never reads the typed value and must not require the codec
+## that produces one; `reconstructFor` gives it the opaque reconstruction. An
+## in-process reap hands the box to a LINKED driver that does read it, so it
+## keeps the strict one.
+##
+## The reaper used to reconstruct strictly on BOTH arms. That was a latent
+## requirement contradicting §4.2's own promise — a daemon holding a provider
+## artifact but not the provider's attrs codec, which is the configuration
+## §4.2 describes, could not reap over the session it had. Removing it is what
+## makes that configuration work.
+##
+## IT IS NOT, HOWEVER, THE CAUSE OF THE MEASURED OUTAGE, and the distinction
+## matters because the outage is what is cited around here. The live per-user
+## daemon's 131,882 consecutive failing ticks over 57 days
+## (reprobuild-pm/issues/2026-09-29-lease-reap-tick-has-never-once-succeeded.md)
+## came through the IN-PROCESS arm: `buildLeaseReapTransport` returns
+## `inProcessTransport()` whenever no provider artifact is registered, and
+## nothing in the shipped tree registers one (see
+## `reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md`).
+## Its `vm_harness.nic` record had neither a linked driver nor a linked codec
+## there, so it was unreapable by that process by ANY route, and strict
+## reconstruction remains correct for it. What this split fixes is the second,
+## independent defect that would have produced the identical symptom in a
+## daemon that did have the artifact.
+##
 ## REVERSE TOPO (§4.2): a group is destroyed in the REVERSE of its
 ## dependency order (nics -> containers -> networks) computed from the
 ## persisted `dependsOn` edges of the records being reaped — a dependent is
@@ -53,6 +84,8 @@ from repro_home_resources/types import ObservedState, ResourceActionKind,
   rakDestroy
 import repro_resources/instance
 import repro_resources/state_store
+import repro_resources/marshal          # isAttrsMarshallerRegistered — the
+                                        # strict/opaque decision + its diagnosis
 import repro_provider_runtime           # ProviderHandle
 import repro_resources/protocol         # observeViaSession / applyViaSession
 
@@ -105,6 +138,15 @@ type
     reaped*: seq[ReapEvent]        ## destroyed (or already-absent) records removed, in order
     skipped*: seq[string]          ## addresses inspected but kept (still leased / never-reap)
     failed*: seq[ReapFailure]      ## selected but NOT reaped — see `ReapFailure`
+    # Records the sweep could not even READ (`scanStateRecords`). They have no
+    # decodable address, so `onlyAddresses` cannot filter them and they are
+    # always reported.
+    foreign*: seq[ForeignStateRecord]
+      ## written by a NEWER repro: left untouched, never reaped
+    quarantined*: seq[QuarantinedStateRecord]
+      ## corrupt: moved into the store's `quarantine/` dir by this sweep
+    unreadable*: seq[UnreadableStateRecord]
+      ## could neither be decoded nor quarantined; still in place
 
 proc inProcessTransport*(): ReapTransport =
   ReapTransport(kind: rtInProcess)
@@ -118,9 +160,15 @@ proc sessionTransport*(resolve: proc (typeId: string): ProviderHandle {.closure.
 # ---------------------------------------------------------------------------
 
 proc hasLiveHolder*(rec: ResourceStateRecord; now: Time): bool =
-  ## A holder is LIVE if its own recorded deadline is still in the future.
-  ## A live holder keeps the state regardless of the folded
-  ## `effectiveDeadline`.
+  ## A holder is LIVE if it is a recorded `keep` holder — it pins with no
+  ## expiry, so it is live at every `now` — or its own recorded deadline is
+  ## still in the future. A live holder keeps the state regardless of the
+  ## folded `effectiveDeadline`. (The merge never writes a keep holder next
+  ## to a dated effective deadline; checking it here is the same defense in
+  ## depth as the dated check: the gate re-reads the holders it can see
+  ## rather than trusting the fold alone.)
+  if rec.keepHolders.len > 0:
+    return true
   for _, deadline in rec.holders:
     if deadline > now:
       return true
@@ -131,15 +179,17 @@ proc isReapable*(rec: ResourceStateRecord; now: Time; force = false): bool =
   ##
   ##   * `force`                     -> reap iff the record is still present
   ##     (ignore deadline + holder liveness — the `--hard-rebuild` path).
-  ##   * `effectiveDeadline.isNone`  -> NEVER reap (keep / no dated holder).
-  ##   * a live holder (`holders[c] > now`) -> NEVER reap (still in use).
+  ##   * `effectiveDeadline.isNone`  -> NEVER reap (a keep holder, possibly
+  ##     an anonymous pre-v4 one, or no dated holder).
+  ##   * a live holder (a recorded keep holder, or `holders[c] > now`) ->
+  ##     NEVER reap (still pinned / in use).
   ##   * otherwise reap iff `effectiveDeadline.get <= now`.
   if force:
     return rec.present
   if rec.effectiveDeadline.isNone:
     return false                       # never-reap: keep dominates
   if hasLiveHolder(rec, now):
-    return false                       # a live holder keeps it
+    return false                       # a keep or unexpired holder keeps it
   rec.effectiveDeadline.get <= now
 
 proc selectReapable*(records: seq[ResourceStateRecord]; now: Time;
@@ -221,6 +271,33 @@ proc destroyVia(transport: ReapTransport; inst: ResourceInstance;
     let handle = transport.resolve(inst.typeId)
     applyViaSession(handle, inst, rakDestroy, observed)
 
+proc reconstructFor(transport: ReapTransport;
+                    rec: ResourceStateRecord): ResourceInstance =
+  ## Rebuild the record's instance under the attrs contract THIS transport
+  ## actually imposes. The two arms want opposite things and conflating them
+  ## is the defect this seam fixes:
+  ##
+  ##   * `rtInProcess` dispatches to a LINKED `ResourceProviderDriver`, which
+  ##     dereferences the typed value (`TypedExtensionBox[T](inst.attrs).val`).
+  ##     A box it cannot read is unusable, so the strict path is correct here:
+  ##     a missing codec must be a diagnosable `KeyError` at the seam, not an
+  ##     opaque box handed to a driver that will cast it to the wrong type.
+  ##   * `rtSession` MARSHALS the box straight back out to a provider process
+  ##     that does link the codec (`observeViaSession` / `applyViaSession`).
+  ##     This process never reads the value, so requiring it to be able to was
+  ##     a requirement with no consumer. `reconstructInstanceOpaque` boxes the
+  ##     persisted bytes verbatim, and `marshalAttrs` sends those same bytes
+  ##     on.
+  ##
+  ## What the session arm's change does and does not fix: it lets a daemon that
+  ## HAS a provider artifact for a type but not that provider's attrs codec
+  ## reap over the session — the configuration §4.2 describes. It does not give
+  ## any process a route to a type it cannot reach at all; see the module
+  ## header for why the measured outage was the latter and not this.
+  case transport.kind
+  of rtInProcess: reconstructInstance(rec)
+  of rtSession:   reconstructInstanceOpaque(rec)
+
 proc reapRecord*(store: StateStore; transport: ReapTransport;
                  rec: ResourceStateRecord): ReapEvent =
   ## Destroy ONE record's real-world state and remove its store record.
@@ -232,7 +309,11 @@ proc reapRecord*(store: StateStore; transport: ReapTransport;
   ## present, `apply(rakDestroy)` tears it down. Either way the record is
   ## removed only after the op, so a crash mid-destroy leaves the record for
   ## the next sweep to resume.
-  let inst = reconstructInstance(rec)
+  ##
+  ## The reconstruction is transport-dependent — see `reconstructFor`. An
+  ## in-process reap needs this process to hold the attrs codec; a session
+  ## reap does not, because the payload is forwarded to the provider.
+  let inst = reconstructFor(transport, rec)
   let observed = observeVia(transport, inst, none(ResourceBinding))
   var wasPresent = false
   if observed.present:
@@ -240,6 +321,58 @@ proc reapRecord*(store: StateStore; transport: ReapTransport;
     discard destroyVia(transport, inst, observed)
   removeStateRecord(store, rec.address)
   ReapEvent(address: rec.address, typeId: rec.typeId, wasPresent: wasPresent)
+
+proc reapFailureReason(transport: ReapTransport; store: StateStore;
+                       rec: ResourceStateRecord; raised: string): string =
+  ## The `reason` a failed per-record reap is RECORDED under: the raised
+  ## message, plus — for the one cause whose own advice does not apply to the
+  ## process that hits it — what the operator of THAT process can do.
+  ##
+  ## `unmarshalAttrs`'s message tells the reader to "import the producer's
+  ## lifted interface". That is the right instruction for a consumer recipe
+  ## and the wrong one for the repro daemon: the daemon is a fixed binary, it
+  ## has no recipe to add an import to, and nothing an operator types will put
+  ## an out-of-tree provider's interface into its closure. Repeating it there
+  ## is how a failure stays unfixed while nominally carrying a remedy — the
+  ## live daemon logged exactly that sentence 131,882 times
+  ## (reprobuild-pm/issues/2026-09-29-lease-reap-tick-has-never-once-succeeded.md).
+  ##
+  ## So when an IN-PROCESS reap failed and the codec is genuinely absent, the
+  ## reason names the two things that could work instead: destroy over a
+  ## provider session (the §4.2 transport, which needs no codec in the reaping
+  ## process), or run the sweep from a process that links the type. The raised
+  ## text is kept verbatim ahead of it — it identifies the typeId, and a
+  ## diagnosis that edits away the original message makes the next reader's
+  ## grep fail.
+  ##
+  ## BOTH SUGGESTIONS CAN BE UNAVAILABLE, and the text is worded as options
+  ## rather than instructions for that reason. Registering a provider artifact
+  ## needs a code path that does it, and the shipped tree has none
+  ## (`reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md`);
+  ## a build that links an out-of-tree type may not exist either. A record in
+  ## that position is permanently unreapable HERE, which is a true fact about
+  ## this process and not a reaper defect — and it is exactly what the
+  ## `lease-reaper` health finding exists to surface rather than hide.
+  result = raised
+  if transport.kind == rtInProcess and
+      not isAttrsMarshallerRegistered(rec.attrsTypeId):
+    # Deliberately NOT phrased with the words the finding's own verb uses:
+    # `leaseReapFindings` renders an `rfkUnreapable` line as "cannot reap
+    # address=…", and a reason that repeated that phrase would make a
+    # substring count of it read 2 for one report. t_l4_daemon_leases case (e)
+    # counts exactly that, and caught this.
+    # The suggested command CARRIES THE STORE ROOT. Without it the sweep it
+    # names addresses the per-user default, which for any other root is a
+    # different store — so a copy-pasted remedy would report "no record for
+    # that address" and read as "the problem went away".
+    result.add(" — this process has no way to destroy '" & rec.address &
+      "' in-process. Either destroy it over a provider session (the " &
+      "Ephemeral-State-Leases §4.2 transport, which needs no attrs codec " &
+      "in the reaping process: register the provider artifact for '" &
+      rec.typeId & "'), or run the sweep from a process that links the " &
+      "type: `repro reap --once --state-root=" & store.root & " " &
+      rec.address & "` from such a build. " &
+      "The record is LEFT IN THE STORE for whichever comes first.")
 
 # ---------------------------------------------------------------------------
 # The sweep — the seam the CLI (`repro reap`), the reconcile hook, and the
@@ -265,16 +398,20 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   ##
   ## ONE UNHANDLEABLE RECORD MUST NOT ABORT THE SWEEP. `reapRecord` can raise
   ## for reasons that are properties of ONE record and of this process, not of
-  ## the store: no attrs marshaller registered for its `attrsTypeId`
-  ## (`reconstructInstance`), no in-process driver for its `typeId`
-  ## (`lookupResourceProvider`), a provider session that will not launch, or a
-  ## real provider whose `observe`/`apply` failed. Letting any of those unwind
-  ## the loop means the OTHER records — the ones this process can perfectly
-  ## well reap — are never reached, so the sweep reaps nothing at all and does
-  ## so again on every subsequent tick, forever. That is not hypothetical: the
-  ## daemon's wall-clock tick failed on its first record (a `vm_harness.nic`
-  ## with no linked marshaller) on every one of 141,895 consecutive attempts
-  ## over 60 days and reaped nothing, ever.
+  ## the store: on the IN-PROCESS arm only, no attrs marshaller registered for
+  ## its `attrsTypeId` (`reconstructInstance`) and no in-process driver for its
+  ## `typeId` (`lookupResourceProvider`); on either arm, a provider session
+  ## that will not launch, or a real provider whose `observe`/`apply` failed.
+  ## (The missing-marshaller cause is in-process-only since `reconstructFor`
+  ## gave the session arm the opaque reconstruction — a session reap has no use
+  ## for a codec it would only marshal straight back out.)
+  ##
+  ## Letting any of those unwind the loop means the OTHER records — the ones
+  ## this process can perfectly well reap — are never reached, so the sweep
+  ## reaps nothing at all and does so again on every subsequent tick, forever.
+  ## That is not hypothetical: the daemon's wall-clock tick failed on its first
+  ## record (a `vm_harness.nic` with no linked marshaller) on every one of
+  ## 141,895 consecutive attempts over 60 days and reaped nothing, ever.
   ##
   ## So each record is attempted independently and a failure is RECORDED in
   ## `failed` rather than raised. The record is left in the store (no
@@ -292,11 +429,20 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   ## HELD as `rfkBlocked` and left alone. Because the iteration order is
   ## reverse-topo, a record's dependencies always come AFTER it, so marking
   ## forward in one pass is sufficient.
+  ##
+  ## …AND ONE UNDECODABLE RECORD MUST NOT ABORT IT EITHER. The listing is
+  ## `scanStateRecords`, which never raises per record: a newer repro's record
+  ## comes back as `foreign` (never reaped — it is not ours to interpret), a
+  ## corrupt one is quarantined, and both are carried into the report.
   result.reaped = @[]
   result.skipped = @[]
   result.failed = @[]
 
-  var all = listStateRecords(store)
+  let scan = scanStateRecords(store)
+  result.foreign = scan.foreign
+  result.quarantined = scan.quarantined
+  result.unreadable = scan.unreadable
+  var all = scan.records
   if onlyAddresses.len > 0:
     var wanted = initHashSet[string]()
     for a in onlyAddresses: wanted.incl(a)
@@ -334,7 +480,7 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
     except CatchableError as err:
       result.failed.add(ReapFailure(
         address: rec.address, typeId: rec.typeId, kind: rfkUnreapable,
-        reason: err.msg))
+        reason: reapFailureReason(transport, store, rec, err.msg)))
       holdDependencies(rec, rec.address)
 
 # ---------------------------------------------------------------------------
@@ -355,8 +501,10 @@ proc reapExpiredAtReconcileStart*(store: StateStore; now: Time = getTime();
 
 # ---------------------------------------------------------------------------
 # The `repro reap` CLI seam (§4.3 fallback (b)) — a proc the CLI subcommand
-# AND the L4 daemon timer both call. Full top-level `repro reap` dispatch
-# wiring in `repro_cli_support` is the L4 integration point; this proc is the
+# AND the L4 daemon timer both call. The top-level `repro reap` dispatch in
+# `repro_cli_support`'s `runThinAppDispatch` now routes here (it did not when
+# this banner was written, which is what the stale "is the L4 integration
+# point" phrasing referred to); this proc is the
 # self-contained entry it (and the daemon) invoke.
 # ---------------------------------------------------------------------------
 
@@ -395,13 +543,26 @@ proc runReapCli*(args: seq[string];
   ## semantics actually describe. Three facts made removal the cheap
   ## direction rather than the expensive one:
   ##
-  ##   1. Nothing dispatches `repro reap` yet. There is no `"reap"` arm in
-  ##      `runThinAppDispatch` and no `reap` entry in the usage text -- the
-  ##      comment above this proc says the CLI wiring is still the L4
-  ##      integration point. No operator can have typed either spelling.
-  ##   2. The only caller in the tree is this library's own test, and it
-  ##      exercises `force` through `reapOnce(force = true)`, never through
-  ##      a flag string.
+  ##   1. The spellings belong to `repro build`, which is where the spec
+  ##      defines them. This verb has no claim on them.
+  ##
+  ##      This reason used to read "nothing dispatches `repro reap` yet …  no
+  ##      operator can have typed either spelling". That is no longer true:
+  ##      there IS a `"reap"` arm in `runThinAppDispatch`, so both spellings
+  ##      are now operator-reachable. The change strengthens the refusal
+  ##      rather than weakening it, and it is why the refusal is spelled out
+  ##      explicitly instead of falling through the generic unknown-flag arm —
+  ##      an operator who reaches for a `repro build` spelling here is told
+  ##      where the verb went rather than getting a bare exit 2. (The verb is
+  ##      absent from the usage text, as the equally-dispatched `health` and
+  ##      `gateway` are: `renderUsage` lists none of the three, so that is the
+  ##      house convention and not an oversight here.)
+  ##   2. Nothing has ever exercised `force` through either flag STRING. The
+  ##      library's own test drives it as `reapOnce(force = true)`, and the
+  ##      dispatcher simply forwards argv, so removing the aliases changed no
+  ##      behaviour anybody depended on — it only changed what a typo gets
+  ##      told. (`t_l3_reaper` case (10) now pins the refusal itself, and
+  ##      `t_repro_reap_verb_is_dispatched` pins that the verb is reachable.)
   ##   3. Keeping them as aliases would have made
   ##      `repro reap --rebuild-host-bound` and
   ##      `repro build --rebuild-host-bound` do unrelated things, one of
@@ -450,14 +611,34 @@ proc runReapCli*(args: seq[string];
     emit("  - " & ev.address & " (" & ev.typeId & ")" &
          (if ev.wasPresent: "" else: " [already-absent]"))
   emit("kept: " & $report.skipped.len)
+  # A newer repro's record is healthy, just not ours: said so (an operator
+  # would otherwise wonder why it never goes), but it does not fail the verb.
+  if report.foreign.len > 0:
+    emit("foreign: " & $report.foreign.len)
+    for f in report.foreign:
+      emit("  - " & f.path & " (written by a newer repro, version " &
+           $f.version & "; left untouched)")
+  # Corrupt state was found. The sweep moved it aside and carried on, but the
+  # resource that record described may now be leaked with nothing holding its
+  # address, so an operator has to look: exit non-zero, name the evidence.
+  if report.quarantined.len > 0:
+    emit("quarantined: " & $report.quarantined.len)
+    for q in report.quarantined:
+      emit("  - " & q.path & " -> " & q.quarantinePath & ": " & q.reason)
+  if report.unreadable.len > 0:
+    emit("unreadable: " & $report.unreadable.len)
+    for u in report.unreadable:
+      emit("  - " & u.path & ": " & u.reason)
   # A selected record the sweep could NOT reap is reported, never swallowed:
   # dropping it here would reproduce, at the CLI, the same invisibility that
   # let the daemon's tick fail for 60 days unnoticed. It is also why the exit
   # code is non-zero — `repro reap` was asked to destroy this state and did
   # not, and an operator (or CI) scripting the verb has to be able to tell.
-  if report.failed.len == 0:
-    return 0
-  emit("unreapable: " & $report.failed.len)
-  for f in report.failed:
-    emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
-  1
+  if report.failed.len > 0:
+    emit("unreapable: " & $report.failed.len)
+    for f in report.failed:
+      emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
+  if report.failed.len > 0 or report.quarantined.len > 0 or
+      report.unreadable.len > 0:
+    return 1
+  0
