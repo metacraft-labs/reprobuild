@@ -343,9 +343,10 @@
       #
       # f51e0ab advances the workspace pin with Windows injection diagnostics;
       # the Darwin source is unchanged.
-      # 6522766 is the promotion merge with the same tree as f51e0ab.
-      # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/6522766fb87f60efb503550042f4f066e2a86a9e";
+      # 600f2a8 additionally carries caller/target Windows injection diagnostics.
+      # Keep this pin aligned with the synced, published workspace dependency;
+      # the pre-push gate rejects a pin that lags that checkout.
+      url = "github:metacraft-labs/nim-stackable-hooks/600f2a80c9e582e860d36be20c04b9c74263458d";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
