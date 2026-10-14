@@ -39,29 +39,19 @@
 ## No mocks: real `build/bin/repro`, real Nim, real io-mon shim, real
 ## filesystem; the `nim` spy is a pass-through counter (harness header).
 
-import repro_test_support/reasoned_skip
+## Platforms: every host. On macOS (milestone GM0m) the negative control
+## accepts a complete re-run in place of a cache answer when macOS monitoring
+## makes the edge fail closed (`cacheAnswered` in the harness); the planned
+## value must be the file's current text everywhere.
 
-const PlatformSkipReason =
-  "[platform N/A] t_e2e_profile_compile_runtime_read_tracked: the nim spy " &
-  "is a POSIX shell script and the gate is verified on Linux, where io-mon " &
-  "is the established backend. macOS is milestone GM0m; Windows has no " &
-  "POSIX spy."
+import std/[strutils, tables, unittest]
 
-when not defined(linux):
-  import std/unittest
+import repro_profile
+import repro_profile_intent
 
-  suite "profile compile edge: run-time reads":
-    test "e2e_profile_compile_runtime_read_tracked":
-      skip(PlatformSkipReason)
-else:
-  import std/[strutils, tables, unittest]
+import ./profile_compile_edge_harness
 
-  import repro_profile
-  import repro_profile_intent
-
-  import ./profile_compile_edge_harness
-
-  const RuntimeReadProfile = """
+const RuntimeReadProfile = """
 import std/os
 import repro_profile
 
@@ -81,42 +71,44 @@ profile "gm0RuntimeRead":
     runtimeFile()
 """
 
-  proc checkPlans(run: PlanRun; value: string) =
-    checkpoint("repro home plan output:\n" & run.output)
-    check run.exitCode == 0
-    check run.createLines.len == 1
-    if run.createLines.len == 1:
-      check run.createLines[0].contains(
-        "fs.userFile:~/runtime-" & value & ".txt")
-    check run.intent.resources.len == 1
-    if run.intent.resources.len == 1:
-      let r = run.intent.resources[0]
-      check r.kind == "fs.userFile"
-      check r.fields["content"].s == value
+proc checkPlans(run: PlanRun; value: string) =
+  checkpoint("repro home plan output:\n" & run.output)
+  check run.exitCode == 0
+  check run.createLines.len == 1
+  if run.createLines.len == 1:
+    check run.createLines[0].contains(
+      "fs.userFile:~/runtime-" & value & ".txt")
+  check run.intent.resources.len == 1
+  if run.intent.resources.len == 1:
+    let r = run.intent.resources[0]
+    check r.kind == "fs.userFile"
+    check r.fields["content"].s == value
 
-  suite "profile compile edge: run-time reads":
+suite "profile compile edge: run-time reads":
 
-    test "e2e_profile_compile_runtime_read_tracked":
-      let sb = newProfileSandbox("runtime-read", RuntimeReadProfile)
-      defer: sb.dispose()
+  test "e2e_profile_compile_runtime_read_tracked":
+    let sb = newProfileSandbox("runtime-read", RuntimeReadProfile)
+    defer: sb.dispose()
 
-      sb.writeProfileFile("runtime.txt", "one")
-      let run1 = sb.runHomePlan()
-      checkPlans(run1, "one")
-      check run1.nimSpawns >= 1
+    sb.writeProfileFile("runtime.txt", "one")
+    let run1 = sb.runHomePlan()
+    checkPlans(run1, "one")
+    check run1.nimSpawns >= 1
 
-      # Negative control: unchanged input, no nim, same plan.
-      let run2 = sb.runHomePlan()
-      checkPlans(run2, "one")
-      check run2.nimSpawns == 0
+    # Negative control: unchanged input, no nim, same plan (on macOS, or a
+    # complete re-run: harness header).
+    let run2 = sb.runHomePlan()
+    checkPlans(run2, "one")
+    check cacheAnswered(run2.nimSpawns, run1.nimSpawns,
+      "unchanged run-time file, repro home plan")
 
-      sb.writeProfileFile("runtime.txt", "two")
-      # Vacuity guard: the read happens at RUN time. The binary compiled for
-      # run 1, run again unchanged, already reports the new value.
-      let direct = sb.runProfileBinaryDirectly()
-      checkpoint("profile binary run directly:\n" & direct)
-      check direct.contains("runtime-two.txt")
-      check not direct.contains("runtime-one.txt")
+    sb.writeProfileFile("runtime.txt", "two")
+    # Vacuity guard: the read happens at RUN time. The binary compiled for
+    # run 1, run again unchanged, already reports the new value.
+    let direct = sb.runProfileBinaryDirectly()
+    checkpoint("profile binary run directly:\n" & direct)
+    check direct.contains("runtime-two.txt")
+    check not direct.contains("runtime-one.txt")
 
-      let run3 = sb.runHomePlan()
-      checkPlans(run3, "two")
+    let run3 = sb.runHomePlan()
+    checkPlans(run3, "two")

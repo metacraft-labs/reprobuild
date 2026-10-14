@@ -216,6 +216,28 @@ const
     ## Suite-Modernization M4. The one test whose execute edge takes EVERY
     ## shared pure-unit binary as a typed input; see the loop below.
 
+  profileCompileNimSpy = TestGraphArtifact(
+    path: "build/test-bin/nim_spy",
+    actionId: "reprobuild.test_helpers.nim_spy")
+    ## The pass-through `nim` the profile-compile-edge gates put first on
+    ## PATH to count compiler spawns (`tests/e2e/m83/nim_spy.nim`). A
+    ## compiled program, not a shell script, so the gates run on Windows and
+    ## macOS too; every test that imports
+    ## `tests/e2e/m83/profile_compile_edge_harness.nim` executes it.
+
+  profileCompileNimSpyConsumers = block:
+    var rows: seq[TestGraphArtifacts]
+    for name in ["t_e2e_profile_compile_staticread_payload_change",
+                 "t_e2e_profile_compile_runtime_read_tracked",
+                 "t_e2e_home_export_matches_compiled_intent",
+                 "t_e2e_home_export_check_detects_stale_snapshot",
+                 "t_e2e_export_describes_other_platform_resources",
+                 "t_e2e_export_refuses_compile_time_dependent_intent",
+                 "t_e2e_home_set_writes_guarded_config"]:
+      rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
+        artifacts: @[profileCompileNimSpy])
+    rows
+
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
     TestGraphArtifacts(
       source: "tests/integration/t_runner_exclusive_phase_budget.nim",
@@ -283,7 +305,7 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/test-bin/repro_catalog_harvester",
         actionId: "reprobuild.test_helpers.repro_catalog_harvester")]),
-  ] & (when defined(linux) or defined(macosx): @[
+  ] & profileCompileNimSpyConsumers & (when defined(linux) or defined(macosx): @[
     TestGraphArtifacts(
       source: "tests/e2e/codetracer-subset/" &
         "t_e2e_codetracer_in_place_project_file.nim",
@@ -2430,6 +2452,18 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/m5_stub_repro_image",
       actionId = "reprobuild.test_helpers.m5_stub_repro_image"))
+
+    # The profile-compile-edge gates' `nim` spy (see `profileCompileNimSpy`
+    # above): standard library only, so it needs no source-only paths beyond
+    # what every helper gets.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/e2e/m83/nim_spy.nim",
+      binary = "build/test-bin/nim_spy",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/nim_spy",
+      actionId = "reprobuild.test_helpers.nim_spy"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "tools/test-runner/repro_test_runner.nim",

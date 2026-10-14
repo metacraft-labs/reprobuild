@@ -1,6 +1,6 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 29,
+    "graphOwnedHelperArtifacts": 30,
     "nimTestBinaries": 1944,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 610,
@@ -1278,6 +1278,12 @@
         "kind": "test-helper",
         "output": "build/test-bin/m5_stub_repro_image",
         "source": "tests/fixtures/selfhost/m5_stub_repro_image.nim"
+      },
+      {
+        "actionId": "reprobuild.test_helpers.nim_spy",
+        "kind": "test-helper",
+        "output": "build/test-bin/nim_spy",
+        "source": "tests/e2e/m83/nim_spy.nim"
       },
       {
         "actionId": "reprobuild.test_helpers.repro_binary_cache",
@@ -2730,7 +2736,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 149,
+          "line": 143,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2746,7 +2752,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 164,
+          "line": 157,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2762,7 +2768,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 173,
+          "line": 178,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2778,7 +2784,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 218,
+          "line": 232,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2794,7 +2800,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 224,
+          "line": 243,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2810,7 +2816,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 235,
+          "line": 259,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -23987,14 +23993,13 @@
       "localDependencyShape": [
         "repro_cli_support",
         "repro_profile",
-        "repro_profile_compile",
-        "repro_test_support"
+        "repro_profile_compile"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_export_describes_other_platform_resources.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24007,14 +24012,13 @@
       "localDependencyShape": [
         "repro_cli_support",
         "repro_profile",
-        "repro_profile_compile",
-        "repro_test_support"
+        "repro_profile_compile"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_export_refuses_compile_time_dependent_intent.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24025,14 +24029,13 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_profile",
-        "repro_test_support"
+        "repro_profile"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_export_check_detects_stale_snapshot.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24048,14 +24051,13 @@
         "repro_home_intent",
         "repro_profile",
         "repro_profile_compile",
-        "repro_profile_intent",
-        "repro_test_support"
+        "repro_profile_intent"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24067,14 +24069,13 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_profile",
-        "repro_test_support"
+        "repro_profile"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24167,14 +24168,13 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_profile",
-        "repro_profile_intent",
-        "repro_test_support"
+        "repro_profile_intent"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24188,14 +24188,13 @@
         "repro_build_engine",
         "repro_profile",
         "repro_profile_compile",
-        "repro_profile_intent",
-        "repro_test_support"
+        "repro_profile_intent"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
