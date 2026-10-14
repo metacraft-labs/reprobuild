@@ -208,7 +208,7 @@
         # identity where it touches the descriptor instead of once per record,
         # and the Linux close hook lets a tracee's close of a replaced
         # descriptor number reach the kernel.
-      url = "github:metacraft-labs/io-mon/295a2e518325440698de013663dab8deeef1dc19";
+      url = "github:metacraft-labs/io-mon/2a354db93e60f165e2d9feb86396b7e3950aae65";
       flake = false;
     };
     nim-shm-gset-src = {
