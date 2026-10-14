@@ -1235,16 +1235,28 @@
                                     }
                                     trap cleanupDaemon EXIT
                                     trap showFailureLogs ERR
+                                    # Let the ERR trap fire inside shell functions too: a
+                                    # failed `test` in assertColdActionLog used to end the
+                                    # build with no output at all.
+                                    set -o errtrace
 
                                     assertColdActionLog() {
                                       log="$1"
                                       test "$(grep -Ec '^providerCompileAction: ' "$log")" -eq 1
                                       test "$(grep -Ec '^action: ' "$log")" -eq 3
-                                      test "$(grep -Ec '^providerCompileAction: __repro_provider_compile status=asSucceeded launched=true( |$)' "$log")" -eq 1
+                                      # The provider compile edge is consulted more than once
+                                      # per invocation and only the LAST consultation is
+                                      # logged; after a real compile that one reads
+                                      # `asUpToDate ... reason=outputs-present`. Whether THIS
+                                      # invocation compiled the provider is `compiled=`
+                                      # (repro_cli_support `providerCompileInvocationSummary`),
+                                      # so a cold build must say `compiled=true`.
+                                      test "$(grep -Ec '^providerCompileAction: __repro_provider_compile status=(asSucceeded launched=true|asUpToDate launched=false .*reason=outputs-present) .*compiled=true( |$)' "$log")" -eq 1
                                       for actionName in build-dir compile-hello run-hello; do
                                         test "$(grep -Ec "^action: $actionName status=asSucceeded launched=true( |$)" "$log")" -eq 1
                                       done
-                                      if grep -Eq '^(providerCompileAction|action): .*status=(asFailed|asBlocked|asSkipped|asUpToDate|asCacheHit)' "$log"; then
+                                      if grep -Eq '^action: .*status=(asFailed|asBlocked|asSkipped|asUpToDate|asCacheHit)' "$log" ||
+                                        grep -Eq '^providerCompileAction: .*status=(asFailed|asBlocked|asSkipped|asCacheHit)' "$log"; then
                                         echo "cold package gate accepted a non-launched action" >&2
                                         return 1
                                       fi

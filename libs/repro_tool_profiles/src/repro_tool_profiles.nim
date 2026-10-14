@@ -19,6 +19,7 @@ import repro_core/nix_store_roots
 # the merged stdout/stderr descriptor (see ``repro_core/process_close``).
 from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
+from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
@@ -4582,7 +4583,9 @@ type
       ## The pinned nixpkgs gcc (Linux hosts that have Nix).
     bcrSystem
       ## The host's system C compiler at its fixed location
-      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX).
+      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX),
+      ## else the C compiler this ``repro`` was built with
+      ## (``BuiltCCompilerPath``) when it exists.
     bcrXcode
       ## The Xcode Command Line Tools clang, at the path ``xcrun -f clang``
       ## names, with the SDK ``xcrun --show-sdk-path`` names (macOS).
@@ -4668,7 +4671,8 @@ proc describeBootstrapNimRoute*(route: BootstrapNimRoute): string =
       (when defined(linux): ", because this host has no Nix" else: "")
 
 proc describeBootstrapCRoute*(route: BootstrapCRoute;
-                              systemCandidates: openArray[string]): string =
+                              systemCandidates: openArray[string];
+                              builtCompiler = BuiltCCompilerPath): string =
   case route
   of bcrArchive:
     let useDef = bootstrapGccToolUse()
@@ -4684,6 +4688,10 @@ proc describeBootstrapCRoute*(route: BootstrapCRoute;
   of bcrSystem:
     "the host's system C compiler (the first of " &
       systemCandidates.join(", ") & ")" &
+      (if builtCompiler.len > 0:
+         ", else the C compiler this repro was built with (" &
+           builtCompiler & ")"
+       else: "") &
       (when defined(linux): ", because this host has no Nix" else: "")
   of bcrXcode:
     "the Xcode Command Line Tools clang (`xcrun -f clang`), the " &
@@ -4741,14 +4749,31 @@ else:
 
 proc provisionBootstrapCCompiler*(storeRoot: string;
     route = bootstrapCRoute();
-    systemCandidates: seq[string] = @bootstrapSystemCCompilers):
+    systemCandidates: seq[string] = @bootstrapSystemCCompilers;
+    builtCompiler = BuiltCCompilerPath):
     BootstrapCCompiler =
   ## Provision the recipe-compile C compiler by ``route`` and probe it, or
   ## raise saying which route failed and why. Never looks at ``PATH``.
   ##
+  ## ``bcrSystem`` takes the first existing ``systemCandidates`` entry, else
+  ## ``builtCompiler`` -- by default ``BuiltCCompilerPath``, the C compiler
+  ## this ``repro`` was built with -- when that file exists. That is the arm
+  ## an installed Nix package reaches where there is neither a ``nix``
+  ## executable nor a ``/usr/bin/cc``: the Nix build sandbox, which is where
+  ## a consumer's import-from-derivation runs ``repro home export`` and where
+  ## the package's own ``packaged-runtime-compile`` check builds a recipe
+  ## cold. The package embeds that path, so its closure carries the compiler
+  ## (Gradual-Nix-To-Reprobuild-Migration GM1l chose it as the profile
+  ## compile's fallback for the same reason); the package does not have to
+  ## pin one through its wrapper, which would oblige every native package to
+  ## ship a C compiler too. It is a fixed path chosen at build time, not a
+  ## ``PATH`` search, and it comes after the system compiler so a host with
+  ## one keeps using it. A build whose compiler is gone (a portable bundle
+  ## moved off the machine that built it) fails as before.
+  ##
   ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
   ## the steady-state cost is a file-existence check.
-  let origin = describeBootstrapCRoute(route, systemCandidates)
+  let origin = describeBootstrapCRoute(route, systemCandidates, builtCompiler)
   var cc = ""
   var sdk = ""
   try:
@@ -4764,9 +4789,17 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
         if fileExists(extendedPath(candidate)):
           cc = candidate
           break
+      if cc.len == 0 and builtCompiler.len > 0 and
+          fileExists(extendedPath(builtCompiler)):
+        cc = builtCompiler
       if cc.len == 0:
         raise newException(OSError, "none of " & systemCandidates.join(", ") &
-          " exists; install the system C compiler (e.g. the distribution's " &
+          " exists" &
+          (if builtCompiler.len > 0:
+             ", nor does the C compiler this repro was built with (" &
+               builtCompiler & ")"
+           else: "") &
+          "; install the system C compiler (e.g. the distribution's " &
           "gcc or build-essential package)")
     of bcrXcode:
       (cc, sdk) = resolveXcodeClang()

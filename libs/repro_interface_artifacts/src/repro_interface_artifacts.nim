@@ -2964,10 +2964,22 @@ proc runCommand*(command: openArray[string];
   else:
     var process: Process
     withSpawnWorkingDir:
-      process = startProcess(command[0],
-        args = command[1 .. ^1],
-        workingDir = cwd,
-        options = {poUsePath, poStdErrToStdOut})
+      # `osproc`'s posix_spawn path chdirs the PARENT into `workingDir` and
+      # restores the old directory only when the spawn succeeds: a spawn that
+      # fails (a "compiler" that is not an executable, ENOEXEC) raises with
+      # this process still in `cwd`. Callers pass scratch directories they
+      # delete afterwards (`probeCCompiler`), so every later spawn then failed
+      # with "No such file or directory" from a deleted current directory.
+      let savedDir = if cwd.len > 0: getCurrentDir() else: ""
+      try:
+        process = startProcess(command[0],
+          args = command[1 .. ^1],
+          workingDir = cwd,
+          options = {poUsePath, poStdErrToStdOut})
+      except OSError:
+        if savedDir.len > 0:
+          setCurrentDir(savedDir)
+        raise
     # N51 triage: LEFT AS `readAll` DELIBERATELY, on BOTH counts. This is the
     # `else` of the `when defined(windows)` above, so it is the POSIX arm —
     # and on POSIX `osproc`'s stream is a stdio `File` whose `fread` already
