@@ -395,6 +395,49 @@ proc finishProfileNim*(p: Process): tuple[output: string; exitCode: int] =
 # Direct Nim invocation (two-phase: `nim c` then run the binary).
 # ---------------------------------------------------------------------------
 
+type RuntimeStderrCapture = object
+  stream: Stream
+  text: string
+  readError: string
+
+proc captureRuntimeStderr(capture: ptr RuntimeStderrCapture) {.thread.} =
+  # This stream is owned by the reader until joinThread returns. Stream's
+  # virtual methods lack gcsafe annotations; no other thread touches it.
+  {.cast(gcsafe).}:
+    try:
+      capture.text = drainStream(capture.stream)
+    except CatchableError as err:
+      capture.readError = err.msg
+
+proc runProfileBinary(outBinary: string): tuple[
+    output, stderrText: string; exitCode: int] =
+  let p = startProcess(outBinary, args = [], options = {})
+  var capture = RuntimeStderrCapture(stream: p.errorStream)
+  var reader: Thread[ptr RuntimeStderrCapture]
+  try:
+    createThread(reader, captureRuntimeStderr, addr capture)
+  except:
+    p.terminate()
+    discard p.waitForExit()
+    p.close()
+    raise
+  try:
+    try:
+      result.output = drainStream(p.outputStream)
+      result.exitCode = p.waitForExit()
+    except:
+      # Stop the writer before joining if stdout capture failed, otherwise
+      # it could remain blocked writing to the pipe we stopped draining.
+      p.terminate()
+      discard p.waitForExit()
+      raise
+  finally:
+    joinThread(reader)
+    p.close()
+  if capture.readError.len > 0:
+    raise newException(IOError, "reading profile stderr: " & capture.readError)
+  result.stderrText = capture.text
+
 proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
                            repoRoot: string;
                            verbose: bool = false): tuple[
@@ -433,23 +476,18 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
 
     # Run the profile binary directly, not through a shell, for the same
     # reason the compile is an argv: the binary sits under the nimcache, so
-    # its path carries any space the state directory has. stderr is merged
-    # into the captured output as `execCmdEx` did before, so a profile that
-    # fails keeps reporting its diagnostics.
-    var runProc = startProcess(outBinary, args = [],
-                               options = {poStdErrToStdOut})
-    let runOutput = drainStream(runProc.outputStream)
-    let runExit = runProc.waitForExit()
-    runProc.close()
-    let runRes = (output: runOutput, exitCode: runExit)
+    # its path carries any space the state directory has. Only stdout is
+    # intent JSON. Drain stderr concurrently so diagnostics larger than a
+    # pipe buffer cannot block the profile before it emits its intent.
+    let runRes = runProfileBinary(outBinary)
     if runRes.exitCode != 0:
       var err = new CompileFailure
       err.msg = "compiled profile binary exited " & $runRes.exitCode &
         " for " & profileRoot
-      err.stderrText = runRes.output
+      err.stderrText = compileRes.output & runRes.stderrText & runRes.output
       raise err
     result.jsonOutput = runRes.output
-    result.stderrText = compileRes.output
+    result.stderrText = compileRes.output & runRes.stderrText
   finally:
     unstageProfileConfig(stagedConfig)
 

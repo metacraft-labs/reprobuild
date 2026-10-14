@@ -83,6 +83,12 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
     let res = compileProfileBinary(profileRoot, nimcacheDir, outBinary,
       repoRoot, verbose)
     jsonText = res.jsonOutput
+    # Keep diagnostics visible even when the profile succeeds or its
+    # stdout subsequently fails JSON/RBPI encoding. Never parse stderr.
+    if res.stderrText.len > 0:
+      stderr.write(res.stderrText)
+      if not res.stderrText.endsWith("\n"):
+        stderr.writeLine("")
   except CompileFailure as err:
     stderr.writeLine("repro __repro-compile-profile: " & err.msg)
     if err.stderrText.len > 0:

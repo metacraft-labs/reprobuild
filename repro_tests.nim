@@ -3834,6 +3834,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim",
+    binary: "build/test-bin/t_profile_runtime_stderr",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_profile_compile/tests/t_smoke_apply_integration.nim",
     binary: "build/test-bin/t_smoke_apply_integration",
     defines: @[],
