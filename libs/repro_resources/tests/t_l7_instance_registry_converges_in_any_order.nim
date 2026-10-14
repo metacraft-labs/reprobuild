@@ -221,7 +221,15 @@ proc materialise(workingDir: string): ServiceInstanceProcess =
   ## Through the REAL daemon materialiser, and recorded so the teardown
   ## below can reap anything a failing case leaves behind. A leaked
   ## `sleep` loop would outlive the suite.
-  result = materialiseServiceInstanceProcess(instanceCommand(), workingDir)
+  # The output log goes beside the throwaway working directory: these
+  # cases address no `serviceStateRoot`, and §4.5 only requires that the
+  # output land in a file.
+  let started = materialiseServiceInstanceProcess(instanceCommand(),
+    workingDir, workingDir / ServiceInstanceOutputLogName)
+  doAssert not started.exitedEarly,
+    "fixture instance died during its start grace window: " &
+    describeEarlyServiceInstanceExit(started, "<fixture>")
+  result = started.process
   spawned.add(result)
 
 proc reapEverySpawnedInstance() =

@@ -227,36 +227,293 @@ proc describeRebuild*(report: ServiceRegistryRebuildReport): string =
 # Materialise / stop.
 # ---------------------------------------------------------------------------
 
+type
+  ServiceInstanceStart* = object
+    ## What `materialiseServiceInstanceProcess` observed. §4.5:
+    ## materialisation is VERIFIED, not declared, so the answer is not
+    ## just "here is a pid" but "here is a pid that was still running at
+    ## the end of the grace window" — or "it died, and this is why".
+    process*: ServiceInstanceProcess
+      ## The instance to register. When `exitedEarly` is true its `pid`
+      ## is 0 and its `processIdentity` empty, deliberately: there is
+      ## nothing to register, and a caller that registered it anyway
+      ## would record a process nothing can find rather than a dead pid
+      ## a later probe might confuse with a recycled one.
+    exitedEarly*: bool
+      ## The child exited inside the grace window.
+    exitedPid*: int
+      ## The pid the child had, for the diagnostic only. 0 when it is
+      ## still running (the pid is then `process.pid`).
+    exitCode*: int
+      ## Shell-style exit status (`128 + signal` for a signal death), as
+      ## `osproc.peekExitCode` reports it. Meaningful only when
+      ## `exitedEarly`.
+    outputPath*: string
+      ## The file the child's stdout and stderr were written to.
+    graceMs*: int
+      ## The grace window that was applied, for the diagnostic.
+
+const
+  ServiceInstanceStartGraceMs* = 500
+    ## §4.5: how long a freshly spawned instance is OBSERVED before the
+    ## daemon answers `ok: true`. The question it answers is only "did it
+    ## die immediately" — a missing interpreter, a bad flag, a port
+    ## already bound, an instant crash all exit within a few tens of
+    ## milliseconds — and NOT "is it ready", which is §7.1's readiness
+    ## concern and deliberately not re-implemented here. Short, because
+    ## a healthy instance pays the whole window on every materialise
+    ## (only a dying one ends it early); long enough that a loaded host
+    ## still sees a `sh` that fails at once. Overridable per call
+    ## (`startGraceMs` / `graceMs`) so a test can pass its own.
+
+  ServiceInstanceOutputTailLines* = 20
+    ## How many trailing lines of the output log an early-exit diagnostic
+    ## quotes.
+  ServiceInstanceOutputTailBytes* = 4096
+    ## ...and the byte cap on the same quote, so a child that printed one
+    ## enormous line cannot turn a `repro up` refusal into megabytes.
+
+  ServiceInstanceStartPollMs = 25
+    ## The poll interval inside the grace window. Small, because a dying
+    ## child ends the window as soon as it is SEEN to have exited.
+
+  ServiceInstanceLauncherName = "reprobuild-service-launcher"
+    ## The launcher shell's `$0`. It is the name the shell prefixes its
+    ## own error messages with ("<name>: line 1: <cmd>: not found"), so it
+    ## is a name that says what failed rather than the log path, which
+    ## would read as if the LOG had been the missing file.
+
+  ServiceInstanceExecScript =
+    "exec </dev/null >>\"$1\" 2>&1; shift; exec \"$@\""
+    ## The POSIX launcher, run as
+    ## `/bin/sh -c <this> <launcherName> <logPath> <argv...>`.
+    ##
+    ## WHY A SHELL, AND WHY IT IS SOUND. `std/osproc.startProcess` can
+    ## only give the child pipes or the daemon's own streams — it cannot
+    ## open a FILE for it — and the daemon's streams are a socket and a
+    ## log nobody reads. The first `exec` (no command) makes the three
+    ## redirections permanent for the shell: stdin from `/dev/null` (not
+    ## a closed pipe, which a service reading stdin would see as an
+    ## error or EOF race), stdout appended to the log, stderr to the
+    ## same place. The second `exec` REPLACES the shell with the service
+    ## — same pid, same start time — so the pid the daemon records, the
+    ## `processIdentity` built from it, and the pid `stop` signals are
+    ## all the service itself, never a wrapper. A command that cannot be
+    ## run makes the shell print its own "not found" to the LOG and exit
+    ## 127, which is exactly the diagnostic §4.5 wants surfaced.
+    ##
+    ## NOTHING IS INTERPOLATED. The log path is `$1` and the argv is
+    ## `"$@"` after a `shift`: both arrive as positional parameters, so no path or
+    ## argument is ever parsed as shell syntax, whatever it contains.
+    ##
+    ## `posix_spawn` with file actions plus `POSIX_SPAWN_SETSID` was the
+    ## alternative. It would avoid the shell, but it means binding the
+    ## file-action API by hand, re-implementing `osproc`'s PATH lookup
+    ## and error reporting, and losing `osproc.Process` — whose
+    ## `peekExitCode` is what the grace window below relies on. The
+    ## shell is the same `/bin/sh` `osproc` itself uses for
+    ## `poEvalCommand`, and costs one `exec`.
+
+proc readServiceInstanceOutputTail*(path: string;
+    maxLines = ServiceInstanceOutputTailLines;
+    maxBytes = ServiceInstanceOutputTailBytes): string =
+  ## The last `maxLines` lines of `path`, capped at `maxBytes`. Never
+  ## raises: this feeds a diagnostic, and a diagnostic that failed
+  ## because the log could not be read would hide the failure it was
+  ## written to explain. An unreadable log says so in its place.
+  var text = ""
+  try:
+    var f: File
+    if not open(f, path, fmRead):
+      return "<the output log could not be opened>"
+    defer: f.close()
+    let size = f.getFileSize()
+    let start = max(0'i64, size - int64(maxBytes))
+    f.setFilePos(start)
+    text = f.readAll()
+    if start > 0:
+      # The first line is probably cut mid-way; drop it rather than quote
+      # half a sentence as if it were the start of one.
+      let nl = text.find('\n')
+      if nl >= 0 and nl + 1 < text.len:
+        text = text[nl + 1 .. ^1]
+  except CatchableError as err:
+    return "<the output log could not be read: " & err.msg & ">"
+  var lines = text.strip(leading = false, trailing = true).splitLines()
+  if lines.len > maxLines:
+    lines = lines[lines.len - maxLines .. ^1]
+  lines.join("\n")
+
+proc quoteCommandForDiagnostic(command: seq[string]): string =
+  ## The argv as a reader can paste it, for diagnostics only. Never fed
+  ## to a shell: the launcher passes argv positionally.
+  var parts: seq[string] = @[]
+  for part in command:
+    parts.add(quoteShell(part))
+  parts.join(" ")
+
+proc describeEarlyServiceInstanceExit*(start: ServiceInstanceStart;
+                                       address: string): string =
+  ## §4.5's early-exit diagnostic: the address, the command, the exit
+  ## status, the log path and the log's tail — enough that the failure is
+  ## diagnosable from `repro up`'s output alone, without opening a file.
+  let tail = readServiceInstanceOutputTail(start.outputPath)
+  "the instance at `" & address & "` exited within its " &
+    $start.graceMs & " ms start grace window with exit status " &
+    $start.exitCode & " (pid " & $start.exitedPid & ", command: " &
+    quoteCommandForDiagnostic(start.process.command) &
+    "), so it was NOT registered and nothing is running there. " &
+    # Exit status 0 is the signature of a command that daemonises itself
+    # (forks into the background and lets the parent return), which the
+    # daemon cannot track: the pid it would record is the parent that
+    # just exited. Said explicitly, because "exit status 0" otherwise
+    # reads as a success the daemon wrongly refused.
+    (if start.exitCode == 0:
+       "A command that forks into the background and exits cannot be " &
+       "tracked; run the service in the foreground. "
+     else: "") &
+    "Its output is in " & start.outputPath &
+    (if tail.strip().len > 0:
+       "; last lines:\n" & tail
+     else:
+       "; it wrote nothing.")
+
+proc writeOutputLogHeader(outputPath: string; command: seq[string];
+                          workingDir: string) =
+  ## Create the log's directory and START THE FILE AFRESH with one header
+  ## line.
+  ##
+  ## TRUNCATE, NOT APPEND, and the header says when. The file is per
+  ## instance ADDRESS, so a previous incarnation's output is from a
+  ## process that has already been stopped (the takeover path stops it
+  ## before materialising) or has died. Appending would let the early-exit
+  ## diagnostic quote the OLD process's last lines when the new one wrote
+  ## nothing — a confidently wrong explanation — and would grow without
+  ## bound across restarts. The shell then APPENDS (`>>`) below this
+  ## header, so the header is kept.
+  ##
+  ## Written by the daemon BEFORE the spawn, so an unwritable state root
+  ## is a clear `IOError` here rather than a shell that fails to open its
+  ## redirection and exits with an obscure status.
+  createDir(parentDir(outputPath))
+  writeFile(outputPath,
+    "# reprobuild: materialising service instance at " &
+    $now().utc & " in " & workingDir & ": " &
+    quoteCommandForDiagnostic(command) & "\n")
+
 proc materialiseServiceInstanceProcess*(command: seq[string];
-                                        workingDir: string):
-    ServiceInstanceProcess =
-  ## Start the instance, detached, and capture the identity that
-  ## recognises it again after this daemon is gone.
+    workingDir: string;
+    outputPath: string;
+    graceMs = ServiceInstanceStartGraceMs): ServiceInstanceStart =
+  ## Start the instance, detached, with its output going to `outputPath`
+  ## (normally `serviceInstanceOutputLogPath(storeRoot, key)`), capture
+  ## the identity that recognises it again after this daemon is gone,
+  ## and OBSERVE it for `graceMs` before reporting it started.
   ##
   ## `poDaemon` is what detaches it. Without it the child dies with the
   ## daemon, and the gate's "a daemon restart recovering the registry"
   ## clause would be measuring a registry whose every instance had just
   ## been killed.
+  ##
+  ## An early exit is RETURNED (`exitedEarly`), not raised: it is an
+  ## expected outcome with structured facts the caller needs (the exit
+  ## status, the log path), not a failure of this function. A failure to
+  ## spawn at all — an unwritable log, `/bin/sh` absent — still raises.
   if command.len == 0:
     raise newException(ServiceRegistryError,
       "a service instance cannot be materialised from an empty command")
-  var process = uncontrolledStartProcess(command[0],
-    workingDir = workingDir,
-    args = (if command.len > 1: command[1 .. ^1] else: @[]),
-    options = {poUsePath, poDaemon, poStdErrToStdOut})
+  if outputPath.len == 0:
+    raise newException(ServiceRegistryError,
+      "a service instance needs an output log path; see " &
+      "`serviceInstanceOutputLogPath`")
+  when defined(posix):
+    if command[0].startsWith("-"):
+      # `exec -x` would be read by some `/bin/sh`s as an option to
+      # `exec` itself rather than as the program to run.
+      raise newException(ServiceRegistryError,
+        "a service instance command cannot begin with `-`: " &
+        quoteCommandForDiagnostic(command))
+  writeOutputLogHeader(outputPath, command, workingDir)
+  result = ServiceInstanceStart(outputPath: outputPath, graceMs: graceMs,
+    exitCode: -1)
+  when defined(posix):
+    # The pipes `startProcess` still creates for stdio are replaced by
+    # the launcher's redirections before the service runs, so nothing
+    # the service writes reaches them; closing our ends below is safe.
+    #
+    # `poStdErrToStdOut` is deliberately NOT passed here: the launcher
+    # merges the two streams into the log itself, and with that option
+    # `osproc`'s POSIX `close` closes the shared stdout/stderr descriptor
+    # TWICE — the second time on a number another thread may already
+    # have reused (reprobuild-pm issue
+    # `2026-10-09-osproc-close-double-close-in-threaded-reprobuild-code`).
+    var process = uncontrolledStartProcess("/bin/sh",
+      workingDir = workingDir,
+      args = @["-c", ServiceInstanceExecScript, ServiceInstanceLauncherName,
+        outputPath] & command,
+      options = {poDaemon})
+  else:
+    # NAMED LIMITATION, not silent: outside POSIX there is no `/bin/sh`
+    # launcher, `startProcess` cannot redirect to a file, and the
+    # output still goes to a pipe that is closed below. The grace-window
+    # liveness check DOES apply. The log says so, so an operator who
+    # opens it is not left wondering why it is empty.
+    try:
+      let f = open(outputPath, fmAppend)
+      defer: f.close()
+      f.writeLine("# reprobuild: capturing a service instance's output " &
+        "is not implemented on this platform; this file receives nothing " &
+        "further.")
+    except CatchableError:
+      discard
+    var process = uncontrolledStartProcess(command[0],
+      workingDir = workingDir,
+      args = (if command.len > 1: command[1 .. ^1] else: @[]),
+      options = {poUsePath, poDaemon, poStdErrToStdOut})
   let pid = process.processID
-  # The handle is closed immediately and deliberately. A detached child
-  # is not this process's to wait on, and holding the handle would make
-  # the daemon's own exit path try.
-  process.close()
-  ServiceInstanceProcess(
+  # The identity is taken IMMEDIATELY, while the pid is certainly ours:
+  # until it is reaped, it cannot be recycled onto another process.
+  let identity = encodeWriterIdentity(WriterIdentity(
+    bootId: currentWriterIdentity().bootId,
     pid: pid,
-    processIdentity: encodeWriterIdentity(WriterIdentity(
-      bootId: currentWriterIdentity().bootId,
+    startStamp: processStartStamp(pid)))
+  try:
+    # §4.5's GRACE WINDOW. Polled through the `Process` handle rather
+    # than through `writerLiveness`, because while we still hold the
+    # handle the parent can ask `waitpid` directly — which also yields
+    # the exit STATUS the diagnostic must name, and reaps the child so a
+    # dead one is not left behind as a zombie.
+    var waited = 0
+    while true:
+      let code = process.peekExitCode()
+      if code != -1:
+        result.exitedEarly = true
+        result.exitCode = code
+        break
+      if waited >= graceMs:
+        break
+      let step = min(ServiceInstanceStartPollMs, graceMs - waited)
+      sleep(step)
+      waited.inc(step)
+  finally:
+    # The handle is still closed, and deliberately — for the reason it
+    # always was. A detached child that is still running is not this
+    # process's to wait on, and holding the handle would make the
+    # daemon's own exit path try. Later liveness questions go through the
+    # recorded `processIdentity` (and `reapIfOurOwnChild`), which work
+    # equally for a daemon that never held a handle.
+    process.close()
+  if result.exitedEarly:
+    result.exitedPid = pid
+    result.process = ServiceInstanceProcess(pid: 0, processIdentity: "",
+      command: command, workingDir: workingDir, outputLog: outputPath)
+  else:
+    result.process = ServiceInstanceProcess(
       pid: pid,
-      startStamp: processStartStamp(pid))),
-    command: command,
-    workingDir: workingDir)
+      processIdentity: identity,
+      command: command,
+      workingDir: workingDir,
+      outputLog: outputPath)
 
 proc stopServiceInstanceProcess*(process: ServiceInstanceProcess;
                                  graceMs = ServiceInstanceStopGraceMs):
@@ -398,13 +655,53 @@ proc uninstallServiceInstanceReapHandler*() =
 # The two handler bodies.
 # ---------------------------------------------------------------------------
 
+proc startForConverge(registry: ServiceInstanceRegistry;
+                       key: ServiceInstanceKey;
+                       request: DaemonServiceConvergeRequest;
+                       startGraceMs: int):
+    tuple[start: ServiceInstanceStart; failure: string] =
+  ## The materialisation BOTH converge paths share — the plain
+  ## `scoMaterialise` and the `--replace` takeover's replacement — so the
+  ## two cannot drift into verifying differently. `failure` is empty only
+  ## when the instance was started AND was still running at the end of
+  ## the grace window; otherwise it is the sentence to answer with, and
+  ## the caller must not register anything.
+  try:
+    let outputPath = serviceInstanceOutputLogPath(registry.storeRoot, key)
+    result.start = materialiseServiceInstanceProcess(request.command,
+      (if request.workingDir.len > 0: request.workingDir
+       else: getCurrentDir()),
+      outputPath, startGraceMs)
+  except CatchableError as err:
+    result.failure = "the instance at `" & serviceInstanceAddress(key) &
+      "` could not be started: " & err.msg
+    return
+  if result.start.exitedEarly:
+    result.failure = describeEarlyServiceInstanceExit(result.start,
+      serviceInstanceAddress(key))
+
+proc materialisedNotice(address: string; process: ServiceInstanceProcess):
+    string =
+  ## The success diagnostic: where the instance's output goes, so the log
+  ## is discoverable from `repro up`'s output as well as from the record.
+  "materialised `" & address & "` as pid " & $process.pid &
+    "; its stdout and stderr are written to " & process.outputLog
+
 proc applyServiceConverge*(registry: var ServiceInstanceRegistry;
                            request: DaemonServiceConvergeRequest;
-                           now: Time = getTime()):
+                           now: Time = getTime();
+                           startGraceMs = ServiceInstanceStartGraceMs):
     DaemonServiceConvergeResponse =
   ## The `udkServiceConverge` handler body: resolve the key, decide, and
   ## — on `scoMaterialise` — start the instance and register it, all
   ## inside this one request.
+  ##
+  ## §4.5: MATERIALISATION IS VERIFIED, NOT DECLARED. On both materialise
+  ## paths the spawned child is observed for `startGraceMs`; one that
+  ## exits inside it is answered `ok: false` with the early-exit
+  ## diagnostic and is NOT registered — no in-memory entry, no store
+  ## record, no pid — so the next converge decides `Materialise` again
+  ## instead of attaching a consumer to a process that is not there.
   let key =
     try:
       decodeServiceInstanceKey(request.keyJson)
@@ -483,20 +780,17 @@ proc applyServiceConverge*(registry: var ServiceInstanceRegistry;
           (if decision.droppedDeadPid != 0:
              "; " & decision.droppedDeadDetail
            else: ""))
-    let process =
-      try:
-        materialiseServiceInstanceProcess(request.command,
-          (if request.workingDir.len > 0: request.workingDir
-           else: getCurrentDir()))
-      except CatchableError as err:
-        return DaemonServiceConvergeResponse(ok: false,
-          outcome: outcomeWord(scoMaterialise),
-          address: decision.address,
-          diagnostic: "materialising the instance at `" &
-            decision.address & "` failed: " & err.msg)
+    let started = startForConverge(registry, key, request, startGraceMs)
+    if started.failure.len > 0:
+      return DaemonServiceConvergeResponse(ok: false,
+        outcome: outcomeWord(scoMaterialise),
+        address: decision.address,
+        diagnostic: started.failure)
+    let process = started.start.process
     let entry = recordMaterialisedInstance(registry, key, snapshot, process,
       request.holderId, policyFromTtlSeconds(request.ttlSeconds), now)
     result.pid = int32(process.pid)
+    result.diagnostic = materialisedNotice(decision.address, process)
     result.holders = @[request.holderId]
     result.holderSetRecoverable = entry.holderRecovery == hrTotal
     return
@@ -528,22 +822,25 @@ proc applyServiceConverge*(registry: var ServiceInstanceRegistry;
         diagnostic: "the instance at `" & decision.address &
           "` was stopped, and the request carried no command to " &
           "materialise its replacement with")
-    let process =
-      try:
-        materialiseServiceInstanceProcess(request.command,
-          (if request.workingDir.len > 0: request.workingDir
-           else: getCurrentDir()))
-      except CatchableError as err:
-        return DaemonServiceConvergeResponse(ok: false,
-          outcome: outcomeWord(decision.outcome),
-          address: decision.address,
-          diagnostic: "the instance at `" & decision.address &
-            "` was stopped and its replacement could not be started: " &
-            err.msg)
+    let started = startForConverge(registry, key, request, startGraceMs)
+    if started.failure.len > 0:
+      # The old instance is already stopped and forgotten, and the
+      # replacement is not running: the key now names NOTHING, and the
+      # answer says so rather than reporting a takeover that left no
+      # instance behind.
+      return DaemonServiceConvergeResponse(ok: false,
+        outcome: outcomeWord(decision.outcome),
+        address: decision.address,
+        diagnostic: "the previous instance was stopped and its " &
+          "replacement did not start: " & started.failure)
+    let process = started.start.process
     discard recordMaterialisedInstance(registry, key, snapshot, process,
       request.holderId, policyFromTtlSeconds(request.ttlSeconds), now)
     result.pid = int32(process.pid)
     result.holders = @[request.holderId]
+    result.diagnostic =
+      (if result.diagnostic.len > 0: result.diagnostic & " " else: "") &
+      materialisedNotice(decision.address, process)
     return
   if convergeAttached(decision.outcome):
     let entry = registry.lookupServiceInstance(key)

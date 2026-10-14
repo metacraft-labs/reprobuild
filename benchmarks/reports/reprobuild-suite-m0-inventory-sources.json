@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 2047,
+    "nimTestBinaries": 2048,
     "pureUnitConsolidationGroups": 60,
-    "pureUnitTests": 643,
+    "pureUnitTests": 644,
     "staticallyDetectedRuntimeCompilerFlowTests": 118,
-    "testEntries": 2065
+    "testEntries": 2066
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1265,7 +1265,7 @@
       "graph-fixture": 17,
       "integration": 1097,
       "platform/destructive": 126,
-      "pure unit": 643,
+      "pure unit": 644,
       "unclassified": 182
     },
     "graphOwnedTestArtifacts": [
@@ -1456,9 +1456,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2047,
+    "nimTestBinaryCount": 2048,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2065
+    "testEntryCount": 2066
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10557,6 +10557,25 @@
       "source": "libs/repro_daemon_core/tests/t_l4_daemon_leases.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_service_materialise_verifies_liveness",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

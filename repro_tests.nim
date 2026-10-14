@@ -1764,6 +1764,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim",
+    binary: "build/test-bin/t_service_materialise_verifies_liveness",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim",
     binary: "build/test-bin/t_deploy_agent_cli_compiles_manifest_profile",
     defines: @[],
