@@ -63,10 +63,12 @@ if paramCount() == 5 and paramStr(1) == FixtureFlag:
     writeFile(pidFile, "daemon start failed: " & err.msg)
     quit(2)
 
+import repro_test_support/reasoned_skip
+
 when not defined(windows):
   suite "auto-started daemon working directory":
     test "the daemon does not hold its starter's working directory":
-      skip()
+      skip("Windows-only test; auto-started daemon working directory is Windows-specific")
 else:
   import std/winlean
 

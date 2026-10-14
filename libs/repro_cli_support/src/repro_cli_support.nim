@@ -60911,6 +60911,7 @@ type
     name*: string
     status*: HealthStatus
     detail*: string
+    fullDetail*: string
     remedy*: string
     fixKind*: HealthFixKind
 
@@ -60919,6 +60920,7 @@ type
     projectName: string
     json: bool
     fix: bool
+    verbose: bool
 
   HealthContext = object
     ## Resolved facts the gatherer shares across checks so it only
@@ -60944,6 +60946,8 @@ proc parseHealthArgs(args: openArray[string]): HealthArgs =
       result.json = true
     elif arg == "--fix":
       result.fix = true
+    elif arg == "--verbose" or arg == "-v":
+      result.verbose = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro health` flag: " & arg)
@@ -61627,6 +61631,14 @@ proc gatherHealthChecks(parsed: HealthArgs):
     # population: "4 wired" means nothing without "of 5 present in 1 repo".
     let census = $okCount & " managed hook(s) wired across " &
       $reposInspected & " participating repo(s)"
+    proc formatHookList(items: openArray[string]; verbose: bool; maxShown = 5): string =
+      if verbose or items.len <= maxShown:
+        items.join(", ")
+      else:
+        let shown = items[0 ..< maxShown]
+        let elided = items.len - maxShown
+        shown.join(", ") & " (+" & $elided & " more)"
+
     if enumerated.mode != "workspace":
       checks.add(HealthCheck(
         name: "vcs-hooks",
@@ -61640,45 +61652,73 @@ proc gatherHealthChecks(parsed: HealthArgs):
       # mismatch is live is how the diagnostic gets deleted instead of the
       # defect. Whatever else is wrong is NAMED here, in the same detail, so
       # nothing is dropped by taking this arm.
+      let fullStaleDetail = $stale.len & " managed hook(s) STALE — present, carrying " &
+        "every marker a generated body carries, and demanding a contract " &
+        "THIS build does not generate, so each fire refuses (pre-push) or " &
+        "fails open in silence (the four observational hooks): " &
+        stale.join(", ") & ". " & census &
+        (if writers.len > 0:
+          ". The installed bodies name their writer(s): " &
+            writers.join(" | ") &
+            " — compare STORE PATHS, not versions"
+        else: "") &
+        (if shadowed.len > 0:
+          ". Also " & $shadowed.len & " SHADOWED: " & shadowed.join(", ")
+        else: "") &
+        (if missing.len > 0:
+          ". Also " & $missing.len & " missing: " & missing.join(", ")
+        else: "") &
+        ". See the hook-interpreter row for whether this host's shells " &
+        "even agree about which 'repro' runs them."
+      let staleDetail = $stale.len & " managed hook(s) STALE — present, carrying " &
+        "every marker a generated body carries, and demanding a contract " &
+        "THIS build does not generate, so each fire refuses (pre-push) or " &
+        "fails open in silence (the four observational hooks): " &
+        formatHookList(stale, parsed.verbose) & ". " & census &
+        (if writers.len > 0:
+          ". The installed bodies name their writer(s): " &
+            writers.join(" | ") &
+            " — compare STORE PATHS, not versions"
+        else: "") &
+        (if shadowed.len > 0:
+          ". Also " & $shadowed.len & " SHADOWED: " & formatHookList(shadowed, parsed.verbose)
+        else: "") &
+        (if missing.len > 0:
+          ". Also " & $missing.len & " missing: " & formatHookList(missing, parsed.verbose)
+        else: "") &
+        ". See the hook-interpreter row for whether this host's shells " &
+        "even agree about which 'repro' runs them."
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
-        detail: $stale.len & " managed hook(s) STALE — present, carrying " &
-          "every marker a generated body carries, and demanding a contract " &
-          "THIS build does not generate, so each fire refuses (pre-push) or " &
-          "fails open in silence (the four observational hooks): " &
-          stale.join(", ") & ". " & census &
-          (if writers.len > 0:
-            ". The installed bodies name their writer(s): " &
-              writers.join(" | ") &
-              " — compare STORE PATHS, not versions"
-          else: "") &
-          (if shadowed.len > 0:
-            ". Also " & $shadowed.len & " SHADOWED: " & shadowed.join(", ")
-          else: "") &
-          (if missing.len > 0:
-            ". Also " & $missing.len & " missing: " & missing.join(", ")
-          else: "") &
-          ". See the hook-interpreter row for whether this host's shells " &
-          "even agree about which 'repro' runs them.",
+        detail: staleDetail,
+        fullDetail: if staleDetail != fullStaleDetail: fullStaleDetail else: "",
         # NOT ``hooks ensure``, and NOT auto-fixable. See the block comment.
         remedy: "direnv reload   # then, only once hook-interpreter agrees: " &
           remedy,
         fixKind: hfNone))
     elif shadowed.len > 0:
+      let fullShadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
+        "installer and not running: " & shadowed.join(", ") & ". " & census
+      let shadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
+        "installer and not running: " & formatHookList(shadowed, parsed.verbose) & ". " & census
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
-        detail: $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
-          "installer and not running: " & shadowed.join(", ") & ". " & census,
+        detail: shadowedDetail,
+        fullDetail: if shadowedDetail != fullShadowedDetail: fullShadowedDetail else: "",
         remedy: remedy,
         fixKind: hfEnsureVcsHooks))
     elif missing.len > 0:
+      let fullMissingDetail = $missing.len & " managed hook(s) missing across " &
+        $reposInspected & " participating repo(s): " & missing.join(", ")
+      let missingDetail = $missing.len & " managed hook(s) missing across " &
+        $reposInspected & " participating repo(s): " & formatHookList(missing, parsed.verbose)
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
-        detail: $missing.len & " managed hook(s) missing across " &
-          $reposInspected & " participating repo(s): " & missing.join(", "),
+        detail: missingDetail,
+        fullDetail: if missingDetail != fullMissingDetail: fullMissingDetail else: "",
         remedy: remedy,
         fixKind: hfEnsureVcsHooks))
     else:
@@ -62145,7 +62185,9 @@ proc toJsonNode*(check: HealthCheck): JsonNode =
   result = newJObject()
   result["name"] = %check.name
   result["status"] = %($check.status)
-  result["detail"] = %check.detail
+  result["detail"] = %(if check.fullDetail.len > 0: check.fullDetail else: check.detail)
+  if check.fullDetail.len > 0:
+    result["digest"] = %check.detail
   result["remedy"] = %check.remedy
   result["fixable"] = %(check.fixKind != hfNone)
 

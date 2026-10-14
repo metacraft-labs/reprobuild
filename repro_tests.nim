@@ -11205,6 +11205,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_health_vcs_hooks_digest_output.nim",
+    binary: "build/test-bin/t_health_vcs_hooks_digest_output",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_highest_satisfied_floor_wins.nim",
     binary: "build/test-bin/t_highest_satisfied_floor_wins",
     defines: @[],

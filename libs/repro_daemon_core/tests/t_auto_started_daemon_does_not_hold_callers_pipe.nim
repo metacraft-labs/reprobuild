@@ -57,10 +57,12 @@ if paramCount() == 4 and paramStr(1) == FixtureFlag:
     echo "daemon start failed: ", err.msg
     quit(2)
 
+import repro_test_support/reasoned_skip
+
 when not defined(windows):
   suite "auto-started daemon stdio":
     test "the daemon does not hold its starter's output pipe open":
-      skip()
+      skip("Windows-only test; auto-started daemon pipe is Windows-specific")
 else:
   import std/[monotimes, times, winlean]
 
