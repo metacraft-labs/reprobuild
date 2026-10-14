@@ -21554,6 +21554,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "io_mon",
         "repro_test_support",
         "repro_tool_profiles"
       ],
