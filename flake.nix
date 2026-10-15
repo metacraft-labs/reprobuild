@@ -212,7 +212,10 @@
         # identity where it touches the descriptor instead of once per record,
         # and the Linux close hook lets a tracee's close of a replaced
         # descriptor number reach the kernel.
-      url = "github:metacraft-labs/io-mon/6e7d2cf28c6bceec5ec0174fd829524770b17ad7";
+        # Bumped to 51228b5 (2026-10-15), io-mon's `agents` tip; 6e7d2cf is an
+        # ancestor. 51228b5 lets small-stack threads start and run under the
+        # Linux shim; the macOS and Windows capture paths are unchanged.
+      url = "github:metacraft-labs/io-mon/51228b560a6fed59e780a763cb9ed13e9443c245";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -449,7 +452,14 @@
       # the incremental adapter and trace-format resolution are unchanged.
       # 47eda1fd adds native recording navigation; ct-test and the incremental
       # adapter are unchanged. Align the pin with the published workspace.
-      url = "github:metacraft-labs/codetracer/47eda1fd580a17099541ead32f5528cb2e37bdc0";
+      # At 272a09ad5 (2026-10-15, the published `agents` tip; 47eda1fd is an
+      # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
+      # ``src/ct_incremental_adapter.nim`` are unchanged. Its ``repro.lock``
+      # now names trace-format 5b32588b, but ``ct-trace-format-src`` stays at
+      # 808ffdb4 here: that revision is repeated in the reprobuild package
+      # derivations and pinned by ``scripts/check_repo_requirements.sh``, so
+      # it moves on its own, across every surface at once.
+      url = "github:metacraft-labs/codetracer/272a09ad56612dec9919aa88815c2b01d659150a";
       flake = false;
     };
 
