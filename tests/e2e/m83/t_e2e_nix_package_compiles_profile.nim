@@ -43,8 +43,10 @@
 ## Vacuity guard: each run's plan must name the profile's one `fs.userFile`
 ## resource, and exactly one `.rbpi` must have been published.
 ##
-## Mocks: none. A real `nix build`, the real wrapped package, the real build
-## engine, a real `nim c` and the real planner.
+## Mocks: none. A real `nix build` of this tree (run once by the fixture edge
+## `reprobuild.test_fixtures.nix_package`, which each case checks against its
+## own `nix eval`; see `nix_package_support.nixPackageUnderTest`), the real
+## wrapped package, the real build engine, a real `nim c` and the real planner.
 
 import std/[json, os, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
@@ -139,7 +141,7 @@ else:
 
     test "e2e_nix_package_compiles_profile: the installed package plans a " &
         "profile with no REPROBUILD_* variable and no nim on PATH":
-      let pkg = buildNixPackage()
+      let pkg = nixPackageUnderTest()
       let repro = pkg / "bin" / "repro"
       let sourceRoot = wrapperDefault(repro, "REPROBUILD_SOURCE_ROOT")
       let nimCompiler = wrapperDefault(repro, "REPRO_NIM_COMPILER")
