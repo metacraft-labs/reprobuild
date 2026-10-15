@@ -40444,7 +40444,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_sync_selectors_narrow_the_default_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
