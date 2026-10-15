@@ -4349,7 +4349,16 @@ const BundledStdlibSelectors* = [
   "xdotool",
   "xvfb-run",
   "yarn",
-  "zstd"
+  "zstd",
+  # The CLI tool and the development channel are two selectors, exactly as
+  # ``python3`` / ``python-dev`` are. ``zstd`` realizes nixpkgs' DEFAULT
+  # output (``bin`` -- ``bin/zstd`` and nothing else); ``zstd-dev`` realizes
+  # every output, so ``zstd.h`` (``dev``) and ``libzstd`` (``out``) reach the
+  # consumer's include and library channels. A recipe that compiles against
+  # the header names ``zstd-dev``; one that runs the binary names ``zstd``.
+  # See ``repro_dsl_stdlib/packages/zstd_dev.nim`` for why the dev package
+  # declares a HEADER as its ``executablePath``.
+  "zstd-dev"
   ]
   ## The stdlib package selectors a recipe's ``uses:`` reaches by name alone:
   ## ``usesImportCode`` auto-imports ``repro_dsl_stdlib/packages/<module>``
