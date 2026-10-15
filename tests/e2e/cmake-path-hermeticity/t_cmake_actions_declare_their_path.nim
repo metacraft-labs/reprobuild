@@ -262,9 +262,14 @@ proc modificationEpoch(path: string): float =
 
 suite "CMake-generated actions declare their PATH":
   let repoRoot = getCurrentDir()
-  let reproBin = requireBinary(
-    repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
-    "reprobuild.apps.repro")
+  # The fixture binary is REQUIRED in `setup`, not here. This suite body runs
+  # at registration, in every process this binary starts -- including the
+  # `--list` / `--list-json` enumeration, which is run from a scratch working
+  # directory where `<cwd>/build/bin/repro` cannot exist. Raising here took the
+  # whole case list down with it, so the inventory could only count this
+  # source from a catalog probed elsewhere and its own `--list` cross-check
+  # refused it. Each case still fails fast on a missing `repro`.
+  let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
   let forkedCMake = findForkedCMake(repoRoot)
 
   # The fixture lives under the repository's build tree, NOT under
@@ -293,6 +298,7 @@ suite "CMake-generated actions declare their PATH":
     (pathDirs(pathB) - pathDirs(pathA))
 
   setup:
+    requireBinary(reproBin, "reprobuild.apps.repro")
     # A stale tree from an earlier run would let an assertion pass on
     # evidence this run did not produce.
     removeDir(testRoot)

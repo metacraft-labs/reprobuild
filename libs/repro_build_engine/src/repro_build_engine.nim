@@ -270,6 +270,18 @@ type
     # the second wave. It is not an ordinary peer edge of the actions it
     # determines; see ``expandGraphInWaves``.
     bakSolveLock
+    # Unified-Locking-And-Hooks HL-10 (§13.3 amended, §13.7.3): the
+    # LOCK-UPDATE NODE of a plan that produces a test certificate. It applies
+    # the commit-time writers (the ``repro.lock`` sibling re-pin and the
+    # ``flake.lock`` refresh) to the attested repository's working tree and
+    # stages what it wrote, so the content the tests run against already
+    # carries the refreshed locks. Every test command of a
+    # certificate-producing node depends on it. Dispatched through the
+    # executor registered by ``repro_cli_support``, which owns the writers.
+    # It never declares an output: the files it may rewrite are the
+    # repository's own tracked sources, not build products the engine may
+    # clean or restore.
+    bakLockUpdate
 
   NetworkMode* = enum
     ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
@@ -1759,6 +1771,11 @@ type
     status*: ActionStatus
     exitCode*: int
     launched*: bool
+    rewrittenSources*: seq[string]
+      ## HL-10 ``bakLockUpdate`` only: the tracked source files (absolute
+      ## paths) the lock-update node rewrote. Not dependency evidence: the
+      ## node is no monitored process, and these are files the engine must
+      ## re-stat and re-hash for every action looked up after it.
     wouldLaunch*: bool
     cacheDecision*: CacheDecision
     reason*: string
@@ -14319,7 +14336,16 @@ type
     ## realizer (download, verify, extract, seal into the tool store) lives
     ## above the engine, and the engine must not depend on it.
 
+  LockUpdateExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## HL-10: hook installed by the certifying ``repro test`` / ``repro
+    ## certify`` run for the ``bakLockUpdate`` node of its plan. Indirect for
+    ## the usual layering reason: the commit-time lock writers live in
+    ## ``repro_cli_support``, above the engine. The executor reports the paths
+    ## it rewrote in ``rewrittenSources`` so the engine drops any stat or
+    ## digest it cached for them earlier in the run.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+var lockUpdateExecutor {.threadvar.}: LockUpdateExecutor
 var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
 var metadataFetchExecutor {.threadvar.}: MetadataFetchExecutor
@@ -14331,6 +14357,15 @@ proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
   ## that exercise the engine in-process call it explicitly to install
   ## a fresh executor bound to a resolved ``GitToolIdentity``.
   workspaceVcsExecutor = executor
+
+proc registerLockUpdateExecutor*(executor: LockUpdateExecutor) =
+  ## Register the per-thread executor for ``bakLockUpdate`` actions (HL-10).
+  ## The certifying run installs one bound to its own state for the duration
+  ## of its build and clears it afterwards.
+  lockUpdateExecutor = executor
+
+proc clearLockUpdateExecutor*() =
+  lockUpdateExecutor = nil
 
 proc clearWorkspaceVcsExecutor*() =
   ## Clear the registered executor. Tests use this to assert the
@@ -15382,6 +15417,25 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.launched = mdRes.launched
       result.runQuotaBackend = if mdRes.runQuotaBackend.len > 0:
         mdRes.runQuotaBackend else: "metadata-fetch"
+      return
+    of bakLockUpdate:
+      # HL-10. Fail CLOSED when nothing is registered: a lock-update node
+      # that quietly no-ops would let the tests run against a lock the
+      # commit-time hook is about to rewrite, which is the uncovered commit
+      # the node exists to prevent.
+      if lockUpdateExecutor.isNil:
+        raiseEngine(
+          "bakLockUpdate action requires registerLockUpdateExecutor " &
+          "before runBuild: " & action.id)
+      let luRes = lockUpdateExecutor(action)
+      result.status = luRes.status
+      result.exitCode = luRes.exitCode
+      result.stdout = luRes.stdout
+      result.stderr = luRes.stderr
+      result.reason = luRes.reason
+      result.launched = luRes.launched
+      result.rewrittenSources = luRes.rewrittenSources
+      result.runQuotaBackend = "lock-update"
       return
     of bakSolveLock:
       if solveLockExecutor.isNil:
@@ -19409,6 +19463,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[id] = finished.status
           if finished.status == asSucceeded:
             invalidateCachedOutputs(plan.action)
+            if plan.action.kind == bakLockUpdate:
+              # HL-10: the node rewrites tracked sources (``repro.lock``,
+              # ``flake.lock``) that no action declares as an output, so
+              # nothing else would drop a stat or digest this run cached for
+              # them before it ran. Its dependents are looked up after this.
+              for written in finished.rewrittenSources:
+                invalidateCachedPath(materialPath(plan.action.cwd, written))
             let evidenceStart = statStart()
             var evidence = collectEvidence(plan.action, strict = true,
               config = addr config)

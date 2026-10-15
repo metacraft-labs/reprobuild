@@ -21,8 +21,10 @@
 ## cases pin: a stale sibling's discovery cleanup leaves a live daemon's record
 ## alone and still removes the stale one's; a daemon started with a non-default
 ## `--state-dir` wrote its record exactly where `statusFileForEndpoint(stateDir,
-## endpoint)` says; and a LEGACY basename-keyed record left by an older daemon
-## is removed only when it names the stale endpoint itself.
+## endpoint)` says; the cleanup given the relative flags a daemon was started
+## with finds the record that daemon keyed on their absolute form; and a
+## LEGACY basename-keyed record left by an older daemon is removed only when it
+## names the stale endpoint itself.
 ##
 ## The survival cases find a daemon's record by scanning the status directory
 ## for one whose `endpoint=` line names it, not by asking the naming proc, so
@@ -165,6 +167,26 @@ when defined(posix):
         check ("stateDir=" & stateDir) in lines
         check ("pid=" & $daemon.process.processID) in lines
       check recordsNaming(stateDir, endpoint) == @[path]
+
+    test "stale cleanup given relative paths finds the record the daemon wrote":
+      # `repro daemon status|stop --endpoint b/d.sock` hands the cleanup the
+      # flags as typed, while the daemon keyed its record on the ABSOLUTE
+      # endpoint it anchored them to. Same flags, same cwd: same record.
+      let scratch = createTempDir("repro-status-", "")
+      defer: removeDir(scratch)
+      let previousDir = getCurrentDir()
+      setCurrentDir(scratch)
+      defer: setCurrentDir(previousDir)
+      let here = getCurrentDir()
+      var stale = startDaemon("b" / "d.sock", "state")
+      defer: stale.killDaemon()
+      check recordsNaming(here / "state", here / "b" / "d.sock").len == 1
+      stale.killDaemon()
+      check cleanupStaleUserDaemonDiscovery(configFor("b" / "d.sock",
+        "state"))
+      checkpoint("status dir: " & $toSeq(walkFiles(here / "state" /
+        "status" / "*.status")))
+      check recordsNaming(here / "state", here / "b" / "d.sock").len == 0
 
     test "stale cleanup removes a legacy record that names the stale endpoint":
       let scratch = createTempDir("repro-status-", "")

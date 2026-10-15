@@ -8010,6 +8010,13 @@ type
     ## reports an exit code and diagnostics, so a caller that installs a sink
     ## gets a direct build (``runBuildCommand``).
 
+  BuildGraphAugmenter* = proc(actions: var seq[BuildAction])
+    ## Adds actions to, or ordering edges between, the actions an engine pass
+    ## is about to schedule, after lowering and every fingerprint fold. The
+    ## certifying ``repro test`` uses it to add the HL-10 lock-update node
+    ## and make every test command depend on it. Like the outcome sink it
+    ## needs an in-process build (``runBuildCommand``).
+
   BuildCommandOutcome = object
     exitCode: int
     modulePath: string
@@ -9790,6 +9797,64 @@ var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## engine for each would re-validate the same evidence with nothing able to
   ## have changed in between.
 
+proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
+  ## Provisioning-Contributions.md §Lookup:
+  ## Before compiling a recipe whose committed repro.lock pins reprobuild-packages,
+  ## the build engine materializes that revision under
+  ## .repro/cross-repo-producers/reprobuild-packages/<rev> (or verifies it is
+  ## already present) unless $REPROBUILD_PACKAGES_ROOT or a develop sibling
+  ## takes precedence.
+  ## Returns the checkout root of the materialized catalog, or "" if skipped.
+  if getEnv(ReprobuildPackagesRootEnv).len > 0:
+    return ""
+
+  let startDir =
+    if modulePath.len > 0: modulePath.parentDir
+    elif consumerRoot.len > 0: consumerRoot
+    else: getCurrentDir()
+
+  # Develop-mode sibling beside consumer or any ancestor
+  var dir = startDir
+  for _ in 0 ..< 16:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    let sibling = parent / ReprobuildPackagesRepositoryName
+    if dirExists(sibling):
+      # Develop-mode sibling takes precedence
+      return ""
+    dir = parent
+
+  # Find enclosing repro.lock
+  var lockDir = ""
+  var lockFile = ""
+  dir = startDir
+  for _ in 0 ..< 16:
+    let candidate = dir / CommittedLockFileName
+    if fileExists(candidate):
+      lockDir = dir
+      lockFile = candidate
+      break
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+
+  if lockFile.len == 0:
+    return ""
+
+  try:
+    let content = readFile(lockFile)
+    let ld = parseLockedDependencies(content)
+    for dep in ld.deps:
+      if dep.name == ReprobuildPackagesRepositoryName and dep.coordinates.kind == ckVcs:
+        return fetchLockPinnedProducer(dep, lockDir)
+  except CatchableError as err:
+    if err of OSError:
+      raise
+    discard
+  return ""
+
 proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           workDir, scratchDir, consumerRoot, publicCliPath,
                           cacheRoot: string;
@@ -9837,6 +9902,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   ## reads — could not appear in it. Editing such a file left the gate warm
   ## and served a stale interface with a green build. The engine's decision
   ## comes from the monitored read set, which does see those files.
+  discard ensureLockPinnedCatalog(modulePath, consumerRoot)
   let helperCliPath = internalReproHelperCliPath(publicCliPath)
   if helperCliPath.len == 0 or not cliPathExists(helperCliPath):
     # No engine-executable image to spawn back into. Embedded callers and
@@ -9897,7 +9963,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     providerCompileConfigurationIdentity(compileCommand)
   # The selected catalog decides which module a catalog `uses:` imports;
   # see `catalogSelectionIdentity`. Appended only when one is selected.
-  let catalogSelection = catalogSelectionIdentity()
+  let catalogSelection = catalogSelectionIdentity(modulePath)
   let keySuffix = "\x00provider-compile-configuration\x00" &
     digestHex(compileConfiguration) &
     (if catalogSelection.len > 0: "\x00" & catalogSelection else: "")
@@ -10275,7 +10341,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCachePublisher: PeerCacheActionPublisher = nil;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
                           nil;
-                        actionOutcomeSink: BuildActionOutcomeSink = nil):
+                        actionOutcomeSink: BuildActionOutcomeSink = nil;
+                        graphAugmenter: BuildGraphAugmenter = nil):
     BuildCommandOutcome =
   ## ``actionOutcomeSink`` receives the per-action outcome of the engine pass
   ## this invocation runs over its lowered graph (``ExecutedActionRecord``),
@@ -10822,6 +10889,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
     # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
+    # HL-10: a certifying run adds its lock-update node here, after every
+    # fold, so the node changes no other action's cache key.
+    if graphAugmenter != nil:
+      graphAugmenter(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
@@ -12460,6 +12531,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
     # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
+    # HL-10: a certifying run adds its lock-update node here, after every
+    # fold, so the node changes no other action's cache key.
+    if graphAugmenter != nil:
+      graphAugmenter(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
@@ -12842,6 +12917,7 @@ proc runInterfaceExtractHelper(args: openArray[string]): int =
       stderr.writeLine("repro interface extract: missing " & name)
       return 2
   try:
+    discard ensureLockPinnedCatalog(modulePath, consumerRoot)
     # ``useExtractionCache = false``: reaching this process at all means the
     # engine already decided the edge must run. Re-asking the narrower
     # text-closure key here could only ever overrule that decision, and it
@@ -14627,7 +14703,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
                      cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil): int
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int
 
 type
   RunTargetResolution = object
@@ -25258,18 +25335,26 @@ proc catalogLockedDep*(catalogRoot, root: string;
   let top = gitTopLevel(catalogRoot)
   if top.len > 0:
     let depAbs = absolutePath(top)
-    if cmpPaths(depAbs, root) == 0 or root.isRelativeTo(depAbs):
+    let targetBase = if pathBase.len > 0: pathBase else: root
+    let targetTop = gitTopLevel(targetBase)
+    let canonTargetBase = if targetTop.len > 0: absolutePath(targetTop) else: absolutePath(targetBase)
+    if cmpPaths(depAbs, canonTargetBase) == 0 or canonTargetBase.isRelativeTo(depAbs):
       return none(LockedDep)
     let facts = committedLockRepoFacts(depAbs)
     let originName = repositoryNameFromUrl(facts.originUrl)
     let bareName = extractFilename(depAbs.strip(
       leading = false, trailing = true, chars = {'/', '\\'}))
+    let depName = (if originName.len > 0: originName
+                   elif bareName.len > 0: bareName
+                   else: ReprobuildPackagesRepositoryName)
+    let depPath =
+      if depAbs.isRelativeTo(canonTargetBase / ".repro") or depAbs.isRelativeTo(absolutePath(root) / ".repro"):
+        "../" & depName
+      else:
+        relativePath(depAbs, canonTargetBase).replace('\\', '/')
     return some(LockedDep(
-      name: (if originName.len > 0: originName
-             elif bareName.len > 0: bareName
-             else: ReprobuildPackagesRepositoryName),
-      path: relativePath(depAbs,
-        (if pathBase.len > 0: pathBase else: root)).replace('\\', '/'),
+      name: depName,
+      path: depPath,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
         gitRef: facts.publishedRef, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
@@ -25715,7 +25800,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
                      cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil): int =
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -26429,7 +26515,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         peerCacheFetcher = peerCacheBuildWiring.fetcher,
         peerCachePublisher = peerCacheBuildWiring.publisher,
         peerCacheInstaller = peerCacheBuildWiring.installer,
-        actionOutcomeSink = actionOutcomeSink).exitCode
+        actionOutcomeSink = actionOutcomeSink,
+        graphAugmenter = graphAugmenter).exitCode
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -26525,7 +26612,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # A caller that needs the per-action outcome (certificate issuance) gets a
   # direct build: the daemon protocol carries an exit code and diagnostics,
   # not the engine's per-action results.
-  if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil:
+  if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil or
+      graphAugmenter != nil:
     return runDirectBuild()
   try:
     return runDaemonBuild()
@@ -50157,6 +50245,8 @@ proc preCommitLogPath*(workspaceRoot: string): string =
   ## commit?" a question about line ordering in a shared append-only file.
   workspaceReportDir(workspaceRoot) / "pre-commit-lock.log"
 
+proc appendCommitHookReportLine(workspaceRoot, logPath, line: string)
+
 proc appendPreCommitLog(workspaceRoot, line: string) =
   ## Append one line to ``pre-commit-lock.log``. Never raises — a failed log
   ## write must not fail the commit.
@@ -50166,6 +50256,13 @@ proc appendPreCommitLog(workspaceRoot, line: string) =
   ## so this changes no behaviour today; it is here because the hazard is a
   ## property of the WRITER (a recursive ``createDir`` in a root the engine
   ## may have disclaimed), not of one caller's current control flow.
+  appendCommitHookReportLine(workspaceRoot, preCommitLogPath(workspaceRoot),
+    line)
+
+proc appendCommitHookReportLine(workspaceRoot, logPath, line: string) =
+  ## Append ``line`` to ``logPath`` in the commit hooks' report directory.
+  ## Never raises. Nothing is written where ``commitHookReportDir`` says the
+  ## hooks may not write.
   if workspaceRoot.len == 0: return
   try:
     let dir = commitHookReportDir(workspaceRoot)
@@ -50173,11 +50270,17 @@ proc appendPreCommitLog(workspaceRoot, line: string) =
       return
     createDir(dir)
     var f: File
-    if open(f, preCommitLogPath(workspaceRoot), fmAppend):
+    if open(f, logPath, fmAppend):
       f.writeLine(line)
       f.close()
   except CatchableError:
     discard
+
+proc lockUpdateLogPath*(workspaceRoot: string): string =
+  ## Where the HL-10 lock-update node of a certifying run files its outcome:
+  ## beside ``pre-commit-lock.log``, in a file of its own, so "what did THIS
+  ## commit's hook do" stays a question about one file.
+  workspaceReportDir(workspaceRoot) / "lock-update.log"
 
 proc preCommitRepinMarkerPath(workspaceRoot, repoRoot: string): string =
   ## TC-8g — where the `pre-commit` refresh phase notes a lock it re-pinned
@@ -50939,6 +51042,16 @@ type
     allowed*: seq[PinRegression] ## regressions recorded because they were named
     allowanceUsed*: seq[string]  ## named inputs that really were regressing
     examined*: seq[string]       ## every flake input name the refresh considered
+    wouldChange*: bool           ## ``mayWrite = false``: it would have rewritten
+    notStaged*: string
+      ## Set by the caller that stages: why the rewritten lock could not be
+      ## staged ("" when it was, or when nothing was written).
+    failure*: string
+      ## Why the refresh could not be performed at all (an unreadable flake
+      ## or lock, no git, an unresolvable workspace, an unwritable lock, an
+      ## exception), "" otherwise. A pin regression is not a failure: it is
+      ## ``refused``. The hook logs a failure and lets the commit proceed; the
+      ## HL-10 lock-update node withholds the certificate on one.
 
 proc shortRev(rev: string): string =
   if rev.len >= 12: rev[0 ..< 12] else: rev
@@ -51223,7 +51336,8 @@ proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
 
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   toolProvisioning: ToolProvisioningMode;
-  allowRegression: seq[string] = @[]; mayWrite = true): FlakeCommitRefresh
+  allowRegression: seq[string] = @[]; mayWrite = true;
+  label = "repro pre-commit"): FlakeCommitRefresh
   ## NF-2 — forward declaration. The implementation lives beside the rest of
   ## the flake-coexistence code far below (it needs the NF-1 override-set
   ## machinery); the commit hook that drives it is here.
@@ -51762,8 +51876,8 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 # act from testing one, and a stale checkout must not become a stale published
 # lock.
 
-proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
-    tuple[ok: bool; diagnostic: string] =
+proc stageRefreshedFlakeLock(repoRoot, lockPath: string;
+    useHookIndex = true): tuple[ok: bool; diagnostic: string] =
   ## `git add` the refreshed lock into the IN-FLIGHT index, so the commit
   ## being formed carries it.
   ##
@@ -51814,10 +51928,17 @@ proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
   ## `t_every_commit_form_stages_through_the_installed_hook`, which drives the
   ## hook `repro hooks ensure --vcs` actually installs; its second case asserts
   ## that nothing else of git's repository-local environment reaches `repro`.
+  ##
+  ## ``useHookIndex = false`` is the HL-10 lock-update node, which runs inside
+  ## ``repro test`` rather than inside ``git commit``: no commit is in flight,
+  ## so the index to stage into is the repository's own, and an inherited
+  ## ``GIT_INDEX_FILE`` is not consulted.
   var env = scrubbedGitRepositoryEnv()
-  var indexFile = getEnv(HookGitIndexFileEnv)
-  if indexFile.len == 0:
-    indexFile = getEnv("GIT_INDEX_FILE")
+  var indexFile = ""
+  if useHookIndex:
+    indexFile = getEnv(HookGitIndexFileEnv)
+    if indexFile.len == 0:
+      indexFile = getEnv("GIT_INDEX_FILE")
   if indexFile.len > 0:
     # A relative value reaches here only on the fallback path (the carrier is
     # absolutised in the hook body). It is resolved against the current working
@@ -52123,46 +52244,260 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string):
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
 
-proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+type
+  CommitTimeWriterSite* = enum
+    ## Who applies the commit-time lock writers (Unified-Locking-And-Hooks
+    ## HL-10). ONE implementation serves both, so the hook and the lock-update
+    ## node cannot disagree about what "current" means: a writer added to one
+    ## is added to the other by construction.
+    ctwsPreCommitHook
+      ## The managed `pre-commit` hook, inside `git commit`: stages into the
+      ## index of the commit being formed and notes each re-pin for the
+      ## certificate gate of the same commit (TC-8g).
+    ctwsLockUpdateNode
+      ## The lock-update node of a certifying `repro test` / `repro certify`
+      ## (§13.7.3): stages into the repository's own index, and notes nothing
+      ## for a gate, because no commit is in flight.
+
+  CommitTimeWritersOutcome* = object
+    ## What one application of the commit-time writers did.
+    written*: seq[string]
+      ## The locks it rewrote (absolute paths), in the order written.
+    changes*: seq[string]
+      ## One line per rewritten lock saying what it records now.
+    notStaged*: seq[string]
+      ## A lock that was rewritten but could not be staged, with git's reason.
+    refused*: seq[PinRegression]
+      ## Pin regressions nobody allowed. When non-empty NOTHING was written.
+    allowed*: seq[PinRegression]
+      ## Regressions written because the allowance named them.
+    failures*: seq[string]
+      ## A writer that could not run at all: an unreadable lock, a flake
+      ## refresh that could not resolve the workspace, a failed write. The
+      ## hook logs these and lets the commit proceed (§13.3 "Blocks only on a
+      ## regression"); the lock-update node withholds the certificate.
+
+  CommitTimeWritersPlan* = object
+    ## The WOULD-WRITE predicate: what the commit-time writers would do to
+    ## ``repoRoot`` right now, computed without writing anything. Every writer
+    ## ``applyCommitTimeLockWriters`` runs is planned here as well.
+    wouldWrite*: seq[string]
+      ## The locks that would be rewritten (absolute paths).
+    refused*: seq[PinRegression]
+    failures*: seq[string]
+
+proc commitTimeWriterLabel(site: CommitTimeWriterSite): string =
+  case site
+  of ctwsPreCommitHook: "repro pre-commit"
+  of ctwsLockUpdateNode: "repro lock-update"
+
+proc appendCommitTimeWriterLog(site: CommitTimeWriterSite;
+    workspaceRoot, line: string) =
+  case site
+  of ctwsPreCommitHook: appendPreCommitLog(workspaceRoot, line)
+  of ctwsLockUpdateNode:
+    appendCommitHookReportLine(workspaceRoot, lockUpdateLogPath(workspaceRoot),
+      line)
+
+proc commitTimeHasFlakeLock(repoRoot: string): bool =
+  fileExists(repoRoot / "flake.nix") and fileExists(repoRoot / "flake.lock")
+
+proc commitTimeHasReproLock(repoRoot: string): bool =
+  fileExists(repoRoot / CommittedLockFileName)
+
+proc committedLockRepinFailure(plan: CommittedLockRepinPlan): string =
+  ## The re-pin could not even be planned: the lock is unreadable or carries
+  ## no `deps` line. A pin regression is a decision, not a failure.
+  if plan.refused.len == 0 and plan.line.startsWith("repro-lock refused-"):
+    plan.line
+  else: ""
+
+proc preCommitFlakeLock(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode; timestamp: string;
     allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh
   ## NF-2's `flake.lock` refresh; defined after the dispatcher.
 
-proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
-    plan: CommittedLockRepinPlan; apply: bool) =
+proc preCommitReproLock(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot, timestamp: string;
+    plan: CommittedLockRepinPlan; apply: bool;
+    outcome: var CommitTimeWritersOutcome) =
   ## §13.3 — report the planned `repro.lock` re-pin and, when ``apply`` (no
-  ## lock refuses this commit), write it and stage it into the commit being
-  ## formed. Never raises.
+  ## lock refuses), write it and stage it. From the hook it is staged into
+  ## the commit being formed; from the lock-update node into the
+  ## repository's index. Never raises.
+  let label = commitTimeWriterLabel(site)
   for w in plan.warnings:
-    stderr.writeLine("repro pre-commit: " & w)
+    stderr.writeLine(label & ": " & w)
   if plan.line.len == 0: return
   var line = timestamp & " "
   if plan.refused.len > 0:
     line.add(plan.line)
   elif not apply:
-    # This lock had nothing to refuse, but `flake.lock` refused the commit:
-    # a refused commit writes nothing, so neither lock is touched.
+    # This lock had nothing to refuse, but `flake.lock` refused: a refusal
+    # writes nothing, so neither lock is touched.
     line.add("repro-lock not-written-commit-refused" &
       (if plan.changed: " (would have: " & plan.line & ")" else: ""))
   else:
     let applied = applyCommittedLockRepin(plan)
     line.add(applied.line)
-    if applied.ok and plan.changed:
-      stderr.writeLine("repro pre-commit: " & plan.line)
-      let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath)
+    if not applied.ok:
+      outcome.failures.add(applied.line)
+    elif plan.changed:
+      outcome.written.add(plan.lockPath)
+      outcome.changes.add(plan.line)
+      stderr.writeLine(label & ": " & plan.line)
+      let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath,
+        useHookIndex = site == ctwsPreCommitHook)
       if staged.ok:
-        line.add("; staged into this commit")
-        notePreCommitRepin(workspaceRoot, repoRoot, plan.lockPath)
+        case site
+        of ctwsPreCommitHook:
+          line.add("; staged into this commit")
+          notePreCommitRepin(workspaceRoot, repoRoot, plan.lockPath)
+        of ctwsLockUpdateNode:
+          line.add("; staged")
       else:
         line.add("; NOT STAGED: " & staged.diagnostic)
-        stderr.writeLine("repro pre-commit: repro.lock was re-pinned but " &
-          "could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
-          staged.diagnostic)
-        stderr.writeLine("repro pre-commit: remedy: `git add " &
-          plan.lockPath & "` and `git commit --amend --no-edit`")
+        outcome.notStaged.add(plan.lockPath & ": " & staged.diagnostic)
+        case site
+        of ctwsPreCommitHook:
+          stderr.writeLine(label & ": repro.lock was re-pinned but " &
+            "could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
+            staged.diagnostic)
+          stderr.writeLine(label & ": remedy: `git add " &
+            plan.lockPath & "` and `git commit --amend --no-edit`")
+        of ctwsLockUpdateNode:
+          stderr.writeLine(label & ": repro.lock was re-pinned but could " &
+            "NOT be staged: " & staged.diagnostic)
+          stderr.writeLine(label & ": remedy: `git add " & plan.lockPath &
+            "`, then run the tests again")
   if plan.warnings.len > 0:
     line.add("; " & plan.warnings.join("; "))
-  appendPreCommitLog(workspaceRoot, line)
+  appendCommitTimeWriterLog(site, workspaceRoot, line)
+
+proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
+    toolProvisioning: ToolProvisioningMode;
+    allowance: PinRegressionAllowance): CommitTimeWritersPlan =
+  ## The would-write predicate (HL-10): what ``applyCommitTimeLockWriters``
+  ## would do to ``repoRoot`` now, for each writer the managed `pre-commit`
+  ## hook runs — the `repro.lock` sibling re-pin (§13.3) and the
+  ## `flake.lock` refresh (§13.6). Writes nothing and stages nothing. (The
+  ## Pre-Commit-Check-Sets PCS-5 managed block is not built; when it is, it
+  ## is a third writer and is planned here too.)
+  let root = absolutePath(repoRoot)
+  let hasReproLock = commitTimeHasReproLock(root)
+  if hasReproLock:
+    try:
+      let plan = planCommittedLockRepin(root, allowance.names)
+      let failure = committedLockRepinFailure(plan)
+      if failure.len > 0:
+        result.failures.add(failure)
+      for r in plan.refused: result.refused.add(r)
+      if plan.changed:
+        result.wouldWrite.add(plan.lockPath)
+    except CatchableError as err:
+      result.failures.add("repro-lock error: " & err.msg)
+  if commitTimeHasFlakeLock(root):
+    var flake: FlakeCommitRefresh
+    try:
+      flake = refreshFlakeLockAtCommit(workspaceRoot, root, toolProvisioning,
+        allowance.names, mayWrite = false,
+        label = commitTimeWriterLabel(ctwsLockUpdateNode))
+    except CatchableError as err:
+      flake.failure = "flake-lock error: " & err.msg
+    if flake.failure.len > 0:
+      result.failures.add(flake.failure)
+    for r in flake.refused: result.refused.add(r)
+    if flake.wouldChange or flake.changed:
+      result.wouldWrite.add(flake.lockPath)
+
+proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot: string; toolProvisioning: ToolProvisioningMode;
+    timestamp: string; allowance: PinRegressionAllowance;
+    allowedVia = PinRegressionAllowEnv): CommitTimeWritersOutcome =
+  ## Apply every commit-time writer to ``repoRoot``'s working tree and stage
+  ## what changed: the `repro.lock` sibling re-pin (§13.3) and the
+  ## `flake.lock` refresh (§13.6). The managed `pre-commit` hook and the
+  ## HL-10 lock-update node both call this, and nothing else writes a lock
+  ## on either path. Under the same rules for both: no solve, write only on
+  ## change, and a pin regression the allowance does not name refuses and
+  ## writes NEITHER lock.
+  ##
+  ## Prints what it changes and the allowance notes; the caller renders a
+  ## refusal (its wording depends on what was refused: a commit, or a lock
+  ## update before a test run). Never raises.
+  let label = commitTimeWriterLabel(site)
+  let action =
+    case site
+    of ctwsPreCommitHook: "commit"
+    of ctwsLockUpdateNode: "lock update"
+  let hasFlake = commitTimeHasFlakeLock(repoRoot)
+  let hasReproLock = commitTimeHasReproLock(repoRoot)
+  # A pin never moves backward silently. The `repro.lock` re-pin is PLANNED
+  # first (a few local git queries per sibling), the `flake.lock` refresh
+  # runs knowing whether it may write, and only when neither lock refuses is
+  # anything written — so a refusal leaves the tree and the index exactly as
+  # it found them, and every regression in both locks is reported at once.
+  var reproPlan: CommittedLockRepinPlan
+  var reproPlanned = false
+  if hasReproLock:
+    try:
+      reproPlan = planCommittedLockRepin(repoRoot, allowance.names)
+      reproPlanned = true
+      let failure = committedLockRepinFailure(reproPlan)
+      if failure.len > 0:
+        result.failures.add(failure)
+    except CatchableError as err:
+      result.failures.add("repro-lock error: " & err.msg)
+      appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+        " repro-lock error: " & err.msg)
+  let reproRefuses = reproPlanned and reproPlan.refused.len > 0
+  var flake: FlakeCommitRefresh
+  if hasFlake:
+    flake = preCommitFlakeLock(site, workspaceRoot, repoRoot,
+      toolProvisioning, timestamp, allowance.names,
+      mayWrite = not reproRefuses)
+    if flake.failure.len > 0:
+      result.failures.add(flake.failure)
+    if flake.changed:
+      result.written.add(flake.lockPath)
+      result.changes.add(flake.line)
+      if flake.notStaged.len > 0:
+        result.notStaged.add(flake.lockPath & ": " & flake.notStaged)
+  let refused = reproRefuses or flake.refused.len > 0
+  if reproPlanned:
+    preCommitReproLock(site, workspaceRoot, repoRoot, timestamp, reproPlan,
+      apply = not refused, result)
+
+  var used, examined: seq[string]
+  var allowedRegressions: seq[PinRegression]
+  if reproPlanned:
+    for n in reproPlan.examined: examined.add(n)
+    for r in reproPlan.allowed: allowedRegressions.add(r)
+  for n in flake.examined: examined.add(n)
+  for r in flake.allowed: allowedRegressions.add(r)
+  for r in allowedRegressions: used.add(r.sibling)
+  # A named input that regressed counts as used even when nothing was written
+  # for it (a refusal, an unpublished revision): the note is for names that
+  # matched no regression at all.
+  for n in flake.allowanceUsed: used.add(n)
+  if not refused:
+    # The downgrade is visible afterwards, not just permitted.
+    for r in allowedRegressions:
+      let announced = pinRegressionAllowedLine(r, allowedVia)
+      stderr.writeLine(label & ": " & announced)
+      appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+        (if r.lock == "flake.lock": " flake-lock " else: " repro-lock ") &
+        announced)
+      result.allowed.add(r)
+  for note in pinRegressionAllowanceNotes(allowance, used, examined, action):
+    stderr.writeLine(label & ": note: " & note)
+    appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+      " pin-regression-allowance note: " & note)
+  if refused:
+    if reproPlanned:
+      for r in reproPlan.refused: result.refused.add(r)
+    for r in flake.refused: result.refused.add(r)
 
 proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch pre-commit --repo-root=<repo>`` routes here.
@@ -52174,6 +52509,10 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## (Unified-Locking-And-Hooks.md §13.3, Nix-Flake-Coexistence.md §3.2). Every
   ## other failure is logged to ``pre-commit-lock.log`` and the commit
   ## proceeds.
+  ##
+  ## The writers themselves are ``applyCommitTimeLockWriters``, shared with
+  ## the lock-update node a certifying ``repro test`` runs before its tests
+  ## (HL-10): for content certified that way this hook finds nothing to do.
   let parsed = parsePostCommitArgs(args)
   let timestamp = isoTimestampNow()
   # The managed hook body cd's to the repo root before dispatching, so an
@@ -52192,11 +52531,10 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # the other 56% is the pin-vs-HEAD comparison inside
   # `refreshFlakeLockAtCommit`, which is what keeps a develop-set resolution
   # off the commit path.
-  let hasFlake = fileExists(repoRoot / "flake.nix") and
-    fileExists(repoRoot / "flake.lock")
+  let hasFlake = commitTimeHasFlakeLock(repoRoot)
   # §13.3 — a committed `repro.lock` is the other in-tree lock this hook
   # maintains; its sibling pins are re-observed below.
-  let hasReproLock = fileExists(repoRoot / CommittedLockFileName)
+  let hasReproLock = commitTimeHasReproLock(repoRoot)
   if not hasFlake and not hasReproLock:
     return 0
 
@@ -52237,64 +52575,12 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
       stderr.writeLine("repro " & standDown.report)
     return 0
 
-  # (2) A pin never moves backward silently. The `repro.lock` re-pin is
-  # PLANNED first (a few local git queries per sibling), the `flake.lock`
-  # refresh runs knowing whether it may write, and only when neither lock
-  # refuses is anything written — so a refused commit leaves the tree and the
-  # index exactly as it found them, and every regression in both locks is
-  # reported in one refusal rather than one per attempt.
+  # (2) The writers, shared with the HL-10 lock-update node.
   let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
-  var reproPlan: CommittedLockRepinPlan
-  var reproPlanned = false
-  if hasReproLock:
-    try:
-      reproPlan = planCommittedLockRepin(repoRoot, allowance.names)
-      reproPlanned = true
-    except CatchableError as err:
-      appendPreCommitLog(workspaceRoot, timestamp & " repro-lock error: " &
-        err.msg)
-  let reproRefuses = reproPlanned and reproPlan.refused.len > 0
-  var flake: FlakeCommitRefresh
-  if hasFlake:
-    flake = preCommitFlakeLock(workspaceRoot, repoRoot,
-      parsed.toolProvisioning, timestamp, allowance.names,
-      mayWrite = not reproRefuses)
-  let refused = reproRefuses or flake.refused.len > 0
-  if reproPlanned:
-    preCommitReproLock(workspaceRoot, repoRoot, timestamp, reproPlan,
-      apply = not refused)
-
-  var used, examined: seq[string]
-  var allowedRegressions: seq[PinRegression]
-  if reproPlanned:
-    for n in reproPlan.examined: examined.add(n)
-    for r in reproPlan.allowed: allowedRegressions.add(r)
-  for n in flake.examined: examined.add(n)
-  for r in flake.allowed: allowedRegressions.add(r)
-  for r in allowedRegressions: used.add(r.sibling)
-  # A named input that regressed counts as used even when nothing was written
-  # for it (a refused commit, an unpublished revision): the note is for names
-  # that matched no regression at all.
-  for n in flake.allowanceUsed: used.add(n)
-  if not refused:
-    # The downgrade is visible afterwards, not just permitted.
-    for r in allowedRegressions:
-      let announced = pinRegressionAllowedLine(r)
-      stderr.writeLine("repro pre-commit: " & announced)
-      appendPreCommitLog(workspaceRoot, timestamp &
-        (if r.lock == "flake.lock": " flake-lock " else: " repro-lock ") &
-        announced)
-  for note in pinRegressionAllowanceNotes(allowance, used, examined):
-    stderr.writeLine("repro pre-commit: note: " & note)
-    appendPreCommitLog(workspaceRoot, timestamp &
-      " pin-regression-allowance note: " & note)
-  if not refused:
+  let outcome = applyCommitTimeLockWriters(ctwsPreCommitHook, workspaceRoot,
+    repoRoot, parsed.toolProvisioning, timestamp, allowance)
+  if outcome.refused.len == 0:
     return 0
-
-  var regressions: seq[PinRegression]
-  if reproPlanned:
-    for r in reproPlan.refused: regressions.add(r)
-  for r in flake.refused: regressions.add(r)
   var identity: GitToolIdentity
   try:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
@@ -52302,22 +52588,25 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # Both refreshes already resolved git to get this far; were it to vanish
     # now, the refusal still stands and only the upstream name is lost.
     discard
-  for line in renderPinRegressionRefusal(regressions, workspaceRoot,
+  for line in renderPinRegressionRefusal(outcome.refused, workspaceRoot,
       identity):
     stderr.writeLine("repro pre-commit: " & line)
   return 1
 
-proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+proc preCommitFlakeLock(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode; timestamp: string;
     allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh =
+  let label = commitTimeWriterLabel(site)
   try:
     result = refreshFlakeLockAtCommit(workspaceRoot, repoRoot,
-      toolProvisioning, allowRegression, mayWrite)
+      toolProvisioning, allowRegression, mayWrite, label = label)
   except CatchableError as err:
     # Belt and braces: the refresh already downgrades its own failures, and a
     # raise reaching here would still not be a reason to reject the commit.
-    appendPreCommitLog(workspaceRoot,
+    appendCommitTimeWriterLog(site, workspaceRoot,
       timestamp & " flake-lock error: " & err.msg)
+    result.failure = "flake-lock error: " & err.msg
     return
   if result.line.len == 0:
     return
@@ -52327,22 +52616,36 @@ proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
     # (2) STAGE it. Without this the refresh would be a working-tree
     # modification the developer has to notice and commit separately — which
     # is the post-commit behaviour §13.1 rejects, reproduced one hook earlier.
-    let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath)
+    let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath,
+      useHookIndex = site == ctwsPreCommitHook)
     if staged.ok:
-      line.add("; staged into this commit")
-      notePreCommitRepin(workspaceRoot, repoRoot, result.lockPath)
+      case site
+      of ctwsPreCommitHook:
+        line.add("; staged into this commit")
+        notePreCommitRepin(workspaceRoot, repoRoot, result.lockPath)
+      of ctwsLockUpdateNode:
+        stderr.writeLine(label & ": " & result.line)
+        line.add("; staged")
     else:
       # Said out loud on BOTH channels. A refreshed-but-unstaged lock is the
       # one outcome that looks like success in the log and behaves like the
       # defect: the commit goes out naming the old revision while the file on
       # disk names the new one.
       line.add("; NOT STAGED: " & staged.diagnostic)
-      stderr.writeLine("repro pre-commit: flake.lock was refreshed but could " &
-        "NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
-        staged.diagnostic)
-      stderr.writeLine("repro pre-commit: remedy: `git add " &
-        result.lockPath & "` and `git commit --amend --no-edit`")
-  appendPreCommitLog(workspaceRoot, line)
+      result.notStaged = staged.diagnostic
+      case site
+      of ctwsPreCommitHook:
+        stderr.writeLine(label & ": flake.lock was refreshed but could " &
+          "NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
+          staged.diagnostic)
+        stderr.writeLine(label & ": remedy: `git add " &
+          result.lockPath & "` and `git commit --amend --no-edit`")
+      of ctwsLockUpdateNode:
+        stderr.writeLine(label & ": flake.lock was refreshed but could " &
+          "NOT be staged: " & staged.diagnostic)
+        stderr.writeLine(label & ": remedy: `git add " & result.lockPath &
+          "`, then run the tests again")
+  appendCommitTimeWriterLog(site, workspaceRoot, line)
 
 # ---- M19a: post-merge / post-checkout manifest auto-refresh ---------------
 #
@@ -70757,6 +71060,12 @@ type
       ## ``--ct-incremental-trace-dir=PATH`` — the incremental adapter's
       ## trace dir; when set, the no-op decision consults the canonical
       ## ct-incremental change signal in addition to the commit/lock signal.
+    allowPinRegression: seq[string]
+      ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` — the siblings whose
+      ## pin the lock-update node (HL-10) may move backward, in addition to
+      ## any ``REPRO_ALLOW_PIN_REGRESSION`` names. The same rule the managed
+      ## ``pre-commit`` hook applies, given on the command line because here
+      ## the user does invoke the command.
 
 proc emitShardDiagnostic(msg: string) =
   stderr.writeLine("repro test: error: " & msg)
@@ -72189,6 +72498,17 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
     elif arg == "--ct-incremental-trace-dir" or
         arg.startsWith("--ct-incremental-trace-dir="):
       result.certTraceDir = valueFromFlag(args, i, "--ct-incremental-trace-dir")
+    elif arg == "--allow-pin-regression" or
+        arg.startsWith("--allow-pin-regression="):
+      let named = parsePinRegressionAllowance(
+        valueFromFlag(args, i, "--allow-pin-regression"))
+      if named.rejected.len > 0 or named.names.len == 0:
+        raise newException(ValueError, "--allow-pin-regression names each " &
+          "sibling whose pin may move backward (there is no wildcard): " &
+          "--allow-pin-regression=<sibling>[,<sibling>...]")
+      for name in named.names:
+        if name notin result.allowPinRegression:
+          result.allowPinRegression.add(name)
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported repro test flag: " & arg)
     else:
@@ -73419,6 +73739,157 @@ proc collectorSink(collector: ActionOutcomeCollector): BuildActionOutcomeSink =
     for record in batch:
       collector.records[record.id] = record
 
+# ---------------------------------------------------------------------------
+# Unified-Locking-And-Hooks HL-10 — the lock-update node.
+#
+# A plan that contains a certificate-producing node gains one LOCK-UPDATE NODE
+# for the attested repository (§13.3 amended, §13.7.3). It is a real edge of
+# the build graph, a ``bakLockUpdate`` built-in, and every test command of
+# every certificate-producing node the run judges depends on it, so the engine
+# runs it before the first of them. It applies exactly the writers the managed
+# ``pre-commit`` hook applies (``applyCommitTimeLockWriters``: the
+# ``repro.lock`` sibling re-pin and the ``flake.lock`` refresh) to the working
+# tree, under the hook's rules: no solve, write only on change, refuse a pin
+# regression unless ``REPRO_ALLOW_PIN_REGRESSION`` or
+# ``--allow-pin-regression`` names the sibling. It stages exactly what it
+# wrote (``git add -- <lock>``), so a plain ``git commit`` records the tested
+# lock and the hook then finds nothing to do (Test-Certificates D14 (1)).
+#
+# The before-run state that issuance binds (TC-8d) is taken AFTER the node:
+# when the would-write predicate (``planCommitTimeLockWriters``) says the node
+# will rewrite a lock, the preconditions are evaluated by the node itself once
+# it has written; otherwise the content cannot change and they are evaluated
+# before the build, which keeps the incremental no-op. Should the node write
+# anyway (a sibling moved in between), it evaluates them again.
+#
+# A refusal or a failure of the node never fails it as an action: the tests
+# still run and the exit code stays the build's own (Interactive-UX
+# Principle 2). It withholds every certificate of the run instead, and the run
+# ends with the refusal text and "no certificate".
+#
+# A plan without a certificate-producing node, ``--no-certify`` and a run that
+# executes nothing (``--dry-run`` and the listings) never reach here, so they
+# never write a lock: §13.3's "Build-time refresh is rejected" still holds for
+# them.
+# ---------------------------------------------------------------------------
+
+type
+  LockUpdateNodeState = ref object
+    ## Shared between a certifying run and its lock-update node's executor.
+    workspaceRoot, repoRoot: string
+    mode: ToolProvisioningMode
+    allowance: PinRegressionAllowance
+    allowedVia: string
+    ran: bool
+      ## The engine executed the node in this run.
+    standDown: string
+      ## Why the node applied nothing without judging (a git operation in
+      ## flight, no workspace), "" otherwise. Not a refusal: the managed hook
+      ## stands down in the same states, so the commit records the content
+      ## tested.
+    outcome: CommitTimeWritersOutcome
+    afterApply: proc(wrote: bool)
+      ## Called by the node once its writers are done, before any test
+      ## command can start: takes the before-run state issuance binds.
+
+proc lockUpdateNodeId(repoRoot: string): string =
+  ## One node per attested repository, named after it.
+  "repro-lock-update:" & lastPathPart(absolutePath(repoRoot))
+
+proc lockUpdateNodeAction(state: LockUpdateNodeState): BuildAction =
+  ## The node as a graph edge. Never cached: its job is to observe the
+  ## siblings as they are now. No declared output: the files it may rewrite
+  ## are tracked sources, which the engine must neither clean nor restore.
+  builtinAction(bakLockUpdate, lockUpdateNodeId(state.repoRoot),
+    cwd = state.repoRoot, cacheable = false, text = state.repoRoot,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+proc lockUpdateNodeRefused(state: LockUpdateNodeState): bool =
+  ## Did the node refuse or fail, so that no certificate may be issued?
+  state.ran and (state.outcome.refused.len > 0 or
+    state.outcome.failures.len > 0 or state.outcome.notStaged.len > 0)
+
+proc runLockUpdateNode(state: LockUpdateNodeState) =
+  ## The node's body. Never raises: a failure is recorded in the outcome.
+  state.ran = true
+  state.standDown = ""
+  state.outcome = CommitTimeWritersOutcome()
+  let label = "repro lock-update"
+  # Observation only, apart from the one `git add` per lock written: a plain
+  # `git status` in a sibling must not rewrite that sibling's index.
+  let savedLocks = suspendOptionalGitLocks()
+  defer: restoreOptionalGitLocks(savedLocks)
+  try:
+    if state.workspaceRoot.len == 0 or
+        not isInitializedWorkspace(state.workspaceRoot):
+      # The hook does nothing outside an initialized workspace either.
+      state.standDown = "no initialized workspace encloses " & state.repoRoot
+      return
+    # The hook stands down inside a rebase / cherry-pick / `am`; so does the
+    # node, so that what it leaves is what that operation's commit records.
+    # Only the in-flight state paths count, never the reflog tail.
+    let standDown = managedHookStandDown("lock-update", state.repoRoot,
+      consultReflog = false)
+    if standDown.standDown:
+      state.standDown = standDown.report
+      stderr.writeLine(label & ": " & standDown.report)
+      appendCommitHookReportLine(state.workspaceRoot,
+        lockUpdateLogPath(state.workspaceRoot), isoTimestampNow() & " " &
+        standDown.report)
+      return
+    state.outcome = applyCommitTimeLockWriters(ctwsLockUpdateNode,
+      state.workspaceRoot, state.repoRoot, state.mode, isoTimestampNow(),
+      state.allowance, state.allowedVia)
+  except CatchableError as err:
+    state.outcome.failures.add("the lock-update node failed: " & err.msg)
+  if state.outcome.refused.len > 0:
+    stderr.writeLine(label & ": REFUSED: " & $state.outcome.refused.len &
+      " pinned sibling revision(s) would move backward; nothing was " &
+      "written. The tests still run; no certificate will be issued " &
+      "(details at the end of the run).")
+  for failure in state.outcome.failures:
+    stderr.writeLine(label & ": " & failure)
+
+proc lockUpdateExecutorFor(state: LockUpdateNodeState): LockUpdateExecutor =
+  ## The engine-side executor of ``state``'s node. It always SUCCEEDS as an
+  ## action, so the test commands that depend on it are never blocked; a
+  ## refusal or failure travels in ``state`` and withholds the certificates.
+  ## ``launched`` is true only when it rewrote a lock, so a dependent re-runs
+  ## its cache lookup against the new bytes rather than taking an
+  ## outputs-present shortcut.
+  result = proc(action: BuildAction): ActionResult {.gcsafe.} =
+    {.cast(gcsafe).}:
+      runLockUpdateNode(state)
+      let wrote = state.outcome.written.len > 0
+      if state.afterApply != nil:
+        state.afterApply(wrote)
+      var res = ActionResult(id: action.id, status: asSucceeded,
+        exitCode: 0, launched: wrote)
+      res.rewrittenSources = state.outcome.written
+      result = res
+
+proc reportLockUpdateRefusal(state: LockUpdateNodeState; rerun: string) =
+  ## The end of a run whose lock-update node refused or failed: the hook's
+  ## refusal text, then "no certificate".
+  if state.outcome.refused.len > 0:
+    var identity: GitToolIdentity
+    try:
+      identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    except CatchableError:
+      discard
+    for line in renderPinRegressionRefusal(state.outcome.refused,
+        state.workspaceRoot, identity, action = "lock update",
+        rerun = rerun):
+      stderr.writeLine("repro lock-update: " & line)
+  for failure in state.outcome.failures:
+    stderr.writeLine("repro lock-update: failed: " & failure)
+  for unstaged in state.outcome.notStaged:
+    stderr.writeLine("repro lock-update: written but not staged: " & unstaged)
+  stderr.writeLine("repro test: no certificate — the lock-update node " &
+    (if state.outcome.refused.len > 0: "refused" else: "failed") &
+    ", so the tested content does not carry the locks a commit of it " &
+    "would have to record; the tests ran, and the exit code is theirs")
+
 proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
                             publicCliPath: string): int =
   ## TC-8e: ``repro test`` / ``repro certify`` on the build-engine path, with
@@ -73494,19 +73965,49 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   let workspaceRoot =
     if opts.certWorkspaceRoot.len > 0: absolutePath(opts.certWorkspaceRoot)
     else: enclosingWorkspaceRoot(currentRepo)
+  # HL-10: the lock-update node of this plan, and the would-write predicate
+  # that says whether it will change the content the preconditions bind.
+  var allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
+  for name in opts.allowPinRegression:
+    if name notin allowance.names:
+      allowance.names.add(name)
+  let lockUpdate = LockUpdateNodeState(workspaceRoot: workspaceRoot,
+    repoRoot: currentRepo, mode: mode, allowance: allowance,
+    allowedVia:
+      if opts.allowPinRegression.len > 0: "--allow-pin-regression"
+      else: PinRegressionAllowEnv)
+  var deferPreconditions = false
+  if workspaceRoot.len > 0 and isInitializedWorkspace(workspaceRoot):
+    let wouldWrite = planCommitTimeLockWriters(workspaceRoot, currentRepo,
+      mode, allowance)
+    deferPreconditions = wouldWrite.wouldWrite.len > 0 and
+      wouldWrite.refused.len == 0
   var pre: IssuancePreconditions
-  if workspaceRoot.len == 0:
-    pre = IssuancePreconditions(kind: ipNoWorkspace, offender: currentRepo,
-      remedy: "run inside an initialized reprobuild workspace, or pass " &
-        "--workspace-root=PATH")
-  else:
-    pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+  var preTaken = false
+  proc takePreconditions() =
+    if workspaceRoot.len == 0:
+      pre = IssuancePreconditions(kind: ipNoWorkspace, offender: currentRepo,
+        remedy: "run inside an initialized reprobuild workspace, or pass " &
+          "--workspace-root=PATH")
+    else:
+      pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+    preTaken = true
+  lockUpdate.afterApply = proc(wrote: bool) =
+    # The before-run state is the state AFTER the node (TC-8d "one tested
+    # state"): taken here when the node changed the content, or when it was
+    # deferred because it was going to.
+    if wrote or not preTaken:
+      takePreconditions()
+  if not deferPreconditions:
+    takePreconditions()
 
   # 3. The incremental no-op, per name: a name the local store already
   # certifies for this content on this platform is not issued again. When
-  # every selector is such a name, nothing runs at all.
+  # every selector is such a name, nothing runs at all. When the lock-update
+  # node is about to rewrite a lock, the content is not yet known, so nothing
+  # is covered.
   var covered: seq[string]
-  if pre.kind == ipOk:
+  if preTaken and pre.kind == ipOk:
     let algorithmName = parseContentId(pre.content).algorithmName
     let existing = findCertificatesInLocalStore(stateWithKnownContent(
       [KnownContentId(algorithm: algorithmName, id: pre.content)]))
@@ -73555,6 +74056,24 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       run.memberDeps[aliases.byAction.getOrDefault(id, id)] = above
     runs.add(run)
 
+  # 4b. HL-10: the lock-update node is an implicit dependency of every test
+  # command of the nodes this run judges, so the engine runs it before the
+  # first of them. Build steps that run no test are left free to start.
+  var testCommands = initHashSet[string]()
+  for run in runs:
+    for id in run.members:
+      testCommands.incl(id)
+  let nodeAction = lockUpdateNodeAction(lockUpdate)
+  let lockUpdateAugmenter: BuildGraphAugmenter =
+    proc(actions: var seq[BuildAction]) =
+      for action in actions:
+        if action.id == nodeAction.id:
+          return
+      for action in actions.mitems:
+        if action.id in testCommands and nodeAction.id notin action.deps:
+          action.deps.add(nodeAction.id)
+      actions.add(nodeAction)
+
   # 5. The build, in-process so its per-action outcome is observable. It
   # keeps the action cache: a reused test result counts when it may be
   # attested (D16, ``reusedResultRefusal``).
@@ -73565,14 +74084,20 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     for name in names:
       args.add(name)
     let collector = ActionOutcomeCollector()
+    # HL-10: the lock-update node joins the graph, and every test command
+    # of every node this run judges depends on it.
+    registerLockUpdateExecutor(lockUpdateExecutorFor(lockUpdate))
+    defer: clearLockUpdateExecutor()
     result.code = runBuildCommand(args, publicCliPath,
-      actionOutcomeSink = collectorSink(collector))
+      actionOutcomeSink = collectorSink(collector),
+      graphAugmenter = lockUpdateAugmenter)
     result.delivered = collector.delivered
     result.records = collector.records
 
   var outcome = certifyingBuild(@[])
   var verdicts: seq[CertificateNodeVerdict]
-  if pre.kind == ipOk and outcome.delivered:
+  if preTaken and pre.kind == ipOk and outcome.delivered and
+      not lockUpdateNodeRefused(lockUpdate):
     for run in runs:
       verdicts.add(certificateNodeVerdict(run, outcome.records))
     # ``repro certify`` is the remedy for a reused result that cannot be
@@ -73601,7 +74126,27 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   let code = outcome.code
 
   # 6. Issue for each passing node.
-  if pre.kind != ipOk:
+  if lockUpdateNodeRefused(lockUpdate):
+    var rerun = (if opts.certifyExplicit: "repro certify" else: "repro test")
+    var regressing: seq[string]
+    for r in lockUpdate.outcome.refused:
+      if r.sibling notin regressing:
+        regressing.add(r.sibling)
+    for name in lockUpdate.allowance.names:
+      if name notin regressing:
+        regressing.add(name)
+    rerun.add(" --allow-pin-regression=" &
+      quoteShell(regressing.join(",")))
+    for sel in opts.selectors:
+      rerun.add(" " & quoteShell(sel))
+    reportLockUpdateRefusal(lockUpdate, rerun)
+  elif not preTaken:
+    # Deferred to the node, which never ran: the build stopped before it.
+    stderr.writeLine("repro test: no certificate — the lock-update node " &
+      "did not run" &
+      (if code != 0: " (the build failed before it)" else: "") &
+      ", so the state the tests ran against was never taken")
+  elif pre.kind != ipOk:
     reportRefusedPreconditions(pre)
   elif not outcome.delivered:
     stderr.writeLine("repro test: no certificate — the build reported no " &
@@ -80968,6 +81513,10 @@ type
     diagnostic*: string
     lockPath*: string
     changed*: bool
+    wouldChange*: bool
+      ## ``mayWrite = false`` only: the refresh WOULD have rewritten the lock.
+      ## The would-write predicate of the commit-time writers (HL-10) reads
+      ## it; ``changed`` stays false because nothing was written.
     rewrites*: seq[FlakeLockRewrite]
     notices*: seq[string]
     blockedBy*: seq[string] ## dirty siblings that suppressed the refresh
@@ -81454,6 +82003,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     var wouldMove: seq[string]
     for r in refreshed.rewrites:
       wouldMove.add(r.input & ": " & r.oldRev & " -> " & r.newRev)
+    result.wouldChange = true
     result.tag = "not-written-commit-refused"
     result.diagnostic = "flake.lock NOT refreshed because the commit is " &
       "refused for a repro.lock pin regression; it would have recorded " &
@@ -81632,10 +82182,18 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
       outcome.diagnostic)
   outcome.exitCode
 
+proc flakeCommitFailure(outcome: FlakeLockRefreshOutcome): string =
+  ## The refresh could not be performed at all: every ``refused-*`` tag but
+  ## the pin regression, which is a decision and travels in ``refused``.
+  if outcome.tag.startsWith("refused-") and
+      outcome.tag != "refused-pin-regression":
+    "flake-lock " & outcome.tag & ": " & outcome.diagnostic
+  else: ""
+
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode;
-    allowRegression: seq[string] = @[]; mayWrite = true):
-    FlakeCommitRefresh =
+    allowRegression: seq[string] = @[]; mayWrite = true;
+    label = "repro pre-commit"): FlakeCommitRefresh =
   ## The commit-path entry point, driven by the managed `pre-commit` hook
   ## (§13.1: an in-tree lock is written "as part of forming the revision").
   ## Returns one log line, whether the file was rewritten, and the lock's path
@@ -81685,6 +82243,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     if not declared.ok:
       result.line = "flake-lock refused-unreadable-flake: " &
         declared.refusals.join("; ")
+      result.failure = result.line
       return
     result.examined = declared.names
     # Where each candidate repo's checkout would be. The manifest is consulted
@@ -81740,13 +82299,15 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
         currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
         toolProvisioning, recordDowngrade = false,
-        label = flakePreCommitLabel, allowRegression = allowRegression,
+        label = label, allowRegression = allowRegression,
         refuseRegressions = true, mayWrite = mayWrite)
       result.line = "flake-lock " & outcome.tag &
         " (the workspace membership at " & workspaceRoot &
         " could not be resolved — " & membershipFailure &
         " — so the fast pre-filter could not locate any sibling checkout and " &
         "handed over): " & outcome.diagnostic
+      result.wouldChange = outcome.wouldChange
+      result.failure = flakeCommitFailure(outcome)
       result.changed = outcome.changed
       result.refused = outcome.refused
       result.allowed = outcome.allowed
@@ -81810,9 +82371,11 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
       currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
-      label = flakePreCommitLabel, allowRegression = allowRegression,
+      label = label, allowRegression = allowRegression,
       refuseRegressions = true, mayWrite = mayWrite)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
+    result.wouldChange = outcome.wouldChange
+    result.failure = flakeCommitFailure(outcome)
     result.changed = outcome.changed
     result.refused = outcome.refused
     result.allowed = outcome.allowed
@@ -81821,6 +82384,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     # Best-effort, exactly like every other commit-path action: say what went
     # wrong and let the commit stand.
     result.line = "flake-lock error: " & err.msg
+    result.failure = "flake-lock error: " & err.msg
 
 
 proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;

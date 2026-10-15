@@ -117,7 +117,14 @@ suite "measurement flags: the new surface parses":
           @["--write-report"], @["--no-write-report"],
           @["--write-diagnostics=" & (getTempDir() / "repro-measure-d.txt")],
           @["--write-benchmark=" & (getTempDir() / "repro-measure-b.json")]]:
-        var args = @["build", "--dry-run", "--progress=quiet"]
+        # `--daemon=off`: in-process, not handed to the per-user daemon.
+        # `--progress=quiet` with piped stderr is exactly the shape the thin
+        # client routes to the daemon, which runs outside this case's process
+        # group; the runner then saw 2.81 s of CPU in 30 minutes and killed
+        # the case as idle (full suite run 33). This case checks flag
+        # parsing, not daemon routing, and the build layer below already
+        # runs its builds the same way.
+        var args = @["build", "--dry-run", "--progress=quiet", "--daemon=off"]
         for a in accepted:
           args.add(a)
         args.add(".")

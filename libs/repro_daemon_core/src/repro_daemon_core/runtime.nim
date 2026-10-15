@@ -1391,9 +1391,14 @@ proc removeLegacyStatusFile(config: UserDaemonConfig): bool =
   except CatchableError:
     discard
 
-proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
+proc cleanupStaleUserDaemonDiscovery*(requested: UserDaemonConfig): bool =
   ## Remove stale discovery files only when the endpoint does not accept a raw
   ## connection. A protocol-incompatible but live daemon must keep its state.
+  ##
+  ## The paths are anchored first, as ``cleanupPlatformBackgroundRegistration``
+  ## anchors them: the daemon keyed its record on the ABSOLUTE endpoint and
+  ## state directory, and `repro daemon status|stop` pass the flags as typed.
+  let config = withAnchoredDaemonPaths(requested)
   when defined(posix):
     let endpointPresent = userDaemonEndpointExists(config.endpoint)
     let accepts = userDaemonEndpointAcceptsConnections(config.endpoint)
