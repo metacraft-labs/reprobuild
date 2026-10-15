@@ -18803,6 +18803,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_dev_shell_hook_scope.py",
   "tests/unit/test_generated_artifact_merge_policy.py",
   "tests/unit/test_graph_owned_test_artifacts.py",
+  "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
   "tests/unit/test_install_nix_paths.py",
   "tests/unit/test_nix_daemon_descriptors.py",
   "tests/unit/test_package_root_anchor.py",

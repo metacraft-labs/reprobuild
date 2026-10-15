@@ -542,6 +542,23 @@ repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
 # M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
+# Fixtures built from SIBLING checkouts: today only the `ct-mcr` recorder
+# bundle that e2e_hcr_linux_replay_of_patched_recording records and replays
+# with (Linux x86-64 only, the one platform repro.nim declares the collection
+# on). They are a separate collection because they can fail for reasons that
+# say nothing about this tree -- a sibling that is not checked out, a private
+# dependency the host cannot fetch -- and that must not stop every other case
+# from running. Each test that needs one depends on its edge and fails on its
+# own when it is missing, naming that edge; the collection's failure is
+# re-raised at the end like the other phases'.
+cross_repo_fixtures_status=0
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" =~ ^(x86_64|amd64)$ ]]; then
+  repro_build_collection ".#test-cross-repo-fixtures" || cross_repo_fixtures_status=$?
+  if (( cross_repo_fixtures_status != 0 )); then
+    printf '::error:: .#test-cross-repo-fixtures failed (exit %d); running the suite, failure re-raised at the end\n' \
+      "${cross_repo_fixtures_status}" >&2
+  fi
+fi
 # A failed test COMPILE is a failed test, not a reason to run nothing. This
 # used to `exit 1` here, so one broken compile cancelled every other case: one
 # 22-hour run and one 7-hour run each produced no test results at all for a
@@ -827,5 +844,10 @@ if (( test_builds_status != 0 )); then
   printf '\n.#test-builds failed (exit %d); see the NOT BUILT lines above\n' \
     "${test_builds_status}" >&2
   (( suite_status != 0 )) || suite_status="${test_builds_status}"
+fi
+if (( cross_repo_fixtures_status != 0 )); then
+  printf '\n.#test-cross-repo-fixtures failed (exit %d); see its build report above\n' \
+    "${cross_repo_fixtures_status}" >&2
+  (( suite_status != 0 )) || suite_status="${cross_repo_fixtures_status}"
 fi
 exit "${suite_status}"

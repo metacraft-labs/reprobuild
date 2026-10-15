@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2098
+    "testEntries": 2099
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1276,7 +1276,7 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 18,
+      "graph-fixture": 19,
       "integration": 1120,
       "platform/destructive": 129,
       "pure unit": 646,
@@ -1477,8 +1477,8 @@
       }
     ],
     "nimTestBinaryCount": 2078,
-    "pythonTestFileCount": 20,
-    "testEntryCount": 2098
+    "pythonTestFileCount": 21,
+    "testEntryCount": 2099
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2244,7 +2244,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 279,
+          "line": 285,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -2268,7 +2268,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 328,
+          "line": 350,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -2292,7 +2292,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 344,
+          "line": 366,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -44577,6 +44577,21 @@
       "source": "tests/unit/test_graph_owned_test_artifacts.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 24,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "graph-fixture",
+      "classificationReason": "fixture path or fixture-oriented test",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
