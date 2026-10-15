@@ -8518,6 +8518,95 @@ class DeclaredSourceGateTests(unittest.TestCase):
         self.assertIn("--check-declared-sources", text)
         self.assertIn("sources_status", text)
 
+    def test_an_unreferenced_shell_script_not_on_baseline_is_reported(self):
+        """Shell test scripts under tests/ must be referenced or on the baseline."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        baseline_file = root / "scripts" / "uninvoked-shell-tests-baseline.txt"
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_text("# baseline\n", encoding="utf-8")
+
+        orphan_shell = root / "tests" / "unit" / "t_unreferenced_shell_gate.sh"
+        orphan_shell.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertFalse(drift["clean"])
+        self.assertIn("tests/unit/t_unreferenced_shell_gate.sh", drift.get("undeclared", []))
+        self.assertIn(
+            "tests/unit/t_unreferenced_shell_gate.sh",
+            inventory.format_declared_source_drift(drift),
+        )
+
+    def test_an_unreferenced_shell_script_on_baseline_is_accepted(self):
+        """An unreferenced shell script recorded in the baseline is accepted debt."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        baseline_file = root / "scripts" / "uninvoked-shell-tests-baseline.txt"
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_text(
+            "# baseline\ntests/unit/t_debt_shell_gate.sh\n", encoding="utf-8"
+        )
+
+        debt_shell = root / "tests" / "unit" / "t_debt_shell_gate.sh"
+        debt_shell.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertTrue(drift["clean"], drift)
+        self.assertEqual(drift.get("shellBaselineCount"), 1)
+        self.assertEqual(drift.get("shellCandidateCount"), 1)
+        self.assertEqual(drift.get("shellReferencedCount"), 0)
+
+    def test_a_referenced_shell_script_is_accepted_without_baseline(self):
+        """A shell script referenced by Justfile/scripts/tests/repro_tests is accepted."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        baseline_file = root / "scripts" / "uninvoked-shell-tests-baseline.txt"
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_text("# baseline\n", encoding="utf-8")
+
+        ref_shell = root / "tests" / "unit" / "t_invoked_shell_gate.sh"
+        ref_shell.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        justfile = root / "Justfile"
+        justfile.write_text("test:\n  bash tests/unit/t_invoked_shell_gate.sh\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertTrue(drift["clean"], drift)
+        self.assertEqual(drift.get("shellReferencedCount"), 1)
+        self.assertEqual(drift.get("shellBaselineCount"), 0)
+
+    def test_missing_uninvoked_shell_tests_baseline_fails_when_shell_tests_present(self):
+        """When shell test scripts exist, missing baseline is a fatal failure."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        shell_script = root / "tests" / "unit" / "t_some_shell_gate.sh"
+        shell_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertFalse(drift["clean"])
+        self.assertTrue(drift.get("shellBaselineMissing"))
+        self.assertIn(
+            "uninvoked-shell-tests-baseline.txt",
+            inventory.format_declared_source_drift(drift),
+        )
+
+
 
 
 class ShapeParityGateTests(unittest.TestCase):

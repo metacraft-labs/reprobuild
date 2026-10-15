@@ -190,10 +190,11 @@ fi
   fi
   if [ "${sources_status}" -ne 0 ]; then
     echo
-    echo "  A test source in the tree is in no build edge, so nothing"
-    echo "  compiles it and nothing runs it. Enrol it by regenerating the"
-    echo "  edge table and commit repro_tests.nim alongside your change:"
+    echo "  A test source in the tree is in no build edge or is an uninvoked"
+    echo "  shell test script. Enrol Nim sources by regenerating the edge table:"
     echo "    ${regenerate_edges}"
+    echo "  For shell scripts, enrol them, delete them if obsolete, or record"
+    echo "  them in scripts/uninvoked-shell-tests-baseline.txt."
   fi
   if [ "${parity_status}" -ne 0 ]; then
     echo
