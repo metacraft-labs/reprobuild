@@ -402,6 +402,93 @@ proc checkCertificateDeclarations(buildBody: NimNode) =
           exported.call.lineInfo & ": a certificate name is a target " &
           "name, so it must name the same node or a new name", cert.call)
 
+proc hasComputedCertificateName(node: NimNode): bool =
+  ## Whether a ``build:`` body declares a ``certificate`` whose name is not
+  ## a string literal: its name is known only when the body runs.
+  if node.kind in {nnkCall, nnkCommand} and node.len >= 2 and
+      node[0].kind in {nnkIdent, nnkSym} and node[0].eqIdent("certificate") and
+      node[1].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return true
+  for child in node:
+    if hasComputedCertificateName(child):
+      return true
+
+proc emitEnactedCertificatePolicy(packageName: string; body: NimNode):
+    NimNode =
+  ## Test-Certificates TC-9b: lower ``enactCertificatePolicy <policy>``.
+  ##
+  ## * At most once per package; a second one is a compile error naming the
+  ##   first.
+  ## * The policy must be a compile-time value (``const``): it is data, and
+  ##   ``repro.lock`` records it as data.
+  ## * Every certificate a rule requires must be declared by this package
+  ##   (``certificate "<name>", <node>`` in ``build:``). The literal
+  ##   declarations are checked HERE, so a missing one fails the provider
+  ##   compile naming the rule, its branch pattern and the name. ``test``
+  ##   (which may be the implicit marking, D15) and packages that compute a
+  ##   certificate name are checked when the body runs instead
+  ##   (``buildPackageFragment``).
+  ## * At module initialisation the policy is registered for the package and,
+  ##   in the provider's main module, emitted for the lock writer.
+  result = newStmtList()
+  var enact: NimNode = nil
+  for stmt in body:
+    if stmt.kind in {nnkCall, nnkCommand} and stmt.len >= 1 and
+        stmt[0].kind in {nnkIdent, nnkSym} and
+        stmt[0].eqIdent("enactCertificatePolicy"):
+      if stmt.len != 2:
+        error("enactCertificatePolicy takes one policy: " &
+          "`enactCertificatePolicy <policy>`", stmt)
+      if not enact.isNil:
+        error("enactCertificatePolicy may appear at most once per package; " &
+          "it is already enacted at " & enact.lineInfo, stmt)
+      enact = stmt
+  if enact.isNil:
+    return
+  var policyExpr = enact[1]
+  if policyExpr.kind == nnkStmtList and policyExpr.len == 1:
+    policyExpr = policyExpr[0]
+  let buildBody = collectBuildStatements(body, packageName)
+  var certificates: seq[CertificateSourceDecl] = @[]
+  var exports: seq[ExportSourceDecl] = @[]
+  collectCertificateSourceDecls(buildBody, "", certificates, exports)
+  var declared = newTree(nnkBracket)
+  for cert in certificates:
+    declared.add(newLit(cert.name))
+  let deferred = newTree(nnkBracket, newLit(implicitCertificateName))
+  let policyConst = genSym(nskConst, "reproEnactedCertificatePolicy")
+  let checkConst = genSym(nskConst, "reproCertificatePolicyCheck")
+  let policyType = bindSym"BranchCertificatePolicy"
+  let undeclared = bindSym"undeclaredRequirement"
+  let register = bindSym"registerEnactedCertificatePolicy"
+  let relativeTo = bindSym"withDeclaredInRelativeTo"
+  let pkgLit = newLit(packageName)
+  # The recipe's own directory, so the policy's declaring file is recorded
+  # relative to it: a compiled provider is reused for every copy of an
+  # identical recipe tree, so an absolute path would name another checkout.
+  let recipeDir = newLit(enact.lineInfoObj.filename.parentDir)
+  # The const is what makes "a policy is data" enforced: a `let` policy, or
+  # one built from a runtime call, does not compile here.
+  # Two steps: the type annotation on the first is what resolves a name that
+  # is also a module (`teamPolicy` and `import .../team_policy` are one
+  # identifier to Nim) to the policy value.
+  let declaredConst = genSym(nskConst, "reproDeclaredCertificatePolicy")
+  result.add(quote do:
+    const `declaredConst`: `policyType` = `policyExpr`
+    const `policyConst`: `policyType` = `relativeTo`(`declaredConst`,
+      `recipeDir`))
+  if not hasComputedCertificateName(buildBody):
+    let errorPragma = newTree(nnkPragma,
+      newColonExpr(ident("error"), checkConst))
+    errorPragma.copyLineInfo(enact)
+    result.add(quote do:
+      const `checkConst` = `undeclared`(`policyConst`, `declared`,
+        `deferred`)
+      when `checkConst`.len > 0:
+        `errorPragma`)
+  result.add(quote do:
+    `register`(`pkgLit`, `policyConst`, isMainModule))
+
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let buildBody = collectBuildStatements(body, pkg.packageName)
   checkCertificateDeclarations(buildBody)
@@ -9557,6 +9644,9 @@ macro packageImpl*(name: untyped;
   let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
   # ── Named-Lock-Files NLF-M7: §4.9's compile error, §4.3's registration ──
   let lockFileEmission = emitLockFileDesignations(pkg, name)
+  # ── Test-Certificates TC-9b: `enactCertificatePolicy` ─────────────
+  let certificatePolicyEmission =
+    emitEnactedCertificatePolicy(packageName, body)
   # ── M5: cross-project uses + cycle detection ─────────────────────
   var declaredUses: seq[string] = @[]
   for u in pkg.toolUses:
@@ -9625,6 +9715,9 @@ macro packageImpl*(name: untyped;
   # module scope (after the package wrapper code so the variant
   # accessor symbols are visible to ``build:`` code emitted below).
   result.add(lockFileEmission)
+  # Before `buildCode`, whose provider-mode `quit` ends module init: the
+  # policy must be registered (and emitted) first.
+  result.add(certificatePolicyEmission)
   result.add(variantsEmission)
   # ── M5: cross-project storage / const / accessors ────────────────
   # `wrapperCode` and `toolActionWrapperCode` BOTH unconditionally

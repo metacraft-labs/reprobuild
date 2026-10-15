@@ -223,6 +223,9 @@ import repro_solver
 # consumption serialize/load ``UnifiedSolution`` through this module.
 # Distinct from the manifest-repo SHA lock in repro_workspace_manifests.
 import repro_lock
+# Test-Certificates TC-9b: the `[certificate_policy]` snapshot model, its
+# strict reader and branch matching.
+import repro_lock/certificate_policy
 # Named-Lock-Files NLF-M7 (§5.1) — the declared NAMES, the `--lock
 # <name>=<path>` binding grammar, and `repro lock list`'s listing renderer.
 import repro_lock_files
@@ -21365,6 +21368,23 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
                       hookRemoteLocation = ""): int
 proc validateCommittedLockAdvisory(repoRoot: string)
+# Test-Certificates TC-9b: `certificate_policy_snapshot_stale`, reported by
+# the pre-push gate and `repro health`; defined beside `repro lock refresh`,
+# whose provider probe it shares.
+proc reportCertificatePolicyStaleness*(projectDir, label: string)
+type
+  CertificatePolicyStaleness* = object
+    ## `certificate_policy_snapshot_stale`: does the committed snapshot
+    ## still say what the recipe enacts? (`certificatePolicyStaleness`)
+    relevant*: bool
+      ## The lock carries a snapshot or the recipe names a policy; when
+      ## false there is nothing to compare and nothing is reported.
+    stale*: bool
+    detail*: string
+    remedy*: string
+proc certificatePolicyStaleness*(projectDir: string): CertificatePolicyStaleness
+const CertificatePolicySnapshotStale* = "certificate_policy_snapshot_stale"
+  ## The finding's name, as `repro health` and the pre-push gate print it.
 proc runPostCommitLockCommand*(args: openArray[string]): int
 # NF-2: the `pre-commit` arm. Declared here for the dispatcher; the body sits
 # beside `runPostCommitLockCommand` because it shares that path's argv parser,
@@ -28269,6 +28289,10 @@ proc certificateNodeKindText(kind: CertificateNodeKind): string =
   of cnkAction: "action"
   of cnkTarget: "target"
 
+proc runCertificatesPolicyCommand*(args: openArray[string]): int
+  ## Test-Certificates TC-9b: `repro certificates policy`; defined beside
+  ## the lock writer that records the snapshot it reads.
+
 proc runCertificatesCommand*(args: openArray[string];
                              publicCliPath: string): int =
   ## ``repro certificates list [--json]`` prints the certificate names the
@@ -28281,11 +28305,14 @@ proc runCertificatesCommand*(args: openArray[string];
   const usage = "usage: repro certificates list [--json] " &
     "[--tool-provisioning=MODE] [--no-runquota]\n" &
     "       repro certificates plan [SELECTOR...] [--no-certify] [--json] " &
-    "[--tool-provisioning=MODE] [--no-runquota]"
+    "[--tool-provisioning=MODE] [--no-runquota]\n" &
+    "       repro certificates policy [--branch BRANCH] [--json]"
   if args.len == 0 or args[0] in ["-h", "--help", "help"]:
     stderr.writeLine(usage)
     return (if args.len == 0: 2 else: 0)
   let sub = args[0]
+  if sub == "policy":
+    return runCertificatesPolicyCommand(args[1 .. ^1])
   if sub notin ["list", "plan"]:
     stderr.writeLine("repro certificates: unknown subcommand: " & sub)
     stderr.writeLine(usage)
@@ -52717,9 +52744,165 @@ proc preCommitReproLock(site: CommitTimeWriterSite;
     line.add("; " & plan.warnings.join("; "))
   appendCommitTimeWriterLog(site, workspaceRoot, line)
 
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9b — the `[certificate_policy]` snapshot in repro.lock.
+#
+# A repository enacts a shared branch policy in its `repro.nim`
+# (`enactCertificatePolicy <policy>`); the policy is a Nim value in a package
+# the repository `uses:`, so its revision is pinned as an ordinary lock
+# dependency. The gates must not compile Nim, so the evaluated policy is
+# recorded in repro.lock as a declarative table (`repro_lock/certificate_policy`
+# renders and reads it). Exactly two writers evaluate the provider and so may
+# write it: `repro lock refresh` (the provider's emission,
+# `evaluatedCertificatePolicySection`) and the lock-update node of a
+# certifying run (the graph the run already evaluated,
+# `certificatePolicyFromGraph`). The commit-time hook never writes it; it
+# carries the table through untouched (`LockedDependencies` keeps it
+# verbatim, and the re-pin splices only the `deps` line).
+# ---------------------------------------------------------------------------
+
+type
+  CertificatePolicySnapshotPlan* = object
+    ## What the lock-update node records as the snapshot. ``active`` is false
+    ## for a run that has no evaluated graph of this repository's recipe, and
+    ## then the node leaves the snapshot alone.
+    active*: bool
+    enacted*: bool
+      ## The recipe enacts a policy; false means the snapshot is removed.
+    emission*: CertificatePolicyEmission
+    failure*: string
+      ## Why the enacted policy could not be read from the graph.
+
+proc certificatePolicyFromGraph*(snapshot: ProviderGraphSnapshot):
+    tuple[enacted: bool; emission: CertificatePolicyEmission] =
+  ## The policy the evaluated graph's packages enact, from their
+  ## ``reprobuild.certificate-policy.v1`` metadata nodes. Raises when two
+  ## packages enact one, or a node does not parse.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind != gnkMetadata or
+          node.stableName != CertificatePolicyGraphStableName:
+        continue
+      let parsed = parseCertificatePolicyEmission(node.payload)
+      if result.enacted and parsed.enactedBy != result.emission.enactedBy:
+        raise newException(ValueError, "packages '" &
+          result.emission.enactedBy & "' and '" & parsed.enactedBy &
+          "' both enact a certificate policy; repro.lock records one " &
+          "policy per repository")
+      result = (enacted: true, emission: parsed)
+
+proc canonicalExistingPath(path: string): string =
+  ## ``path`` absolute, normalized, and with symlinks resolved when it
+  ## exists, so two spellings of one directory compare equal.
+  result = os.normalizedPath(absolutePath(path))
+  try:
+    if fileExists(result) or dirExists(result):
+      result = expandFilename(result)
+  except OSError:
+    discard
+
+proc certificatePolicyPackageFor*(emission: CertificatePolicyEmission;
+                                  repoRoot: string;
+                                  deps: openArray[LockedDep]): string =
+  ## The ``repro.lock`` dependency whose checkout holds the file that
+  ## declares the enacted policy: the package the snapshot names, and whose
+  ## revision is the policy's pin. The innermost checkout wins (a package
+  ## nested inside the repository is named, not the repository). Raises when
+  ## no locked dependency holds it: an unpinned policy would change under the
+  ## repository with nothing in its history saying so.
+  if emission.declaredIn.len == 0:
+    raise newException(ValueError, "the enacted certificate policy '" &
+      emission.policy.name & "' does not say which file declares it")
+  # Recorded relative to the enacting recipe's directory, which is the
+  # project root (`withDeclaredInRelativeTo`).
+  let declared = canonicalExistingPath(
+    if emission.declaredIn.isAbsolute: emission.declaredIn
+    else: repoRoot / emission.declaredIn)
+  let base = committedLockPathBase(repoRoot)
+  var bestLen = -1
+  for d in deps:
+    if d.path.len == 0 or d.coordinates.kind != ckVcs:
+      continue
+    let depRoot = canonicalExistingPath(base / d.path)
+    let prefix = if depRoot.endsWith($DirSep): depRoot else: depRoot & $DirSep
+    if declared.startsWith(prefix) and depRoot.len > bestLen:
+      bestLen = depRoot.len
+      result = d.name
+  if bestLen < 0:
+    raise newException(ValueError, "the enacted certificate policy '" &
+      emission.policy.name & "' is declared in " & declared & ", which is " &
+      "in no dependency repro.lock pins; name its package in `uses:` so " &
+      "its revision is pinned, then run `repro lock refresh`")
+
+proc renderCertificatePolicySectionFor*(emission: CertificatePolicyEmission;
+                                        repoRoot: string;
+                                        deps: openArray[LockedDep]): string =
+  ## The ``[certificate_policy]`` text ``repoRoot``'s lock records for
+  ## ``emission``.
+  var policy = emission.policy
+  policy.package = certificatePolicyPackageFor(emission, repoRoot, deps)
+  renderCertificatePolicySnapshot(policy)
+
+proc plannedCertificatePolicySection(plan: CertificatePolicySnapshotPlan;
+    repoRoot, lockText: string): string =
+  ## The snapshot ``plan`` records into the lock whose text is
+  ## ``lockText``. Raises when it cannot be rendered.
+  if plan.failure.len > 0:
+    raise newException(ValueError, plan.failure)
+  if not plan.enacted:
+    return ""
+  renderCertificatePolicySectionFor(plan.emission, repoRoot,
+    parseLockedDependencies(lockText).deps)
+
+proc applyCertificatePolicySnapshot(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot, timestamp: string;
+    plan: CertificatePolicySnapshotPlan;
+    outcome: var CommitTimeWritersOutcome) =
+  ## The lock-update node's third writer (TC-9b): bring ``repro.lock``'s
+  ## snapshot to what the evaluated provider enacts, and stage it. Runs after
+  ## the re-pin, so the dependency the snapshot names is the one the lock now
+  ## pins. Never raises; a failure withholds the certificate like any other.
+  let label = commitTimeWriterLabel(site)
+  let lockPath = committedLockPath(repoRoot)
+  try:
+    let text = readFile(lockPath)
+    let section = plannedCertificatePolicySection(plan, repoRoot, text)
+    let updated = replaceCertificatePolicySection(text, section)
+    if updated == text:
+      appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+        " certificate-policy up-to-date")
+      return
+    let before = splitCertificatePolicySection(text).policySection
+    writeFile(lockPath, updated)
+    let change =
+      if section.len == 0: "repro.lock: certificate policy snapshot removed"
+      elif before.len == 0: "repro.lock: certificate policy snapshot recorded"
+      else: "repro.lock: certificate policy snapshot updated"
+    if lockPath notin outcome.written:
+      outcome.written.add(lockPath)
+    outcome.changes.add(change)
+    stderr.writeLine(label & ": " & change)
+    var line = timestamp & " certificate-policy " & change
+    let staged = stageRefreshedFlakeLock(repoRoot, lockPath,
+      useHookIndex = false)
+    if staged.ok:
+      line.add("; staged")
+    else:
+      line.add("; NOT STAGED: " & staged.diagnostic)
+      outcome.notStaged.add(lockPath & ": " & staged.diagnostic)
+      stderr.writeLine(label & ": repro.lock's certificate policy snapshot " &
+        "was written but could NOT be staged: " & staged.diagnostic)
+    appendCommitTimeWriterLog(site, workspaceRoot, line)
+  except CatchableError as err:
+    let failure = "certificate-policy error: " & err.msg
+    outcome.failures.add(failure)
+    appendCommitTimeWriterLog(site, workspaceRoot, timestamp & " " & failure)
+
 proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode;
-    allowance: PinRegressionAllowance): CommitTimeWritersPlan =
+    allowance: PinRegressionAllowance;
+    certificatePolicy = CertificatePolicySnapshotPlan()):
+    CommitTimeWritersPlan =
   ## The would-write predicate (HL-10): what ``applyCommitTimeLockWriters``
   ## would do to ``repoRoot`` now, for each writer the managed `pre-commit`
   ## hook runs — the `repro.lock` sibling re-pin (§13.3) and the
@@ -52752,11 +52935,26 @@ proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
     for r in flake.refused: result.refused.add(r)
     if flake.wouldChange or flake.changed:
       result.wouldWrite.add(flake.lockPath)
+  # TC-9b: the lock-update node also brings the certificate policy snapshot
+  # to what the evaluated provider enacts (`applyCertificatePolicySnapshot`).
+  if certificatePolicy.active and hasReproLock:
+    let lockPath = committedLockPath(root)
+    try:
+      let text = readFile(lockPath)
+      let section = plannedCertificatePolicySection(certificatePolicy, root,
+        text)
+      if replaceCertificatePolicySection(text, section) != text and
+          lockPath notin result.wouldWrite:
+        result.wouldWrite.add(lockPath)
+    except CatchableError as err:
+      result.failures.add("certificate-policy error: " & err.msg)
 
 proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
     workspaceRoot, repoRoot: string; toolProvisioning: ToolProvisioningMode;
     timestamp: string; allowance: PinRegressionAllowance;
-    allowedVia = PinRegressionAllowEnv): CommitTimeWritersOutcome =
+    allowedVia = PinRegressionAllowEnv;
+    certificatePolicy = CertificatePolicySnapshotPlan()):
+    CommitTimeWritersOutcome =
   ## Apply every commit-time writer to ``repoRoot``'s working tree and stage
   ## what changed: the `repro.lock` sibling re-pin (§13.3) and the
   ## `flake.lock` refresh (§13.6). The managed `pre-commit` hook and the
@@ -52810,6 +53008,13 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
   if reproPlanned:
     preCommitReproLock(site, workspaceRoot, repoRoot, timestamp, reproPlan,
       apply = not refused, result)
+  # TC-9b: the certificate policy snapshot, after the re-pin and only from
+  # the lock-update node -- the hook does not evaluate the provider, so it
+  # never writes the snapshot. A refusal writes nothing, this included.
+  if site == ctwsLockUpdateNode and certificatePolicy.active and
+      hasReproLock and not refused:
+    applyCertificatePolicySnapshot(site, workspaceRoot, repoRoot, timestamp,
+      certificatePolicy, result)
 
   var used, examined: seq[string]
   var allowedRegressions: seq[PinRegression]
@@ -61548,6 +61753,12 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
     validateCommittedLockAdvisory(
       if parsed.currentRepo.len > 0: parsed.currentRepo
       else: parsed.workspaceRoot)
+    # TC-9b: a `[certificate_policy]` snapshot that no longer says what the
+    # recipe enacts is REPORTED, never refused: the pushed content is judged
+    # against the snapshot it carries.
+    reportCertificatePolicyStaleness(
+      if parsed.currentRepo.len > 0: parsed.currentRepo
+      else: parsed.workspaceRoot, "repro check")
     var report: CheckReport
     try:
       report = executeCheckPrePush(parsed)
@@ -65752,6 +65963,43 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           if stale.len > 0: self & " health --fix"
           else: "follow the per-ref fix in the messages printed below",
         fixKind: if stale.len > 0: hfSharedCloneLeaves else: hfNone))
+
+  # Test-Certificates TC-9b: `certificate_policy_snapshot_stale`. A row only
+  # when some participating repository carries a snapshot or names a policy,
+  # so a workspace that has adopted none sees no change. A stale snapshot is a
+  # warning with the remedy, never a failure: nothing refuses on it.
+  block certificatePolicyCheck:
+    if not ctx.initialized:
+      break certificatePolicyCheck
+    var stale, current: seq[string]
+    var remedies: seq[string]
+    for repo in enumerateParticipatingRepos(parsed.workspaceRoot).repos:
+      if gitTopLevel(repo.repoPath).len == 0:
+        continue
+      let staleness = certificatePolicyStaleness(repo.repoPath)
+      if not staleness.relevant:
+        continue
+      if staleness.stale:
+        stale.add(repo.name & ": " & staleness.detail)
+        remedies.add(staleness.remedy)
+      else:
+        current.add(repo.name)
+    if stale.len == 0 and current.len == 0:
+      break certificatePolicyCheck
+    if stale.len == 0:
+      checks.add(HealthCheck(
+        name: "certificate-policy-snapshot",
+        status: hsOk,
+        detail: $current.len & " repo(s) record the certificate policy " &
+          "their recipe enacts",
+        remedy: "", fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "certificate-policy-snapshot",
+        status: hsWarn,
+        detail: CertificatePolicySnapshotStale & ": " & stale.join("; "),
+        remedy: remedies.join("; "),
+        fixKind: hfNone))
 
   result = (checks: checks, ctx: ctx)
 
@@ -74257,6 +74505,9 @@ type
     afterApply: proc(wrote: bool)
       ## Called by the node once its writers are done, before any test
       ## command can start: takes the before-run state issuance binds.
+    certificatePolicy: CertificatePolicySnapshotPlan
+      ## TC-9b: the policy the evaluated graph enacts, which the node records
+      ## as repro.lock's `[certificate_policy]` snapshot.
 
 proc lockUpdateNodeId(repoRoot: string): string =
   ## One node per attested repository, named after it.
@@ -74305,7 +74556,8 @@ proc runLockUpdateNode(state: LockUpdateNodeState) =
       return
     state.outcome = applyCommitTimeLockWriters(ctwsLockUpdateNode,
       state.workspaceRoot, state.repoRoot, state.mode, isoTimestampNow(),
-      state.allowance, state.allowedVia)
+      state.allowance, state.allowedVia,
+      certificatePolicy = state.certificatePolicy)
   except CatchableError as err:
     state.outcome.failures.add("the lock-update node failed: " & err.msg)
   if state.outcome.refused.len > 0:
@@ -74442,10 +74694,23 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     allowedVia:
       if opts.allowPinRegression.len > 0: "--allow-pin-regression"
       else: PinRegressionAllowEnv)
+  # TC-9b: the policy the evaluated graph enacts. Recorded by the node only
+  # when the graph is this repository's own recipe; a plan anchored on a
+  # sibling project leaves this repository's snapshot alone.
+  if cmpPaths(os.normalizedPath(absolutePath(info.projectRoot)),
+      os.normalizedPath(currentRepo)) == 0:
+    lockUpdate.certificatePolicy.active = true
+    try:
+      let found = certificatePolicyFromGraph(info.snapshot)
+      lockUpdate.certificatePolicy.enacted = found.enacted
+      lockUpdate.certificatePolicy.emission = found.emission
+    except CatchableError as err:
+      lockUpdate.certificatePolicy.failure = "the enacted certificate " &
+        "policy could not be read from the evaluated graph: " & err.msg
   var deferPreconditions = false
   if workspaceRoot.len > 0 and isInitializedWorkspace(workspaceRoot):
     let wouldWrite = planCommitTimeLockWriters(workspaceRoot, currentRepo,
-      mode, allowance)
+      mode, allowance, lockUpdate.certificatePolicy)
     deferPreconditions = wouldWrite.wouldWrite.len > 0 and
       wouldWrite.refused.len == 0
   var pre: IssuancePreconditions
@@ -76803,6 +77068,287 @@ proc reportGeneratedLock(verb, lockP: string;
     " consulted observation(s))")
   return 0
 
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9b — the snapshot as `repro lock refresh` renders it,
+# and the staleness `repro health` and the pre-push gate report.
+# ---------------------------------------------------------------------------
+
+proc recipeMentionsCertificatePolicy(projectDir: string): bool =
+  ## Whether the project's recipe contains an ``enactCertificatePolicy``
+  ## outside a comment. A cheap TEXT test that decides only whether the
+  ## provider is asked at all: a recipe that does not name the statement
+  ## cannot enact a policy (it is a package-level statement of the recipe
+  ## itself), so it costs nothing. A recipe that does is always evaluated,
+  ## and the provider's answer is what is recorded.
+  try:
+    let match = resolveProjectFile(projectDir)
+    if match.path.len == 0:
+      return false
+    for raw in readFile(extendedPath(match.path)).splitLines():
+      let hashAt = raw.find('#')
+      let code = if hashAt >= 0: raw[0 ..< hashAt] else: raw
+      if "enactCertificatePolicy" in code:
+        return true
+  except CatchableError:
+    discard
+  false
+
+proc evaluatedCertificatePolicy*(projectDir: string):
+    tuple[enacted: bool; emission: CertificatePolicyEmission] =
+  ## The policy the project's recipe enacts, as its compiled provider reports
+  ## it through ``$REPRO_EMIT_CERTIFICATE_POLICY``: the same compiled provider
+  ## and the same probe ``repro lock refresh`` and ``repro lock list`` use, so
+  ## nothing is built. Raises when the recipe names ``enactCertificatePolicy``
+  ## but its provider could not be compiled or run: the answer would
+  ## otherwise read as "no policy" and remove a snapshot that is still meant.
+  if not recipeMentionsCertificatePolicy(projectDir):
+    return
+  let emitPath = getTempDir() /
+    ("repro-certificate-policy-" & $getCurrentProcessId() & ".txt")
+  try: removeFile(extendedPath(emitPath))
+  except CatchableError: discard
+  let inherited = getEnv(CertificatePolicyEmitEnvVar)
+  putEnv(CertificatePolicyEmitEnvVar, emitPath)
+  var failure = ""
+  try:
+    discard solverInputsFromCompiledProvider(projectDir,
+      requireSolverBinding = false, failure = addr failure)
+    if fileExists(extendedPath(emitPath)):
+      result = (enacted: true,
+        emission: parseCertificatePolicyEmission(
+          readFile(extendedPath(emitPath))))
+    elif failure.len > 0:
+      raise newException(IOError, "the recipe's provider could not be " &
+        "evaluated to read its certificate policy: " & failure)
+  finally:
+    if inherited.len > 0: putEnv(CertificatePolicyEmitEnvVar, inherited)
+    else: delEnv(CertificatePolicyEmitEnvVar)
+    try: removeFile(extendedPath(emitPath))
+    except CatchableError: discard
+
+proc evaluatedCertificatePolicySection*(projectDir: string;
+                                        deps: openArray[LockedDep]): string =
+  ## The ``[certificate_policy]`` text the project's lock should carry, with
+  ## the package named from ``deps``; "" when the recipe enacts no policy.
+  let evaluated = evaluatedCertificatePolicy(projectDir)
+  if not evaluated.enacted:
+    return ""
+  renderCertificatePolicySectionFor(evaluated.emission, projectDir, deps)
+
+proc certificatePolicyStaleness*(projectDir: string): CertificatePolicyStaleness =
+  ## Compare the committed snapshot with the evaluated provider. Reported,
+  ## never refused: the content being pushed is judged against the snapshot
+  ## it carries (Test-Certificates.md §"The policy snapshot in repro.lock").
+  ## A snapshot that does not parse is reported here too, since the gates
+  ## refuse on it.
+  let root = absolutePath(projectDir)
+  let lockPath = committedLockPath(root)
+  if not fileExists(extendedPath(lockPath)):
+    return
+  let text = readFile(extendedPath(lockPath))
+  let committed = splitCertificatePolicySection(text).policySection
+  let mentions = recipeMentionsCertificatePolicy(root)
+  if committed.len == 0 and not mentions:
+    return
+  result.relevant = true
+  result.remedy = "repro lock refresh " & quoteShell(root)
+  if committed.len > 0:
+    try:
+      discard parseCertificatePolicySnapshot(committed)
+    except CertificatePolicySnapshotError as err:
+      result.stale = true
+      result.detail = "repro.lock's [certificate_policy] does not parse (" &
+        err.msg & ")"
+      return
+  var expected: string
+  try:
+    expected = evaluatedCertificatePolicySection(root,
+      parseLockedDependencies(text).deps)
+  except CatchableError as err:
+    result.stale = true
+    result.detail = "the enacted certificate policy could not be compared " &
+      "with repro.lock: " & err.msg
+    return
+  if expected == committed:
+    result.detail = if committed.len > 0: "repro.lock's certificate policy " &
+      "snapshot matches the enacted policy" else: "no policy enacted"
+    return
+  result.stale = true
+  result.detail =
+    if committed.len == 0: "the recipe enacts a certificate policy that " &
+      "repro.lock does not record"
+    elif expected.len == 0: "repro.lock records a certificate policy the " &
+      "recipe no longer enacts"
+    else: "repro.lock's certificate policy snapshot differs from the policy " &
+      "the recipe enacts (an edited policy, or a bumped pin)"
+
+proc reportCertificatePolicyStaleness*(projectDir, label: string) =
+  ## The pre-push gate's notice: one line, and only when stale. Never
+  ## raises and never changes the gate's verdict.
+  try:
+    let staleness = certificatePolicyStaleness(projectDir)
+    if staleness.stale:
+      stderr.writeLine(label & ": " & CertificatePolicySnapshotStale & ": " &
+        staleness.detail & " (" & committedLockPath(absolutePath(projectDir)) &
+        "); remedy: " & staleness.remedy)
+  except CatchableError as err:
+    stderr.writeLine(label & ": " & CertificatePolicySnapshotStale &
+      ": could not be checked: " & err.msg)
+
+proc currentCommitBranch(repoRoot: string): BranchRef =
+  ## The branch a commit in ``repoRoot`` is judged as: its upstream's branch
+  ## (``branch.<b>.merge``) when one is configured, else its own; a detached
+  ## ``HEAD`` otherwise (Test-Certificates.md §"Branch matching").
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  let head = gitRunPlain(identity, ["-C", repoRoot, "symbolic-ref", "-q",
+    "HEAD"])
+  let headRef = if head.code == 0: head.output.strip() else: ""
+  var upstream = ""
+  if headRef.startsWith("refs/heads/"):
+    let merge = gitRunPlain(identity, ["-C", repoRoot, "config", "--get",
+      "branch." & headRef["refs/heads/".len .. ^1] & ".merge"])
+    if merge.code == 0:
+      upstream = merge.output.strip()
+  commitTimeBranch(headRef, upstream)
+
+proc requirementText(req: PolicyRequirement): string =
+  req.certificate & " (" &
+    (if req.platforms == @[AnyPlatformMarker]: "any platform"
+     else: "each of " & req.platforms.join(", ")) & ")"
+
+proc runCertificatesPolicyCommand*(args: openArray[string]): int =
+  ## ``repro certificates policy [--branch <branch>] [--json]``: the
+  ## certificate policy the current project's ``repro.lock`` records (the
+  ## snapshot every gate reads), the package that exports it and the
+  ## revision the lock pins it at, and the rule that applies to ``<branch>``
+  ## (the current branch's upstream, else the current branch, by default).
+  ## ``<branch>`` may be a full ref: ``refs/tags/...`` is not a branch and no
+  ## rule applies. Reads only; it compiles and builds nothing.
+  var branchArg = ""
+  var branchGiven = false
+  var asJson = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--json":
+      asJson = true
+    elif arg == "--branch" or arg.startsWith("--branch="):
+      branchArg = valueFromFlag(args, i, "--branch")
+      branchGiven = true
+      if branchArg.len == 0:
+        stderr.writeLine("repro certificates policy: --branch needs a name")
+        return 2
+    else:
+      stderr.writeLine("repro certificates policy: unknown argument: " & arg)
+      return 2
+    inc i
+  let projectDir = getCurrentDir()
+  let lockPath = committedLockPath(projectDir)
+  var policy: BranchCertificatePolicy
+  var present = false
+  var revision = ""
+  if fileExists(extendedPath(lockPath)):
+    let text = readFile(extendedPath(lockPath))
+    try:
+      let read = readCertificatePolicySnapshot(text)
+      present = read.present
+      policy = read.policy
+    except CertificatePolicySnapshotError as err:
+      stderr.writeLine("repro certificates policy: " & lockPath & ": " &
+        err.msg & " (a malformed snapshot is a structural error that every " &
+        "gate refuses; run `repro lock refresh`)")
+      return 1
+    if present:
+      for d in parseLockedDependencies(text).deps:
+        if d.name == policy.package and d.coordinates.kind == ckVcs:
+          revision = d.coordinates.revision
+  var target: BranchRef
+  if branchGiven:
+    target = branchRefFromRef(branchArg)
+  else:
+    try:
+      target = currentCommitBranch(projectDir)
+    except CatchableError as err:
+      stderr.writeLine("repro certificates policy: cannot tell the current " &
+        "branch: " & err.msg)
+      return 1
+  let branchText =
+    case target.kind
+    of brkBranch: target.name
+    of brkDetached: "(detached HEAD)"
+    of brkOther: target.name
+  let applied =
+    if present: matchPolicy(policy, target)
+    else: PolicyMatch(ruleIndex: -1, reason: "repro.lock records no " &
+      "certificate policy: no branch is gated")
+  if asJson:
+    var rules = newJArray()
+    for rule in policy.rules:
+      var requires = newJArray()
+      for req in rule.requires:
+        requires.add(%*{"certificate": req.certificate,
+          "platforms": req.platforms})
+      rules.add(%*{"branches": rule.branches, "gateMode": $rule.gateMode,
+        "commitGate": $rule.commitGate, "requires": requires})
+    var matchNode = %*{"matched": applied.matched, "reason": applied.reason}
+    if applied.matched:
+      matchNode["rule"] = %(applied.ruleIndex + 1)
+      matchNode["pattern"] = %applied.pattern
+      matchNode["gateMode"] = %($applied.rule.gateMode)
+      matchNode["commitGate"] = %($applied.rule.commitGate)
+      var requires = newJArray()
+      for req in applied.rule.requires:
+        requires.add(%*{"certificate": req.certificate,
+          "platforms": req.platforms})
+      matchNode["requires"] = requires
+    echo $(%*{
+      "schemaId": "reprobuild.certificate-policy-report.v1",
+      "lock": lockPath,
+      "enacted": present,
+      "name": policy.name,
+      "package": policy.package,
+      "revision": revision,
+      "ciTrust": (if present: $policy.ciTrust else: ""),
+      "untrackedInputs": (if present: $policy.untrackedInputs else: ""),
+      "rules": rules,
+      "branch": {"kind": $target.kind, "name": branchText},
+      "match": matchNode
+    })
+    return 0
+  if not present:
+    echo "repro certificates policy: " & lockPath & " records no " &
+      "certificate policy; no branch is gated"
+    if recipeMentionsCertificatePolicy(projectDir):
+      echo "repro certificates policy: the recipe names " &
+        "enactCertificatePolicy; run `repro lock refresh` to record it"
+    return 0
+  echo "certificate policy: " & policy.name & " (package " & policy.package &
+    (if revision.len > 0: " at " & revision else: ", not pinned") & ")"
+  echo "  ci_trust " & $policy.ciTrust & "; untracked_inputs " &
+    $policy.untrackedInputs
+  for idx, rule in policy.rules:
+    var line = "  " & $(idx + 1) & ". " & ruleLabel(policy, idx) &
+      ": push " & $rule.gateMode & ", commit " & $rule.commitGate
+    if rule.requires.len > 0:
+      var reqs: seq[string]
+      for req in rule.requires: reqs.add(requirementText(req))
+      line.add("; requires " & reqs.join(", "))
+    echo line
+  if applied.matched:
+    var line = "branch " & branchText & ": rule " & $(applied.ruleIndex + 1) &
+      " (pattern \"" & applied.pattern & "\"): push " &
+      $applied.rule.gateMode & ", commit " & $applied.rule.commitGate
+    if applied.rule.requires.len > 0:
+      var reqs: seq[string]
+      for req in applied.rule.requires: reqs.add(requirementText(req))
+      line.add("; requires " & reqs.join(", "))
+    else:
+      line.add("; requires nothing")
+    echo line
+  else:
+    echo "branch " & branchText & ": " & applied.reason
+  0
+
 proc runLockGenerationVerb(rest: openArray[string]; verb: string;
                            entryPoint: LockGenerationEntryPoint;
                            writeByDefault: bool): int =
@@ -76881,6 +77427,21 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     for r in gate.allowed:
       stderr.writeLine("repro lock " & verb & ": " &
         pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
+  # Test-Certificates TC-9b: a writing door records the certificate policy the
+  # recipe enacts as the lock's `[certificate_policy]` snapshot, naming the
+  # package from the dependencies this lock pins. A policy that cannot be
+  # read refuses the write: a lock written without it would silently drop a
+  # requirement that is still meant.
+  if writeTo.len > 0:
+    try:
+      request.certificatePolicySection =
+        evaluatedCertificatePolicySection(projectDir, request.extraDeps)
+      request.recordCertificatePolicy = true
+    except CatchableError as err:
+      stderr.writeLine("repro lock " & verb & ": cannot record the " &
+        "certificate policy: " & err.msg & "; the committed lock " & writeTo &
+        " is left as it is")
+      return 1
   try:
     defer:
       try: removeDir(extendedPath(request.workDir))
