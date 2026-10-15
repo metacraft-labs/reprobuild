@@ -2003,6 +2003,26 @@
               buildSystem = builtins.currentSystem or system;
               root = ./.;
             };
+            # ── Host facts (GM6) ──────────────────────────────────────────
+            # `homeManagerFacts` over a real Home Manager configuration:
+            # its evaluated half is decided at evaluation time, its
+            # digests when built on this check's system.
+            lib-host-facts = import ./nix/tests/host-facts.nix {
+              inherit pkgs system reprobuildLib;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
+              root = ./.;
+            };
+            # `homeEquivalenceCheck` end to end: the packaged `repro home
+            # facts` / `repro home compare` against `homeManagerFacts`, an
+            # equivalent pair that must pass and a diverged one that must
+            # fail.
+            lib-home-equivalence = import ./nix/tests/home-equivalence.nix {
+              inherit pkgs system reprobuildLib;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
+              root = ./.;
+            };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''

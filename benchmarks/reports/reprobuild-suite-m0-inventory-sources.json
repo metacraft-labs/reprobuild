@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 32,
-    "nimTestBinaries": 2069,
+    "nimTestBinaries": 2073,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2088
+    "testEntries": 2092
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1277,8 +1277,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1114,
-      "platform/destructive": 126,
+      "integration": 1117,
+      "platform/destructive": 127,
       "pure unit": 646,
       "unclassified": 184
     },
@@ -1476,9 +1476,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2069,
+    "nimTestBinaryCount": 2073,
     "pythonTestFileCount": 19,
-    "testEntryCount": 2088
+    "testEntryCount": 2092
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -26138,6 +26138,51 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_compare_allowlist_requires_reasons",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_compare_allowlist_requires_reasons.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_compare_reports_each_category",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_compare_reports_each_category.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_compare_unmapped_is_not_different",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_compare_unmapped_is_not_different.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_compile_fail_is_hard_error",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26316,6 +26361,24 @@
       "source": "tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_facts_from_isolated_plan",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

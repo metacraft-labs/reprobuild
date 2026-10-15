@@ -13,6 +13,9 @@
 #   brewRealizationOf  canonical package -> Homebrew cask / formula token,
 #                      from the pinned reprobuild-brew-packages contribution
 #                      records (bridge records: Reprobuild never realizes them)
+#   homeManagerFacts   a Home Manager configuration -> host facts, the Nix
+#                      side of `repro home compare` (homeEquivalenceCheck
+#                      runs the comparison as a check)
 #
 # User documentation: docs/user-guide/nix-helper-library.md.
 #
@@ -38,11 +41,28 @@ let
   intent = import ./intent.nix { inherit predicate platforms; };
   realizations = import ./realizations.nix { inherit catalogs; };
   brew = import ./brew.nix { inherit catalogs; };
+  hostFacts = import ./host-facts.nix {
+    inherit realizations reproFor;
+    brew = {
+      lookupToken = brew.lookupBrewToken;
+    };
+  };
 in
 {
   inherit (data) readData;
   inherit (realizations) nixRealizationOf;
   readIntent = intent.mkReadIntent { inherit pkgsFor reproFor; };
+
+  # The reverse of nixRealizationOf, for the equivalence report:
+  # `{ pkgs, drv }` -> `{ found, name, attribute, packageName }` or
+  # `{ found = false; reason; packageName; }` (nix/lib/realizations.nix).
+  lookupNixPackageName = realizations.lookupCanonical;
+
+  # Host facts (nix/lib/host-facts.nix; docs/user-guide/host-facts.md):
+  # `homeManagerFacts` -- the Nix side of `repro home compare`, a derivation
+  # writing the facts of a Home Manager configuration; `homeEquivalenceCheck`
+  # -- a check derivation comparing it with `repro home facts` of a profile.
+  inherit (hostFacts) homeManagerFacts homeEquivalenceCheck reprobuildFacts;
 
   # Non-throwing form of nixRealizationOf: `{ found, attribute, attrPath,
   # record, catalog }` or `{ found = false; reason; }`.
