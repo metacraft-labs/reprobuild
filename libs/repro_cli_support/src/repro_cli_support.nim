@@ -61529,7 +61529,7 @@ type
 
   PushRepoOutcome = enum
     proPushed              ## had unpublished commits → ``git push`` succeeded.
-    proAlreadyPublished    ## HEAD already on a remote-tracking branch.
+    proAlreadyPublished    ## HEAD already reachable from an advertised branch.
     proSkippedDirty        ## dirty/divergent → STOP (never silently discarded).
     proFailed              ## the ``git push`` itself failed.
 
@@ -61953,6 +61953,33 @@ proc advertisedPushHeads(identity: GitToolIdentity; probeGitDir,
     if result == 0: result = cmp(a.oid, b.oid))
   result.ok = true
 
+proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
+    headOid: string): HashSet[string] =
+  ## Branch names that MAY contain ``headOid`` on a remote, read from the
+  ## source checkout's own remote-tracking refs (``refs/remotes/<remote>/<b>``
+  ## containing HEAD). Strictly a hint for which advertised heads are worth
+  ## transferring into the publication probe: nothing is concluded from it,
+  ## every hinted head is re-proven against a fresh advertisement.
+  ##
+  ## Remote names may themselves contain ``/``, so every suffix after a ``/``
+  ## is offered as a candidate branch name. An over-wide hint costs at most one
+  ## probe fetch of a branch that turns out not to contain HEAD; a missing hint
+  ## only falls back to the exact-destination rule. A failed query therefore
+  ## yields no hints rather than an error.
+  result = initHashSet[string]()
+  let contained = gitRunPlainQuery(identity,
+    ["--no-optional-locks", "-C", repoRoot, "for-each-ref",
+     "--format=%(refname)", "--contains=" & headOid, "refs/remotes/"])
+  if contained.code != 0: return
+  const prefix = "refs/remotes/"
+  for raw in contained.output.splitLines():
+    let refName = raw.strip()
+    if not refName.startsWith(prefix): continue
+    let rest = refName[prefix.len .. ^1]
+    for index, ch in rest:
+      if ch == '/' and index + 1 < rest.len:
+        result.incl(rest[index + 1 .. ^1])
+
 proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
     remoteName, expectedLocationFingerprint, headOid,
     destinationRef: string):
@@ -61961,14 +61988,44 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
   ## remote-tracking refs. This is used once during global preflight and again
   ## immediately before deciding between a no-op and `git push`.
   ##
+  ## Publication is decided from COMMITS, not from the existence of a branch
+  ## name: where the exact destination branch does not exist at a URL, HEAD
+  ## still counts as published there if another advertised branch contains
+  ## it. This matches the pre-push gate's own publication probe (any remote
+  ## branch containing HEAD). It matters for checkouts parked on a local-only
+  ## branch name, such as a pinned dependency on
+  ## ``reprobuild/pinned/<short-sha>`` at a revision its upstream already
+  ## carries on ``main``: the exact destination ref exists nowhere remotely,
+  ## yet there is nothing to publish. Reading "no remote branch of this name"
+  ## as "unpublished" made push transmit such a member, which stops the
+  ## closure on a read-only third-party upstream and, on a writable one,
+  ## creates a stray branch there.
+  ##
   ## A push remote can have multiple push URLs and Git publishes to each one.
   ## For an attached checkout, classify the exact destination ref that the
-  ## later ``HEAD:<branch>`` transport will update at every URL. A partially
-  ## published set is pushable only when every existing destination tip is an
-  ## ancestor of HEAD; otherwise one URL could advance before a later URL
-  ## rejects the same multi-push. For a detached checkout there is no
-  ## destination ref to update, so only the already-published case is valid:
-  ## HEAD must be reachable from some advertised branch at every URL.
+  ## later ``HEAD:<branch>`` transport would update at every URL. Where that
+  ## ref EXISTS it alone decides: a destination behind HEAD is fast-forwarded
+  ## even if another branch already contains HEAD (the checkout's own remote
+  ## branch must not be left stale), and a divergent one is refused. Only
+  ## where it is MISSING are the advertised branches that the source's
+  ## remote-tracking refs suggest may contain HEAD fetched into the probe and
+  ## checked (see ``remoteTrackingContainmentHints``; fetching every
+  ## advertised branch on every push would make an ordinary push of new work
+  ## transfer the whole remote). If the exact ref contains HEAD, or (where it
+  ## is missing) a hinted branch does, at EVERY URL, HEAD is published and no
+  ## transport happens. Otherwise a partially published set is pushable only
+  ## when every existing destination tip is an ancestor of HEAD; otherwise one
+  ## URL could advance before a later URL rejects the same multi-push. For a detached checkout
+  ## there is no destination ref to update, so only the already-published case
+  ## is valid: HEAD must be reachable from some advertised branch at every URL.
+  ##
+  ## The advertisement fingerprint records every head a decision rested on: the
+  ## exact destination state and, when another branch proved publication, that
+  ## branch's name. Revalidation recomputes the decision from a fresh
+  ## advertisement, so deleting or rewinding the containing branch changes the
+  ## outcome or the fingerprint and is refused; a mere fast-forward of the
+  ## containing branch (which keeps HEAD published) is deliberately not a
+  ## change, so a busy upstream does not fail the push spuriously.
   let format = storageObjectFormat(identity.binaryPath, repoRoot)
   let oidLength =
     case format
@@ -62011,6 +62068,14 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
     return
   writeFile(alternatesDir / "alternates", sourceObjects & "\n")
 
+  # Only an attached checkout consults other branches; a detached one already
+  # considers every advertised branch below.
+  let containmentHints =
+    if destinationRef.len > 0:
+      remoteTrackingContainmentHints(identity, repoRoot, headOid)
+    else:
+      initHashSet[string]()
+
   result.published = true
   result.pushable = true
   var destinationStates: seq[string]
@@ -62022,30 +62087,67 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
         " did not provide a valid branch advertisement"
       return
 
-    var relevantHeads: seq[AdvertisedPushHead]
+    # `ls-remote` gives exact destination OIDs but does not transfer their
+    # objects. Fetch a named advertised head, without FETCH_HEAD or any local
+    # ref update, when ancestry cannot yet be evaluated locally. A head whose
+    # objects cannot be obtained fails closed: its ancestry is unknown.
+    proc ensureProbeHasHead(head: AdvertisedPushHead): bool =
+      let available = gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "cat-file", "-e",
+         head.oid & "^{commit}"])
+      if available.code == 0: return true
+      let fetched = gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "fetch", "--quiet", "--no-tags",
+         "--no-write-fetch-head", "--", pushLocation, head.refName])
+      fetched.code == 0 and gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "cat-file", "-e",
+         head.oid & "^{commit}"]).code == 0
+
+    proc probeIsAncestor(ancestor, descendant: string): bool =
+      gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
+         ancestor, descendant]).code == 0
+
+    # Attached: classify against the exact destination, then, only when that
+    # branch is absent at this URL, against hinted other branches. Ancestry is
+    # evaluated on the first advertisement; the race check below proves the
+    # second advertisement identical, so the conclusions hold for it too.
+    var exactTip = ""
+    var headInTip = false
+    var tipInHead = false
+    var containingRef = ""
     if destinationRef.len > 0:
       for head in first.heads:
         if head.refName == destinationRef and
             head.oid != repeat('0', oidLength):
-          relevantHeads.add(head)
+          if not ensureProbeHasHead(head):
+            result.diagnostic = "push destination " & $(index + 1) &
+              " advertised an unverifiable branch tip"
+            return
+          exactTip = head.oid
+          headInTip = probeIsAncestor(headOid, exactTip)
+          tipInHead = probeIsAncestor(exactTip, headOid)
+          break
+      if exactTip.len == 0 and containmentHints.len > 0:
+        const headsPrefix = "refs/heads/"
+        for head in first.heads:
+          if head.refName == destinationRef or
+              head.oid == repeat('0', oidLength) or
+              not head.refName.startsWith(headsPrefix) or
+              head.refName[headsPrefix.len .. ^1] notin containmentHints:
+            continue
+          if not ensureProbeHasHead(head):
+            result.diagnostic = "push destination " & $(index + 1) &
+              " advertised an unverifiable branch tip"
+            return
+          if probeIsAncestor(headOid, head.oid):
+            # Heads are sorted by name, so the first containing branch is a
+            # deterministic choice for the fingerprint.
+            containingRef = head.refName
+            break
     else:
-      relevantHeads = first.heads
-
-    # `ls-remote` gives exact destination OIDs but does not transfer their
-    # objects. Fetch only the relevant named advertised heads, without
-    # FETCH_HEAD or any local ref update, when ancestry cannot yet be
-    # evaluated locally.
-    for head in relevantHeads:
-      let available = gitRunPlainEnv(identity,
-        ["--git-dir=" & probeGitDir, "cat-file", "-e",
-         head.oid & "^{commit}"])
-      if available.code != 0:
-        let fetched = gitRunPlainEnv(identity,
-          ["--git-dir=" & probeGitDir, "fetch", "--quiet", "--no-tags",
-           "--no-write-fetch-head", "--", pushLocation, head.refName])
-        if fetched.code != 0 or gitRunPlainEnv(identity,
-            ["--git-dir=" & probeGitDir, "cat-file", "-e",
-             head.oid & "^{commit}"]).code != 0:
+      for head in first.heads:
+        if not ensureProbeHasHead(head):
           result.diagnostic = "push destination " & $(index + 1) &
             " advertised an unverifiable branch tip"
           return
@@ -62061,27 +62163,15 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
 
     let locationId = remoteLocationDigest(pushLocation)
     if destinationRef.len > 0:
-      var exactTip = ""
-      for advertised in second.heads:
-        if advertised.refName == destinationRef and
-            advertised.oid != repeat('0', oidLength):
-          exactTip = advertised.oid
-          break
-      destinationStates.add(locationId & "\t" & destinationRef & "\t" &
-        (if exactTip.len > 0: exactTip else: "<missing>"))
-      if exactTip.len == 0:
+      var state = locationId & "\t" & destinationRef & "\t" &
+        (if exactTip.len > 0: exactTip else: "<missing>")
+      if containingRef.len > 0:
+        state.add("\tcontained-by\t" & containingRef)
+      destinationStates.add(state)
+      if not headInTip and containingRef.len == 0:
         result.published = false
-      else:
-        let headInTip = gitRunPlainEnv(identity,
-          ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
-           headOid, exactTip]).code == 0
-        let tipInHead = gitRunPlainEnv(identity,
-          ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
-           exactTip, headOid]).code == 0
-        if not headInTip:
-          result.published = false
-        if not tipInHead:
-          result.pushable = false
+      if exactTip.len > 0 and not tipInHead:
+        result.pushable = false
     else:
       var state = locationId
       var reachable = false
