@@ -30,6 +30,10 @@
 ##     the lock entry fetches is not compared, and says so;
 ##   * an unreadable lock, and a resolved version the range grammar cannot
 ##     read, are named rather than passed or refused;
+##   * the commit-time re-pin verdict (H3): a range that excludes the
+##     version its producer maps the observed revision to, an unmapped
+##     revision listed as not checked, an exact version's pin, and the
+##     refusal text with and without an explicit develop override;
 ##   * the `uses:` scan: block and inline forms, nested policy blocks,
 ##     `when` / `case` arms, comments and triple-quoted strings.
 ##
@@ -375,6 +379,106 @@ suite "H1: a repro.lock satisfies repro.nim":
       check "no single revision satisfies both recipes" in h2[0].summary
       check "kind=constraint-conflict" in h2[0].evidence
     check r.violationsOf(crH1).len == 1
+
+suite "the commit-time re-pin verdict (H3, §16.4)":
+
+  proc repinInputs(recipe: string; tagOf: proc (tag: string): string):
+      ConsistencyInputs =
+    ## `app` requires something of `lib`, whose `versions:` maps 1.0.0 and
+    ## 2.0.0 to tags; ``tagOf`` says which commit each tag names.
+    result.repoRoot = "/w/app"
+    result.lockPathBase = "/w/app"
+    result.reproNim = text("/w/app/repro.nim", recipe)
+    result.producerVersions = proc (depName, depAbs: string):
+        tuple[found: bool; file: string; entries: seq[ReproVersionEntry]] =
+      (true, "/w/lib/repro.nim", reproRecipeVersions(
+        "package lib:\n  versions:\n" &
+        "    \"1.0.0\":\n      sourceRevision = \"refs/tags/v1\"\n" &
+        "    \"2.0.0\":\n      sourceRevision = \"refs/tags/v2\"\n"))
+    result.resolveRef = proc (depAbs, gitRef: string): string =
+      tagOf(gitRef)
+
+  proc tags(gitRef: string): string =
+    if gitRef == "refs/tags/v1": ShaA
+    elif gitRef == "refs/tags/v2": ShaB
+    else: ""
+
+  test "a range excludes a revision its producer maps outside it":
+    let inputs = repinInputs(
+      "package app:\n  uses:\n    \"lib >=1.0 <2\"\n", tags)
+    let admitted = reproRepinVerdict(inputs, "lib", "/w/lib",
+      "https://example.invalid/lib", ShaA)
+    check admitted.exclusions.len == 0
+    check admitted.exactPin == ""
+    let excluded = reproRepinVerdict(inputs, "lib", "/w/lib",
+      "https://example.invalid/lib", ShaB)
+    check excluded.exclusions.len == 1
+    if excluded.exclusions.len == 1:
+      var e = excluded.exclusions[0]
+      check e.kind == rckRange
+      check e.observedVersion == "2.0.0"
+      check e.recipeFile == "/w/app/repro.nim"
+      check e.recipeLine == 3
+      e.lockedRev = ShaA
+      e.held = @["/w/app/repro.lock 'lib' stays at " & ShaA]
+      let v = repinExclusionViolation(e)
+      check v.rule == crH3
+      check v.summary == "H3 (the commit-time re-pin moves lock " &
+        "resolutions, never a recipe constraint): the sibling checkout " &
+        "/w/lib is at " & ShaB & ", but /w/app/repro.nim:3 requires " &
+        "'lib >=1.0 <2', which does not admit version 2.0.0 " &
+        "(/w/lib/repro.nim:5 maps " & ShaB & " to it); the re-pin wrote " &
+        "nothing for this repository in either lock (/w/app/repro.lock " &
+        "'lib' stays at " & ShaA & ")"
+      # Not overridden: the experiment remedy is to check out an admitted
+      # revision, runnable as printed.
+      check v.remedies.len == 2
+      check ("`git -C /w/lib checkout " & ShaA & "`") in v.remedies[1]
+      check "develop override" notin v.remedies[1]
+
+  test "a revision no versions: entry maps is listed, not refused":
+    let inputs = repinInputs(
+      "package app:\n  uses:\n    \"lib >=1.0 <2\"\n", tags)
+    let v = reproRepinVerdict(inputs, "lib", "/w/lib",
+      "https://example.invalid/lib", ShaC)
+    check v.exclusions.len == 0
+    check v.notChecked == @["/w/app/repro.nim:3: 'lib >=1.0 <2' — no " &
+      "versions: entry of /w/lib/repro.nim maps to " & ShaC & ", so " &
+      "whether that range admits the checkout is not decidable"]
+
+  test "an exact version reports its pin and excludes every other revision":
+    let inputs = repinInputs(
+      "package app:\n  uses:\n    \"lib ==1.0.0\"\n", tags)
+    let at = reproRepinVerdict(inputs, "lib", "/w/lib",
+      "https://example.invalid/lib", ShaA)
+    check at.exactPin == ShaA
+    check at.exactPinLine == 3
+    check at.exclusions.len == 0
+    let past = reproRepinVerdict(inputs, "lib", "/w/lib",
+      "https://example.invalid/lib", ShaB)
+    check past.exclusions.len == 1
+    if past.exclusions.len == 1:
+      var e = past.exclusions[0]
+      check e.kind == rckExactVersion
+      check e.pinnedRev == ShaA
+      e.overridden = true
+      e.overrideRepo = "lib"
+      e.overrideFiles = @["/w/.repro/develop-overrides.toml"]
+      let v = repinExclusionViolation(e)
+      check ("repro lock update lib --to " & ShaB & " (not available yet)") in
+        v.remedies[0]
+      check "`repro lock update" notin v.remedies[0]
+      check ("drop the develop override of 'lib' (remove its entry from " &
+        "/w/.repro/develop-overrides.toml; no repro command removes a " &
+        "single override yet), or check the sibling out at the pinned " &
+        "revision: `git -C /w/lib checkout " & ShaA & "`") in v.remedies[1]
+    # A conditional entry is listed, never applied.
+    let cond = reproRepinVerdict(repinInputs("package app:\n  uses:\n" &
+      "    when defined(macosx):\n      \"lib ==1.0.0\"\n", tags), "lib",
+      "/w/lib", "https://example.invalid/lib", ShaB)
+    check cond.exclusions.len == 0
+    check cond.exactPin == ""
+    check cond.notChecked.len == 1
 
 suite "the uses: text scan":
 

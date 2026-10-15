@@ -10413,6 +10413,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_commit_repin_plans_both_locks.nim",
+    binary: "build/test-bin/t_commit_repin_plans_both_locks",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_commit_repins_committed_lock_siblings.nim",
     binary: "build/test-bin/t_commit_repins_committed_lock_siblings",
     defines: @[],

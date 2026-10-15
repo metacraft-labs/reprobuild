@@ -1163,6 +1163,7 @@ tests/integration/t_cmake_fresh_configure.nim	nim	1
 tests/integration/t_cmake_install_mirror_tools.nim	nim	1
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
 tests/integration/t_commit_refuses_a_backward_sibling_pin.nim	nim	10
+tests/integration/t_commit_repin_plans_both_locks.nim	nim	6
 tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	1
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
@@ -1961,7 +1962,7 @@ tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	4
 tests/unit/t_recipe_constraint_reader.nim	nim	32
-tests/unit/t_recipe_lock_consistency_check.nim	nim	17
+tests/unit/t_recipe_lock_consistency_check.nim	nim	20
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_relocation_move_ordering.nim	nim	10
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1

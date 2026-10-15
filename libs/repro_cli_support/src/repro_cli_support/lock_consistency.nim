@@ -16,6 +16,13 @@
 ##   a name: two names for one repository are compared, and one name for two
 ##   repositories is not.
 ##
+## * **H3, the commit-time re-pin moves resolutions only** (§16.4). This is a
+##   rule for a WRITER, not a check over a lock: ``reproRepinVerdict`` says
+##   whether a `repro.nim` constraint excludes the revision a sibling checkout
+##   is at, and ``repinExclusionViolation`` renders the refusal the
+##   `pre-commit` hook prints when one does (the hook itself decides which
+##   repositories to hold in both locks).
+##
 ## Neither rule classifies a dependency (first-party, third-party, sibling).
 ## Each checks only facts that are written down: the recipe text and the lock
 ## text. An exact pin, a range, a library with no lock, and a repository only
@@ -76,6 +83,9 @@ type
   ConsistencyRule* = enum
     crH1 = "H1"
     crH2 = "H2"
+    crH3 = "H3"
+      ## A refusal of the commit-time re-pin (§16.4), not a check over a
+      ## lock: see ``repinExclusionViolation``.
 
   ConsistencyViolation* = object
     ## One inconsistency, with everything a refusal names.
@@ -180,7 +190,7 @@ proc lockUpdateMention(dependency, rev: string): string =
     (if rev.len > 0: " --to " & rev else: "") & " (" &
     LockUpdateAvailabilityNote & ") will do this in one step"
 
-proc isPathFormPin(c: FlakeInputConstraint): bool =
+proc isPathFormPin*(c: FlakeInputConstraint): bool =
   ## Is the exact revision written as the URL's path (`github:o/r/<sha>`)
   ## rather than as `rev=`?
   c.exactRev.len > 0 and ("rev=" & c.exactRev) notin c.url.toLowerAscii()
@@ -594,9 +604,239 @@ proc renderConsistencyRefusal*(violations: openArray[ConsistencyViolation]):
   for v in violations:
     result.add(renderConsistencyViolation(v))
 
+# ---------------------------------------------------------------------------
+# H3: the commit-time re-pin moves lock resolutions, never a recipe constraint
+# (Unified-Locking-And-Hooks.md §16.3 H3, §16.4)
+# ---------------------------------------------------------------------------
+#
+# The managed `pre-commit` hook re-pins both locks from the sibling checkouts
+# it observes. When the recipe constrains a dependency so that the observed
+# revision falls outside the constraint (an exact `rev=` in `flake.nix`, an
+# exact `uses:` version in `repro.nim`, a `uses:` range), the re-pin writes
+# nothing for that repository in either lock and the commit is refused. The
+# functions below decide whether a `repro.nim` constraint excludes an observed
+# revision, and render the refusal; the hook decides which repositories to
+# hold and when to write.
+
+const
+  H3Property* = "commit_repin_excluded_by_recipe_constraint"
+    ## The evidence tag of an H3 refusal in `pre-commit-lock.log`.
+
 type
-  FlakeLockWriteGate* = proc (plannedText: string): bool {.closure.}
-    ## Asked by the commit-time `flake.lock` refresh with the document it is
-    ## about to write; returning false vetoes the write. The `pre-commit` hook
-    ## uses it to run H1 / H2 over the lock the commit WOULD carry, so a commit
-    ## refused for an inconsistency writes and stages nothing.
+  RepinConstraintKind* = enum
+    rckFlakeRev       ## `flake.nix` names the input's revision
+    rckExactVersion   ## an exact `uses:` version, mapped to a sourceRevision
+    rckRange          ## a `uses:` range
+
+  RepinConstraintExclusion* = object
+    ## A recipe constraint that excludes the revision a sibling checkout is
+    ## at, found by the commit-time re-pin.
+    kind*: RepinConstraintKind
+    dependency*: string     ## the name the recipe gives it (input / selector)
+    repository*: string     ## canonical repository URL, "" when unknown
+    checkout*: string       ## the sibling checkout observed
+    observed*: string       ## the checkout's HEAD
+    constraintText*: string ## the constraint as written (`beta ==1.0.0`)
+    pinnedRev*: string
+      ## The revision an exact constraint means (``rckFlakeRev``,
+      ## ``rckExactVersion``), or "" for a range.
+    observedVersion*: string
+      ## For ``rckRange``: the version the producer's `versions:` table maps
+      ## the observed revision to.
+    producerFile*: string   ## the producer recipe whose `versions:` was read
+    producerLine*: int
+    recipeFile*: string     ## the recipe that states the constraint
+    recipeLine*: int
+    pathForm*: bool         ## a `flake.nix` pin written as `/<sha>`
+    repoRoot*: string       ## the repo being committed (for the flake remedy)
+    held*: seq[string]
+      ## One sentence per lock resolution of the repository the re-pin left
+      ## alone (`flake.lock input 'beta-src' stays at <rev>`).
+    lockedRev*: string      ## the revision the locks name now
+    overridden*: bool       ## an explicit develop override substitutes it
+    overrideRepo*: string   ## the workspace repo the override names
+    overrideFiles*: seq[string]
+      ## The develop-override documents that name it.
+
+  ReproRepinVerdict* = object
+    ## What `repro.nim` says about moving one `repro.lock` dependency to an
+    ## observed revision.
+    exclusions*: seq[RepinConstraintExclusion]
+    exactPin*: string
+      ## The revision an unconditional exact `uses:` version maps it to, or "".
+    exactPinFile*: string
+    exactPinLine*: int
+    notChecked*: seq[string]
+      ## Constraints that could not be evaluated, and why. None of them is a
+      ## pass and none is a refusal.
+
+proc versionAtRevision(inputs: ConsistencyInputs; c: ReproUsesConstraint;
+    depAbs, depUrl, observed: string; report: var ConsistencyReport):
+    tuple[found: bool; version, file: string; line: int] =
+  ## The version whose producer `versions:` entry maps to ``observed``: the
+  ## only way a hook that does not compile the producer recipe can tell which
+  ## version a checkout is. Every way this fails to answer is recorded in
+  ## ``report.notChecked``.
+  let where = c.file & ":" & $c.line
+  if inputs.producerVersions.isNil: return
+  let pv = inputs.producerVersions(c.selector, depAbs)
+  if not pv.found:
+    report.notChecked.add(where & ": '" & c.selector & " " & c.rangeText &
+      "' — no producer recipe at " & depAbs / "repro.nim" & ", so the " &
+      "version of " & observed & " is unknown")
+    return
+  let lockedRepo = canonicalRepositoryUrl(depUrl)
+  for e in pv.entries:
+    if not e.sourceRevisionIsLiteral: continue
+    let declaredRepo = canonicalRepositoryUrl(e.sourceRepository)
+    if declaredRepo.len > 0 and lockedRepo.len > 0 and
+        declaredRepo != lockedRepo:
+      continue
+    var rev = ""
+    if isExactRevision(e.sourceRevision):
+      rev = e.sourceRevision.toLowerAscii()
+    elif not inputs.resolveRef.isNil:
+      rev = inputs.resolveRef(depAbs, e.sourceRevision).toLowerAscii()
+    if rev.len > 0 and rev == observed.toLowerAscii():
+      return (true, e.version, pv.file, e.line)
+  report.notChecked.add(where & ": '" & c.selector & " " & c.rangeText &
+    "' — no versions: entry of " & pv.file & " maps to " & observed &
+    ", so whether that range admits the checkout is not decidable")
+
+proc reproRepinVerdict*(inputs: ConsistencyInputs; dependency, depAbs,
+    depUrl, observed: string): ReproRepinVerdict =
+  ## Does `repro.nim` (``inputs.reproNim``) admit moving the `repro.lock`
+  ## dependency ``dependency`` (checked out at ``depAbs``, fetched from
+  ## ``depUrl``) to ``observed``? A `uses:` entry is related to the dependency
+  ## by its selector name, as H1 relates it (see the module header).
+  ##
+  ## * An unconditional exact version excludes every revision but the one its
+  ##   producer's `versions:` entry maps it to; ``exactPin`` reports that
+  ##   revision whether or not it excludes ``observed``, because a dependency
+  ##   the recipe pins exactly is not compared with its checkout unless a
+  ##   develop override substitutes it (§16.5), and only the caller knows
+  ##   whether one does.
+  ## * An unconditional range excludes ``observed`` when the producer's
+  ##   `versions:` table maps ``observed`` to a version the range does not
+  ##   admit. When no entry maps to it, the range is listed in ``notChecked``.
+  ## * A conditional entry is listed in ``notChecked``, as H1 lists it.
+  if not inputs.reproNim.present: return
+  let decls = scanReproUsesDeclarations(inputs.reproNim.text,
+    inputs.reproNim.path)
+  var report: ConsistencyReport
+  let dep = LockedDep(name: dependency, path: depAbs,
+    coordinates: Coordinates(kind: ckVcs, url: depUrl))
+  for decl in decls:
+    let c = decl.constraint
+    if c.selector != dependency: continue
+    if c.kind notin {uckRange, uckExact}: continue
+    let where = c.file & ":" & $c.line
+    if decl.conditional:
+      report.notChecked.add(where & ": '" & decl.rawConstraint &
+        "' — under a when/if/case arm, so whether it constrains the re-pin " &
+        "of '" & dependency & "' is not decidable without compiling the " &
+        "recipe")
+      continue
+    if c.kind == uckExact:
+      let mapped = exactRevisionOf(inputs, c, dep, report)
+      if not mapped.found: continue
+      result.exactPin = mapped.rev
+      result.exactPinFile = c.file
+      result.exactPinLine = c.line
+      if mapped.rev != observed.toLowerAscii():
+        result.exclusions.add(RepinConstraintExclusion(kind: rckExactVersion,
+          dependency: dependency, repository: canonicalRepositoryUrl(depUrl),
+          checkout: depAbs, observed: observed,
+          constraintText: decl.rawConstraint, pinnedRev: mapped.rev,
+          producerFile: mapped.producerFile, producerLine: mapped.producerLine,
+          recipeFile: c.file, recipeLine: c.line))
+    else:
+      let at = versionAtRevision(inputs, c, depAbs, depUrl, observed, report)
+      if at.found and not c.admits(at.version):
+        result.exclusions.add(RepinConstraintExclusion(kind: rckRange,
+          dependency: dependency, repository: canonicalRepositoryUrl(depUrl),
+          checkout: depAbs, observed: observed,
+          constraintText: decl.rawConstraint, observedVersion: at.version,
+          producerFile: at.file, producerLine: at.line,
+          recipeFile: c.file, recipeLine: c.line))
+  result.notChecked = deduplicate(report.notChecked)
+
+proc repinExclusionViolation*(e: RepinConstraintExclusion):
+    ConsistencyViolation =
+  ## THE refusal for a commit whose re-pin a recipe constraint stopped: the
+  ## observed revision, the constrained value, the recipe line, and the two
+  ## ways forward (§16.4). Rendered by ``renderConsistencyViolation`` like the
+  ## H1 / H2 refusals, so the three read alike.
+  ##
+  ## Backticks mark only commands that run today (see
+  ## ``flakeRevPinEditRemedy``): `repro lock update` is named and qualified as
+  ## not available yet, and the edits are in words.
+  let where = e.recipeFile & ":" & $e.recipeLine
+  result = ConsistencyViolation(rule: crH3,
+    system: (if e.kind == rckFlakeRev: "flake" else: "repro"),
+    dependency: e.dependency, repository: e.repository,
+    recipeFile: e.recipeFile, recipeLine: e.recipeLine,
+    constraint: (if e.pinnedRev.len > 0: e.pinnedRev else: e.constraintText),
+    resolved: e.observed)
+  let statement =
+    case e.kind
+    of rckFlakeRev:
+      " pins input '" & e.dependency & "' at revision " & e.pinnedRev
+    of rckExactVersion:
+      " requires '" & e.constraintText & "', which " & e.producerFile &
+        ":" & $e.producerLine & " maps to sourceRevision " & e.pinnedRev
+    of rckRange:
+      " requires '" & e.constraintText & "', which does not admit version " &
+        e.observedVersion & " (" & e.producerFile & ":" & $e.producerLine &
+        " maps " & e.observed & " to it)"
+  result.summary = "H3 (the commit-time re-pin moves lock resolutions, " &
+    "never a recipe constraint): the sibling checkout " & e.checkout &
+    " is at " & e.observed & ", but " & where & statement &
+    "; the re-pin wrote nothing for this repository in either lock" &
+    (if e.held.len > 0: " (" & e.held.join("; ") & ")" else: "")
+  # (1) The intended upgrade.
+  case e.kind
+  of rckFlakeRev:
+    result.remedies.add("If " & e.observed & " is the intended upgrade, " &
+      lockUpdateMention(e.dependency, e.observed) & "; today, " &
+      flakeRevPinEditRemedy(e.pinnedRev, e.observed, e.repoRoot, e.pathForm) &
+      ", and commit again")
+  of rckExactVersion:
+    result.remedies.add("If " & e.observed & " is the intended upgrade, " &
+      lockUpdateMention(e.dependency, e.observed) & "; today, change the " &
+      "uses: entry at " & where & " to the version whose sourceRevision is " &
+      e.observed & " (adding that versions: entry to " & e.producerFile &
+      " if it has none), and commit again")
+  of rckRange:
+    result.remedies.add("If version " & e.observedVersion & " is the " &
+      "intended upgrade, widen the range at " & where & " so it admits " &
+      e.observedVersion & ", and commit again (repro lock update, " &
+      LockUpdateAvailabilityNote & ", will not widen a range: that is the " &
+      "author's decision)")
+  # (2) The temporary experiment.
+  let back = if e.pinnedRev.len > 0: e.pinnedRev else: e.lockedRev
+  let checkoutCmd =
+    if back.len > 0: "`git -C " & quoteShell(e.checkout) & " checkout " &
+      back & "`"
+    else: ""
+  if e.overridden:
+    result.remedies.add("If " & e.observed & " was a temporary experiment, " &
+      "drop the develop override of '" & e.overrideRepo & "' (remove its " &
+      "entry from " &
+      (if e.overrideFiles.len > 0: e.overrideFiles.join(" and ")
+       else: "the workspace's develop overrides") &
+      "; no repro command removes a single override yet)" &
+      (if checkoutCmd.len > 0:
+         ", or check the sibling out at the " &
+           (if e.pinnedRev.len > 0: "pinned" else: "locked") &
+           " revision: " & checkoutCmd
+       else: "") & "; then commit again")
+  elif checkoutCmd.len > 0:
+    result.remedies.add("If " & e.observed & " was a temporary experiment, " &
+      "check the sibling out at a revision the recipe admits, such as the " &
+      "one the locks name now: " & checkoutCmd & "; then commit again")
+  result.evidence = "rule=H3 system=" & result.system & " dependency=" &
+    e.dependency & " recipe=" & where & " constraint=" &
+    quoteShell(result.constraint) & " observed=" & e.observed &
+    (if e.observedVersion.len > 0: " version=" & e.observedVersion else: "") &
+    " overridden=" & $e.overridden

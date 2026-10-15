@@ -71,19 +71,12 @@
 
 import std/[json, os, strutils, unittest]
 
-import nf3_override_state_fixture
+import hl11_two_lock_fixture
 import repro_test_support/reasoned_skip
 
 const
   H1 = "recipe_lock_constraint_violated"
   H2 = "cross_lock_revision_disagreement"
-
-proc lineNumberOf(text, needle: string): int =
-  var n = 0
-  for line in text.splitLines():
-    inc n
-    if needle in line: return n
-  0
 
 proc failureText(report: JsonNode; property: string): string =
   ## The remediation and evidence of the gate failure ``property``, or "".
@@ -97,43 +90,6 @@ proc checkNoConsistencyFailure(gate: tuple[code: int; output: string;
   check not hasGateFailure(gate.report, H1)
   check not hasGateFailure(gate.report, H2)
   check gate.code == 0
-
-proc commitWithoutHook(fx: Nf2Fixture; message: string) =
-  ## Commit whatever the working tree holds WITHOUT the pre-commit hook, and
-  ## publish it: the bypassed commit path the push gate exists to catch.
-  removePreCommitDispatch(fx)
-  discard gitIn(fx, fx.app, "add -A")
-  discard gitIn(fx, fx.app, "commit -q -m " & q(message))
-  publishRepo(fx, fx.app)
-  installPreCommitDispatch(fx)
-
-proc stagedText(fx: Nf2Fixture; rel: string): string =
-  ## ``rel`` as the index holds it: what a refused commit left staged.
-  run(q(fx.gitBin) & " -C " & q(fx.app) & " show " & q(":" & rel)).output
-
-proc lockDepEntry(fx: Nf2Fixture; name, path, origin, rev: string): string =
-  "{ name = \"" & name & "\", path = \"" & path &
-  "\", coord_kind = \"vcs\", url = \"" & originUrl(fx, origin) &
-  "\", ref = \"main\", revision = \"" & rev &
-  "\", integrity = \"git-sha1:" & rev &
-  "\", version = \"\", visibility = \"public\", participation = \"\"" &
-  ", depends = \"\", groups = \"\" }"
-
-proc reproLockText(fx: Nf2Fixture; owner, ownerRev: string;
-    deps: openArray[string]; packages = ""): string =
-  ## A committed `repro.lock` in the shipped `reprobuild.solved-graph-lock.v2`
-  ## shape: the owner's root entry plus ``deps``.
-  var all = @[lockDepEntry(fx, owner, ".", owner, ownerRev)]
-  for d in deps: all.add(d)
-  "schema = \"reprobuild.solved-graph-lock.v2\"\n\n[lock]\n" &
-  "platform = \"x86_64-linux\"\noptimal = true\n" &
-  "inputs_digest = \"h1-h2-fixture\"\nvariants = []\n" &
-  "packages = [" & packages & "]\n" &
-  "deps = [" & all.join(", ") & "]\n"
-
-proc packageEntry(name, version: string): string =
-  "{ name = \"" & name & "\", version = \"" & version & "\", source = \"" &
-    name & "\", selection = \"selected\" }"
 
 suite "HL-11 H1 / H2: the recipe and its locks are consistent":
 
