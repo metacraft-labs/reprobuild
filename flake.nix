@@ -215,7 +215,21 @@
         # Bumped to 51228b5 (2026-10-15), io-mon's `agents` tip; 6e7d2cf is an
         # ancestor. 51228b5 lets small-stack threads start and run under the
         # Linux shim; the macOS and Windows capture paths are unchanged.
-      url = "github:metacraft-labs/io-mon/51228b560a6fed59e780a763cb9ed13e9443c245";
+        # Bumped to 6453936 (2026-10-15), io-mon's `agents` tip; 51228b5 is an
+        # ancestor. Under full action monitoring Node 24 started (51228b5) but
+        # Chromium 143 headless still hung: recording a call the host made
+        # under its allocator lock allocated from that same allocator.
+        # cb1db14 moved the shim's private heap to glibc's allocator, which
+        # broke every nixpkgs gcc-wrapper (bash 5.2's bundled sbrk malloc and
+        # glibc's main arena both moved the program break, and the exec hooks
+        # handed bash an `environ` from the shim's heap), so it is not pinned
+        # on its own. 6453936 gives the shim its own mmap-backed allocator that
+        # touches neither the break nor `environ`, makes execvp search PATH only
+        # (never `./name`), and keeps raw-clone children of multi-threaded
+        # hosts off shim locks. cb1db14 also adds the probe/enumeration entry
+        # points Node and Chromium call and per-architecture raw-syscall
+        # numbers.
+      url = "github:metacraft-labs/io-mon/6453936f34d69c506ee33b8e44a0b2d0a9440ec0";
       flake = false;
     };
     nim-shm-gset-src = {
