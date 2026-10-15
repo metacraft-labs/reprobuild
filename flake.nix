@@ -235,7 +235,13 @@
         # while routing internal forwarders and raw syscalls past sibling shim
         # wrappers, and reads `syscall(2)` variadic arguments from the stack per
         # the arm64 Apple Darwin ABI.
-      url = "github:metacraft-labs/io-mon/9576b796ed8d0220635bf609720e10e71080b2b0";
+        # Bumped to 3ccdd4b (2026-10-15), io-mon's `agents` tip; 9576b79 is an
+        # ancestor. On Linux, children of an inline `syscall` clone and of
+        # glibc's clone(3) reclaim inherited shim locks; a vfork child's
+        # successful exec no longer leaks the prepared environment into the
+        # parent; and realpath, canonicalize_file_name and the readlink family
+        # record every symbolic link they follow and the path they end at.
+      url = "github:metacraft-labs/io-mon/3ccdd4bec34b883901bf208b30a966922471ac32";
       flake = false;
     };
     nim-shm-gset-src = {
