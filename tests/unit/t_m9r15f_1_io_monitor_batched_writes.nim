@@ -41,7 +41,10 @@
 ##    record once held the batched path to ~2.2x on m1
 ##    (aarch64-darwin, APFS) while writes and flushes were still
 ##    amortised; with no per-record syscall the same host measures
-##    12-18x. The throughput figures are printed on every run.
+##    12-18x. Each path is timed as the fastest of several interleaved
+##    rounds, because a ~10 ms batched window is otherwise at the mercy
+##    of a single preemption on a loaded host. The throughput figures are
+##    printed on every run.
 ## 2. **Write-count amortization** — emitting N short records must
 ##    drive far fewer ``writeBuffer`` syscalls than N: with the 64 KiB
 ##    stack buffer the underlying-write count must stay below
@@ -139,49 +142,70 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
       records[i - 1] = sampleRecord(uint64(i), osPid, threadId,
         "/usr/include/h-" & $i & ".h")
 
-    # --- Baseline: the M9.R.15c.1 per-record path (encode each frame
-    # and write+flush it on its own), against the SAME backing store so
-    # the comparison cancels out the filesystem's absolute speed. ---
-    let baselineFile = fragmentDir / "baseline.iomon"
-    var bf: File
-    doAssert open(bf, baselineFile, fmWrite)
-    # Warm.
-    block:
-      let frame = encodeFrame(sampleRecord(0'u64, osPid, threadId, "/warm"))
-      discard bf.writeBuffer(unsafeAddr frame[0], frame.len)
-      flushFile(bf)
-    let b0 = getMonoTime()
-    for i in 0 ..< N:
-      let frame = encodeFrame(records[i])
-      discard bf.writeBuffer(unsafeAddr frame[0], frame.len)
-      flushFile(bf)
-    let b1 = getMonoTime()
-    close(bf)
-    let baselineS = float64((b1 - b0).inNanoseconds) / 1_000_000_000.0
-    let baselineRate = float64(N) / baselineS
+    # --- Measurement protocol: interleaved best-of-``Rounds``. ---
+    # One batched pass of 100k records takes only ~5-15 ms on a fast host
+    # (the unbatched pass ~200-400 ms), so a single scheduler preemption
+    # of a few tens of ms inside the batched window alone was enough to
+    # drag one-shot measurements under the floor on a loaded host
+    # (observed 2.25x inside the full suite and 2.6x standalone at load
+    # average ~28 on m1, where unloaded runs of the same binary measure
+    # 12-25x). Noise only ever ADDS time, so each path's fastest round is
+    # the standard estimate of its steady-state cost; alternating the two
+    # paths round by round exposes both to the same host conditions.
+    # The floor itself is unchanged.
+    const Rounds = 7
 
-    # --- Batched: the M9.R.15f.1 path. ---
+    # Baseline: the M9.R.15c.1 per-record path (encode each frame and
+    # write+flush it on its own), against the SAME backing store so the
+    # comparison cancels out the filesystem's absolute speed.
+    let baselineFile = fragmentDir / "baseline.iomon"
+    proc baselinePassNs(): int64 =
+      var bf: File
+      doAssert open(bf, baselineFile, fmWrite)
+      defer: close(bf)
+      # Warm.
+      let warm = encodeFrame(sampleRecord(0'u64, osPid, threadId, "/warm"))
+      discard bf.writeBuffer(unsafeAddr warm[0], warm.len)
+      flushFile(bf)
+      let b0 = getMonoTime()
+      for i in 0 ..< N:
+        let frame = encodeFrame(records[i])
+        discard bf.writeBuffer(unsafeAddr frame[0], frame.len)
+        flushFile(bf)
+      (getMonoTime() - b0).inNanoseconds
+
+    # Batched: the M9.R.15f.1 path, timed through its final flush so the
+    # batched figure pays for every byte it puts on disk.
+    proc batchedPassNs(): int64 =
+      let t0 = getMonoTime()
+      for i in 0 ..< N:
+        appendFragmentRecord(fragmentDir, records[i])
+      flushFragmentBatch()
+      (getMonoTime() - t0).inNanoseconds
+
     # Warm the slot (open + first batch start) so the measurement
-    # reflects steady-state hot-path cost only.
+    # reflects steady-state hot-path cost only, then count the syscalls
+    # of every measured batched pass.
     appendFragmentRecord(fragmentDir, sampleRecord(0'u64, osPid, threadId, "/warm"))
     flushFragmentBatch()
     resetFragmentLogOpenCount()
     resetFragmentLogWriteCount()
     resetFragmentLogFlushCount()
     resetFragmentLogHandleProbeCount()
-    let t0 = getMonoTime()
-    for i in 0 ..< N:
-      appendFragmentRecord(fragmentDir, records[i])
-    flushFragmentBatch()
-    let t1 = getMonoTime()
-    let batchedS = float64((t1 - t0).inNanoseconds) / 1_000_000_000.0
-    let batchedRate = float64(N) / batchedS
+    var bestBaselineNs = high(int64)
+    var bestBatchedNs = high(int64)
+    for round in 1 .. Rounds:
+      bestBaselineNs = min(bestBaselineNs, baselinePassNs())
+      bestBatchedNs = min(bestBatchedNs, batchedPassNs())
+    let baselineRate = float64(N) * 1_000_000_000.0 / float64(bestBaselineNs)
+    let batchedRate = float64(N) * 1_000_000_000.0 / float64(bestBatchedNs)
     let speedup = batchedRate / baselineRate
 
     let writes = fragmentLogWriteCount()
     let flushes = fragmentLogFlushCount()
     let probes = fragmentLogHandleProbeCount()
-    let measurement = "baseline=" & $baselineRate & " emit/s  batched=" &
+    let measurement = "best of " & $Rounds & ": baseline=" & $baselineRate &
+      " emit/s  batched=" &
       $batchedRate & " emit/s  speedup=" & $speedup & "x  writes=" &
       $writes & " flushes=" & $flushes & " identity-probes=" & $probes
     # Reported on every run, not only on failure: the absolute figures
@@ -191,16 +215,16 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
 
     # Batching must amortise every per-record syscall across many
     # frames. Writes: the ~90-byte frames fill a 64 KiB batch roughly
-    # seven hundred at a time, so 100k records need ~145 writes; N div 64
-    # still leaves room for the 100 ms staleness flushes a loaded host
-    # adds. Descriptor-identity probes: one per flush plus one for each
+    # seven hundred at a time, so each 100k-record pass needs ~145 writes;
+    # N div 64 per pass still leaves room for the 100 ms staleness
+    # flushes a loaded host adds. Descriptor-identity probes: one per flush plus one for each
     # of the read-tail pending / committed markers that open and close a
     # dirty cycle — at most three per flush, however many records the
     # batch holds. No reopen happens on the steady-state path.
     check fragmentLogOpenCount() == 0
     check writes >= 1
     check writes == flushes
-    check writes <= uint64(N div 64)
+    check writes <= uint64(Rounds * (N div 64))
     check probes <= 3 * flushes
     # And the amortisation must show up as a large net throughput win
     # over the per-record path.
