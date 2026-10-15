@@ -1,6 +1,6 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 32,
+    "graphOwnedHelperArtifacts": 33,
     "nimTestBinaries": 2087,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
@@ -1383,6 +1383,12 @@
         "actionId": "reprobuild.test_fixtures.rp3_provider_plain",
         "kind": "test-fixture",
         "output": "dynamic",
+        "source": "dynamic"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.runquotad",
+        "kind": "test-fixture",
+        "output": "build/test-fixtures/runquota/runquotad",
         "source": "dynamic"
       },
       {
@@ -28306,7 +28312,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_b0_repro_build_runquota_daemon.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29841,7 +29847,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",

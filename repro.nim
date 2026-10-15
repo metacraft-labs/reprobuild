@@ -341,6 +341,16 @@ const
         path: "build/test-fixtures/macos-no-bundle/no_bundle_launch",
         actionId: "reprobuild.test_fixtures.macos_no_bundle_launch")]),
     TestGraphArtifacts(
+      source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
+      artifacts: @[
+        TestGraphArtifact(path: "build/test-fixtures/runquota/runquotad",
+          actionId: "reprobuild.test_fixtures.runquotad")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
+      artifacts: @[
+        TestGraphArtifact(path: "build/test-fixtures/runquota/runquotad",
+          actionId: "reprobuild.test_fixtures.runquotad")]),
+    TestGraphArtifacts(
       source: "tests/integration/t_runner_exclusive_phase_budget.nim",
       artifacts: @[
         TestGraphArtifact(path: "build/bin/repro_test_runner",
@@ -2765,6 +2775,20 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/macos_no_bundle_launch",
       actionId = "reprobuild.test_fixtures.macos_no_bundle_launch"))
+
+    var runquotaFixtureSource = ""
+    for entry in sourceOnlyEnv:
+      if entry[0] == "RUNQUOTA_SRC":
+        runquotaFixtureSource = entry[1]
+    doAssert runquotaFixtureSource.len > 0, "runquota fixture source is required"
+    reprobuildTestFixturesActions.add(nim.c(
+      source = runquotaFixtureSource / "apps/runquotad/runquotad.nim",
+      binary = "build/test-fixtures/runquota/runquotad",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/test-fixture-runquotad",
+      actionId = "reprobuild.test_fixtures.runquotad"))
 
     reprobuildTestFixturesActions.add(nim.c(
       source = "tests/fixtures/exclusive-phase/probe.nim",

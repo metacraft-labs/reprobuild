@@ -234,8 +234,6 @@ tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	t_an_unprov
 tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	t_an_unpushed_sibling_revision_is_not_recorded	1
 tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	t_an_unresolvable_membership_is_not_read_as_no_overrides	1
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	t_apply_if_binds_config_by_workspace_path	1
-tests/integration/t_b0_develop_mode_uses_local_source.nim	repro graph records a path-mode runquotad profile	1
-tests/integration/t_b0_repro_build_runquota_daemon.nim	engine builds runquotad via cross-project selector (or skips)	1
 tests/integration/t_b1_apps_action_cache_hit.nim	second repro build apps cache-hits every per-app nim c edge	1
 tests/integration/t_b1_repro_build_apps_byte_equivalent.nim	every apps/entrypoints.txt entry yields a present binary	1
 tests/integration/t_b1_repro_build_apps_byte_equivalent.nim	every shipped binary is executable and produces output	1
@@ -332,8 +330,6 @@ tests/integration/t_config_layer_determines_tier_not_per_repo_field.nim	t_config
 tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	t_cross_repo_library_consumer_does_not_build_producer_tests	1
 tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	t_cross_repo_nim_library_src_threaded_onto_consumer_path	2
 tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim	t_cross_tier_move_between_layers_errors_loudly	1
-tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim	behavioural: engine lowers + executes the buildNimUnittest.run edge end-to-end	2
-tests/integration/t_d2_cross_project_selector_recognised.nim	engine accepts runquota:runquotad without a usage dump	1
 tests/integration/t_d5_collection_member_selector.nim	behavioural: ``.#test#<stem>`` resolves to the execute edge and runs end-to-end	1
 tests/integration/t_d5_collection_member_selector.nim	collection-agnostic: ``.#apps#<name>`` resolves to an apps-collection member	1
 tests/integration/t_d5_collection_member_selector.nim	collection-agnostic: ``.#test-builds#<stem>`` resolves to the build edge	1
