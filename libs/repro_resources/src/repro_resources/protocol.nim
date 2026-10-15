@@ -472,7 +472,10 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
                                    store: Option[StateStore] = none(StateStore);
                                    now: Time = getTime();
                                    inProcess: ResourceInProcessPredicate = nil;
-                                   library: ResourceLibraryResolver = nil):
+                                   library: ResourceLibraryResolver = nil;
+                                   providerArtifacts: openArray[
+                                     tuple[typeId: string;
+                                           artifact: ResourceProviderArtifactRef]] = @[]):
                                    ReconcileResult =
   ## The PROTOCOL-backed reconcile: the same seven-step algorithm as the
   ## in-process ``reconcileResources``, but each leaf op (observe / digest /
@@ -505,7 +508,22 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
   ## pre-N3a behaviour: no store I/O, no record writes — the RP5b tests and the
   ## L5 reaper's no-store session reconcile are untouched. ``now`` is injectable
   ## for hermetic tests, exactly as in-process.
+  ##
+  ## ``providerArtifacts`` (Ephemeral-State-Leases.md §4.2) names, per
+  ## ``typeId``, the provider artifact this reconcile launched the type over —
+  ## normally the same refs ``resolve`` draws on. Each record written for such a
+  ## type PERSISTS its ref, so a later reaper can open a session to that
+  ## provider knowing only the store. Without it a record of an out-of-tree type
+  ## is materialized with no route back to the code that can destroy it, and the
+  ## only process that ever knew the route is the one that exits: that is the
+  ## whole of
+  ## reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md.
+  ## Empty (the default) writes no ref, which is correct for a caller whose
+  ## resolver is a hand-built test handle with no artifact behind it.
   registerResourceProtocolCodecs()
+  var artifactByType = initTable[string, ResourceProviderArtifactRef]()
+  for pa in providerArtifacts:
+    artifactByType[pa.typeId] = pa.artifact
   result.actions = @[]
   result.bindings = @[]
 
@@ -572,6 +590,29 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
 
     # L1/L2 persist (only with a store — the no-store path is untouched).
     if store.isSome and effective.isSome and effective.get.present:
+      # The route to the provider that owns this type, recorded WITH the record
+      # so a later reap can reach it from the store alone (§4.2).
+      #
+      # THE KEY IS MEMBERSHIP OF THE HARVESTED SET, not the `inProcess` gate,
+      # and that is deliberate. The set holds the refs the caller harvested for
+      # the out-of-tree types it composed, so:
+      #
+      #   * a type with NO provider binary — the synthetic run-edge consumer,
+      #     whose lease-bookkeeping driver is always linked here — is never in
+      #     it, and records `none`. Claiming an artifact for it would make its
+      #     reap try to launch an unrelated provider.
+      #   * a type that is BOTH linked here and provider-backed legitimately
+      #     records its ref. Gating on `inProcess` would blank it, throwing away
+      #     a real route to a real provider binary — and §4.2 prefers the
+      #     session for exactly that case, with in-process linking as the
+      #     fallback. The gate decides how THIS pass runs an op; it does not
+      #     decide what a later reaper, in a process that links nothing, can
+      #     reach.
+      let thisRunArtifact =
+        if artifactByType.hasKey(inst.typeId):
+          some(artifactByType[inst.typeId])
+        else:
+          none(ResourceProviderArtifactRef)
       if isLeasedState:
         # The whole existing holder state, keep holders included, so a keep
         # pin from an earlier run survives this run's dated renewals (same
@@ -587,8 +628,10 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
           effectiveDeadline = merged.effective,
           lastRenewed = now,
           keepHolders = merged.keepHolders,
-          keepHoldersKnown = merged.keepHoldersKnown)
+          keepHoldersKnown = merged.keepHoldersKnown,
+          providerArtifact = carriedProviderArtifact(existing, thisRunArtifact))
       else:
         # Not consumed this run: carry any existing lease forward untouched
         # (the same helper as `reconcileResources`).
-        writeUnconsumedStateRecord(store.get, inst, effective.get)
+        writeUnconsumedStateRecord(store.get, inst, effective.get,
+          providerArtifact = thisRunArtifact)

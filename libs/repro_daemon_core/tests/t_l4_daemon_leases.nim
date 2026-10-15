@@ -941,3 +941,340 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
       check afterUnreadable.get.stuck[0].contains("cannot read record")
       # It is still there, which is why retrying cannot help.
       check fileExists(bad)
+
+  test "(m) the reap-provider frame round-trips, and refuses an unusable entry":
+    ## Ephemeral-State-Leases §4.2 — the FRESH half of the destroy-transport
+    ## artifact resolution, on the wire. Body codec first, because a frame that
+    ## does not round-trip makes every behavioural assertion below it a test of
+    ## the wrong bytes.
+    let request = DaemonLeaseReapProvidersRequest(
+      scope: dlsUser,
+      providers: @[
+        DaemonLeaseReapProvider(typeId: "vm_harness.nic",
+          binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "aa11",
+          workingDir: "/work"),
+        DaemonLeaseReapProvider(typeId: "vm_harness.container",
+          binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "aa11",
+          workingDir: "/work")])
+    let back = parseLeaseReapProvidersRequestBody(
+      leaseReapProvidersRequestBody(request))
+    check back.scope == dlsUser
+    check back.providers.len == 2
+    check back.providers[0].typeId == "vm_harness.nic"
+    check back.providers[0].binaryPath == "/nix/store/p/bin/prov"
+    check back.providers[0].providerArtifactId == "aa11"
+    check back.providers[0].workingDir == "/work"
+    check back.providers[1].typeId == "vm_harness.container"
+
+    # The system scope survives the hop too (the daemon logs it; a client
+    # routes by endpoint).
+    let sys = parseLeaseReapProvidersRequestBody(
+      leaseReapProvidersRequestBody(DaemonLeaseReapProvidersRequest(
+        scope: dlsSystem, providers: @[])))
+    check sys.scope == dlsSystem
+    check sys.providers.len == 0
+
+    let response = parseLeaseReapProvidersResponseBody(
+      leaseReapProvidersResponseBody(DaemonLeaseReapProvidersResponse(
+        ok: false, reason: "nope", registered: 7)))
+    check not response.ok
+    check response.reason == "nope"
+    check response.registered == 7
+
+    # A COUNT the frame cannot honour is refused on the count, before anything
+    # is allocated from it: the number comes from the client, so a corrupt or
+    # hostile frame must not get to size the daemon's allocation.
+    var hostile: seq[byte] = @[]
+    hostile.writeU32Le(uint32(ord(dlsUser)))
+    hostile.writeU32Le(uint32(MaxLeaseReapProviders + 1))
+    expect ValueError:
+      discard parseLeaseReapProvidersRequestBody(hostile)
+
+  test "(n) a registration over the socket reaches the daemon's reap registry":
+    ## The feeder whose absence made the whole `rtSession` arm unreachable from
+    ## the product: `registerLeaseReapProvider` had NO caller in the shipped
+    ## tree (reprobuild-pm/issues/
+    ## 2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md).
+    ## Here a real client frame over the real IPC stack reaches a real daemon's
+    ## handler, and the daemon reports what it registered.
+    ##
+    ## THE REGISTRY IS DELIBERATELY NOT READ FROM THIS THREAD. The daemon runs
+    ## on a spawned `Thread`, and `leaseReapProviders` is a plain module global
+    ## with no synchronisation — which is sound IN THE DAEMON, where the frame
+    ## handler and the reap tick are the same event-loop thread, and unsound
+    ## for a reader on another thread. `hasLeaseReapProviders()` /
+    ## `registeredLeaseReapArtifacts()` from the test thread would be an
+    ## unsynchronised read of a `Table` the daemon thread is mutating: at best a
+    ## torn answer, and a case that can pass or fail on timing proves nothing
+    ## either way. So every assertion below is on evidence that crossed a REAL
+    ## boundary — the ack the daemon sent back over the socket, and the line it
+    ## wrote to its own log file.
+    let root = scratchRoot("reap-providers")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    discard openStateStore(stateRoot)
+
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      # The daemon's own shutdown `defer` calls `clearLeaseReapProviders`, so
+      # the registry this case filled does not leak into a sibling case. Joined
+      # first, so that has happened before anything here looks at it.
+      clearLeaseReapProviders()
+      removeDir(root)
+
+    let sent = registerLeaseReapProvidersBestEffort(
+      DaemonLeaseReapProvidersRequest(scope: dlsUser, providers: @[
+        DaemonLeaseReapProvider(typeId: "l4.outoftree",
+          binaryPath: "/nix/store/p/bin/prov",
+          providerArtifactId: "bb22", workingDir: "/work")]),
+      config.endpoint)
+    check sent.sent
+    check sent.response.ok
+    check sent.response.registered == 1
+
+    # An entry that names no type, or no binary, is refused WHOLE — a daemon
+    # that believed it could reap a type it cannot would be the same
+    # silently-wrong-and-reporting-success shape this area keeps fixing.
+    let bad = registerLeaseReapProvidersBestEffort(
+      DaemonLeaseReapProvidersRequest(scope: dlsUser, providers: @[
+        DaemonLeaseReapProvider(typeId: "l4.second",
+          binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "cc33"),
+        DaemonLeaseReapProvider(typeId: "",
+          binaryPath: "/nix/store/p/bin/prov")]),
+      config.endpoint)
+    check bad.sent
+    check not bad.response.ok
+    check bad.response.registered == 0
+    check bad.response.reason.contains("typeId")
+
+    let noPath = registerLeaseReapProvidersBestEffort(
+      DaemonLeaseReapProvidersRequest(scope: dlsUser, providers: @[
+        DaemonLeaseReapProvider(typeId: "l4.third", binaryPath: "")]),
+      config.endpoint)
+    check noPath.sent
+    check not noPath.response.ok
+    check noPath.response.reason.contains("binaryPath")
+
+    # A RELATIVE path is refused too, and that is not pedantry: the transport
+    # drops a ref `isLaunchableArtifact` rejects, and non-absolute is one of
+    # its two rejection criteria. A handler that accepted this would answer
+    # `ok: true, registered: 1`, log a successful registration and make
+    # `hasLeaseReapProviders()` true, while every tick afterwards dropped the
+    # ref and reaped in-process — reporting success and doing nothing, which is
+    # the shape the handler's own contract forbids.
+    let relative = registerLeaseReapProvidersBestEffort(
+      DaemonLeaseReapProvidersRequest(scope: dlsUser, providers: @[
+        DaemonLeaseReapProvider(typeId: "l4.relative",
+          binaryPath: "prov", providerArtifactId: "dd44")]),
+      config.endpoint)
+    check relative.sent
+    check not relative.response.ok
+    check relative.response.registered == 0
+    # The reason names the path and why it is not launchable, so the client's
+    # operator can fix the producer rather than guess.
+    check relative.response.reason.contains("'prov'")
+    check relative.response.reason.contains("not absolute")
+    check relative.response.reason.contains("PATH")
+
+    # An EMPTY providerArtifactId is refused on the same terms, and for a
+    # reason the operator could not guess: that field is the provider-session
+    # POOL KEY, so an empty one would alias this provider with any other
+    # empty-id artifact into a single session — the first child launched would
+    # serve both types and its errors would be reported as this type's. The
+    # transport drops such a ref (`isLaunchableArtifact`), so a handler that
+    # accepted it would report a registration that changes no sweep.
+    let noId = registerLeaseReapProvidersBestEffort(
+      DaemonLeaseReapProvidersRequest(scope: dlsUser, providers: @[
+        DaemonLeaseReapProvider(typeId: "l4.noid",
+          binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "")]),
+      config.endpoint)
+    check noId.sent
+    check not noId.response.ok
+    check noId.response.registered == 0
+    check noId.response.reason.contains("providerArtifactId")
+    check noId.response.reason.contains("POOL KEY")
+    # ...and the refusal is the TRANSPORT's own test, not a second opinion:
+    # the validator delegates to `isLaunchableArtifact` on the very artifact
+    # that would have been registered.
+    check leaseReapProviderRefusal("l4.noid", LeaseReapProviderArtifact(
+      binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "")).len > 0
+    check leaseReapProviderRefusal("l4.noid", LeaseReapProviderArtifact(
+      binaryPath: "/nix/store/p/bin/prov",
+      providerArtifactId: "ee55")).len == 0
+    check leaseReapProviderRefusal("", LeaseReapProviderArtifact(
+      binaryPath: "/nix/store/p/bin/prov",
+      providerArtifactId: "ee55")).len > 0
+
+    # The daemon's own log — the other side of the boundary, and where an
+    # operator diagnosing a reap that did not happen will look. One accepted
+    # registration and two refusals, each named.
+    #
+    # POLLED, not read once: the handler writes the ack frame BEFORE its log
+    # line, so a client that has its answer can be ahead of the daemon's
+    # `logLine`. Reading immediately raced the last line. The loop is bounded
+    # and the assertions below it are unconditional, so a daemon that never
+    # logs fails the case rather than hanging it. (`logLine` opens, appends and
+    # closes per line, so anything written is already on disk.)
+    let wantedLines = @[
+      "lease reap providers registered=1 requested=1 ok=true",
+      "registered=0 requested=2 ok=false",
+      "registered=0 requested=1 ok=false",
+      "not absolute",
+      "providerArtifactId"]
+    proc logHasAll(path: string): bool =
+      let text = try: readFile(path) except CatchableError: ""
+      for wanted in wantedLines:
+        if not text.contains(wanted):
+          return false
+      true
+    let logDeadline = epochTime() + 8.0
+    while epochTime() < logDeadline and not logHasAll(config.logPath):
+      sleep(50)
+    let logText = readFile(config.logPath)
+    for wanted in wantedLines:
+      check logText.contains(wanted)
+
+  test "(n2) the in-process registry drives the transport selection":
+    ## The other half of (n), asserted WITHOUT a daemon thread so the registry
+    ## is read by the only thread that touches it. (n) proves the frame reaches
+    ## the daemon; this proves what the registry does once filled — that the
+    ## §4.2 transport selection turns a registered artifact into a SESSION
+    ## route for that type and leaves every other type in-process.
+    clearLeaseReapProviders()
+    defer: clearLeaseReapProviders()
+    check not hasLeaseReapProviders()
+
+    # The plain in-process transport is what an empty registry yields, which is
+    # all the product could ever produce before this change.
+    check buildLeaseReapTransport().kind == rtInProcess
+
+    registerLeaseReapProvider("l4.outoftree", LeaseReapProviderArtifact(
+      binaryPath: "/nix/store/p/bin/prov",
+      providerArtifactId: "bb22", workingDir: "/work"))
+    check hasLeaseReapProviders()
+    let registered = registeredLeaseReapArtifacts()
+    check registered.len == 1
+    check registered[0].typeId == "l4.outoftree"
+    check registered[0].artifact.binaryPath == "/nix/store/p/bin/prov"
+    check registered[0].artifact.providerArtifactId == "bb22"
+    check registered[0].artifact.workingDir == "/work"
+
+    let transport = buildLeaseReapTransport()
+    check transport.kind == rtSession
+    check transport.inProcess != nil
+    check not transport.inProcess("l4.outoftree")   # over the session
+    check transport.inProcess("l4.stub")            # in-process, as before
+
+  test "(o) a registration against NO daemon is a healthy no-op":
+    ## No-daemon-safe, on the same terms as `renewLeaseBestEffort`: the
+    ## registration is a freshness optimization, and the artifact is persisted
+    ## in each state record anyway, so a reconcile must not fail — or even
+    ## notice — when nothing is listening.
+    clearLeaseReapProviders()
+    defer: clearLeaseReapProviders()
+    let dead = scratchRoot("no-daemon") / "absent.sock"
+    let outcome = registerLeaseReapProvidersBestEffort(
+      DaemonLeaseReapProvidersRequest(scope: dlsUser, providers: @[
+        DaemonLeaseReapProvider(typeId: "l4.outoftree",
+          binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "bb22")]),
+      dead)
+    check not outcome.sent
+    check not outcome.response.ok
+    check outcome.response.reason.len > 0
+    # And it did NOT register locally — the registry belongs to the daemon
+    # process, so a client that could not reach one has registered nothing.
+    check not hasLeaseReapProviders()
+
+  test "(p) clearLeaseReapProviders empties the registry and the pool":
+    ## The daemon's shutdown `defer` calls this, which is what makes
+    ## `clearLeaseReapProviders`' own docstring true. It used to claim the
+    ## shutdown path with no caller — and that mattered once records began
+    ## driving the pool, because a stopped daemon would have left one provider
+    ## child per artifact it had reaped over, orphaned and holding a pipe, with
+    ## nothing left to close them.
+    ##
+    ## SCOPE, stated so this case is not mistaken for more than it is: no
+    ## session is launched here (no provider binary), so this asserts the
+    ## registry half and that the pool is empty afterwards. That the pool is
+    ## BOUNDED ACROSS TICKS — the `pruneLeaseReapSessionPool` rule — needs live
+    ## sessions and therefore a real compiled provider; it is proven in
+    ## `tests/integration/t_lease_reap_session_transport_is_reachable_from_production.nim`
+    ## ("the reap session pool is bounded across ticks"), where launching one is
+    ## already the point of the file.
+    clearLeaseReapProviders()
+    defer: clearLeaseReapProviders()
+    check not hasLeaseReapProviders()
+    check leaseReapSessionCount() == 0
+
+    registerLeaseReapProvider("l4.oota", LeaseReapProviderArtifact(
+      binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "id-aaaa"))
+    registerLeaseReapProvider("l4.ootb", LeaseReapProviderArtifact(
+      binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "id-bbbb"))
+    check hasLeaseReapProviders()
+    check registeredLeaseReapArtifacts().len == 2
+
+    clearLeaseReapProviders()
+    check not hasLeaseReapProviders()
+    check registeredLeaseReapArtifacts().len == 0
+    check leaseReapSessionCount() == 0
+
+  test "(q) the capability is advertised, and the client gate refuses what is not":
+    ## §4.2 registration is BEST-EFFORT, and best-effort has to be able to tell
+    ## "no daemon wants this" from "the daemon broke". A daemon that predates
+    ## `lease-reap-providers` would answer an unknown frame kind with
+    ## `unsupported user-daemon message in lifecycle server` — an error frame,
+    ## for a daemon that is working exactly as built and simply lacks the
+    ## capability. So the capability is ADVERTISED as a feature flag and
+    ## `requestUserDaemonLeaseReapProviders` REQUIRES it, which turns that into
+    ## a handshake refusal: truthful, and cheaper (no frame is sent at all,
+    ## because `connectUserDaemon` checks the flags before the caller writes
+    ## anything).
+    ##
+    ## WHAT THIS CASE PROVES, exactly, against a REAL daemon: that a current
+    ## daemon advertises the flag, so the new requirement does not refuse the
+    ## daemons we ship; and that the gate really refuses a feature the daemon
+    ## does not advertise, so requiring the flag is load-bearing rather than
+    ## decorative. The remaining link — that the client asks for this
+    ## particular flag — is the `requiredFeatures` list in
+    ## `requestUserDaemonLeaseReapProviders`, asserted by reading.
+    ##
+    ## An earlier draft stood up a FAKE daemon advertising the pre-change flag
+    ## set. It deadlocked: the fake had to block in `readFrame` to witness
+    ## whether a frame arrived, and then never returned to its poll loop to see
+    ## the stop flag, so `joinThread` hung. A case that can hang the suite is
+    ## worse than one that proves slightly less.
+    let root = scratchRoot("feature-gate")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    discard openStateStore(stateRoot)
+
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      clearLeaseReapProviders()
+      removeDir(root)
+
+    # A current daemon advertises it: the handshake succeeds.
+    block:
+      var conn = connectUserDaemon(config.endpoint,
+        commandMode = "lease-reap-providers",
+        requiredFeatures = ["lease-registry", "lease-reap-providers"])
+      conn.closeIpcConn()
+
+    # ...and the gate is real: an unadvertised feature is refused, by the same
+    # code path, against the same daemon.
+    expect UserDaemonClientError:
+      var conn = connectUserDaemon(config.endpoint,
+        commandMode = "lease-reap-providers",
+        requiredFeatures = ["lease-registry", "no-such-feature-v9"])
+      conn.closeIpcConn()
+
+    # The flag is in the advertised set, which is what the first block above
+    # consumed — asserted directly so a rename cannot silently make the gate
+    # a permanent refusal.
+    check UserDaemonFeatureFlags.contains("lease-reap-providers")

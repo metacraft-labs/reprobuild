@@ -211,8 +211,31 @@ proc mergeHolderDeadlines*(existing: Option[ResourceStateRecord];
   (holders: rec.holders, keepHolders: rec.keepHolders,
    keepHoldersKnown: rec.keepHoldersKnown, effective: rec.effectiveDeadline)
 
+proc carriedProviderArtifact*(existing: Option[ResourceStateRecord];
+                              thisRun: Option[ResourceProviderArtifactRef]):
+    Option[ResourceProviderArtifactRef] =
+  ## Which provider artifact a record being (re)written should carry
+  ## (Ephemeral-State-Leases.md §4.2).
+  ##
+  ## THIS RUN'S ref wins when it has one — it just launched that provider, so
+  ## it is the freshest route anybody has. Otherwise the EXISTING record's ref
+  ## is carried forward, exactly as the lease fields are, and for the same
+  ## reason: a run that reconciled this resource IN-PROCESS has not discovered
+  ## that the provider binary is gone, it merely did not need it. Blanking the
+  ## ref there would silently withdraw the only route a later reap has to an
+  ## out-of-tree record, turning a reapable record into a permanently stuck one
+  ## — and it would do so on the ordinary path, where nobody is looking.
+  if thisRun.isSome:
+    thisRun
+  elif existing.isSome:
+    existing.get.providerArtifact
+  else:
+    none(ResourceProviderArtifactRef)
+
 proc writeUnconsumedStateRecord*(store: StateStore; inst: ResourceInstance;
-                                 binding: ResourceBinding) =
+                                 binding: ResourceBinding;
+                                 providerArtifact =
+                                   none(ResourceProviderArtifactRef)) =
   ## Persist the record of a resource NO consumer leases this run (a plain
   ## resource, or a leased state that is in the graph but unconsumed), with
   ## its lease fields CARRIED FORWARD unchanged from the existing record.
@@ -233,8 +256,8 @@ proc writeUnconsumedStateRecord*(store: StateStore; inst: ResourceInstance;
   ## has never failed on a damaged record, and there is no lease in it to
   ## carry forward that anyone could read.
   var rec = buildStateRecord(inst, binding)
+  var prior = none(ResourceStateRecord)
   if hasStateRecord(store, inst.address):
-    var prior = none(ResourceStateRecord)
     try:
       prior = some(readStateRecord(store, inst.address))
     except IOError, StateStoreCodecError:
@@ -246,6 +269,9 @@ proc writeUnconsumedStateRecord*(store: StateStore; inst: ResourceInstance;
       rec.keepHoldersKnown = p.keepHoldersKnown
       rec.effectiveDeadline = p.effectiveDeadline
       rec.lastRenewed = p.lastRenewed
+  # The provider artifact is carried forward on the same terms as the lease
+  # above — see `carriedProviderArtifact`.
+  rec.providerArtifact = carriedProviderArtifact(prior, providerArtifact)
   writeStateRecord(store, rec)
 
 proc reconcileResources*(desired: seq[ResourceInstance];
@@ -384,7 +410,13 @@ proc reconcileResources*(desired: seq[ResourceInstance];
           effectiveDeadline = merged.effective,
           lastRenewed = now,
           keepHolders = merged.keepHolders,
-          keepHoldersKnown = merged.keepHoldersKnown)
+          keepHoldersKnown = merged.keepHoldersKnown,
+          # This path reconciles IN-PROCESS, so it has no artifact of its own to
+          # record — but an existing record may carry one from a session
+          # reconcile of the same resource, and dropping it here would withdraw
+          # a later reap's only route to it (`carriedProviderArtifact`).
+          providerArtifact = carriedProviderArtifact(existing,
+            none(ResourceProviderArtifactRef)))
       else:
         # Not consumed this run: carry any existing lease forward untouched.
         writeUnconsumedStateRecord(store.get, inst, effective.get)

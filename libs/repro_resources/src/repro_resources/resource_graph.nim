@@ -29,6 +29,8 @@ import repro_project_dsl                 # StateGroupDef / setResourceGraphHarve
 import repro_resources/instance
 import repro_resources/collect           # collectedResources
 import repro_resources/marshal           # (shared attrs marshaller registry via registerExtension)
+import repro_resources/state_store       # ResourceProviderArtifactRef (persisted
+                                         # in the state record from v5 on)
 import repro_resources/protocol          # encodeResourceInstance / decodeResourceInstance / registerResourceProtocolCodecs
 
 # ---------------------------------------------------------------------------
@@ -119,15 +121,16 @@ registerRunEdgeConsumerProvider()
 # resources side.
 # ---------------------------------------------------------------------------
 
-type
-  ResourceProviderArtifactRef* = object
-    ## The provider binary that serves an out-of-tree resource ``typeId`` —
-    ## the CLI-side analog of the daemon reaper's ``LeaseReapProviderArtifact``
-    ## and a strict subset of the engine's ``ProviderArtifactRef`` (the three
-    ## fields a session launch needs). Carried in the resource-graph metadata.
-    binaryPath*: string
-    providerArtifactId*: string
-    workingDir*: string
+## ``ResourceProviderArtifactRef`` — the provider binary that serves an
+## out-of-tree resource ``typeId``, a strict subset of the engine's
+## ``ProviderArtifactRef`` (the three fields a session launch needs) — is
+## defined in ``state_store.nim`` and re-exported from ``repro_resources``.
+## It used to be declared here, as a CLI-side analog of the daemon reaper's
+## own copy; it moved when the STATE RECORD began to persist it
+## (Ephemeral-State-Leases.md §4.2, record v5), because a type carried in the
+## resource-graph metadata, in the store, and in the reap transport must be
+## ONE type: a field added for one reader and not the others is how the
+## materialize side came to carry refs the reap side never saw.
 
 var resourceProviderArtifacts {.threadvar.}: Table[string, ResourceProviderArtifactRef]
   ## typeId -> the provider artifact serving that out-of-tree type. Populated

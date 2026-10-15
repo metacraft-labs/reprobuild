@@ -749,12 +749,13 @@ suite "L3: crash-safe reaper":
     ## NOT the cause of the outage in reprobuild-pm/issues/
     ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md, and this case
     ## does not claim to reproduce it. That daemon swept on the IN-PROCESS
-    ## transport for all 131,882 ticks — `buildLeaseReapTransport` falls back
-    ## to it when no provider artifact is registered, and nothing in the
-    ## shipped tree registers one — where its record had no linked driver
-    ## either and the strict path is still right. This case pins the second,
-    ## independent defect that would have produced the identical symptom in a
-    ## daemon that did have the artifact.
+    ## transport for all 131,882 ticks — the transport falls back to it when no
+    ## provider artifact is known, and at the time nothing in the shipped tree
+    ## could make one known — where its record had no linked driver either and
+    ## the strict path is still right. This case pins the second, independent
+    ## defect that would have produced the identical symptom in a daemon that
+    ## did have the artifact. (Cases 19-21 cover the artifacts a record now
+    ## carries, which is what made the session arm reachable.)
     ##
     ## The two arms want OPPOSITE things and that is the whole point:
     ##
@@ -833,3 +834,614 @@ suite "L3: crash-safe reaper":
     # leaves the record.
     check hasStateRecord(store, "nic0")
     check destroyLog.len == 0
+
+  test "(19) a hybrid session transport reaps IN-TREE records in-process":
+    ## Ephemeral-State-Leases.md §4.2 — the routing is PER RECORD, and that is
+    ## what makes the production feeders safe to add at all.
+    ##
+    ## A transport is chosen once per SWEEP, but a sweep runs over a whole
+    ## store, and one store holds every type the host has leased. Before the
+    ## hybrid gate, the moment anything handed the reaper ONE provider artifact
+    ## the transport became `rtSession` for the ENTIRE sweep, and every in-tree
+    ## record in that store started failing: `resolve` has no artifact for
+    ## `l3.stub`, so it raised and a record that was reaped a tick ago became an
+    ## `rfkUnreapable` finding. Wiring a feeder without this would have traded
+    ## the issue's defect for a worse one.
+    ##
+    ## NON-VACUITY: the resolver RAISES if it is ever asked for the in-tree
+    ## type, so "reaped in-process" cannot be confused with "reaped over a
+    ## session that happened to work", and the in-tree record's destroy is
+    ## witnessed by `destroyLog`, which only the linked stub driver appends to.
+    let store = scratchStore("hybrid-routing")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+
+    # IN-TREE: a real stub-provider record, driver and codec both linked here.
+    materialize(store, "intree", "smoke", delayed(ttl), t0)
+
+    # OUT-OF-TREE: a record of a type this process links nothing for, carrying
+    # its own provider artifact — the v5 route the session arm follows.
+    writeStateRecord(store, ResourceStateRecord(
+      address: "outoftree",
+      typeId: "l3.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @[],
+      identity: "stub:outoftree",
+      present: true,
+      holders: initTable[string, Time](),
+      keepHolders: @[],
+      keepHoldersKnown: true,
+      effectiveDeadline: some(t0),
+      lastRenewed: t0,
+      providerArtifact: some(ResourceProviderArtifactRef(
+        binaryPath: "/nonexistent/l3-provider",
+        providerArtifactId: "l3artifact",
+        workingDir: getCurrentDir()))))
+
+    # The artifacts the sweep derives from its own records: exactly one, for
+    # the out-of-tree type. The in-tree type is absent, which is what sends it
+    # in-process.
+    let derived = providerArtifactsOfRecords(listStateRecords(store))
+    check derived.len == 1
+    check derived[0].typeId == "l3.unregistered"
+    check derived[0].artifact.binaryPath == "/nonexistent/l3-provider"
+
+    # The WITNESS: every artifact the transport actually asked to launch. The
+    # in-tree record must never produce an entry here, and the assertion below
+    # is only worth making because this closure fills it.
+    var launched: seq[string] = @[]
+    let report = reapOnce(store, now = later,
+      transportFromRecords = reapTransportFactory(@[],
+        proc (artifact: ResourceProviderArtifactRef): ProviderHandle =
+          launched.add(artifact.binaryPath)
+          raise newException(ValueError, "L3-SENTINEL would launch " &
+            artifact.binaryPath)))
+
+    # The IN-TREE record was destroyed by the LINKED driver — `destroyLog` is
+    # appended to only by `stubApply`, so this is a witness and not an
+    # inference.
+    check "intree" in destroyLog
+    check not hasStateRecord(store, "intree")
+    check report.reaped.len == 1
+    check report.reaped[0].address == "intree"
+
+    # The OUT-OF-TREE record went to the session arm, which here refuses to
+    # launch — so it is a finding naming the sentinel, NOT the missing-codec
+    # refusal the in-process arm would have produced. That distinction is the
+    # proof it was routed over the session.
+    check report.failed.len == 1
+    check report.failed[0].address == "outoftree"
+    check report.failed[0].reason.contains("L3-SENTINEL")
+    check report.failed[0].reason.contains("/nonexistent/l3-provider")
+    check not report.failed[0].reason.contains("marshaller")
+    check hasStateRecord(store, "outoftree")
+    # The launcher was asked EXACTLY ONCE, for the out-of-tree provider. The
+    # in-tree record never reached it: had the hybrid gate sent `l3.stub` to the
+    # session, this would hold two entries and `destroyLog` would be empty.
+    check launched == @["/nonexistent/l3-provider"]
+
+  test "(20) a registered artifact outranks the one a record carries":
+    ## Ephemeral-State-Leases.md §4.2 resolution order. A recorded binary path
+    ## is a build output: a rebuild or a store garbage collection can leave it
+    ## naming nothing, and the record cannot notice. An artifact supplied by a
+    ## live process — the daemon's registry, fed by a consuming `repro run` —
+    ## came from something launching that provider right now, so it wins.
+    let recorded = ResourceProviderArtifactRef(
+      binaryPath: "/stale/provider", providerArtifactId: "old",
+      workingDir: "/stale")
+    let fresh = ResourceProviderArtifactRef(
+      binaryPath: "/fresh/provider", providerArtifactId: "new",
+      workingDir: "/fresh")
+    let other = ResourceProviderArtifactRef(
+      binaryPath: "/other/provider", providerArtifactId: "other",
+      workingDir: "/other")
+
+    let merged = mergeProviderArtifacts(
+      @[(typeId: "t.a", artifact: fresh)],
+      @[(typeId: "t.a", artifact: recorded), (typeId: "t.b", artifact: other)])
+    # Sorted by typeId, `primary` winning on the collision and `fallback`
+    # supplying the type it does not name.
+    check merged.len == 2
+    check merged[0].typeId == "t.a"
+    check merged[0].artifact.binaryPath == "/fresh/provider"
+    check merged[1].typeId == "t.b"
+    check merged[1].artifact.binaryPath == "/other/provider"
+
+    # An artifact with no binary path cannot launch anything, so it never
+    # enters the merged set — it would otherwise mask a usable fallback with
+    # something guaranteed to fail.
+    let blanked = mergeProviderArtifacts(
+      @[(typeId: "t.a", artifact: ResourceProviderArtifactRef())],
+      @[(typeId: "t.a", artifact: recorded)])
+    check blanked.len == 1
+    check blanked[0].artifact.binaryPath == "/stale/provider"
+
+    # With NO artifacts on either side the transport is the plain in-process
+    # one, so a host that has never materialized an out-of-tree resource pays
+    # nothing and launches nothing.
+    let plain = artifactSessionTransport(@[],
+      proc (artifact: ResourceProviderArtifactRef): ProviderHandle =
+        raise newException(ValueError, "must not be called"))
+    check plain.kind == rtInProcess
+
+  test "(21) a record's provider artifact survives a later write, on all three paths":
+    ## Ephemeral-State-Leases.md §4.2 — the ref is carried forward on the same
+    ## terms as the lease fields.
+    ##
+    ## A run that reconciles the resource without supplying an artifact has not
+    ## discovered that the provider binary is gone; it merely did not need it.
+    ## Blanking the ref there would withdraw the only route a later reap has to
+    ## an out-of-tree record — silently, on the ordinary path, turning a
+    ## reapable record into a permanently stuck one.
+    ##
+    ## `carriedProviderArtifact` HAS THREE CALL SITES and this case covers each
+    ## with an assertion that reddens when THAT site's call is removed:
+    ##
+    ##   * `reconcile.nim` `writeUnconsumedStateRecord` — the not-consumed-this-
+    ##     run write, shared by the in-process and session reconciles;
+    ##   * `reconcile.nim` `reconcileResources` — the LEASED in-process write;
+    ##   * `protocol.nim` `reconcileResourcesViaSession` — the LEASED session
+    ##     write.
+    ##
+    ## TWO WAYS THIS CASE WAS PREVIOUSLY VACUOUS, both fixed here and both worth
+    ## naming because they are easy to reintroduce:
+    ##
+    ##   1. A no-op reconcile WRITES NOTHING. With no `recorded` binding passed,
+    ##      a digest-matching resource decides `rakNoOp`, `effective` stays
+    ##      `none`, and the persist step is skipped entirely — so the record
+    ##      still held the seeded ref no matter what the carry-forward did. Each
+    ##      block below therefore passes `recorded` so the write really happens,
+    ##      and asserts the record was REWRITTEN (`lastRenewed` / a changed
+    ##      field) before asserting the ref survived it.
+    ##   2. Supplying an artifact short-circuits the carry. When this run has
+    ##      its own ref, `carriedProviderArtifact` returns it without consulting
+    ##      the existing record — so a case that passes one proves nothing about
+    ##      carrying. The session block below passes NO artifact for exactly
+    ##      that reason. (It is also why
+    ##      `t_run_consumes_session_store_out_of_tree` does not cover this: its
+    ##      second pass supplies `harvested` again.)
+    let t0 = fromUnix(1_700_000_000)
+    let artifact = ResourceProviderArtifactRef(
+      binaryPath: "/carried/provider", providerArtifactId: "carried",
+      workingDir: getCurrentDir())
+
+    proc seedCarried(store: StateStore): ResourceBinding =
+      ## A materialized `carried` record holding the ref a session reconcile
+      ## would have written, plus the binding a later run must pass as
+      ## `recorded` for its no-op to carry forward (and so to WRITE).
+      ##
+      ## The stub world is cleared first: the three blocks share this process,
+      ## and a world left materialized by the previous one makes this reconcile
+      ## a digest-matching no-op that writes NO record at all — which is the
+      ## same trap that made the old version of this case vacuous.
+      stubWorld = initTable[string, string]()
+      resetDesiredResources()
+      discard stubState("carried", "up")
+      let first = reconcileResources(collectedResources(),
+        store = some(store), now = t0)
+      var seeded = readStateRecord(store, "carried")
+      check seeded.providerArtifact.isNone      # nothing invented it
+      seeded.providerArtifact = some(artifact)
+      seeded.lastRenewed = t0
+      # POISON `identity` so each block's `after.identity == resourceId` is a
+      # real WRITE WITNESS and not a tautology. Site 1 needs this most: it goes
+      # through `writeUnconsumedStateRecord`, which carries `lastRenewed`
+      # forward, so without a field the write must overwrite, all three of its
+      # guard assertions are equally true of an untouched record — and this is
+      # the block whose vacuity was the original defect. `identity` is the right
+      # field: `buildStateRecord` always sets it from the binding, and it is NOT
+      # in the carried-forward list, so a record that still says SENTINEL was
+      # never rewritten.
+      seeded.identity = "SENTINEL-not-rewritten"
+      writeStateRecord(store, seeded)
+      for b in first.bindings:
+        if b.address == "carried":
+          return b
+      raise newException(ValueError, "no binding for 'carried'")
+
+    # ── SITE 1: `writeUnconsumedStateRecord` (not consumed this run) ───────
+    block:
+      let store = scratchStore("carry-unconsumed")
+      let binding = seedCarried(store)
+      resetDesiredResources()
+      discard stubState("carried", "up")
+      discard reconcileResources(collectedResources(), recorded = @[binding],
+        store = some(store), now = t0 + initDuration(minutes = 1))
+      let after = readStateRecord(store, "carried")
+      # The record really WAS rewritten — without this the assertion below
+      # would hold on an untouched record and prove nothing.
+      check after.identity == binding.resourceId
+      check after.present
+      check hasStateRecord(store, "carried")
+      check after.providerArtifact.isSome
+      check after.providerArtifact.get.binaryPath == "/carried/provider"
+      check after.providerArtifact.get.providerArtifactId == "carried"
+
+    # ── SITE 2: `reconcileResources`, LEASED in-process write ─────────────
+    block:
+      let store = scratchStore("carry-leased")
+      let binding = seedCarried(store)
+      resetDesiredResources()
+      discard stubState("carried", "up")
+      discard stubConsumer("carried-c", "probe",
+        consumes = @[leased("carried", "smoke",
+          delayed(initDuration(minutes = 10)))])
+      let now = t0 + initDuration(minutes = 2)
+      discard reconcileResources(collectedResources(), recorded = @[binding],
+        store = some(store), now = now)
+      let after = readStateRecord(store, "carried")
+      # WITNESS that this write happened: the lease was renewed, which only the
+      # leased arm does, and `lastRenewed` moved off the seeded `t0`.
+      check after.lastRenewed == now
+      check after.effectiveDeadline == some(now + initDuration(minutes = 10))
+      check after.providerArtifact.isSome
+      check after.providerArtifact.get.binaryPath == "/carried/provider"
+
+    # ── SITE 3: `reconcileResourcesViaSession`, LEASED session write ───────
+    block:
+      let store = scratchStore("carry-session")
+      let binding = seedCarried(store)
+      resetDesiredResources()
+      discard stubState("carried", "up")
+      discard stubConsumer("carried-c", "probe",
+        consumes = @[leased("carried", "smoke",
+          delayed(initDuration(minutes = 10)))])
+      let now = t0 + initDuration(minutes = 3)
+      # The SESSION reconcile's persist step, driven hermetically: every leaf op
+      # is routed to the LINKED stub driver by the hybrid gate, so no provider
+      # binary is needed, while the write still goes through
+      # `reconcileResourcesViaSession`'s own branch rather than
+      # `reconcileResources`'. The resolver raises if it is ever reached, so
+      # "the ops ran in-process" is witnessed rather than assumed.
+      discard reconcileResourcesViaSession(collectedResources(),
+        proc (typeId: string): ProviderHandle =
+          raise newException(ValueError, "L3-SENTINEL: no session here"),
+        recorded = @[binding], store = some(store), now = now,
+        inProcess = proc (typeId: string): bool = true,
+        providerArtifacts = @[])      # NO ref this run: the carry is the point
+      let after = readStateRecord(store, "carried")
+      check after.lastRenewed == now
+      check after.effectiveDeadline == some(now + initDuration(minutes = 10))
+      check after.providerArtifact.isSome
+      check after.providerArtifact.get.binaryPath == "/carried/provider"
+      check after.providerArtifact.get.providerArtifactId == "carried"
+
+  test "(22) a stale sibling record does not mask a reachable artifact":
+    ## Resolution is per TYPE within a sweep: when two records of one typeId
+    ## name DIFFERENT artifacts, whichever wins is used for BOTH. So picking the
+    ## first by filename let a record from an old build — whose store path has
+    ## since been garbage-collected — mask a sibling carrying a route that still
+    ## works, and the reachable record became permanently unreapable for as long
+    ## as the stale neighbour sat beside it. Every tick would report it, and the
+    ## reported reason would name a path that is simply not there.
+    ##
+    ## NON-VACUITY: the stale path sorts FIRST by record filename (`aaa-` before
+    ## `zzz-`), so first-record-wins would pick it. The reachable artifact is a
+    ## file this test creates, so `fileExists` is answering about a real file,
+    ## and the witness records which path the transport actually asked to
+    ## launch.
+    let store = scratchStore("stale-sibling")
+    let t0 = fromUnix(1_700_000_000)
+    let later = t0 + initDuration(minutes = 11)
+
+    # A real file to stand in for a provider binary that is still installed.
+    # Never executed — the launcher closure refuses before any spawn — so its
+    # contents do not matter, only that it EXISTS.
+    let liveProvider = store.root / "live-provider"
+    writeFile(liveProvider, "#!/bin/sh\nexit 0\n")
+    let stalePath = store.root / "collected-away-provider"
+    check not fileExists(stalePath)
+
+    proc outOfTreeRecord(address, binaryPath: string): ResourceStateRecord =
+      ResourceStateRecord(
+        address: address,
+        typeId: "l3.unregistered",
+        determinism: rdVolatile,
+        attrsTypeId: "l3.unregistered",
+        attrsJson: "\x01\x00\x00\x00\x00\x00",
+        dependsOn: @[],
+        identity: "stub:" & address,
+        present: true,
+        holders: initTable[string, Time](),
+        keepHolders: @[],
+        keepHoldersKnown: true,
+        effectiveDeadline: some(t0),
+        lastRenewed: t0,
+        providerArtifact: some(ResourceProviderArtifactRef(
+          binaryPath: binaryPath,
+          providerArtifactId: "id-" & address,
+          workingDir: getCurrentDir())))
+
+    # The STALE one sorts first; the reachable one second.
+    writeStateRecord(store, outOfTreeRecord("aaa-stale", stalePath))
+    writeStateRecord(store, outOfTreeRecord("zzz-live", liveProvider))
+
+    # The derived set prefers the artifact that EXISTS, for both records.
+    let derived = providerArtifactsOfRecords(listStateRecords(store))
+    check derived.len == 1
+    check derived[0].typeId == "l3.unregistered"
+    check derived[0].artifact.binaryPath == liveProvider
+
+    var launched: seq[string] = @[]
+    let report = reapOnce(store, now = later,
+      transportFromRecords = reapTransportFactory(@[],
+        proc (artifact: ResourceProviderArtifactRef): ProviderHandle =
+          launched.add(artifact.binaryPath)
+          raise newException(ValueError, "L3-SENTINEL would launch " &
+            artifact.binaryPath)))
+
+    # Both records were routed to the LIVE provider, never to the collected
+    # path. (The sentinel refuses the launch, so both come back as findings —
+    # which path the sweep chose is the property under test.)
+    check launched.len == 2
+    for path in launched:
+      check path == liveProvider
+    check report.failed.len == 2
+    for f in report.failed:
+      check f.reason.contains(liveProvider)
+      check not f.reason.contains("collected-away-provider")
+
+    # When NO candidate exists, the first launchable one is still used, so the
+    # finding names a concrete path an operator can go and look for rather than
+    # saying only that the type is unreachable.
+    let store2 = scratchStore("stale-only")
+    let gone = store2.root / "also-gone"
+    writeStateRecord(store2, outOfTreeRecord("aaa-stale", stalePath))
+    writeStateRecord(store2, outOfTreeRecord("zzz-also-stale", gone))
+    let derived2 = providerArtifactsOfRecords(listStateRecords(store2))
+    check derived2.len == 1
+    check derived2[0].artifact.binaryPath == stalePath   # first, deterministic
+
+  test "(23) a RELATIVE recorded binaryPath is no route at all":
+    ## `openProviderSession` launches with `poUsePath`, so a non-absolute
+    ## `binaryPath` is resolved through the ambient `PATH` of whatever process
+    ## is sweeping. The field is meant to name one specific build output by its
+    ## own path; `PATH` resolution instead makes the binary that runs a function
+    ## of the sweeper's environment, and for the system-scoped store the writer
+    ## and the daemon need not even be the same user.
+    ##
+    ## So such a ref is treated as NO ROUTE: the record is routed in-process —
+    ## where, having no linked driver or codec either, it becomes the §4.5
+    ## finding — rather than launching whatever `PATH` happens to resolve.
+    ##
+    ## NON-VACUITY: the launcher closure records every artifact it is asked
+    ## for, so "nothing was launched" is a witness rather than an absence of
+    ## evidence.
+    let store = scratchStore("relative-path")
+    let t0 = fromUnix(1_700_000_000)
+    let later = t0 + initDuration(minutes = 11)
+
+    writeStateRecord(store, ResourceStateRecord(
+      address: "relative",
+      typeId: "l3.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @[],
+      identity: "stub:relative",
+      present: true,
+      holders: initTable[string, Time](),
+      keepHolders: @[],
+      keepHoldersKnown: true,
+      effectiveDeadline: some(t0),
+      lastRenewed: t0,
+      providerArtifact: some(ResourceProviderArtifactRef(
+        binaryPath: "sh",                  # resolvable on PATH, and refused
+        providerArtifactId: "relative-id",
+        workingDir: getCurrentDir()))))
+
+    check not isLaunchableArtifact(ResourceProviderArtifactRef(
+      binaryPath: "sh", providerArtifactId: "x"))
+    check not isLaunchableArtifact(ResourceProviderArtifactRef(
+      binaryPath: "", providerArtifactId: "x"))
+    check isLaunchableArtifact(ResourceProviderArtifactRef(
+      binaryPath: "/usr/bin/sh", providerArtifactId: "x"))
+    # ...and an EMPTY providerArtifactId is unlaunchable however good the path
+    # is, because that field is the provider-session POOL KEY: two refs naming
+    # different absolute binaries with an empty id would collapse to one key,
+    # the first child launched would serve both types, and the second type's
+    # finding would carry the first provider's error. See case (24).
+    check not isLaunchableArtifact(ResourceProviderArtifactRef(
+      binaryPath: "/usr/bin/sh", providerArtifactId: ""))
+
+    # The record contributes NO artifact, so the sweep's transport for this
+    # store is the plain in-process one.
+    check providerArtifactsOfRecords(listStateRecords(store)).len == 0
+
+    var launched: seq[string] = @[]
+    let report = reapOnce(store, now = later,
+      transportFromRecords = reapTransportFactory(@[],
+        proc (artifact: ResourceProviderArtifactRef): ProviderHandle =
+          launched.add(artifact.binaryPath)
+          raise newException(ValueError, "L3-SENTINEL must not be reached")))
+
+    check launched.len == 0                 # nothing was launched, witnessed
+    check report.reaped.len == 0
+    check report.failed.len == 1
+    check report.failed[0].address == "relative"
+    check report.failed[0].kind == rfkUnreapable
+    # It came back through the IN-PROCESS arm: the marshaller refusal and its
+    # §4.5 remedy, not a session-launch error.
+    check report.failed[0].reason.contains("marshaller")
+    check not report.failed[0].reason.contains("L3-SENTINEL")
+
+    # THE REMEDY MUST DESCRIBE THIS STATE, not the no-artifact one. The record
+    # DOES name an artifact, so "the record names no provider artifact" would
+    # be a false statement, and "re-materialize it, which records the artifact"
+    # would be useless advice — the same relative path would be recorded again.
+    # So the reason names the recorded path, the requirement it fails, and who
+    # has to change.
+    let reason = report.failed[0].reason
+    check reason.contains("cannot be launched")
+    check reason.contains("binaryPath 'sh'")
+    check reason.contains("not an absolute path")
+    # The remedy says what to re-record it WITH, and who has to do it. (The
+    # wording moved from "the provider's ABSOLUTE path" to the general
+    # "launchable provider artifact" when a second unlaunchability criterion —
+    # the empty pool key of case (24) — joined the first; the sentence above
+    # is what names which of the two this record fails.)
+    check reason.contains("launchable provider artifact")
+    check reason.contains("the producer")
+    check not reason.contains("names no provider artifact")
+    check not reason.contains("which records the artifact in the record")
+    # The by-hand route is still offered, carrying this store's root.
+    check reason.contains("repro reap --once --state-root=" & store.root)
+
+    # ...and the OTHER state still gets the other remedy, so this is a genuine
+    # split rather than one message replacing the other. Same store, a record
+    # with NO ref at all.
+    writeStateRecord(store, ResourceStateRecord(
+      address: "no-ref",
+      typeId: "l3.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @[],
+      identity: "stub:no-ref",
+      present: true,
+      holders: initTable[string, Time](),
+      keepHolders: @[],
+      keepHoldersKnown: true,
+      effectiveDeadline: some(t0),
+      lastRenewed: t0,
+      providerArtifact: none(ResourceProviderArtifactRef)))
+    let both = reapOnce(store, now = later)
+    check both.failed.len == 2
+    for f in both.failed:
+      if f.address == "no-ref":
+        check f.reason.contains("names no provider artifact")
+        check f.reason.contains("which records the artifact in the record")
+        check not f.reason.contains("cannot be launched")
+      else:
+        check f.reason.contains("cannot be launched")
+
+    # THE THIRD STATE: a record whose ref is perfectly LAUNCHABLE, swept on a
+    # PINNED in-process transport — which is what `reapOnce(store, now)` is.
+    # Nothing is wrong with this record, so it must get neither of the other
+    # two remedies: "names no provider artifact" would be false, and telling
+    # its producer to re-record a good artifact would send the operator to fix
+    # something that is already right. The remedy is to stop pinning.
+    writeStateRecord(store, ResourceStateRecord(
+      address: "good-ref",
+      typeId: "l3.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @[],
+      identity: "stub:good-ref",
+      present: true,
+      holders: initTable[string, Time](),
+      keepHolders: @[],
+      keepHoldersKnown: true,
+      effectiveDeadline: some(t0),
+      lastRenewed: t0,
+      providerArtifact: some(ResourceProviderArtifactRef(
+        binaryPath: getCurrentDir() / "build" / "bin" / "repro",
+        providerArtifactId: "good-id",
+        workingDir: getCurrentDir()))))
+    let pinned = reapOnce(store, now = later, inProcessTransport())
+    var sawGood = false
+    for f in pinned.failed:
+      if f.address != "good-ref":
+        continue
+      sawGood = true
+      check f.reason.contains("did not use the provider artifact")
+      check f.reason.contains("in-process transport")
+      check f.reason.contains("pinned")
+      check not f.reason.contains("names no provider artifact")
+      check not f.reason.contains("cannot be launched")
+      check not f.reason.contains("the producer that wrote this record")
+    check sawGood
+
+    # And the records survive for a sweep that can do better.
+    check hasStateRecord(store, "relative")
+    check hasStateRecord(store, "no-ref")
+
+    # `mergeProviderArtifacts` drops it on BOTH sides, so a relative path in
+    # the daemon's registry cannot sneak in either.
+    let rel = ResourceProviderArtifactRef(binaryPath: "sh",
+      providerArtifactId: "relative-id")
+    check mergeProviderArtifacts(@[(typeId: "t.a", artifact: rel)], @[]).len == 0
+    check mergeProviderArtifacts(@[], @[(typeId: "t.a", artifact: rel)]).len == 0
+
+  test "(24) an empty providerArtifactId is no route: it would alias the pool":
+    ## `providerArtifactId` is the PROVIDER-SESSION POOL KEY.
+    ## `providerSessionKey` is built from it, `openProviderSession` REUSES an
+    ## existing session on a key match, `closeProviderSession` matches on it,
+    ## and the daemon's idleness bookkeeping is keyed on it. Nothing in the reap
+    ## lane constrains the field, so two records of DIFFERENT types naming
+    ## DIFFERENT absolute binaries with an empty id would collapse to ONE pool
+    ## key: the first child launched would serve both, the second binary would
+    ## never run, and the second type's §4.5 finding would carry the FIRST
+    ## provider's error message — a wrong answer that reads like a real one.
+    ##
+    ## So an empty id is unlaunchable, exactly like a relative path, and both
+    ## records are routed in-process and reported instead.
+    ##
+    ## NON-VACUITY: the launcher closure records every artifact it is asked to
+    ## launch, so "neither binary was launched" is a witness; and the two
+    ## records name DIFFERENT existing files, so the aliasing this prevents
+    ## would have been observable as one path serving both.
+    let store = scratchStore("empty-artifact-id")
+    let t0 = fromUnix(1_700_000_000)
+    let later = t0 + initDuration(minutes = 11)
+
+    # Two real files, so `fileExists` is answering about real binaries and the
+    # refusal cannot be mistaken for "the path is missing".
+    let binA = store.root / "provider-a"
+    let binB = store.root / "provider-b"
+    writeFile(binA, "#!/bin/sh\nexit 0\n")
+    writeFile(binB, "#!/bin/sh\nexit 0\n")
+
+    proc aliasedRecord(address, typeId, binaryPath: string):
+        ResourceStateRecord =
+      ResourceStateRecord(
+        address: address, typeId: typeId, determinism: rdVolatile,
+        attrsTypeId: typeId, attrsJson: "\x01\x00\x00\x00\x00\x00",
+        dependsOn: @[], identity: "stub:" & address, present: true,
+        holders: initTable[string, Time](), keepHolders: @[],
+        keepHoldersKnown: true,
+        effectiveDeadline: some(t0), lastRenewed: t0,
+        providerArtifact: some(ResourceProviderArtifactRef(
+          binaryPath: binaryPath,
+          providerArtifactId: "",        # the hazard
+          workingDir: getCurrentDir())))
+
+    writeStateRecord(store, aliasedRecord("alias-a", "l3.aliasA", binA))
+    writeStateRecord(store, aliasedRecord("alias-b", "l3.aliasB", binB))
+
+    # Neither ref is a route, so the sweep derives NO artifacts and the
+    # transport for this store is the plain in-process one.
+    check providerArtifactsOfRecords(listStateRecords(store)).len == 0
+
+    var launched: seq[string] = @[]
+    let report = reapOnce(store, now = later,
+      transportFromRecords = reapTransportFactory(@[],
+        proc (artifact: ResourceProviderArtifactRef): ProviderHandle =
+          launched.add(artifact.binaryPath)
+          raise newException(ValueError, "L3-SENTINEL must not be reached")))
+
+    check launched.len == 0               # witnessed: nothing was launched
+    check report.reaped.len == 0
+    check report.failed.len == 2
+    for f in report.failed:
+      check f.kind == rfkUnreapable
+      # In-process arm, and the remedy names the pool-key requirement rather
+      # than the path (which is absolute and really exists here).
+      check f.reason.contains("marshaller")
+      check f.reason.contains("providerArtifactId is empty")
+      check f.reason.contains("POOL KEY")
+      check not f.reason.contains("is not an absolute path")
+      check not f.reason.contains("names no provider artifact")
+    check hasStateRecord(store, "alias-a")
+    check hasStateRecord(store, "alias-b")
+
+    # `mergeProviderArtifacts` drops such a ref on both sides too, so an
+    # empty id cannot enter through the daemon's registry either.
+    let noId = ResourceProviderArtifactRef(
+      binaryPath: binA, providerArtifactId: "")
+    check mergeProviderArtifacts(@[(typeId: "t.a", artifact: noId)], @[]).len == 0
+    check mergeProviderArtifacts(@[], @[(typeId: "t.a", artifact: noId)]).len == 0

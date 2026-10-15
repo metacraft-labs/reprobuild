@@ -14650,6 +14650,32 @@ type
     renewedGroups*: seq[string]           ## group addresses a renew was forwarded for
     missingGroups*: seq[string]           ## consumed names with no ``stateGroup`` / no members
     daemonSent*: seq[string]              ## group addresses whose renew reached a daemon
+    startReaped*: seq[string]
+      ## Ephemeral-State-Leases §4.3 fallback (a): the addresses the
+      ## opportunistic sweep at the START of this reconcile destroyed, before
+      ## anything was materialized. Observational — the sweep is best-effort
+      ## and its findings belong to the daemon tick and ``repro reap`` — but
+      ## carried so a test can see that fallback (a) ran at all, which is
+      ## otherwise invisible: a store that had nothing due looks exactly like a
+      ## sweep that never happened.
+    startReapFindings*: seq[string]
+      ## What the §4.3 (a) sweep could not do, rendered by the same
+      ## ``leaseReapFindings`` the daemon tick logs through — so a record this
+      ## sweep quarantined, left foreign, could not read, or could not destroy
+      ## is reported in one vocabulary wherever the sweep ran.
+      ##
+      ## CARRYING THESE OUT IS NOT OPTIONAL. ``reapOnce`` QUARANTINES a corrupt
+      ## record as a side effect of scanning, so a sweep whose report is
+      ## discarded moves a record aside and loses the finding §4.4 requires —
+      ## the bytes are preserved but nothing says the resource they described
+      ## may now be leaked. The caller prints these; see
+      ## ``runReproRunCommand``.
+    startReapError*: string
+      ## Non-empty when the §4.3 (a) sweep itself failed. Returned rather than
+      ## raised: this is an OPPORTUNISTIC reap of state belonging to lapsed
+      ## leases, and failing the run over it would make an unrelated stale
+      ## record block a command that was going to materialize its own state
+      ## anyway. It must still be PRINTED — see ``runReproRunCommand``.
 
 proc buildStateGroupDesired*(lease: RunEdgeLease;
                              runEdgeName: string;
@@ -14732,6 +14758,9 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
                                    resources: seq[ResourceInstance];
                                    groups: seq[StateGroupDef];
                                    store: StateStore;
+                                   providerArtifacts: openArray[
+                                     tuple[typeId: string;
+                                           artifact: ResourceProviderArtifactRef]];
                                    scope: DaemonLeaseScope = dlsUser;
                                    endpoint = defaultUserDaemonEndpoint();
                                    now: Time = getTime();
@@ -14777,6 +14806,70 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ## discovery the reaper transport uses). When a group has an out-of-tree
   ## member but no ``sessionResolver`` is available, reconciliation fails:
   ## required state cannot be treated as an optional optimization.
+  ##
+  ## ``providerArtifacts`` (the harvested per-typeId refs) is REQUIRED, with no
+  ## default, and that is deliberate — do not "tidy" a ``= @[]`` back in. The
+  ## whole production value of the §4.2 reap route rests on this one argument
+  ## being passed at the one call site that has the refs
+  ## (``runReproRunCommand``): omit it and every record this bridge writes for
+  ## an out-of-tree member names no way back to the provider that can destroy
+  ## it, the daemon falls back to in-process linking it does not have, and
+  ## nothing anywhere fails — the exact silent regression
+  ## reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md
+  ## records. A default would make that regression a deletion of one argument;
+  ## without one it is a compile error, which is a stronger guarantee than any
+  ## assertion. A caller with genuinely no out-of-tree members passes ``@[]``
+  ## and says so.
+  ##
+  ## It does two things here, both from Ephemeral-State-Leases.md §4.2/§4.3:
+  ##
+  ##   1. it is PERSISTED into each record this reconcile writes over a session,
+  ##      so a later reaper — the daemon tick, ``repro reap``, or the sweep in
+  ##      (2) — can open a session to that provider knowing only the store;
+  ##   2. it gives the §4.3 fallback (a) sweep below the same reach, so the
+  ##      no-daemon path can actually destroy an out-of-tree record rather than
+  ##      only report that it cannot.
+  #
+  # §4.3 fallback (a): "every `repro` reconcile opportunistically reaps expired
+  # records at start (cheap, bounded)". THIS is that reconcile — the only
+  # production path that reconciles leased state against the store — and until
+  # now nothing called the hook, so fallback (a) was a promise the spec made and
+  # the product did not keep (the second half of
+  # reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md).
+  #
+  # ONCE, BEFORE THE LOOP, not once per consumed group: it is a whole-store
+  # sweep, so running it per group would re-scan the store N times to find
+  # nothing new. Bounded to that one scan, `force = false` (it must never reap a
+  # state still under lease — including the ones this run is about to consume),
+  # and wrapped: see `startReapError`.
+  var reapPool: ProviderSessionPool = nil
+  try:
+    try:
+      let report = reapExpiredAtReconcileStart(store, now,
+        transportFromRecords = reapTransportFactory(providerArtifacts,
+          proc (artifact: ResourceProviderArtifactRef): ProviderHandle =
+            if reapPool == nil:
+              reapPool = newProviderSessionPool()
+            reapPool.openProviderSession(ProviderArtifactRef(
+                binaryPath: artifact.binaryPath,
+                providerArtifactId: artifact.providerArtifactId,
+                workingDir: artifact.workingDir),
+              defaultSessionPolicy(), reapEngineHello())))
+      for ev in report.reaped:
+        result.startReaped.add(ev.address)
+      # Everything the sweep could NOT do, in the daemon's own vocabulary. A
+      # discarded report is how a quarantined record becomes invisible — the
+      # sweep moved it aside and only the caller can say so.
+      for finding in leaseReapFindings(report):
+        result.startReapFindings.add(finding.line)
+    except CatchableError as err:
+      result.startReapError = err.msg
+  finally:
+    # Closed before the materialize loop opens its own sessions, so a reap
+    # session is never left alive for the duration of the run.
+    if reapPool != nil:
+      try: reapPool.closeAll() except CatchableError: discard
+
   for lease in consumes:
     let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
     if desired.len == 0:
@@ -14797,6 +14890,11 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
             "' has no provider session for its out-of-tree resources")
         reconcileResourcesViaSession(desired, sessionResolver,
           store = some(store), now = now,
+          # The harvested refs are PERSISTED with each record written for a
+          # type they name, so the reaper can reach that provider from the
+          # store alone (§4.2). The synthetic consumer, routed in-process
+          # below, is not in this set and so records no artifact.
+          providerArtifacts = providerArtifacts,
           inProcess = proc (typeId: string): bool =
             # Hybrid routing (spec §3.2): the always-linked synthetic run-edge
             # consumer (registered in THIS process, no provider binary) runs
@@ -14830,7 +14928,10 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
 
 proc runEdgeSessionEngineHello(): EngineHello =
   ## The engine handshake ``repro run`` opens out-of-tree member sessions with
-  ## — the CLI analog of ``leaseReapEngineHello``.
+  ## — the MATERIALIZE-side analog of ``reaper.nim``'s ``reapEngineHello``.
+  ## Deliberately a different one: the capability and lock-slice names say
+  ## which lane opened the session, so a provider's own log distinguishes a
+  ## run-edge materialize from a reap.
   EngineHello(
     protocolVersion: ProviderProtocolVersion,
     engineCapabilities: @["named-run-edge-consumes"],
@@ -14977,10 +15078,55 @@ proc runReproRunCommand(args: openArray[string];
           defer: (try: sessionPool.closeAll() except CatchableError: discard)
           let sessionResolver = buildRunEdgeSessionResolver(
             resolution.providerArtifacts, sessionPool)
+          # Ephemeral-State-Leases §4.2, the FRESH half of the destroy-transport
+          # artifact resolution: hand the running daemon the artifacts for the
+          # types this run is about to materialize, so its next wall-clock tick
+          # can destroy them over a launched provider session instead of falling
+          # back to in-process linking it does not have. Best-effort by
+          # construction — the same refs are persisted with each record below,
+          # which is what makes the reap work with no daemon or after a restart,
+          # so a daemon that is absent or asleep costs this run nothing.
+          #
+          # WHAT IS EXECUTED BY A TEST AND WHAT IS NOT: the client/daemon halves
+          # of this call are covered end-to-end by
+          # `libs/repro_daemon_core/tests/t_l4_daemon_leases.nim` cases (m)-(o)
+          # — body codec, a real frame over the real IPC stack reaching a real
+          # daemon's registry, and the no-daemon no-op. THIS call site (building
+          # the request from `resolution.providerArtifacts`) is reached only by
+          # a `repro run` of a run-edge whose consumed group has an out-of-tree
+          # member, which needs a compiled out-of-tree provider in a project
+          # recipe; it is covered by reading.
+          if resolution.providerArtifacts.len > 0:
+            var providers: seq[DaemonLeaseReapProvider] = @[]
+            for pa in resolution.providerArtifacts:
+              providers.add(DaemonLeaseReapProvider(
+                typeId: pa.typeId,
+                binaryPath: pa.artifact.binaryPath,
+                providerArtifactId: pa.artifact.providerArtifactId,
+                workingDir: pa.artifact.workingDir))
+            discard registerLeaseReapProvidersBestEffort(
+              DaemonLeaseReapProvidersRequest(scope: dlsUser,
+                providers: providers))
           let bridge = reconcileConsumedStateGroups(
             resolution.entry.consumes, resolution.entry.name,
             resolution.resources, resolution.groups, store,
+            resolution.providerArtifacts,
             sessionResolver = sessionResolver)
+          # §4.3 (a)/§4.4: what the start-of-reconcile sweep could not do.
+          # NON-FATAL — it swept state belonging to LAPSED leases, none of
+          # which this run asked for, so a stale record someone else left must
+          # not change this command's exit code. But it must not be SILENT
+          # either: that sweep quarantines a corrupt record as it scans, and a
+          # quarantined record means the resource it described may now be
+          # leaked with nothing naming its address. Printing is the only place
+          # an operator can learn that, since the reap did not come from a
+          # daemon with a log.
+          for finding in bridge.startReapFindings:
+            stderr.writeLine("repro run: lease reap: " & finding)
+          if bridge.startReapError.len > 0:
+            stderr.writeLine("repro run: lease reap: the opportunistic sweep " &
+              "at reconcile start failed: " & bridge.startReapError &
+              " (continuing; this run's own state is reconciled below)")
           for missing in bridge.missingGroups:
             stderr.writeLine("repro run: error: run-edge '" &
               resolution.entry.name & "' requires leased state group '" & missing &

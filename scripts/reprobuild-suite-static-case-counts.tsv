@@ -189,7 +189,7 @@ libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
 libs/repro_daemon_core/tests/t_daemon_launchd_label.nim	nim	12
 libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	12
-libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	12
+libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	18
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
@@ -536,11 +536,11 @@ libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_l1_state_store.nim	nim	7
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	13
-libs/repro_resources/tests/t_l3_reaper.nim	nim	19
+libs/repro_resources/tests/t_l3_reaper.nim	nim	25
 libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4
-libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim	nim	12
+libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim	nim	18
 libs/repro_selfhost/tests/t_removing_the_pin_makes_the_version_collectable.nim	nim	7
 libs/repro_selfhost/tests/t_self_store_root_matches_the_store.nim	nim	7
 libs/repro_selfhost/tests/t_the_bootstrap_hands_over_only_to_a_different_pin.nim	nim	10
@@ -925,7 +925,7 @@ tests/e2e/local-build-engine/t_e2e_provider_graph_tracks_binary.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	nim	2
 tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim	nim	2
 tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim	nim	3
-tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	nim	2
+tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	nim	3
 tests/e2e/local-build-engine/t_e2e_repro_run_qualified_and_ambiguous.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_run_unknown_and_nonrunnable.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim	nim	1
@@ -1348,6 +1348,7 @@ tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
 tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	3
 tests/integration/t_leaked_instance_is_reaped.nim	nim	53
 tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim	nim	1
+tests/integration/t_lease_reap_session_transport_is_reachable_from_production.nim	nim	4
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
 tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim	nim	1
 tests/integration/t_levelless_catalog_selection_is_unchanged.nim	nim	1
@@ -1566,7 +1567,7 @@ tests/integration/t_reproos_uki_through_the_cvm_path.nim	nim	8
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
 tests/integration/t_reseal_on_generation_switch.nim	nim	4
 tests/integration/t_rp1_provider_compile_edge_materializes.nim	nim	1
-tests/integration/t_rp2_provider_session_invoke.nim	nim	3
+tests/integration/t_rp2_provider_session_invoke.nim	nim	4
 tests/integration/t_rp3_bind_deps_and_sharing.nim	nim	3
 tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim	nim	1
 tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim	nim	1
@@ -1946,7 +1947,7 @@ tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	4
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_relocation_move_ordering.nim	nim	10
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
-tests/unit/t_run_consumes.nim	nim	6
+tests/unit/t_run_consumes.nim	nim	10
 tests/unit/t_runner_closes_merged_pipes_once.nim	nim	4
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11

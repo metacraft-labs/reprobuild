@@ -671,6 +671,32 @@ proc closeAll*(pool: ProviderSessionPool) =
     closeSession(session)
   pool.sessions = @[]
 
+proc closeProviderSession*(pool: ProviderSessionPool;
+                           providerArtifactId: string): bool =
+  ## Tear down just the session(s) for one ``providerArtifactId`` and drop them
+  ## from the pool, leaving every other session live. Returns true if anything
+  ## was closed.
+  ##
+  ## WHY A SINGLE-SESSION CLOSE EXISTS BESIDE ``closeAll``. An engine run ends
+  ## all at once, so ``closeAll`` is the whole lifetime policy it needs. A
+  ## LONG-LIVED pool does not: the Ephemeral-State-Leases reaper (§4.2) keeps
+  ## one pool for the daemon's life and must evict the child for a provider the
+  ## store has stopped referencing — a rebuilt provider gets a new
+  ## content-addressed id every time — WITHOUT dropping the sessions its next
+  ## tick still wants. Expressed as ``closeAll``, that eviction had to discard
+  ## every session, which made a daemon reaping two providers with
+  ## non-simultaneous deadlines relaunch both on every other tick.
+  ##
+  ## Idempotent: an id with no session returns false and changes nothing.
+  var kept: seq[ProviderSession] = @[]
+  for session in pool.sessions:
+    if session.providerArtifactId == providerArtifactId:
+      closeSession(session)
+      result = true
+    else:
+      kept.add(session)
+  pool.sessions = kept
+
 proc sessionCount*(pool: ProviderSessionPool): int =
   ## Number of live sessions in the pool (for reuse observability).
   for session in pool.sessions:
