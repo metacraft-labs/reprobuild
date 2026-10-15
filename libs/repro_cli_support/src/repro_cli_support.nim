@@ -65892,6 +65892,7 @@ type
     sharedBarePath*: string
     barePresent*: bool
     wired*: bool
+    verdict*: string
     rewired*: bool
     # RA-15 maintenance fields (populated for the ``gc`` verb).
     maintenanceRan*: bool
@@ -65928,6 +65929,7 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["sharedBarePath"] = %entry.sharedBarePath
     obj["barePresent"] = %entry.barePresent
     obj["wired"] = %entry.wired
+    obj["verdict"] = %entry.verdict
     obj["rewired"] = %entry.rewired
     obj["maintenanceRan"] = %entry.maintenanceRan
     obj["looseBefore"] = %entry.looseBefore
@@ -65984,6 +65986,8 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       " bare=" & entry.sharedBarePath &
       " present=" & $entry.barePresent &
       " wired=" & $entry.wired
+    if entry.verdict.len > 0:
+      line.add(" verdict=" & entry.verdict)
     if report.verb == "rewire":
       line.add(" rewired=" & $entry.rewired)
     if report.verb == "gc":
@@ -66129,6 +66133,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     entry.sharedBarePath = info.sharedBarePath
     entry.barePresent = info.barePresent
     entry.wired = info.wired
+    entry.verdict = info.verdict
 
     if parsed.verb == "rewire":
       let repoAbs = parsed.workspaceRoot / repo.path

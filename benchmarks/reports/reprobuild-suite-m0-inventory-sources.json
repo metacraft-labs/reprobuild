@@ -37378,7 +37378,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_shared_bare_refresh_keeps_objects_borrowers_reference.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40380,7 +40380,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_shared_clones_list_and_rewire.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

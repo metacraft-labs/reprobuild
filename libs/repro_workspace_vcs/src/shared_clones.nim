@@ -2722,6 +2722,109 @@ proc maintainSharedBare*(gitBin, barePath: string;
 
 # ---- inspection (the `shared-clones list` surface) -------------------------
 
+proc inspectSharedBareVerdict*(barePath: string): string =
+  ## Directly inspect the bare repository's git config at ``barePath / "config"``
+  ## without spawning git subprocesses.
+  ##
+  ## Verdicts:
+  ##   - "no-bare" when not looksLikeGitDir(barePath) or config does not exist
+  ##   - "ok" when both the fetch refspec and all safety keys are present
+  ##   - "refspec-without-safety" when refspec is present but safety keys are not
+  ##   - "safety-without-refspec" when safety keys are present but refspec is not
+  ##   - "unconfigured" when neither is present
+  if not looksLikeGitDir(barePath):
+    return "no-bare"
+  let configPath = barePath / "config"
+  if not fileExists(configPath):
+    return "no-bare"
+
+  var content: string
+  try:
+    content = readFile(configPath)
+  except CatchableError:
+    return "no-bare"
+
+  var currentSection = ""
+  var fetchValues: seq[string] = @[]
+  var gcAuto = ""
+  var maintAuto = ""
+  var maintStrategy = ""
+  var gcWriteCommitGraph = ""
+  var fetchWriteCommitGraph = ""
+  var gcPruneExpire = ""
+
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#") or line.startsWith(";"):
+      continue
+    if line.startsWith("[") and line.endsWith("]"):
+      let inside = line[1 .. ^2].strip()
+      let quoteStart = inside.find('"')
+      if quoteStart >= 0:
+        let quoteEnd = inside.rfind('"')
+        let sec = inside[0 ..< quoteStart].strip().toLowerAscii
+        let subsec = if quoteEnd > quoteStart:
+                       inside[quoteStart + 1 ..< quoteEnd]
+                     else:
+                       inside[quoteStart + 1 .. ^1]
+        currentSection = sec & "." & subsec.toLowerAscii
+      else:
+        currentSection = inside.toLowerAscii
+    else:
+      let eqIdx = line.find('=')
+      if eqIdx >= 0:
+        let k = line[0 ..< eqIdx].strip().toLowerAscii
+        var v = line[eqIdx + 1 .. ^1].strip()
+        var commentIdx = -1
+        for i in 0 ..< v.len:
+          if (v[i] == '#' or v[i] == ';') and i > 0 and v[i - 1] in Whitespace:
+            commentIdx = i
+            break
+        if commentIdx >= 0:
+          v = v[0 ..< commentIdx].strip()
+        if v.len >= 2 and v.startsWith("\"") and v.endsWith("\""):
+          v = v[1 .. ^2]
+        let fullKey = if currentSection.len > 0: currentSection & "." & k else: k
+        case fullKey
+        of "remote.origin.fetch":
+          fetchValues.add(v)
+        of "gc.auto":
+          gcAuto = v
+        of "maintenance.auto":
+          maintAuto = v
+        of "maintenance.strategy":
+          maintStrategy = v
+        of "gc.writecommitgraph":
+          gcWriteCommitGraph = v
+        of "fetch.writecommitgraph":
+          fetchWriteCommitGraph = v
+        of "gc.pruneexpire":
+          gcPruneExpire = v
+        else:
+          discard
+
+  var hasRefspec = false
+  for f in fetchValues:
+    if f == SharedBareFetchRefspec or f.contains(SharedBareFetchRefspec):
+      hasRefspec = true
+      break
+
+  let hasSafety = gcAuto == "0" and
+    maintAuto.toLowerAscii == "false" and
+    maintStrategy.toLowerAscii == "none" and
+    gcWriteCommitGraph.toLowerAscii == "false" and
+    fetchWriteCommitGraph.toLowerAscii == "false" and
+    gcPruneExpire.len > 0 and gcPruneExpire.toLowerAscii != "now"
+
+  if hasRefspec and hasSafety:
+    "ok"
+  elif hasRefspec and not hasSafety:
+    "refspec-without-safety"
+  elif not hasRefspec and hasSafety:
+    "safety-without-refspec"
+  else:
+    "unconfigured"
+
 type
   SharedCloneRepoInfo* = object
     ## Per-repo wiring view used by ``repro workspace shared-clones list``.
@@ -2730,6 +2833,7 @@ type
     sharedBarePath*: string
     barePresent*: bool
     wired*: bool
+    verdict*: string
 
 proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
                         fetchUrl: string): SharedCloneRepoInfo =
@@ -2741,4 +2845,6 @@ proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
     fetchUrl: fetchUrl,
     sharedBarePath: bare,
     barePresent: looksLikeGitDir(bare),
-    wired: isWiredTo(repoAbs, bare))
+    wired: isWiredTo(repoAbs, bare),
+    verdict: inspectSharedBareVerdict(bare))
+
