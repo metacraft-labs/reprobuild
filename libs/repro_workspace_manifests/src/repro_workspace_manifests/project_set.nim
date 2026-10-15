@@ -33,6 +33,18 @@ import resolver
 import compose
 import workspace_branch
 
+proc namesOnlyRootVariantOrRepoSet*(workspaceRoot, name: string): bool =
+  ## Whether ``name`` is, at the workspace's manifests root, ONLY a variant or
+  ## a repo-set: no ``projects/<name>.toml`` there, but a
+  ## ``variants/<name>.toml`` or ``repo-sets/<name>.toml``. Such a name
+  ## resolves from the root and is never composed across manifest layers: the
+  ## composer composes projects, and neither kind is defined across layers.
+  ## The one definition of that rule for every name lookup that routes on it.
+  let manifests = manifestsRoot(workspaceRoot)
+  not fileExists(manifests / "projects" / (name & ".toml")) and
+    (fileExists(manifests / "variants" / (name & ".toml")) or
+     fileExists(manifests / repoSetsDirName / (name & ".toml")))
+
 proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
                                     layersMayOmitProject = false):
     ResolvedProject =
@@ -59,11 +71,7 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
   ## always did: the composer composes projects, and neither kind is defined
   ## across layers.
   let manifests = manifestsRoot(workspaceRoot)
-  let rootOnlyNonProject =
-    not fileExists(manifests / "projects" / (name & ".toml")) and
-    (fileExists(manifests / "variants" / (name & ".toml")) or
-     fileExists(manifests / repoSetsDirName / (name & ".toml")))
-  if not rootOnlyNonProject and
+  if not namesOnlyRootVariantOrRepoSet(workspaceRoot, name) and
       isCompositionalWorkspaceToml(workspaceRoot, name):
     let absToml = absolutePath(workspaceTomlPath(workspaceRoot))
     var workspaceLocal = effectiveWorkspaceLocal(workspaceRoot, name)
@@ -80,7 +88,7 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
   # rather than getting a parallel one. Looked up last, so a converted manifest
   # repo and an unconverted one both resolve the name they actually carry, and
   # a workspace mid-conversion keeps preferring the project it already had.
-  let repoSetFile = manifests / "repo-sets" / (name & ".toml")
+  let repoSetFile = manifests / repoSetsDirName / (name & ".toml")
   if fileExists(projectFile):
     return resolveProject(projectFile)
   if fileExists(variantFile):
@@ -153,15 +161,11 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
         result.repos.add(repo)
 
 proc activeProjectSetOrEmpty*(workspaceRoot: string): seq[string] =
-  ## The recorded active project set, or an empty seq when the workspace has
-  ## no readable metadata. A malformed `workspace.toml` is NOT fatal here:
-  ## every caller already resolved a primary project through its own ladder,
-  ## and the pre-existing behaviour for unreadable metadata is to fall back to
-  ## that single project rather than to fail the command.
-  try:
-    readWorkspaceProjects(workspaceRoot)
-  except CatchableError:
-    @[]
+  ## The recorded active project set, or an empty seq when the workspace
+  ## records no state. A state file that exists but does not parse raises the
+  ## strict reader's diagnostic: falling back to the primary project alone
+  ## would silently drop every other active project's repos from the command.
+  readWorkspaceProjects(workspaceRoot)
 
 proc extendWithActiveProjectSet*(workspaceRoot: string;
                                  primary: ResolvedProject): ResolvedProject =

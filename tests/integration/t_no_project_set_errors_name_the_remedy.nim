@@ -92,6 +92,13 @@ proc requireGit(gitBin: string; args: openArray[string]): string =
     quit 1
   res.output
 
+const MinimalSettings = "schema = \"reprobuild.workspace.settings.v1\"\n"
+  ## The smallest valid committed settings file: it marks the workspace root
+  ## and records nothing else, in particular no project set. It declares its
+  ## schema because every TOML file repro reads must, and a settings file
+  ## that does not is refused, naming the file and the `schema` key, before
+  ## any verb gets as far as the project-set question this suite is about.
+
 proc seedRepo(gitBin, path: string) =
   ## A real git repo with one real commit, and nothing else.
   createDir(path)
@@ -214,7 +221,7 @@ suite "no-project-set refusals name the remedy":
       # ========================================================
       let empty = scratch / "empty-workspace"
       seedRepo(gitBin, empty)
-      writeFile(empty / "repro-workspace.toml", "")
+      writeFile(empty / "repro-workspace.toml", MinimalSettings)
       commitAll(gitBin, empty, "settings file")
       check not fileExists(empty / ".repro" / "workspace-state.toml")
       check not fileExists(empty / ".repro" / "workspace.toml")
@@ -237,7 +244,7 @@ suite "no-project-set refusals name the remedy":
       let workspace = scratch / "real-workspace"
       seedRepo(gitBin, workspace)
       writeMembershipManifests(workspace)
-      writeFile(workspace / "repro-workspace.toml", "")
+      writeFile(workspace / "repro-workspace.toml", MinimalSettings)
       commitAll(gitBin, workspace, "membership")
       createDir(workspace / ".repro")
       check not fileExists(workspace / ".repro" / "workspace-state.toml")

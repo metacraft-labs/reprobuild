@@ -1,6 +1,7 @@
 import std/[os, sets, strutils, times]
 
 import repro_core
+import blake3
 
 import ./ipc
 export ipc
@@ -15,7 +16,7 @@ const
   UserDaemonFeatureFlags* =
     "lifecycle,status,logs,shutdown,sessions,build-routing,build-events," &
     "watch-routing,watch-events,watch-sessions,dev-self-restart," &
-    "substitute-routing,lease-registry"
+    "substitute-routing,lease-registry,service-instance-registry"
   BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
   BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
@@ -150,6 +151,24 @@ type
     udkLeaseRenewAck = 21
       ## Reply for ``udkLeaseRenew``: whether a record existed + was
       ## renewed, and the resulting (optional) effective deadline.
+    udkServiceConverge = 22
+      ## Shared-Development-Services L7 (§4.5): converge on the instance
+      ## of a shared development service named by ``(identity, scope,
+      ## environment)``. The daemon attaches when an instance is present
+      ## and MATERIALISES one otherwise, inside this one request -- see
+      ## ``instance_registry.nim`` for why the decision and the
+      ## materialisation cannot be two round trips. Answered with
+      ## ``udkServiceConvergeAck``.
+    udkServiceConvergeAck = 23
+      ## Reply for ``udkServiceConverge``.
+    udkServiceRelease = 24
+      ## L7 (§4.5): drop ONE holder's reference to an instance. The
+      ## instance is stopped only when that was the last holder; this is
+      ## ``repro down``'s request and the reason it does not stop an
+      ## instance another project is using. Answered with
+      ## ``udkServiceReleaseAck``.
+    udkServiceReleaseAck = 25
+      ## Reply for ``udkServiceRelease``.
     udkError = 255
 
   UserDaemonBuildEventKind* = enum
@@ -403,9 +422,37 @@ proc defaultUserDaemonEndpoint*(): string =
 proc defaultUserDaemonLogPath*(): string =
   userDaemonStateDir() / "logs" / "repro-daemon.log"
 
-proc statusFileForEndpoint*(endpoint: string): string =
-  userDaemonStateDir() / "status" /
-    (safePathSegment(endpoint.extractFilename, "repro-daemon") & ".status")
+proc endpointDigest*(endpoint: string): string =
+  ## The part of a per-daemon name that identifies the WHOLE endpoint: 16 hex
+  ## characters (64 bits) of blake3 over the endpoint string VERBATIM. The
+  ## one digest behind every such name -- the status record
+  ## (``endpointInstanceKey``), the systemd unit and the launchd label
+  ## (``systemdUnitName``, ``launchdLabel``) -- so they cannot drift apart.
+  ## ``systemdUnitName``'s docstring carries the reasoning for the width and
+  ## for hashing verbatim.
+  blake3.digest(endpoint).toHex()[0 ..< 16]
+
+proc endpointInstanceKey*(endpoint, fallback: string): string =
+  ## ``<readable basename>-<endpointDigest>``: the name of per-daemon objects
+  ## that live in a namespace shared by several daemons
+  ## (``systemdUnitName``, ``statusFileForEndpoint``).
+  ##
+  ## KEYED ON THE WHOLE ENDPOINT. Endpoints sit in per-run scratch
+  ## directories precisely because the basename is not unique, so a name
+  ## built from ``extractFilename`` alone is shared by every ``d.sock``. The
+  ## basename is kept in front for the human reader. See ``systemdUnitName``
+  ## for the measured failure.
+  safePathSegment(endpoint.extractFilename, fallback) & "-" &
+    endpointDigest(endpoint)
+
+proc statusFileForEndpoint*(stateDir, endpoint: string): string =
+  ## The daemon status record for ``endpoint`` under ``stateDir``. The ONE
+  ## derivation: the daemon writes, removes and stale-cleans its record
+  ## through it. It takes the state directory rather than defaulting to
+  ## ``userDaemonStateDir()``, because that default is how a reader once
+  ## disagreed with a daemon started with ``--state-dir``.
+  stateDir / "status" / (endpointInstanceKey(endpoint, "repro-daemon") &
+    ".status")
 
 proc binaryIdentity*(name, path, version: string): BinaryIdentity =
   result = BinaryIdentity(name: name, path: path, version: version)
@@ -946,6 +993,138 @@ type
       ## The resulting effective deadline, or ``LeaseRenewKeepSentinel``
       ## when the folded deadline is ``none`` (never reap).
 
+  DaemonServiceConvergeRequest* = object
+    ## Shared-Development-Services L7 (§4.5) `repro up`'s converge
+    ## request.
+    ##
+    ## `keyJson` and `snapshotJson` are OPAQUE STRINGS here on purpose.
+    ## This module is a leaf — "``protocol.nim`` stays a leaf (only
+    ## ``repro_core``)", as `lease_registry.nim`'s header puts it — and
+    ## the instance key and the interface snapshot are `repro_resources`
+    ## / `repro_project_dsl` types. Carrying them as the strings
+    ## `encodeServiceInstanceKey` / `encodeServiceInterfaceSnapshot`
+    ## produce keeps the frame codec independent of the resource lane,
+    ## exactly as the `ttlSeconds` encoding does for a lease policy.
+    scope*: DaemonLeaseScope
+    keyJson*: string
+    snapshotJson*: string
+    holderId*: string
+      ## §4.5's "one holder per consuming project":
+      ## `serviceLeaseHolderId(<consuming project root>)`.
+    ttlSeconds*: int64
+      ## The holder's lease policy, in the SAME encoding
+      ## `DaemonLeaseRenewRequest.ttlSeconds` uses (negative = keep,
+      ## 0 = immediate, positive = delayed). One encoding for one
+      ## concept; a second one would be a second answer to "what does
+      ## -1 mean".
+    command*: seq[string]
+      ## The argv to materialise the instance with, when none is
+      ## running. Carried on the converge request rather than fetched
+      ## later because the decision and the materialisation happen in
+      ## one request.
+    workingDir*: string
+    replace*: bool
+      ## `repro up --replace` (§4.3's explicit takeover).
+    force*: bool
+      ## `--force`, which has meaning ONLY together with `replace` and
+      ## whose §4.5-rule-2 diagnostic differs depending on whether the
+      ## holder set was recoverable.
+    generationJson*: string
+      ## Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION:
+      ## the requesting client's established answer to "does the owner's
+      ## lifted artifact correspond to the owner's current definition",
+      ## as `encodeServiceArtifactGenerationCheck` produces it.
+      ##
+      ## OPAQUE HERE for the reason `keyJson` and `snapshotJson` are:
+      ## this module stays a leaf on `repro_core`.
+      ##
+      ## IT IS THE CLIENT THAT ESTABLISHES IT, AND THAT IS NOT AN
+      ## ACCIDENT OF LAYERING. The question is about the OWNER's recipe
+      ## sources and the OWNER's artifact on disk; the daemon has never
+      ## seen either -- it holds the RUNNING instance's persisted
+      ## snapshot, which is the other side of §4.3's comparison. Asking
+      ## the daemon would reduce the check to "the running snapshot
+      ## equals the artifact's snapshot", which is exactly the vacuous
+      ## comparison §4.3's second half forbids.
+      ##
+      ## AN EMPTY STRING MEANS UNESTABLISHED, NOT FRESH. That is what a
+      ## body written before this field decodes to, and
+      ## `decodeServiceArtifactGenerationCheck` turns it into
+      ## `sagUnknownProvenance` with a `detail` saying so. The opposite
+      ## default would make the precondition vanish on a client/daemon
+      ## revision skew.
+
+  DaemonServiceConvergeResponse* = object
+    ok*: bool
+      ## False when the daemon could not carry the decision out — a
+      ## materialisation that failed, a takeover whose stop failed. It is
+      ## NOT false for a refusal: a refusal is a decision the daemon made
+      ## correctly, and `outcome` says which.
+    outcome*: string
+      ## `outcomeWord(ServiceConvergeOutcome)`. A word rather than an
+      ## ordinal so a client built against a different revision reports
+      ## an unknown NAME instead of silently reading some other outcome.
+    diagnostic*: string
+    address*: string
+    pid*: int32
+      ## The instance's process, after the decision. 0 when nothing is
+      ## running (a refusal).
+    hadInstance*: bool
+    holderSetRecoverable*: bool
+      ## False when §4.5's lossy rebuild applies: the holder set may be
+      ## incomplete. Sent as its own field rather than inferred from
+      ## `holders.len`, because "no holders" and "no holders I can name"
+      ## are the two states §4.5 insists must not be conflated.
+    holders*: seq[string]
+    contributionPoints*: seq[string]
+      ## Shared-Development-Services D-SS11 (§4.6): the CONTRIBUTION
+      ## POINTS the instance this decision resolved to DECLARES, bare
+      ## names, declaration order.
+      ##
+      ## §4.6 requires a contribution to a point "the running instance
+      ## does not declare" to be refused, "including across a version
+      ## skew, where the running instance was built from an older
+      ## definition that lacks the point". That is a fact about the
+      ## RUNNING instance, and on an attach it comes from the registry
+      ## entry's own persisted snapshot -- not from the snapshot the
+      ## requesting consumer sent, which is by definition the newer
+      ## definition when there is skew.
+      ##
+      ## SENT ON THE RESPONSE RATHER THAN READ FROM THE STORE BY THE
+      ## CLIENT, and the reason is measured rather than stylistic: the
+      ## daemon's instance records live under its own `--state-root`,
+      ## while a client's `serviceInstanceStoreRoot(dlsUser)` with no
+      ## override is `$HOME/.cache/repro/state`. A client that read the
+      ## record itself would find nothing whenever the daemon was
+      ## started with an explicit root, and would then refuse every
+      ## contribution for a reason that has nothing to do with the
+      ## contribution.
+      ##
+      ## An EMPTY list is "this instance converges no points", which is
+      ## what every pre-D-SS11 instance really did and what a client
+      ## built against an older protocol decodes to. It is not "unknown":
+      ## a contribution against it is refused by name, which is the
+      ## correct answer for an instance that declares none.
+
+  DaemonServiceReleaseRequest* = object
+    ## L7 (§4.5) `repro down`'s release request.
+    scope*: DaemonLeaseScope
+    keyJson*: string
+    holderId*: string
+
+  DaemonServiceReleaseResponse* = object
+    ok*: bool
+    outcome*: string
+      ## `outcomeWord(ServiceReleaseOutcome)`.
+    diagnostic*: string
+    address*: string
+    holderSetRecoverable*: bool
+    remainingHolders*: seq[string]
+    stoppedPid*: int32
+      ## The pid that was stopped, when this release was the last
+      ## holder's. 0 otherwise.
+    stopDetail*: string
+
 proc scopeFromWire(v: uint32): DaemonLeaseScope =
   if v == uint32(ord(dlsSystem)): dlsSystem else: dlsUser
 
@@ -976,3 +1155,106 @@ proc parseLeaseRenewResponseBody*(body: openArray[byte]):
   result.reason = body.readString(pos)
   result.hadRecord = body.readBool(pos)
   result.effectiveDeadlineUnix = body.readI64(pos)
+
+proc serviceConvergeRequestBody*(request: DaemonServiceConvergeRequest):
+    seq[byte] =
+  result.writeU32Le(uint32(ord(request.scope)))
+  result.writeString(request.keyJson)
+  result.writeString(request.snapshotJson)
+  result.writeString(request.holderId)
+  result.writeI64(request.ttlSeconds)
+  result.writeStringSeq(request.command)
+  result.writeString(request.workingDir)
+  result.writeBool(request.replace)
+  result.writeBool(request.force)
+  # §4.3's precondition: appended at the END, so every field above keeps
+  # its offset.
+  result.writeString(request.generationJson)
+
+proc parseServiceConvergeRequestBody*(body: openArray[byte]):
+    DaemonServiceConvergeRequest =
+  var pos = 0
+  result.scope = scopeFromWire(body.readU32Le(pos))
+  result.keyJson = body.readString(pos)
+  result.snapshotJson = body.readString(pos)
+  result.holderId = body.readString(pos)
+  result.ttlSeconds = body.readI64(pos)
+  result.command = body.readStringSeq(pos)
+  result.workingDir = body.readString(pos)
+  result.replace = body.readBool(pos)
+  result.force = body.readBool(pos)
+  if pos < body.len:
+    result.generationJson = body.readString(pos)
+  # A body written before §4.3's precondition ends here, and
+  # `generationJson` stays "". It is read as UNESTABLISHED, which
+  # refuses -- never as fresh. See the field's own comment, and
+  # `decodeServiceArtifactGenerationCheck`, which is where the "" is
+  # turned into a refusal with a sentence naming why.
+
+proc serviceConvergeResponseBody*(response: DaemonServiceConvergeResponse):
+    seq[byte] =
+  result.writeBool(response.ok)
+  result.writeString(response.outcome)
+  result.writeString(response.diagnostic)
+  result.writeString(response.address)
+  result.writeI64(int64(response.pid))
+  result.writeBool(response.hadInstance)
+  result.writeBool(response.holderSetRecoverable)
+  result.writeStringSeq(response.holders)
+  # D-SS11: appended at the END, so every field above keeps its offset.
+  result.writeStringSeq(response.contributionPoints)
+
+proc parseServiceConvergeResponseBody*(body: openArray[byte]):
+    DaemonServiceConvergeResponse =
+  var pos = 0
+  result.ok = body.readBool(pos)
+  result.outcome = body.readString(pos)
+  result.diagnostic = body.readString(pos)
+  result.address = body.readString(pos)
+  result.pid = int32(body.readI64(pos))
+  result.hadInstance = body.readBool(pos)
+  result.holderSetRecoverable = body.readBool(pos)
+  result.holders = body.readStringSeq(pos)
+  if pos < body.len:
+    # A body written before D-SS11 ends here. Read as an EMPTY point
+    # list rather than refused, for the reason the field's own comment
+    # gives: an instance that converges no points is a real state, and
+    # refusing the whole response over a trailing field would make a
+    # newer client unable to talk to an older daemon at all.
+    result.contributionPoints = body.readStringSeq(pos)
+
+proc serviceReleaseRequestBody*(request: DaemonServiceReleaseRequest):
+    seq[byte] =
+  result.writeU32Le(uint32(ord(request.scope)))
+  result.writeString(request.keyJson)
+  result.writeString(request.holderId)
+
+proc parseServiceReleaseRequestBody*(body: openArray[byte]):
+    DaemonServiceReleaseRequest =
+  var pos = 0
+  result.scope = scopeFromWire(body.readU32Le(pos))
+  result.keyJson = body.readString(pos)
+  result.holderId = body.readString(pos)
+
+proc serviceReleaseResponseBody*(response: DaemonServiceReleaseResponse):
+    seq[byte] =
+  result.writeBool(response.ok)
+  result.writeString(response.outcome)
+  result.writeString(response.diagnostic)
+  result.writeString(response.address)
+  result.writeBool(response.holderSetRecoverable)
+  result.writeStringSeq(response.remainingHolders)
+  result.writeI64(int64(response.stoppedPid))
+  result.writeString(response.stopDetail)
+
+proc parseServiceReleaseResponseBody*(body: openArray[byte]):
+    DaemonServiceReleaseResponse =
+  var pos = 0
+  result.ok = body.readBool(pos)
+  result.outcome = body.readString(pos)
+  result.diagnostic = body.readString(pos)
+  result.address = body.readString(pos)
+  result.holderSetRecoverable = body.readBool(pos)
+  result.remainingHolders = body.readStringSeq(pos)
+  result.stoppedPid = int32(body.readI64(pos))
+  result.stopDetail = body.readString(pos)

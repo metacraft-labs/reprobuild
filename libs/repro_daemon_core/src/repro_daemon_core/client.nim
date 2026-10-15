@@ -317,6 +317,52 @@ proc requestUserDaemonLeaseRenew*(request: DaemonLeaseRenewRequest;
   raise newException(UserDaemonClientError,
     "unexpected user-daemon lease-renew frame: " & $frame.kind)
 
+proc requestUserDaemonServiceConverge*(
+    request: DaemonServiceConvergeRequest;
+    endpoint = defaultUserDaemonEndpoint()):
+    DaemonServiceConvergeResponse =
+  ## Shared-Development-Services L7 (§4.5): `repro up`'s converge.
+  ##
+  ## THERE IS DELIBERATELY NO `...BestEffort` SIBLING, unlike
+  ## `renewLeaseBestEffort` one proc up. A lease renew that cannot reach
+  ## the daemon is harmless -- the reconcile's own store write is the
+  ## source of truth. A CONVERGE that cannot reach the daemon is not:
+  ## there is no registry to resolve against, so the only things a
+  ## best-effort arm could do are start a second instance or pretend one
+  ## is running. §4.5 makes the daemon the registry, so an unreachable
+  ## daemon has to be an error the caller sees and reports.
+  var socket = connectUserDaemon(endpoint, commandMode = "service-converge",
+    requiredFeatures = ["service-instance-registry"])
+  defer: socket.closeIpcConn()
+  socket.writeFrame(udkServiceConverge, serviceConvergeRequestBody(request))
+  let frame = socket.readFrame()
+  if frame.kind == udkServiceConvergeAck:
+    return parseServiceConvergeResponseBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon service-converge frame: " & $frame.kind)
+
+proc requestUserDaemonServiceRelease*(
+    request: DaemonServiceReleaseRequest;
+    endpoint = defaultUserDaemonEndpoint()):
+    DaemonServiceReleaseResponse =
+  ## L7 (§4.5): `repro down`'s release. No best-effort sibling, for the
+  ## reason above pointing the other way: a release that silently did
+  ## nothing would leave this project counted as a holder forever, so the
+  ## instance would never be released by anyone.
+  var socket = connectUserDaemon(endpoint, commandMode = "service-release",
+    requiredFeatures = ["service-instance-registry"])
+  defer: socket.closeIpcConn()
+  socket.writeFrame(udkServiceRelease, serviceReleaseRequestBody(request))
+  let frame = socket.readFrame()
+  if frame.kind == udkServiceReleaseAck:
+    return parseServiceReleaseResponseBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon service-release frame: " & $frame.kind)
+
 proc renewLeaseBestEffort*(request: DaemonLeaseRenewRequest;
                            endpoint = defaultUserDaemonEndpoint()):
     tuple[sent: bool; response: DaemonLeaseRenewResponse] =

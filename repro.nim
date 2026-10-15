@@ -287,6 +287,11 @@ const
 
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
     TestGraphArtifacts(
+      source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/test-fixtures/macos-no-bundle/no_bundle_launch",
+        actionId: "reprobuild.test_fixtures.macos_no_bundle_launch")]),
+    TestGraphArtifacts(
       source: "tests/integration/t_runner_exclusive_phase_budget.nim",
       artifacts: @[
         TestGraphArtifact(path: "build/bin/repro_test_runner",
@@ -2600,6 +2605,20 @@ package reprobuild:
     # above. The shim is a host-native artifact (LD_PRELOAD / DYLD_INSERT
     # / IAT-patch DLL), so the host arm is the correct (and only) target.
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
+
+    # A separate build configuration preserves the real missing-bundle control
+    # even when the test executable itself retains shipped replacement tools.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "tests/fixtures/macos-no-bundle-launch/no_bundle_launch.nim",
+      binary = "build/test-fixtures/macos-no-bundle/no_bundle_launch",
+      defines = @["StackableHooksBuiltToolsDir="],
+      threadsOn = true,
+      parallelBuild = 2,
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/macos_no_bundle_launch",
+      actionId = "reprobuild.test_fixtures.macos_no_bundle_launch"))
 
     reprobuildTestFixturesActions.add(nim.c(
       source = "tests/fixtures/exclusive-phase/probe.nim",
