@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 32,
-    "nimTestBinaries": 2074,
+    "nimTestBinaries": 2075,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2093
+    "testEntries": 2095
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1277,10 +1277,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1118,
+      "integration": 1119,
       "platform/destructive": 127,
       "pure unit": 646,
-      "unclassified": 184
+      "unclassified": 185
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1476,9 +1476,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2074,
-    "pythonTestFileCount": 19,
-    "testEntryCount": 2093
+    "nimTestBinaryCount": 2075,
+    "pythonTestFileCount": 20,
+    "testEntryCount": 2095
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30842,6 +30842,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_engine_embeds_the_trees_source_revision",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_engine_embeds_the_trees_source_revision.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_entrypoints",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -44603,6 +44618,21 @@
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 94,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_source_revision.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

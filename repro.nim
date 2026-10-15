@@ -1947,6 +1947,7 @@ package reprobuild:
       let pyActionId = pythonTestActionId(source)
       let hookScopeTest = source == "tests/unit/test_dev_shell_hook_scope.py"
       let nixCacheTest = source == "tests/integration/test_nix_daemon_cache.py"
+      let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
       let pyExecute = pythonUnittest.run(
         source = source,
         actionId = pyActionId,
@@ -1956,12 +1957,23 @@ package reprobuild:
           @["tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
             "tests/fixtures/nix-daemon-local-flake/flake.nix",
             "tests/fixtures/nix-daemon-local-flake/flake.lock"]
+        elif sourceRevisionTest:
+          # The script under test, and the two callers whose sources the
+          # single-derivation cases read.
+          @["scripts/source_revision.sh", "scripts/build_apps.sh", "repro.nim"]
         else: @[])
       when not defined(windows):
         if hookScopeTest:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
         if nixCacheTest:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["nix"])
+      # On every OS, unlike the hook-scope test: the script it runs is the one
+      # the `reprobuild.apps.source-revision` probe runs on Windows too. The
+      # same three tools as that probe -- its `--nim-module` cases run
+      # `mkdir`, which a declared-tools PATH does not otherwise carry.
+      if sourceRevisionTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id,
+          ["bash", "git", "mkdir"])
       if hookScopeTest:
         discard target("test-dev-shell-hook-scope", pyExecute)
       if nixCacheTest:
@@ -2028,20 +2040,66 @@ package reprobuild:
     # probe is `<its own dir>/reprobuild`. Moving the engine to `libexec`
     # would have broken both silently, which is why this is a rename in place
     # rather than a move.
+    #
+    # The source revision the engine embeds -- an environment FACT, built as
+    # the probe-edge pattern of docs/user-guide/idiomatic-reprobuild.md §7.
+    #
+    # `ReprobuildSourceRevision` (repro_core) names the commit the engine is
+    # built from; `repro home export` records it as provenance.
+    # `scripts/source_revision.sh` is the one derivation of it, shared with
+    # `scripts/build_apps.sh`: `$REPROBUILD_SOURCE_REVISION` when set (the
+    # release workflow sets it), else `git rev-parse HEAD` of this tree with
+    # `-dirty` for uncommitted tracked changes, else unknown.
+    #
+    # It is NOT read here. This edge used to pass `getEnv(...)` of the
+    # variable as a define, which had two faults: nothing on the suite route
+    # sets the variable (no git fallback, so `repro build '.#test#…'` produced
+    # an engine with no revision), and a value read at recipe evaluation is
+    # snapshotted with the provider and served to later builds (§4.4). The
+    # probe below runs the script at ACTION time instead -- the variable
+    # reaches it because the launcher layers an action's declared environment
+    # over the inherited one -- and writes the answer as a Nim module.
+    #
+    # The probe is `cacheable = false`: its whole job is to re-observe the
+    # tree, and it is two git calls. The engine edge lists the module in
+    # `extraInputs` (which orders it after the probe and mixes the file's
+    # content digest into its key) and actually imports it (repro_core, under
+    # `-d:reproGeneratedSourceRevision`), so its monitored read set covers it
+    # too. A build at an unchanged revision rewrites identical bytes and the
+    # engine stays a cache hit; a new commit, or the tree turning dirty or
+    # clean, changes the bytes and rebuilds the engine -- and with it re-runs
+    # every test execute edge that declares the engine as an input.
+    const sourceRevisionModuleDir = "build/generated/source-revision"
+    const sourceRevisionModule =
+      sourceRevisionModuleDir & "/reprobuild_source_revision.nim"
+    let reprobuildSourceRevision = shell(
+      command = "bash scripts/source_revision.sh --nim-module " &
+        sourceRevisionModule,
+      actionId = "reprobuild.apps.source-revision",
+      extraInputs = @["scripts/source_revision.sh"],
+      extraOutputs = @[sourceRevisionModule],
+      cacheable = false)
+    # Exactly what the script runs (its header says so): `bash`, `git`, and
+    # `mkdir` for the module's directory. All three are `uses:` entries on
+    # every OS -- Git for Windows supplies `bash` and `git` there -- and
+    # naming them is what puts their directories on the action's PATH under
+    # --tool-provisioning=path.
+    appendRegisteredActionToolIdentityRefs(reprobuildSourceRevision.id,
+      ["bash", "git", "mkdir"])
+
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/reprobuild",
-      # `ReprobuildSourceRevision` (repro_core) names the commit the engine
-      # is built from; `repro home export` records it as provenance. It is
-      # taken from $REPROBUILD_SOURCE_REVISION, which the release workflow
-      # sets; unset, the engine reports the revision as unknown.
-      # `scripts/build_apps.sh` makes the same choice (plus a git fallback).
+      # `reproGeneratedSourceRevision` makes repro_core import the probe's
+      # module (see above); the module's directory is the last `paths` entry.
+      # No `-d:ReprobuildSourceRevision=` here: that spelling is
+      # `scripts/build_apps.sh`'s route, and it would win over the module.
+      # (The entrypoint triple stays spelled as one literal:
+      # `t_b1_repro_build_apps_collection` pins it to keep `ssl` here.)
       defines = @["release", "reproVendoredHash", "ssl"] &
-        (if getEnv("REPROBUILD_SOURCE_REVISION").len > 0:
-           @["ReprobuildSourceRevision=" &
-             getEnv("REPROBUILD_SOURCE_REVISION")]
-         else: @[]),
-      paths = ioMonNimPaths & sourceOnlyNimPaths,
+        @["reproGeneratedSourceRevision"],
+      paths = ioMonNimPaths & sourceOnlyNimPaths & @[sourceRevisionModuleDir],
+      extraInputs = @[sourceRevisionModule],
       # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto`` AND the ``-L``
       # that resolves them (M8). Nothing OpenSSL-shaped belongs in this list:
       # the reason this edge once carried one is that the search path was
