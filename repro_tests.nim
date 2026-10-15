@@ -13140,6 +13140,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_locked_catalog_materialized_and_consulted.nim",
+    binary: "build/test-bin/t_locked_catalog_materialized_and_consulted",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim",
     binary: "build/test-bin/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db",
     defines: @[],
