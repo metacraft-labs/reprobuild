@@ -46273,8 +46273,16 @@ proc convergeRepoToManifestRevision(
   # Always fetch first so <remoteName>/<branch> reflects the manifest's
   # upstream tip (pull is a network-converge op, unlike a pure checkout).
   let rName = if remoteName.len > 0: remoteName else: "origin"
-  let fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
-    "--prune", rName])
+  var fetched: tuple[code: int; output: string]
+  withCheckoutVcsLock(repoPath):
+    const MaxPullFetchLockRetries = 5
+    for attempt in 0 .. MaxPullFetchLockRetries:
+      fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
+        "--prune", rName])
+      if fetched.code == 0 or attempt == MaxPullFetchLockRetries or
+          not isTransientGitLockContention(fetched.output):
+        break
+      sleep(25 * (attempt + 1))
   if fetched.code != 0:
     return (false, "", "",
       "git fetch failed: " & fetched.output.strip())
@@ -59396,8 +59404,16 @@ proc headPublicationOf*(identity: GitToolIdentity;
   # exactly the shape that produced the false negative. The verdict itself
   # stays scoped exactly as the pre-push gate scopes it — this widens what gets
   # refreshed, never what counts as published.
-  let fetched = gitRunPlain(identity,
-    ["-C", repoAbsPath, "fetch", "--all", "--quiet"])
+  var fetched: tuple[code: int; output: string]
+  withCheckoutVcsLock(repoAbsPath):
+    const MaxPublishFetchLockRetries = 5
+    for attempt in 0 .. MaxPublishFetchLockRetries:
+      fetched = gitRunPlain(identity,
+        ["-C", repoAbsPath, "fetch", "--all", "--quiet"])
+      if fetched.code == 0 or attempt == MaxPublishFetchLockRetries or
+          not isTransientGitLockContention(fetched.output):
+        break
+      sleep(25 * (attempt + 1))
   let second = queryGitState(isPublishedQuery(repoAbsPath, remoteName),
     identity)
   result.scope = second.publishedScope

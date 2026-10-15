@@ -46,6 +46,11 @@
 ##      mainline path in the forked workspace rather than requiring the source
 ##      checkout's old path, and uncommitted edits under ``--include-changes``
 ##      are transferred to the renamed path.
+##   8. ``test_wv7_concurrent_forks_serialize_shared_cache_and_source_fetches`` —
+##      concurrent ``repro branch --from-mainlines`` runs sharing one source
+##      workspace and one ``REPRO_WORKSPACE_CLONES`` directory serialize their
+##      shared-cache creation/refresh and source-checkout tracking-ref fetches
+##      without ``cannot lock ref`` or ``shared-clone cache miss`` races.
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
 ## real filesystem, and the real engine-built ``build/bin/repro`` spawned as a
@@ -69,8 +74,9 @@
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9–M16 / WV-6).
 
-import std/[json, options, os, osproc, strutils, tempfiles, unittest]
+import std/[json, options, os, osproc, strtabs, strutils, tempfiles, unittest]
 
+from repro_core/process_streams import drainStream
 import repro_test_support
 import repro_test_support/reasoned_skip
 import repro_workspace_manifests
@@ -547,3 +553,149 @@ suite "WV-7 — repro branch --from-mainlines":
       let entryChanges = entryByPath(reportChanges, "lib-renamed")
       check entryChanges != newJNull()
       check entryChanges["outcome"].getStr() == "branched_with_changes"
+
+  test "test_wv7_concurrent_forks_serialize_shared_cache_and_source_fetches":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a real git working tree")
+    else:
+      let fx = setupFixture(gitBin, "concurrent")
+      defer: removeDirEventually(fx.scratch)
+
+      # Seed extra branches in lib-a and lib-b and fetch them once into the
+      # source checkouts so subsequent upstream advances cause multi-ref
+      # updates in both the shared source checkouts and the shared bare cache.
+      for (originPath, checkoutName, mainline) in [
+          (fx.libAOrigin, "lib-a", "dev"),
+          (fx.libBOrigin, "lib-b", "latest")]:
+        let seedBranchesWork = fx.scratch / ("seed-branches-" & checkoutName)
+        discard requireGit(q(gitBin) & " clone --branch " & mainline & " " &
+          q(fileUrl(originPath)) & " " & q(seedBranchesWork))
+        gitConfig(gitBin, seedBranchesWork)
+        for i in 1 .. 16:
+          discard requireGit(q(gitBin) & " -C " & q(seedBranchesWork) &
+            " branch b-" & $i)
+        discard requireGit(q(gitBin) & " -C " & q(seedBranchesWork) &
+          " push origin --all --quiet")
+        discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / checkoutName) &
+          " fetch origin --quiet")
+
+      proc advanceOriginAllBranches(originPath, slug, mainline, tag: string): string =
+        let workPath = fx.scratch / ("advance-" & slug & "-" & tag)
+        removeDir(workPath)
+        discard requireGit(q(gitBin) & " clone --branch " & mainline & " " &
+          q(fileUrl(originPath)) & " " & q(workPath))
+        gitConfig(gitBin, workPath)
+        writeFile(workPath / ("ADV-" & tag & ".md"), tag & "\n")
+        discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
+        discard requireGit(q(gitBin) & " -C " & q(workPath) &
+          " commit -m " & q("advance " & tag))
+        for i in 1 .. 16:
+          discard requireGit(q(gitBin) & " -C " & q(workPath) &
+            " branch -f b-" & $i & " HEAD")
+        discard requireGit(q(gitBin) & " -C " & q(workPath) &
+          " push origin --all --quiet")
+        requireGit(q(gitBin) & " -C " & q(workPath) &
+          " rev-parse HEAD").strip()
+
+      proc runShellBatch(cmds: openArray[CmdSpec]): seq[CmdResult] =
+        var procs = newSeq[Process](cmds.len)
+        for i, cmd in cmds:
+          var envTable = newStringTable()
+          for k, v in envPairs(): envTable[k] = v
+          for entry in cmd.env: envTable[entry.name] = entry.value
+          procs[i] = startProcess(cmd.args[0],
+            workingDir = getCurrentDir(),
+            args = cmd.args[1..^1],
+            env = envTable,
+            options = {poStdErrToStdOut, poUsePath})
+        result = newSeq[CmdResult](cmds.len)
+        for i, p in procs:
+          let output = drainStream(p.outputStream)
+          let code = p.waitForExit()
+          p.close()
+          result[i] = (code: code, output: output)
+
+      let sharedCacheDir = fx.scratch / "shared-clones-cache"
+      let env = @[("REPRO_WORKSPACE_CLONES", sharedCacheDir)]
+
+      # Wave 1: cold shared bare cache + advanced upstream mainlines.
+      let wave1TipA = advanceOriginAllBranches(fx.libAOrigin, "lib-a", "dev", "w1")
+      let wave1TipB = advanceOriginAllBranches(fx.libBOrigin, "lib-b", "latest", "w1")
+
+      const WorkerCount = 4
+      var wave1Cmds: seq[CmdSpec]
+      for w in 0 ..< WorkerCount:
+        let forkPath = fx.scratch / ("fork-cold-" & $w)
+        let branchName = "feat-cold-" & $w
+        wave1Cmds.add(shellCommand(@[
+          fx.reproBin, "branch", "--write-report", forkPath,
+          "--branch=" & branchName,
+          "--workspace-root=" & fx.workspaceRoot,
+          "--from-mainlines"
+        ], env))
+      let wave1Results = runShellBatch(wave1Cmds)
+      for w in 0 ..< WorkerCount:
+        let res = wave1Results[w]
+        if res.code != 0 or res.output.contains("shared-clone cache miss") or
+            res.output.contains("cannot lock ref") or
+            res.output.contains("incorrect old value provided") or
+            res.output.contains("BUG:"):
+          checkpoint("wave1 worker " & $w & " exit=" & $res.code &
+            " output:\n" & res.output)
+        check res.code == 0
+        check not res.output.contains("shared-clone cache miss")
+        check not res.output.contains("mainline_fetch_failed")
+        check not res.output.contains("cannot lock ref")
+        check not res.output.contains("incorrect old value provided")
+        check not res.output.contains("BUG:")
+        let forkPath = fx.scratch / ("fork-cold-" & $w)
+        check dirExists(forkPath / "lib-a")
+        check dirExists(forkPath / "lib-b")
+        if dirExists(forkPath / "lib-a") and dirExists(forkPath / "lib-b"):
+          check headSha(gitBin, forkPath / "lib-a") == wave1TipA
+          check headSha(gitBin, forkPath / "lib-b") == wave1TipB
+        check fileExists(forkPath / "lib-a" / ".git" / "objects" / "info" /
+          "alternates")
+        check fileExists(forkPath / "lib-b" / ".git" / "objects" / "info" /
+          "alternates")
+
+      # Wave 2: warm shared bare cache + another upstream mainline advance.
+      let wave2TipA = advanceOriginAllBranches(fx.libAOrigin, "lib-a", "dev", "w2")
+      let wave2TipB = advanceOriginAllBranches(fx.libBOrigin, "lib-b", "latest", "w2")
+
+      var wave2Cmds: seq[CmdSpec]
+      for w in 0 ..< WorkerCount:
+        let forkPath = fx.scratch / ("fork-warm-" & $w)
+        let branchName = "feat-warm-" & $w
+        wave2Cmds.add(shellCommand(@[
+          fx.reproBin, "branch", "--write-report", forkPath,
+          "--branch=" & branchName,
+          "--workspace-root=" & fx.workspaceRoot,
+          "--from-mainlines"
+        ], env))
+      let wave2Results = runShellBatch(wave2Cmds)
+      for w in 0 ..< WorkerCount:
+        let res = wave2Results[w]
+        if res.code != 0 or res.output.contains("shared-clone cache miss") or
+            res.output.contains("cannot lock ref") or
+            res.output.contains("incorrect old value provided") or
+            res.output.contains("BUG:"):
+          checkpoint("wave2 worker " & $w & " exit=" & $res.code &
+            " output:\n" & res.output)
+        check res.code == 0
+        check not res.output.contains("shared-clone cache miss")
+        check not res.output.contains("mainline_fetch_failed")
+        check not res.output.contains("cannot lock ref")
+        check not res.output.contains("incorrect old value provided")
+        check not res.output.contains("BUG:")
+        let forkPath = fx.scratch / ("fork-warm-" & $w)
+        check dirExists(forkPath / "lib-a")
+        check dirExists(forkPath / "lib-b")
+        if dirExists(forkPath / "lib-a") and dirExists(forkPath / "lib-b"):
+          check headSha(gitBin, forkPath / "lib-a") == wave2TipA
+          check headSha(gitBin, forkPath / "lib-b") == wave2TipB
+        check fileExists(forkPath / "lib-a" / ".git" / "objects" / "info" /
+          "alternates")
+        check fileExists(forkPath / "lib-b" / ".git" / "objects" / "info" /
+          "alternates")

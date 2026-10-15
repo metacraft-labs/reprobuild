@@ -1184,7 +1184,7 @@ tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	9
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
-tests/integration/t_branch_from_mainlines.nim	nim	7
+tests/integration/t_branch_from_mainlines.nim	nim	8
 tests/integration/t_branch_unpublished_source_head.nim	nim	5
 tests/integration/t_build_action_output_all_passes_action_output_through.nim	nim	6
 tests/integration/t_build_declares_its_pools_to_runquota.nim	nim	2
