@@ -9790,6 +9790,64 @@ var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## engine for each would re-validate the same evidence with nothing able to
   ## have changed in between.
 
+proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
+  ## Provisioning-Contributions.md §Lookup:
+  ## Before compiling a recipe whose committed repro.lock pins reprobuild-packages,
+  ## the build engine materializes that revision under
+  ## .repro/cross-repo-producers/reprobuild-packages/<rev> (or verifies it is
+  ## already present) unless $REPROBUILD_PACKAGES_ROOT or a develop sibling
+  ## takes precedence.
+  ## Returns the checkout root of the materialized catalog, or "" if skipped.
+  if getEnv(ReprobuildPackagesRootEnv).len > 0:
+    return ""
+
+  let startDir =
+    if modulePath.len > 0: modulePath.parentDir
+    elif consumerRoot.len > 0: consumerRoot
+    else: getCurrentDir()
+
+  # Develop-mode sibling beside consumer or any ancestor
+  var dir = startDir
+  for _ in 0 ..< 16:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    let sibling = parent / ReprobuildPackagesRepositoryName
+    if dirExists(sibling):
+      # Develop-mode sibling takes precedence
+      return ""
+    dir = parent
+
+  # Find enclosing repro.lock
+  var lockDir = ""
+  var lockFile = ""
+  dir = startDir
+  for _ in 0 ..< 16:
+    let candidate = dir / CommittedLockFileName
+    if fileExists(candidate):
+      lockDir = dir
+      lockFile = candidate
+      break
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+
+  if lockFile.len == 0:
+    return ""
+
+  try:
+    let content = readFile(lockFile)
+    let ld = parseLockedDependencies(content)
+    for dep in ld.deps:
+      if dep.name == ReprobuildPackagesRepositoryName and dep.coordinates.kind == ckVcs:
+        return fetchLockPinnedProducer(dep, lockDir)
+  except CatchableError as err:
+    if err of OSError:
+      raise
+    discard
+  return ""
+
 proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           workDir, scratchDir, consumerRoot, publicCliPath,
                           cacheRoot: string;
@@ -9837,6 +9895,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   ## reads — could not appear in it. Editing such a file left the gate warm
   ## and served a stale interface with a green build. The engine's decision
   ## comes from the monitored read set, which does see those files.
+  discard ensureLockPinnedCatalog(modulePath, consumerRoot)
   let helperCliPath = internalReproHelperCliPath(publicCliPath)
   if helperCliPath.len == 0 or not cliPathExists(helperCliPath):
     # No engine-executable image to spawn back into. Embedded callers and
@@ -9897,7 +9956,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     providerCompileConfigurationIdentity(compileCommand)
   # The selected catalog decides which module a catalog `uses:` imports;
   # see `catalogSelectionIdentity`. Appended only when one is selected.
-  let catalogSelection = catalogSelectionIdentity()
+  let catalogSelection = catalogSelectionIdentity(modulePath)
   let keySuffix = "\x00provider-compile-configuration\x00" &
     digestHex(compileConfiguration) &
     (if catalogSelection.len > 0: "\x00" & catalogSelection else: "")
@@ -12842,6 +12901,7 @@ proc runInterfaceExtractHelper(args: openArray[string]): int =
       stderr.writeLine("repro interface extract: missing " & name)
       return 2
   try:
+    discard ensureLockPinnedCatalog(modulePath, consumerRoot)
     # ``useExtractionCache = false``: reaching this process at all means the
     # engine already decided the edge must run. Re-asking the narrower
     # text-closure key here could only ever overrule that decision, and it
@@ -25258,18 +25318,26 @@ proc catalogLockedDep*(catalogRoot, root: string;
   let top = gitTopLevel(catalogRoot)
   if top.len > 0:
     let depAbs = absolutePath(top)
-    if cmpPaths(depAbs, root) == 0 or root.isRelativeTo(depAbs):
+    let targetBase = if pathBase.len > 0: pathBase else: root
+    let targetTop = gitTopLevel(targetBase)
+    let canonTargetBase = if targetTop.len > 0: absolutePath(targetTop) else: absolutePath(targetBase)
+    if cmpPaths(depAbs, canonTargetBase) == 0 or canonTargetBase.isRelativeTo(depAbs):
       return none(LockedDep)
     let facts = committedLockRepoFacts(depAbs)
     let originName = repositoryNameFromUrl(facts.originUrl)
     let bareName = extractFilename(depAbs.strip(
       leading = false, trailing = true, chars = {'/', '\\'}))
+    let depName = (if originName.len > 0: originName
+                   elif bareName.len > 0: bareName
+                   else: ReprobuildPackagesRepositoryName)
+    let depPath =
+      if depAbs.isRelativeTo(canonTargetBase / ".repro") or depAbs.isRelativeTo(absolutePath(root) / ".repro"):
+        "../" & depName
+      else:
+        relativePath(depAbs, canonTargetBase).replace('\\', '/')
     return some(LockedDep(
-      name: (if originName.len > 0: originName
-             elif bareName.len > 0: bareName
-             else: ReprobuildPackagesRepositoryName),
-      path: relativePath(depAbs,
-        (if pathBase.len > 0: pathBase else: root)).replace('\\', '/'),
+      name: depName,
+      path: depPath,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
         gitRef: facts.publishedRef, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
