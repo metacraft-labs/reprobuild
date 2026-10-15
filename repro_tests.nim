@@ -15453,6 +15453,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim",
+    binary: "build/test-bin/t_when_each_case_runs_alone_no_fixture_outlives_its_process",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_working_tree_certificate_covers_the_commit_made_from_it.nim",
     binary: "build/test-bin/t_working_tree_certificate_covers_the_commit_made_from_it",
     defines: @[],

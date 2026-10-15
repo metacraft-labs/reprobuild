@@ -216,6 +216,35 @@ const
     ## Suite-Modernization M4. The one test whose execute edge takes EVERY
     ## shared pure-unit binary as a typed input; see the loop below.
 
+  PerCaseFixtureGate* =
+    "tests/integration/" &
+    "t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim"
+    ## Runs each subject below the way the suite runner does -- a
+    ## `--list-json` probe, then one process per case -- and fails when a
+    ## fixture outlives the process that acquired it. Its execute edge takes
+    ## every subject's binary as a typed input; see the loop below.
+
+  PerCaseFixtureGateSubjects* = [
+    "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
+    "libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim",
+    "libs/repro_cas_store/tests/t_cas_materialize_link.nim",
+    "libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim",
+    "libs/repro_cas_store/tests/t_link_capability_facts.nim",
+    "libs/repro_cas_store/tests/t_link_capability_probe.nim",
+    "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
+    "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
+    "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
+    "tests/integration/t_leaked_instance_is_reaped.nim",
+    "tests/integration/t_measurement_manifest_cross_check.nim",
+    "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
+    "tests/integration/t_snp_expectation_reaches_the_manifest.nim",
+    "tests/integration/t_teardown_runs_on_failure_path.nim",
+    "tests/integration/t_verify_e2e_mock.nim",
+  ]
+    ## The test files that once released their fixtures only in a final
+    ## "teardown" CASE, and so leaked them from every other per-case process.
+    ## Kept in step with the gate's own list by the gate's last case.
+
   profileCompileNimSpy = TestGraphArtifact(
     path: "build/test-bin/nim_spy",
     actionId: "reprobuild.test_helpers.nim_spy")
@@ -1538,6 +1567,17 @@ package reprobuild:
     # `checkBundleLimits` refuses a bundle that lives anywhere else.
     var pureUnitBundleArtifacts: seq[TestGraphArtifact] = @[]
 
+    # The per-case fixture gate's subjects, collected the same way and for the
+    # same two reasons: the PATH so a changed subject re-runs the gate, the
+    # ACTION ID so a focused build of the gate builds its subjects first.
+    # Every subject's source sorts before the gate's (`libs/...`, or a
+    # `tests/integration/t_<name>` alphabetically before `t_when_...`), so it
+    # has been collected by the time the gate's spec comes round; the gate's
+    # branch below REFUSES a short list rather than registering an edge that
+    # silently declares less.
+    var perCaseFixtureGateInputs: seq[TestGraphArtifact] = @[]
+    var perCaseFixtureGateNeedsRepro = false
+
     for spec in reprobuildTestSpecs:
       when defined(windows):
         if spec.source.contains("nix_daemon"):
@@ -1563,6 +1603,14 @@ package reprobuild:
             when defined(windows): spec.binary & ".exe"
             else: spec.binary,
           actionId: edge.action.id))
+      if spec.source in PerCaseFixtureGateSubjects:
+        perCaseFixtureGateInputs.add(TestGraphArtifact(
+          path:
+            when defined(windows): spec.binary & ".exe"
+            else: spec.binary,
+          actionId: edge.action.id))
+        perCaseFixtureGateNeedsRepro =
+          perCaseFixtureGateNeedsRepro or spec.requiresReproBinary
       # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
       #
       # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
@@ -1618,6 +1666,23 @@ package reprobuild:
         for artifact in pureUnitBundleArtifacts:
           requiredBinaries.add(artifact.path)
           executeDeps.add(artifact.actionId)
+      if spec.source == PerCaseFixtureGate:
+        # The gate EXECUTES each subject, so it needs what a subject's own
+        # execute edge declares: its binary and, for the subjects that drive
+        # the engine, the two CLI images. (No subject has a
+        # `testFixtureArtifacts` row; one that did would need it here too.)
+        doAssert perCaseFixtureGateInputs.len ==
+            PerCaseFixtureGateSubjects.len,
+          "PerCaseFixtureGate reached with " & $perCaseFixtureGateInputs.len &
+          " of " & $PerCaseFixtureGateSubjects.len & " subjects collected: " &
+          "a subject that is not a registered test, or one that sorts after " &
+          "the gate, would be run without being declared"
+        for artifact in perCaseFixtureGateInputs:
+          requiredBinaries.add(artifact.path)
+          executeDeps.add(artifact.actionId)
+        if perCaseFixtureGateNeedsRepro and not spec.requiresReproBinary:
+          requiredBinaries.add(reproBinaryPath)
+          requiredBinaries.add(reprobuildEngineBinaryPath)
       # Graph-Owned-Test-Artifacts M3: typed fixture inputs on the EXECUTE
       # edge, read from ONE table instead of a chain of source-path ``if``s.
       #
