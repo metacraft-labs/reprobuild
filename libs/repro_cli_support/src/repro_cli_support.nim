@@ -10356,6 +10356,14 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     # no undeclared surviving write). A hit whose outputs are already in
     # place restores nothing and keeps their mtimes.
     edgeConfig.enableCachedOutputRestore()
+  # The workspace's root classification, for `Incremental-Invalidation.md`
+  # §"Validation Criteria"'s second mandatory exemption: an enumerated
+  # directory in an UNTRACKED scope carries no membership digest. This
+  # edge runs `nim c`, whose module and config search enumerates every
+  # ANCESTOR of its working directory, so without the classification its
+  # key carries the immediate membership of `/` and of the user's home.
+  wireFilesystemRoots(edgeConfig, projectRootForModule(modulePath), workDir,
+    outRoot = consumerRoot)
   # The recipe-relative outputs are shared by every caller of this edge for
   # this recipe; the caller's own copy is its own.
   var edgeLock =
@@ -11345,6 +11353,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
         cancelCallback: cancelCheck)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
+      # Same classification as every other engine configuration here; see
+      # `wireFilesystemRoots`.
+      wireFilesystemRoots(cmakeRegenerationConfig, reportProjectRoot, outDir)
       cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
         cmakeRegenerationConfig)
       buildStats.mergeStats(cmakeRegenerationResult.stats)
@@ -12410,6 +12421,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
         cancelCallback: cancelCheck)
       providerCompileConfig.statsEnabled = statsEnabled
+      # The workspace's root classification, for `Incremental-Invalidation.md`
+      # §"Validation Criteria"'s second mandatory exemption: an enumerated
+      # directory in an UNTRACKED scope carries no membership digest. This
+      # edge runs `nim c`, whose module and config search enumerates every
+      # ANCESTOR of its working directory, so without the classification its
+      # key carries the immediate membership of `/` and of the user's home.
+      wireFilesystemRoots(providerCompileConfig, reportProjectRoot, outDir)
       # Distinguish "running" from "checking" so a silent hang inside
       # the build engine (e.g. inline runquota session that wedges on a
       # stale daemon) is visibly attributed to the launch path rather
@@ -27477,6 +27495,13 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       forceRebuild: forceRefresh,
       suppressTrace: true,
       skipCacheHitEvidence: true)
+    # The workspace's root classification, for `Incremental-Invalidation.md`
+    # §"Validation Criteria"'s second mandatory exemption: an enumerated
+    # directory in an UNTRACKED scope carries no membership digest. This
+    # edge runs `nim c`, whose module and config search enumerates every
+    # ANCESTOR of its working directory, so without the classification its
+    # key carries the immediate membership of `/` and of the user's home.
+    wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
     let providerCompileResult = runProviderCompileEdge(providerPlan,
       modulePath, interfacePath, providerArtifactPath,
       internalReproHelperCliPath(publicCliPath), compileWorkDir,
@@ -27689,6 +27714,13 @@ proc refreshRecipeProviderSnapshot(target: string;
       forceRebuild: false,
       suppressTrace: true,
       skipCacheHitEvidence: true)
+    # The workspace's root classification, for `Incremental-Invalidation.md`
+    # §"Validation Criteria"'s second mandatory exemption: an enumerated
+    # directory in an UNTRACKED scope carries no membership digest. This
+    # edge runs `nim c`, whose module and config search enumerates every
+    # ANCESTOR of its working directory, so without the classification its
+    # key carries the immediate membership of `/` and of the user's home.
+    wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
     let providerCompileResult = runProviderCompileEdge(providerPlan,
       modulePath, interfacePath, providerArtifactPath,
       internalReproHelperCliPath(publicCliPath), compileWorkDir,

@@ -227,6 +227,29 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     runQuotaQueueTimeoutMs: devEnvRunQuotaQueueTimeoutMsDefault,
     suppressTrace: false,
     skipCacheHitEvidence: false)
+  # The root classification this activation declares, for
+  # `Incremental-Invalidation.md` §"Validation Criteria"'s second mandatory
+  # exemption: an enumerated directory in an UNTRACKED scope carries no
+  # membership digest.
+  #
+  # THIS EDGE IS THE ONE THE EXEMPTION WAS MEASURED ON. The provider compile
+  # is a `nim c`, and Nim's upward module and config search enumerates every
+  # ancestor of its working directory: 449 recorded enumerations on one
+  # activation, among them `/`, `/Users/`, `$HOME`, `$HOME/.cache/` and
+  # `/nix/` (see
+  # `issues/2026-09-24-dev-env-never-converges-on-a-fresh-project.md`, the
+  # fifth cause). So the edge's key carried the immediate membership of the
+  # filesystem root and of the user's home directory, and could not converge
+  # across processes at all — which relinked the provider binary, made it
+  # non-bit-reproducible, and left the introspection edge reporting "no cache
+  # record for weak fingerprint" downstream of it.
+  #
+  # No `repositoryRoot`: finding one is a `.git` walk (the CLI's
+  # `repositoryRootOf`), and an activation runs on every `cd`. Omitting a
+  # root leaves more directories membership-tracked, which is the safe
+  # direction.
+  result.filesystemRoots = declaredFilesystemRoots(config.projectRoot,
+    config.workDir, resolvedStoreRootOrEmpty(), outRoot = config.outDir)
   result.statsEnabled = config.statsEnabled
   result.progressCallback = config.progressCallback
   # A warm activation must stay on the no-op fast path even while it renders
