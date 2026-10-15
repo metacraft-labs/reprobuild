@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 1989,
+    "nimTestBinaries": 1991,
     "pureUnitConsolidationGroups": 54,
-    "pureUnitTests": 617,
+    "pureUnitTests": 618,
     "staticallyDetectedRuntimeCompilerFlowTests": 116,
-    "testEntries": 2007
+    "testEntries": 2009
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1164,9 +1164,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 15,
-      "integration": 1090,
+      "integration": 1091,
       "platform/destructive": 126,
-      "pure unit": 617,
+      "pure unit": 618,
       "unclassified": 159
     },
     "graphOwnedTestArtifacts": [
@@ -1357,9 +1357,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1989,
+    "nimTestBinaryCount": 1991,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2007
+    "testEntryCount": 2009
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29864,6 +29864,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_hooks_consult_only_the_repos_own_dependencies",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_hooks_consult_only_the_repos_own_dependencies.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_hooks_ensure_coexists_with_pre_commit_shim",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -41782,6 +41799,24 @@
       "source": "tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_constraint_reader",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_recipe_constraint_reader.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 32,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

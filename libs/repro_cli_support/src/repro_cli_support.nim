@@ -131,6 +131,10 @@ import repro_cli_support/content_id
 # local certificate store (test-certificates Transport §2).
 import repro_cli_support/certificate_store
 export certificate_store
+# HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
+# `repro.nim` `uses:` entry state about a dependency's revision, and the
+# canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
+import repro_cli_support/recipe_constraints
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -49074,6 +49078,12 @@ type
     allowed*: seq[PinRegression] ## regressions recorded because they were named
     allowanceUsed*: seq[string]  ## named inputs that really were regressing
     examined*: seq[string]       ## every flake input name the refresh considered
+    consulted*: seq[string]
+      ## the flake half of the hooks' develop set (§16.5), one
+      ## `flake.lock:<input>=<repo>` per input bound to a sibling checkout
+    pinnedByRecipe*: seq[string]
+      ## inputs `flake.nix` pins by exact revision that no override
+      ## substitutes: not compared with their checkout (§16.5)
 
 proc shortRev(rev: string): string =
   if rev.len >= 12: rev[0 ..< 12] else: rev
@@ -50011,13 +50021,295 @@ proc keptPublishedRef(depAbs: string; pinned, fresh: LockedDep): string =
     return pinned.coordinates.gitRef
   fresh.coordinates.gitRef
 
-proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
+# ---------------------------------------------------------------------------
+# HL-11 — the hooks' develop set is the repo's OWN dependencies
+# (Unified-Locking-And-Hooks.md §16.5; CLI/develop.md DS-1, applied to the
+# hooks).
+#
+# The managed `pre-commit` re-pin, the pre-push `repro.lock` sibling stage and
+# the pre-push flake stage used to take the bulk set `repro develop --all`
+# computes over the WHOLE workspace. In a workspace of 56 repos that is 56
+# repos, for a repo whose own lock names a handful, and whether the repo's own
+# flake input was consulted at all depended on lock records of repos it does
+# not depend on. The set the hooks consult is now:
+#
+#   * for a repo with a committed `repro.lock`: the §14.2 union — the lock's
+#     own non-root VCS entries plus the manifest-declared develop-set siblings
+#     (`observeCommittedLockSiblings`, unchanged);
+#   * plus every repository the repo's `flake.lock` resolves that has a
+#     sibling checkout in the workspace (`hookDevelopSetOf`).
+#
+# A repo with neither has an empty set and its hooks check nothing about
+# siblings.
+#
+# A repository a recipe pins by EXACT revision, and that no explicit develop
+# override substitutes, is taken OUT of the set: it is not compared with its
+# checkout by the re-pin or by either pre-push stage, so a sibling ahead of a
+# release pin is neither re-pinned nor refused as stale. Its consistency is
+# the business of the recipe-vs-lock checks (§16.3), not of a comparison with
+# whatever happens to be checked out next door. An overridden exact pin, and
+# every branch-floating input, keep the existing behaviour.
+#
+# What M1 reads as "pins by exact revision": a `flake.nix` input whose URL
+# names a revision (`rev=` / `/<sha>`). A `repro.nim` exact `uses:` version is
+# read by the same constraint reader (`parseReproUsesConstraint`), but knowing
+# which repository it pins needs the recipe's extracted interface, which a
+# commit hook does not compile; it is not consulted here yet.
+# ---------------------------------------------------------------------------
+
+proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string]
+  ## Forward declaration; defined beside ``manifestDevelopSiblings``.
+
+type
+  RecipePinnedSibling = object
+    ## A sibling repository that a recipe pins by exact revision and no
+    ## explicit develop override substitutes (§16.5). The hooks do not compare
+    ## it with its checkout.
+    input: string           ## the flake input that pins it
+    repo: string            ## the workspace repo bound to that input
+    path: string            ## its sibling checkout (absolute, normalised)
+    canonicalRepo: string   ## canonical repository URL, "" when unknown
+    pin: FlakeInputConstraint
+    flakePath: string       ## the `flake.nix` that states the pin
+
+  HookFlakeMember = object
+    ## One flake input of the hooks' develop set, bound to its sibling.
+    input: string           ## the flake input name
+    repo: string            ## the workspace repo it is bound to
+    bindKey: string
+      ## The key the NF-1 binder looks the input up by: the input name with
+      ## its suffix stripped. Equal to ``repo`` when the input names the repo;
+      ## for an input bound by canonical URL to a repo of another name it is
+      ## still the stripped input name, which is what
+      ## ``flakeBindInputsToCheckouts`` derives.
+    path: string            ## the sibling checkout (absolute, normalised)
+    exactPinOverridden: bool
+      ## The recipe pins this input by revision, and an explicit develop
+      ## override substitutes it, so it is compared as before.
+
+  HookDevelopSet = object
+    ## The flake half of the hooks' develop set (the `repro.lock` half is
+    ## ``observeCommittedLockSiblings``).
+    flakeMembers: seq[HookFlakeMember]
+    pinnedByRecipe: seq[RecipePinnedSibling]
+    notices: seq[string]
+
+proc describeRecipePin(p: RecipePinnedSibling): string =
+  ## ``<input>=<repo>@<flake.nix>:<line> (rev <sha>)`` — one entry of the
+  ## pre-commit log's "pinned by recipe, not compared" list.
+  p.input & "=" & p.repo & "@" & describeFlakePin(p.pin, p.flakePath)
+
+proc describeHookFlakeMember(m: HookFlakeMember): string =
+  ## ``flake.lock:<input>=<repo>`` — one entry of the "consulted" list.
+  "flake.lock:" & m.input & "=" & m.repo
+
+proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
+    tuple[names: HashSet[string]; paths: HashSet[string];
+          notices: seq[string]] =
+  ## Every dependency an EXPLICIT develop override substitutes: the entries of
+  ## the workspace's ``.repro/develop-overrides.toml`` (`repro develop`) and of
+  ## the per-project ``develop-overrides.json`` documents (`repro develop
+  ## <dependency> --into`), by name and by checkout path.
+  ##
+  ## An override is local state that a person or a `repro develop` run wrote
+  ## on purpose; it is what §16.4 means by "a develop override substitutes".
+  ## An exact recipe pin named here is compared with its checkout exactly as
+  ## before, so the commit-time refusal keeps the experiment from being
+  ## published by accident. An override file that cannot be read is said, and
+  ## contributes nothing.
+  result.names = initHashSet[string]()
+  result.paths = initHashSet[string]()
+  if workspaceRoot.len > 0:
+    try:
+      let doc = readDevelopOverridesFile(workspaceRoot)
+      if doc.isSome:
+        for e in doc.get().`override`:
+          if e.package.len > 0: result.names.incl(e.package)
+          if e.local_path.len > 0:
+            result.paths.incl(os.normalizedPath(
+              absolutePath(e.local_path, workspaceRoot)))
+    except CatchableError as err:
+      result.notices.add("the develop overrides of " & workspaceRoot &
+        " could not be read (" & err.msg & "); no exact recipe pin is " &
+        "treated as substituted")
+  for root in [workspaceRoot, repoRoot]:
+    if root.len == 0: continue
+    try:
+      for e in readDevelopOverrides(developOverridesMetadataPath(root)):
+        if e.node.len > 0: result.names.incl(e.node)
+        if e.path.len > 0:
+          result.paths.incl(os.normalizedPath(absolutePath(e.path, root)))
+    except CatchableError as err:
+      result.notices.add("the develop overrides recorded for " & root &
+        " could not be read (" & err.msg & ")")
+
+proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
+    repos: seq[ResolvedRepo]): HookDevelopSet =
+  ## §16.5 — the flake half of the managed hooks' develop set for the repo at
+  ## ``repoRoot``: every root input of its `flake.lock` that resolves to a
+  ## node of its own and is bound to a sibling checkout of the workspace whose
+  ## membership is ``repos``. Pure reads: `flake.nix`, `flake.lock` and the
+  ## develop-override documents. No develop-set composer, no other repo's
+  ## lock, no git.
+  ##
+  ## An input is bound by IDENTITY: to the repo whose fetch URL (or checkout,
+  ## as a `file://` URL) has the same canonical identity as the input's URL or
+  ## its locked node (``canonicalRepositoryUrl``, the identity `repro sync`
+  ## uses), or, for a `path:` input, to the repo checked out at that path. A
+  ## same-named repo at a different URL is NOT bound. Only an input with no
+  ## resolvable repository URL falls back to the NF-1 naming convention
+  ## (`runquota-src` -> `runquota`). The repo itself is never its own sibling.
+  ##
+  ## An input `flake.nix` pins by exact revision goes to ``pinnedByRecipe``
+  ## instead, unless an explicit develop override names it
+  ## (``explicitDevelopOverrideTargets``), in which case it stays a member and
+  ## is compared as before. Only inputs with a sibling checkout are listed
+  ## there: a pin of something nobody has checked out was never compared.
+  let flakeRoot = os.normalizedPath(absolutePath(repoRoot))
+  if not fileExists(flakeRoot / "flake.nix") or
+      not fileExists(flakeRoot / "flake.lock"):
+    return
+  let constraints = readFlakeRecipeConstraints(flakeRoot)
+  if not constraints.ok:
+    result.notices.add(constraints.diagnostic)
+    return
+  var lockText = ""
+  try:
+    lockText = readFile(flakeRoot / "flake.lock")
+  except CatchableError as err:
+    result.notices.add(flakeRoot / "flake.lock" & " could not be read (" &
+      err.msg & ")")
+    return
+  var resolvedBy = initTable[string, FlakeLockResolution]()
+  for r in flakeLockResolutions(lockText): resolvedBy[r.input] = r
+  let overrides = explicitDevelopOverrideTargets(workspaceRoot, flakeRoot)
+  for n in overrides.notices: result.notices.add(n)
+  let ws =
+    if workspaceRoot.len > 0: os.normalizedPath(absolutePath(workspaceRoot))
+    else: ""
+  proc checkoutOf(r: ResolvedRepo): string =
+    ## The absolute checkout of workspace repo ``r``, or "".
+    if ws.len == 0 or r.path.len == 0 or r.path == ".": return ""
+    os.normalizedPath(absolutePath(ws / r.path))
+  for c in constraints.inputs:
+    # Only what the LOCK resolves: a `follows` input, or one the lock does
+    # not carry, has no node of its own to compare with anything.
+    if c.input notin resolvedBy: continue
+    let resolution = resolvedBy[c.input]
+    let stripped = stripFlakeInputSuffix(c.input,
+      defaultFlakeInputStripSuffixes)
+    let identity =
+      if c.canonicalRepo.len > 0: c.canonicalRepo
+      else: resolution.canonicalRepo
+    # IDENTITY FIRST, NAME ONLY WHEN THERE IS NO IDENTITY (§16.3: a repository
+    # is identified by its canonical URL, never by a name).
+    #
+    # * A `path:` input names a DIRECTORY, so it is bound to the repo checked
+    #   out there, and to nothing else.
+    # * An input with a repository URL (in `flake.nix`, or else in its
+    #   `flake.lock` node) is bound to the repo one of whose fetch URLs, or
+    #   whose checkout as a `file://` URL, has the same canonical identity. A
+    #   same-named repo with a DIFFERENT URL is not that input's sibling: an
+    #   input `lib-src` that fetches some other project's `lib` must not be
+    #   compared with, re-pinned to, or refused over the workspace's `lib`.
+    #   No match means the input has no sibling checkout here.
+    # * Only an input with NO resolvable repository URL (a registry name, an
+    #   interpolated URL this reader does not evaluate, a tarball) falls back
+    #   to the NF-1 naming convention, the suffix-stripped input name — the
+    #   same binding `repro flake override-args` gives it, and the only one
+    #   available.
+    var repo: ResolvedRepo
+    var found = false
+    if c.kind == frkPath and c.url.len > 0:
+      let target = parseFlakeRef(c.url).fetchUrl
+      if target.len > 0:
+        let abs = os.normalizedPath(absolutePath(target, flakeRoot))
+        for r in repos:
+          if checkoutOf(r) == abs:
+            repo = r
+            found = true
+            break
+    elif identity.len > 0:
+      for r in repos:
+        var urls = @[r.fetchUrl]
+        for remote in r.remotes: urls.add(remote.fetchUrl)
+        let co = checkoutOf(r)
+        if co.len > 0: urls.add("file://" & co)
+        for u in urls:
+          if u.len > 0 and canonicalRepositoryUrl(u) == identity:
+            repo = r
+            found = true
+            break
+        if found: break
+    else:
+      for r in repos:
+        if r.name == stripped:
+          repo = r
+          found = true
+          break
+    var path = ""
+    if found:
+      let abs = checkoutOf(repo)
+      if abs.len > 0 and abs != flakeRoot and dirExists(extendedPath(abs)):
+        path = abs
+    if path.len == 0: continue
+    var overridden = false
+    if c.exactRev.len > 0:
+      # The override must name the REPO this input is bound to (by name or by
+      # checkout path). The input's own spelling is not consulted: it may
+      # coincide with an unrelated repo's name.
+      overridden = repo.name in overrides.names or path in overrides.paths
+      if not overridden:
+        result.pinnedByRecipe.add(RecipePinnedSibling(input: c.input,
+          repo: repo.name, path: path, canonicalRepo: identity, pin: c,
+          flakePath: constraints.flakePath))
+        continue
+    result.flakeMembers.add(HookFlakeMember(input: c.input, repo: repo.name,
+      bindKey: stripped, path: path, exactPinOverridden: overridden))
+
+proc recipePinnedSiblingsFor(repoRoot: string): seq[RecipePinnedSibling] =
+  ## The siblings of the repo at ``repoRoot`` that its recipe pins by exact
+  ## revision and no override substitutes, for the `repro.lock` stages. Empty
+  ## when the repo has no locked flake or the workspace membership cannot be
+  ## resolved, in which case the `repro.lock` stages compare every entry, as
+  ## before: an unresolved membership must not silently widen what is skipped.
+  let root = absolutePath(repoRoot)
+  if not fileExists(root / "flake.nix") or not fileExists(root / "flake.lock"):
+    return
+  let membership = manifestMembershipOf(root)
+  if not membership.resolved: return
+  hookDevelopSetOf(root, membership.workspaceRoot,
+    membership.repos).pinnedByRecipe
+
+proc pinnedSiblingMatching(pinned: openArray[RecipePinnedSibling];
+    depAbs, url: string): int =
+  ## The index of the recipe pin that names the sibling checked out at
+  ## ``depAbs`` with fetch URL ``url``, or -1. Matched by checkout path, or by
+  ## canonical repository URL — never by a name, because a `repro.lock` entry
+  ## and a flake input may name one repository differently (§16.3, H2).
+  let abs = os.normalizedPath(absolutePath(depAbs))
+  let identity = if url.len > 0: canonicalRepositoryUrl(url) else: ""
+  for i, p in pinned:
+    if p.path.len > 0 and p.path == abs: return i
+    if p.canonicalRepo.len > 0 and identity.len > 0 and
+        p.canonicalRepo == identity:
+      return i
+  -1
+
+proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies;
+    pinned: seq[RecipePinnedSibling] = @[]):
     tuple[observations: seq[CommittedPinObservation]; manifestResolved: bool;
-          workspaceRoot: string] =
+          workspaceRoot: string; pinnedByRecipe: seq[string]] =
   ## Every non-root VCS entry of the committed lock plus every manifest-
   ## declared develop-set sibling it does not carry, each observed from its
   ## checkout and related to its pin by ``classifySiblingPin``. Reads only;
   ## writes nothing.
+  ##
+  ## A sibling named by ``pinned`` — one the repo's recipe pins by exact
+  ## revision and no develop override substitutes (§16.5) — is NOT observed:
+  ## it is listed in ``pinnedByRecipe`` instead, and neither the re-pin nor
+  ## the pre-push stage compares it with its checkout.
   let root = absolutePath(repoRoot)
   # The committed lock's frame of reference, not the invoking tree's: this
   # runs from the managed ``pre-commit`` hook, which fires in a linked
@@ -50046,6 +50338,10 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
       result.aheadBy = verdict.aheadBy
       result.behindBy = verdict.behindBy
       result.detail = verdict.detail
+  template notePinned(idx: int) =
+    let described = describeRecipePin(pinned[idx])
+    if described notin result.pinnedByRecipe:
+      result.pinnedByRecipe.add(described)
   let manifest = manifestDevelopSiblings(root)
   result.manifestResolved = manifest.resolved
   result.workspaceRoot = manifest.workspaceRoot
@@ -50055,15 +50351,23 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
     if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
       continue
     let depAbs = absolutePath(pathBase / d.path)
-    result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
-      d.name in declaredNames))
     seen.add(d.name)
     seen.add(relativePath(depAbs, pathBase).replace('\\', '/'))
+    let pin = pinnedSiblingMatching(pinned, depAbs, d.coordinates.url)
+    if pin >= 0:
+      notePinned(pin)
+      continue
+    result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
+      d.name in declaredNames))
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
       let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if sib.name in seen or rel in seen: continue
+      let pin = pinnedSiblingMatching(pinned, depAbs, sib.fetchUrl)
+      if pin >= 0:
+        notePinned(pin)
+        continue
       result.observations.add(observe(sib.name, depAbs, "", true))
 
 type
@@ -50086,6 +50390,9 @@ type
     allowed: seq[PinRegression]
       ## siblings whose pin moves backward because the variable named them
     examined: seq[string]     ## every sibling name this re-pin considered
+    pinnedByRecipe: seq[string]
+      ## siblings the recipe pins by exact revision and no override
+      ## substitutes (§16.5): not observed, not re-pinned, not refused
 
 proc planCommittedLockRepin(repoRoot: string;
     allowRegression: openArray[string]): CommittedLockRepinPlan =
@@ -50119,7 +50426,10 @@ proc planCommittedLockRepin(repoRoot: string;
     result.line = "repro-lock refused-no-deps-line: " & result.lockPath &
       " carries no `deps = [...]` line to re-pin"
     return
-  let obs = observeCommittedLockSiblings(root, ld)
+  # §16.5: a sibling the recipe pins by exact revision is not re-pinned.
+  let obs = observeCommittedLockSiblings(root, ld,
+    recipePinnedSiblingsFor(root))
+  result.pinnedByRecipe = obs.pinnedByRecipe
   # Resolved once: the lookup costs a subprocess, and every observation below
   # shares the same base.
   let pathBase = committedLockPathBase(root)
@@ -50231,7 +50541,10 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string):
     # committed-lock integrity stage.
     return
   result.examined = true
-  let obs = observeCommittedLockSiblings(root, ld)
+  # §16.5: a sibling the recipe pins by exact revision and no override
+  # substitutes is not compared with its checkout here.
+  let obs = observeCommittedLockSiblings(root, ld,
+    recipePinnedSiblingsFor(root))
   var bad: seq[string] = @[]
   for o in obs.observations:
     if o.pinned.len == 0 and o.declared:
@@ -50391,6 +50704,26 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   if reproPlanned:
     preCommitReproLock(workspaceRoot, repoRoot, timestamp, reproPlan,
       apply = not refused)
+
+  # §16.5 — WHICH siblings this commit consulted, recorded on every commit
+  # that has a lock to maintain. The develop set is the repo's own
+  # dependencies, and a set nobody can see is indistinguishable from one taken
+  # over the wrong repos; this line is what makes "only its own dependencies"
+  # checkable after the fact.
+  block:
+    var consulted, pinned: seq[string]
+    if reproPlanned:
+      for n in reproPlan.examined: consulted.add("repro.lock:" & n)
+      for p in reproPlan.pinnedByRecipe:
+        if p notin pinned: pinned.add(p)
+    for n in flake.consulted: consulted.add(n)
+    for p in flake.pinnedByRecipe:
+      if p notin pinned: pinned.add(p)
+    appendPreCommitLog(workspaceRoot, timestamp & " hook-develop-set " &
+      "consulted: " & (if consulted.len == 0: "(none)"
+                       else: consulted.join(", ")) &
+      "; pinned by recipe, not compared: " &
+      (if pinned.len == 0: "(none)" else: pinned.join(", ")))
 
   var used, examined: seq[string]
   var allowedRegressions: seq[PinRegression]
@@ -76523,148 +76856,25 @@ proc runReproLockingCommand*(args: openArray[string]): int =
 
 const
   flakeOverrideArgsLabel = "repro flake override-args"
-  defaultFlakeInputStripSuffixes = @["-src"]
-    ## The metacraft naming convention `.envrc` configures as
-    ## `NIX_FLAKE_OVERRIDE_AUTO_STRIP_SUFFIXES=-src`: an input named
-    ## `runquota-src` is backed by the repo `runquota`. It is a DEFAULT rather
-    ## than a hardcode — `--strip-suffix=<list>` replaces it, and
-    ## `--strip-suffix=` (empty) turns suffix stripping off — because the
-    ## convention belongs to the projects that use it, not to the tool.
+  # `defaultFlakeInputStripSuffixes` and `stripFlakeInputSuffix` live in
+  # `repro_cli_support/recipe_constraints`, because the hooks' develop set
+  # (§16.5), which is computed long before this section, binds flake inputs
+  # to sibling checkouts with them too.
 
 proc flakeDeclaredInputNames*(source: string): seq[string] =
   ## Every input name a `flake.nix` declares, in declaration order, without
   ## duplicates and WITHOUT evaluating anything.
   ##
-  ## Both spellings an input can be written in are recognised:
-  ##
-  ##   * inside the `inputs = { … }` block — `nixpkgs.url = "…";`,
-  ##     `nixpkgs.follows = "…";`, and the attribute-set form
-  ##     `bundlers = { url = "…"; inputs.nixpkgs.follows = "nixpkgs"; };`
-  ##   * flattened at the top level — `inputs.nixpkgs.url = "…";`
-  ##
-  ## An input with no `url` at all (a pure `follows`) IS returned: the
-  ## question this answers is "what names can `--override-input` address",
-  ## which is a property of the name, not of how it is resolved.
-  ##
-  ## The scan tracks brace depth so a nested `inputs.<x>.follows` inside an
-  ## attribute-set input cannot be mistaken for a top-level input called
-  ## `inputs`, and it skips comments and both string forms so a `{` inside a
-  ## URL or a `#` inside a string cannot move the depth.
-  var
-    i = 0
-    depth = 0
-    inputsDepth = -1     ## brace depth INSIDE the `inputs = { … }` block
-    path: seq[string]    ## the dotted attribute path being accumulated
-    seen = initHashSet[string]()
-    awaitingInputsBrace = false
-    names: seq[string]
-      ## Accumulated locally rather than into ``result`` because the nested
-      ## ``record`` closure below cannot capture ``result`` (Nim refuses it as
-      ## a memory-safety violation).
-  proc isIdentChar(c: char): bool =
-    c in {'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '\''}
-  proc record() =
-    ## An `=` closed an attribute path. Decide whether it names an input.
-    if path.len == 0: return
-    var name = ""
-    if depth == 1 and path.len >= 2 and path[0] == "inputs":
-      name = path[1]
-    elif inputsDepth >= 0 and depth == inputsDepth:
-      name = path[0]
-    if name.len > 0 and name notin seen:
-      seen.incl(name)
-      names.add(name)
-  while i < source.len:
-    let c = source[i]
-    if c == '#':
-      while i < source.len and source[i] != '\n': inc i
-      continue
-    if c == '/' and i + 1 < source.len and source[i + 1] == '*':
-      i += 2
-      while i + 1 < source.len and not (source[i] == '*' and source[i + 1] == '/'):
-        inc i
-      i += 2
-      continue
-    if c == '"':
-      inc i
-      while i < source.len and source[i] != '"':
-        if source[i] == '\\': inc i
-        inc i
-      inc i
-      continue
-    if c == '\'' and i + 1 < source.len and source[i + 1] == '\'' and
-        (i == 0 or not isIdentChar(source[i - 1])):
-      # Nix's indented-string form ``''…''``. Guarded on the preceding
-      # character because ``'`` is also a legal identifier character, so a
-      # trailing prime inside a name (``foo''``) must not open a string.
-      i += 2
-      while i + 1 < source.len and not (source[i] == '\'' and source[i + 1] == '\''):
-        inc i
-      i += 2
-      continue
-    if c == '{':
-      inc depth
-      if awaitingInputsBrace:
-        inputsDepth = depth
-        awaitingInputsBrace = false
-      path.setLen(0)
-      inc i
-      continue
-    if c == '}':
-      if inputsDepth >= 0 and depth == inputsDepth:
-        inputsDepth = -1
-      dec depth
-      path.setLen(0)
-      inc i
-      continue
-    if c == '=':
-      # ``==`` is a comparison, not an assignment; it cannot close a path.
-      if i + 1 < source.len and source[i + 1] == '=':
-        i += 2
-        path.setLen(0)
-        continue
-      record()
-      # ``inputs = {`` opens the block whose members are input names. The
-      # brace may be several tokens away (whitespace, a comment), so the
-      # decision is deferred to whichever `{` comes next.
-      awaitingInputsBrace = depth == 1 and path == @["inputs"]
-      path.setLen(0)
-      inc i
-      continue
-    if c == ';' or c == ',':
-      path.setLen(0)
-      awaitingInputsBrace = false
-      inc i
-      continue
-    if c == '.':
-      inc i
-      continue
-    if isIdentChar(c):
-      var j = i
-      while j < source.len and isIdentChar(source[j]): inc j
-      path.add(source[i ..< j])
-      i = j
-      continue
-    if c notin {' ', '\t', '\r', '\n'}:
-      # Anything else (`:`, `[`, `(`, an operator) ends the attribute path
-      # without recording it.
-      path.setLen(0)
-      awaitingInputsBrace = false
-    inc i
-  names
-
-proc stripFlakeInputSuffix*(name: string; suffixes: openArray[string]): string =
-  ## The repo name an input name is a spelling of: the LONGEST declared suffix
-  ## the name ends with, removed. Same rule as
-  ## `dev_shell_strip_input_suffix` in `scripts/lib/dev_shell_overrides.sh`,
-  ## so an `.envrc` migrating from the six-variable form resolves the same
-  ## siblings it did before.
-  var best = ""
-  for suffix in suffixes:
-    if suffix.len == 0: continue
-    if not name.endsWith(suffix): continue
-    if suffix.len > best.len: best = suffix
-  if best.len == 0: name else: name[0 ..< name.len - best.len]
+  ## The scan is `scanFlakeInputDeclarations` (`recipe_constraints`), which
+  ## also reads each input's URL and line for the recipe-constraint reader.
+  ## ONE scanner, so the names `--override-input` can address and the inputs
+  ## whose revisions the hooks read cannot disagree. It recognises both
+  ## spellings an input can be written in (inside `inputs = { … }`, and
+  ## flattened as `inputs.<name>.…` at the top level), returns a pure
+  ## `follows` input too, tracks brace depth, and skips comments and both
+  ## string forms; see that proc for the details.
+  for decl in scanFlakeInputDeclarations(source):
+    result.add(decl.name)
 
 proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## The workspace whose develop set backs this flake's overrides.
@@ -76788,6 +76998,28 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
     result.selected.add(row.name)
     result.checkoutOf[row.name] = row.path
   result.ok = true
+
+proc hookFlakeSelection(hs: HookDevelopSet;
+    workspaceRoot: string): FlakeDevelopSelection =
+  ## The managed hooks' flake selection (§16.5), in the shape the NF-1 binder
+  ## takes: the repo's own sibling inputs (``hookDevelopSetOf``), never the
+  ## workspace-wide `repro develop --all` set ``flakeDevelopSelectionOf``
+  ## composes for the shell-entry verbs.
+  ##
+  ## An input pinned by recipe goes into ``exceptNames``: it is left out on
+  ## purpose, so the binder's inventory says nothing about it, and the hook's
+  ## own log names it as "pinned by recipe, not compared" instead.
+  result.ok = true
+  result.workspaceRoot = workspaceRoot
+  result.checkoutOf = initTable[string, string]()
+  for m in hs.flakeMembers:
+    result.checkoutOf[m.bindKey] = m.path
+    result.selected.add(m.bindKey)
+  for p in hs.pinnedByRecipe:
+    let stripped = stripFlakeInputSuffix(p.input,
+      defaultFlakeInputStripSuffixes)
+    if stripped notin result.exceptNames: result.exceptNames.add(stripped)
+  for n in hs.notices: result.notices.add(n)
 
 proc flakeDeclaredInputsAt(flakeRoot: string):
     tuple[ok: bool; flakePath: string; names: seq[string];
@@ -78914,7 +79146,8 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     label = flakeRefreshLockLabel;
     allowRegression: seq[string] = @[];
     refuseRegressions = false;
-    mayWrite = true): FlakeLockRefreshOutcome =
+    mayWrite = true;
+    preset = none(FlakeDevelopSelection)): FlakeLockRefreshOutcome =
   ## The whole NF-2 refresh, from "which inputs are overridden" to "the bytes
   ## on disk". Shared verbatim by the operator verb and the commit hook so the
   ## two cannot diverge.
@@ -78971,8 +79204,14 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     # off, the composer would resolve its own git by the default policy and a
     # hook could end up materialising a toolchain on the commit path.
     selector.add("--tool-provisioning=path")
-  let selection = flakeDevelopSelectionOf(selector,
-    if workspaceRoot.len > 0: workspaceRoot else: "")
+  #
+  # ``preset`` is the managed hooks' own develop set (§16.5,
+  # ``hookFlakeSelection``); without it, the operator verb's selector is
+  # composed exactly as before.
+  let selection =
+    if preset.isSome: preset.get()
+    else: flakeDevelopSelectionOf(selector,
+      if workspaceRoot.len > 0: workspaceRoot else: "")
   if not selection.ok:
     result.tag = "refused-unresolvable-workspace"
     result.diagnostic = selection.refusals.join("; ")
@@ -79395,6 +79634,15 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## (Nix-Flake-Coexistence.md §3.2 "Rule, at commit"); the caller refuses the
   ## commit on them, and nothing was written.
   ##
+  ## ## Which inputs it consults (§16.5)
+  ##
+  ## The repo's OWN sibling inputs (``hookDevelopSetOf``): every root input of
+  ## its `flake.lock` bound to a sibling checkout of the workspace, never the
+  ## workspace-wide `repro develop --all` set. An input `flake.nix` pins by
+  ## exact revision, and no explicit develop override substitutes, is not
+  ## compared with its checkout, so it is neither re-pinned nor refused; it is
+  ## reported in ``pinnedByRecipe``. ``consulted`` names the inputs that were.
+  ##
   ## ## The cheap negative, and why it is not a shortcut around correctness
   ##
   ## Resolving the develop set is not free — `repro develop --list --all`
@@ -79441,6 +79689,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     # because a repo's PATH is not always its NAME, and a scan keyed on the
     # name alone would silently miss exactly those.
     var pathOf = initTable[string, string]()
+    var memberRepos: seq[ResolvedRepo]
     var membershipFailure = ""
     var membershipKnowsThisRepo = false
     try:
@@ -79448,6 +79697,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
           flakeRefreshLockLabel).resolved.repos:
         let abs = absolutePath(workspaceRoot / repo.path)
         pathOf[repo.name] = abs
+        memberRepos.add(repo)
         if abs == flakeRoot: membershipKnowsThisRepo = true
     except CatchableError as err:
       membershipFailure = err.msg
@@ -79487,21 +79737,27 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       # `refused-unresolvable-workspace` — a refusal with a remedy — instead
       # of this function answering "nothing moved" about repos it could not
       # locate.
-      let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
-        currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
-        toolProvisioning, recordDowngrade = false,
-        label = flakePreCommitLabel, allowRegression = allowRegression,
-        refuseRegressions = true, mayWrite = mayWrite)
-      result.line = "flake-lock " & outcome.tag &
+      #
+      # §16.5: the hooks' develop set is the repo's OWN sibling inputs, and
+      # without a membership there is no way to say where any sibling is
+      # checked out. The refresh used to hand over to the workspace-wide
+      # develop-set composer here, which failed on the same membership; it
+      # now refuses directly, naming the cause, and writes nothing.
+      result.line = "flake-lock refused-unresolvable-workspace" &
         " (the workspace membership at " & workspaceRoot &
         " could not be resolved — " & membershipFailure &
-        " — so the fast pre-filter could not locate any sibling checkout and " &
-        "handed over): " & outcome.diagnostic
-      result.changed = outcome.changed
-      result.refused = outcome.refused
-      result.allowed = outcome.allowed
-      result.allowanceUsed = outcome.allowanceUsed
+        " — so the fast pre-filter could not locate any sibling checkout, " &
+        "and the repo's own sibling inputs cannot be located without it): " &
+        "flake.lock was left alone; repair the workspace (`repro workspace " &
+        "status --workspace-root=" & workspaceRoot & "`) and commit again"
       return
+    # §16.5 — the repo's own sibling inputs, and the exact recipe pins that
+    # are taken out of the comparison.
+    let hookSet = hookDevelopSetOf(flakeRoot, workspaceRoot, memberRepos)
+    for m in hookSet.flakeMembers:
+      result.consulted.add(describeHookFlakeMember(m))
+    for p in hookSet.pinnedByRecipe:
+      result.pinnedByRecipe.add(describeRecipePin(p))
     let lockText = readFile(lockPath)
     let doc = parseJson(lockText)
     var candidateMoved = false
@@ -79514,14 +79770,12 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       if nodes.hasKey(rootKey) and nodes[rootKey].kind == JObject and
           nodes[rootKey].hasKey("inputs"):
         let rootInputs = nodes[rootKey]["inputs"]
-        for name in declared.names:
-          let repo = stripFlakeInputSuffix(name, defaultFlakeInputStripSuffixes)
-          # A repo the membership does not declare has no checkout this
-          # workspace is responsible for, so no override can bind it and its
-          # pin is not ours to move. That is an ANSWER, not a gap — unlike the
-          # membership failure handled above, which is the absence of one.
-          if not pathOf.hasKey(repo): continue
-          let dir = pathOf[repo]
+        # Only the hooks' develop set: an input with no sibling checkout has
+        # no HEAD to differ from its pin, and an input the recipe pins by
+        # exact revision is not compared with its checkout (§16.5).
+        for member in hookSet.flakeMembers:
+          let name = member.input
+          let dir = member.path
           if not dirExists(dir) or not flakeSiblingIsGitCheckout(dir) or
               not fileExists(dir / "flake.nix"):
             continue
@@ -79553,7 +79807,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
       label = flakePreCommitLabel, allowRegression = allowRegression,
-      refuseRegressions = true, mayWrite = mayWrite)
+      refuseRegressions = true, mayWrite = mayWrite,
+      preset = some(hookFlakeSelection(hookSet, workspaceRoot)))
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
     result.changed = outcome.changed
     result.refused = outcome.refused
@@ -79649,13 +79904,30 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     result.summary = "flake.lock could not be verified: " &
       declared.refusals.join("; ")
     return
-  # The EXACT override set: `repro develop`'s own composed selection, bound by
-  # NF-1's binder. The same two calls `repro flake override-args` makes, so the
-  # set this gate verifies is by construction the set the dev shell was given.
-  var selector = @["--all", "--workspace-root=" & workspaceRoot]
-  if toolProvisioning == tpmPathOnly:
-    selector.add("--tool-provisioning=path")
-  let selection = flakeDevelopSelectionOf(selector, workspaceRoot)
+  # The set this gate verifies is the managed hooks' develop set (§16.5): the
+  # repo's OWN sibling inputs (``hookDevelopSetOf``), bound by NF-1's binder,
+  # the same set the commit-time refresh consulted. It used to be `repro
+  # develop --all` over the whole workspace, which made whether this repo's
+  # own input was verified depend on lock records of repos it does not depend
+  # on. An input `flake.nix` pins by exact revision, and no explicit develop
+  # override substitutes, is not compared with its checkout at all: a sibling
+  # ahead of a release pin is not drift.
+  let wsRoot = flakeOverrideWorkspaceRoot(workspaceRoot)
+  var memberRepos: seq[ResolvedRepo]
+  var membershipFailure = ""
+  try:
+    memberRepos = resolveWorkspaceProjectShared(wsRoot, "",
+      "repro check --mode=pre-push").resolved.repos
+  except CatchableError as err:
+    membershipFailure = err.msg
+  let selection =
+    if membershipFailure.len > 0:
+      FlakeDevelopSelection(ok: false, workspaceRoot: wsRoot,
+        refusals: @["the workspace membership at " & wsRoot &
+          " could not be resolved: " & membershipFailure])
+    else:
+      hookFlakeSelection(hookDevelopSetOf(flakeRoot, wsRoot, memberRepos),
+        wsRoot)
   if not selection.ok:
     # No answer at all. REFUSE, naming the cause: the alternative is to publish
     # a state whose lock nobody could check, which is §3.1 with the gate's

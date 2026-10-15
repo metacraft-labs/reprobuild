@@ -11520,6 +11520,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_hooks_consult_only_the_repos_own_dependencies.nim",
+    binary: "build/test-bin/t_hooks_consult_only_the_repos_own_dependencies",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim",
     binary: "build/test-bin/t_hooks_ensure_coexists_with_pre_commit_shim",
     defines: @[],
@@ -17543,6 +17552,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim",
     binary: "build/test-bin/t_recipe_compile_honours_the_reprobuild_libs_override",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_recipe_constraint_reader.nim",
+    binary: "build/test-bin/t_recipe_constraint_reader",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

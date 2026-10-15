@@ -89,6 +89,18 @@
 ## boundary of the first: a rev-pinned input can disagree with its sibling
 ## because the CHECKOUT is stale, and there the author's flake is already right.
 ##
+## ## Every case substitutes `beta` EXPLICITLY
+##
+## Since HL-11 (Unified-Locking-And-Hooks.md §16.5) the managed hooks do not
+## compare an input `flake.nix` pins by exact revision with its checkout unless
+## an explicit develop override substitutes it: a sibling ahead of a release
+## pin is ordinary, and is covered by
+## `t_hooks_consult_only_the_repos_own_dependencies`. Every case here is about
+## the comparison itself, so each one first substitutes `beta` with the real
+## `repro develop --only=beta` (`overrideExplicitly`) — the way a developer
+## debugging a pinned dependency does — and the behaviour pinned below is the
+## behaviour §16.5 keeps for an overridden input.
+##
 ## Test-double policy: NO mocks, doubles or fakes. Real git repositories, a
 ## real `git commit`, the real installed `pre-commit` hook and the real `repro`
 ## binary — see the header of `nf2_flake_lock_fixture.nim` for the inventory.
@@ -147,6 +159,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedAlpha = fx.seedSha[0]
       let seedBeta = fx.seedSha[1]
@@ -250,6 +266,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedBeta = fx.seedSha[1]
       let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
@@ -340,6 +360,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedAlpha = fx.seedSha[0]
       let seedBeta = fx.seedSha[1]
@@ -478,6 +502,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedBeta = fx.seedSha[1]
       let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
@@ -604,6 +632,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       # The pin is moved FORWARD (flake.nix and both halves of the lock node),
       # then the checkout is wound back to where it started. The objects stay in

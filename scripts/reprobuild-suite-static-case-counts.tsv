@@ -1286,6 +1286,7 @@ tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	6
 tests/integration/t_health_vcs_hooks_digest_output.nim	nim	1
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6
+tests/integration/t_hooks_consult_only_the_repos_own_dependencies.nim	nim	4
 tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1
 tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim	nim	1
 tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	18
@@ -1958,6 +1959,7 @@ tests/unit/t_provider_startup_body_containment.nim	nim	14
 tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	4
+tests/unit/t_recipe_constraint_reader.nim	nim	32
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_relocation_move_ordering.nim	nim	10
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
