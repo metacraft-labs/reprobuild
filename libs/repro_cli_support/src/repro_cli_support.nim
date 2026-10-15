@@ -20865,6 +20865,18 @@ type
     hookPath*: string
     managedPath*: string
 
+  RepoHookWiring* = object
+    ## What `ensureRepoVcsHooks` did to one repo. Deliberately not a
+    ## `HooksEnsureReport`: that document describes an INVOCATION of
+    ## `repro hooks ensure` and is written to disk under that name, so
+    ## returning one from a pass that runs inside `repro sync` would file a
+    ## report for a command nobody ran.
+    ok*: bool                       ## false only when `core.hooksPath` could
+                                    ## not be made worktree-safe, which leaves
+                                    ## the repo's worktrees ungated.
+    skippedUnmaterialized*: bool    ## no git checkout at that path yet.
+    entries*: seq[VcsHookEntry]
+
   HooksEnsureReport* = object
     ## Structured outcome of one ``repro hooks ensure --vcs`` invocation
     ## written to ``<workspaceRoot>/.repro/build/reports/hooks-report.json``.
@@ -21088,6 +21100,73 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
     result = (mode: "workspace", projectName: "",
       repos: newSeq[HookRepoTarget]())
 
+proc ensureRepoVcsHooks(repoName, repoPath: string;
+                        guard: HookWriteGuard): RepoHookWiring =
+  ## Install or repair the managed VCS hooks of ONE materialized repo.
+  ##
+  ## Extracted from `ensureWorkspaceHooks` so that the sweep and every other
+  ## caller write hooks through the same code. There used to be exactly one
+  ## caller, and a second copy would be free to drift from it — which is the
+  ## failure this file has paid for elsewhere: two sibling probes that
+  ## disagreed about what a valid checkout is, and two workspace-root ascents
+  ## that disagreed about what "here" means. A hook writer is a worse place
+  ## for that, because the thing that drifts is the gate.
+  ##
+  ## The caller owns the `guard`: it resolves the interpreter from THIS
+  ## process's environment, which is the thing that differs between two
+  ## shells, so it is resolved once per invocation and shared across repos
+  ## rather than rebuilt per repo.
+  ##
+  ## Returns `ok = false` only when `core.hooksPath` could not be made
+  ## worktree-safe. That is a real failure — the repo's worktrees are ungated
+  ## — and must not be counted as a success by any caller.
+  result.ok = true
+  if gitTopLevel(repoPath).len == 0:
+    # Not materialized yet. Same rule the legacy repo-workspaces installer
+    # used, and the reason the sweep can run against a partially-synced
+    # workspace without failing.
+    result.skippedUnmaterialized = true
+    return
+  # Make the hook PATH worktree-safe before writing hooks into it; see
+  # `ensureWorktreeSafeHooksPath`. A repo whose path cannot be repaired has
+  # ungated worktrees, which must be reported as a FAILURE rather than counted
+  # among the successes — installing the bundle the main worktree will run is
+  # not the same as installing the repo's gate.
+  let pathRepair = ensureWorktreeSafeHooksPath(repoPath)
+  let repairLine = hooksPathRepairReport(repoPath, pathRepair)
+  if repairLine.len > 0:
+    # stderr, not stdout: `--json` makes stdout a single JSON document, and
+    # the single-repo path's stdout carries the idempotent activation line
+    # `.envrc` consumes. An advisory that corrupted either would trade one
+    # silent failure for another.
+    stderr.writeLine(repairLine)
+  if not pathRepair.ok:
+    stderr.writeLine("repro hooks: " & repoName &
+      ": could NOT make core.hooksPath worktree-safe (it is '" &
+      pathRepair.previous & "'): " & pathRepair.diagnostic)
+    result.ok = false
+  let hooksDir = gitHooksDir(repoPath)
+  for hookName in VcsHookNames:
+    let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
+    let tag = vcsHookOutcomeTag(outcome)
+    if outcome == vheoRewroteContractlessBody:
+      # Deliverable 2's distinct state, said out loud and not only counted.
+      # An operator who sees this knows a non-speaking build writes here and
+      # that the next ambient `hooks ensure` from that build will undo this
+      # repair; a count in a summary table does not carry that.
+      stderr.writeLine("repro hooks: " & repoName & "/" & hookName &
+        ": the installed body demanded NO contract — a build that predates " &
+        "the handshake wrote it. Rewritten with a contract-bearing body; " &
+        "reconcile what supplies 'repro' (direnv reload, then the pin) or " &
+        "it will be stripped again.")
+    result.entries.add(VcsHookEntry(
+      repo: repoName,
+      repoPath: repoPath,
+      hook: hookName,
+      outcome: tag,
+      hookPath: hookPath(hooksDir, hookName),
+      managedPath: managedHookPath(hooksDir, hookName)))
+
 proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   ## M17 workspace-aware ``ensure`` driver. Walks every participating
   ## repo, installs the four canonical VCS hooks per repo, and returns
@@ -21108,50 +21187,14 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   # it.
   let guard = newHookWriteGuard()
   for repo in enumerated.repos:
-    if gitTopLevel(repo.repoPath).len == 0:
-      # Skip repos that the operator hasn't materialized yet — same
-      # rule the legacy repo-workspaces installer used.
-      continue
-    # Make the hook PATH worktree-safe before writing hooks into it; see
-    # `ensureWorktreeSafeHooksPath`. A repo whose path cannot be repaired has
-    # ungated worktrees, which `ensure` must report as a FAILURE rather than
-    # count among its successes — installing the bundle the main worktree will
-    # run is not the same as installing the repo's gate.
-    let pathRepair = ensureWorktreeSafeHooksPath(repo.repoPath)
-    let repairLine = hooksPathRepairReport(repo.repoPath, pathRepair)
-    if repairLine.len > 0:
-      # stderr, not stdout: `--json` makes stdout a single JSON document, and
-      # the single-repo path's stdout carries the idempotent activation line
-      # `.envrc` consumes. An advisory that corrupted either would trade one
-      # silent failure for another.
-      stderr.writeLine(repairLine)
-    if not pathRepair.ok:
-      stderr.writeLine("repro hooks: " & repo.name &
-        ": could NOT make core.hooksPath worktree-safe (it is '" &
-        pathRepair.previous & "'): " & pathRepair.diagnostic)
+    let wiring = ensureRepoVcsHooks(repo.name, repo.repoPath, guard)
+    if wiring.skippedUnmaterialized: continue
+    if not wiring.ok:
       result.exitCode = 1
-    let hooksDir = gitHooksDir(repo.repoPath)
-    for hookName in VcsHookNames:
-      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
-      let tag = vcsHookOutcomeTag(outcome)
-      if outcome == vheoRewroteContractlessBody:
-        # Deliverable 2's distinct state, said out loud and not only counted.
-        # An operator who sees this knows a non-speaking build writes here and
-        # that the next ambient `hooks ensure` from that build will undo this
-        # repair; a count in a summary table does not carry that.
-        stderr.writeLine("repro hooks: " & repo.name & "/" & hookName &
-          ": the installed body demanded NO contract — a build that predates " &
-          "the handshake wrote it. Rewritten with a contract-bearing body; " &
-          "reconcile what supplies 'repro' (direnv reload, then the pin) or " &
-          "it will be stripped again.")
-      result.entries.add(VcsHookEntry(
-        repo: repo.name,
-        repoPath: repo.repoPath,
-        hook: hookName,
-        outcome: tag,
-        hookPath: hookPath(hooksDir, hookName),
-        managedPath: managedHookPath(hooksDir, hookName)))
-      result.summary[tag] = result.summary.getOrDefault(tag, 0) + 1
+    for entry in wiring.entries:
+      result.entries.add(entry)
+      result.summary[entry.outcome] =
+        result.summary.getOrDefault(entry.outcome, 0) + 1
 
 proc writeHooksEnsureReport(report: HooksEnsureReport; destination: string) =
   ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
@@ -45417,6 +45460,65 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
               discard gitRunPlain(identity, ["-C", repoAbs, "switch", "-c", wsBranch])
             else:
               discard gitRunPlain(identity, ["-C", repoAbs, "switch", wsBranch])
+
+  # Wire the managed VCS hooks into every repo this sync CLONED.
+  #
+  # A clone used to arrive ungated. Nothing installed the hooks implicitly —
+  # not `init`, not `sync`, not `ws enable` — so a freshly cloned repo had no
+  # pre-push gate and no post-commit cache push until somebody noticed and ran
+  # `repro hooks ensure --vcs`. `repro health` reports the gap, which made it
+  # recoverable but only by a human who thought to look: measured on one
+  # workspace, a sync that materialized 21 declared repos left 105 hooks
+  # missing, and a single later clone left 5.
+  #
+  # Scoped strictly to NEW clones. An existing checkout is left alone, because
+  # rewriting the hooks of every repo on every sync would make an ordinary
+  # `repro sync` churn the gate of a hundred repos — and would undo a
+  # deliberate local hook arrangement without being asked. `hooks ensure`
+  # remains the verb that reconciles the whole workspace.
+  #
+  # Placed after the locked-revision reset and the branch attach above so the
+  # hooks are written into a checkout that is already on its final branch and
+  # revision; `ensureWorktreeSafeHooksPath` reads git config, and doing that
+  # before the switch would describe a state the sync was about to leave.
+  #
+  # Best-effort, like every other pass in this phase (RA-11 no-rollback
+  # partial-advance): a repo that could not be wired is REPORTED and does not
+  # fail the sync. A clone that succeeded is still a clone that succeeded, and
+  # failing it here would roll back work that is already on disk. The report
+  # is what makes the gap actionable rather than silent.
+  if cloneRepoIdx.len > 0:
+    var hookGuard = newHookWriteGuard()
+    var wiredRepos = 0
+    var wiredHooks = 0
+    var ungated: seq[string] = @[]
+    for repoIdx in cloneRepoIdx:
+      if not checkoutStatus.hasKey(repoIdx): continue
+      if checkoutStatus[repoIdx][0] != "cloned": continue
+      let repo = resolved.repos[repoIdx]
+      let repoAbs = args.workspaceRoot / repo.path
+      var wiring: RepoHookWiring
+      try:
+        wiring = ensureRepoVcsHooks(repo.name, repoAbs, hookGuard)
+      except CatchableError as err:
+        # The installer raises rather than classifying a write failure, so a
+        # raise here is the only way a wiring failure reaches us.
+        ungated.add(repo.path & " (" & err.msg & ")")
+        continue
+      if wiring.skippedUnmaterialized: continue
+      if not wiring.ok:
+        ungated.add(repo.path & " (core.hooksPath is not worktree-safe)")
+      inc wiredRepos
+      wiredHooks += wiring.entries.len
+    if wiredRepos > 0 and emitProgress:
+      stderr.writeLine("workspace sync: wired " & $wiredHooks &
+        " managed hook(s) into " & $wiredRepos & " newly cloned repo(s)")
+    for entry in ungated:
+      stderr.writeLine("workspace sync: WARNING: cloned '" & entry &
+        "' but could not wire its managed hooks, so that repo is UNGATED: " &
+        "its pre-push publication check and post-commit cache push will not " &
+        "run. The clone itself succeeded. Remedy: `repro hooks ensure --vcs " &
+        args.workspaceRoot & "`")
 
   for repoIdx, decision in planned.report.decisions:
     var status = ""

@@ -38526,7 +38526,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
