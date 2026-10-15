@@ -4196,10 +4196,11 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ## recipe compile will run the compiler.
   var identity = cCompilerIdentity(cc)
   when defined(macosx):
-    # Old success markers only tested standard headers. Never reuse them for
-    # the framework probe, or across changes to SDK/compiler-wrapper inputs.
-    identity.add("|darwin-framework-probe-v1")
-    for name in ["SDKROOT", "DEVELOPER_DIR", "NIX_CFLAGS_COMPILE",
+    # Old success markers only tested standard headers or probed with ambient
+    # SDKROOT/DEVELOPER_DIR set. Never reuse them for the framework probe, or
+    # across changes to compiler-wrapper inputs.
+    identity.add("|darwin-framework-probe-v2")
+    for name in ["NIX_CFLAGS_COMPILE",
                  "NIX_CFLAGS_COMPILE_FOR_BUILD", "NIX_LDFLAGS",
                  "NIX_LDFLAGS_FOR_BUILD"]:
       identity.add("|" & name & "=" & getEnv(name))
@@ -4219,6 +4220,15 @@ proc probeCCompiler*(cc: string; cacheDir = "";
     result.usable = true
     cachedCCompilerProbes[identity] = result
     return
+  const scrubbedProbeEnvVars = [
+    "SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
+    "LIBRARY_PATH", "LIB"
+  ]
+  var savedEnv: seq[tuple[name: string; present: bool; value: string]] = @[]
+  for name in scrubbedProbeEnvVars:
+    savedEnv.add((name: name, present: existsEnv(name), value: getEnv(name)))
+    delEnv(name)
   var scratch = ""
   try:
     scratch = createTempDir("repro-cc-probe-", "")
@@ -4237,6 +4247,11 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   except CatchableError, OSError:
     result.detail = "could not run it: " & getCurrentExceptionMsg()
   finally:
+    for entry in savedEnv:
+      if entry.present:
+        putEnv(entry.name, entry.value)
+      else:
+        delEnv(entry.name)
     if scratch.len > 0:
       try: removeDir(extendedPath(scratch))
       except CatchableError, OSError: discard
@@ -4374,6 +4389,9 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
     result.add("REPRO_NIM_COMPILER=" & nim)
   if cc.len > 0 and cc.isAbsolute:
     result.add(bootstrapCCompilerEnv & "=" & cc)
+  let sdk = getEnv(bootstrapSdkRootEnv)
+  if sdk.len > 0:
+    result.add(bootstrapSdkRootEnv & "=" & sdk)
   if dirs.len > 0:
     result.add("PATH=" & dirs.join($PathSep))
   result.add("TERM=dumb")
@@ -6284,6 +6302,7 @@ const
   ProviderCompileEnvironmentPassthrough* = [
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",
+    "REPRO_BOOTSTRAP_SDKROOT",
     "CC",
     "REPRO_PROVIDER_NIMCACHE_MODE",
     ProviderParallelBuildEnv,

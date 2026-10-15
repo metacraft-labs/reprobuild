@@ -1852,6 +1852,42 @@
             "clang"
           ],
           "snippet": "let clang = findExe(\"clang\")"
+        },
+        {
+          "assignedCommandVariable": "wrappedClang",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 263,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "clang"
+          ],
+          "snippet": "let wrappedClang = findExe(\"clang\")"
+        },
+        {
+          "assignedCommandVariable": "unwrappedClang",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 268,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "clang"
+          ],
+          "snippet": "let unwrappedClang = readFile(origCcPath).strip() / \"bin\" / \"clang\""
         }
       ],
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim"
@@ -13546,7 +13582,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
