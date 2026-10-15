@@ -43,6 +43,7 @@ proc reproBinary(): string =
     "reprobuild.apps.repro")
 
 const newSettings = """schema = "reprobuild.workspace.settings.v1"
+push_gateway = "off"
 
 [projects]
 default = ["beta"]
@@ -64,6 +65,7 @@ auto_load_flake = true
 """
 
 const oldSettings = """schema = "reprobuild.workspace.bootstrap.v1"
+push_gateway = "off"
 
 [manifest]
 url = "https://git.example.invalid/acme/records.git"
@@ -138,6 +140,10 @@ proc enabledSet(root: string): seq[string] =
       result.add(line.strip().split('\t')[0])
 
 proc sameSettings(a, b: WorkspaceSettings) =
+  # Both fixtures declare the per-workspace push-gateway opt-out, so equality
+  # here proves it is read from (and carried over from) either file.
+  check a.push_gateway == some("off")
+  check a.push_gateway == b.push_gateway
   check a.projects == b.projects
   check a.records == b.records
   check a.develop == b.develop

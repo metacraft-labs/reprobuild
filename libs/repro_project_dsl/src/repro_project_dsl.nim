@@ -62,6 +62,7 @@ from repro_core/relocation import recipeSourceName
 import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/shell_fetch
 import repro_project_dsl/source_cache_identity
+import repro_project_dsl/selector_names
 import repro_project_dsl/reprobuild_packages_catalog
 export reprobuild_packages_catalog
 # How a macro shells out at compile time. A `std`-only leaf, deliberately

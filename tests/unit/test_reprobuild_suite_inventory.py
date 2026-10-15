@@ -6836,17 +6836,26 @@ compileProfileBinary()
         eleven extra Linux cases; M9.R.30.2's relocation test one more;
         loopback and stackable hooks contribute one each; SIP launch, FHS
         stubs, and watch contribute four, two, and a net six extra Darwin
-        cases.  The resulting Linux total is exactly TWO greater -- it is not
-        a stale host-independent pin, and the arithmetic is asserted at the
+        cases.  That made the Linux total exactly TWO greater.
+
+        The 2026-10-14 reconciliation added forty-one asymmetric sources
+        (thirty-four Linux x86_64 HLX gates with a Darwin sentinel, seven
+        Linux-only gates with nothing on Darwin) and dropped one deleted
+        swap, so the Linux total is now FIFTY-TWO greater.  Their Linux
+        names come from the Linux catalog; their Darwin names were read off
+        the literal `else:` branch of each source, NOT from a Darwin catalog
+        -- this host checks only the Linux side, and a Darwin run of this
+        method is what confirms the other.  The arithmetic is asserted at the
         end of this method rather than only claimed here.
 
-        A lexer-derived census below covers all twenty-five enrolled sources
-        in which a Linux/macOS gate owns a real test declaration.  Nine gates
-        select the same catalog on both hosts; the remaining sixteen are
-        exactly the keys of ``exclusive``.  This distinction keeps a new
-        gated source from hiding behind a cardinality-neutral catalog swap --
-        and it worked: six sources had joined the census since it was last
-        reconciled, five of them cardinality-neutral and one not.
+        A lexer-derived census below covers all seventy-three enrolled
+        sources in which a Linux/macOS gate owns a real test declaration.
+        Seventeen gates select the same catalog on both hosts; the remaining
+        fifty-six are exactly the keys of ``exclusive``.  This distinction
+        keeps a new gated source from hiding behind a cardinality-neutral
+        catalog swap -- and it worked: six sources had joined the census at
+        one reconciliation, five of them cardinality-neutral and one not, and
+        forty-seven at the next.
         """
         if sys.platform.startswith("linux"):
             host = "linux"
@@ -7011,21 +7020,17 @@ compileProfileBinary()
                 },
                 "darwin": set(),
             },
-            "tests/integration/"
-            "t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim": {
-                "linux": {
-                    "integration_cache_daemon_drains_dedups_persists_and_warms_from_disk::"
-                    "pinned origin dev peer interoperates in both directions"
-                },
-                "darwin": {
-                    "integration_cache_daemon_drains_dedups_persists_and_warms_from_disk::"
-                    "Darwin v1 and v2 peers isolate volatile state and share Tier-1"
-                },
-            },
+            # REMOVED by the 2026-10-14 reconciliation:
+            # `tests/integration/t_cache_daemon_drains_dedups_persists_and_`
+            # `warms_from_disk.nim` was deleted (e42ef05b2) together with its
+            # one-for-one Linux/Darwin swap, so it is cardinality-neutral to
+            # drop and it can no longer be in the census.
             "tests/unit/t_hcr_agent_process_target.nim": {
                 "linux": {
+                    # Renamed by 23685c648 (the skip now names the lane that
+                    # covers it); still the one Linux sentinel.
                     "HCR process target runtime::process target runtime is "
-                    "macOS arm64-only"
+                    "covered by the macOS arm64 lane, not this host"
                 },
                 "darwin": {
                     "HCR process target runtime::agent runtime patches "
@@ -7066,6 +7071,579 @@ compileProfileBinary()
                     "check"
                 },
                 "darwin": set(),
+            },
+            # ADDED by the 2026-10-14 reconciliation: forty-one sources the
+            # census found and this table did not have. The table had not
+            # been reconciled since the built-tree guard last let this method
+            # run -- the full runs in between had a failed `.#test-builds`,
+            # so the guard skipped it -- and in that time the whole HLX
+            # (Linux x86_64 HCR) series landed. Two shapes, both genuine
+            # asymmetries:
+            #
+            # * thirty-four `when defined(linux) and defined(amd64):` gates
+            #   with a one-case `else:` sentinel. The published Darwin host
+            #   is arm64, so it registers the sentinel and Linux registers
+            #   the real cases;
+            # * seven `when defined(linux):` gates with no `else:` at the
+            #   gate's indentation (daemon transient unit, nix-daemon helper
+            #   sockets, install-mirror ELF patching and action shapes,
+            #   bootstrap hash-library runtime paths, tarball PT_INTERP
+            #   refusal). Darwin registers nothing in their place.
+            #
+            # The Linux names are the ones the Linux catalog registers; the
+            # Darwin names are read off each `else:` branch's literal suite
+            # and test.
+            "libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim": {
+                "linux": {
+                    "a transient unit name identifies the endpoint, not its "
+                    "basename::systemd itself starts both units for two "
+                    "same-basename endpoints",
+                },
+                "darwin": set(),
+            },
+            "tests/e2e/hcr-linux-direct/"
+            "t_e2e_hcr_linux_replay_of_patched_recording.nim": {
+                "linux": {
+                    "e2e_hcr_linux_replay_of_patched_recording::a recorded "
+                    "patch bundle is applied again at its geid by the real "
+                    "in-process agent",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_replay_of_patched_recording::linux x86_64 "
+                    "only",
+                },
+            },
+            "tests/e2e/hcr-linux-direct/"
+            "t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim": {
+                "linux": {
+                    "e2e_hcr_linux_x86_64_single_threaded_direct_patch::linux "
+                    "x86_64 target returns 11, is patched over the wire, "
+                    "returns 77",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_x86_64_single_threaded_direct_patch::HLX-M0 "
+                    "direct patch gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-far/"
+            "t_e2e_hcr_linux_far_target_island_patch.nim": {
+                "linux": {
+                    "e2e_hcr_linux_far_target_island_patch::a body beyond 2 "
+                    "GiB is reached through an island, store still 5 bytes",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_far_target_island_patch::HLX-M2 island gate "
+                    "is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-far/"
+            "t_integration_hcr_linux_island_exhaustion_refuses.nim": {
+                "linux": {
+                    "integration_hcr_linux_island_exhaustion_refuses::an "
+                    "exhausted +/-2 GiB region refuses by name and writes "
+                    "nothing",
+                },
+                "darwin": {
+                    "integration_hcr_linux_island_exhaustion_refuses::HLX-M2 "
+                    "island exhaustion gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-hardening/"
+            "t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim": {
+                "linux": {
+                    "e2e_hcr_linux_text_left_writable_reaches_the_wire::target "
+                    "text is never left writable, and a failed protection step "
+                    "is a clean refusal",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_text_left_writable_reaches_the_wire::requires "
+                    "linux x86_64",
+                },
+            },
+            "tests/e2e/hcr-linux-hardening/"
+            "t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim": {
+                "linux": {
+                    "integration_hcr_linux_hardened_host_refuses_at_negotiation::a "
+                    "host that cannot regain PROT_EXEC is refused during "
+                    "negotiation",
+                },
+                "darwin": {
+                    "integration_hcr_linux_hardened_host_refuses_at_negotiation::the "
+                    "hardened-host negotiation gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-hardening/"
+            "t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim": {
+                "linux": {
+                    "integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings::a "
+                    "real patch body executes from a sealed memfd with no "
+                    "writable alias",
+                    "integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings::the "
+                    "dual mapping allocates executable pages where the "
+                    "anonymous path cannot",
+                },
+                "darwin": {
+                    "integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings::the "
+                    "provider code-page gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-prepare/"
+            "t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections.nim": {
+                "linux": {
+                    "e2e_hcr_linux_prepare_object_expands_compressed_debug_sections::prepare-object "
+                    "expands SHF_COMPRESSED debug sections and agrees with "
+                    "objcopy",
+                    "e2e_hcr_linux_prepare_object_expands_compressed_debug_sections::the "
+                    "prepared object registers where the compiler's own output "
+                    "cannot",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_prepare_object_expands_compressed_debug_sections::the "
+                    "ELF prepare-object expansion gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-prepare/"
+            "t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.nim": {
+                "linux": {
+                    "integration_hcr_linux_phase_i_refusal_reports_an_applied_patch::a "
+                    "Phase I registration refusal reports an applied patch, "
+                    "not a failed one",
+                },
+                "darwin": {
+                    "integration_hcr_linux_phase_i_refusal_reports_an_applied_patch::the "
+                    "Phase I degraded-publication gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-rbhcr/"
+            "t_e2e_hcr_linux_isonim_shim_against_real_agent.nim": {
+                "linux": {
+                    "e2e_hcr_linux_isonim_shim_against_real_agent::IsoNim's "
+                    "shim links the real agent and a real patch reaches it",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_isonim_shim_against_real_agent::HLX-M8 "
+                    "IsoNim shim gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-rbhcr/"
+            "t_integration_hcr_linux_late_load_failure_still_reaches_after_reload.nim": {
+                "linux": {
+                    "integration_hcr_linux_late_load_failure_still_reaches_after_reload::a "
+                    "Phase F failure after before-reload still reaches "
+                    "after-reload",
+                },
+                "darwin": {
+                    "integration_hcr_linux_late_load_failure_still_reaches_after_reload::HLX-M8 "
+                    "step-38 gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-rbhcr/"
+            "t_integration_hcr_linux_managed_type_layout_change_lifecycle.nim": {
+                "linux": {
+                    "integration_hcr_linux_managed_type_layout_change_lifecycle::a "
+                    "managed layout change runs the lifecycle; an unmanaged "
+                    "one is refused",
+                },
+                "darwin": {
+                    "integration_hcr_linux_managed_type_layout_change_lifecycle::HLX-M8 "
+                    "managed-type lifecycle gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-rbhcr/"
+            "t_integration_hcr_linux_rejected_patch_never_fires_before_reload.nim": {
+                "linux": {
+                    "integration_hcr_linux_rejected_patch_never_fires_before_reload::a "
+                    "patch refused in prepare fires no callback and moves no "
+                    "byte",
+                },
+                "darwin": {
+                    "integration_hcr_linux_rejected_patch_never_fires_before_reload::HLX-M8 "
+                    "rejected-patch gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-rbhcr/"
+            "t_integration_hcr_linux_threaded_synchronized_reload.nim": {
+                "linux": {
+                    "integration_hcr_linux_threaded_synchronized_reload::a "
+                    "threaded agent parks the patch until the application "
+                    "applies it",
+                },
+                "darwin": {
+                    "integration_hcr_linux_threaded_synchronized_reload::HLX-M8 "
+                    "threaded synchronized-mode gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-shared/"
+            "t_e2e_hcr_linux_shared_library_sled_patch.nim": {
+                "linux": {
+                    "e2e_hcr_linux_shared_library_sled_patch::a function "
+                    "inside a dlopen'd .so is patched: 11 -> 77",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_shared_library_sled_patch::HLX-M2 "
+                    "shared-library sled gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-threads/"
+            "t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim": {
+                "linux": {
+                    "e2e_hcr_linux_concurrent_patch_no_torn_instruction::the "
+                    "AGENT chooses tier 2 over the wire for a multithreaded "
+                    "target",
+                    "e2e_hcr_linux_concurrent_patch_no_torn_instruction::tier-2 "
+                    "publication survives concurrent execution; tier-1 does "
+                    "not",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_concurrent_patch_no_torn_instruction::HLX-M4 "
+                    "concurrency gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-threads/"
+            "t_e2e_hcr_linux_quiescence_handshake_and_release.nim": {
+                "linux": {
+                    "e2e_hcr_linux_quiescence_handshake_and_release::every "
+                    "thread parks, publishes its PC, and is released",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_quiescence_handshake_and_release::HLX-M4 "
+                    "quiescence gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-threads/"
+            "t_integration_hcr_linux_on_stack_function_reported_skipped.nim": {
+                "linux": {
+                    "integration_hcr_linux_on_stack_function_reported_skipped::a "
+                    "frame inside the patched function is detected and "
+                    "completes in the old body",
+                },
+                "darwin": {
+                    "integration_hcr_linux_on_stack_function_reported_skipped::HLX-M4 "
+                    "on-stack gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-threads/"
+            "t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim": {
+                "linux": {
+                    "integration_hcr_linux_quiescence_timeout_aborts_without_writing::an "
+                    "unresponsive thread aborts the patch and changes nothing",
+                },
+                "darwin": {
+                    "integration_hcr_linux_quiescence_timeout_aborts_without_writing::HLX-M4 "
+                    "quiescence timeout gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-threads/"
+            "t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim": {
+                "linux": {
+                    "integration_hcr_linux_signal_blocked_thread_refused_by_name::a "
+                    "thread that blocks the quiescence signal is refused by "
+                    "NAME, not as a timeout",
+                },
+                "darwin": {
+                    "integration_hcr_linux_signal_blocked_thread_refused_by_name::HLX-M4 "
+                    "signal-blocked quiescence gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-txn/"
+            "t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim": {
+                "linux": {
+                    "integration_hcr_linux_commit_failure_rolls_back_published_sites::a "
+                    "commit failing after N of M restores all N, for N = 0, 1 "
+                    "and 2",
+                    "integration_hcr_linux_commit_failure_rolls_back_published_sites::a "
+                    "three-function set commits, which is what makes a failure "
+                    "mean something",
+                    "integration_hcr_linux_commit_failure_rolls_back_published_sites::the "
+                    "claim map the leak assertion needs is present",
+                    "integration_hcr_linux_commit_failure_rolls_back_published_sites::the "
+                    "same arm goes RED against a provider with no undo path",
+                },
+                "darwin": {
+                    "integration_hcr_linux_commit_failure_rolls_back_published_sites::linux/amd64 "
+                    "only",
+                },
+            },
+            "tests/e2e/hcr-linux-txn/"
+            "t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim": {
+                "linux": {
+                    "integration_hcr_linux_prepare_failure_leaves_process_byte_identical::every "
+                    "prepare-phase failure class leaves the text "
+                    "byte-identical",
+                    "integration_hcr_linux_prepare_failure_leaves_process_byte_identical::the "
+                    "claim map the leak check needs is present",
+                    "integration_hcr_linux_prepare_failure_leaves_process_byte_identical::the "
+                    "same arm goes RED against a provider without the unwind",
+                },
+                "darwin": {
+                    "integration_hcr_linux_prepare_failure_leaves_process_byte_identical::linux/amd64 "
+                    "only",
+                },
+            },
+            "tests/e2e/hcr-linux-txn/"
+            "t_integration_hcr_linux_repeated_patch_of_same_function.nim": {
+                "linux": {
+                    "integration_hcr_linux_repeated_patch_of_same_function::a "
+                    "window modified behind the provider's back is REFUSED",
+                    "integration_hcr_linux_repeated_patch_of_same_function::rollback "
+                    "goes RED against a provider that restores generation N-1",
+                    "integration_hcr_linux_repeated_patch_of_same_function::the "
+                    "claim map the rollback assertion needs is present",
+                    "integration_hcr_linux_repeated_patch_of_same_function::three "
+                    "generations, retained bodies, rollback to the ORIGINAL",
+                },
+                "darwin": {
+                    "integration_hcr_linux_repeated_patch_of_same_function::linux/amd64 "
+                    "only",
+                },
+            },
+            "tests/e2e/hcr-linux-unwind/"
+            "t_e2e_hcr_linux_backtrace_through_patched_function.nim": {
+                "linux": {
+                    "e2e_hcr_linux_backtrace_through_patched_function::GDB, "
+                    "LLDB and the in-process unwinder all cross the patched "
+                    "frame",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_backtrace_through_patched_function::[platform "
+                    "N/A] the HLX-M5 backtrace gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-unwind/"
+            "t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim": {
+                "linux": {
+                    "e2e_hcr_linux_registration_payloads_travel_over_the_production_wire::a "
+                    "non-empty debug object and .eh_frame reach the agent over "
+                    "the wire",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_registration_payloads_travel_over_the_production_wire::HLX-M5 "
+                    "wire registration gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-unwind/"
+            "t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim": {
+                "linux": {
+                    "integration_hcr_linux_jit_symfile_accepted_by_gdb::GDB "
+                    "accepts the ELF ET_REL symfile and resolves lines inside "
+                    "the patch",
+                },
+                "darwin": {
+                    "integration_hcr_linux_jit_symfile_accepted_by_gdb::[platform "
+                    "N/A] the HLX-M5 JIT symfile gate is linux-x86_64-only",
+                },
+            },
+            "tests/e2e/hcr-linux-unwind/"
+            "t_integration_hcr_linux_register_frame_abi_detection.nim": {
+                "linux": {
+                    "integration_hcr_linux_register_frame_abi_detection::the "
+                    "__register_frame convention is measured, not guessed, "
+                    "under both unwinders",
+                },
+                "darwin": {
+                    "integration_hcr_linux_register_frame_abi_detection::[platform "
+                    "N/A] the HLX-M5 __register_frame ABI gate is "
+                    "linux-x86_64-only",
+                },
+            },
+            "tests/integration/t_install_mirror_atomic_patching.nim": {
+                "linux": {
+                    "atomic install mirror ELF normalization::ELF inspection "
+                    "errors fail before changing the original",
+                    "atomic install mirror ELF normalization::OpenMP runtime "
+                    "is resolved through the declared compiler",
+                    "atomic install mirror ELF normalization::a dependency "
+                    "loader reached through a store symlink is recorded by its "
+                    "store name",
+                    "atomic install mirror ELF normalization::a failed patch "
+                    "preserves the original ELF and fails the action",
+                    "atomic install mirror ELF normalization::a published "
+                    "mirror survives being restored under a DIFFERENT checkout",
+                    "atomic install mirror ELF normalization::a selected "
+                    "source patchelf can normalize its own mirror",
+                    "atomic install mirror ELF normalization::loader "
+                    "normalization preserves symlinks and read-only "
+                    "permissions",
+                    "atomic install mirror ELF normalization::shared-only "
+                    "mirrors retain their declared prelinked C runtime",
+                    "atomic install mirror ELF normalization::static "
+                    "executables are left byte-identical without a runtime "
+                    "path",
+                },
+                "darwin": set(),
+            },
+            "tests/integration/"
+            "t_integration_hcr_linux_build_id_mismatch_refused.nim": {
+                "linux": {
+                    "integration_hcr_linux_build_id_mismatch_refused::a shared "
+                    "library rebuilt under a running process is refused, not "
+                    "mis-resolved",
+                },
+                "darwin": {
+                    "integration_hcr_linux_build_id_mismatch_refused::HLX-M1 "
+                    "build-id verification gate is linux-x86_64-only",
+                },
+            },
+            "tests/integration/"
+            "t_integration_hcr_linux_cf_protection_sled_layout.nim": {
+                "linux": {
+                    "integration_hcr_linux_cf_protection_sled_layout::GCC and "
+                    "Clang patchable-entry layouts under -fcf-protection",
+                },
+                "darwin": {
+                    "integration_hcr_linux_cf_protection_sled_layout::HLX-M0 "
+                    "sled layout gate is linux-x86_64-only",
+                },
+            },
+            "tests/integration/"
+            "t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim": {
+                "linux": {
+                    "integration_hcr_linux_elf_object_parsing_and_patch_plan::real "
+                    "ELF relocatable objects produce facts, diffs, classified "
+                    "relocations and plans",
+                },
+                "darwin": {
+                    "integration_hcr_linux_elf_object_parsing_and_patch_plan::HLX-M1 "
+                    "ELF object parsing gate is linux-x86_64-only",
+                },
+            },
+            "tests/integration/"
+            "t_integration_hcr_linux_elf_symbol_resolution.nim": {
+                "linux": {
+                    "integration_hcr_linux_elf_symbol_resolution::static, "
+                    "hidden and exported functions resolve to their real "
+                    "runtime addresses",
+                },
+                "darwin": {
+                    "integration_hcr_linux_elf_symbol_resolution::HLX-M1 ELF "
+                    "symbol resolution gate is linux-x86_64-only",
+                },
+            },
+            "tests/integration/"
+            "t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim": {
+                "linux": {
+                    "integration_hcr_linux_static_local_symbol_ambiguity_refused::an "
+                    "ambiguous static name is refused and the qualified form "
+                    "resolves",
+                },
+                "darwin": {
+                    "integration_hcr_linux_static_local_symbol_ambiguity_refused::HLX-M1 "
+                    "static-local ambiguity gate is linux-x86_64-only",
+                },
+            },
+            "tests/integration/t_nix_daemon_ipc.nim": {
+                "linux": {
+                    "Python Nix Evaluation Daemon IPC Integration Tests::a "
+                    "helper going idle unlinks only its own socket",
+                    "Python Nix Evaluation Daemon IPC Integration Tests::a "
+                    "helper started beside a live one leaves the live socket "
+                    "alone",
+                    "Python Nix Evaluation Daemon IPC Integration Tests::a "
+                    "stopped helper releases its socket",
+                },
+                "darwin": set(),
+            },
+            "tests/integration/t_nix_daemon_provisioner.nim": {
+                "linux": {
+                    "Nix Evaluation Daemon and Foreign Provisioner Integration "
+                    "Tests::a helper slower to start than two seconds is "
+                    "waited for",
+                    "Nix Evaluation Daemon and Foreign Provisioner Integration "
+                    "Tests::concurrent clients are served while helpers are "
+                    "stopped under them",
+                    "Nix Evaluation Daemon and Foreign Provisioner Integration "
+                    "Tests::failed daemon startup does not leak connection or "
+                    "process descriptors",
+                    "Nix Evaluation Daemon and Foreign Provisioner Integration "
+                    "Tests::the helper socket is keyed by the helper's "
+                    "identity",
+                },
+                "darwin": set(),
+            },
+            "tests/integration/t_source_hash_runtime_paths.nim": {
+                "linux": {
+                    "Source bootstrap hash-library runtime paths::real hash "
+                    "libraries load without ambient paths; missing RPATH fails",
+                },
+                "darwin": set(),
+            },
+            "tests/unit/t_m9r83_install_mirror_action_shapes.nim": {
+                "linux": {
+                    "M9.R.83 install mirror emitted action shape::custom "
+                    "libexec closure executes and rejects missing libraries",
+                    "M9.R.83 install mirror emitted action shape::custom "
+                    "libexec resolves provisioned runtime libraries",
+                    "M9.R.83 install mirror emitted action shape::custom "
+                    "nested executables resolve their own relocatable "
+                    "libraries",
+                    "M9.R.83 install mirror emitted action shape::typed "
+                    "libexec closure executes and rejects missing libraries",
+                    "M9.R.83 install mirror emitted action shape::typed nested "
+                    "executables resolve their own relocatable libraries",
+                },
+                "darwin": set(),
+            },
+            "tests/unit/t_tarball_refuses_binary_host_cannot_start.nim": {
+                "linux": {
+                    "tarball executables the host cannot start::PT_INTERP of a "
+                    "host binary is read, and a script has none",
+                    "tarball executables the host cannot start::a binary whose "
+                    "loader exists resolves as before",
+                    "tarball executables the host cannot start::a binary whose "
+                    "loader is missing is refused by name",
+                    "tarball executables the host cannot start::the refusal is "
+                    "a distinct, inspectable error",
+                },
+                "darwin": set(),
+            },
+            "tests/unit/"
+            "t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim": {
+                "linux": {
+                    "HLX-M7 HCR/MCR claim arbitration::MCR is refused the "
+                    "bytes HCR holds — the arbitration is symmetric",
+                    "HLX-M7 HCR/MCR claim arbitration::a publication that "
+                    "fails after claiming RELEASES the claim",
+                    "HLX-M7 HCR/MCR claim arbitration::a window MCR has "
+                    "claimed is refused, named, and left untouched",
+                    "HLX-M7 HCR/MCR claim arbitration::the claim is RETAINED "
+                    "across re-patch generations, not re-taken",
+                    "HLX-M7 HCR/MCR claim arbitration::with the recorder's "
+                    "claim released the same publication succeeds",
+                },
+                "darwin": {
+                    "HLX-M7 HCR/MCR claim arbitration::linux/amd64 only",
+                },
+            },
+            "tests/unit/"
+            "t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim": {
+                "linux": {
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::E9 "
+                    "rel32 encoder matches hand-computed bytes for "
+                    "representative displacements",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::NOP "
+                    "predicate decodes real GCC and Clang sled encodings by "
+                    "length",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::each "
+                    "refusal cause has a distinct named diagnostic",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::far "
+                    "targets select an island, and islands are packed and "
+                    "reused",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::host "
+                    "provides SYNC_CORE membarrier and an mprotect RW/RX round "
+                    "trip",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::island "
+                    "exhaustion refuses by name rather than widening the store",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::portable "
+                    "Nim encoder agrees with the C agent byte for byte",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::publication "
+                    "is one aligned store, and re-patching the same site works",
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::the "
+                    "GCC sled yields an 8-byte-aligned window wholly inside it",
+                },
+                "darwin": {
+                    "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions::HLX-M0 "
+                    "x86_64 trampoline gate is linux-x86_64-only",
+                },
             },
         }
 
@@ -7120,6 +7698,28 @@ compileProfileBinary()
             # the source contributes nothing to the delta. Cardinality-neutral,
             # which is why the (24, 22) assertion below does not move.
             "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim",
+            # ADDED by the 2026-10-14 reconciliation, same disposition as
+            # the entries above, through gates both published hosts take the
+            # same way: `when defined(linux) or defined(macosx):` with no
+            # `else:` at the gate's indentation (wrapped monitor evidence,
+            # mirror relocation) or with an `else:` neither host takes (watch
+            # arming on cache-hit evidence); and `when defined(linux):`
+            # chains whose every branch declares the SAME suite and test
+            # names -- the off-platform branch skips, it does not rename (the
+            # runner-binary-replacement test and the two auto-started-daemon
+            # stdio / working-directory tests, whose `elif not
+            # defined(windows):` arm is the Darwin one). Checked per file by
+            # comparing the branches' literal names.
+            "libs/repro_build_engine/tests/"
+            "test_wrapped_monitor_evidence_ownership.nim",
+            "tests/e2e/watch/t_e2e_repro_watch_arms_on_cache_hit_evidence.nim",
+            "tests/integration/"
+            "t_repro_test_runner_survives_its_binary_being_replaced.nim",
+            "tests/unit/t_install_mirror_relocation.nim",
+            "libs/repro_daemon_core/tests/"
+            "t_auto_started_daemon_does_not_hold_callers_pipe.nim",
+            "libs/repro_daemon_core/tests/"
+            "t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
         }
         gated_sources = self.platform_gated_test_sources(data)
         self.assertEqual(gated_sources, set(exclusive) | catalog_identical)
@@ -7127,8 +7727,11 @@ compileProfileBinary()
         # they refuse a disposition that moves a source between the two
         # tables without saying so. The equality alone is satisfied by any
         # partition of the census.
-        self.assertEqual(len(exclusive), 16)
-        self.assertEqual(len(catalog_identical), 11)
+        # 16/11 -> 56/17 at the 2026-10-14 reconciliation: one deleted
+        # source out of `exclusive`, forty-one in, six into
+        # `catalog_identical`.
+        self.assertEqual(len(exclusive), 56)
+        self.assertEqual(len(catalog_identical), 17)
 
         by_source = {item["source"]: item for item in data["tests"]}
         for source, expected_by_host in exclusive.items():
@@ -7150,14 +7753,21 @@ compileProfileBinary()
         # relocation test, above. Every other newly censused source is a
         # `linux or macosx` gate and is cardinality-neutral, so the Darwin
         # side does not move at all.
-        self.assertEqual((linux_only, darwin_only), (24, 22))
+        #
+        # 24/22 -> 107/55 at the 2026-10-14 reconciliation. The deleted cache
+        # daemon source took one case from each side (23/21); the thirty-four
+        # HLX gates added their fifty-seven Linux cases and one Darwin
+        # sentinel each (80/55); the seven Linux-only gates without an
+        # `else:` added twenty-seven Linux cases and nothing on Darwin
+        # (107/55).
+        self.assertEqual((linux_only, darwin_only), (107, 55))
         # The delta is DERIVED here and asserted, not assumed. It used to be
         # what `expected_nim_total`'s Darwin arm was carried on; that literal
         # is gone (see the note where it stood), so this line no longer
         # supports anything but itself — which is the right amount. A reader
         # who trusts the docstring's old "exactly one greater" over this line
         # will be wrong by one.
-        self.assertEqual(linux_only - darwin_only, 2)
+        self.assertEqual(linux_only - darwin_only, 52)
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
         fingerprint = "same-source"
@@ -7907,6 +8517,95 @@ class DeclaredSourceGateTests(unittest.TestCase):
         )
         self.assertIn("--check-declared-sources", text)
         self.assertIn("sources_status", text)
+
+    def test_an_unreferenced_shell_script_not_on_baseline_is_reported(self):
+        """Shell test scripts under tests/ must be referenced or on the baseline."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        baseline_file = root / "scripts" / "uninvoked-shell-tests-baseline.txt"
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_text("# baseline\n", encoding="utf-8")
+
+        orphan_shell = root / "tests" / "unit" / "t_unreferenced_shell_gate.sh"
+        orphan_shell.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertFalse(drift["clean"])
+        self.assertIn("tests/unit/t_unreferenced_shell_gate.sh", drift.get("undeclared", []))
+        self.assertIn(
+            "tests/unit/t_unreferenced_shell_gate.sh",
+            inventory.format_declared_source_drift(drift),
+        )
+
+    def test_an_unreferenced_shell_script_on_baseline_is_accepted(self):
+        """An unreferenced shell script recorded in the baseline is accepted debt."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        baseline_file = root / "scripts" / "uninvoked-shell-tests-baseline.txt"
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_text(
+            "# baseline\ntests/unit/t_debt_shell_gate.sh\n", encoding="utf-8"
+        )
+
+        debt_shell = root / "tests" / "unit" / "t_debt_shell_gate.sh"
+        debt_shell.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertTrue(drift["clean"], drift)
+        self.assertEqual(drift.get("shellBaselineCount"), 1)
+        self.assertEqual(drift.get("shellCandidateCount"), 1)
+        self.assertEqual(drift.get("shellReferencedCount"), 0)
+
+    def test_a_referenced_shell_script_is_accepted_without_baseline(self):
+        """A shell script referenced by Justfile/scripts/tests/repro_tests is accepted."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        baseline_file = root / "scripts" / "uninvoked-shell-tests-baseline.txt"
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_text("# baseline\n", encoding="utf-8")
+
+        ref_shell = root / "tests" / "unit" / "t_invoked_shell_gate.sh"
+        ref_shell.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        justfile = root / "Justfile"
+        justfile.write_text("test:\n  bash tests/unit/t_invoked_shell_gate.sh\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertTrue(drift["clean"], drift)
+        self.assertEqual(drift.get("shellReferencedCount"), 1)
+        self.assertEqual(drift.get("shellBaselineCount"), 0)
+
+    def test_missing_uninvoked_shell_tests_baseline_fails_when_shell_tests_present(self):
+        """When shell test scripts exist, missing baseline is a fatal failure."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        shell_script = root / "tests" / "unit" / "t_some_shell_gate.sh"
+        shell_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+        drift = inventory.declared_source_drift(root)
+        self.assertFalse(drift["clean"])
+        self.assertTrue(drift.get("shellBaselineMissing"))
+        self.assertIn(
+            "uninvoked-shell-tests-baseline.txt",
+            inventory.format_declared_source_drift(drift),
+        )
+
 
 
 

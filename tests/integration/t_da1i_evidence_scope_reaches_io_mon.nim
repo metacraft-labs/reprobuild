@@ -41,7 +41,8 @@
 ## MOCK POLICY — NO MOCKS ARE USED IN THIS FILE, AND NONE MAY BE ADDED. Every
 ## assertion drives the graph-built `repro` binary, the graph-built monitor
 ## shim, io-mon's real host and real depfile reader, the real `runBuild`
-## scheduler, a real `/bin/sh`, and real files in a real temporary directory.
+## scheduler, the shipped shell replacement, and real files in a real
+## temporary directory.
 ## The defect class under test IS the path from a CLI flag to a recorded
 ## observation; a harness that supplied its own depfile would assert nothing
 ## about it.
@@ -90,10 +91,27 @@ const FixtureScript =
 
 const AbsentName = "absent.txt"
 const PresentName = "present.txt"
+const FixtureName = "fixture.sh"
+
+proc writeFixture(workRoot, script: string): string =
+  ## Let the monitor's existing shebang handling select the shipped non-SIP
+  ## shell. An explicit /bin/sh root strips injection before hooks can run.
+  ## An outer monitor can mask that defect by rewriting the nested spawn, so
+  ## this fixture also has to work when its test binary runs standalone.
+  result = workRoot / FixtureName
+  writeFile(result, "#!/bin/sh\n" & script & "\n")
+  setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+
+proc fixtureCommand(workRoot: string; script = FixtureScript): seq[string] =
+  when defined(macosx):
+    return @[writeFixture(workRoot, script)]
+  @["/bin/sh", "-c", script]
 
 proc makeWorkRoot(): string =
   result = createTempDir("repro-da1i-", "")
   writeFile(result / PresentName, "present\n")
+  when defined(macosx):
+    discard writeFixture(result, FixtureScript)
   # `absent.txt` is deliberately NOT created. The whole point is a lookup
   # that finds nothing.
 
@@ -102,14 +120,31 @@ proc pathsNaming(dep: MonitorDepFile; needle: string): int =
     if record.path.contains(needle):
       inc result
 
+template checkShellTree(dep: MonitorDepFile) =
+  when defined(macosx):
+    # The shell and its external cat must both load the monitor. Together
+    # with mcComplete, this pins the replacement route.
+    var starts: seq[uint64] = @[]
+    var catSpawn = false
+    for record in dep.records:
+      if record.kind == mrProcessStart and record.osPid > 0 and
+          record.osPid notin starts:
+        starts.add record.osPid
+      if record.kind in {mrProcessSpawn, mrProcessExec} and
+          record.path.extractFilename == "cat":
+        catSpawn = true
+    check starts.len >= 2
+    check catSpawn
+
 proc runMonitorCli(tools: MonitorTools; workRoot, depPath: string;
                    evidenceArgs: seq[string];
                    script = FixtureScript):
                    tuple[code: int, output: string] =
   ## One spawn of the real `repro internal io monitor`, over the real fixture
   ## command, in the fixture's own directory.
+  let command = fixtureCommand(workRoot, script)
   let args = tools.monitorCliArgs & @["--depfile", depPath] & evidenceArgs &
-    @["--", "/bin/sh", "-c", script]
+    @["--"] & command
   let process = startProcess(tools.monitorCliPath, workingDir = workRoot,
     args = args, options = {poStdErrToStdOut})
   let output = process.outputStream.readAll()
@@ -141,6 +176,10 @@ suite "DA-1i the evidence scope reaches io-mon":
 
     let full = readMonitorDepFile(fullPath)
     let narrow = readMonitorDepFile(narrowPath)
+    check full.completeness == mcComplete
+    check narrow.completeness == mcComplete
+    checkShellTree(full)
+    checkShellTree(narrow)
 
     # THE STAMPS. `reads-only` is stated; `full` is deliberately not, because
     # an unstamped capture has always meant exactly full scope and stamping it
@@ -233,7 +272,7 @@ suite "DA-1i the engine forwards the operator's scope":
       config.monitorCliArgs = tools.monitorCliArgs
       config.evidenceScope = scope
       let act = action("da1i/" & tag,
-        ["/bin/sh", "-c", FixtureScript],
+        fixtureCommand(workRoot),
         cwd = workRoot,
         inputs = [PresentName],
         outputs = [],
@@ -265,7 +304,10 @@ suite "DA-1i the engine forwards the operator's scope":
           " build (path=`", depPath, "`); nothing below is grading the flag."
       check depPath.len > 0
       check fileExists(depPath)
-      readMonitorDepFile(depPath)
+      let dep = readMonitorDepFile(depPath)
+      check dep.completeness == mcComplete
+      checkShellTree(dep)
+      dep
 
     let narrow = buildUnder(esReadsOnly, "narrow")
     let full = buildUnder(esFull, "full")

@@ -6,7 +6,7 @@
 ## equivalent text. The adapters are pure functions; these tests do
 ## NOT touch the filesystem, run a build engine, or invoke `nim c`.
 
-import std/[options, strutils, tables, unittest]
+import std/[options, os, strutils, tables, unittest]
 
 import repro_home_intent
 import repro_infra
@@ -434,17 +434,86 @@ suite "M83 Phase D: home adapter — resources":
         depAttr = a.resourceAttrValueSource
     check depAttr == "[\"windows.capability:OpenSSH\"]"
 
-  test "system-scope resource kinds are filtered out of the home block":
+  # A system-scope resource in a home profile used to be dropped from the
+  # resources block without a word, so it never took effect while
+  # `repro home apply` reported success (reprobuild-pm
+  # issues/2026-10-14-home-planner-silently-drops-a-system-scope-resource.md;
+  # Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped).
+  proc homeAdapterRefusal(intent: ProfileIntent): string =
+    try:
+      discard profileIntentToHomeProfile(intent, "/x/home.nim")
+    except ValueError as err:
+      return err.msg
+    ""
+
+  test "a system-scope resource in a home profile is refused, naming it":
     var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("env.userPath", "p",
+      @[strFieldEntry("entries", "C:\\bin")]))
     intent.resources.add(resourceIntent("windows.capability", "ssh",
       @[strFieldEntry("name", "OpenSSH.Server"),
         boolFieldEntry("installed", true)]))
-    intent.resources.add(resourceIntent("env.userPath", "p",
-      @[strFieldEntry("entries", "C:\\bin")]))
-    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
-    let entries = findResourcesBlock(prof).get.resourcesEntries
-    check entries.len == 1
-    check entries[0].resourceKind == "env.userPath"
+    let message = homeAdapterRefusal(intent)
+    checkpoint message
+    check "windows.capability `ssh`" in message
+    check "system-scope" in message
+    check "repro infra apply" in message
+
+  test "a guarded system-scope resource is refused whatever the guard":
+    # The declaration is misplaced on every host, including those where
+    # the guard is false.
+    var intent = ProfileIntent(name: "demo")
+    var r = resourceIntent("fs.systemFile", "/etc/gm5.conf",
+      @[strFieldEntry("path", "/etc/gm5.conf"),
+        strFieldEntry("content", "y")])
+    r.guard = PredicateExpr(expr: "false")
+    intent.resources.add(r)
+    let message = homeAdapterRefusal(intent)
+    checkpoint message
+    check "fs.systemFile `/etc/gm5.conf`" in message
+    check "system-scope" in message
+
+  test "a resource kind neither planner applies is refused":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("fs.userSymlink", "",
+      @[strFieldEntry("path", "~/x")]))
+    let message = homeAdapterRefusal(intent)
+    checkpoint message
+    check "fs.userSymlink" in message
+    check "neither the home nor the system planner" in message
+
+suite "resource scope: one classification for both planners":
+
+  test "every kind a repro_profile constructor emits has a scope":
+    # Read the constructors' source rather than a hand-kept list, so a new
+    # constructor whose kind is missing from `resourceScope` fails here
+    # instead of being refused only when a profile first uses it.
+    let source = readFile(currentSourcePath().parentDir.parentDir.parentDir /
+      "repro_profile" / "src" / "repro_profile" / "resources.nim")
+    const marker = "pushResource(targetResources, \""
+    var kinds: seq[string]
+    var at = source.find(marker)
+    while at >= 0:
+      let start = at + marker.len
+      let stop = source.find('"', start)
+      kinds.add source[start ..< stop]
+      at = source.find(marker, stop)
+    checkpoint $kinds
+    # Vacuity guard: 43 constructors at the time of writing.
+    check kinds.len >= 40
+    for kind in kinds:
+      checkpoint kind
+      check resourceScope(kind) != rsUnknown
+
+  test "home and system scope partition the kinds; the rest are unknown":
+    check resourceScope("fs.userFile") == rsHome
+    check resourceScope("pkg.homebrewCask") == rsHome
+    check resourceScope("systemd.userUnit") == rsHome
+    check resourceScope("fs.systemFile") == rsSystem
+    check resourceScope("systemd.systemUnit") == rsSystem
+    check resourceScope("windows.registryValueHKLM") == rsSystem
+    check resourceScope("") == rsUnknown
+    check resourceScope("fs.userSymlink") == rsUnknown
 
 # ---------------------------------------------------------------------------
 # System adapter.
@@ -511,10 +580,43 @@ suite "M83 Phase D: system adapter":
     check sp.resources[0].kind == srkWindowsRegistryValue
     check sp.resources[0].regKey == "HKLM\\SOFTWARE\\Foo"
 
-  test "home-scope resource kinds are filtered out of the system profile":
+  # A home-scope resource in a system profile used to be dropped without a
+  # word -- the `pkg.homebrewCask` resources a macOS system profile declared
+  # were never installed while `repro infra apply` reported success
+  # (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped).
+  proc systemAdapterRefusal(intent: ProfileIntent): string =
+    try:
+      discard profileIntentToSystemProfile(intent)
+    except ValueError as err:
+      return err.msg
+    ""
+
+  test "a home-scope resource in a system profile is refused, naming it":
     var intent = ProfileIntent(name: "demo")
-    intent.resources.add(resourceIntent("env.userPath", "p",
-      @[strFieldEntry("entries", "C:\\bin")]))
+    intent.resources.add(resourceIntent("windows.capability", "ssh",
+      @[strFieldEntry("name", "OpenSSH"),
+        boolFieldEntry("installed", true)]))
+    intent.resources.add(resourceIntent("pkg.homebrewCask", "ghostty",
+      @[strFieldEntry("name", "ghostty")]))
+    let message = systemAdapterRefusal(intent)
+    checkpoint message
+    check "pkg.homebrewCask `ghostty`" in message
+    check "home-scope" in message
+    check "repro home apply" in message
+
+  test "a resource kind neither planner applies is refused by the system adapter":
+    var intent = ProfileIntent(name: "demo")
+    intent.resources.add(resourceIntent("fs.userSymlink", "",
+      @[strFieldEntry("path", "/x")]))
+    let message = systemAdapterRefusal(intent)
+    checkpoint message
+    check "fs.userSymlink" in message
+    check "neither the home nor the system planner" in message
+
+  test "a system profile of system-scope kinds only is adapted whole":
+    # Control for the two refusals above: the same system-scope resource
+    # alone is accepted.
+    var intent = ProfileIntent(name: "demo")
     intent.resources.add(resourceIntent("windows.capability", "ssh",
       @[strFieldEntry("name", "OpenSSH"),
         boolFieldEntry("installed", true)]))
@@ -1246,8 +1348,7 @@ suite "M83 Phase D: home adapter round-trip via attribute readback":
         strFieldEntry("mode", "0644"),
         boolFieldEntry("executable", false)]))
     # M83 step 4b: the two POSIX home-scope user-service kinds also
-    # belong to the home-scope set and must NOT be filtered out by
-    # `isHomeScopeResource`.
+    # belong to the home-scope set (`resourceScope` = `rsHome`).
     intent.resources.add(resourceIntent("systemd.userUnit", "su",
       @[strFieldEntry("name", "gpg-agent.service"),
         strFieldEntry("content", "[Unit]\n"),

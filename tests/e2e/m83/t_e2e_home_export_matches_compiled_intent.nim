@@ -252,8 +252,19 @@ suite "repro home export: compiled intent":
     let versionOut = execProcess(reproBinary(), args = ["--version"],
       options = {})
     check versionOut.contains(prov["repro"]["version"].getStr)
-    check prov["repro"]["sourceRevision"].kind == JString
-    checkpoint("sourceRevision: " & $prov["repro"]["sourceRevision"])
+    # `sourceRevision` is injected at build time (repro_core's
+    # `sourceRevisionString`): `scripts/build_apps.sh` and the release
+    # packaging supply it, but the suite builds the engine through the
+    # `.#apps` edge, which adds it only when $REPROBUILD_SOURCE_REVISION is
+    # set. The export then reports the documented "unknown", null. Either is
+    # correct provenance; a string must be a commit id.
+    let revision = prov["repro"]["sourceRevision"]
+    checkpoint("sourceRevision: " & $revision)
+    check revision.kind in {JString, JNull}
+    if revision.kind == JString:
+      let sha = revision.getStr.replace("-dirty", "")
+      check sha.len == 40
+      check sha.allCharsInSet(HexDigits)
     check prov["profile"]["root"].getStr == "home.nim"
     check prov["profile"]["digest"].kind == JString
     var homeNimDigest = ""

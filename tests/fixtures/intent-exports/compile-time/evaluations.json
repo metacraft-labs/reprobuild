@@ -1,0 +1,482 @@
+{
+  "m1": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "m1",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "m1",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "x86_64-darwin": {
+      "refused": true
+    },
+    "aarch64-darwin": {
+      "refused": true
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "m1",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "m1",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    }
+  },
+  "home-pc": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "home-pc",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "home-pc",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "x86_64-darwin": {
+      "refused": true
+    },
+    "aarch64-darwin": {
+      "refused": true
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "home-pc",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "home-pc",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    }
+  },
+  "server": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "x86_64-darwin": {
+      "refused": true
+    },
+    "aarch64-darwin": {
+      "refused": true
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM5_EVERYWHERE",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM5_EVERYWHERE"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null
+        }
+      ],
+      "configOverrides": []
+    }
+  }
+}

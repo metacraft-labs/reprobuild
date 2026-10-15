@@ -137,6 +137,36 @@ view. A test that needs its own `--path` or `-d:` flag carries it in a
 sibling `<test>.nim.cfg`; `TestSpec` has no field for either, and every build
 route honours the `.cfg`.
 
+## Test fixtures: one process per case
+
+The suite runner probes every test binary with `--list-json` and then runs each
+case in a process of its own (`<binary> --run "<suite>::<test>"`). Every one of
+those processes executes the file's module-level code, and none of them sees
+what another one did. So:
+
+- **Acquire a fixture lazily, from inside the case that needs it** — not at
+  module scope, where the `--list-json` probe and every unrelated case pay for
+  it.
+- **Release it in the process that acquired it**, with
+  `repro_test_support/process_fixtures`: `releaseDirAtProcessExit(path)` for a
+  scratch directory (register it before creating the directory),
+  `terminateAtProcessExit(pid)` for a daemon you started. Never in a final
+  "teardown" case: that case runs in one process and releases only what that
+  process acquired, so every other case's fixture is leaked for good.
+- **Do not release through an `addExitProc` closure over module globals.**
+  Under ORC the compiler destroys every heap-backed global (strings, seqs,
+  refs, closures) when the main module's top-level code ends, before any exit
+  hook runs; such a closure reads freed memory, usually works, and sometimes
+  crashes or silently removes nothing. `process_fixtures` keeps its state
+  outside the Nim heap for that reason.
+
+`tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim`
+runs files that once had the teardown-as-a-case shape exactly as the runner
+does and fails when anything they created survives; add a file there when it
+acquires fixtures the gate can attribute (under `$TMPDIR`/`$HOME`, or named
+with the pid). `repro_test_support/per_case_runs` is the runner emulation it
+uses.
+
 ## Why these refreshes are enforced
 
 Forgetting either refresh used to be somebody else's problem: `just lint` went

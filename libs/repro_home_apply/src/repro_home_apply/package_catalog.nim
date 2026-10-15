@@ -39,7 +39,11 @@ import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/package_registry
 import repro_tool_profiles/realization_selection
 
+import ./catalog_projection
+from repro_home_resources/drivers/app_bundle import installerProductPathError
+
 export packages_schema
+export catalog_projection
 export realization_selection
 export package_registry.packageAvailability
 
@@ -105,6 +109,19 @@ type
       ## ``dark.exe`` for MSI extraction (the per-record form of the global
       ## ``CAKBUILTIN_PREFER_MSIEXEC=1``).
     launcherEmit*: seq[LauncherEmitSpec]
+    appBundle*: string
+      ## GM4c: the ``.app`` bundle's path inside the archive, for an
+      ## ``imAppBundle`` record (Store-And-Installation-Layout.md § macOS
+      ## Application Bundles). With ``bundleId`` / ``teamId`` and the
+      ## record's version it is what the realizer verifies. For a macOS
+      ## installer application it is the product bundle's path inside the
+      ## installed prefix (§ Installer applications).
+    bundleId*: string
+    teamId*: string
+    installerApp*: string
+      ## The installer application's path inside the archive, for a macOS
+      ## ``imInstallerSilent`` record (Store-And-Installation-Layout.md
+      ## § Installer applications); "" for a Windows installer.
 
   ArchiveRoute* = enum
     ## Which realizer a ``tarball`` selection goes to (see
@@ -716,7 +733,7 @@ proc detectHostTarget*(): PlatformTarget =
 # hard-coded map. Migration starting point: move these consts into the
 # per-package realization
 # (each affected `packages/<tool>.nim` declares its own
-# `requires_for_realize: @["sevenzip"]` or similar in the
+# `requires_for_realize: @["7zip"]` or similar in the
 # `tarball` statement); then have `extractorDependencies`
 # below read `resolution.requiresForRealize` directly instead of
 # pattern-matching on `archive_format` / `install_method`. The case
@@ -724,9 +741,9 @@ proc detectHostTarget*(): PlatformTarget =
 # See Realize-Layer-Plumbing-Closures.milestones.org M0 Outstanding
 # Tasks for the planned schema shape.
 const
-  ExtractorProvider7zip*    = "sevenzip"
-    ## GM4b: the stdlib definition is ``package sevenzip`` (the package
-    ## macro cannot declare a name that starts with a digit).
+  ExtractorProvider7zip*    = "7zip"
+    ## The stdlib definition is ``package "7zip"`` (module
+    ## ``packages/pkg_7zip.nim``).
   ExtractorProviderLessmsi* = "lessmsi"
   ExtractorProviderWix3*    = "wix3"
   ExtractorProviderInnounp* = "innounp"
@@ -747,9 +764,9 @@ proc extractorDependencies*(packageId: string;
   ## ``uses:`` provisioning edge, has no extractor-discovery edge.
   ##
   ## The returned seq never contains ``packageId`` itself (self-edges are
-  ## skipped) — even though e.g. ``sevenzip.nim`` itself uses
+  ## skipped) — even though e.g. ``pkg_7zip.nim`` itself uses
   ## ``imInstallerMsi`` which needs ``lessmsi``, that's a real edge
-  ## (sevenzip → lessmsi); the self-edge filter is for the degenerate
+  ## (7zip → lessmsi); the self-edge filter is for the degenerate
   ## case where the mapping ever points a package at itself.
   var deps: seq[string] = @[]
   # archive_format-driven edges
@@ -1135,6 +1152,18 @@ proc selectionPolicyFor*(adapterPreference: OrderedTable[string, seq[string]];
       adapterPreference[key].len > 0:
     for name in adapterPreference[key]:
       let parsed = parseRealizationKind(name)
+      if not parsed.ok and name.strip().toLowerAscii() in
+          ["homebrew", "brew", "brewcask", "brewformula"]:
+        # Not a typo: Homebrew is a contribution kind, but only as a BRIDGE
+        # record that consumers installing through Homebrew read (the Nix
+        # helper library). Reprobuild has no Homebrew realizer, so a policy
+        # naming it is refused with that reason rather than as an unknown
+        # word (Provisioning-Contributions.md §"Homebrew bridge records").
+        raise newException(ValueError,
+          "adapterPreference." & key & " names '" & name & "': Homebrew " &
+          "contribution records are bridge records read by Nix consumers; " &
+          "Reprobuild does not realize packages through Homebrew " &
+          "(known kinds: tarball, builtin, nix, scoop, path)")
       if not parsed.ok:
         raise newException(ValueError,
           "adapterPreference." & key & " names unknown realization kind '" &
@@ -1153,13 +1182,34 @@ proc selectionPolicyFor*(adapterPreference: OrderedTable[string, seq[string]];
 const ProfileProjectionPackage = "repro-home-profile"
   ## The synthetic package a profile reference is a ``uses:`` of.
 
-proc profileToolUse*(packageId: string):
+proc profileToolUse*(packageId: string;
+                     catalog = ProfileCatalog()):
     tuple[useDef: InterfaceToolUse; known: bool] =
   ## Project ``package "<packageId>"`` exactly as interface extraction
   ## projects ``uses: "<packageId>"`` (``toProjectInterface``): the canonical
   ## definitions of that name with their in-package realizations, plus every
   ## registered contribution targeting it whose interface fingerprint
-  ## matches. ``known`` says whether any linked definition has the name.
+  ## matches. ``known`` says whether a definition of the name was found.
+  ##
+  ## The definitions are found in ``usesImportCode``'s order: a bundled
+  ## stdlib selector is the linked stdlib definition; otherwise a definition
+  ## in the ``reprobuild-packages`` catalog (``catalog``, projected by
+  ## ``catalog_projection`` from the profile's location) wins; otherwise the
+  ## other stdlib definitions the engine links (the former catalog packages,
+  ## which a recipe reaches through an explicit import).
+  ##
+  ## When the profile imports contribution catalogs (``catalogs:``), every
+  ## reference with a definition in scope is in ``catalog`` -- bundled ones
+  ## included -- projected by a recipe that imports those catalogs, so the
+  ## contributions they register are candidates exactly as for that recipe.
+  ## Without imports a bundled selector never is, and resolves from the
+  ## linked definition below.
+  if packageId in catalog.failures:
+    raise newException(ValueError, catalog.failures[packageId])
+  if packageId in catalog.uses:
+    var use = catalog.uses[packageId]
+    use.location = SourceLocation(file: "home-profile", line: 1)
+    return (use, true)
   var home = PackageDef(packageName: ProfileProjectionPackage,
     sourceFile: "home-profile", sourceLine: 1)
   home.toolUses.add(PackageUseDef(rawConstraint: packageId,
@@ -1191,11 +1241,52 @@ proc narrowedTo(useDef: InterfaceToolUse; selection: RealizationSelection):
 # Archive realization inputs
 # ---------------------------------------------------------------------------
 
+const
+  MacosPkgInstallRefusal* =
+    "no system-scope realizer runs macOS installer packages yet"
+    ## The reason a ``pkg-install`` record is refused, quoted verbatim in the
+    ## refusal so tests and callers can recognise it.
+
+proc refuseUnrealizableMacosShape(packageId: string;
+                                  record: InterfaceTarballProvisioning) =
+  ## GM4c: the macOS vendor shapes a contribution may DECLARE but nothing
+  ## realizes (Store-And-Installation-Layout.md § macOS Application Bundles,
+  ## "Shapes this does not cover"), and the application shapes declared for
+  ## another os. Refused at resolution, so ``--plan`` names the reason
+  ## before anything is downloaded. A macOS ``installer-silent`` record is
+  ## an installer application and IS realized (§ Installer applications);
+  ## ``archiveRealizationOf`` refuses one that lacks a field the realizer
+  ## verifies.
+  let detail = record.detail
+  let os = parsePlatformOsToken(record.os)
+  let macos = os.ok and os.os == poMacos
+  if detail.installMethod == $imPkgInstall:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") is an installer package that must be run as root " &
+      "(installMethod pkg-install): its scripts and privileged components " &
+      "are what install the product, which makes it system scope (P3). " &
+      "A home profile cannot realize it, and " & MacosPkgInstallRefusal &
+      ". Install it outside Reprobuild until one does.")
+  if detail.installMethod == $imAppBundle and not macos:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") declares installMethod app-bundle for os '" &
+      record.os & "'; an application bundle is a macOS realization")
+  if detail.installerApp.len > 0 and not macos:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") names the installer application " &
+      detail.installerApp.escape & " for os '" & record.os & "'; an " &
+      "installer application is a macOS realization")
+
 proc archiveRouteFor*(packageId: string;
                       record: InterfaceTarballProvisioning): ArchiveRoute =
   ## Route a selected ``tarball`` record to the realizer that performs
   ## everything it asks for. A record that asks for work only one realizer
-  ## does AND work only the other does has no realizer; it is refused.
+  ## does AND work only the other does has no realizer; it is refused, as
+  ## is a declared macOS shape nothing realizes.
+  refuseUnrealizableMacosShape(packageId, record)
   let installer = archiveInstallerFeatures(record)
   if installer.len == 0:
     return arExtract
@@ -1278,6 +1369,68 @@ proc archiveRealizationOf*(packageId: string;
   result.preInstallUnrecognized = detail.preInstallUnrecognized
   for encoded in detail.launcherEmit:
     result.launcherEmit.add(decodeLauncherEmitSpec(encoded))
+  result.appBundle = detail.appBundle
+  result.bundleId = detail.bundleId
+  result.teamId = detail.teamId
+  result.installerApp = detail.installerApp
+  if result.installMethod == imInstallerSilent and
+      (result.installerApp.len > 0 or result.appBundle.len > 0 or
+       result.bundleId.len > 0 or result.teamId.len > 0):
+    # An installer-silent record that names an installer application or
+    # any application field is a macOS installer APPLICATION
+    # (Store-And-Installation-Layout.md § Installer applications): the
+    # realizer verifies the installer against teamId and the product it
+    # produced against appBundle / bundleId / version / teamId, so a record
+    # missing any of them cannot be realized. One that names none of them
+    # is a Windows installer (NSIS / MSI), realized as before.
+    var missing: seq[string] = @[]
+    if result.installerApp.len == 0: missing.add("installerApp")
+    if result.appBundle.len == 0: missing.add("appBundle")
+    if result.bundleId.len == 0: missing.add("bundleId")
+    if result.teamId.len == 0: missing.add("teamId")
+    if result.builtinVersion.len == 0: missing.add("version")
+    if missing.len > 0:
+      raise newException(ValueError, "package '" & packageId &
+        "': the tarball realization " & record.url & " is a macOS " &
+        "installer application (installMethod installer-silent) and must " &
+        "declare installerApp (the installer's path inside the archive), " &
+        "appBundle (the product bundle in the installed prefix), bundleId, " &
+        "teamId and version; it lacks " & missing.join(", "))
+    # The paths the realizer walks, checked before anything is downloaded
+    # (§ Installer applications, "Declaring it"): the product path has one
+    # or two components and the first is the placed item, never a bundle
+    # holding another; the installer is a bundle inside the archive.
+    let productError = installerProductPathError(result.appBundle)
+    if productError.len > 0:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " declares " &
+        "appBundle " & result.appBundle.escape & ", the product bundle in " &
+        "the installed prefix; " & productError)
+    let installerPath = result.installerApp.replace('\\', '/')
+    var installerOk = not installerPath.startsWith("/") and
+      installerPath.endsWith(".app")
+    for part in installerPath.split('/'):
+      if part.len == 0 or part == "." or part == "..":
+        installerOk = false
+    if not installerOk:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " declares " &
+        "installerApp " & result.installerApp.escape & "; it must be a " &
+        "relative path inside the archive naming a .app bundle")
+    if result.archiveFormat notin {afDmg, afZip, afTarGz, afTarXz,
+        afTarBz2}:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " is delivered " &
+        "as " & $result.archiveFormat & "; an installer application is " &
+        "copied out of a dmg, zip, tar.gz, tar.xz or tar.bz2 (a flat " &
+        "installer package that must run is installMethod pkg-install)")
+  if result.installMethod == imAppBundle and (result.appBundle.len == 0 or
+      result.bundleId.len == 0 or result.teamId.len == 0 or
+      result.builtinVersion.len == 0):
+    raise newException(ValueError, "package '" & packageId &
+      "': the app-bundle realization " & record.url & " must declare " &
+      "appBundle, bundleId, teamId and version (the bundle's " &
+      "CFBundleShortVersionString); realization verifies all four")
   # ``executablePath`` is a TARGET-platform path (``bin\gh.exe`` for a
   # Windows record); split on both separators so the leaf is right whichever
   # platform the resolution runs on.
@@ -1296,7 +1449,8 @@ proc resolveProfilePackage*(packageId: string;
                             inventory = HostInventory();
                             scoop: ScoopHostInventory = nil;
                             availability = none(PackageAvailability);
-                            lockIdentity = ""):
+                            lockIdentity = "";
+                            catalog = ProfileCatalog()):
     ProfilePackageResolution =
   ## Resolve one profile package reference for ``target`` under ``policy``.
   ##
@@ -1308,7 +1462,10 @@ proc resolveProfilePackage*(packageId: string;
   ## ``scoop`` supplies the cache-hit verdict for a declared Scoop
   ## realization on a Windows host. ``lockIdentity`` pins the exact
   ## realization a home-profile lock recorded (``SelectionRequest``).
-  let projected = profileToolUse(packageId)
+  ## ``catalog`` carries the references the ``reprobuild-packages`` catalog
+  ## defines (``projectCatalogPackages``); a resolution without one sees the
+  ## linked definitions only.
+  let projected = profileToolUse(packageId, catalog)
   let useDef = projected.useDef
   var probeNames = binaries
   if probeNames.len == 0:
@@ -1356,12 +1513,15 @@ proc resolveProfilePackage*(packageId: string;
   of rkNix:
     discard
 
-proc offeredVersions*(packageId: string): seq[string] =
+proc offeredVersions*(packageId: string;
+                      catalog = ProfileCatalog()): seq[string] =
   ## Every version a linked definition of ``packageId`` (or a contribution
   ## to it) pins a realization at, in declaration order, for any platform.
   ## ``tarball`` records name theirs in ``version``; ``scoopApp`` records in
   ## ``version``; ``nixPackage`` records name none.
-  let useDef = profileToolUse(packageId).useDef
+  let useDef =
+    try: profileToolUse(packageId, catalog).useDef
+    except ValueError: return
   for record in useDef.tarballProvisioning:
     if record.detail.version.len > 0 and record.detail.version notin result:
       result.add(record.detail.version)
@@ -1369,7 +1529,8 @@ proc offeredVersions*(packageId: string): seq[string] =
     if record.version.len > 0 and record.version notin result:
       result.add(record.version)
 
-proc unpinnedHostVersion*(packageId: string): Option[string] =
+proc unpinnedHostVersion*(packageId: string;
+                          catalog = ProfileCatalog()): Option[string] =
   ## The version an UNPINNED reference to ``packageId`` resolves to on this
   ## host among the versioned kinds (``tarball``, then ``scoop``) — what
   ## ``repro home add <tool>@latest`` writes, so that pinning a reference
@@ -1377,7 +1538,7 @@ proc unpinnedHostVersion*(packageId: string): Option[string] =
   ## realization exists for the host.
   try:
     let resolution = resolveProfilePackage(packageId,
-      hostRealizationTarget(), @[rkTarball, rkScoop])
+      hostRealizationTarget(), @[rkTarball, rkScoop], catalog = catalog)
     if resolution.selection.version.len > 0:
       return some(resolution.selection.version)
   except CatchableError:

@@ -72,6 +72,8 @@
 
 import std/[options, os, strutils, unittest]
 
+import repro_test_support/process_fixtures
+
 import cbor
 
 import repro_attest
@@ -156,6 +158,12 @@ require_challenge = true
 
 let scratch = getTempDir() / "repro-manifest-cross-check-" &
   $getCurrentProcessId()
+# Removed when THIS process exits, whichever cases it ran — not by a final
+# "teardown" case, which under the runner's one-process-per-case model ran in
+# one process and left every other case process's scratch behind. Registering
+# a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 proc scratchFile(name, content: string): string =
   createDir(scratch)
@@ -514,7 +522,3 @@ suite "a measurement manifest, judged from both directions":
     # And the good invocation still passes, so the refusals above are
     # discriminating rather than universal.
     check runCrossCheck(args, "still-good.txt").code == AttestExitAccepted
-
-  test "t_scratch_is_removed":
-    removeDir(scratch)
-    check not dirExists(scratch)

@@ -23,6 +23,7 @@
 import std/[strutils, tables]
 from repro_core/paths import extendedPath
 from repro_profile/data_refs import dataFilePathProblem
+from repro_profile/catalog_refs import catalogImportPathProblem
 
 import ./errors
 import ./model
@@ -36,6 +37,7 @@ const
   ResourcesHeader = "resources"
   AdapterPreferenceHeader = "adapterPreference"
   DataHeader = "data"
+  CatalogsHeader = "catalogs"
   WhenHeader = "when"
   IfHeader = "if"
   ElifHeader = "elif"
@@ -166,7 +168,7 @@ proc matchAnyHeader(line: string): tuple[ok: bool; keyword, rest: string;
   for kw in [ProfileHeader, ActivityHeader, WhenHeader, IfHeader,
              ElifHeader, ElseHeader,
              ConfigHeader, HostsHeader, ResourcesHeader,
-             AdapterPreferenceHeader, DataHeader]:
+             AdapterPreferenceHeader, DataHeader, CatalogsHeader]:
     let m = matchHeader(line, kw)
     if m.matched:
       return (true, m.keyword, m.rest, m.indent)
@@ -285,6 +287,27 @@ const
     "yield", "break", "continue", "try", "except", "finally",
     "static", "block", "asm", "defer", "echo"]
 
+proc isQuotedPackageNameChar(ch: char): bool =
+  ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}
+
+proc validateQuotedPackageName(ctx: ParseCtx; idx, column: int;
+                               name, spelling: string) =
+  ## A double-quoted package name (``"7zip"``, ``package("7zip")``). A
+  ## package name is a selector string, not a Nim identifier
+  ## (Package-Model.md §"Package names"), so the quoted form is the one that
+  ## reaches a name starting with a digit — the profile macro accepts a
+  ## string literal there. It holds the characters the bare and backtick
+  ## forms allow, with no rule about the first.
+  if name.len == 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, column,
+      "an empty quoted package name " & spelling,
+      "a non-empty package name (e.g. \"7zip\")")
+  for ch in name:
+    if not isQuotedPackageNameChar(ch):
+      raiseUnstructured(ctx.profilePath, idx + 1, column,
+        "'" & spelling & "' as a quoted package name",
+        "a quoted name containing only letters, digits, `_`, and `-`")
+
 proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
                           body: string): IntentNode =
   ## M69: parse the new `package(<id>[, "<version>"])` call form used
@@ -321,12 +344,23 @@ proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
     hasVersion = true
     inc i  # past comma
     versionArg = inner[i .. ^1]
-  let pkgId = idArg.strip()
+  var pkgId = idArg.strip()
   if pkgId.len == 0:
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "an empty package id in `package(...)`",
       "a package identifier (e.g. `package(jdk)`)")
-  if not (pkgId[0].isAlphaAscii() or pkgId[0] == '_'):
+  if pkgId[0] == '"':
+    # `package("windows-terminal")` / `package("7zip", "26.01")`:
+    # Home-Profile-Intent-Layer.md §"`package(...)` — explicit constructor
+    # forms", the quoted-name form.
+    if pkgId.len < 2 or pkgId[^1] != '"':
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & pkgId & "' as a `package(...)` id",
+        "a double-quoted package name with a closing quote")
+    let quoted = pkgId
+    pkgId = pkgId[1 ..< pkgId.len - 1]
+    validateQuotedPackageName(ctx, idx, indent + 1, pkgId, quoted)
+  elif not (pkgId[0].isAlphaAscii() or pkgId[0] == '_'):
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "'" & pkgId & "' as a `package(...)` id",
       "an identifier starting with a letter or underscore")
@@ -393,7 +427,19 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
   # attributes which we accept and preserve.
   var i = 0
   var pkgName = ""
-  if body[0] == '`':
+  if body[0] == '"':
+    # A quoted name, `"7zip"`: the bare form of a package name that is not
+    # a Nim identifier (the profile macro accepts a string literal here).
+    let closeIdx = body.find('"', 1)
+    if closeIdx < 1:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "'" & body & "'",
+        "a closing double quote after the package name (e.g. \"7zip\")")
+    pkgName = body[1 ..< closeIdx]
+    i = closeIdx + 1
+    validateQuotedPackageName(ctx, idx, indent + 2, pkgName,
+      body[0 .. closeIdx])
+  elif body[0] == '`':
     # Phase F3: backtick-quoted form `<name>`.
     let closeIdx = body.find('`', 1)
     if closeIdx <= 1:
@@ -1275,12 +1321,56 @@ proc parseDataBlock(ctx: ParseCtx; idx, entryIndent: int): seq[string] =
     inc i
 
 # ---------------------------------------------------------------------------
+# catalogs block parsing.
+#
+#   catalogs:
+#     "../reprobuild-scoop-packages/repro"
+#
+# One string literal per line, each the Nim module of a contribution
+# catalog relative to the profile directory -- the shape the `profile`
+# macro's `catalogs:` section accepts, validated by the same rule
+# (`catalogImportPathProblem`).
+# ---------------------------------------------------------------------------
+
+proc parseCatalogsBlock(ctx: ParseCtx; idx, entryIndent: int): seq[string] =
+  let endIdx = lastStructuralIdx(ctx.lines, idx + 1, entryIndent)
+  var i = idx + 1
+  while i <= endIdx:
+    let line = ctx.lines[i]
+    if isBlankOrComment(line):
+      inc i; continue
+    let ind = countLeadingSpaces(line)
+    if ind != entryIndent:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & line.strip() & "' at indent " & $ind,
+        "a catalog module path at indent " & $entryIndent)
+    let text = stripInlineComment(line).strip()
+    if text.len < 2 or text[0] != '"' or text[^1] != '"' or
+       text[1 ..< text.len - 1].contains('"'):
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "'" & text & "' inside `catalogs:`",
+        "a quoted catalog module path such as " &
+        "\"../reprobuild-scoop-packages/repro\"")
+    let path = text[1 ..< text.len - 1]
+    let problem = catalogImportPathProblem(path)
+    if problem.len > 0:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "\"" & path & "\" inside `catalogs:` (" & problem & ")",
+        "a catalog module path relative to the profile directory")
+    if path in result:
+      raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+        "\"" & path & "\" declared twice", "each catalog once")
+    result.add path
+    inc i
+
+# ---------------------------------------------------------------------------
 # Profile body.
 # ---------------------------------------------------------------------------
 
 proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
                       outAdapterPreference: var OrderedTable[string, seq[string]];
-                      outDataFiles: var seq[string]):
+                      outDataFiles: var seq[string];
+                      outCatalogImports: var seq[string]):
     IntentNode =
   ## M2.5: also populates `outAdapterPreference` (empty table when no
   ## `adapterPreference:` block was present).
@@ -1302,6 +1392,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
   var sawResources = false
   var sawAdapterPreference = false
   var sawData = false
+  var sawCatalogs = false
   while i <= ctx.lines.high:
     let line = ctx.lines[i]
     if isBlankOrComment(line):
@@ -1328,7 +1419,7 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "'",
         "one of `activity <name>:`, `config:`, `hosts:`, " &
-        "`resources:`, `adapterPreference:`, or `data:`")
+        "`resources:`, `adapterPreference:`, `data:`, or `catalogs:`")
     case hm.keyword
     of ActivityHeader:
       let blk = parseActivity(ctx, i, childIndent,
@@ -1391,11 +1482,22 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
       let endIdx = lastStructuralIdx(ctx.lines, i + 1, entryIndent)
       lastBodyIdx = endIdx
       i = max(endIdx + 1, i + 1)
+    of CatalogsHeader:
+      if sawCatalogs:
+        raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
+          "a second `catalogs:` block",
+          "exactly one `catalogs:` block per profile")
+      sawCatalogs = true
+      let entryIndent = childIndent + ctx.indentStep
+      outCatalogImports = parseCatalogsBlock(ctx, i, entryIndent)
+      let endIdx = lastStructuralIdx(ctx.lines, i + 1, entryIndent)
+      lastBodyIdx = endIdx
+      i = max(endIdx + 1, i + 1)
     else:
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "`" & hm.keyword & "` at the profile top level",
         "one of `activity <name>:`, `config:`, `hosts:`, " &
-        "`resources:`, `adapterPreference:`, or `data:`")
+        "`resources:`, `adapterPreference:`, `data:`, or `catalogs:`")
   result.endLine = lastBodyIdx + 1
 
 # ---------------------------------------------------------------------------
@@ -1414,12 +1516,14 @@ proc parseProfile*(profilePath, source: string): Profile =
   ctx.indentStep = detectIndentStep(ctx.lines, headerLine)
   var adapterPreference = initOrderedTable[string, seq[string]]()
   var dataFiles: seq[string]
+  var catalogImports: seq[string]
   let root = parseProfileBody(ctx, headerLine - 1, adapterPreference,
-    dataFiles)
+    dataFiles, catalogImports)
   result = Profile(path: profilePath, lines: ctx.lines,
     lineEnding: ending, hasTrailingNewline: trailingNewline,
     root: root, indentStep: ctx.indentStep,
-    adapterPreference: adapterPreference, dataFileRefs: dataFiles)
+    adapterPreference: adapterPreference, dataFileRefs: dataFiles,
+    catalogImports: catalogImports)
 
 proc loadProfile*(profilePath: string): Profile =
   ## Read `profilePath` and parse it. `ENoProfile` and `EUnstructured`

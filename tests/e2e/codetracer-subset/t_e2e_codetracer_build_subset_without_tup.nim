@@ -2,6 +2,7 @@ import std/[json, os, osproc, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_tool_profiles
 import repro_test_support
+import io_mon/[reader, types]
 
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
@@ -27,9 +28,9 @@ const
   NimJsWithoutOldCaseObjectsHash = "600a5090da25c07b"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "17c111fb280214f6d331f1bafd560989b6bd509b"
+    "222a4a0099115066ba331817e94a3ac9f2293290"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-17c111fb.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-222a4a00.tup"
 
 type
   TupRules = object
@@ -337,6 +338,15 @@ proc withMakeDepfile(command: openArray[string]; depfilePath: string): seq[strin
   result.add(depfilePath)
 
 proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
+  # Give this independent source slice a real Nim package boundary. Nim's
+  # `getNimbleFile` searches ancestors with `*.nimble`; without the marker,
+  # macOS observes directory enumerations up through the shared temp root.
+  # Those are genuine inputs, so unrelated host activity correctly misses
+  # the cache. The fixture must bound that search rather than hide evidence.
+  writeFile(projectRoot / "codetracer_subset.nimble", "version = \"0.1.0\"\n")
+  # The oracle is part of fixture setup. Adding its directory after the cold
+  # build changes the package-root membership Nim just observed.
+  createDir(projectRoot / "oracle")
   createDir(projectRoot / "src" / "frontend" / "tests")
   createDir(projectRoot / "src" / "frontend" / "index")
   createDir(projectRoot / "src" / "frontend" / "lib")
@@ -497,6 +507,32 @@ proc jsonStringSet(node: JsonNode): seq[string] =
   for item in node.getElems():
     result.add(item.getStr())
 
+proc assertNimPackageBoundary(projectRoot, tempRoot: string) =
+  ## Nim discovers its package with an ancestor `*.nimble` search. The
+  ## subset must retain its own directory evidence while stopping that search
+  ## before the fixture's parent and the host's shared temporary directory.
+  let capture = projectRoot / ".repro" / "build" / "reprobuild" /
+    "build-engine-cache" / "monitor-depfiles" /
+    "nim-js-ipc-registry-test.iomon"
+  require fileExists(capture)
+  var directories: seq[string]
+  for record in streamMonitorDepFileRecords(capture):
+    if record.kind == mrDirectoryEnumerate:
+      # Capture paths may name ephemeral monitor directories already removed
+      # by teardown. Normalize their spelling without requiring they exist.
+      var directory = normalizedPath(absolutePath(record.path, projectRoot)).
+        replace('\\', '/')
+      while directory.len > 1 and directory.endsWith("/"):
+        directory.setLen(directory.len - 1)
+      if directory notin directories:
+        directories.add(directory)
+  check projectRoot in directories or expandFilename(projectRoot) in directories
+  check tempRoot notin directories
+  check expandFilename(tempRoot) notin directories
+  let tempDir = getTempDir().strip(leading = false, chars = {'/', '\\'})
+  check tempDir notin directories
+  check expandFilename(tempDir) notin directories
+
 suite "e2e_codetracer_build_subset_without_tup":
   # The CodeTracer integration build exercises the full POSIX
   # toolchain (nix + sh + runquotad) end-to-end against a sibling
@@ -595,6 +631,7 @@ suite "e2e_codetracer_build_subset_without_tup":
       check not identity.profiles.anyIt(it.executableName == "sh")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      assertNimPackageBoundary(projectRoot, tempRoot)
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)
       assertAction(firstReport, "nim-js-ipc-registry-test", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
@@ -626,6 +663,9 @@ suite "e2e_codetracer_build_subset_without_tup":
       check mainSymbol("build/c/main.with-header.o", projectRoot) ==
         mainSymbol("oracle/main.o", projectRoot)
 
+      # An unrelated sibling belongs to fixture setup, not the Nim package.
+      # Its appearance must not invalidate an unchanged subset build.
+      writeFile(tempRoot / "unrelated-sibling.txt", "unrelated fixture work\n")
       let second = build(reproBin, target, repoRoot, pathValue)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertActionCacheEffective(secondReport, "generate-config-header")
@@ -633,6 +673,24 @@ suite "e2e_codetracer_build_subset_without_tup":
       assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
       assertActionCacheEffective(secondReport,
         "c-sudoku-object-with-generated-header")
+
+      let nimSource = projectRoot / "src" / "frontend" / "index" /
+        "ipc_registry.nim"
+      writeFile(nimSource, readFile(nimSource) &
+        "\necho \"reprobuild selected Nim source edit\"\n")
+      let nimChanged = build(reproBin, target, repoRoot, pathValue)
+      let nimChangedReport = parseFile(valueAfter(nimChanged, "buildReport:"))
+      assertActionCacheEffective(nimChangedReport, "generate-config-header")
+      assertAction(nimChangedReport, "nim-js-ipc-registry-test", "asSucceeded", true)
+      assertActionCacheEffective(nimChangedReport, "c-sudoku-object-tup")
+      assertActionCacheEffective(nimChangedReport,
+        "c-sudoku-object-with-generated-header")
+      directOracle(projectRoot, "oracle/ipc_registry_test.js",
+        nimJsOracleCommand, pathValue)
+      check runNode("tests/ipc_registry_test.js", projectRoot, pathValue) ==
+        runNode("oracle/ipc_registry_test.js", projectRoot, pathValue)
+      check runNode("tests/ipc_registry_test.js", projectRoot, pathValue).
+        contains("reprobuild selected Nim source edit")
 
       writeFile(projectRoot / "src" / "c" / "main.c",
         readFile(projectRoot / "src" / "c" / "main.c") &

@@ -670,6 +670,18 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   let interfaceArtifact = extractInterfaceFromModule(active.modulePath,
     interfacePath, stubPath, workDir, compileScratchDir,
     consumerRoot = parentDir(absolutePath(active.modulePath)))
+  # Shared-Development-Services §4.3's stale-lift precondition: record what
+  # this artifact was lifted from, beside it, so a CONSUMER of a shared
+  # service this recipe declares can establish whether it still corresponds
+  # to this recipe.
+  #
+  # Stamped after every call, warm or not. While the prompt-time key gated
+  # reuse, a reused interface could be older than its import closure, and
+  # stamping it would have recorded the current closure against older bytes.
+  # ``extractInterfaceFromModule`` returns an interface only after checking
+  # it against that closure (or after re-extracting it), so the closure
+  # recorded here is the one those bytes were extracted from.
+  writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
   let effectiveProvisioning =
     active.effectiveToolProvisioning(interfaceArtifact)
 

@@ -86,6 +86,15 @@ type
     afInstallerNsis = "installer-nsis"
     afInstallerMsi = "installer-msi"
     afRaw = "raw"
+    afDmg = "dmg"
+      ## GM4c: a macOS disk image (UDIF; HFS+ or APFS volume). Attached
+      ## read-only, copied from, detached; realized only with
+      ## ``imAppBundle``. Store-And-Installation-Layout.md § macOS
+      ## Application Bundles.
+    afPkg = "pkg"
+      ## GM4c: a macOS flat installer package (xar). Expanded with
+      ## ``pkgutil --expand-full`` (its scripts are never run) and copied
+      ## from; realized only with ``imAppBundle``.
 
   InstallMethod* = enum
     ## How the realize loop turns the verified artifact into a usable
@@ -118,6 +127,14 @@ type
     ##     dispatches via the discovered ``innounp.exe``.
     imExtract = "extract"
     imInstallerSilent = "installer-silent"
+      ## A Windows installer run with its silent flags (``installerArgs``),
+      ## or -- on macOS, a ``tarball`` record that names ``installerApp`` --
+      ## an installer APPLICATION: the installer is copied out of the
+      ## archive, verified against ``teamId``, run confined under
+      ## ``sandbox-exec`` into the staging prefix, and the product bundle it
+      ## produced (``appBundle``, a path in the prefix) verified before the
+      ## prefix is published. Store-And-Installation-Layout.md § Installer
+      ## applications.
     imMsys2Pacman = "msys2-pacman"
       ## M6 (Realize-Closure-And-Catalog-Expansion spec): provenance-
       ## labelled variant of ``imExtract`` for ``.pkg.tar.zst`` payloads
@@ -145,6 +162,19 @@ type
     imInstallerNsisBundle = "installer-nsis-bundle"
     imInstallerNsis = "installer-nsis"
     imInstallerInnoSetup = "installer-inno-setup"
+    imAppBundle = "app-bundle"
+      ## GM4c: a macOS application. The declared bundle (``appBundle``) is
+      ## copied out of the archive into the prefix root, verified (bundle
+      ## id, version, signature, Developer ID team, notarization) before the
+      ## prefix is published, and activated by copying it into
+      ## ``~/Applications``. Store-And-Installation-Layout.md § macOS
+      ## Application Bundles.
+    imPkgInstall = "pkg-install"
+      ## GM4c: a macOS installer package that must be RUN as root (its
+      ## scripts and privileged components are what install the product:
+      ## Karabiner-Elements' DriverKit extension). System scope; declared so
+      ## a contribution can pin the vendor artifact, and refused by the home
+      ## archive realizer -- no system-scope package realizer exists yet.
 
   PlatformCpu* = enum
     ## The CPU **family** axis. Matches the ``cpu_arch`` tokens the
@@ -1066,6 +1096,14 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
     if vp.bin_relpath.len == 0:
       result.add("install_method=" & $vp.install_method &
         " requires at least one bin_relpath entry")
+  of imAppBundle, imPkgInstall:
+    # GM4c: macOS application shapes are authored as `tarball` records
+    # (`appBundle` / `bundleId` / `teamId`, and `installerApp` for a macOS
+    # installer application), never harvested into this parse model; the
+    # catalog harvester has no source that produces them.
+    result.add("install_method=" & $vp.install_method &
+      " is authored as a tarball realization with appBundle / bundleId / " &
+      "teamId, not as a VersionedProvisioning record")
   # M5: when launcher_emit is non-empty, every spec's launcher_name must
   # appear in bin_relpath as a .ps1 / .cmd entry. The sanity check
   # confirms the catalog declares the emitted launchers as the tool's
@@ -1959,6 +1997,8 @@ proc archiveFormatIdent(af: ArchiveFormat): string =
   of afInstallerNsis: "afInstallerNsis"
   of afInstallerMsi: "afInstallerMsi"
   of afRaw: "afRaw"
+  of afDmg: "afDmg"
+  of afPkg: "afPkg"
 
 proc launcherEmitKindIdent*(lek: LauncherEmitKind): string =
   case lek
@@ -1996,6 +2036,8 @@ proc installMethodIdent(im: InstallMethod): string =
   of imInstallerNsisBundle: "imInstallerNsisBundle"
   of imInstallerNsis: "imInstallerNsis"
   of imInstallerInnoSetup: "imInstallerInnoSetup"
+  of imAppBundle: "imAppBundle"
+  of imPkgInstall: "imPkgInstall"
 
 proc serializePlatformBinary(pb: PlatformBinary): string =
   # Field order: sha256, sha512, sha1 — sha1 last to make it

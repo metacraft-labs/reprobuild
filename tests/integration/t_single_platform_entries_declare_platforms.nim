@@ -37,7 +37,7 @@
 ##
 ## GM4b: the harvested catalogs are gone; their records are ``tarball``
 ## realizations of the packages, and the four genuinely Windows-only entries
-## (wix3, innounp, lessmsi, sevenzip) declare ``platforms [windows]`` on the
+## (wix3, innounp, lessmsi, 7zip) declare ``platforms [windows]`` on the
 ## package itself. The survey now covers the ``tarball`` realizations of EVERY
 ## package the engine links (``package_registry``) — the set a home profile
 ## resolves against — not just the former catalog registry, so a single-OS
@@ -135,9 +135,7 @@ suite "PMC-5 — single-OS entries are declared or explicitly excused":
     check checked > 0
 
   test "the genuinely Windows-only entries resolve as declared":
-    # GM4b: 7-Zip's canonical definition is ``package sevenzip`` (the package
-    # macro cannot declare a name starting with a digit).
-    for name in ["wix3", "innounp", "lessmsi", "sevenzip"]:
+    for name in ["wix3", "innounp", "lessmsi", "7zip"]:
       let avail = packageAvailability(name)
       checkpoint "package: " & name
       check avail.declared

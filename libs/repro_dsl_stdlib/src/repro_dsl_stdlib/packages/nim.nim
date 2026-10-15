@@ -101,7 +101,12 @@ package nim:
       version = "2.2.10",
       extraExecutable = "bin/atlas",
       extraExecutable = "bin/nimble",
-      extraExecutable = "bin/nimgrab",
+      # No ``bin/nimgrab``: upstream's linux_x64 bundle does not carry it.
+      # ``nimgrab`` is built by ``koch tools`` from ``tools/nimgrab.nim``,
+      # which is the only thing in the archive under that name, so the
+      # declaration bound an exported executable the realization cannot
+      # produce. Measured by the catalog conformance sweep; the other arms
+      # keep the claim because only a host of their platform can decide it.
       extraExecutable = "bin/nimgrep",
       extraExecutable = "bin/nimpretty",
       extraExecutable = "bin/nimsuggest",

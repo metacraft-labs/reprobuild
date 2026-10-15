@@ -39,6 +39,8 @@ import std/[os, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
 from repro_core/source_root import InstalledSourceRootSubdir,
   InstalledSourceTreesSubdir
+from repro_core/c_compiler import BuiltCCompilerPath, cCompilerFamily,
+  cCompilerAcceptsFlag, clangNoTempFileCFlags, clangNoTempFileFlag
 
 import repro_core
 import repro_build_engine
@@ -79,6 +81,8 @@ template extraResources*(targetResources: var seq[ResourceIntent]) =
 # ---------------------------------------------------------------------------
 # Profile-root resolution.
 # ---------------------------------------------------------------------------
+
+const nullDevice = when defined(windows): "NUL" else: "/dev/null"
 
 suite "M83 Phase C: profile-root resolution":
 
@@ -253,6 +257,9 @@ suite "M83 Phase C: profileCompileBuildAction":
       "/opt/repro", "/s/profile-cache/k.rbpi")
     check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
       "/bin/repro", "/s/profile-cache/other.rbpi")
+    # The C compiler is part of the compiler identity (GM1l).
+    check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
+      "/bin/repro", "/s/profile-cache/k.rbpi", "/nix/cc/bin/cc")
 
   test "verbose=true adds --verbose argv element":
     let weak = weakFingerprintFromText("smoke.weak.v")
@@ -407,6 +414,144 @@ suite "installed repro: profile compile source root and compiler":
     withEnv(ProfileNimCompilerEnvVar, dir / "no-such-nim"):
       expect CompileFailure:
         discard resolveProfileNimCompiler()
+
+  # The C compiler: the recipe compile's selection
+  # (`repro_core/c_compiler.resolveConfiguredCCompiler`), handed to nim as an
+  # explicit compiler and linker (Gradual-Nix-To-Reprobuild-Migration GM1l).
+  # The end-to-end proof against the installed Nix package in a clean
+  # environment is `tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim`.
+
+  test "REPRO_BOOTSTRAP_CC names the profile compile's C compiler":
+    let dir = createTempDir("repro-profile-cc-", " dir")
+    defer: removeDir(dir)
+    let fakeCC = dir / addFileExt("my cc", ExeExt)
+    writeFile(extendedPath(fakeCC), "")
+    withEnv("REPRO_BOOTSTRAP_CC", fakeCC):
+      check resolveProfileCCompiler() == fakeCC
+      let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+        "/c/out", "/r", resolveProfileCCompiler())
+      for flag in ["--gcc.exe:", "--gcc.linkerexe:", "--clang.exe:",
+                   "--clang.linkerexe:"]:
+        check (flag & fakeCC) in argv
+      var families = 0
+      for arg in argv:
+        if arg.startsWith("--cc:"):
+          inc families
+      check families == 1
+      # Flags come before the profile, which stays the last argument.
+      check argv[^1] == "/p/home.nim"
+
+  test "a REPRO_BOOTSTRAP_CC naming no file is refused by name":
+    let dir = createTempDir("repro-profile-cc-missing-", "")
+    defer: removeDir(dir)
+    withEnv("REPRO_BOOTSTRAP_CC", dir / "no-such-cc"):
+      try:
+        discard resolveProfileCCompiler()
+        check false
+      except CompileFailure as err:
+        check ("REPRO_BOOTSTRAP_CC=" & dir / "no-such-cc") in err.msg
+
+  test "no C compiler in the environment falls back to the build compiler":
+    # What an installed package meets in a clean environment: no variable
+    # and no `cc` on PATH. The compiler `repro` was built with is the answer
+    # wherever it still exists (always, for a Nix package: the binary's
+    # reference keeps it in the closure).
+    when defined(windows):
+      check BuiltCCompilerPath.len == 0
+    else:
+      let emptyBin = createTempDir("repro-profile-cc-path-", "")
+      defer: removeDir(emptyBin)
+      check BuiltCCompilerPath.len > 0
+      withEnv("REPRO_BOOTSTRAP_CC", ""):
+        withEnv("CC", ""):
+          withEnv("PATH", emptyBin):
+            check resolveProfileCCompiler() == BuiltCCompilerPath
+
+  test "nim's default C compiler on PATH is left to nim":
+    # The recipe compile would take `cc` from PATH; the profile compile keeps
+    # Nim's default where it is available (see `resolveProfileCCompiler` for
+    # the measured reason: a `cc` that is clang left the edge's first run
+    # unpublished).
+    let bin = createTempDir("repro-profile-cc-default-", "")
+    defer: removeDir(bin)
+    for name in [NimDefaultCCompilerExe, "cc"]:
+      let exe = bin / addFileExt(name, ExeExt)
+      writeFile(extendedPath(exe), "")
+      setFilePermissions(extendedPath(exe), {fpUserRead, fpUserWrite,
+        fpUserExec})
+    withEnv("REPRO_BOOTSTRAP_CC", ""):
+      withEnv("CC", ""):
+        withEnv("PATH", bin):
+          check resolveProfileCCompiler() == ""
+
+  test "an empty C compiler leaves nim's default in place":
+    let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+      "/c/out", "/r")
+    for arg in argv:
+      check not arg.startsWith("--cc:")
+      check not arg.startsWith("--gcc.exe:")
+      check not arg.startsWith("--passC:")
+
+  # clang's `-fno-temp-file` (reprobuild-pm issue
+  # 2026-10-14-clang-profile-compile-is-not-published-on-its-first-run). The
+  # end-to-end proof that it makes a clang-driven compile publish on its
+  # first run is `tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim`.
+
+  test "executed profiles force C compilation rather than reuse opaque Nim objects":
+    let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+      "/c/out", "/r")
+    check "--forceBuild:on" in argv
+
+  test "C flags reach nim as --passC, before the profile":
+    let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+      "/c/out", "/r", "/cc/bin/clang", [clangNoTempFileFlag])
+    check ("--passC:" & clangNoTempFileFlag) in argv
+    check argv[^1] == "/p/home.nim"
+
+  test "-fno-temp-file is probed by a real compile and is clang-only":
+    # Real compilers, no fakes: the probe's job is to ask THIS binary, so a
+    # stand-in would only test the stand-in. gcc rejects the flag, which is
+    # the fail-safe arm measured on a real compiler; an invented flag is the
+    # same arm on clang. Linux's dev shell has both compilers (`cc` is clang,
+    # `gcc` is gcc); elsewhere each family present is checked.
+    let scratch = createTempDir("repro-cc-flag-probe-", " dir")
+    defer: removeDir(scratch)
+    var clangExe, gccExe = ""
+    for name in ["clang", "cc", "gcc"]:
+      let exe = findExe(name)
+      if exe.len == 0:
+        continue
+      if cCompilerFamily(exe) == "clang":
+        if clangExe.len == 0: clangExe = exe
+      elif gccExe.len == 0:
+        gccExe = exe
+    when defined(linux):
+      doAssert clangExe.len > 0 and gccExe.len > 0,
+        "needs clang and gcc on PATH (enter reprobuild's dev shell)"
+    doAssert clangExe.len > 0 or gccExe.len > 0,
+      "needs a C compiler on PATH (enter reprobuild's dev shell)"
+    if clangExe.len > 0:
+      checkpoint("clang: " & clangExe)
+      check cCompilerAcceptsFlag(clangExe, clangNoTempFileFlag, scratch)
+      check clangNoTempFileCFlags(clangExe, scratch) == @[clangNoTempFileFlag]
+      check profileCompileCFlags(clangExe, scratch) ==
+        @[clangNoTempFileFlag, "-Xclang -dependency-file -Xclang " & nullDevice]
+      check not cCompilerAcceptsFlag(clangExe, "-fno-repro-no-such-flag",
+        scratch)
+    if gccExe.len > 0:
+      checkpoint("gcc: " & gccExe)
+      check not cCompilerAcceptsFlag(gccExe, clangNoTempFileFlag, scratch)
+      check clangNoTempFileCFlags(gccExe, scratch).len == 0
+      check profileCompileCFlags(gccExe, scratch).len == 0
+      # Positive control: the probe can say yes to gcc, so the no above is
+      # gcc rejecting the flag and not a probe that never succeeds.
+      check cCompilerAcceptsFlag(gccExe, "-O1", scratch)
+    # A compiler that does not exist is a no, never an exception.
+    check not cCompilerAcceptsFlag(scratch / "no-such-cc",
+      clangNoTempFileFlag, scratch)
+    check clangNoTempFileCFlags("", scratch).len == 0
+    # The probe cleans up after itself.
+    check not dirExists(scratch / "cc-flag-probe")
 
 # ---------------------------------------------------------------------------
 # An installed layout's source-only inputs (Gradual-Nix-To-Reprobuild-Migration

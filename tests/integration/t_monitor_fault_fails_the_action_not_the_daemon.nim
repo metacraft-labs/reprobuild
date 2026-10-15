@@ -40,6 +40,7 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_test_support
+import repro_test_support/process_fixtures
 
 const FixtureSource = r"""
 #include <fcntl.h>
@@ -119,13 +120,26 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
 
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-hm4-monitor-fault", "")
-    let fixtureSource = tempRoot / "fixture.c"
-    let fixtureBin = tempRoot / "fixture"
-    writeFile(fixtureSource, FixtureSource)
-    compileFixture(fixtureSource, fixtureBin)
+    var tempRoot = ""
+    var fixtureBin = ""
+
+    proc ensureFixture() =
+      ## The scratch tree and the compiled C fixture come up inside the case
+      ## that needs them and go away with the process that made them. This
+      ## used to run in the suite body, which also runs for the runner's
+      ## ``--list-json`` probe and for every per-case process, while only a
+      ## final "teardown" case removed a tree (its own process's): every other
+      ## process left one behind, and every probe compiled the fixture.
+      if tempRoot.len > 0: return
+      tempRoot = createTempDir("repro-hm4-monitor-fault", "")
+      releaseDirAtProcessExit(tempRoot)
+      let fixtureSource = tempRoot / "fixture.c"
+      fixtureBin = tempRoot / "fixture"
+      writeFile(fixtureSource, FixtureSource)
+      compileFixture(fixtureSource, fixtureBin)
 
     test "a corrupt iomon fails one action, not the build and not the host":
+      ensureFixture()
       let workRoot = tempRoot / "work"
       createDir(workRoot)
       let cacheRoot = tempRoot / ".repro-cache"
@@ -199,6 +213,7 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
         check not good.joinedDiagnostics.contains("monitor depfile read failed")
 
     test "the host still serves a further build after the fault":
+      ensureFixture()
       ## The "daemon serving every build on the host" half: a monitor
       ## fault in one build must not poison the next one in the same
       ## process.
@@ -235,9 +250,3 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
         # a degraded state that silently stops capturing evidence.
         check mentionsPath(res.evidence.monitorReads.paths,
           expandFilename(marker))
-
-    test "teardown":
-      removeDir(tempRoot)
-      # ``check true`` could not fail, so a removeDir that silently left the
-      # scratch tree behind still reported [OK]. Assert the post-state.
-      check not dirExists(tempRoot)

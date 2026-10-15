@@ -419,6 +419,22 @@ checkout's branch, the remote's default, or any other published branch
 containing it) and is empty when no published branch contains it; a
 local-only branch name is never recorded.
 
+`repro lock refresh` also **refuses to write a lock from an incomplete
+solve**. A recipe's `uses:` pulls sibling recipes into the solve
+transitively; when a `uses:` names a develop-set sibling (one the
+workspace manifest's `depends` declare, even when the project containing
+it is not enabled in this workspace, or one the committed lock already
+pins) whose recipe the refresh cannot read — the sibling is
+not checked out, or is checked out where `uses:` discovery does not find
+it — that recipe's version constraints would be missing from the solve,
+and the lock would pin versions the next build in a complete workspace
+refuses. The refresh then writes nothing, exits 5, and names the sibling,
+the recipe whose `uses:` reaches it, and where it was expected. Check the
+sibling out (`repro sync`, or `repro ws enable` the project that declares
+it) and refresh again. A sibling checked out without any recipe declares
+no constraints and is not a reason to refuse. `repro lock solve` without
+`--write` prints the same finding as a warning.
+
 `repro workspace lock` resolves a bare invocation against the **current
 directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be

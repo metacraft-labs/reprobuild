@@ -46,6 +46,7 @@ import repro_home_resources/drivers/launchd_user
 import repro_home_resources/drivers/systemd_user
 import repro_home_resources/drivers/user_file
 import repro_home_resources/drivers/vscode_extension
+import repro_home_resources/drivers/app_bundle
 
 export errors
 export types
@@ -58,6 +59,7 @@ export env_user
 export managed_block
 export registry
 export shell_integration
+export app_bundle
 export windows_startup
 export dconf_key
 export defaults
