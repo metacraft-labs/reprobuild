@@ -595,7 +595,25 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/842fd4718fa2381e17f32b1b4eeeec1735538d3c";
+      url = "github:metacraft-labs/reprobuild-nix-packages/8eaa8520008e3cc3da6d081a1547c51c6f632632";
+      flake = false;
+    };
+
+    # The Homebrew contribution catalog `reprobuild.lib.brewRealizationOf`
+    # reads (milestone GM5b): which Homebrew cask or formula installs a
+    # canonical package, for hosts whose Home Manager still installs macOS
+    # applications through Homebrew, and the reverse map the equivalence
+    # report needs. Same arrangement as `reprobuild-nix-packages-src` above,
+    # for the same reasons: the library's pin, inherited by consumers through
+    # their one reprobuild pin; `flake = false` (only the published
+    # `provisioning-contributions.json` is read); the catalog is flake-free,
+    # so a sibling checkout is tried with `--override-input
+    # reprobuild-brew-packages-src git+file:<checkout>` (declared in
+    # scripts/dev-shell-pinned-siblings.tsv). Reprobuild never realizes a
+    # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
+    # records"). Move the pin when the catalog's records change.
+    reprobuild-brew-packages-src = {
+      url = "github:metacraft-labs/reprobuild-brew-packages/49f4057f05b2ebd69d764208279ad5c8b1379fab";
       flake = false;
     };
   };
@@ -622,6 +640,7 @@
       nim-checksums-src,
       nim-nimony-src,
       reprobuild-nix-packages-src,
+      reprobuild-brew-packages-src,
       bundlers,
       ...
     }:
@@ -638,13 +657,31 @@
           pkgsFor = system: inputs.nixpkgs.legacyPackages.${system};
           reproFor = system: inputs.self.packages.${system}.repro;
         };
+      nixCatalog = {
+        name = "reprobuild-nix-packages";
+        records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+      };
       reprobuildLib = reprobuildLibFor [
+        nixCatalog
         {
-          name = "reprobuild-nix-packages";
-          records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+          name = "reprobuild-brew-packages";
+          records = "${reprobuild-brew-packages-src}/provisioning-contributions.json";
         }
       ];
       intentHomeManagerModule = import ./nix/modules/home-manager-intent.nix { inherit reprobuildLib; };
+      # The same module over the Nix catalog plus a fixture Homebrew catalog
+      # whose records claim packages of the neutral export fixture
+      # (tests/fixtures/brew-catalog), so `lib-home-manager` sees the module's
+      # DEFAULT `homebrew.realizationOf` hook move them into the token lists.
+      brewFixtureHomeManagerModule = import ./nix/modules/home-manager-intent.nix {
+        reprobuildLib = reprobuildLibFor [
+          nixCatalog
+          {
+            name = "gm5b-brew-fixture";
+            records = ./tests/fixtures/brew-catalog/provisioning-contributions.json;
+          }
+        ];
+      };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       # No x86_64-darwin: the pinned nixpkgs (26.11) dropped it, so no package,
@@ -1950,6 +1987,7 @@
               inherit (pkgs) lib;
               homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
               intentModule = intentHomeManagerModule;
+              brewIntentModule = brewFixtureHomeManagerModule;
               root = ./.;
             };
             # readIntent's IFD mode: the packaged `repro` exports the fixture

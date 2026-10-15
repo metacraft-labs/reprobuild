@@ -1145,6 +1145,18 @@ proc selectionPolicyFor*(adapterPreference: OrderedTable[string, seq[string]];
       adapterPreference[key].len > 0:
     for name in adapterPreference[key]:
       let parsed = parseRealizationKind(name)
+      if not parsed.ok and name.strip().toLowerAscii() in
+          ["homebrew", "brew", "brewcask", "brewformula"]:
+        # Not a typo: Homebrew is a contribution kind, but only as a BRIDGE
+        # record that consumers installing through Homebrew read (the Nix
+        # helper library). Reprobuild has no Homebrew realizer, so a policy
+        # naming it is refused with that reason rather than as an unknown
+        # word (Provisioning-Contributions.md §"Homebrew bridge records").
+        raise newException(ValueError,
+          "adapterPreference." & key & " names '" & name & "': Homebrew " &
+          "contribution records are bridge records read by Nix consumers; " &
+          "Reprobuild does not realize packages through Homebrew " &
+          "(known kinds: tarball, builtin, nix, scoop, path)")
       if not parsed.ok:
         raise newException(ValueError,
           "adapterPreference." & key & " names unknown realization kind '" &

@@ -65,6 +65,7 @@ metacraft-labs/nim-shm-gset	public
 metacraft-labs/nim-shm-lease	public
 metacraft-labs/nim-shm-queue	public
 metacraft-labs/nim-stackable-hooks	public
+metacraft-labs/reprobuild-brew-packages	public
 metacraft-labs/reprobuild-ct-test-runner	public
 metacraft-labs/reprobuild-nix-packages	public
 metacraft-labs/reprobuild-packages	public
