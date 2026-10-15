@@ -13842,8 +13842,8 @@
       "owner": "libs/repro_local_store",
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

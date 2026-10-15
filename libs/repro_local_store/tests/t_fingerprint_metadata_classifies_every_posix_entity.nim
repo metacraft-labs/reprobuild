@@ -25,14 +25,20 @@
 ## concluding nothing, and a negative path lookup costs about twice a positive
 ## one.
 ##
-## THE TWO DELIBERATE DIVERGENCES, both asserted below:
+## THE THREE DELIBERATE DIVERGENCES, all asserted below:
 ##
 ##   dangling symlink   retired: ffkMissing(0, 0)   now: ffkUnresolvedSymlink
 ##                      (link's own size and mtime)
 ##   FIFO / socket      retired: ffkMissing(0, 0)   now: ffkOther, and
 ##                      therefore not a recorded input at all
+##   link to directory  retired: ffkDirectory(0, 0) now: ffkDirectory with
+##                      `sizeBytes` = a digest of the link's target text
+##                      (`linkedDirectoryIdentity`); the retired answer was
+##                      the one a real directory gives, so a directory
+##                      replaced by a link, or a directory link retargeted,
+##                      compared equal
 ##
-## Both follow the branch that was kept, and both are argued in the code
+## All three follow the branch that was kept, and are argued in the code
 ## comment beside it. The consequences run in the last two suites: what the
 ## new classification BUYS (a dangling link retargeted to another absent
 ## target now invalidates) and what it USED TO COST: while a dangling link was
@@ -46,6 +52,16 @@ import std/[os, posix, sets, tempfiles, times, unittest]
 import repro_hash
 import repro_local_store
 import repro_test_support/reasoned_skip
+
+when defined(posix):
+  # Not in std/posix. Restores a symlink's own timestamps without following
+  # it, which is what a retarget that hides itself from `lstat` does.
+  var
+    AtFdcwd {.importc: "AT_FDCWD", header: "<fcntl.h>".}: cint
+    AtSymlinkNofollow {.importc: "AT_SYMLINK_NOFOLLOW",
+      header: "<fcntl.h>".}: cint
+  proc utimensat(dirfd: cint; path: cstring; times: ptr array[2, Timespec];
+                 flags: cint): cint {.importc, header: "<sys/stat.h>".}
 
 proc weakFor(text: string): ContentDigest =
   var payload = newSeq[byte](text.len)
@@ -129,7 +145,14 @@ suite "fingerprintMetadata classifies every POSIX entity":
       check metadataOf(t.root / "link-to-file") !=
         metadataOf(t.root / "file.txt")
 
+      # A link to a directory classifies as a directory, but is not recorded
+      # as one: its `sizeBytes` carries the link's identity, a real
+      # directory's is 0. `mtimeNs` stays 0, the "not membership-tracked"
+      # value (`membershipTrackedDirectory`).
       check kindOf(t.root / "link-to-dir") == ffkDirectory
+      check metadataOf(t.root / "link-to-dir").sizeBytes != 0'u64
+      check metadataOf(t.root / "link-to-dir").mtimeNs == 0'u64
+      check metadataOf(t.root / "link-to-dir") != metadataOf(t.root / "dir")
 
       check kindOf(t.root / "absent-entirely") == ffkMissing
       check metadataOf(t.root / "absent-entirely") ==
@@ -149,17 +172,17 @@ suite "fingerprintMetadata classifies every POSIX entity":
       # Not a file, not a directory, and it has no meaningful size or mtime.
       check kindOf(t.root / "fifo") == ffkOther
 
-  test "the retired classifier agreed on five cases and disagreed on two":
+  test "the retired classifier agreed on four cases and disagreed on three":
     when not defined(posix):
-      skip()
+      skip("symbolic links, lstat(2) and utimensat(2) are POSIX; " &
+        "this case observes the POSIX fingerprint branch")
     else:
       let t = makeTree()
       defer: removeDir(t.root)
 
       # AGREEMENT. If widening the branch had changed any of these, the change
       # would not be the narrow one it claims to be.
-      for name in ["file.txt", "dir", "link-to-file", "link-to-dir",
-                   "absent-entirely"]:
+      for name in ["file.txt", "dir", "link-to-file", "absent-entirely"]:
         let path = t.root / name
         checkpoint("agree on " & name)
         check metadataOf(path) == retiredGenericBranch(path)
@@ -174,6 +197,14 @@ suite "fingerprintMetadata classifies every POSIX entity":
       check retiredGenericBranch(fifo) == FileMetadata(kind: ffkMissing)
       check metadataOf(fifo).kind == ffkOther
       check metadataOf(fifo) != retiredGenericBranch(fifo)
+
+      let linkToDir = t.root / "link-to-dir"
+      check retiredGenericBranch(linkToDir) ==
+        FileMetadata(kind: ffkDirectory)
+      check retiredGenericBranch(linkToDir) ==
+        retiredGenericBranch(t.root / "dir")
+      check metadataOf(linkToDir).kind == ffkDirectory
+      check metadataOf(linkToDir) != retiredGenericBranch(linkToDir)
 
   test "a FIFO input is not recorded; a dangling symlink input is":
     when not defined(posix):
@@ -282,3 +313,138 @@ suite "what the dangling-symlink classification buys and costs":
       removeFile(link)
       createSymlink(t.root / "other.txt", link)
       check not hotMetadataRecordInputsUnchanged([record])
+
+suite "a link to a directory is not the directory":
+  # A path resolution (`realpath`, `readlink`, any open through the path)
+  # depends on whether each directory on the way is a directory or a link,
+  # and on where each link points. The monitor records every component it
+  # walks through as a probe; these cases pin that such a probe's recorded
+  # state actually moves when that fact does.
+
+  test "a directory replaced by a link to an identical directory invalidates":
+    when not defined(posix):
+      skip("symbolic links, lstat(2) and utimensat(2) are POSIX; " &
+        "this case observes the POSIX fingerprint branch")
+    else:
+      let t = makeTree()
+      defer: removeDir(t.root)
+      let component = t.root / "dir"
+
+      let record = recordFor(component)
+      check hotMetadataRecordInputsUnchanged([record])
+
+      # Same names behind the path, so every file reached through it still
+      # exists with the same content; `realpath(component / "inside.txt")`
+      # now answers `elsewhere/inside.txt`.
+      createDir(t.root / "elsewhere")
+      writeFile(t.root / "elsewhere" / "inside.txt", "nested\n")
+      removeDir(component)
+      createSymlink(t.root / "elsewhere", component)
+      check kindOf(component) == ffkDirectory
+      check not hotMetadataRecordInputsUnchanged([record])
+
+  test "a directory link retargeted with its own mtime restored invalidates":
+    when not defined(posix):
+      skip("symbolic links, lstat(2) and utimensat(2) are POSIX; " &
+        "this case observes the POSIX fingerprint branch")
+    else:
+      let t = makeTree()
+      defer: removeDir(t.root)
+      let link = t.root / "link-to-dir"
+      # The new target text has the SAME LENGTH as the old one, and the
+      # link's own mtime is restored: nothing `lstat` reports moves.
+      let other = t.root / "dis"
+      check other.len == (t.root / "dir").len
+      createDir(other)
+      writeFile(other / "inside.txt", "nested\n")
+
+      var before: Stat
+      doAssert lstat(link.cstring, before) == 0
+      let record = recordFor(link)
+      check hotMetadataRecordInputsUnchanged([record])
+
+      removeFile(link)
+      createSymlink(other, link)
+      var times = [before.st_atim, before.st_mtim]
+      doAssert utimensat(AtFdcwd, link.cstring, addr times,
+        AtSymlinkNofollow) == 0
+      var after: Stat
+      doAssert lstat(link.cstring, after) == 0
+      check after.st_size == before.st_size
+      check after.st_mtim.tv_sec == before.st_mtim.tv_sec
+      check after.st_mtim.tv_nsec == before.st_mtim.tv_nsec
+      check not hotMetadataRecordInputsUnchanged([record])
+
+  test "an unchanged directory link stays a hit":
+    when not defined(posix):
+      skip("symbolic links, lstat(2) and utimensat(2) are POSIX; " &
+        "this case observes the POSIX fingerprint branch")
+    else:
+      let t = makeTree()
+      defer: removeDir(t.root)
+      let link = t.root / "link-to-dir"
+      let record = recordFor(link)
+      # Its target's contents moving is not the link moving; membership of an
+      # enumerated directory is a separate fingerprint.
+      writeFile(t.root / "dir" / "added.txt", "added\n")
+      check hotMetadataRecordInputsUnchanged([record])
+      check metadataOf(link) == record.inputs[0].metadata
+
+suite "a content-keyed policy sees a file link retargeted":
+
+  when defined(posix):
+    proc retargetToIdenticalContent(policy: FileFingerprintPolicy):
+        ActionCacheLookupStatus =
+      let t = makeTree()
+      defer: removeDir(t.root)
+      let link = t.root / "link-to-file"
+      # Same content, different file: an action that opened through the link
+      # read the same bytes, one that READ the link got a different answer.
+      writeFile(t.root / "twin.txt", readFile(t.root / "file.txt"))
+      var cache = openActionCache(t.root / "cache", attachShm = false)
+      defer: cache.closeShmTier()
+      let cas = openLocalCas(t.root / "cas")
+      let weak = weakFor("fpmeta.link-retarget." & $policy)
+      discard cache.recordActionResult(cas, weak, policy, [link], [])
+      doAssert cache.lookupActionResult(cas, weak, policy).status == aclHit
+      var before: Stat
+      doAssert lstat(link.cstring, before) == 0
+      removeFile(link)
+      # The same target length ("twin.txt" / "file.txt"), so the link's own
+      # size does not move.
+      createSymlink(t.root / "twin.txt", link)
+      # A retarget that happens later than the record moves the link's own
+      # mtime; one that happens in the same timestamp tick does not. Linux
+      # stamps from a coarse clock, so the two links here, created
+      # milliseconds apart, can carry the SAME mtime -- a hit under
+      # `ffpTimestamp`, and a metadata match under `ffpHybrid` that never
+      # reaches the hash this suite is about. Set the new link's mtime one
+      # second later explicitly, so every policy sees what a real retarget
+      # shows it: only the mtime moved, and only a content-keyed policy has
+      # to look further.
+      var times = [before.st_atim, before.st_mtim]
+      times[1].tv_sec = posix.Time(int(before.st_mtim.tv_sec) + 1)
+      doAssert utimensat(AtFdcwd, link.cstring, addr times,
+        AtSymlinkNofollow) == 0
+      cache.lookupActionResult(cas, weak, policy).status
+
+  test "ffpChecksum":
+    when not defined(posix):
+      skip("symbolic links, lstat(2) and utimensat(2) are POSIX; " &
+        "this case observes the POSIX fingerprint branch")
+    else:
+      check retargetToIdenticalContent(ffpChecksum) == aclMissInputChanged
+
+  test "ffpHybrid":
+    when not defined(posix):
+      skip("symbolic links, lstat(2) and utimensat(2) are POSIX; " &
+        "this case observes the POSIX fingerprint branch")
+    else:
+      check retargetToIdenticalContent(ffpHybrid) == aclMissInputChanged
+
+  test "ffpTimestamp":
+    when not defined(posix):
+      skip("symbolic links, lstat(2) and utimensat(2) are POSIX; " &
+        "this case observes the POSIX fingerprint branch")
+    else:
+      check retargetToIdenticalContent(ffpTimestamp) == aclMissInputChanged

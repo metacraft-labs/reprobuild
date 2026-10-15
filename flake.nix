@@ -241,7 +241,12 @@
         # successful exec no longer leaks the prepared environment into the
         # parent; and realpath, canonicalize_file_name and the readlink family
         # record every symbolic link they follow and the path they end at.
-      url = "github:metacraft-labs/io-mon/3ccdd4bec34b883901bf208b30a966922471ac32";
+        # Bumped to 414a3de (2026-10-15), io-mon's `agents` tip; 3ccdd4b is an
+        # ancestor. On Linux, that replay also records each directory it walks
+        # through, the first absent component, and the link the readlink
+        # family reads with its target, so a directory replaced by a link and
+        # a retargeted link change a recorded input.
+      url = "github:metacraft-labs/io-mon/414a3de4f5912f498f6adea0994458b776884a26";
       flake = false;
     };
     nim-shm-gset-src = {

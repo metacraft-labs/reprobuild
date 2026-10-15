@@ -114,7 +114,6 @@ libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entit
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	a FIFO input is not recorded; a dangling symlink input is	1
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	a symlink to a file tracks the LINK, not the file it points at	1
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	regular file, directory, symlinks, dangling link, FIFO, absent path	1
-libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	the retired classifier agreed on five cases and disagreed on two	1
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a cache-missing edge is identifiable, and so is why it missed	1
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a failed edge is audited as an error with its diagnostic	1
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	every counted resource is audited; the two populations stay apart	1
