@@ -454,11 +454,9 @@
       # adapter are unchanged. Align the pin with the published workspace.
       # At 272a09ad5 (2026-10-15, the published `agents` tip; 47eda1fd is an
       # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
-      # ``src/ct_incremental_adapter.nim`` are unchanged. Its ``repro.lock``
-      # now names trace-format 5b32588b, but ``ct-trace-format-src`` stays at
-      # 808ffdb4 here: that revision is repeated in the reprobuild package
-      # derivations and pinned by ``scripts/check_repo_requirements.sh``, so
-      # it moves on its own, across every surface at once.
+      # ``src/ct_incremental_adapter.nim`` are unchanged; the ``repro.lock``
+      # now names trace-format 5b32588b, so ``ct-trace-format-src`` moves
+      # with it.
       url = "github:metacraft-labs/codetracer/272a09ad56612dec9919aa88815c2b01d659150a";
       flake = false;
     };
@@ -560,7 +558,10 @@
       # 17c111fb2's ``repro.lock`` names (7b8b587c is an ancestor; adds the ten
       # exact I/O event kinds of trace format version 7 and a step count that
       # counts step records only).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/808ffdb4507634c3aba0661d96cbc353420ed856";
+      # Moved with ``codetracer-src`` to 5b32588b, the revision CodeTracer
+      # 272a09ad5's ``repro.lock`` names (808ffdb4 is an ancestor; refuses a
+      # container that carries only some of the interning tables).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/5b32588b28476bc7a45e5c9ba61c088f6c0d2826";
       flake = false;
     };
     nim-stew-src = {

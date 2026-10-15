@@ -158,7 +158,7 @@ reprobuild-packages=9f981af6c771ce062de810dcdd3affae21857f22
 # `io-mon-src` in flake.nix, flake.lock and `ioMonSrc` in nix/pkgs/by-name.
 # Current clones match flake.nix/flake.lock for shipped-tools capture.
 # package.nix standalone defaults separately match its historical release src.
-io-mon=6e7d2cf28c6bceec5ec0174fd829524770b17ad7
+io-mon=51228b560a6fed59e780a763cb9ed13e9443c245
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
