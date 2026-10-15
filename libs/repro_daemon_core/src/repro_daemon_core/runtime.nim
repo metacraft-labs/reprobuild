@@ -10,6 +10,7 @@ import ./writer_identity
 import ./protocol
 import ./stats_store
 import ./lease_registry
+import ./instance_registry
 when defined(windows):
   import ./windows_detached_spawn
 
@@ -827,9 +828,7 @@ proc releaseUserDaemonLock(lock: var UserDaemonLock) =
   lock.held = false
 
 proc statusPath(config: UserDaemonConfig): string =
-  config.stateDir / "status" /
-    (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
-      ".status")
+  statusFileForEndpoint(config.stateDir, config.endpoint)
 
 proc sessionRecordsDir(config: UserDaemonConfig): string =
   config.stateDir / "sessions"
@@ -1373,9 +1372,33 @@ proc removeEndpointFiles(config: UserDaemonConfig) =
   try: removeFile(config.endpoint) except OSError: discard
   removeStatusFile(config)
 
-proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
+proc removeLegacyStatusFile(config: UserDaemonConfig): bool =
+  ## Remove the record an older-generation daemon for ``config.endpoint``
+  ## left behind when it died uncleanly. That generation keyed the record on
+  ## the endpoint BASENAME, so the file at the legacy name may belong to any
+  ## same-basename endpoint, possibly a live one; it is removed only when its
+  ## ``endpoint=`` line names this endpoint exactly, and only from the posix
+  ## stale gate below (the endpoint refuses connections). The normal exit
+  ## path never touches it.
+  let legacy = config.stateDir / "status" /
+    (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
+      ".status")
+  try:
+    if fileExists(legacy) and
+        ("endpoint=" & config.endpoint) in readFile(legacy).splitLines():
+      removeFile(legacy)
+      result = true
+  except CatchableError:
+    discard
+
+proc cleanupStaleUserDaemonDiscovery*(requested: UserDaemonConfig): bool =
   ## Remove stale discovery files only when the endpoint does not accept a raw
   ## connection. A protocol-incompatible but live daemon must keep its state.
+  ##
+  ## The paths are anchored first, as ``cleanupPlatformBackgroundRegistration``
+  ## anchors them: the daemon keyed its record on the ABSOLUTE endpoint and
+  ## state directory, and `repro daemon status|stop` pass the flags as typed.
+  let config = withAnchoredDaemonPaths(requested)
   when defined(posix):
     let endpointPresent = userDaemonEndpointExists(config.endpoint)
     let accepts = userDaemonEndpointAcceptsConnections(config.endpoint)
@@ -1388,6 +1411,8 @@ proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
     if not accepts:
       if fileExists(statusPath(config)):
         removeStatusFile(config)
+        result = true
+      if removeLegacyStatusFile(config):
         result = true
   else:
     if fileExists(statusPath(config)):
@@ -1492,6 +1517,59 @@ proc handleLeaseRenew(socket: IpcConn; config: UserDaemonConfig;
     " consumer=" & request.consumerId & " ttlSeconds=" &
     $request.ttlSeconds & " ok=" & $response.ok & " hadRecord=" &
     $response.hadRecord)
+
+proc handleServiceConverge(socket: IpcConn; config: UserDaemonConfig;
+                           instances: var ServiceInstanceRegistry;
+                           request: DaemonServiceConvergeRequest) =
+  ## Shared-Development-Services L7 (§4.5) converge handler: resolve
+  ## `(identity, scope, environment)` against the instance registry,
+  ## attach when an instance is present and materialise one otherwise.
+  ##
+  ## THE REGISTRY IS THE DAEMON'S, NOT THIS REQUEST'S. It is rebuilt once
+  ## at daemon start and mutated in place by each handler, which is what
+  ## §4.5 means by "in-memory, and authoritative only while the daemon is
+  ## running" -- and it is what makes the gate's daemon-restart clause
+  ## non-vacuous: a registry re-read from disk on every request would
+  ## satisfy that clause without ever exercising a rebuild.
+  ##
+  ## The accept loop is single-threaded and sequential (one
+  ## `handleClient` at a time), so a `var` registry needs no lock; the
+  ## comment is here because adding a worker thread to that loop would
+  ## break this assumption silently.
+  let response =
+    try:
+      applyServiceConverge(instances, request)
+    except CatchableError as err:
+      DaemonServiceConvergeResponse(ok: false,
+        outcome: outcomeWord(scoRefuseUnknownHolders),
+        diagnostic: "service converge raised: " & err.msg)
+  socket.writeFrame(udkServiceConvergeAck,
+    serviceConvergeResponseBody(response))
+  logLine(config.logPath, "service converge holder=" & request.holderId &
+    " address=" & response.address & " outcome=" & response.outcome &
+    " ok=" & $response.ok & " hadInstance=" & $response.hadInstance &
+    " holderSetRecoverable=" & $response.holderSetRecoverable &
+    " holders=" & $response.holders.len & " pid=" & $response.pid)
+
+proc handleServiceRelease(socket: IpcConn; config: UserDaemonConfig;
+                          instances: var ServiceInstanceRegistry;
+                          request: DaemonServiceReleaseRequest) =
+  ## L7 (§4.5) release handler: drop ONE holder, and stop the instance
+  ## only when that holder was the last.
+  let response =
+    try:
+      applyServiceRelease(instances, request)
+    except CatchableError as err:
+      DaemonServiceReleaseResponse(ok: false,
+        outcome: outcomeWord(srlRefuseUnknownHolders),
+        diagnostic: "service release raised: " & err.msg)
+  socket.writeFrame(udkServiceReleaseAck,
+    serviceReleaseResponseBody(response))
+  logLine(config.logPath, "service release holder=" & request.holderId &
+    " address=" & response.address & " outcome=" & response.outcome &
+    " ok=" & $response.ok & " remaining=" &
+    $response.remainingHolders.len & " stoppedPid=" &
+    $response.stoppedPid)
 
 proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
                  frameBody: openArray[byte];
@@ -2199,6 +2277,7 @@ proc handleWatchDetach(socket: IpcConn; config: UserDaemonConfig;
 proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
                   generation: string; shuttingDown: var bool;
                   sessions: var seq[UserDaemonSession];
+                  instances: var ServiceInstanceRegistry;
                   devRestart: DevRestartState) =
   # Both request-side reads are bounded: the accept loop is single-threaded,
   # so a client that connects and then goes quiet must not be able to starve
@@ -2292,6 +2371,24 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
           "malformed udkLeaseRenew body: " & err.msg))
         return
     handleLeaseRenew(socket, config, request)
+  of udkServiceConverge:
+    let request =
+      try:
+        parseServiceConvergeRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkServiceConverge body: " & err.msg))
+        return
+    handleServiceConverge(socket, config, instances, request)
+  of udkServiceRelease:
+    let request =
+      try:
+        parseServiceReleaseRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkServiceRelease body: " & err.msg))
+        return
+    handleServiceRelease(socket, config, instances, request)
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
@@ -2533,7 +2630,8 @@ proc reportOnce(state: var LeaseReapTickState; config: UserDaemonConfig;
   logLine(config.logPath, message)
 
 proc runScopedLeaseReapTick(config: UserDaemonConfig;
-                            state: var LeaseReapTickState) =
+                            state: var LeaseReapTickState;
+                            instances: ptr ServiceInstanceRegistry) =
   ## Ephemeral-State-Leases L4 (§4.2): run ONE wall-clock reap sweep against
   ## this daemon's scoped lease store. Best-effort — a reap must never wedge
   ## the event loop or crash the daemon, so all errors are logged + swallowed.
@@ -2551,6 +2649,19 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ## unreadable store root), which is equally unfixable-by-retrying and so is
   ## deduplicated on the same terms.
   ##
+  ## Shared-Development-Services L7 (§4.5): "an instance is reaped when its
+  ## last lease lapses". A shared service INSTANCE record lives in THIS store
+  ## — one root, deliberately, see ``serviceInstanceStoreRoot`` — so this
+  ## tick is where that clause is honoured. The real instance-reap handler is
+  ## installed for the duration of the sweep and the DECLINING one
+  ## (``repro_resources/service_registry``'s) restored afterwards, so nothing
+  ## outside this tick can remove an instance record while its process is
+  ## still running. The handler is scoped to the sweep rather than installed
+  ## once at startup because it has to reach THIS daemon's registry object:
+  ## stopping the process without dropping the in-memory entry would leave
+  ## the next ``repro up`` attaching a consumer to a process this tick had
+  ## just killed.
+  ##
   ## THE VERDICT IS RECORDED BY THE SWEEP, NOT BY THIS LOGGING.
   ## ``runAndRecordLeaseReapTick`` runs the sweep and persists its verdict in
   ## one step and returns only what to log, which is what makes a reaper that
@@ -2559,37 +2670,48 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
   ## permanently stuck reaper says NOTHING at all, so the log stops being
   ## evidence of its own state.
   ##
-  ## Everything below is therefore best-effort reporting around an outcome
-  ## already decided and already on disk. Each logging call is individually
-  ## guarded, including the ``reportOnce`` calls — ``reportOnce`` writes to the
-  ## log too, so the arm that reports a failure can fail the same way, and this
-  ## proc is called from the startup sweep and from the event loop, neither of
-  ## which wraps it. An escape here would stop the daemon over a log write.
-  let outcome = runAndRecordLeaseReapTick(daemonLeaseScope(config),
-    overrideRoot = config.leaseStoreRoot)
+  ## Everything in the inner ``try`` is therefore best-effort reporting around
+  ## an outcome already decided and already on disk. Each logging call is
+  ## individually guarded, including the ``reportOnce`` calls — ``reportOnce``
+  ## writes to the log too, so the arm that reports a failure can fail the
+  ## same way, and this proc is called from the startup sweep and from the
+  ## event loop, neither of which wraps it. An escape there would stop the
+  ## daemon over a log write.
+  ##
+  ## THE OUTER ``try`` CARRIES ONLY A ``finally``, which is the whole reason
+  ## the sweep can sit inside it: it uninstalls the instance handler whatever
+  ## happens, and it catches NOTHING, so a whole-sweep raise propagates
+  ## exactly as it does without the handler scoping. The sweep is not made
+  ## best-effort by being lexically inside a ``try``.
+  installServiceInstanceReapHandler(instances)
   try:
-    if outcome.raised:
-      reportOnce(state, config, "sweep\x00" & outcome.failure,
-        "lease reap tick error (reported once per daemon run): " &
-          outcome.failure)
-    else:
-      if outcome.reapedCount > 0:
-        logLine(config.logPath, "lease reap tick reaped=" &
-          $outcome.reapedCount & " kept=" & $outcome.keptCount &
-          " unreapable=" & $outcome.failedCount & " scope=" &
-          (if config.systemScope: "system" else: "user"))
-      for finding in outcome.findings:
-        reportOnce(state, config, finding.signature,
-          "lease reap tick (reported once per daemon run) " & finding.line)
-    if outcome.healthWriteError.len > 0:
-      reportOnce(state, config, "health-write\x00" & outcome.healthWriteError,
-        "lease reap tick health not recorded (reported once per daemon run): " &
-          outcome.healthWriteError)
-  except CatchableError:
-    # Nowhere left to report a reporting failure, and nothing depends on it:
-    # the tick's verdict is already written, and it is the thing
-    # ``repro health`` actually reads.
-    discard
+    let outcome = runAndRecordLeaseReapTick(daemonLeaseScope(config),
+      overrideRoot = config.leaseStoreRoot)
+    try:
+      if outcome.raised:
+        reportOnce(state, config, "sweep\x00" & outcome.failure,
+          "lease reap tick error (reported once per daemon run): " &
+            outcome.failure)
+      else:
+        if outcome.reapedCount > 0:
+          logLine(config.logPath, "lease reap tick reaped=" &
+            $outcome.reapedCount & " kept=" & $outcome.keptCount &
+            " unreapable=" & $outcome.failedCount & " scope=" &
+            (if config.systemScope: "system" else: "user"))
+        for finding in outcome.findings:
+          reportOnce(state, config, finding.signature,
+            "lease reap tick (reported once per daemon run) " & finding.line)
+      if outcome.healthWriteError.len > 0:
+        reportOnce(state, config, "health-write\x00" & outcome.healthWriteError,
+          "lease reap tick health not recorded (reported once per daemon run): " &
+            outcome.healthWriteError)
+    except CatchableError:
+      # Nowhere left to report a reporting failure, and nothing depends on it:
+      # the tick's verdict is already written, and it is the thing
+      # ``repro health`` actually reads.
+      discard
+  finally:
+    uninstallServiceInstanceReapHandler()
 
 proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # A daemon started by hand may have been given relative flags; its dev
@@ -2665,6 +2787,21 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
       "reclaimed abandoned sessions count=" & $reclaimed)
   cleanupPreviousStagedGeneration(config)
   var sessions: seq[UserDaemonSession] = @[]
+  # Shared-Development-Services L7 (§4.5): "A daemon that restarts
+  # rebuilds it from the lease records". This IS that rebuild, and it runs
+  # at startup rather than lazily for the same reason
+  # `reclaimAbandonedSessions` above does: a daemon nobody asks still has
+  # to drop the records of instances whose processes are gone, or the
+  # next `repro up` attaches to one that is not there.
+  let instancesOpen = openDaemonServiceInstanceRegistry(
+    daemonLeaseScope(config), config.leaseStoreRoot)
+  var instances = instancesOpen.registry
+  logLine(config.logPath, describeRebuild(instancesOpen.report))
+  for event in instancesOpen.report.events:
+    logLine(config.logPath, "service instance " & $event.kind &
+      " address=" & event.address & " liveness=" & $event.liveness &
+      " holderRecovery=" & $event.holderRecovery &
+      " detail=" & event.detail)
   writeStatusFile(config, statusFor(config, startedAt, generation,
     sessions.len, devRestart))
   logLine(config.logPath, "started role=" & UserDaemonRole &
@@ -2687,7 +2824,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # (an expired record left by a crashed/stopped prior instance is reaped on
   # the first pass rather than after a full interval).
   if leaseReapMs > 0:
-    runScopedLeaseReapTick(config, leaseReapState)
+    runScopedLeaseReapTick(config, leaseReapState, addr instances)
 
   var shuttingDown = false
   while not shuttingDown:
@@ -2698,7 +2835,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
         selfRestarting = true
         return 0
     if leaseReapMs > 0 and nowUnixMs() - lastLeaseReapMs >= leaseReapMs:
-      runScopedLeaseReapTick(config, leaseReapState)
+      runScopedLeaseReapTick(config, leaseReapState, addr instances)
       lastLeaseReapMs = nowUnixMs()
     var pollMs = int(devRestartPollIntervalMs())
     if leaseReapMs > 0 and leaseReapMs < pollMs:
@@ -2708,7 +2845,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
     var client = listener.acceptIpc()
     try:
       handleClient(client, config, startedAt, generation, shuttingDown,
-        sessions, devRestart)
+        sessions, instances, devRestart)
     except CatchableError as err:
       logLine(config.logPath, "client error: " & err.msg)
       try:
@@ -2770,14 +2907,6 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
     result.add("--state-root")
     result.add(config.leaseStoreRoot)
 
-proc endpointNameDigest(config: UserDaemonConfig): string =
-  ## The digest that makes a service-manager name identify the WHOLE
-  ## endpoint: 16 hex characters (64 bits) of blake3 over the endpoint string
-  ## VERBATIM. Shared by ``launchdLabel`` and ``systemdUnitName`` so the two
-  ## platforms cannot drift apart; ``systemdUnitName``'s docstring carries the
-  ## reasoning for each of those choices.
-  blake3.digest(config.endpoint).toHex()[0 ..< 16]
-
 proc legacyLaunchdLabel(config: UserDaemonConfig): string =
   ## The label binaries before the endpoint-keyed naming registered: the
   ## endpoint's basename alone. Kept only so the launcher and the cleanup can
@@ -2810,7 +2939,7 @@ proc launchdLabel*(config: UserDaemonConfig): string =
   ##
   ## Exported so a second derivation -- a test teardown -- asks for the name
   ## instead of restating it.
-  legacyLaunchdLabel(config) & "-" & endpointNameDigest(config)
+  legacyLaunchdLabel(config) & "-" & endpointDigest(config.endpoint)
 
 proc launchdPlistPath*(config: UserDaemonConfig): string =
   ## Where the launcher writes the plist for ``launchdLabel(config)``; it
@@ -3043,8 +3172,9 @@ proc systemdUnitName*(config: UserDaemonConfig): string =
   ## is not a risk worth a longer name. The result is bounded well under
   ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
   ## ``sun_path`` (108 bytes).
-  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
-    "-" & endpointNameDigest(config) & ".service"
+  ##
+  ## The key is ``endpointInstanceKey``, which the status record shares.
+  "repro-daemon-" & endpointInstanceKey(config.endpoint, "user") & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =
@@ -3347,6 +3477,46 @@ proc startUserDaemon*(publicCliPath: string;
 proc stopUserDaemon*(endpoint = defaultUserDaemonEndpoint()) =
   requestUserDaemonShutdown(endpoint)
 
+const UserDaemonBinaryVersionNote* =
+  "the version string does not identify the build; two builds with " &
+  "different features can share it. Compare binary-identity and features."
+  ## Printed as `binary-version-note:` directly under `binary-version:` in
+  ## `repro daemon status`. One line, so `field: value` readers of the
+  ## report are unaffected. See `userDaemonBinaryIdentity` for why.
+
+proc userDaemonBinaryIdentity*(status: UserDaemonStatus): string =
+  ## The value `repro daemon status` prints as `binary-identity:` -- the
+  ## field that actually tells two daemon builds apart.
+  ##
+  ## WHY NOT `binary-version` (reprobuild-pm issue 2026-10-13). The version
+  ## is the package version, shared by every build between two bumps. A
+  ## nix-store daemon and a locally built one both reported `0.2.5` while
+  ## advertising different feature sets, and a reader who compared the CLI's
+  ## version with the daemon's concluded the daemon was current. The spec
+  ## (Local-Daemons-And-Control-Plane.md, *Protocol Compatibility*) asks for
+  ## binary IDENTITY as a field distinct from the feature flags.
+  ##
+  ## The preference order is by strength of evidence:
+  ##
+  ## 1. `runningHash`, verbatim -- the content digest of the running image
+  ##    as `imageDigestHex` produced it, algorithm prefix included
+  ##    (`blake3-256:<hex>`), the same value `running-hash:` prints.
+  ## 2. `path:<image>` when no digest could be taken (the image was deleted
+  ##    or replaced under a running daemon): weaker, and labelled so a
+  ##    reader does not compare it with a digest as if they were alike.
+  ##    The running image wins over the source image, which may have been
+  ##    rebuilt since the daemon staged its copy.
+  ## 3. `unknown` -- never empty, because two empty identities compared by
+  ##    eye read as "the same build".
+  if status.runningHash.len > 0:
+    status.runningHash
+  elif status.runningImagePath.len > 0:
+    "path:" & status.runningImagePath
+  elif status.sourceImagePath.len > 0:
+    "path:" & status.sourceImagePath
+  else:
+    "unknown"
+
 proc renderUserDaemonStatus*(status: UserDaemonStatus): string =
   if not status.running:
     return "repro daemon: not-running\nendpoint: " & status.endpoint
@@ -3359,6 +3529,10 @@ proc renderUserDaemonStatus*(status: UserDaemonStatus): string =
     "binary-name: " & status.binary.name & "\n" &
     "binary-path: " & status.binary.path & "\n" &
     "binary-version: " & status.binary.version & "\n" &
+    # Kept verbatim (tools parse it); the two lines after it say why it
+    # must not be read as the build identity.
+    "binary-identity: " & userDaemonBinaryIdentity(status) & "\n" &
+    "binary-version-note: " & UserDaemonBinaryVersionNote & "\n" &
     "features: " & status.featureFlags & "\n" &
     "generation: " & status.generation & "\n" &
     "pid: " & $status.pid & "\n" &

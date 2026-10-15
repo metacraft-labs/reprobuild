@@ -224,20 +224,19 @@ proc runProfilePlatformProbes*(profileRoot, nimcacheDir, repoRoot: string):
   let repoRootAbs = absolutePath(repoRoot)
   requireReprobuildSources(repoRootAbs)
   let childEnv = profileCompileChildEnv(repoRootAbs)
-  let staged = stageProfileConfig(profileRoot, repoRootAbs)
-  var config: ProfileNimConfig
+  let staged = stageProfileFiles(profileRoot, repoRootAbs)
   try:
-    config = resolveProfileNimConfig(nimExe, profileRoot, repoRootAbs,
-      childEnv)
-  except CompileFailure as err:
-    # Nothing can be checked without the configuration; every platform is
-    # unevaluated, with the reason.
-    unstageProfileConfig(staged)
-    for t in ProfileTargetPlatforms:
-      result.add ProbeOutcome(system: t.system,
-        diagnostic: err.msg & ": " & diagnosticTail(err.stderrText, 1))
-    return
-  try:
+    var config: ProfileNimConfig
+    try:
+      config = resolveProfileNimConfig(nimExe, profileRoot, repoRootAbs,
+        childEnv)
+    except CompileFailure as err:
+      # Nothing can be checked without the configuration; every platform is
+      # unevaluated, with the reason.
+      for t in ProfileTargetPlatforms:
+        result.add ProbeOutcome(system: t.system,
+          diagnostic: err.msg & ": " & diagnosticTail(err.stderrText, 1))
+      return
     let width = max(1, min(ProfileTargetPlatforms.len, countProcessors()))
     var next = 0
     while next < ProfileTargetPlatforms.len:
@@ -263,7 +262,7 @@ proc runProfilePlatformProbes*(profileRoot, nimcacheDir, repoRoot: string):
           outcome.diagnostic = diagnosticTail(output, exitCode)
         result.add outcome
   finally:
-    unstageProfileConfig(staged)
+    unstageProfileFiles(staged)
 
 proc encodeProbeOutcomes*(outcomes: openArray[ProbeOutcome]): string =
   ## The probe edge's published document.

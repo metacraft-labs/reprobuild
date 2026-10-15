@@ -35,8 +35,26 @@
 ## text, the reprobuild libraries, the compiler, the selected catalog root).
 ## The recipe's text carries the content digest of every catalog module it
 ## names, so editing a definition in place re-extracts.
+##
+## Contribution catalogs. A recipe IMPORTS a provisioning-contribution
+## catalog (``import "../reprobuild-scoop-packages/repro"``), and the
+## ``provisioningFor`` blocks the import registers are folded into its
+## ``uses:`` by ``toProjectInterface``. A profile declares the same imports
+## in its ``catalogs:`` section (``Profile.catalogImports``). When it does,
+## the synthetic recipe is the recipe beside the profile that imports them:
+## every recipe this module writes carries one ``import`` per declared
+## module, and EVERY reference with a definition in scope is projected
+## through extraction, not only the catalog-defined ones, so a contribution
+## to a bundled stdlib package (the Scoop catalog's ``cmake``) reaches the
+## profile as it reaches the recipe. The references no ``reprobuild-packages``
+## catalog defines are projected by one more recipe, extracted with
+## ``$REPROBUILD_PACKAGES_ROOT`` naming an empty directory so its own lookup
+## finds no catalog either; it imports the linked stdlib modules of the
+## references that are neither bundled nor catalog-defined, as a recipe
+## naming them imports them. Without a ``catalogs:`` section nothing about
+## the projection changes.
 
-import std/[algorithm, os, strutils, tables]
+import std/[algorithm, os, sequtils, strutils, tables]
 from repro_core/paths import extendedPath
 from repro_core/source_root import resolveReprobuildSourceRoot,
   describeReprobuildSourceRootSearch
@@ -44,6 +62,8 @@ import nimcrypto/sha2 as catalogSha2
 
 import repro_project_dsl
 import repro_interface_artifacts
+from repro_profile/catalog_refs import catalogImportPathProblem,
+  CatalogModuleExtension
 
 type
   CatalogPackage* = object
@@ -64,9 +84,70 @@ type
       ## Name -> why its catalog definition could not be projected (the
       ## extraction failed). Resolution reports this instead of
       ## "unknown package".
+    importedModules*: seq[string]
+      ## The contribution-catalog modules the profile's ``catalogs:``
+      ## section imports, resolved against the profile directory (absolute
+      ## ``.nim`` files), in declaration order. Every synthetic recipe of
+      ## the projection imports them.
 
 const SyntheticPackageName = "reproHomeProfileCatalog"
   ## The synthetic recipe's package. Never registered in the engine.
+
+const PlainGroupDir = "imports-plain"
+  ## The scratch directory of the recipe that projects the references no
+  ## ``reprobuild-packages`` catalog defines (only written when the profile
+  ## imports contribution catalogs).
+
+proc resolveCatalogImports*(anchorFile: string;
+                            declared: openArray[string]): seq[string] =
+  ## The module files the profile's ``catalogs:`` entries name: each entry
+  ## resolved against the directory of ``anchorFile`` (the profile), with
+  ## ``.nim`` appended when omitted -- the file a Nim ``import`` of that
+  ## path from the profile's directory opens. A malformed entry or a module
+  ## that does not exist raises ``ValueError`` naming the entry: a declared
+  ## import that is skipped would resolve the profile without the
+  ## contributions it asked for (Core-Invariants.md §Unrecognised Input Is
+  ## Rejected, Not Skipped).
+  let profileDir = anchorFile.parentDir
+  for entry in declared:
+    let problem = catalogImportPathProblem(entry)
+    if problem.len > 0:
+      raise newException(ValueError, "the profile's `catalogs:` entry " &
+        entry.escape & " cannot name a catalog module: " & problem)
+    var file = normalizedPath(absolutePath(profileDir / entry))
+    if not file.endsWith(CatalogModuleExtension):
+      file.add CatalogModuleExtension
+    if not fileExists(extendedPath(file)):
+      raise newException(ValueError, "the profile's `catalogs:` entry " &
+        entry.escape & " names " & file & ", which does not exist (paths " &
+        "are relative to the profile directory " & profileDir & ")")
+    if file notin result:
+      result.add file
+
+proc isRegisteredPackage(name: string): bool =
+  ## Whether a definition of ``name`` is registered in this process (the
+  ## engine links the stdlib definitions, ``repro_dsl_stdlib/
+  ## package_registry``).
+  for pkg in registeredPackages():
+    if pkg.packageName == name:
+      return true
+  false
+
+proc linkedStdlibModule(name: string): string =
+  ## ``repro_dsl_stdlib/packages/<module>`` for a name the engine links from
+  ## a stdlib package module, "" otherwise. A recipe reaches such a package
+  ## (one that is not a bundled selector) through exactly this import.
+  for pkg in registeredPackages():
+    if pkg.packageName != name:
+      continue
+    let file = pkg.sourceFile.replace('\\', '/')
+    let marker = "/repro_dsl_stdlib/packages/"
+    let at = file.rfind(marker)
+    if at >= 0 and file.endsWith(".nim"):
+      let module = file[at + marker.len ..< file.len - ".nim".len]
+      if module.len > 0 and '/' notin module:
+        return "repro_dsl_stdlib/packages/" & module
+  ""
 
 proc catalogPackagesFor*(names: openArray[string];
                          anchorFile: string): seq[CatalogPackage] =
@@ -96,19 +177,39 @@ proc moduleDigest(file: string): string =
   except IOError, OSError:
     "unreadable"
 
-proc syntheticRecipeText*(packages: openArray[CatalogPackage]): string =
-  ## The recipe whose ``uses:`` is the profile's catalog references. Its
-  ## comment lines carry each module's content digest: the extractor keys
-  ## its cache on the recipe's text, and the catalog modules reach the
-  ## compile through the macro, not through a textual import.
+proc syntheticRecipeText*(packages: openArray[CatalogPackage];
+                          imports: openArray[string] = [];
+                          linkedModules: openArray[string] = []): string =
+  ## The recipe whose ``uses:`` is the profile's references in
+  ## ``packages``, importing the contribution-catalog modules ``imports``
+  ## (absolute ``.nim`` files) and the linked stdlib modules
+  ## ``linkedModules``. Its comment lines carry each catalog and imported
+  ## module's content digest: the extractor keys its cache on the recipe's
+  ## text, and the catalog modules reach the compile through the macro, not
+  ## through a textual import. A ``CatalogPackage`` with an empty ``module``
+  ## names a reference no catalog defines.
   var sorted = @packages
   sorted.sort(proc(a, b: CatalogPackage): int = cmp(a.name, b.name))
   result = "## Generated by `repro home apply`: the profile package references\n" &
-    "## the reprobuild-packages catalog defines, as a recipe's `uses:`.\n"
+    "## as a recipe's `uses:`, with the profile's contribution-catalog imports.\n"
   for pkg in sorted:
-    result.add("##   " & pkg.name & " " & moduleDigest(pkg.module) & "\n")
-  result.add("\nimport repro_project_dsl\n\npackage " & SyntheticPackageName &
-    ":\n  uses:\n")
+    if pkg.module.len > 0:
+      result.add("##   " & pkg.name & " " & moduleDigest(pkg.module) & "\n")
+  for file in imports:
+    result.add("##   import " & file.replace('\\', '/') & " " &
+      moduleDigest(file) & "\n")
+  result.add("\nimport repro_project_dsl\n")
+  for module in linkedModules:
+    result.add("import " & module & " as " &
+      module.split('/')[^1] & "_linked_module\n")
+  for i, file in imports:
+    # The import a recipe writes, by path; the alias keeps two catalogs whose
+    # modules are both named `repro` apart.
+    let modulePath = file.replace('\\', '/')[0 ..< file.len -
+      CatalogModuleExtension.len]
+    result.add("import " & modulePath.escape & " as reproHomeCatalogImport" &
+      $i & "\n")
+  result.add("\npackage " & SyntheticPackageName & ":\n  uses:\n")
   for pkg in sorted:
     result.add("    " & pkg.name.escape & "\n")
 
@@ -138,10 +239,16 @@ proc recordsComeFrom(use: InterfaceToolUse; module: string): bool =
   ## ``uses:`` before the catalog (``usesImportCode``'s order); the synthetic
   ## recipe lives in the state directory, where that should never happen,
   ## and this is the check that it did not.
+  ##
+  ## Only the definition's own (in-package) realizations are compared: a
+  ## contribution an imported catalog registers is written in that catalog.
   var files: seq[string] = @[]
-  for r in use.tarballProvisioning: files.add(r.location.file)
-  for r in use.nixProvisioning: files.add(r.location.file)
-  for r in use.scoopProvisioning: files.add(r.location.file)
+  for r in use.tarballProvisioning:
+    if r.contributor.len == 0: files.add(r.location.file)
+  for r in use.nixProvisioning:
+    if r.contributor.len == 0: files.add(r.location.file)
+  for r in use.scoopProvisioning:
+    if r.contributor.len == 0: files.add(r.location.file)
   if files.len == 0:
     return true
   let wanted = canonicalFile(module)
@@ -150,9 +257,20 @@ proc recordsComeFrom(use: InterfaceToolUse; module: string): bool =
       return true
   false
 
+proc hasRecords(use: InterfaceToolUse): bool =
+  use.tarballProvisioning.len > 0 or use.nixProvisioning.len > 0 or
+    use.scoopProvisioning.len > 0
+
 proc extractCatalogGroup(packages: seq[CatalogPackage]; root, scratchDir,
-                         workDir: string; catalog: var ProfileCatalog) =
-  let dir = scratchDir / ("catalog-" & catalogKey(root))
+                         workDir: string; catalog: var ProfileCatalog;
+                         plainGroup = false) =
+  ## Extract one synthetic recipe and record its projections. ``root`` is
+  ## the ``reprobuild-packages`` checkout the group's names come from, or,
+  ## for the ``plainGroup`` (names no catalog defines; written only when the
+  ## profile imports contribution catalogs), an empty directory, so the
+  ## macro's own lookup finds no catalog either.
+  let dir = scratchDir / (if plainGroup: PlainGroupDir
+                          else: "catalog-" & catalogKey(root))
   createDir(extendedPath(dir))
   let modulePath = dir / "repro.nim"
   let artifactPath = dir / "project-interface.rbsz"
@@ -162,7 +280,16 @@ proc extractCatalogGroup(packages: seq[CatalogPackage]; root, scratchDir,
   let hadRoot = existsEnv(ReprobuildPackagesRootEnv)
   var artifact: ProjectInterfaceArtifact
   try:
-    writeIfChanged(modulePath, syntheticRecipeText(packages))
+    var linkedModules: seq[string] = @[]
+    if plainGroup:
+      for pkg in packages:
+        if isBundledStdlibSelector(pkg.name):
+          continue
+        let module = linkedStdlibModule(pkg.name)
+        if module.len > 0 and module notin linkedModules:
+          linkedModules.add(module)
+    writeIfChanged(modulePath, syntheticRecipeText(packages,
+      catalog.importedModules, linkedModules))
     # The lookup in step 1 already chose the catalog; the variable makes the
     # macro's own lookup choose the same one (when set, it is the only place
     # `reprobuildPackagesSearch` consults), and the extractor keys its cache
@@ -181,7 +308,15 @@ proc extractCatalogGroup(packages: seq[CatalogPackage]; root, scratchDir,
       if use.packageSelector != pkg.name:
         continue
       found = true
-      if not recordsComeFrom(use, pkg.module):
+      if plainGroup:
+        # No catalog defines the name. A definition the engine links, or
+        # any realization at all (a contribution, or a definition in an
+        # imported module), makes the projection the reference's
+        # candidates; otherwise the name stays unknown, as it was.
+        if isBundledStdlibSelector(pkg.name) or isRegisteredPackage(pkg.name) or
+            hasRecords(use):
+          catalog.uses[pkg.name] = use
+      elif not recordsComeFrom(use, pkg.module):
         catalog.failures[pkg.name] = "the catalog definition of '" &
           pkg.name & "' (" & pkg.module & ") was not what the synthetic " &
           "recipe imported; a project named '" & pkg.name & "' beside " &
@@ -191,18 +326,43 @@ proc extractCatalogGroup(packages: seq[CatalogPackage]; root, scratchDir,
       break
     if not found:
       catalog.failures[pkg.name] = "the interface extracted for the " &
-        "catalog definitions at " & root & " has no use of '" & pkg.name & "'"
+        (if plainGroup: "profile's references" else: "catalog definitions at " &
+          root) & " has no use of '" & pkg.name & "'"
 
 proc projectCatalogPackages*(names: openArray[string];
-                             anchorFile, scratchDir: string): ProfileCatalog =
+                             anchorFile, scratchDir: string;
+                             catalogImports: openArray[string] = []):
+    ProfileCatalog =
   ## Project every reference in ``names`` that the catalog defines (see the
-  ## module documentation). ``anchorFile`` is the profile's source file;
-  ## ``scratchDir`` holds the synthetic recipes and their extraction state
-  ## (the home state directory's ``catalog-projection``). Names nothing in
-  ## a catalog defines are left out; a failed extraction is recorded per name
-  ## in ``failures``, so the other references still resolve.
+  ## module documentation) -- and, when the profile imports contribution
+  ## catalogs (``catalogImports``, the ``catalogs:`` entries as declared),
+  ## every other reference a definition in scope names, with those catalogs
+  ## imported. ``anchorFile`` is the profile's source file; ``scratchDir``
+  ## holds the synthetic recipes and their extraction state (the home state
+  ## directory's ``catalog-projection``). Names nothing projects are left
+  ## out; a failed extraction is recorded per name in ``failures``, so the
+  ## other references still resolve. A ``catalogs:`` entry that does not
+  ## name an existing module raises ``ValueError``
+  ## (``resolveCatalogImports``).
+  result.importedModules = resolveCatalogImports(anchorFile, catalogImports)
   let packages = catalogPackagesFor(names, anchorFile)
-  if packages.len == 0:
+  var plain: seq[CatalogPackage] = @[]
+  if result.importedModules.len > 0:
+    var seen: seq[string] = @[]
+    for pkg in packages:
+      seen.add(pkg.name)
+    for name in names:
+      if name in seen:
+        continue
+      seen.add(name)
+      # A moved name that no catalog defines is a compile error of the
+      # recipe that names it (§ Moved packages are a compile error without
+      # a catalog); it would fail every other reference of the group, so it
+      # is left to the linked resolution, which reports it unknown.
+      if name in MovedToReprobuildPackages and not isRegisteredPackage(name):
+        continue
+      plain.add(CatalogPackage(name: name))
+  if packages.len == 0 and plain.len == 0:
     return
   for pkg in packages:
     result.modules[pkg.name] = pkg.module
@@ -223,3 +383,23 @@ proc projectCatalogPackages*(names: openArray[string];
       for pkg in group:
         result.failures[pkg.name] = "the catalog definition " & pkg.module &
           " could not be projected (interface extraction failed): " & err.msg
+  if plain.len > 0:
+    let names = plain.mapIt(it.name).join(", ")
+    if workDir.len == 0:
+      for pkg in plain:
+        result.failures[pkg.name] = "projecting '" & pkg.name & "' with " &
+          "the profile's contribution catalogs needs the reprobuild " &
+          "sources, and none were found:\n" &
+          describeReprobuildSourceRootSearch()
+      return
+    let noCatalog = scratchDir / PlainGroupDir / "no-catalog"
+    try:
+      createDir(extendedPath(noCatalog))
+      extractCatalogGroup(plain, noCatalog, scratchDir, workDir, result,
+        plainGroup = true)
+    except CatchableError as err:
+      for pkg in plain:
+        result.failures[pkg.name] = "'" & pkg.name & "' could not be " &
+          "projected with the profile's contribution catalogs (" &
+          result.importedModules.join(", ") & "; interface extraction of " &
+          "the recipe using " & names & " failed): " & err.msg

@@ -1074,23 +1074,20 @@ proc selectorFromConstraint(value: string): string =
   else:
     parts[0]
 
-proc selectorModuleName(selector: string): string =
-  var previousWasWord = false
-  for ch in selector:
-    if ch.isAlphaNumeric():
-      if ch.isUpperAscii() and previousWasWord and
-          result.len > 0 and result[^1] != '_':
-        result.add('_')
-      result.add(ch.toLowerAscii())
-      previousWasWord = true
-    else:
-      if result.len > 0 and result[^1] != '_':
-        result.add('_')
-      previousWasWord = false
-  while result.len > 0 and result[^1] == '_':
-    result.setLen(result.len - 1)
-  if result.len == 0:
-    result = "package"
+proc packageNameText(name: NimNode): string =
+  ## The canonical package name a ``package`` declaration names. It is a
+  ## selector string, like a ``uses:`` selector, so besides the identifier
+  ## form (``package just:``) it may be written as a string literal
+  ## (``package "7zip":``) — the only spelling of a name that is not a Nim
+  ## identifier, such as one starting with a digit. Every Nim identifier the
+  ## macro emits is derived from it through ``selectorModuleName``.
+  case name.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    if name.strVal.strip().len == 0:
+      error("a package name must not be empty", name)
+    result = name.strVal
+  else:
+    result = identText(name)
 
 proc packageMarkerName(packageName: string): string =
   "reprobuildPackageMarker_" & selectorModuleName(packageName)
@@ -2445,7 +2442,7 @@ proc parsePackageDef(name: NimNode; body: NimNode;
   ## ``platforms <expr>`` form; the legacy shapes still parse their own tokens,
   ## and a package with no ``platforms`` declaration ignores it entirely.
   let loc = lineFile(name)
-  result.packageName = identText(name)
+  result.packageName = packageNameText(name)
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   # The doc comment immediately preceding a statement documents THAT

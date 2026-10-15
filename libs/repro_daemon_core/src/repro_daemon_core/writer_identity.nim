@@ -19,7 +19,8 @@
 ##
 ## So the writer records a triple that pins its own identity for as long as it
 ## exists: the boot it is running under, its pid, and its own start time. A
-## recycled pid fails the start-time comparison. A reboot fails the boot id.
+## recycled pid fails the start-time comparison. Linux's boot UUID also proves
+## a reboot; Darwin's calendar-based boot stamp can change within one boot.
 ##
 ## THE FAILURE DIRECTION IS ASYMMETRIC AND THE CODE LEANS THE SAFE WAY.
 ## Declaring a LIVE writer dead is far worse than the reverse: two builds
@@ -32,7 +33,10 @@
 ## Boot provenance is part of new identities. Legacy triples used boot sources
 ## that changed across releases (including a wall-clock fallback on Darwin),
 ## so their boot values cannot prove death. They require process interrogation.
-## Only a recognized version and native source permit a boot-only shortcut.
+## Only a recognized version and Linux's native boot UUID permit a boot-only
+## shortcut. Darwin always requires process interrogation, independently of
+## current boot-probe availability, because calendar corrections adjust
+## `kern.boottime` while live writers retain their recorded boot stamps.
 
 import std/[options, strutils]
 
@@ -251,20 +255,23 @@ proc writerLiveness*(encoded: string): WriterLiveness =
   ## Is the writer named by `encoded` still running?
   ##
   ## Every uncertain answer is `wlUnknown`, which callers treat as live. The
-  ## only `wlDead` is a proven different boot, absent pid, or reused pid.
+  ## only `wlDead` is a proven different Linux boot, absent pid, or reused pid.
   let parsed = decodeWriterIdentity(encoded)
   if parsed.isNone:
     return wlUnknown
   let identity = parsed.get()
-  if identity.bootSource == NativeWriterBootSource:
-    let currentBoot = exactWriterBootId()
-    if currentBoot.isNone: return wlUnknown
-    if identity.bootId != currentBoot.get():
-      # Provenance makes these numbers comparable. A legacy mismatch might
-      # only mean that a different release chose a different source.
-      return wlDead
-  # Legacy identities never need the current boot probe: the PID and native
-  # stamp can establish liveness even if that boot probe is unavailable.
+  when not defined(macosx):
+    if identity.bootSource == NativeWriterBootSource:
+      let currentBoot = exactWriterBootId()
+      if currentBoot.isNone: return wlUnknown
+      if identity.bootId != currentBoot.get():
+        # Linux's native UUID is stable for a boot; a legacy mismatch might
+        # only mean that a different release chose a different source.
+        return wlDead
+  # Neither legacy boot values nor Darwin's calendar-based boot stamp can
+  # prove death. In particular, XNU adjusts kern.boottime on calendar changes:
+  # https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/kern/clock.c
+  # Interrogate the process even if the current boot probe is unavailable.
   let probe = probeProcessStart(identity.pid)
   case probe.status
   of pssUnknown: wlUnknown

@@ -1816,8 +1816,10 @@ proc packageResolutionContext(opts: ApplyOptions; plan: ApplyPlan):
   var names: seq[string] = @[]
   for p in plan.packages:
     names.add(p.packageId)
+  # A profile's `catalogs:` section imports contribution catalogs into the
+  # same projection, as a recipe's `import` does.
   let catalog = projectCatalogPackages(names, opts.profilePath,
-    opts.stateDir / "catalog-projection")
+    opts.stateDir / "catalog-projection", plan.catalogImports)
   profileResolutionContext(plan.adapterPreference,
     opts.targetContext.platform, opts.targetContext.arch,
     targetIsThisHost(opts), lock, opts.relock, catalog)
@@ -3004,11 +3006,29 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # staged copy (trust checks + the store bundle's identity),
             # rename it into place. Replacing an existing bundle is allowed
             # only when this profile placed it (checked above as well).
-            let placed = placeAppBundle(desired.appBundleSource,
-              desired.appBundleTargetDir, desired.appBundleName,
-              desired.appBundleExpectation, desired.appBundleTrust,
-              managedPrior = managesAppBundle(action.address),
-              pinned = desired.appBundleIdentity)
+            # A refusal of the staged copy, or a failed copy or rename, is
+            # an apply failure naming the package, the bundle and the
+            # check; `placeAppBundle` has already removed the staged copy
+            # and left the target as it was.
+            let placed =
+              try:
+                placeAppBundle(desired.appBundleSource,
+                  desired.appBundleTargetDir, desired.appBundleName,
+                  desired.appBundleExpectation, desired.appBundleTrust,
+                  managedPrior = managesAppBundle(action.address),
+                  pinned = desired.appBundleIdentity)
+              except EAppBundleRefused as err:
+                raiseAppBundleFailed(
+                  packageIdOfAppBundleAddress(action.address),
+                  action.address, desired.appBundleName,
+                  desired.appBundleTargetDir / desired.appBundleName,
+                  err.check, err.msg)
+              except EAppBundlePlacement as err:
+                raiseAppBundleFailed(
+                  packageIdOfAppBundleAddress(action.address),
+                  action.address, desired.appBundleName,
+                  desired.appBundleTargetDir / desired.appBundleName,
+                  "placement", err.msg)
             postWriteBytes = appBundleCanonicalBytes(placed)
             payloadKindStr = "app-bundle-identity"
           let rb = toResourceBinding(action.address, desired.kind,

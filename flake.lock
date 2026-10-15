@@ -870,6 +870,24 @@
         "type": "github"
       }
     },
+    "flake-utils_6": {
+      "inputs": {
+        "systems": "systems_8"
+      },
+      "locked": {
+        "lastModified": 1731533236,
+        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
     "foundry-nix": {
       "inputs": {
         "flake-utils": [
@@ -1229,17 +1247,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791964629,
-        "narHash": "sha256-Ra6qEQfxHnYgPGTjz/0wZbSfLdnHy/B/HFdSvw8d+7I=",
+        "lastModified": 1792016514,
+        "narHash": "sha256-7MEx8uRcijVRGBEHNr0R7ZShRKvdJaZFF26tQ7YwlWI=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "295a2e518325440698de013663dab8deeef1dc19",
+        "rev": "6e7d2cf28c6bceec5ec0174fd829524770b17ad7",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "295a2e518325440698de013663dab8deeef1dc19",
+        "rev": "6e7d2cf28c6bceec5ec0174fd829524770b17ad7",
         "type": "github"
       }
     },
@@ -1433,17 +1451,17 @@
     "nim-stackable-hooks-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791978267,
-        "narHash": "sha256-ZHXfSvZwLk4i4i5PwWRRO68kxfdx9WyyXOotxFgGqsw=",
+        "lastModified": 1792014092,
+        "narHash": "sha256-QWpuPfJWEtNWv7JUugRkUBat7mUa/tPcbJqlhaSawlg=",
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "6522766fb87f60efb503550042f4f066e2a86a9e",
+        "rev": "3af63afc5c0b55a27fc5e0a26f3a32833caf8873",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "6522766fb87f60efb503550042f4f066e2a86a9e",
+        "rev": "3af63afc5c0b55a27fc5e0a26f3a32833caf8873",
         "type": "github"
       }
     },
@@ -2181,6 +2199,22 @@
         "type": "github"
       }
     },
+    "nixpkgs_10": {
+      "locked": {
+        "lastModified": 1789006805,
+        "narHash": "sha256-xB8mKMOx1IA9vTDNLmJZ6n4wCMq/cuWBBOzGCRnqxrU=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "8ce4ef6cb6f871616146b9fe26d2a5ae594e94fe",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "nixpkgs_2": {
       "locked": {
         "lastModified": 1765186076,
@@ -2450,6 +2484,23 @@
         "type": "github"
       }
     },
+    "reprobuild-nix-packages-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791989213,
+        "narHash": "sha256-YgmMv7qcRdKClHQwsMxozwICrYEjPZrO+NQ31KOPWeQ=",
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-nix-packages",
+        "rev": "842fd4718fa2381e17f32b1b4eeeec1735538d3c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-nix-packages",
+        "rev": "842fd4718fa2381e17f32b1b4eeeec1735538d3c",
+        "type": "github"
+      }
+    },
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
@@ -2495,8 +2546,27 @@
           "nixpkgs-unstable"
         ],
         "reprobuild-ct-test-runner-src": "reprobuild-ct-test-runner-src",
+        "reprobuild-nix-packages-src": "reprobuild-nix-packages-src",
         "reprobuild-test-adapters-src": "reprobuild-test-adapters-src",
-        "runquota-src": "runquota-src"
+        "runquota-src": "runquota-src",
+        "stackable-hooks-macos-tools": "stackable-hooks-macos-tools"
+      }
+    },
+    "runquota-package-catalog": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791021809,
+        "narHash": "sha256-U6iZFGwIW9UKtLoBTiA53J2uIEsIP/k9PxZl65/9n5k=",
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-packages",
+        "rev": "4e2fd1dcabf8ae8eac28a2d27c3160233589c1e6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-packages",
+        "rev": "4e2fd1dcabf8ae8eac28a2d27c3160233589c1e6",
+        "type": "github"
       }
     },
     "runquota-src": {
@@ -2522,12 +2592,13 @@
         ],
         "release-bearssl-src": "release-bearssl-src",
         "release-nimcrypto-src": "release-nimcrypto-src",
-        "release-packaging-src": []
+        "release-packaging-src": [],
+        "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "86bf4711f6ad4800d739b3e2c402ae657fdc6033",
+        "rev": "01e37c119a168c98da7a37dbdc6214e230ea7e9a",
         "type": "github"
       },
       "original": {
@@ -2606,6 +2677,26 @@
       "original": {
         "type": "git",
         "url": "https://spectrum-os.org/git/spectrum"
+      }
+    },
+    "stackable-hooks-macos-tools": {
+      "inputs": {
+        "flake-utils": "flake-utils_6",
+        "nixpkgs": "nixpkgs_10"
+      },
+      "locked": {
+        "lastModified": 1792013776,
+        "narHash": "sha256-l4rPNg0DzGmaNpBpCFGTM6qFAg2Og0HCA5X/yny0/R0=",
+        "owner": "metacraft-labs",
+        "repo": "stackable-hooks-macos-tools",
+        "rev": "1ad378d58776ec9b6cc73e1c27b8e53c15676f03",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "stackable-hooks-macos-tools",
+        "rev": "1ad378d58776ec9b6cc73e1c27b8e53c15676f03",
+        "type": "github"
       }
     },
     "systems": {
@@ -2700,6 +2791,21 @@
       }
     },
     "systems_7": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "systems_8": {
       "locked": {
         "lastModified": 1681028828,
         "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",

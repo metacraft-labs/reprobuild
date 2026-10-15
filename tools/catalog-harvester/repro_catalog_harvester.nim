@@ -434,16 +434,13 @@ proc parseCli(argv: openArray[string]): CliOptions =
         if srcName.len == 0 or dstName.len == 0:
           stderr.writeLine("error: --app-alias both sides must be non-empty")
           quit(2)
-        # Validate dstName is a usable Nim identifier head — leading
-        # underscore is fine, leading digit is not, hyphens are not.
-        if dstName[0] notin {'a'..'z', 'A'..'Z', '_'}:
-          stderr.writeLine("error: --app-alias target '" & dstName &
-            "' must start with a letter or underscore")
-          quit(2)
+        # The target is a package name, held to ``isValidAppName``'s rule:
+        # letters, digits and underscores, a leading digit included
+        # (``7zip`` is written ``package "7zip":``). Hyphens are not.
         for ch in dstName:
           if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
             stderr.writeLine("error: --app-alias target '" & dstName &
-              "' contains invalid identifier character '" & $ch & "'")
+              "' contains invalid character '" & $ch & "'")
             quit(2)
         result.appAliases[srcName] = dstName
       of "bin-default":
@@ -477,40 +474,35 @@ proc writeDiagnostics(diagnostics: openArray[Diagnostic]) =
     stderr.writeLine($d.kind & " [" & d.app & "]: " & d.detail)
 
 # ---------------------------------------------------------------------------
-# Output-app-name validation (Nim-identifier check)
+# Output-app-name validation
 # ---------------------------------------------------------------------------
 
-proc isValidNimIdent(name: string): bool =
-  ## Nim identifier rules (matchFull ``^[A-Za-z_][A-Za-z0-9_]*$``):
-  ## first char is a letter or underscore; remaining chars are
-  ## alphanumerics or underscores. Hyphens, dots, leading digits, and
-  ## the empty string are all rejected.
+proc isValidAppName(name: string): bool =
+  ## An output app name is a package name, so it need not be a Nim
+  ## identifier (Package-Model.md §"Package names"): ``7zip`` is declared
+  ## ``package "7zip":`` in ``pkg_7zip.nim`` (``harvestModuleName``). It is
+  ## restricted to letters, digits and underscores, so hyphens and dots
+  ## (``dotnet-sdk``, ``foo.bar``) still need ``--app-alias``.
   if name.len == 0: return false
-  if name[0] notin {'a'..'z', 'A'..'Z', '_'}: return false
   for ch in name:
     if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}: return false
   return true
 
 proc validateResolvedAppName(name: string) =
   ## Fail fast (exit 2) if the resolved output app name (post-alias) is
-  ## not a usable Nim identifier. The harvester writes
-  ## ``packages/<name>.nim`` containing ``package <name>:``; a name like
-  ## ``7zip`` is not a Nim identifier and the module fails ``nim check``. M8 reviewer flagged this for ``7zip`` /
-  ## ``dotnet-sdk``; the remedy is ``--app-alias <bad>=<good>``.
-  if isValidNimIdent(name): return
+  ## not usable. M8 reviewer flagged ``dotnet-sdk``; the remedy is
+  ## ``--app-alias <bad>=<good>``.
+  if isValidAppName(name): return
   let reason =
     if name.len == 0:
-      "an empty name is not a Nim identifier"
-    elif name[0] in {'0'..'9'}:
-      "Nim identifiers cannot start with a digit"
-    elif name[0] notin {'a'..'z', 'A'..'Z', '_'}:
-      "Nim identifiers must start with a letter or underscore"
+      "an empty name is not a package name"
     else:
-      "Nim identifiers may only contain letters, digits, and underscores"
+      "app names may only contain letters, digits, and underscores"
   stderr.writeLine("repro_catalog_harvester: invalid output app name '" &
     name & "' (" & reason & ").")
-  stderr.writeLine("  Re-run with --app-alias to specify a valid identifier, e.g.:")
-  stderr.writeLine("    --app-alias " & name & "=" & "sevenzip")
+  stderr.writeLine("  Re-run with --app-alias to specify a valid name, e.g.:")
+  stderr.writeLine("    --app-alias " & name & "=" &
+    name.multiReplace(("-", "_"), (".", "_")))
   quit(2)
 
 proc validateResolvedAppNames(opts: CliOptions) =
@@ -738,7 +730,7 @@ proc cmdHarvestMsys2(opts: CliOptions): int =
       anyError = true
       continue
     let body = emitted.body
-    let outPath = opts.outputDir / (toolName & ".nim")
+    let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
     if opts.dryRun:
       echo "DRY-RUN would write " & outPath & " (version=" &
         entry.version & ")"
@@ -834,7 +826,7 @@ proc cmdHarvestGhReleases(opts: CliOptions): int =
   if not emitted.ok:
     return 3
   let body = emitted.body
-  let outPath = opts.outputDir / (toolName & ".nim")
+  let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
   if opts.dryRun:
     echo "DRY-RUN would write " & outPath & " (version=" & entry.version & ")"
     var n = 0
@@ -907,7 +899,7 @@ proc cmdHarvest(opts: CliOptions): int =
         anyError = true
         continue
       let body = emitted.body
-      let outPath = opts.outputDir / (toolName & ".nim")
+      let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
       if opts.dryRun:
         echo "DRY-RUN would write " & outPath & " (" & $ordered.len &
           " version(s))"

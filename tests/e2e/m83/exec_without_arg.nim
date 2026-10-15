@@ -1,5 +1,5 @@
 ## A pass-through program that runs a configured executable with every
-## argument it was given EXCEPT one configured argument, which it drops.
+## argument it was given EXCEPT the configured arguments, which it drops.
 ##
 ## Used by `t_e2e_profile_compile_clang_first_run_published.nim` as the C
 ## compiler of its positive control: a "clang" that is handed
@@ -16,7 +16,7 @@
 ## and macOS alike.
 ##
 ## CONFIGURATION. `exec-without-arg.conf` next to the executable: line 1 the
-## real executable (an absolute path), line 2 the argument to drop. Nothing
+## real executable (an absolute path), lines 2 onward the arguments to drop. Nothing
 ## is read from the environment, so the program adds nothing an action key
 ## could depend on beyond its own image and that file.
 ##
@@ -46,10 +46,13 @@ proc main() =
     fail(confPath & " must name the real executable (line 1) and the " &
       "argument to drop (line 2)")
   let realExe = lines[0]
-  let dropped = lines[1]
+  var dropped: seq[string]
+  for line in lines[1..^1]:
+    if line.len > 0:
+      dropped.add line
   var args: seq[string]
   for arg in commandLineParams():
-    if arg != dropped:
+    if arg notin dropped:
       args.add arg
 
   when defined(windows):

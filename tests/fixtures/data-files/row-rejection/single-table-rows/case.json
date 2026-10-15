@@ -1,0 +1,1 @@
+{ "description": "`[package]` (one table) is not an array of rows.", "error": ["`package`", "must be an array of tables"] }

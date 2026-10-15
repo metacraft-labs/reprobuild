@@ -9,7 +9,11 @@
 ##   6. Walk the plan, digest-checking every record before its
 ##      destructive op. Raise `EUserEditDetected` unless
 ##      `--accept-overwrite` was passed.
+##   6b. Stage and verify every macOS application bundle the target
+##       generation re-places (GM4c). A bundle that cannot be staged raises
+##       `ERollbackAppBundleFailed` before anything is changed.
 ##   7. Execute the plan:
+##        0. Rename the staged application bundles into place.
 ##        a. Remove files / blocks / launchers no longer in target.
 ##        b. Restore + Update from target (reading content bytes from
 ##           CAS via `storeContentHash`).
@@ -521,6 +525,93 @@ proc refuseUnmanagedAppBundleRestores(plan: RollbackPlan) =
       e.targetPath = path
       raise e
 
+proc discardStagedAppBundles(staged: seq[StagedAppBundle]) =
+  ## Drop staged copies that will not be committed, newest first (so an
+  ## Applications directory the first staging created is removed last).
+  for i in countdown(staged.high, 0):
+    discardStagedAppBundle(staged[i])
+
+proc stageAppBundleRestores(store: var Store; target: ActivationManifest;
+                            targetIdHex: string;
+                            plan: RollbackPlan): seq[StagedAppBundle] =
+  ## Step 6b: copy every bundle the target generation re-places from its
+  ## store prefix to a staging directory beside its target and verify the
+  ## staged copy against the identity the target generation recorded
+  ## (``verifyPinnedAppBundle``: intact signature, identical identity).
+  ##
+  ## This runs before ANY rollback operation, and none of it touches a
+  ## target: a refusal (tampered or damaged store copy, a store copy that is
+  ## gone, a failed copy) discards whatever was staged and raises
+  ## ``ERollbackAppBundleFailed``, leaving the current generation exactly as
+  ## it was -- its bundles in place, its files and resources untouched,
+  ## ``current`` unmoved. A user is never left with neither the old bundle
+  ## nor the new one. No disk image is involved: the store holds the bundle
+  ## itself.
+  var staged: seq[StagedAppBundle]
+  try:
+    for op in plan.resourceOps:
+      if op.kind notin {rokRestoreResource, rokUpdateResource}:
+        continue
+      let rec = op.targetRecord
+      if rec.resourceKind != $rkMacosAppBundle or appBundleOpIsRemoval(op):
+        continue
+      let packageId = packageIdOfAppBundleAddress(rec.resourceAddress)
+      let bundleName = extractFilename(rec.realWorldIdentity)
+      template fail(check, msg: string) =
+        discardStagedAppBundles(staged)
+        staged.setLen(0)
+        raiseRollbackAppBundleFailed(packageId, rec.resourceAddress,
+          bundleName, rec.realWorldIdentity, check, targetIdHex, msg)
+      var source = ""
+      try:
+        source = appBundleSourceInGeneration(store, target, rec)
+      except ValueError as err:
+        fail("store-copy", err.msg)
+      if not dirExists(source):
+        fail("store-copy", "the target generation's store copy " &
+          source.escape & " does not exist")
+      try:
+        staged.add stageAppBundle(source,
+          parentDir(rec.realWorldIdentity), bundleName,
+          AppBundleExpectation(), {},
+          managedPrior = op.hasCurrentRecord and
+            not isZeroDigest(op.currentRecord.postWriteDigest),
+          pinned = rec.payloadBytes)
+      except EAppBundleRefused as err:
+        fail(err.check, err.msg)
+      except EAppBundlePlacement as err:
+        fail("placement", err.msg)
+  except CatchableError:
+    # Anything else (a collision that appeared after the ownership check)
+    # still leaves nothing staged.
+    discardStagedAppBundles(staged)
+    raise
+  staged
+
+proc commitAppBundleRestores(staged: seq[StagedAppBundle];
+                             targetIdHex: string; plan: RollbackPlan) =
+  ## Step 7.0: rename every staged bundle into place, before any other
+  ## rollback operation. Each rename moves the current bundle aside first
+  ## and removes it only once the staged copy is in place, so the target
+  ## always holds one of the two. A failed rename (the only failure left
+  ## once everything verified) discards the bundles not yet committed and
+  ## raises ``ERollbackAppBundleFailed`` with check "placement"; the bundles
+  ## renamed before it stay re-placed (re-running the rollback converges).
+  for i, s in staged:
+    try:
+      discard commitStagedAppBundle(s)
+    except EAppBundlePlacement as err:
+      if i < staged.high:
+        discardStagedAppBundles(staged[i + 1 .. ^1])
+      var address = ""
+      for op in plan.resourceOps:
+        if op.kind in {rokRestoreResource, rokUpdateResource} and
+            op.targetRecord.realWorldIdentity == s.target:
+          address = op.targetRecord.resourceAddress
+      raiseRollbackAppBundleFailed(packageIdOfAppBundleAddress(address),
+        address, extractFilename(s.target), s.target, "placement",
+        targetIdHex, err.msg)
+
 proc touchMtime(path: string; timestamp: int64) =
   if not dirExists(extendedPath(path)) and not fileExists(extendedPath(path)):
     return
@@ -568,7 +659,13 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
 
       refuseUnmanagedAppBundleRestores(plan)
 
+      # ---- Step 6b: stage + verify re-placed application bundles ----
+      let stagedBundles = stageAppBundleRestores(store, tgt.manifest,
+        targetIdHex, plan)
+
       # ---- Step 7: execute ----
+      # Application bundles first: they verified, so this is renames only.
+      commitAppBundleRestores(stagedBundles, targetIdHex, plan)
       # Files.
       for op in plan.fileOps:
         case op.kind
@@ -611,23 +708,14 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
           try: resourceKindFromString(rec.resourceKind)
           except ValueError: rkFsManagedBlock
         if kindEnum == rkMacosAppBundle:
-          # GM4c: remove the bundle the current generation placed, or
-          # re-place the target generation's bundle from its store prefix,
-          # verified against the identity that generation recorded
-          # (Store-And-Installation-Layout.md § macOS Application Bundles,
+          # GM4c: remove the bundle the current generation placed. A
+          # bundle the target generation re-places from its store prefix
+          # was staged, verified against the identity that generation
+          # recorded, and renamed into place above (steps 6b and 7.0;
+          # Store-And-Installation-Layout.md § macOS Application Bundles,
           # "Rollback").
           if appBundleOpIsRemoval(op):
             removeAppBundle(rec.realWorldIdentity)
-          else:
-            let source = appBundleSourceInGeneration(store, tgt.manifest,
-              rec)
-            discard placeAppBundle(source,
-              parentDir(rec.realWorldIdentity),
-              extractFilename(rec.realWorldIdentity),
-              AppBundleExpectation(), {},
-              managedPrior = op.hasCurrentRecord and
-                not isZeroDigest(op.currentRecord.postWriteDigest),
-              pinned = rec.payloadBytes)
           inc result.resourceOpsApplied
           continue
         case op.kind

@@ -98,6 +98,8 @@ proc cCompilerOverrideRemedy*(): string =
     ", or unset it to use the pinned bootstrap compiler reprobuild " &
     "provisions into its tool store."
 
+proc cCompilerFamily*(cc: string): string
+
 when defined(macosx):
   # SIP prefixes, kept byte-identical to nim-stackable-hooks'
   # `propagation.sipProtectedPrefixes` (the population io-mon itself uses via
@@ -142,6 +144,21 @@ when defined(macosx):
         return candidate
     ""
 
+  proc firstNonSipClangOnPath(): string =
+    ## Darwin's Nim runtime needs SDK framework headers. An implicit GCC cc
+    ## cannot find them even with SDKROOT set, while a clang wrapper can.
+    ## Keep SIP avoidance: a system clang cannot carry the monitor shim.
+    for name in ["cc", "clang"]:
+      for dir in getEnv("PATH").split(PathSep):
+        if dir.len == 0:
+          continue
+        let candidate = absolutePath(dir / name)
+        if fileExists(extendedPath(candidate)) and
+            not isSipProtectedCompiler(candidate) and
+            cCompilerFamily(candidate) == "clang":
+          return candidate
+    ""
+
   proc preferNonSipCompiler(candidate: string): string =
     ## When `candidate` is a SIP-protected compiler, substitute a non-SIP one
     ## if PATH offers it; otherwise keep `candidate` (best effort).
@@ -182,10 +199,15 @@ proc fallbackCCompiler*(): string =
   ## The C compiler when the environment names none explicitly, or "":
   ##
   ## 3. `cc` on `PATH` (POSIX only; Windows has no system `cc`; on macOS a
-  ##    SIP-protected one is swapped as in `explicitCCompiler`).
+  ##    SIP-protected one is swapped as in `explicitCCompiler`). Darwin first
+  ##    prefers a non-SIP clang-family cc/clang for SDK framework support.
   ## 4. `BuiltCCompilerPath`, the compiler `repro` was built with, when it
   ##    still exists (POSIX only). This is the arm an installed Nix package
   ##    reaches in a clean environment.
+  when defined(macosx):
+    let clang = firstNonSipClangOnPath()
+    if clang.len > 0:
+      return clang
   when not defined(windows):
     let runtimeCC = uncontrolledFindExe("cc")
     if runtimeCC.len > 0 and isAbsolute(runtimeCC) and
@@ -281,9 +303,10 @@ const clangNoTempFileFlag* = "-fno-temp-file"
 
 var cachedFlagAcceptance = initTable[string, bool]()
 
-proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
+proc cCompilerAcceptsFlags*(cc: string; flags: openArray[string];
+                            scratchDir: string): bool =
   ## Whether `cc` compiles a trivial C translation unit to an object file
-  ## when given `flag`. A real compile, not a version comparison: what
+  ## when given the paired `flags`. A real compile, not a version comparison: what
   ## matters is that THIS binary accepts the flag, and vendor builds (Apple
   ## clang) do not map onto upstream version numbers. Any failure -- the
   ## compiler rejects the flag, is missing, cannot write its output -- answers
@@ -295,10 +318,10 @@ proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
   ## pass a directory the edge ignores as an input (its nimcache), so the
   ## probe's own files never become part of the edge's key.
   ##
-  ## Memoised per (compiler path, flag) for the life of the process.
-  if cc.len == 0 or flag.len == 0:
+  ## Memoised per (compiler path, flags) for the life of the process.
+  if cc.len == 0 or flags.len == 0:
     return false
-  let key = cc & "\0" & flag
+  let key = cc & "\0" & flags.join("\0")
   if cachedFlagAcceptance.hasKey(key):
     return cachedFlagAcceptance[key]
   result = false
@@ -310,8 +333,11 @@ proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
     writeFile(extendedPath(src), "int repro_cc_flag_probe(void) { return 0; }\n")
     if fileExists(extendedPath(obj)):
       removeFile(extendedPath(obj))
-    let (_, exitCode) = uncontrolledExecCmdEx(quoteShell(cc) & " " &
-      quoteShell(flag) & " -c " & quoteShell(src) & " -o " & quoteShell(obj))
+    var command = quoteShell(cc)
+    for flag in flags:
+      command.add " " & quoteShell(flag)
+    let (_, exitCode) = uncontrolledExecCmdEx(command &
+      " -c " & quoteShell(src) & " -o " & quoteShell(obj))
     result = exitCode == 0 and fileExists(extendedPath(obj))
   except CatchableError, OSError:
     result = false
@@ -320,6 +346,12 @@ proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
   except CatchableError, OSError:
     discard
   cachedFlagAcceptance[key] = result
+
+proc cCompilerAcceptsFlag*(cc, flag, scratchDir: string): bool =
+  ## Single-flag convenience wrapper; paired cc1 options must be probed as
+  ## one argv, since accepting either half alone says nothing about the pair.
+  if flag.len > 0:
+    result = cCompilerAcceptsFlags(cc, [flag], scratchDir)
 
 proc clangNoTempFileCFlags*(cc, scratchDir: string): seq[string] =
   ## `@[clangNoTempFileFlag]` when `cc` is a clang (`cCompilerFamily`) that

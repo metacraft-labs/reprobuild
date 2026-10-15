@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 5'u16            ## Current envelope schema version.
+  RbpiSchemaVersion* = 6'u16            ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -69,6 +69,12 @@ const
     ##     profile's ``data:`` section names, which the planner reads and
     ##     expands. Bumped because a build that did not know the key would
     ##     plan the profile without the rows those files contribute.
+    ##   6 (contribution-catalog imports): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"catalogImports"`` array of text -- the
+    ##     contribution-catalog modules the profile's ``catalogs:`` section
+    ##     imports. Bumped because a build that did not know the key would
+    ##     resolve the profile's packages without those catalogs'
+    ##     contributions.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

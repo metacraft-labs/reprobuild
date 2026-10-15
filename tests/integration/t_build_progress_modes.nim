@@ -39,6 +39,12 @@ proc runBuild(reproBin, repoRoot: string; progressMode: string; workRoot: string
   if progressMode.len > 0:
     args.add("--progress=" & progressMode)
   args.add("--no-runquota")
+  # In-process, not handed to the per-user daemon. The daemon runs outside
+  # this case's process group, so the test runner saw no CPU from the builds
+  # and killed the case as idle after 30 minutes (0.86 s of group CPU), and
+  # the outcome would also depend on whatever daemon happened to be running.
+  # What this test checks is the progress rendering, not daemon routing.
+  args.add("--daemon=off")
   args.add("--tool-provisioning=path")
   args.add("--action-cache-root=" & actionCacheRoot)
   args.add("--work-root=" & workRoot)

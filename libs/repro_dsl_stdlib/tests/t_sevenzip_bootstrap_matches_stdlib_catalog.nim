@@ -13,14 +13,14 @@
 ## rather than leaving two versions of an extractor in the store.
 ##
 ## GM4b: 7-Zip's stdlib realizations are ``tarball`` statements of ``package
-## sevenzip`` (the retired ``sevenzipCatalog`` record), read here through the
+## "7zip"`` (the retired ``sevenzipCatalog`` record), read here through the
 ## same projection the zstd case uses.
 
 import std/[strutils, unittest]
 
 import repro_project_dsl
 import repro_interface_artifacts
-import repro_dsl_stdlib/packages/sevenzip
+import repro_dsl_stdlib/packages/pkg_7zip
 import repro_dsl_stdlib/packages/zstd
 import repro_tool_profiles
 
@@ -37,7 +37,7 @@ proc stdlibToolUse(packageName, executableName: string): InterfaceToolUse =
 suite "7-Zip extractor bootstrap":
   test "the bootstrap pins the catalog's Windows x86_64 MSI":
     var catalogUrl, catalogSha256, catalogVersion: string
-    for arm in stdlibToolUse("sevenzip", "7z").tarballProvisioning:
+    for arm in stdlibToolUse("7zip", "7z").tarballProvisioning:
       if arm.os == "windows" and arm.cpu == "x86_64":
         catalogUrl = arm.url
         catalogSha256 = arm.sha256

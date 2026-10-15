@@ -103,6 +103,9 @@ else:
 
 import repro_core
 import repro_core/relocation
+# Nix GC roots for the store paths working-tree outputs name; see the ledger
+# note in `runBuild`.
+import repro_core/nix_store_roots
 from repro_core/process_streams import drainStream
 # ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
 # second time on POSIX. This scheduler thread is not alone once the worker
@@ -267,6 +270,18 @@ type
     # the second wave. It is not an ordinary peer edge of the actions it
     # determines; see ``expandGraphInWaves``.
     bakSolveLock
+    # Unified-Locking-And-Hooks HL-10 (§13.3 amended, §13.7.3): the
+    # LOCK-UPDATE NODE of a plan that produces a test certificate. It applies
+    # the commit-time writers (the ``repro.lock`` sibling re-pin and the
+    # ``flake.lock`` refresh) to the attested repository's working tree and
+    # stages what it wrote, so the content the tests run against already
+    # carries the refreshed locks. Every test command of a
+    # certificate-producing node depends on it. Dispatched through the
+    # executor registered by ``repro_cli_support``, which owns the writers.
+    # It never declares an output: the files it may rewrite are the
+    # repository's own tracked sources, not build products the engine may
+    # clean or restore.
+    bakLockUpdate
 
   NetworkMode* = enum
     ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
@@ -1081,9 +1096,8 @@ type
     origin*: EntropyCallerOrigin
     image*: string
       ## The IMAGE OF THE PROCESS THAT EMITTED THE RECORD, resolved from the
-      ## record's `osPid` against the capture's own `mrProcessExec` records --
-      ## or the EMPTY STRING when no exec record in this capture names that
-      ## pid.
+      ## record's `osPid` against successful exec records and initial child
+      ## images from spawn records, or EMPTY when this capture cannot name it.
       ##
       ## WHY IT IS HERE. `BuildAction.nonDeterminism` is action-scoped and the
       ## evidence is process-tree-scoped; see `repro_core/entropy_blessings`
@@ -1757,6 +1771,11 @@ type
     status*: ActionStatus
     exitCode*: int
     launched*: bool
+    rewrittenSources*: seq[string]
+      ## HL-10 ``bakLockUpdate`` only: the tracked source files (absolute
+      ## paths) the lock-update node rewrote. Not dependency evidence: the
+      ## node is no monitored process, and these are files the engine must
+      ## re-stat and re-hash for every action looked up after it.
     wouldLaunch*: bool
     cacheDecision*: CacheDecision
     reason*: string
@@ -3400,6 +3419,25 @@ proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
       text.add(". " & causeNote)
     result.results[resultIndex].cachePublishSkipReason = text
 
+proc traceUnreadableInput(result: var BuildRunResult; actionId: string;
+                          resultIndex: int; detail: string) =
+  ## The action succeeded, but one of its observed inputs has content a
+  ## content-keyed record needs and cannot read (`UnreadableInputError`).
+  ##
+  ## This is the "make it non-cacheable" arm of Monitor-Hook-Shim.md
+  ## §"Failure Semantics", taken at publish time: the outputs stand, nothing
+  ## is published, and the edge re-executes next build. It used to be the
+  ## other arm by accident -- the read's `IOError` escaped the publish and
+  ## failed the whole build, so one unreadable path the monitor happened to
+  ## observe (a stale link in a listed directory) broke every build on the
+  ## host. Failing an exit-0 action to punish its evidence is exactly what
+  ## that section rules out.
+  result.trace(actionId, "cache-skip-unreadable-input",
+    "action-cache publication skipped; " & detail)
+  if resultIndex >= 0 and resultIndex < result.results.len:
+    result.results[resultIndex].cachePublishSkipReason =
+      "reasons=unreadable-input; " & detail
+
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
 
@@ -4687,8 +4725,8 @@ type
     monitorDirectoryEnumerations*: HashSet[string]
 
     execImageByPid*: Table[uint64, string]
-      ## pid -> the image that pid was last observed EXEC'ing, built from the
-      ## capture's own `mrProcessExec` records and read by the
+      ## pid -> its initial spawn image or its most recent observed exec, built from the
+      ## capture's successful exec/spawn records and read by the
       ## `mrNonDeterministic` arm to attribute an entropy read to the program
       ## that made it. See `EntropyObservation.image`.
       ##
@@ -7393,6 +7431,20 @@ proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
   # requires (`monitorEvidenceRequirement`).
   mesUnknownScopeLoss
 
+proc observeSpawnImage(record: MonitorRecord;
+                       images: var Table[uint64, string]) =
+  ## Canonical captures sort by PID, not wall time. Spawn metadata must be
+  ## read before the child's stream regardless of which PID sorts first.
+  ## Conflicting paths for a recycled child PID cannot establish its initial
+  ## image: keep an empty binding until an explicit exec supplies one.
+  if record.kind != mrProcessSpawn or record.result != 0 or
+      record.childOsPid == 0 or not record.path.isAbsolute:
+    return
+  if not images.hasKey(record.childOsPid):
+    images[record.childOsPid] = record.path
+  elif images[record.childOsPid] != record.path:
+    images[record.childOsPid] = ""
+
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
                                  seen: var EvidenceSeenSets;
@@ -7453,6 +7505,10 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
   try:
+    seen.execImageByPid.clear()
+    for record in streamMonitorDepFileRecords(path,
+        defaultMonitorDepFileReaderOptions()):
+      observeSpawnImage(record, seen.execImageByPid)
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
@@ -7519,6 +7575,9 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   result = mesComplete
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
+  seen.execImageByPid.clear()
+  for record in records:
+    observeSpawnImage(record, seen.execImageByPid)
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
@@ -7744,7 +7803,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       else:
         blocking.add(observation.source & " from " &
           (if observation.image.len > 0: observation.image
-           else: "an unattributed process (no `mrProcessExec` record in " &
+           else: "an unattributed process (no unambiguous exec or spawn image in " &
                  "this capture names its pid)") & ", " &
           describeEntropyOrigin(observation.origin))
         if observation.image.len > 0:
@@ -9091,6 +9150,36 @@ proc expandPolicyPath(action: BuildAction; path: string): string =
       result = result[0 ..< start] & value & result.substr(stop)
     start = result.find('$', start)
 
+proc canonicalPolicyPath(path: string): string =
+  ## Resolve symlinked spellings for policy comparisons, including absent
+  ## descendants: a missing probe or output still belongs to its existing
+  ## parent. Relative input-policy roots stay relative; only the restore
+  ## gate materializes them against the action's cwd before calling this.
+  if not path.isAbsolute:
+    return normalizeWriteRoot(path)
+  var ancestor = normalizeWriteRoot(path)
+  var suffix: seq[string] = @[]
+  while ancestor.len > 0:
+    try:
+      result = expandFilename(ancestor)
+      for i in countdown(suffix.high, 0):
+        result = result / suffix[i]
+      return normalizeWriteRoot(result)
+    except CatchableError:
+      let parent = parentDir(ancestor)
+      if parent.len == 0 or parent == ancestor:
+        break
+      suffix.add(extractFilename(ancestor))
+      ancestor = parent
+  # If no ancestor can be resolved, retain the original spelling rather
+  # than invent a relationship to an unrelated directory.
+  normalizeWriteRoot(path)
+
+proc canonicalPolicyRoots(roots: openArray[string]): seq[string] =
+  var seen = initHashSet[string]()
+  for root in roots:
+    result.addUnique(seen, canonicalPolicyPath(root))
+
 proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## Each ignored prefix, in BOTH the spelling the recipe wrote and the
   ## spelling the kernel reports, because those are routinely not the same
@@ -9111,11 +9200,10 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## it missed too. Measured: every one of those paths was recorded under
   ## `/private/tmp`, and not one under `/tmp`.
   ##
-  ## Resolved once per root rather than per observed path: there are a
-  ## handful of roots and tens of thousands of paths, and resolving the
-  ## latter would put a syscall on the hot comparison. A root that does not
-  ## exist yet simply contributes its literal spelling, which is what it
-  ## does today.
+  ## Keep both emitted spellings for callers of the prefix set. Policy
+  ## comparisons canonicalize both the roots and observed paths, so a
+  ## physical prefix also covers logical observations, including missing
+  ## descendants beneath an existing symlinked directory.
   ##
   ## Only an ABSOLUTE root is resolved. ``expandFilename`` resolves a relative
   ## path against THIS PROCESS's working directory, which is not the action's
@@ -9309,6 +9397,11 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
       return true
 
+proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool =
+  ## Roots have already been canonicalized once by the caller. Avoid any
+  ## filesystem resolution when the action has no ignored roots.
+  roots.len > 0 and canonicalPolicyPath(path).isUnderAnyRoot(roots)
+
 const
   MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
   CompilerWrapperScratchPrefixes = ["cc-params.", "ld-params."]
@@ -9444,7 +9537,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # self-written set applies to the ENUMERATION channel only — see
   # `enumerationIgnoredRoots` for the whole argument, and for the shipped
   # recipe that makes the difference load-bearing.
-  let ignoredRoots = action.ignoredInputRoots()
+  let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
   let selfWritten = action.selfWrittenOutputKeys()
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
@@ -9461,7 +9554,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9472,7 +9566,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9483,7 +9578,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+        (path.isUnderAnyRoot(toolRoots) or
+         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
          path.isCompilerWrapperScratchPath()):
       continue
@@ -9653,10 +9749,14 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
   ##   stays exempt through ``selfWrittenOutputKeys`` either way, so all
   ##   this costs is that its undeclared NEIGHBOURS are seen again.
   ##
+  ## Both sides of coverage resolve symlinks, including the existing parent
+  ## of an absent product. Comparing only the prefix's resolved spelling
+  ## would let it escape disqualification against a logical product path.
+  ##
   ## Note the asymmetry with ``ignoredInputRoots``' use in
   ## ``cacheInputPaths``: this side materializes the prefix against
-  ## ``action.cwd`` while the input side compares raw, so a RELATIVE prefix
-  ## is honoured here and inert there. That difference is deliberate and it
+  ## ``action.cwd`` while the input side leaves relative roots raw, so a
+  ## RELATIVE prefix is honoured here and inert there. That difference is deliberate and it
   ## is this side that is right — a recipe spells its scratch directory the
   ## way it spells its outputs, and a declaration the author wrote must not
   ## be honoured or ignored depending on whether they happened to write it
@@ -9681,7 +9781,7 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
     ## product?", where a MISSED match re-enables the exemption and loses
     ## the product. Folding is the fail-closed direction here and the
     ## strict spelling is the fail-closed direction there.
-    let normalized = normalizeWriteRoot(path)
+    let normalized = canonicalPolicyPath(path)
     when defined(windows): normalized.toLowerAscii()
     else: normalized
 
@@ -9695,8 +9795,9 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
     let normalized = coverageKey(materialPath(action.cwd, output))
     if normalized.len > 0:
       productFiles.add(normalized)
+  var seenPrefixes = initHashSet[string]()
   for raw in action.ignoredInputRoots():
-    let materialized = materialPath(action.cwd, raw)
+    let materialized = canonicalPolicyPath(materialPath(action.cwd, raw))
     let prefix = coverageKey(materialized)
     if prefix.len == 0:
       continue
@@ -9712,7 +9813,7 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
           break
     if covers:
       continue
-    result.add(materialized)
+    result.addUnique(seenPrefixes, materialized)
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -9779,7 +9880,7 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
     let path = materialPath(action.cwd, write)
     if selfWritten.contains(path.replace('\\', '/')):
       continue
-    if path.isUnderAnyRoot(derivedRoots):
+    if path.isUnderCanonicalPolicyRoot(derivedRoots):
       continue
     if dirExists(path) or not fileExists(path):
       continue
@@ -9796,7 +9897,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   ## one either, or the record would carry membership for something it does
   ## not record at all.
   let toolRoots = action.toolInputRoots()
-  let ignoredRoots = action.enumerationIgnoredRoots()
+  let ignoredRoots = canonicalPolicyRoots(action.enumerationIgnoredRoots())
   let selfWrittenDirs = action.selfWrittenDirectoryKeys()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
@@ -9808,7 +9909,8 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     if declaredMaterialized.contains(path.replace('\\', '/')):
       result.addUnique(seen, path)
       continue
-    if path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots):
+    if path.isUnderAnyRoot(toolRoots) or
+        path.isUnderCanonicalPolicyRoot(ignoredRoots):
       continue
     # The action's OWN output directory: its entry list changed because this
     # action added an entry to it, so the membership digest is derived state
@@ -10080,7 +10182,7 @@ func interestConsumer*(category: EventCategory): string =
   of ecPathProbes: "monitorProbes / monitorDirectoryEnumerations"
   of ecFileWrites: "monitorWrites (and undeclaredSurvivingWrites)"
   of ecProcessTree:
-    "seen.execImageByPid (pid->image attribution) and the mrProcessExec " &
+    "seen.execImageByPid (exec/spawn pid->image attribution) and the mrProcessExec " &
       "content-dependency arm of the fold"
   of ecLibraryLoads: "the mrLibraryLoad arm of the fold (monitorReads)"
   of ecEnvReads: "cacheEnvInputs — the ACTION CACHE KEY"
@@ -12198,13 +12300,16 @@ when defined(macosx):
     ##    ``<shell> -c "umask 022 && <argv> > out 2> err"`` — plain POSIX that
     ##    bash, dash, ash and zsh all honour.
     ##
-    ## Returns ``""`` when only SIP-protected shells are available — the caller
+    ## 3. The shared propagation resolver uses configured or build-embedded
+    ##    shipped tools when the caller has no shell on PATH.
+    ##
+    ## Returns ``""`` when no valid replacement is available — the caller
     ## then enforces the Monitor-Hook-Shim.md:501 fail-safe for monitored
     ## actions (injection failure MUST fail the action / make it non-cacheable).
     let sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
     if sandboxDir.len > 0:
       let dropInSh = sip_propagation.rewriteSipPath("/bin/sh", sandboxDir)
-      if fileExists(dropInSh) or symlinkExists(dropInSh):
+      if sip_propagation.resolveSipReplacement("/bin/sh") == dropInSh:
         return dropInSh
     let pathEnv = getEnv("PATH")
     for name in nonSipShellCandidateNames:
@@ -12212,11 +12317,12 @@ when defined(macosx):
         if entry.len == 0:
           continue
         let candidate = entry / name
-        if not fileExists(candidate):
-          continue
-        if sip_propagation.isSipProtected(candidate):
+        if not sip_propagation.isValidSipReplacement(candidate):
           continue
         return candidate
+    let replacement = sip_propagation.resolveSipReplacement("/bin/sh")
+    if replacement != "/bin/sh":
+      return replacement
     ""
 
   proc nonSipShellSearchReport*(): string =
@@ -12245,6 +12351,7 @@ when defined(macosx):
         let candidate = entry / name
         if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
           rejected.add(candidate)
+    parts.add("shipped tools=" & sip_propagation.StackableHooksBuiltToolsDir)
     parts.add("searched " & $pathDirs & " PATH dir(s) for " &
       nonSipShellCandidateNames.join("/"))
     if rejected.len == 0:
@@ -14229,7 +14336,16 @@ type
     ## realizer (download, verify, extract, seal into the tool store) lives
     ## above the engine, and the engine must not depend on it.
 
+  LockUpdateExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## HL-10: hook installed by the certifying ``repro test`` / ``repro
+    ## certify`` run for the ``bakLockUpdate`` node of its plan. Indirect for
+    ## the usual layering reason: the commit-time lock writers live in
+    ## ``repro_cli_support``, above the engine. The executor reports the paths
+    ## it rewrote in ``rewrittenSources`` so the engine drops any stat or
+    ## digest it cached for them earlier in the run.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+var lockUpdateExecutor {.threadvar.}: LockUpdateExecutor
 var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
 var metadataFetchExecutor {.threadvar.}: MetadataFetchExecutor
@@ -14241,6 +14357,15 @@ proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
   ## that exercise the engine in-process call it explicitly to install
   ## a fresh executor bound to a resolved ``GitToolIdentity``.
   workspaceVcsExecutor = executor
+
+proc registerLockUpdateExecutor*(executor: LockUpdateExecutor) =
+  ## Register the per-thread executor for ``bakLockUpdate`` actions (HL-10).
+  ## The certifying run installs one bound to its own state for the duration
+  ## of its build and clears it afterwards.
+  lockUpdateExecutor = executor
+
+proc clearLockUpdateExecutor*() =
+  lockUpdateExecutor = nil
 
 proc clearWorkspaceVcsExecutor*() =
   ## Clear the registered executor. Tests use this to assert the
@@ -15293,6 +15418,25 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.runQuotaBackend = if mdRes.runQuotaBackend.len > 0:
         mdRes.runQuotaBackend else: "metadata-fetch"
       return
+    of bakLockUpdate:
+      # HL-10. Fail CLOSED when nothing is registered: a lock-update node
+      # that quietly no-ops would let the tests run against a lock the
+      # commit-time hook is about to rewrite, which is the uncovered commit
+      # the node exists to prevent.
+      if lockUpdateExecutor.isNil:
+        raiseEngine(
+          "bakLockUpdate action requires registerLockUpdateExecutor " &
+          "before runBuild: " & action.id)
+      let luRes = lockUpdateExecutor(action)
+      result.status = luRes.status
+      result.exitCode = luRes.exitCode
+      result.stdout = luRes.stdout
+      result.stderr = luRes.stderr
+      result.reason = luRes.reason
+      result.launched = luRes.launched
+      result.rewrittenSources = luRes.rewrittenSources
+      result.runQuotaBackend = "lock-update"
+      return
     of bakSolveLock:
       if solveLockExecutor.isNil:
         raiseEngine(
@@ -15945,6 +16089,190 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       getCurrentDir() / ".repro" / "build-engine-cache"
     else:
       config.cacheRoot
+  # NIX GC ROOTS FOR WORKING-TREE OUTPUTS (`repro_core/nix_store_roots`).
+  #
+  # A build output that names `/nix/store/<hash>-<name>` — a linked binary's
+  # load commands and RPATH, a receipt, a generated wrapper — needs that path
+  # to stay in the store for as long as the output is used. The dev-shell
+  # profile does not guarantee it: it roots the SHELL at the generation it was
+  # written, and an output linked under another generation names other paths
+  # (reprobuild-pm issue 2026-10-02). So the engine keeps a ledger under the
+  # cache root: one manifest per action listing the store paths its outputs
+  # named, and a pool of indirect GC roots for them.
+  #
+  # The ledger does two separate jobs, and only the first can fail softly:
+  #
+  #   * ROOTING, after an action produces or restores its outputs. A failure
+  #     (no `nix-store`, a daemon that refuses) is traced as
+  #     `nix-gc-root-failed` and does not fail the build: the output that was
+  #     produced is still the one the action declared.
+  #   * DETECTION, before an action is reported up to date. If a store path
+  #     its manifest recorded is gone — collected by an older engine, a root
+  #     removed by hand, a GC on behalf of another checkout — the action is
+  #     re-executed rather than served, and the trace names the paths. This
+  #     is one `lstat` per recorded path and never re-scans an output.
+  #
+  # Absolute, because the roots registered with Nix are absolute link paths.
+  let nixRootsLedger = absolutePath(cacheRoot) / "nix-gc-roots"
+  let nixRootsStoreDir = nixStoreDir()
+  # A host without a store directory has nothing to root and nothing to
+  # lose; every ledger step below is skipped there, including on Windows.
+  let nixRootsActive = dirExists(nixRootsStoreDir)
+
+  proc nixRootsApply(action: BuildAction): bool =
+    ## Does the ledger track this action's outputs at all?
+    ##
+    ## Not for an action that declares no outputs (nothing to scan), and not
+    ## for a `bakWorkspaceVcs` checkout: its outputs are SOURCE trees, where a
+    ## store path quoted in a document or a fixture is text rather than a
+    ## dependency, and "a quoted path was collected" is no reason to re-clone.
+    nixRootsActive and action.outputs.len > 0 and
+      action.kind != bakWorkspaceVcs
+
+  proc nixRootsKey(action: BuildAction): string =
+    ledgerKey(action.id, action.cwd)
+
+  # The ledger's one-file index (`NixLedgerIndex`), loaded on first use. When
+  # it is valid every lookup is a table probe plus one `lstat` per DISTINCT
+  # store path per build; when it is not (a manifest changed since the last
+  # prune), lookups read the action's own manifest instead.
+  var nixLedgerIndex: NixLedgerIndex
+  var nixLedgerIndexLoaded = false
+  # Keys whose manifest THIS build wrote. The index was loaded before they
+  # were written and does not know them, so they are answered from the
+  # manifest itself; without this, an action recorded during the detection
+  # check below would look manifest-less again at completion and be scanned
+  # a second time.
+  var nixRecordedThisBuild = initHashSet[string]()
+
+  proc nixLedgerLookup(action: BuildAction):
+      tuple[found: bool; missing: seq[string]] =
+    if not nixLedgerIndexLoaded:
+      nixLedgerIndex = loadNixLedgerIndex(nixRootsLedger)
+      nixLedgerIndexLoaded = true
+    let key = nixRootsKey(action)
+    if nixLedgerIndex.valid and key notin nixRecordedThisBuild:
+      nixLedgerIndex.missingStorePaths(key)
+    else:
+      ledgerMissingStorePaths(nixRootsLedger, key)
+
+  proc nixRootsOutputs(action: BuildAction): seq[string] =
+    ## The action's declared outputs as the absolute paths the ledger records.
+    for output in action.outputs:
+      let path =
+        if output.isAbsolute or action.cwd.len == 0: output
+        else: action.cwd / output
+      result.add(absolutePath(path))
+
+  proc nixRecordOutputs(action: BuildAction; absentIsLost: bool) =
+    ## Scan the action's outputs into its manifest and root what they name.
+    ## A failure is a trace event, not a failed build; see the ledger note.
+    let key = nixRootsKey(action)
+    let recordStart = statStart()
+    try:
+      let outcome = recordOutputRoots(nixRootsLedger, key, action.id,
+        nixRootsOutputs(action), storeDir = nixRootsStoreDir,
+        absentIsLost = absentIsLost)
+      if outcome.rooted.len > 0 or outcome.absent.len > 0:
+        runResult.trace(action.id, "nix-gc-roots",
+          "rooted=" & $outcome.rooted.len &
+          " registered=" & $outcome.registered &
+          (if outcome.absent.len > 0:
+            " absent-at-record=" & outcome.absent.join(",") else: ""))
+    except CatchableError as err:
+      # `NixStoreRootError` from the registration, or an I/O error writing
+      # the manifest under the cache root. Either way the outputs stand; what
+      # is lost is protection against a later collection, and the trace says
+      # so rather than letting it pass silently.
+      runResult.trace(action.id, "nix-gc-root-failed",
+        "the Nix store paths this action's outputs name are not protected " &
+        "from garbage collection: " & err.msg)
+    # Recorded even when registration failed: the manifest is written before
+    # the roots are, and it is the manifest later lookups must read.
+    nixRecordedThisBuild.incl(key)
+    finishStat("repro nix gc root record", recordStart)
+
+  proc nixReferencesLost(action: BuildAction):
+      tuple[found: bool; missing: seq[string]] =
+    ## The DETECTION half: whether the action has a ledger manifest, and which
+    ## store paths it recorded are no longer in the store. One index probe (or
+    ## one manifest read) and an `lstat` per recorded path; never scans an
+    ## output.
+    if not nixRootsApply(action):
+      return (found: true, missing: @[])
+    let checkStart = statStart()
+    result = nixLedgerLookup(action)
+    finishStat("repro nix store reference check", checkStart)
+
+  proc nixOutputsLostPaths(action: BuildAction): seq[string] =
+    ## The DETECTION rule in full, for every arm that could otherwise serve
+    ## the action without executing it (the scheduler's decision chain and
+    ## the portable pre-pass): the store paths the outputs depend on that are
+    ## gone. Empty means "nothing known to be lost".
+    ##
+    ## With a manifest this is `nixReferencesLost`. WITHOUT one, and with
+    ## every output present, the outputs were produced before the ledger
+    ## existed (or by a run that could not write a manifest) — which is
+    ## exactly the state of the binary reprobuild-pm issue 2026-10-02
+    ## observed, linked weeks earlier against paths since collected. Such
+    ## outputs are scanned now, once, and a path they name that is absent is
+    ## LOST (`absentIsLost`): the output was produced while it existed.
+    ## Outputs that are not all present will be produced anyway, and are
+    ## scanned then.
+    if not nixRootsApply(action):
+      return
+    let lost = nixReferencesLost(action)
+    if lost.found:
+      return lost.missing
+    if not action.allOutputsExist():
+      return
+    if config.dryRun:
+      # A dry run reports; it writes no manifest and registers no root.
+      for r in scanStoreReferences(nixRootsOutputs(action), nixRootsStoreDir):
+        if r.isRootableStorePath(nixRootsStoreDir) and not storePathExists(r):
+          result.add(r)
+      return
+    nixRecordOutputs(action, absentIsLost = true)
+    ledgerMissingStorePaths(nixRootsLedger, nixRootsKey(action)).missing
+
+  proc maintainNixLedger() =
+    ## Prune the ledger and rebuild its index (`pruneStaleRoots`): manifests
+    ## whose outputs are all gone (deleted, or their producer left the
+    ## graph), then pool roots no surviving manifest names (an output rebuilt
+    ## to name other store paths).
+    ##
+    ## Run at most once per build, and only when the manifests on disk are
+    ## no longer the ones the index summarises (`nixLedgerNeedsMaintenance`,
+    ## one `stat`): this build wrote or replaced a manifest, or found the
+    ## index stale. A build that re-executed actions into the SAME store
+    ## references leaves every manifest untouched and reads nothing here, so
+    ## an incremental build does not pay a read of every manifest. Failure
+    ## is a trace event: an unpruned root keeps a store path alive longer,
+    ## it breaks nothing.
+    if not nixRootsActive or config.dryRun:
+      return
+    if not nixLedgerIndexLoaded:
+      nixLedgerIndex = loadNixLedgerIndex(nixRootsLedger)
+      nixLedgerIndexLoaded = true
+    if not nixLedgerNeedsMaintenance(nixRootsLedger, nixLedgerIndex):
+      return
+    let pruneStart = statStart()
+    try:
+      let pruned = pruneStaleRoots(nixRootsLedger, nixRootsStoreDir)
+      if pruned.manifestsRemoved > 0 or pruned.rootsRemoved > 0:
+        runResult.trace("", "nix-gc-roots-pruned",
+          "manifests=" & $pruned.manifestsRemoved &
+          " roots=" & $pruned.rootsRemoved)
+    except CatchableError as err:
+      runResult.trace("", "nix-gc-roots-prune-failed", err.msg)
+    finishStat("repro nix gc root prune", pruneStart)
+
+  proc nixReferencesLostReason(missing: seq[string]): string =
+    "nix-store-references-missing: " & missing.join(", ") & " named by " &
+      "this action's outputs when they were produced " &
+      (if missing.len == 1: "is" else: "are") & " no longer in the Nix " &
+      "store; re-executing rather than reporting an output that names " &
+      "deleted store paths as up to date"
   # The CAS and action-cache live under the shared user-level
   # `actionCacheRoot` when set (Provider-Compile-Tiering.md §"Cache Scope"
   # Phase 1). When empty (legacy / unmigrated callers, tests), they fall
@@ -17014,6 +17342,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if action.declaresNoOutputs(): "no-declared-outputs"
     else: "outputs-present"
 
+  proc nixLedgerRefusesFastNoop(action: BuildAction): bool =
+    ## The whole-graph shortcut never reaches the scheduler's per-action
+    ## decision, so the Nix-reference check has to be made here as well or
+    ## an output naming a collected store path is reported up to date by the
+    ## commonest warm path of all. Two refusals, both falling back to the
+    ## scheduler rather than answering here:
+    ##
+    ##   * a recorded store path is gone — the scheduler re-executes the
+    ##     action and traces which paths; this arm has no per-action trace;
+    ##   * there is no manifest yet (outputs produced before the ledger
+    ##     existed, or by a run that could not write one) — the scheduler
+    ##     records one on its up-to-date path, once, so later warm builds
+    ##     take this shortcut again.
+    let lost = nixReferencesLost(action)
+    not lost.found or lost.missing.len > 0
+
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
     # Backfill needs each full action-cache record so it can publish the
     # validated, materialized output. The regular scheduler already performs
@@ -17106,6 +17450,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro output stat", outputStatStart)
           if not outputsPresent:
             return none(BuildRunResult)
+        if nixLedgerRefusesFastNoop(action):
+          return none(BuildRunResult)
         hotProbes.add(HotMetadataProbe(
           weakFingerprint: action.weakFingerprint,
           policy: action.actionCachePolicy,
@@ -17171,6 +17517,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         finishStat("repro output stat", outputStatStart)
         if not outputsPresent:
           return none(BuildRunResult)
+      if nixLedgerRefusesFastNoop(action):
+        return none(BuildRunResult)
       let hotRecordLookupStart = statStart()
       let hotRecord = cache.lookupHotMetadataRecord(action.weakFingerprint,
         action.actionCachePolicy)
@@ -17226,6 +17574,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro fast noop scan", fastNoopStart)
   if fastNoop.isSome:
     runResult = fastNoop.get()
+    # Nothing executed and no manifest was written, so this only does work
+    # when the scan had to read manifests one by one (a stale index): it
+    # rebuilds the index so the next no-op does not. See `maintainNixLedger`.
+    maintainNixLedger()
     if config.progressCallback != nil:
       # Only reachable with `fastNoopReportsProgress`. Every action settled
       # at once, as a reuse, so the renderer ends on the same totals the
@@ -17861,8 +18213,48 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       else:
         toHex(lookup.record.strongFingerprint.bytes)
 
+  proc noteNixRoots(id: string; status: ActionStatus; launched: bool;
+                    detail: string) =
+    ## The ROOTING half of the ledger (see the note where `nixRootsLedger` is
+    ## declared), run once an action's outputs are in place.
+    ##
+    ## * Executed, or materialized from a cache (`restored`, a portable or
+    ##   peer restore): the outputs are new bytes, so they are scanned and
+    ##   the manifest replaced. This is the only path that scans, and it runs
+    ##   for non-cacheable actions too — they still leave outputs in the
+    ##   working tree.
+    ## * Reused in place (`outputs-present`, up to date): the manifest
+    ##   already describes these bytes. Only an action with NO manifest is
+    ##   scanned, once — outputs produced before the ledger existed — so the
+    ##   warm path stays an index probe (or one manifest read) plus `lstat`s.
+    ##
+    ## A failure is a trace event, not a failed build; see the ledger note.
+    if config.dryRun or status notin {asSucceeded, asCacheHit, asUpToDate}:
+      return
+    if id notin actionsById:
+      return
+    let action = actionsById[id]
+    if not nixRootsApply(action):
+      return
+    # The details that mean "the bytes already on disk were kept": a local
+    # hit whose outputs were in place, and a portable pre-pass hit whose
+    # outputs were in place (`portable-outputs-present`) or not needed and
+    # left untouched (`portable-resolved`). Everything else that succeeds
+    # without launching wrote new bytes (`restored`, `portable-restored`).
+    let produced = launched or
+      (status == asCacheHit and detail notin
+        ["outputs-present", "portable-outputs-present", "portable-resolved"])
+    if not produced and nixLedgerLookup(action).found:
+      return
+    # Produced bytes: whatever they name that is absent, the producer named
+    # absent, and re-executing would not change it. Reused bytes reaching
+    # here have no manifest; `nixOutputsLostPaths` normally recorded them
+    # already, and this only covers an arm that did not ask it.
+    nixRecordOutputs(action, absentIsLost = not produced)
+
   proc completeSuccess(id: string; status: ActionStatus; cacheDecision: CacheDecision;
                        launched: bool; detail = "") =
+    noteNixRoots(id, status, launched, detail)
     let idx = idToIndex.resultIndex(id)
     runResult.results[idx].status = status
     runResult.results[idx].cacheDecision = cacheDecision
@@ -18207,6 +18599,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           break
       if not depsResolved:
         continue
+      # The Nix-store DETECTION rule, which the scheduler's decision chain
+      # applies too late for this path: an action resolved here completes as
+      # a hit without ever reaching that chain, and with its outputs in place
+      # (`portable-outputs-present`) nothing else asks whether the store
+      # paths they name still exist. A restore cannot help either — it would
+      # write the same bytes naming the same collected paths. So an action
+      # that has lost one is left unresolved; it, and every descendant (whose
+      # dependency is now unresolved), go through the ordinary scheduler,
+      # which re-executes it and traces the paths.
+      let nixLostPaths = nixOutputsLostPaths(action)
+      if nixLostPaths.len > 0:
+        runResult.trace(id, "portable-record-refused",
+          nixReferencesLostReason(nixLostPaths))
+        continue
       let weak = portableWeakOf(action)
       let resolver = makeResolver(ancestors, action)
       var hit = none(PortableMemoRecord)
@@ -18394,6 +18800,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # `cacheMissInputChanged` for this would have worked mechanically and
         # then lied in every diagnostic that reads it.
         var cacheInvalidatedByPolicy = false
+        # Filled by the Nix-reference arm of the decision chain below, which
+        # is reached only when no earlier arm already forces execution.
+        var nixLostPaths: seq[string] = @[]
         var dependencyLaunched = false
         var outputsPresentBeforeLookup = false
         var outputsPresentKnown = false
@@ -18462,6 +18871,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # (Monitor-Loss-Path-Invalidation.md §"Consequences For The
           # Engine") is not satisfied by a `cdMiss` the next branch
           # swallows.
+          cacheInvalidatedByPolicy = true
+        elif (nixLostPaths = nixOutputsLostPaths(action);
+              nixLostPaths.len > 0):
+          # The output names Nix store paths that were in the store when it
+          # was produced and are not now (reprobuild-pm issue 2026-10-02).
+          # Neither a cache record nor "the outputs are present" can make it
+          # usable again — a binary whose `LC_LOAD_DYLIB` names a collected
+          # openssl exists and fails at `dyld` load — so this is decided
+          # BEFORE the lookup, for cacheable and non-cacheable actions alike.
+          # It sets `cacheInvalidatedByPolicy` for the same reason the
+          # monitor-loss arm above does: the outputs-present shortcut below
+          # only asks whether the paths exist, and here they all do.
+          let reason = nixReferencesLostReason(nixLostPaths)
+          runResult.results[idToIndex.resultIndex(id)].cacheDecision =
+            if action.cacheable: cdMiss else: cdNotCacheable
+          runResult.results[idToIndex.resultIndex(id)].reason = reason
+          runResult.trace(id, "cache-skipped", reason)
           cacheInvalidatedByPolicy = true
         elif action.cacheable:
           if config.rebuildMissingOutputsOnCacheHit:
@@ -18866,37 +19292,40 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # Cache ineligibility withholds publication, not successful outputs.
             if action.cacheable and (not evidence.disableCacheHits or
                 determinismProbeAdmits(action, evidence)):
-              let recordStart = statStart()
-              let storeOutputBlobs =
-                storeOutputBlobsFor(action, evidence.evidence)
-              let record = cache.recordActionResult(cas.inner,
-                action.weakFingerprint,
-                action.actionCachePolicy,
-                action.recordedInputNames(
-                  action.cacheInputPaths(evidence.evidence)),
-                action.outputs, action.cwd,
-                storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache,
-                envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                # An elevated edge reaches this site instead of the
-                # monitored one, and it used to record every directory
-                # input with NO membership digest. That is not "less
-                # precise": a recorded `mtimeNs = 0` means "not
-                # membership-tracked", such a directory is never
-                # re-listed, and the hit path does not re-record — so the
-                # record was PERMANENTLY existence-only
-                # (Incremental-Invalidation.md:814-821). The evidence was
-                # already collected two lines up; only the hand-off was
-                # missing.
-                enumeratedDirectories = action.recordedInputNames(
-                  action.cacheEnumeratedDirectories(evidence.evidence)),
-                determinism = entryDeterminismFor(config, action))
-              finishStat("repro cache record", recordStart)
-              writeActionResultRecordFile(
-                dependencyEvidencePath(cacheRoot, action.id), record)
-              recordPortableFingerprint(idx, action, evidence.evidence, record)
-              publishPeerCacheBundle(action.weakFingerprint, record)
-              publishBinaryCacheBundle(action, record)
+              try:
+                let recordStart = statStart()
+                let storeOutputBlobs =
+                  storeOutputBlobsFor(action, evidence.evidence)
+                let record = cache.recordActionResult(cas.inner,
+                  action.weakFingerprint,
+                  action.actionCachePolicy,
+                  action.recordedInputNames(
+                    action.cacheInputPaths(evidence.evidence)),
+                  action.outputs, action.cwd,
+                  storeOutputBlobs = storeOutputBlobs,
+                  metadataCache = addr fileMetadataCache,
+                  envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+                  # An elevated edge reaches this site instead of the
+                  # monitored one, and it used to record every directory
+                  # input with NO membership digest. That is not "less
+                  # precise": a recorded `mtimeNs = 0` means "not
+                  # membership-tracked", such a directory is never
+                  # re-listed, and the hit path does not re-record — so the
+                  # record was PERMANENTLY existence-only
+                  # (Incremental-Invalidation.md:814-821). The evidence was
+                  # already collected two lines up; only the hand-off was
+                  # missing.
+                  enumeratedDirectories = action.recordedInputNames(
+                    action.cacheEnumeratedDirectories(evidence.evidence)),
+                  determinism = entryDeterminismFor(config, action))
+                finishStat("repro cache record", recordStart)
+                writeActionResultRecordFile(
+                  dependencyEvidencePath(cacheRoot, action.id), record)
+                recordPortableFingerprint(idx, action, evidence.evidence, record)
+                publishPeerCacheBundle(action.weakFingerprint, record)
+                publishBinaryCacheBundle(action, record)
+              except UnreadableInputError as err:
+                runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
             elif action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(id, evidence,
                 idToIndex.resultIndex(id),
@@ -19034,6 +19463,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[id] = finished.status
           if finished.status == asSucceeded:
             invalidateCachedOutputs(plan.action)
+            if plan.action.kind == bakLockUpdate:
+              # HL-10: the node rewrites tracked sources (``repro.lock``,
+              # ``flake.lock``) that no action declares as an output, so
+              # nothing else would drop a stat or digest this run cached for
+              # them before it ran. Its dependents are looked up after this.
+              for written in finished.rewrittenSources:
+                invalidateCachedPath(materialPath(plan.action.cwd, written))
             let evidenceStart = statStart()
             var evidence = collectEvidence(plan.action, strict = true,
               config = addr config)
@@ -19072,45 +19508,48 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # Cache ineligibility withholds publication, not successful outputs.
             if plan.action.cacheable and (not evidence.disableCacheHits or
                 determinismProbeAdmits(plan.action, evidence)):
-              let recordStart = statStart()
-              # Peer-Cache M1: when a publisher closure is set, force
-              # output-blob retention so the publisher can read the
-              # blob payloads back out of the local CAS. The
-              # publisher-less path (legacy CLI default) keeps the
-              # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
-              # M9.L.4-refactor Step A: ALSO force retention when the
-              # binary-cache publisher is configured AND this action
-              # opted into publishing — the publish hook guards on
-              # ``outputPayloadKind == opkCasBlobs`` and would
-              # silently skip otherwise.
-              let storeOutputBlobs =
-                storeOutputBlobsFor(plan.action, evidence.evidence)
-              let record = cache.recordActionResult(cas.inner,
-                plan.action.weakFingerprint,
-                plan.action.actionCachePolicy,
-                plan.action.recordedInputNames(
-                  plan.action.cacheInputPaths(evidence.evidence)),
-                plan.action.outputs, plan.action.cwd,
-                storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache,
-                envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                # Same omission as the elevated site above, reached by
-                # builtin edges and by anything whose plan is not a
-                # `bakProcess`. A builtin cannot be wrapped in the
-                # io-monitor, so its enumeration evidence arrives either
-                # from a converter path set or from a monitor depfile a
-                # direct engine caller prewired — both of which
-                # `collectEvidence` has already folded by this point.
-                enumeratedDirectories = plan.action.recordedInputNames(
-                  plan.action.cacheEnumeratedDirectories(evidence.evidence)),
-                determinism = entryDeterminismFor(config, plan.action))
-              finishStat("repro cache record", recordStart)
-              writeActionResultRecordFile(
-                dependencyEvidencePath(cacheRoot, plan.action.id), record)
-              recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                record)
-              publishPeerCacheBundle(plan.action.weakFingerprint, record)
-              publishBinaryCacheBundle(plan.action, record)
+              try:
+                let recordStart = statStart()
+                # Peer-Cache M1: when a publisher closure is set, force
+                # output-blob retention so the publisher can read the
+                # blob payloads back out of the local CAS. The
+                # publisher-less path (legacy CLI default) keeps the
+                # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
+                # M9.L.4-refactor Step A: ALSO force retention when the
+                # binary-cache publisher is configured AND this action
+                # opted into publishing — the publish hook guards on
+                # ``outputPayloadKind == opkCasBlobs`` and would
+                # silently skip otherwise.
+                let storeOutputBlobs =
+                  storeOutputBlobsFor(plan.action, evidence.evidence)
+                let record = cache.recordActionResult(cas.inner,
+                  plan.action.weakFingerprint,
+                  plan.action.actionCachePolicy,
+                  plan.action.recordedInputNames(
+                    plan.action.cacheInputPaths(evidence.evidence)),
+                  plan.action.outputs, plan.action.cwd,
+                  storeOutputBlobs = storeOutputBlobs,
+                  metadataCache = addr fileMetadataCache,
+                  envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+                  # Same omission as the elevated site above, reached by
+                  # builtin edges and by anything whose plan is not a
+                  # `bakProcess`. A builtin cannot be wrapped in the
+                  # io-monitor, so its enumeration evidence arrives either
+                  # from a converter path set or from a monitor depfile a
+                  # direct engine caller prewired — both of which
+                  # `collectEvidence` has already folded by this point.
+                  enumeratedDirectories = plan.action.recordedInputNames(
+                    plan.action.cacheEnumeratedDirectories(evidence.evidence)),
+                  determinism = entryDeterminismFor(config, plan.action))
+                finishStat("repro cache record", recordStart)
+                writeActionResultRecordFile(
+                  dependencyEvidencePath(cacheRoot, plan.action.id), record)
+                recordPortableFingerprint(idx, plan.action, evidence.evidence,
+                  record)
+                publishPeerCacheBundle(plan.action.weakFingerprint, record)
+                publishBinaryCacheBundle(plan.action, record)
+              except UnreadableInputError as err:
+                runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
             elif plan.action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(finished.id, evidence,
                 idToIndex.resultIndex(finished.id),
@@ -19694,28 +20133,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # Cache ineligibility withholds publication, not successful outputs.
         if action.cacheable and (not evidence.disableCacheHits or
             determinismProbeAdmits(action, evidence)):
-          let recordStart = statStart()
-          # M9.L.4-refactor Step A: force output-blob retention when
-          # either the peer-cache publisher OR the binary-cache
-          # publisher (with this action opted in) needs to read the
-          # blob payloads back out of the local CAS.
-          let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
-          let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
-            action.actionCachePolicy,
-            action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
-            action.outputs, action.cwd,
-            storeOutputBlobs = storeOutputBlobs,
-            metadataCache = addr fileMetadataCache,
-            envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-            enumeratedDirectories = action.recordedInputNames(
-              action.cacheEnumeratedDirectories(evidence.evidence)),
-            determinism = entryDeterminismFor(config, action))
-          finishStat("repro cache record", recordStart)
-          writeActionResultRecordFile(
-            dependencyEvidencePath(cacheRoot, action.id), record)
-          recordPortableFingerprint(idx, action, evidence.evidence, record)
-          publishPeerCacheBundle(action.weakFingerprint, record)
-          publishBinaryCacheBundle(action, record)
+          try:
+            let recordStart = statStart()
+            # M9.L.4-refactor Step A: force output-blob retention when
+            # either the peer-cache publisher OR the binary-cache
+            # publisher (with this action opted in) needs to read the
+            # blob payloads back out of the local CAS.
+            let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
+            let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
+              action.actionCachePolicy,
+              action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
+              action.outputs, action.cwd,
+              storeOutputBlobs = storeOutputBlobs,
+              metadataCache = addr fileMetadataCache,
+              envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+              enumeratedDirectories = action.recordedInputNames(
+                action.cacheEnumeratedDirectories(evidence.evidence)),
+              determinism = entryDeterminismFor(config, action))
+            finishStat("repro cache record", recordStart)
+            writeActionResultRecordFile(
+              dependencyEvidencePath(cacheRoot, action.id), record)
+            recordPortableFingerprint(idx, action, evidence.evidence, record)
+            publishPeerCacheBundle(action.weakFingerprint, record)
+            publishBinaryCacheBundle(action, record)
+          except UnreadableInputError as err:
+            runResult.traceUnreadableInput(finished.id, idx, err.msg)
         elif action.cacheable and evidence.disableCacheHits:
           runResult.traceCacheIneligibility(finished.id, evidence, idx,
             unobservableRootImageNote(action, unsafeAddr config))
@@ -19822,6 +20264,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         removeFile(extendedPath(capture))
       except CatchableError as err:
         runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
+  maintainNixLedger()
   finishStat("repro scheduler total", totalStart)
   finishChildCpuStat()
   finishMetadataCacheStats(fileMetadataCache)

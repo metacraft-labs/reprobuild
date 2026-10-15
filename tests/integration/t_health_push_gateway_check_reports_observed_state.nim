@@ -626,7 +626,12 @@ required_platforms = ["linux/amd64"]
       # system temp dir, and the override makes the arm independent of what is
       # above `createTempDir` on the host running it.
       let wsConfig = fx.scratch / "bootstrap-with-gateway-off.toml"
-      writeFile(wsConfig, "push_gateway = \"off\"\n")
+      # A settings file must declare its schema (Workspace-Settings-Files.md
+      # §3); the strict reader that now reads this key rejects one that does
+      # not, where the old line scan read any file. The fixture is otherwise
+      # the same opt-out §7.4 documents.
+      writeFile(wsConfig, "schema = \"reprobuild.workspace.settings.v1\"\n" &
+        "push_gateway = \"off\"\n")
       let perWorkspace = healthRows(fx, "opt-out/per-workspace",
         [(name: "REPRO_WORKSPACE_CONFIG", value: wsConfig)])
       let perWorkspaceDetail = perWorkspace.gateway["detail"].getStr()

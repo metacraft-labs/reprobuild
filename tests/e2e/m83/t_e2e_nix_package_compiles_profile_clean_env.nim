@@ -267,17 +267,19 @@ else:
       check plannedResources(again.res.output) ==
         plannedResources(plan.res.output)
       check again.rec.rbpiCount == 1
-      when defined(macosx):
-        # macOS may fail closed (a complete re-run) until GM0m settles what
-        # its monitoring vouches for -- the rule `profile_compile_edge_harness
-        # .cacheAnswered` applies to every profile-compile gate. Announced so
-        # the m1 run records which arm it took.
-        if again.rec.cCommands.len > 0:
-          echo "    [fail-closed, GM0m] clean-env second plan: the edge " &
-            "re-ran (", again.rec.cCommands.len, " C command(s)) instead " &
-            "of being answered from the action cache"
-      else:
-        check again.rec.cCommands.len == 0
+      # Packaged replacements preserve Nim shell children on macOS too.
+      check again.rec.cCommands.len == 0
+
+      # A cache hit must still depend on the profile source. Change it after
+      # the unchanged hit and require a fresh compile and the same plan.
+      writeFile(extendedPath(box.profileDir / "home.nim"),
+        ProfileBody & "\n# source changed after the unchanged cache hit\n")
+      let changed = planClean(repro, box)
+      checkpoint(changed.res.output)
+      check changed.res.exitCode == 0
+      check changed.rec.cCommands.len > 0
+      check plannedResources(changed.res.output) ==
+        plannedResources(plan.res.output)
 
     test "e2e_nix_package_compiles_profile_linux: negative control - the " &
         "unwrapped engine in the same environment has no sources and refuses":

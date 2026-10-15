@@ -640,10 +640,15 @@ proc runHomeAdd(args: openArray[string]): int =
     # References").
     # A name the reprobuild-packages catalog defines resolves from it, as
     # `repro home apply` would resolve it for this profile.
+    # The contribution catalogs the profile imports (`catalogs:`) take part
+    # as they do in `repro home apply`. `repro home add` edits the profile
+    # as text, so the text inspector reads it here as well.
     let catalog =
       try:
-        projectCatalogPackages([pkg], loadProfilePath(),
-          resolveStateDir() / "catalog-projection")
+        let profilePath = loadProfilePath()
+        projectCatalogPackages([pkg], profilePath,
+          resolveStateDir() / "catalog-projection",
+          loadProfile(profilePath).catalogImports)
       except CatchableError:
         ProfileCatalog()
     let latest = unpinnedHostVersion(pkg, catalog)
@@ -3463,20 +3468,23 @@ proc runHomeGcCommand(args: openArray[string]): int =
 # `repro home migrate-from-env-scripts` (M70).
 # ---------------------------------------------------------------------------
 
-proc defaultEnvFilePath(): string =
-  ## Resolve the default ``--env-file`` path from $METACRAFT_ROOT (set
-  ## by env.ps1) or fall back to the spec's canonical location
-  ## ``D:/metacraft/windows/toolchain-versions.env``. Tests pass an
-  ## explicit ``--env-file`` so they never depend on the env var.
-  let root = getEnv("METACRAFT_ROOT")
+proc defaultEnvFilePathFor*(root: string): string =
+  ## Default ``--env-file`` path for a workspace rooted at ``root``:
+  ## ``<root>/windows/toolchain-versions.env``. Returns ``""`` when
+  ## ``root`` is empty: there is no machine-neutral location to fall
+  ## back to, so ``runHomeMigrateFromEnvScripts`` refuses and asks for
+  ## an explicit ``--env-file`` instead of guessing one.
   if root.len > 0:
     return root / "windows" / "toolchain-versions.env"
-  when defined(windows):
-    return "D:/metacraft/windows/toolchain-versions.env"
-  else:
-    return ""
+  return ""
 
-proc renderMigrateUsage(): string =
+proc defaultEnvFilePath(): string =
+  ## Resolve the default ``--env-file`` path from ``$METACRAFT_ROOT``
+  ## (set by the workspace's ``env.ps1``). Tests pass an explicit
+  ## ``--env-file`` so they never depend on the env var.
+  defaultEnvFilePathFor(getEnv("METACRAFT_ROOT"))
+
+proc renderMigrateUsage*(): string =
   result = ""
   result.add "usage: repro home migrate-from-env-scripts [--env-file <path>] \n"
   result.add "                                           [--activity <name>] \n"
@@ -3487,7 +3495,9 @@ proc renderMigrateUsage(): string =
   result.add "\n"
   result.add "Options:\n"
   result.add "  --env-file <path>   Path to a toolchain-versions.env-shaped\n"
-  result.add "                      file. Default: " & defaultEnvFilePath() & "\n"
+  result.add "                      file. Default:\n"
+  result.add "                      $METACRAFT_ROOT/windows/toolchain-versions.env;\n"
+  result.add "                      required when METACRAFT_ROOT is unset.\n"
   result.add "  --activity <name>   Activity block to receive the synthesized\n"
   result.add "                      lines. Must be a Nim identifier (letters,\n"
   result.add "                      digits, underscore). Default:\n"

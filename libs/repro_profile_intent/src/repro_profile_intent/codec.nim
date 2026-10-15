@@ -54,6 +54,11 @@ const
     ## declares (`ProfileIntent.dataFiles`). Optional; omitted when empty,
     ## so a profile without data files encodes exactly as before. Envelope
     ## schema 5.
+  KeyCatalogImports = "catalogImports"
+    ## The contribution-catalog modules a profile's `catalogs:` section
+    ## imports (`ProfileIntent.catalogImports`). Optional; omitted when
+    ## empty, so a profile without the section encodes exactly as before.
+    ## Envelope schema 6.
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -289,6 +294,8 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
               encodeAdapterPreference(p.adapterPreference))]
   if p.dataFiles.len > 0:
     entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
+  if p.catalogImports.len > 0:
+    entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
   cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
@@ -556,6 +563,13 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   if dfFound:
     for it in expectArray(dfNode, KeyDataFiles):
       result.dataFiles.add expectText(it, KeyDataFiles)
+  # Contribution-catalog imports are OPTIONAL on the wire (absent when the
+  # profile declares none).
+  var ciFound = false
+  let ciNode = lookupOpt(entries, KeyCatalogImports, ciFound)
+  if ciFound:
+    for it in expectArray(ciNode, KeyCatalogImports):
+      result.catalogImports.add expectText(it, KeyCatalogImports)
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

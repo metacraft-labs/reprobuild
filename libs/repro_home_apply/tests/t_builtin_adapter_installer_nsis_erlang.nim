@@ -2,7 +2,7 @@
 ## realize family hook (the erlang OTP shape). Hermetic: fixtures are
 ## materialized on disk + served via file://. The non-hermetic
 ## dependency is a host ``7z.exe`` on PATH (or in a pre-staged
-## ``sevenzip`` catalog prefix) — same dependency the M3 7z-SFX tests use.
+## ``7zip`` catalog prefix) — same dependency the M3 7z-SFX tests use.
 ##
 ## Closes the long-standing erlang carryover documented in M3, M4, and
 ## M8 retros: OTP's installer is a bona-fide NSIS installer (NOT a Burn
@@ -72,12 +72,12 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
   ## ``discoverSevenZipExe`` (Step i prefers a catalog-resident 7zip
   ## prefix). The seeded prefix carries ``bin/7z.exe`` + sibling
   ## ``7z.dll`` (codec support).
-  let prefixId = computeRealizationHash("sevenzip", "test-seed",
+  let prefixId = computeRealizationHash("7zip", "test-seed",
     "builtin", "sha256:seed", "bin/7z.exe", "file:///seed",
     "seed", @["fixture"])
   let hint = StoreReceiptHint(
     adapter: "builtin",
-    packageName: "sevenzip",
+    packageName: "7zip",
     version: "test-seed",
     declaredExecutablePath: "bin/7z.exe",
     exportedExecutables: @["bin/7z.exe"],

@@ -237,9 +237,8 @@ require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-l
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''
-# The macOS benchmark leg uses capability labels. The Linux benchmark leg
-# retains its dedicated persistent benchmark runner requirement above.
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos", "arm64"]'\'''
+# Both measurement legs require dedicated benchmark runners.
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "darwin", "nix-darwin", "aarch64-darwin", "benchmark"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
 require_contains .github/workflows/benchmark.yml "ref: reprobuild"
