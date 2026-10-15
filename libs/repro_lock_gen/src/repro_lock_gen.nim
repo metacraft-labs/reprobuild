@@ -204,6 +204,16 @@ type
       ## so a test can serve the release tree from a loopback listener and
       ## an air-gapped site from its own mirror; whatever base is used, the
       ## URL it resolved to is what the lock records.
+    recordCertificatePolicy*: bool
+      ## Test-Certificates TC-9b: whether this generation records the
+      ## ``[certificate_policy]`` snapshot (``certificatePolicySection``) in
+      ## the document it writes. Set by the CLI for the writing doors, which
+      ## are the ones that evaluated the provider for it; false keeps every
+      ## other caller's document exactly as it was.
+    certificatePolicySection*: string
+      ## The snapshot to record when ``recordCertificatePolicy``: rendered
+      ## from the policy the recipe enacts, "" when it enacts none (so the
+      ## snapshot of a policy that was removed leaves the lock).
 
   MetadataFetchPlanEntry* = object
     ## One planned `bakMetadataFetch` edge — one retrieved object.
@@ -1084,6 +1094,31 @@ proc generateLock*(req: LockGenerationRequest): LockGenerationResult =
 # The four doors
 # ---------------------------------------------------------------------------
 
+proc withCertificatePolicy(req: LockGenerationRequest; document: string):
+    string =
+  ## Test-Certificates TC-9b: `document` with the request's policy snapshot
+  ## recorded, when the request records one. Applied to the finished document
+  ## rather than inside the solve edge, so a solve served from a recorded path
+  ## set (§5.7) records the CURRENT policy too, and the lock identity -- which
+  ## the policy is not part of -- is untouched.
+  if not req.recordCertificatePolicy:
+    return document
+  var ld = parseLockedDependencies(document)
+  ld.certificatePolicySection = req.certificatePolicySection
+  serializeLockedDependencies(ld)
+
+proc landLockDocument(writeTo, document: string) =
+  ## Write the committed lock only when its bytes change, so a refresh that
+  ## finds nothing new leaves the file -- and its mtime -- alone.
+  if fileExists(writeTo):
+    try:
+      if readFile(writeTo) == document:
+        return
+    except IOError:
+      discard
+  createDir(parentDir(writeTo))
+  writeFile(writeTo, document)
+
 proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
     LockGenerationResult =
   ## `repro lock solve [--write]` — generate, then land the lock at the
@@ -1091,9 +1126,9 @@ proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
   var r = req
   r.entryPoint = lgeLockSolve
   result = generateLock(r)
+  result.lockDocument = withCertificatePolicy(r, result.lockDocument)
   if writeTo.len > 0:
-    createDir(parentDir(writeTo))
-    writeFile(writeTo, result.lockDocument)
+    landLockDocument(writeTo, result.lockDocument)
     result.lockPath = writeTo
 
 proc runImplicitBuildSolve*(req: LockGenerationRequest):
@@ -1133,9 +1168,9 @@ proc runLockRefresh*(req: LockGenerationRequest; writeTo: string):
   var r = req
   r.entryPoint = lgeLockRefresh
   result = generateLock(r)
+  result.lockDocument = withCertificatePolicy(r, result.lockDocument)
   if writeTo.len > 0:
-    createDir(parentDir(writeTo))
-    writeFile(writeTo, result.lockDocument)
+    landLockDocument(writeTo, result.lockDocument)
     result.lockPath = writeTo
 
 # ---------------------------------------------------------------------------

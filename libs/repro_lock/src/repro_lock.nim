@@ -67,6 +67,7 @@ import repro_solver
 import repro_multihash
 import repro_lock/identity
 import repro_lock/toml_subset
+import repro_lock/certificate_policy
 
 export UnifiedSolution
 export SelectionStatus
@@ -247,6 +248,18 @@ type
     variants*: seq[LockedVariant]
     packages*: seq[LockedPackage]
     deps*: seq[LockedDep]
+    certificatePolicySection*: string
+      ## Test-Certificates TC-9b: the ``[certificate_policy]`` snapshot,
+      ## VERBATIM as the lock carries it (``""`` when it carries none).
+      ##
+      ## Kept as text, not parsed here, on purpose. Only the writers that
+      ## evaluate the provider (``repro lock refresh`` and the certifying
+      ## run's lock-update node) may change it; every other writer -- the
+      ## commit-time re-pin above all -- must carry it through byte for byte,
+      ## hand edits included. The strict reader in
+      ## ``repro_lock/certificate_policy`` is what the gates judge it with, so
+      ## a malformed snapshot does not make the lock unreadable to a build; it
+      ## makes the GATES refuse.
 
 const
   LockedArchiveBinary* = "binary"
@@ -467,7 +480,9 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## are ignored (forward-compatible within the v2 schema).
   result = SolvedGraphLock(schema: "", variants: @[], packages: @[])
   var sawSchema = false
-  for rawLine in content.splitLines():
+  # The policy snapshot's keys (``schema``, ``name``, ...) are not lock keys,
+  # so only the lines outside it are read.
+  for rawLine in splitCertificatePolicySection(content).lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
@@ -809,6 +824,13 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
     if i > 0: result.add(", ")
     result.add(serializeDepInline(d))
   result.add("]\n")
+  # TC-9b: the certificate-policy snapshot, last and verbatim. Absent from
+  # every lock that enacts no policy, so those re-serialize byte-identically.
+  if ld.certificatePolicySection.len > 0:
+    result.add("\n")
+    result.add(ld.certificatePolicySection)
+    if not ld.certificatePolicySection.endsWith("\n"):
+      result.add("\n")
 
 proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## Render a ``SolvedGraphLock`` to a canonical committed-lock document.
@@ -842,8 +864,10 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
   ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the v2 addition.
   let solved = parseSolvedGraphLock(content)  # validates schema + solved part
   result = lockedDepsFromSolved(solved)
+  let split = splitCertificatePolicySection(content)
+  result.certificatePolicySection = split.policySection
   # Pull the v2 ``deps`` array (empty when the lock carries no deps).
-  for rawLine in content.splitLines():
+  for rawLine in split.lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#") or line.startsWith("["):
       continue

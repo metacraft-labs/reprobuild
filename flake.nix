@@ -229,7 +229,13 @@
         # hosts off shim locks. cb1db14 also adds the probe/enumeration entry
         # points Node and Chromium call and per-architecture raw-syscall
         # numbers.
-      url = "github:metacraft-labs/io-mon/6453936f34d69c506ee33b8e44a0b2d0a9440ec0";
+        # Bumped to 9576b79 (2026-10-15), io-mon's `agents` tip; 6453936 is an
+        # ancestor. On macOS, re-propagates capture seed variables across
+        # clean-env spawns, keeps only the last co-loaded shim image active
+        # while routing internal forwarders and raw syscalls past sibling shim
+        # wrappers, and reads `syscall(2)` variadic arguments from the stack per
+        # the arm64 Apple Darwin ABI.
+      url = "github:metacraft-labs/io-mon/9576b796ed8d0220635bf609720e10e71080b2b0";
       flake = false;
     };
     nim-shm-gset-src = {

@@ -218,6 +218,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
+libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_da6_capture_breadth_dsl_surface.nim	nim	14
@@ -1195,6 +1196,7 @@ tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
 tests/integration/t_branch_from_mainlines.nim	nim	8
+tests/integration/t_branch_matching_first_rule_wins_upstream_and_detached.nim	nim	1
 tests/integration/t_branch_unpublished_source_head.nim	nim	5
 tests/integration/t_build_action_output_all_passes_action_output_through.nim	nim	6
 tests/integration/t_build_declares_its_pools_to_runquota.nim	nim	2
@@ -1220,6 +1222,7 @@ tests/integration/t_certificate_round_trips_against_the_canonical_form.nim	nim	1
 tests/integration/t_certificate_signature_verifies_against_registered_key.nim	nim	1
 tests/integration/t_certificates_travel_with_pushed_commit.nim	nim	1
 tests/integration/t_certify_check_set_issues_and_attaches_pre_commit_certificate.nim	nim	1
+tests/integration/t_certifying_run_records_the_policy_snapshot_the_hook_carries.nim	nim	1
 tests/integration/t_certifying_run_refreshes_the_lock_before_testing.nim	nim	1
 tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	nim	16
 tests/integration/t_ci_plan_v2_binds_the_checked_out_content.nim	nim	1
@@ -1557,6 +1560,9 @@ tests/integration/t_plan_without_certificate_node_never_writes_the_lock.nim	nim	
 tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim	nim	1
 tests/integration/t_platforms_form_diagnostics.nim	nim	1
 tests/integration/t_policy_fail_closed.nim	nim	5
+tests/integration/t_policy_imported_from_a_shared_package_is_snapshotted_into_the_lock.nim	nim	1
+tests/integration/t_policy_requiring_an_undeclared_name_fails_the_compile.nim	nim	1
+tests/integration/t_policy_snapshot_rejects_unknown_keys_and_mixed_platforms.nim	nim	1
 tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim	nim	1
 tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim	nim	1
 tests/integration/t_post_commit_dispatch_returns_and_detached_push_lands.nim	nim	2
@@ -1793,6 +1799,7 @@ tests/integration/t_tpm2_structure_vectors.nim	nim	2
 tests/integration/t_tpm_quote_verifies.nim	nim	7
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	nim	15
 tests/integration/t_tsm_report_transport.nim	nim	39
+tests/integration/t_two_repos_on_different_policy_pins_resolve_different_rules.nim	nim	1
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
 tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim	nim	9
