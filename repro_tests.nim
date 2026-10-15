@@ -10737,6 +10737,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_build_write_report_on_lowered_provider_routes.nim",
+    binary: "build/test-bin/t_build_write_report_on_lowered_provider_routes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_buildtype_drives_compile_flags.nim",
     binary: "build/test-bin/t_buildtype_drives_compile_flags",
     defines: @[],

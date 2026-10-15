@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 32,
-    "nimTestBinaries": 2078,
+    "nimTestBinaries": 2079,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2099
+    "testEntries": 2100
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1277,7 +1277,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1120,
+      "integration": 1121,
       "platform/destructive": 129,
       "pure unit": 646,
       "unclassified": 185
@@ -1476,9 +1476,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2078,
+    "nimTestBinaryCount": 2079,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2099
+    "testEntryCount": 2100
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -28729,6 +28729,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_build_write_report_on_lowered_provider_routes",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cmake_trycompile",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_build_write_report_on_lowered_provider_routes.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_buildtype_drives_compile_flags",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -43535,13 +43554,15 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
-        "repro_cli_support"
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_provider_runtime"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_measurement_axes.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 17,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

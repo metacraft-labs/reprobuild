@@ -5832,21 +5832,113 @@ proc environmentInheritanceHeaderLine*(
   if census.emptyPathActions > 0:
     result.add(" <- DEFECT: those actions run with no PATH at all")
 
-proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
-                      refresh: ProviderRefreshReport;
-                      providerInvocationCount: int;
+const BuildReportSchemaId* = "reprobuild.build.report.v1"
+  ## ``CLI/build.md`` §"Persist": the full report's versioned schema marker,
+  ## the counterpart of ``BuildFailureReportSchemaId``. Emitted on EVERY
+  ## route that writes the full report, so a reader can tell the document
+  ## apart from the failure report (and from a stale pre-schema file) by
+  ## value rather than by file name.
+
+type
+  BuildReportProviderKind* = enum
+    ## How the graph a full build report describes was obtained. The report's
+    ## provider record is shaped per kind, because the three routes have
+    ## genuinely different evidence and a shared shape would force one of
+    ## them to invent fields (``CLI/build.md`` §"Reports from lowered or
+    ## prebuilt provider routes").
+    brpkCompiled
+      ## The per-project provider was compiled (or its compile was served from
+      ## cache) and then invoked. Carries the compile fingerprint, output and
+      ## compile actions exactly as the report always has.
+    brpkPrebuilt
+      ## A provider binary SHIPPED beside the CLI was dispatched directly —
+      ## Tier 2a ``repro-cmake-trycompile-provider`` or Tier 2b
+      ## ``repro-standard-provider``. Nothing was compiled, so there is no
+      ## compile fingerprint or compile output to report; its identity is the
+      ## binary's path and content digest.
+    brpkLoweredGraphCache
+      ## The lowered graph was read back from the lowered-graph cache and no
+      ## provider ran at all.
+
+  BuildReportProviderContext* = object
+    ## The provider half of a full build report: what produced the graph the
+    ## engine executed. Built by the route that dispatched the provider and
+    ## handed to ``buildReportJson``, so the writer never has to guess the
+    ## route from which fields happen to be populated.
+    route*: string
+      ## The route label also used for ``invocationFastPath`` /
+      ## ``--write-benchmark`` (``compiled-provider``,
+      ## ``tier2a-trycompile-direct``, ``tier2b-standard-direct``,
+      ## ``lowered-graph-cache``), so the two documents name a route alike.
+    artifactId*: string
+      ## The ``providerArtifactId`` the refresh was keyed under.
+    snapshotPath*: string
+      ## ``ProviderRefreshReport.persistedSnapshotPath`` of the real refresh.
+    invocations*: int
+      ## Provider invocations the real refresh performed.
+    case kind*: BuildReportProviderKind
+    of brpkCompiled:
+      compiled*: ProviderCompileArtifact
+      providerCompileResult*: BuildRunResult
+    of brpkPrebuilt:
+      binaryPath*: string
+        ## The shipped binary that was dispatched. Its content digest is
+        ## computed by the writer, from these bytes, at write time — see
+        ## ``buildReportJson``.
+    of brpkLoweredGraphCache:
+      loweredGraphCachePath*: string
+
+proc compiledProviderReportContext*(provider: ProviderCompileArtifact;
+                                    providerCompileResult: BuildRunResult;
+                                    artifactId: string;
+                                    refresh: ProviderRefreshReport;
+                                    invocations: int):
+    BuildReportProviderContext =
+  ## Context for the per-project provider-compile route. ``invocations`` is
+  ## passed rather than read off ``refresh`` because that route also counts
+  ## the focused-snapshot invocations it made before the refresh.
+  BuildReportProviderContext(kind: brpkCompiled, route: "compiled-provider",
+    artifactId: artifactId, snapshotPath: refresh.persistedSnapshotPath,
+    invocations: invocations, compiled: provider,
+    providerCompileResult: providerCompileResult)
+
+proc prebuiltProviderReportContext*(route, binaryPath, artifactId: string;
+                                    refresh: ProviderRefreshReport):
+    BuildReportProviderContext =
+  ## Context for a shipped provider binary dispatched directly (Tier 2a /
+  ## Tier 2b). Cheap to build on every invocation: it records paths and the
+  ## refresh's counters only, and the content digest is left to the writer,
+  ## which runs only when a report was asked for.
+  BuildReportProviderContext(kind: brpkPrebuilt, route: route,
+    artifactId: artifactId, snapshotPath: refresh.persistedSnapshotPath,
+    invocations: refresh.invoked.len, binaryPath: binaryPath)
+
+proc loweredGraphCacheReportContext*(cachePath: string):
+    BuildReportProviderContext =
+  ## Context for a build served from the lowered-graph cache. That route is
+  ## admitted only when NO report was requested (see the guard at its call
+  ## site in ``executeBuildTarget``), so today no report is written from it;
+  ## the context exists so that, if that admission ever changes, the writer
+  ## labels the route truthfully instead of borrowing another route's shape.
+  BuildReportProviderContext(kind: brpkLoweredGraphCache,
+    route: "lowered-graph-cache", loweredGraphCachePath: cachePath)
+
+proc buildReportJson*(context: BuildReportProviderContext;
                       cmakeRegenerationResult,
-                      providerCompileResult,
                       buildResult: BuildRunResult;
-                      workspaceVcs: openArray[
-                          workspaceVcsEvidence.WorkspaceVcsEvidence] = [];
-                      targetResolutions:
-                          openArray[TargetResolutionRecord] = []) =
+                      workspaceVcs = none(seq[
+                          workspaceVcsEvidence.WorkspaceVcsEvidence]);
+                      targetResolutions =
+                          none(seq[TargetResolutionRecord])): JsonNode =
+  ## The full build report (``CLI/build.md`` §"Persist"), serialised from a
+  ## COMPLETED engine result. The ONE serializer for every route that writes
+  ## the full report: the compiled-provider route and the lowered-graph
+  ## routes used to differ in whether they wrote anything at all, and a
+  ## second serializer is how they would start differing in what they write.
+  ##
   ## M4: ``workspaceVcs`` carries the unified Workspace-VCS evidence
   ## seq accumulated by ``repro workspace status`` / ``repro check``
-  ## while invoking the M2/M3 query actions. Callers pass an empty seq
-  ## (the default) when no query observations occurred during the
-  ## reported build. The JSON view embedded under the
+  ## while invoking the M2/M3 query actions. The JSON view embedded under the
   ## ``"workspaceVcs"`` key is derived from the same record the SSZ
   ## codec persists; see ``libs/repro_workspace_vcs/src/evidence.nim``.
   ##
@@ -5855,12 +5947,17 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
   ## no positional was supplied (the legacy default-action path). The
   ## per-selector ``kind`` field mirrors the CLI text diagnostics
   ## (``resolved`` / ``ambiguous`` / ``unknown``).
+  ##
+  ## Both are ``Option``s because ``CLI/build.md`` requires the report to
+  ## "explicitly distinguish unavailable workspace-VCS or target-export
+  ## observations from a verified empty observation set". ``none`` means
+  ## "not observed on this route" and is written as ``…Observed: false``
+  ## beside the (then empty) member; ``some(@[])`` is a real observation
+  ## that found nothing. The members themselves keep their array shape on
+  ## every route, which is the contract existing readers rely on.
   var cmakeRegenerationActions = newJArray()
   for item in cmakeRegenerationResult.results:
     cmakeRegenerationActions.add(actionResultJson(item))
-  var providerCompileActions = newJArray()
-  for item in providerCompileResult.results:
-    providerCompileActions.add(actionResultJson(item))
   var actions = newJArray()
   for item in buildResult.results:
     actions.add(actionResultJson(item))
@@ -5873,27 +5970,128 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
       "detail": event.detail
     })
   var targetResolutionArr = newJArray()
-  for record in targetResolutions:
-    targetResolutionArr.add(targetResolutionJson(record))
-  let root = %*{
-    "providerBinary": provider.outputBinaryPath,
-    "providerFingerprint": digestHex(provider.providerFingerprint),
-    "providerCompileOutput": provider.executionResult.output,
-    "cmakeRegenerationActions": cmakeRegenerationActions,
-    "providerCompileActions": providerCompileActions,
-    "providerSnapshot": refresh.persistedSnapshotPath,
-    "providerInvocations": providerInvocationCount,
-    "actions": actions,
-    "trace": trace,
-    "workspaceVcs": workspaceVcsEvidence.toJson(workspaceVcs),
-    "targetResolution": targetResolutionArr,
-    # RA-13: machine-readable resource-authority status (see
-    # ``runQuotaReportJson``).
-    "runQuota": runQuotaReportJson(buildResult.runQuotaBypassed),
-    "stats": statsJson(buildResult.stats)
+  if targetResolutions.isSome:
+    for record in targetResolutions.get():
+      targetResolutionArr.add(targetResolutionJson(record))
+  let vcsRecords =
+    if workspaceVcs.isSome: workspaceVcs.get()
+    else: newSeq[workspaceVcsEvidence.WorkspaceVcsEvidence]()
+  result = %*{
+    "schemaId": BuildReportSchemaId,
+    "providerRoute": context.route
   }
+  case context.kind
+  of brpkCompiled:
+    # The compiled-provider members, unchanged in name and meaning from the
+    # report before routes were distinguished.
+    var providerCompileActions = newJArray()
+    for item in context.providerCompileResult.results:
+      providerCompileActions.add(actionResultJson(item))
+    result["providerBinary"] = %context.compiled.outputBinaryPath
+    result["providerArtifact"] = %context.artifactId
+    result["providerFingerprint"] =
+      %digestHex(context.compiled.providerFingerprint)
+    result["providerCompileOutput"] =
+      %context.compiled.executionResult.output
+    result["providerCompileActions"] = providerCompileActions
+    result["providerSnapshot"] = %context.snapshotPath
+    result["providerInvocations"] = %context.invocations
+  of brpkPrebuilt:
+    # A prebuilt provider reports "its actual binary/content identity,
+    # snapshot and invocations rather than an invented compile
+    # fingerprint/output" (CLI/build.md). So the compile members are ABSENT,
+    # not empty: an empty ``providerFingerprint`` would read as "a compile
+    # whose fingerprint was the empty digest". The digest is the same
+    # ``fileContentDigest`` the Tier 2b artifact id is built from (see
+    # ``standardProviderArtifactIdForBinary``), taken here from the bytes on
+    # disk, so on that route it equals the artifact id's suffix.
+    result["providerBinary"] = %context.binaryPath
+    result["providerArtifact"] = %context.artifactId
+    result["providerBinaryContentDigest"] =
+      %fileContentDigest(context.binaryPath)
+    result["providerSnapshot"] = %context.snapshotPath
+    result["providerInvocations"] = %context.invocations
+  of brpkLoweredGraphCache:
+    # No provider ran. The route and the cache file are what is known; the
+    # validated content key that admitted the entry is not handed to the
+    # writer, so it is stated as unavailable rather than calling the path a
+    # key (CLI/build.md: "state ``keyAvailable: false``").
+    result["loweredGraphCache"] = %*{
+      "path": context.loweredGraphCachePath,
+      "keyAvailable": false
+    }
+    result["providerInvocations"] = %0
+  result["cmakeRegenerationActions"] = cmakeRegenerationActions
+  result["actions"] = actions
+  result["trace"] = trace
+  result["workspaceVcs"] = workspaceVcsEvidence.toJson(vcsRecords)
+  result["workspaceVcsObserved"] = %workspaceVcs.isSome
+  result["targetResolution"] = targetResolutionArr
+  result["targetResolutionObserved"] = %targetResolutions.isSome
+  # RA-13: machine-readable resource-authority status (see
+  # ``runQuotaReportJson``).
+  result["runQuota"] = runQuotaReportJson(buildResult.runQuotaBypassed)
+  result["stats"] = statsJson(buildResult.stats)
+
+proc writeBuildReport(path: string; context: BuildReportProviderContext;
+                       cmakeRegenerationResult,
+                       buildResult: BuildRunResult;
+                       workspaceVcs = none(seq[
+                           workspaceVcsEvidence.WorkspaceVcsEvidence]);
+                       targetResolutions =
+                           none(seq[TargetResolutionRecord])) =
+  ## Persist ``buildReportJson`` at ``path``, creating its directory.
+  let root = buildReportJson(context, cmakeRegenerationResult, buildResult,
+    workspaceVcs, targetResolutions)
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), $root)
+
+proc resolveSnapshotTargetSelectors*(snapshot: ProviderGraphSnapshot;
+                                     userSelectors: openArray[string]):
+    tuple[records: seq[TargetResolutionRecord];
+          aliases: DirectTargetAliases] =
+  ## Named-Targets M5: classify every user-supplied selector against the
+  ## snapshot's target-export table, for the build report's
+  ## ``targetResolution`` member, and collect the public direct-target
+  ## aliases the argument-forwarding step needs. Shared by every route that
+  ## writes the full report so that a lowered-graph route reports the same
+  ## classification the compiled route does, from the same rule.
+  result.aliases = DirectTargetAliases(
+    byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  let exportTable = aggregateTargetExportTable(snapshot)
+  var actionIds: seq[string] = @[]
+  var explicitTargets: seq[string] = @[]
+  # **Deferred Item D5** collection-membership view passed to
+  # ``resolveTargetExportSelector`` so the build report's
+  # ``targetResolution`` row for a ``<collection>#<member>``
+  # selector matches what the engine actually executed (instead
+  # of being recorded as ``unknown_target``).
+  var collectionMembers = initTable[string, seq[string]]()
+  var seenAction = initHashSet[string]()
+  var seenExplicit = initHashSet[string]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        let payload = decodeBuildActionPayload(toBytes(node.payload))
+        if not seenAction.containsOrIncl(payload.id):
+          actionIds.add(payload.id)
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let targetDef = decodeBuildTargetPayload(toBytes(node.payload))
+        if not seenExplicit.containsOrIncl(targetDef.name):
+          explicitTargets.add(targetDef.name)
+        considerDirectAlias(result.aliases, targetDef)
+        if targetDef.kind == btkCollection:
+          if collectionMembers.hasKey(targetDef.name):
+            for a in targetDef.actions:
+              if a notin collectionMembers[targetDef.name]:
+                collectionMembers[targetDef.name].add(a)
+          else:
+            collectionMembers[targetDef.name] = targetDef.actions
+  for sel in userSelectors:
+    result.records.add(resolveTargetExportSelector(exportTable,
+      actionIds, explicitTargets, sel, collectionMembers))
 
 const BuildFailureReportSchemaId* = "reprobuild.build.failure-report.v1"
 
@@ -10595,6 +10793,62 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     except CatchableError:
       discard
 
+  proc userTargetSelectors(): seq[string] =
+    ## The selectors the USER named on this invocation (the ``#action``
+    ## fragment and any extra name-shaped positionals), in order, without
+    ## duplicates — what the report's ``targetResolution`` classifies. The
+    ## default action a route picks on the user's behalf is not one of them.
+    if parsedTarget.fragmentKind == tfkActionSelection and
+        parsedTarget.selectedActionId.len > 0:
+      result.add(parsedTarget.selectedActionId)
+    for extra in extraNameSelectors:
+      if extra.len > 0 and result.find(extra) < 0:
+        result.add(extra)
+
+  # The path the full report was written to by this invocation, or "" when
+  # none was. A holder rather than ``result.buildReportPath`` directly because
+  # ``persistFullReport`` is also called from ``runLoweredGraphBuild``, a
+  # nested proc whose own ``result`` is an ``int``; every route copies it
+  # into ``result.buildReportPath`` beside ``inputEvidencePaths``.
+  var writtenBuildReportPath = ""
+
+  proc persistFullReport(context: BuildReportProviderContext;
+                         cmakeRegeneration: BuildRunResult;
+                         buildResult: var BuildRunResult;
+                         targetResolutions:
+                           Option[seq[TargetResolutionRecord]]) =
+    ## PERSIST axis, opt-in full report (CLI/build.md §"Persist" and
+    ## §"Reports from lowered or prebuilt provider routes"). The ONE place
+    ## that decides whether and where the full report is written, called by
+    ## every route that runs the engine over a lowered graph — the
+    ## compiled-provider route and ``runLoweredGraphBuild`` alike.
+    ##
+    ## It existed only on the compiled-provider route, after the point where
+    ## the Tier 2a trycompile-direct and Tier 2b standard-direct routes had
+    ## already returned, so on those routes ``--write-report`` was accepted,
+    ## the build exited 0, and no document was written anywhere
+    ## (reprobuild-pm issue 2026-09-30).
+    ##
+    ## Call it only with a COMPLETED engine result: an engine pass that
+    ## raised or was cancelled never reaches here, and that is deliberate —
+    ## "an exception or cancellation that never produces a completed engine
+    ## result is not synthesized as a successful report".
+    ##
+    ## ``--no-write-report`` wins over ``--write-report``; the absent option
+    ## writes nothing (success) — the failure report is
+    ## ``persistFailureReport``'s, not this proc's.
+    if not reportWillBeWritten:
+      return
+    let reportPath =
+      if reportPersistence.path.len > 0: absolutePath(reportPersistence.path)
+      else: outDir / "build-report.json"
+    let reportStart = statStart(statsEnabled)
+    writeBuildReport(reportPath, context, cmakeRegeneration, buildResult,
+      targetResolutions = targetResolutions)
+    finishStat(buildStats, statsEnabled, "repro report write", reportStart)
+    buildResult.stats = buildStats
+    writtenBuildReportPath = reportPath
+
   proc usesRunQuotaBypass(runResult: BuildRunResult): bool =
     for item in runResult.results:
       if item.launched and item.runQuotaBackend == "runquota-bypass":
@@ -10727,7 +10981,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
   proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
                                           pools: seq[BuildPool]];
-                            selectedActionId: string): int =
+                            selectedActionId: string;
+                            reportContext: BuildReportProviderContext;
+                            cmakeRegeneration: BuildRunResult;
+                            targetResolutions:
+                              Option[seq[TargetResolutionRecord]]): int =
+    ## Run the engine over a graph a route lowered WITHOUT the per-project
+    ## provider compile, and do everything the compiled-provider route does
+    ## with the result — logging, evidence, stats, the failure report AND the
+    ## opt-in full report. ``reportContext`` / ``cmakeRegeneration`` /
+    ## ``targetResolutions`` describe the route for that report; the caller
+    ## knows them, this proc does not.
     if parsedTarget.fragmentKind == tfkActionSelection:
       logSummary("selectedTarget: " & parsedTarget.selectedActionId)
     elif effectiveSelectDefaultAction and selectedActionId.len > 0:
@@ -10916,6 +11180,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
+    # Same point relative to the engine result as the compiled-provider
+    # route: after the completed ``runBuild`` and its totals, before the
+    # action log. See ``persistFullReport``.
+    persistFullReport(reportContext, cmakeRegeneration, buildResult,
+      targetResolutions)
     let actionLogStart = statStart(statsEnabled)
     for item in buildResult.results:
       logAction("action: " & item.id & " status=" & $item.status &
@@ -10929,6 +11198,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         " evidence=depfile:" & $item.depfileInputCount())
       for line in cacheAttributionLines(item):
         logAction(line)
+    if writtenBuildReportPath.len > 0:
+      logSummary("buildReport: " & writtenBuildReportPath)
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
@@ -11114,16 +11385,26 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheSelectedActionId != "\0":
     let loweredCacheStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
+    let loweredCacheFile =
+      loweredGraphCachePath(outDir, cacheSelectedActionId)
     let loweredCache = warmReadFreshLoweredGraphCache(
-      loweredGraphCachePath(outDir, cacheSelectedActionId), modulePath,
+      loweredCacheFile, modulePath,
       result.projectRoot, cacheSelectedActionId, pathEnv, "cmake-pre-provider")
     finishStat(buildStats, statsEnabled, "repro lowered graph cache read",
       loweredCacheStart)
     if loweredCache.isSome:
       logSummary("loweredGraphCache: hit")
+      # The admission guard above (``not reportPersistence.requested``) is
+      # load-bearing and stays: CLI/build.md — "report qualification does not
+      # make an otherwise excluded cache fast path accessible". A report
+      # request therefore never reaches this arm, and the context below only
+      # makes sure that, were it ever admitted, the report would name THIS
+      # route and its cache file rather than borrow another route's record.
       result.exitCode = runLoweredGraphBuild(loweredCache.get(),
-        cacheSelectedActionId)
+        cacheSelectedActionId, loweredGraphCacheReportContext(loweredCacheFile),
+        cmakeRegenerationResult, none(seq[TargetResolutionRecord]))
       result.inputEvidencePaths = collectedInputEvidence
+      result.buildReportPath = writtenBuildReportPath
       return
 
   # Tier 2a fast path: stereotyped CMake try_compile() projects ship a
@@ -11209,8 +11490,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "repro cmake regeneration cache seed", seedStart)
       result.exitCode = 0
       return
-    result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+    # The report names the shipped binary that produced this graph and the
+    # refresh that ran it; the user's selectors are classified only when the
+    # report will be written, since nothing else on this route reads them.
+    let tryCompileTargetResolutions =
+      if reportWillBeWritten:
+        some(resolveSnapshotTargetSelectors(refresh.snapshot,
+          userTargetSelectors()).records)
+      else:
+        none(seq[TargetResolutionRecord])
+    result.exitCode = runLoweredGraphBuild(lowered, selectedActionId,
+      prebuiltProviderReportContext(invocationFastPath,
+        tryCompileProviderBinary, TryCompileProviderArtifactId, refresh),
+      cmakeRegenerationResult, tryCompileTargetResolutions)
     result.inputEvidencePaths = collectedInputEvidence
+    result.buildReportPath = writtenBuildReportPath
     return
 
   let interfacePath = outDir / "project-interface.rbsz"
@@ -11940,8 +12234,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           lowerProviderSnapshot(refresh.snapshot, synthIdentity,
             result.projectRoot, selectorList)
       finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
-      result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+      # See the Tier 2a call above: the actual standard-provider binary and
+      # refresh, and selectors classified only for a report that will exist.
+      let standardTargetResolutions =
+        if reportWillBeWritten:
+          some(resolveSnapshotTargetSelectors(refresh.snapshot,
+            userTargetSelectors()).records)
+        else:
+          none(seq[TargetResolutionRecord])
+      result.exitCode = runLoweredGraphBuild(lowered, selectedActionId,
+        prebuiltProviderReportContext(invocationFastPath,
+          standardProviderBinary, standardProviderArtifactId, refresh),
+        cmakeRegenerationResult, standardTargetResolutions)
       result.inputEvidencePaths = collectedInputEvidence
+      result.buildReportPath = writtenBuildReportPath
       return
     else:
       logSummary("standardDirect: provider binary missing; falling back to " &
@@ -12252,50 +12558,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # on any recipe carrying both shapes the id the engine keyed an action
     # under and the id this code forwarded arguments to could disagree.
     # One implementation, one answer.
-    var publicAliases = DirectTargetAliases(
-      byAction: initTable[string, string](),
-      rankByAction: initTable[string, int]())
-    block computeTargetResolutions:
-      let exportTable = aggregateTargetExportTable(refresh.snapshot)
-      var actionIds: seq[string] = @[]
-      var explicitTargets: seq[string] = @[]
-      # **Deferred Item D5** collection-membership view passed to
-      # ``resolveTargetExportSelector`` so the build report's
-      # ``targetResolution`` row for a ``<collection>#<member>``
-      # selector matches what the engine actually executed (instead
-      # of being recorded as ``unknown_target``).
-      var collectionMembers = initTable[string, seq[string]]()
-      var seenAction = initHashSet[string]()
-      var seenExplicit = initHashSet[string]()
-      for fragment in refresh.snapshot.fragments:
-        for node in fragment.nodes:
-          if node.kind == gnkAction:
-            let payload = decodeBuildActionPayload(toBytes(node.payload))
-            if not seenAction.containsOrIncl(payload.id):
-              actionIds.add(payload.id)
-          elif node.kind == gnkMetadata and
-              node.stableName == "reprobuild.build-target.v1":
-            let targetDef = decodeBuildTargetPayload(toBytes(node.payload))
-            if not seenExplicit.containsOrIncl(targetDef.name):
-              explicitTargets.add(targetDef.name)
-            considerDirectAlias(publicAliases, targetDef)
-            if targetDef.kind == btkCollection:
-              if collectionMembers.hasKey(targetDef.name):
-                for a in targetDef.actions:
-                  if a notin collectionMembers[targetDef.name]:
-                    collectionMembers[targetDef.name].add(a)
-              else:
-                collectionMembers[targetDef.name] = targetDef.actions
-      var userSelectors: seq[string] = @[]
-      if parsedTarget.fragmentKind == tfkActionSelection and
-          parsedTarget.selectedActionId.len > 0:
-        userSelectors.add(parsedTarget.selectedActionId)
-      for extra in extraNameSelectors:
-        if extra.len > 0 and userSelectors.find(extra) < 0:
-          userSelectors.add(extra)
-      for sel in userSelectors:
-        targetResolutions.add(resolveTargetExportSelector(exportTable,
-          actionIds, explicitTargets, sel, collectionMembers))
+    let resolvedSelectors = resolveSnapshotTargetSelectors(refresh.snapshot,
+      userTargetSelectors())
+    targetResolutions = resolvedSelectors.records
+    let publicAliases = resolvedSelectors.aliases
 
     # A named run-edge selector is an export-table name, not necessarily the
     # underlying action id. Forward arguments to the exact action selected by
@@ -12558,17 +12824,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
-    let reportPath =
-      if reportPersistence.path.len > 0: absolutePath(reportPersistence.path)
-      else: outDir / "build-report.json"
-    if reportPersistence.requested and not reportPersistence.suppressed:
-      let reportStart = statStart(statsEnabled)
-      writeBuildReport(reportPath, provider, refresh, providerInvocationCount,
-        cmakeRegenerationResult, providerCompileResult, buildResult,
-        targetResolutions = targetResolutions)
-      finishStat(buildStats, statsEnabled, "repro report write", reportStart)
-      buildResult.stats = buildStats
-      result.buildReportPath = reportPath
+    persistFullReport(
+      compiledProviderReportContext(provider, providerCompileResult,
+        providerArtifactId, refresh, providerInvocationCount),
+      cmakeRegenerationResult, buildResult, some(targetResolutions))
+    result.buildReportPath = writtenBuildReportPath
     let actionLogStart = statStart(statsEnabled)
     for item in buildResult.results:
       logAction("action: " & item.id & " status=" & $item.status &
@@ -12582,8 +12842,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         " evidence=depfile:" & $item.depfileInputCount())
       for line in cacheAttributionLines(item):
         logAction(line)
-    if reportPersistence.requested and not reportPersistence.suppressed:
-      logSummary("buildReport: " & reportPath)
+    if writtenBuildReportPath.len > 0:
+      logSummary("buildReport: " & writtenBuildReportPath)
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
@@ -29569,16 +29829,33 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
   finally:
     releaseAutoRunQuotaProcess(autoRunQuota)
 
+proc reportActionById*(report: JsonNode; actionId: string): Option[JsonNode] =
+  ## The record for ``actionId`` in a full build report, searched in the
+  ## engine's ``actions`` first, then the provider-compile and CMake
+  ## regeneration actions. ``none`` when no member names it.
+  ##
+  ## A member can be legitimately ABSENT: a report from a prebuilt provider
+  ## route carries no ``providerCompileActions`` because nothing was compiled
+  ## (see ``buildReportJson``). ``report{section}`` is then nil, and iterating
+  ## nil is a SIGSEGV that no ``except`` catches, so a missing or non-array
+  ## member is skipped explicitly rather than iterated.
+  if report.isNil or report.kind != JObject:
+    return none(JsonNode)
+  for section in ["actions", "providerCompileActions", "cmakeRegenerationActions"]:
+    let members = report{section}
+    if members.isNil or members.kind != JArray:
+      continue
+    for action in members:
+      if action{"id"}.getStr() == actionId:
+        return some(action)
+  none(JsonNode)
+
 proc latestReportAction(info: BuildGraphInspection; actionId: string): Option[JsonNode] =
   let reportPath = info.outDir / "build-report.json"
   if not fileExists(extendedPath(reportPath)):
     return none(JsonNode)
   try:
-    let report = parseFile(extendedPath(reportPath))
-    for section in ["actions", "providerCompileActions", "cmakeRegenerationActions"]:
-      for action in report{section}:
-        if action{"id"}.getStr() == actionId:
-          return some(action)
+    result = reportActionById(parseFile(extendedPath(reportPath)), actionId)
   except CatchableError:
     return none(JsonNode)
 
