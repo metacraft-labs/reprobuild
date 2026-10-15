@@ -4402,6 +4402,11 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         packageId: "nim-source@2.2.10",
         lockIdentity: "tarball:nim-source@2.2.10:sha256:" &
           BootstrapNimSourceTarballSha256)]
+  # Every record above realizes exactly 2.2.10. Say so, so the selection's
+  # range check (``rawConstraint``'s ``>=2.2 <3.0``) can prove the request
+  # instead of refusing an "unversioned" record.
+  for record in result.tarballProvisioning.mitems:
+    record.detail.version = "2.2.10"
 
 proc bootstrapGccToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -4933,7 +4938,7 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
   ## The tarball package of Nim ``version``'s pinned source archive. Its
   ## declared executable is ``build.sh``: what the tarball edge must find in
   ## the extracted tree for the build edge to run.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim-source@" & version,
     executableName: "nim",
@@ -4946,6 +4951,9 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
       stripComponents: 1,
       packageId: "nim-source@" & version,
       lockIdentity: "tarball:nim-source@" & version & ":sha256:" & sha256)])
+  # The archive IS ``version``. The selection proves ``rawConstraint``'s
+  # ``==version`` against the record, and an unversioned record cannot.
+  result.tarballProvisioning[0].detail.version = version
 
 proc nimSourceBuildEdges*(version, url, sha256, storeRoot, cc,
                           sdkRoot: string): ProvisioningEdges =
@@ -5192,7 +5200,7 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
   ## bootstrap's own Windows Nim this is the same selector, URL, digest and
   ## lock identity as ``bootstrapNimToolUse``, so the two share one
   ## tool-store prefix.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim@" & version,
     executableName: "nim",
@@ -5205,6 +5213,9 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
       stripComponents: 1,
       packageId: "nim@" & version,
       lockIdentity: "tarball:nim@" & version & ":sha256:" & sha256)])
+  # The archive IS ``version``. The selection proves ``rawConstraint``'s
+  # ``==version`` against the record, and an unversioned record cannot.
+  result.tarballProvisioning[0].detail.version = version
 
 type
   PinnedNimRealization* = object
