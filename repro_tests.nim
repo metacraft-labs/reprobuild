@@ -7389,6 +7389,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_dev_env_reextracts_interface_after_lib_source_change.nim",
+    binary: "build/test-bin/t_e2e_dev_env_reextracts_interface_after_lib_source_change",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_runquota_queue_is_loud_and_bounded.nim",
     binary: "build/test-bin/t_e2e_dev_env_runquota_queue_is_loud_and_bounded",
     defines: @[],
