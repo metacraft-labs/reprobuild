@@ -483,7 +483,14 @@
       # ``src/ct_incremental_adapter.nim`` are unchanged; the ``repro.lock``
       # now names trace-format 5b32588b, so ``ct-trace-format-src`` moves
       # with it.
-      url = "github:metacraft-labs/codetracer/272a09ad56612dec9919aa88815c2b01d659150a";
+      #
+      # At 23d5af70f (2026-10-15, the published `agents` tip; 272a09ad5 is an
+      # ancestor) ``config.nims``, ``src/Tuprules.tup``, ``src/ct_test/ct_test.nim``
+      # and ``src/ct_incremental_adapter.nim`` are unchanged. ``repro.nim`` does
+      # change -- it declares the Zstandard headers through the new ``zstd-dev``
+      # selector -- and that revision's ``repro.lock`` names trace-format d8cd2ed5,
+      # so ``ct-trace-format-src`` moves to it in the same step.
+      url = "github:metacraft-labs/codetracer/23d5af70f74765e0717e57aefaa453e3a1c18717";
       flake = false;
     };
 
@@ -587,7 +594,11 @@
       # Moved with ``codetracer-src`` to 5b32588b, the revision CodeTracer
       # 272a09ad5's ``repro.lock`` names (808ffdb4 is an ancestor; refuses a
       # container that carries only some of the interning tables).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/5b32588b28476bc7a45e5c9ba61c088f6c0d2826";
+      # Moved with ``codetracer-src`` to d8cd2ed5, the revision CodeTracer
+      # 23d5af70f's ``repro.lock`` names (5b32588b is an ancestor; extends the
+      # partial-interning-table refusal to every container writer and reads a
+      # MaxRootEntries of 0 as the auto-filled root in every reader).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/d8cd2ed542b9cdd990eef8a1cda5c89b539f8d4e";
       flake = false;
     };
     nim-stew-src = {
