@@ -135,6 +135,13 @@ export certificate_store
 # `repro.nim` `uses:` entry state about a dependency's revision, and the
 # canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
 import repro_cli_support/recipe_constraints
+# HL-11 M2: the H1 / H2 consistency checks (the lock satisfies its recipe; the
+# two locks agree by canonical repository URL), and the one remedy generator
+# for a revision written in `flake.nix` (`flakeRevPinEditRemedy`), which every
+# refusal that sends the operator to `flake.nix` prints.
+import repro_cli_support/lock_consistency
+export lock_consistency.flakeRevPinEditRemedy, lock_consistency.H1Property,
+  lock_consistency.H2Property
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -49361,7 +49368,8 @@ proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
 
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   toolProvisioning: ToolProvisioningMode;
-  allowRegression: seq[string] = @[]; mayWrite = true): FlakeCommitRefresh
+  allowRegression: seq[string] = @[]; mayWrite = true;
+  writeGate: FlakeLockWriteGate = nil): FlakeCommitRefresh
   ## NF-2 — forward declaration. The implementation lives beside the rest of
   ## the flake-coexistence code far below (it needs the NF-1 override-set
   ## machinery); the commit hook that drives it is here.
@@ -50566,7 +50574,8 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string):
 
 proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode; timestamp: string;
-    allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh
+    allowRegression: seq[string]; mayWrite: bool;
+    writeGate: FlakeLockWriteGate = nil): FlakeCommitRefresh
   ## NF-2's `flake.lock` refresh; defined after the dispatcher.
 
 proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
@@ -50605,6 +50614,132 @@ proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
     line.add("; " & plan.warnings.join("; "))
   appendPreCommitLog(workspaceRoot, line)
 
+# ---------------------------------------------------------------------------
+# HL-11 M2 — H1 / H2 at the hooks and in `repro check`
+# (Unified-Locking-And-Hooks.md §16.3)
+#
+# The pure check lives in `repro_cli_support/lock_consistency`. What is here
+# decides WHICH bytes it reads, and that differs by where it runs:
+#
+#   * the `pre-commit` hook reads the INDEX — the tree the commit is about to
+#     record — through the index file of the commit in flight (the managed
+#     body's carrier, or git's own `GIT_INDEX_FILE`; see
+#     `stageRefreshedFlakeLock` for why that has to be asked for). The two
+#     locks are read as the refresh is about to leave them;
+#   * the pre-push gate and `repro check` read `HEAD` — what is being pushed —
+#     so a dirty working tree cannot make a clean push fail or pass.
+#
+# A file the source does not carry is ABSENT for the check: an untracked
+# `flake.lock` is not part of the commit or the push.
+# ---------------------------------------------------------------------------
+
+type
+  ConsistencySource = enum
+    csIndex     ## the index of the commit in flight (`pre-commit`)
+    csHead      ## the `HEAD` commit (pre-push, `repro check`)
+    csWorktree  ## the working tree (a caller with no git state to consult)
+
+proc consistencyGitEnv(source: ConsistencySource): StringTableRef =
+  ## git's environment for reading ``source``: scrubbed of every repository
+  ## binding (the call names its repository with `-C`), plus the in-flight
+  ## index for `csIndex`.
+  result = scrubbedGitRepositoryEnv()
+  if source == csIndex:
+    var indexFile = getEnv(HookGitIndexFileEnv)
+    if indexFile.len == 0:
+      indexFile = getEnv("GIT_INDEX_FILE")
+    if indexFile.len > 0:
+      result["GIT_INDEX_FILE"] =
+        if isAbsolute(indexFile): indexFile else: absolutePath(indexFile)
+
+proc readConsistencyText(repoRoot, rel: string; source: ConsistencySource;
+    gitBinary: string): ConsistencyText =
+  ## One input of the H1 / H2 check, from ``source``.
+  result.path = repoRoot / rel
+  if source == csWorktree or gitBinary.len == 0:
+    if fileExists(extendedPath(result.path)):
+      try:
+        result.text = readFile(extendedPath(result.path))
+        result.present = true
+      except CatchableError:
+        discard
+    return
+  let spec = (if source == csHead: "HEAD:" else: ":") & rel
+  try:
+    # stdout ONLY: the output IS the file. Merging stderr would splice any
+    # benign git diagnostic (a stale commit-graph warning, say) into the
+    # document, and a lock corrupted that way reads as unparseable, which this
+    # check must not confuse with a lock that really is. git's stderr is left
+    # to the hook's own stderr, where the operator sees it.
+    let res = execCmdEx(quoteShell(gitBinary) & " -C " & quoteShell(repoRoot) &
+      " cat-file blob " & quoteShell(spec),
+      options = {poUsePath}, env = consistencyGitEnv(source))
+    if res.exitCode == 0:
+      result.text = res.output
+      result.present = true
+  except CatchableError:
+    discard
+
+proc gatherConsistencyInputs(repoRoot: string; source: ConsistencySource;
+    flakeLockOverride = none(string);
+    reproLockOverride = none(string)): ConsistencyInputs =
+  ## Everything `checkRecipeLockConsistency` reads for the repo at
+  ## ``repoRoot``. ``flakeLockOverride`` / ``reproLockOverride`` replace the
+  ## lock text read from ``source`` with the document a refresh is about to
+  ## write, so the commit is checked as it WILL be recorded.
+  let root = absolutePath(repoRoot)
+  var gitBinary = ""
+  if source != csWorktree:
+    try:
+      gitBinary = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH")).binaryPath
+    except CatchableError:
+      gitBinary = ""
+  result.repoRoot = root
+  result.flakeNix = readConsistencyText(root, "flake.nix", source, gitBinary)
+  result.flakeLock = readConsistencyText(root, "flake.lock", source, gitBinary)
+  result.reproNim = readConsistencyText(root, "repro.nim", source, gitBinary)
+  result.reproLock = readConsistencyText(root, CommittedLockFileName, source,
+    gitBinary)
+  if flakeLockOverride.isSome:
+    result.flakeLock.present = true
+    result.flakeLock.text = flakeLockOverride.get()
+  if reproLockOverride.isSome:
+    result.reproLock.present = true
+    result.reproLock.text = reproLockOverride.get()
+  result.lockPathBase =
+    if result.reproLock.present: committedLockPathBase(root) else: root
+  result.producerVersions = proc (depName, depAbs: string):
+      tuple[found: bool; file: string; entries: seq[ReproVersionEntry]] =
+    ## A producer's `versions:` entries, read from its CHECKOUT: the table
+    ## that says which commit an exact version means lives in the producer's
+    ## recipe, and its checkout is the only copy a hook has.
+    let file = depAbs / "repro.nim"
+    if not fileExists(extendedPath(file)): return
+    try:
+      result = (true, file, reproRecipeVersions(readFile(extendedPath(file))))
+    except CatchableError:
+      discard
+  let gitForRefs = gitBinary
+  result.resolveRef = proc (depAbs, gitRef: string): string =
+    ## A `sourceRevision` that names a ref, resolved in the producer checkout.
+    if gitForRefs.len == 0 or not dirExists(extendedPath(depAbs)): return ""
+    try:
+      let res = execCmdEx(quoteShell(gitForRefs) & " -C " &
+        quoteShell(depAbs) & " rev-parse --verify --quiet " &
+        quoteShell(gitRef & "^{commit}"), options = {poUsePath},
+        env = scrubbedGitRepositoryEnv())
+      if res.exitCode == 0:
+        let rev = res.output.strip()
+        if isExactRevision(rev): return rev
+    except CatchableError:
+      discard
+    ""
+
+proc consistencyFailureEvidence(vs: openArray[ConsistencyViolation]): string =
+  var parts: seq[string]
+  for v in vs: parts.add(v.evidence)
+  parts.join("; ")
+
 proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch pre-commit --repo-root=<repo>`` routes here.
   ##
@@ -50612,9 +50747,11 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## would move a sibling's pin BACKWARD (the checkout is behind the pin, has
   ## diverged from it, or lacks the pinned commit) returns 1, and git refuses
   ## the commit, unless ``REPRO_ALLOW_PIN_REGRESSION`` names that sibling
-  ## (Unified-Locking-And-Hooks.md §13.3, Nix-Flake-Coexistence.md §3.2). Every
-  ## other failure is logged to ``pre-commit-lock.log`` and the commit
-  ## proceeds.
+  ## (Unified-Locking-And-Hooks.md §13.3, Nix-Flake-Coexistence.md §3.2). It
+  ## also returns 1 when the recipe and the locks the commit carries are
+  ## inconsistent (§16.3 H1 / H2, ``checkRecipeLockConsistency``), which no
+  ## variable waives. Every other failure is logged to ``pre-commit-lock.log``
+  ## and the commit proceeds.
   let parsed = parsePostCommitArgs(args)
   let timestamp = isoTimestampNow()
   # The managed hook body cd's to the repo root before dispatching, so an
@@ -50695,12 +50832,53 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
       appendPreCommitLog(workspaceRoot, timestamp & " repro-lock error: " &
         err.msg)
   let reproRefuses = reproPlanned and reproPlan.refused.len > 0
+  # (3) HL-11 H1 / H2 — the recipe and the locks the commit will carry must be
+  # consistent: each lock satisfies its own recipe, and the two locks agree on
+  # every repository both resolve (Unified-Locking-And-Hooks.md §16.3). The
+  # check runs AFTER the refresh, over the locks as the refresh is about to
+  # leave them: the `repro.lock` re-pin is only planned at this point, and the
+  # `flake.lock` refresh asks ``consistencyGate`` with the document it is about
+  # to write. A commit refused here therefore writes and stages neither lock.
+  # There is no escape hatch: neither rule forbids anything an author can
+  # legitimately want, only an internal inconsistency.
+  let plannedReproLock =
+    if reproPlanned and reproPlan.changed:
+      some(reproPlan.text.replace(reproPlan.originalDepsLine,
+        reproPlan.depsLine))
+    else: none(string)
+  var consistency: ConsistencyReport
+  var consistencyChecked = false
+  let consistencyGate: FlakeLockWriteGate = proc (plannedText: string): bool =
+    consistency = checkRecipeLockConsistency(gatherConsistencyInputs(
+      repoRoot, csIndex, some(plannedText), plannedReproLock))
+    consistencyChecked = true
+    not consistency.hasViolations
   var flake: FlakeCommitRefresh
   if hasFlake:
     flake = preCommitFlakeLock(workspaceRoot, repoRoot,
       parsed.toolProvisioning, timestamp, allowance.names,
-      mayWrite = not reproRefuses)
-  let refused = reproRefuses or flake.refused.len > 0
+      mayWrite = not reproRefuses, writeGate = consistencyGate)
+  if not consistencyChecked:
+    # The flake refresh wrote nothing (nothing moved, or it never reached a
+    # write), so the index already holds the `flake.lock` this commit carries.
+    try:
+      consistency = checkRecipeLockConsistency(gatherConsistencyInputs(
+        repoRoot, csIndex, none(string), plannedReproLock))
+    except CatchableError as err:
+      # Not refused here (the pre-push gate re-runs the check over what is
+      # pushed), but never silent: an unchecked commit says so on stderr.
+      stderr.writeLine("repro pre-commit: the recipe/lock consistency " &
+        "(H1/H2) of this commit could not be checked: " & err.msg)
+      appendPreCommitLog(workspaceRoot, timestamp &
+        " lock-consistency error: " & err.msg)
+  let inconsistent = consistency.hasViolations
+  for d in consistency.diagnostics:
+    appendPreCommitLog(workspaceRoot, timestamp & " lock-consistency note: " &
+      d)
+  if consistency.notChecked.len > 0:
+    appendPreCommitLog(workspaceRoot, timestamp &
+      " lock-consistency not checked: " & consistency.notChecked.join(" | "))
+  let refused = reproRefuses or flake.refused.len > 0 or inconsistent
   if reproPlanned:
     preCommitReproLock(workspaceRoot, repoRoot, timestamp, reproPlan,
       apply = not refused)
@@ -50763,17 +50941,30 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # Both refreshes already resolved git to get this far; were it to vanish
     # now, the refusal still stands and only the upstream name is lost.
     discard
-  for line in renderPinRegressionRefusal(regressions, workspaceRoot,
-      identity):
-    stderr.writeLine("repro pre-commit: " & line)
+  if regressions.len > 0:
+    for line in renderPinRegressionRefusal(regressions, workspaceRoot,
+        identity):
+      stderr.writeLine("repro pre-commit: " & line)
+  if inconsistent:
+    # The same paragraphs the pre-push gate prints (`renderConsistencyRefusal`),
+    # one per inconsistency: the files, the recipe line, both values and each
+    # way to restore consistency.
+    stderr.writeLine("repro pre-commit: commit REFUSED: the recipe and the " &
+      "locks this commit carries are inconsistent; nothing was written or " &
+      "staged.")
+    for line in renderConsistencyRefusal(consistency.violations):
+      stderr.writeLine("repro pre-commit: " & line)
+    appendPreCommitLog(workspaceRoot, timestamp & " lock-consistency " &
+      "refused: " & consistencyFailureEvidence(consistency.violations))
   return 1
 
 proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode; timestamp: string;
-    allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh =
+    allowRegression: seq[string]; mayWrite: bool;
+    writeGate: FlakeLockWriteGate = nil): FlakeCommitRefresh =
   try:
     result = refreshFlakeLockAtCommit(workspaceRoot, repoRoot,
-      toolProvisioning, allowRegression, mayWrite)
+      toolProvisioning, allowRegression, mayWrite, writeGate)
   except CatchableError as err:
     # Belt and braces: the refresh already downgrades its own failures, and a
     # raise reaching here would still not be a reason to reject the commit.
@@ -58085,6 +58276,47 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.deferredPublishWrites = deferredParticipation
       result.participation = executeParticipationWrites(deferredParticipation)
       applyParticipationTierPolicy(result)
+
+  # ---- 0. HL-11 H1 / H2: the pushed recipe and locks are consistent -------
+  #
+  # Unified-Locking-And-Hooks.md §16.3. Each lock the pushed revision carries
+  # satisfies its own recipe (H1), and when it carries both a `repro.lock` and
+  # a `flake.lock` they resolve every repository both name — identified by
+  # canonical URL, never by a name — at one revision (H2). Read from `HEAD`,
+  # which is what is being pushed, so the verdict does not depend on whatever
+  # the working tree holds; that is also what lets `repro check` answer it in
+  # a tree with work in progress.
+  #
+  # FIRST, before any stage that compares a lock with a sibling checkout: an
+  # inconsistency inside the pushed revision is a fact about the revision, and
+  # reporting it as a stale sibling (`flake_lock_stale`) would send the
+  # operator to move a checkout that is not the problem. The `pre-commit` hook
+  # refuses the same states; reaching one here means the commit path was
+  # bypassed or the hook was not installed.
+  if parsed.currentRepo.len > 0:
+    var consistency: ConsistencyReport
+    try:
+      consistency = checkRecipeLockConsistency(
+        gatherConsistencyInputs(parsed.currentRepo, csHead))
+    except CatchableError as err:
+      result.notices.add("the recipe/lock consistency of " &
+        parsed.currentRepo & " could not be checked: " & err.msg)
+    for d in consistency.diagnostics: result.notices.add(d)
+    # What the check could not evaluate is named, not left to read as a pass.
+    for n in consistency.notChecked:
+      result.notices.add("recipe/lock consistency not checked: " & n)
+    for rule in [crH1, crH2]:
+      let vs = consistency.violationsOf(rule)
+      if vs.len == 0: continue
+      result.failures.add(CheckFailure(
+        repo: currentRepoPath,
+        property: (if rule == crH1: H1Property else: H2Property),
+        remediation: renderConsistencyRefusal(vs).join(" "),
+        evidence: consistencyFailureEvidence(vs),
+        source: vs[0].recipeFile))
+      result.exitCode = 2
+    if result.exitCode != 0:
+      return
 
   # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
@@ -78727,38 +78959,11 @@ type
     failed*: bool           ## the document itself could not be read as a lock
     diagnostic*: string
 
-proc flakeRevPinFile(flakeRoot: string): string =
-  if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
-
-proc flakeRevPinEditRemedy*(declaredRev, observedRev,
-    flakeRoot: string): string =
-  ## THE single generator for "the remedy here is a FILE EDIT, not a command".
-  ##
-  ## Both halves of the campaign print it: the refresh's own decline notice, and
-  ## NF-3's pre-push refusal over the same input. They are kept on one generator
-  ## for the reason `flakeReconcileCommands` is — the two used to disagree about
-  ## what fixes a row, and the gate named a command the refresh would decline,
-  ## which is the loop this milestone removes.
-  ##
-  ## NOTE for anyone editing this string: backticks are reserved for RUNNABLE
-  ## command lines — `backtickedCommands` lifts every one of them out and the
-  ## cases EXECUTE what they find — and the first step here is an edit to a
-  ## file. It therefore carries no backticks around the edit, and quotes only
-  ## the one thing that really is a command line: the re-lock.
-  ##
-  ## The re-lock is named because the edit ALONE does not clear the disagreement.
-  ## After it, `flake.nix` says one revision and the lock's `original` still says
-  ## the other; nix reconciles that on its next evaluation by re-locking the node
-  ## — moving `original.rev` and `locked.rev` together and computing the new
-  ## `narHash` itself, which is the one part of this no reprobuild command can
-  ## do. `nix flake lock` is that evaluation, asked for explicitly.
-  "change rev=" & declaredRev & " to rev=" & observedRev &
-    " in that input's url in " & flakeRevPinFile(flakeRoot) &
-    " — the revision is the author's statement and lives there, so no refresh " &
-    "can move it — then re-lock the node so flake.lock follows the edit (`nix " &
-    "flake lock" & (if flakeRoot.len > 0: " " & flakeRoot else: "") &
-    "`, or simply re-enter the dev shell), which is also what recomputes its " &
-    "narHash"
+# `flakeRevPinFile` and `flakeRevPinEditRemedy` live in
+# `repro_cli_support/lock_consistency`: the H1 / H2 refusals, which run long
+# before this section, print the same remedy for a revision written in
+# `flake.nix`, and a message generator has to be declared before its first
+# user.
 
 proc flakeDeclinedPinNotice(input, node, declaredRev, observedRev,
     flakeRoot: string): string =
@@ -79147,7 +79352,8 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     allowRegression: seq[string] = @[];
     refuseRegressions = false;
     mayWrite = true;
-    preset = none(FlakeDevelopSelection)): FlakeLockRefreshOutcome =
+    preset = none(FlakeDevelopSelection);
+    writeGate: FlakeLockWriteGate = nil): FlakeLockRefreshOutcome =
   ## The whole NF-2 refresh, from "which inputs are overridden" to "the bytes
   ## on disk". Shared verbatim by the operator verb and the commit hook so the
   ## two cannot diverge.
@@ -79436,16 +79642,25 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       " overridden input(s); not touched; dirt-scope: " &
       result.dirtyScope.join(",")
     return
-  if not mayWrite:
-    # The `repro.lock` re-pin is refusing this commit, and a refused commit
-    # writes nothing — so this refresh reports what it WOULD have recorded and
+  # HL-11: the `pre-commit` hook asks whether the lock this refresh is about
+  # to write keeps the repo consistent (H1 / H2). Asked only when the write
+  # would otherwise happen, with the exact document that would be written.
+  let writeVetoed = mayWrite and not writeGate.isNil and
+    not writeGate(refreshed.text)
+  if not mayWrite or writeVetoed:
+    # The commit is refused — by the `repro.lock` re-pin, or by the H1 / H2
+    # check over the lock this refresh would write — and a refused commit
+    # writes nothing, so this refresh reports what it WOULD have recorded and
     # leaves the file alone.
     var wouldMove: seq[string]
     for r in refreshed.rewrites:
       wouldMove.add(r.input & ": " & r.oldRev & " -> " & r.newRev)
     result.tag = "not-written-commit-refused"
     result.diagnostic = "flake.lock NOT refreshed because the commit is " &
-      "refused for a repro.lock pin regression; it would have recorded " &
+      "refused for " &
+      (if writeVetoed: "a recipe/lock inconsistency (H1/H2)"
+       else: "a repro.lock pin regression") &
+      "; it would have recorded " &
       wouldMove.join("; ") & "; dirt-scope: " & result.dirtyScope.join(",")
     return
   try:
@@ -79623,8 +79838,8 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
 
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode;
-    allowRegression: seq[string] = @[]; mayWrite = true):
-    FlakeCommitRefresh =
+    allowRegression: seq[string] = @[]; mayWrite = true;
+    writeGate: FlakeLockWriteGate = nil): FlakeCommitRefresh =
   ## The commit-path entry point, driven by the managed `pre-commit` hook
   ## (§13.1: an in-tree lock is written "as part of forming the revision").
   ## Returns one log line, whether the file was rewritten, and the lock's path
@@ -79808,7 +80023,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       toolProvisioning, recordDowngrade = false,
       label = flakePreCommitLabel, allowRegression = allowRegression,
       refuseRegressions = true, mayWrite = mayWrite,
-      preset = some(hookFlakeSelection(hookSet, workspaceRoot)))
+      preset = some(hookFlakeSelection(hookSet, workspaceRoot)),
+      writeGate = writeGate)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
     result.changed = outcome.changed
     result.refused = outcome.refused

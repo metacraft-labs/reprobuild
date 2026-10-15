@@ -13761,6 +13761,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_recipe_lock_consistency_refuses.nim",
+    binary: "build/test-bin/t_recipe_lock_consistency_refuses",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim",
     binary: "build/test-bin/t_remote_alignment_never_strips_a_checkouts_remotes",
     defines: @[],
@@ -17561,6 +17570,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_recipe_constraint_reader.nim",
     binary: "build/test-bin/t_recipe_constraint_reader",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_recipe_lock_consistency_check.nim",
+    binary: "build/test-bin/t_recipe_lock_consistency_check",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

@@ -763,6 +763,16 @@ proc admits*(c: ReproUsesConstraint; version: string): bool =
     try: satisfies(parseSemver(version.strip()), c.range)
     except ESemverParse: false
 
+proc isComparableVersion*(version: string): bool =
+  ## Can ``version`` be compared with a range at all? ``admits`` answers false
+  ## both for a version outside the range and for one the grammar cannot read;
+  ## a caller that must tell those apart asks this.
+  try:
+    discard parseSemver(version.strip())
+    true
+  except ESemverParse:
+    false
+
 type
   ReproVersionEntry* = object
     ## One `"<version>":` entry of a recipe's `versions:` block.
@@ -770,6 +780,9 @@ type
     sourceRevision*: string
       ## The literal `sourceRevision`, or "" when absent or not a literal.
     sourceRevisionIsLiteral*: bool
+    sourceRepository*: string
+      ## The literal `sourceRepository` (the repository the version is cut
+      ## from), or "" when absent or not a literal.
     line*: int             ## 1-based line of the `"<version>":` head
 
 proc reproRecipeVersions*(source: string): seq[ReproVersionEntry] =
@@ -816,15 +829,20 @@ proc reproRecipeVersions*(source: string): seq[ReproVersionEntry] =
               line: j + 1))
             current = result.len - 1
         elif current >= 0 and ind > headIndent and
-            s.startsWith("sourceRevision"):
+            (s.startsWith("sourceRevision") or
+             s.startsWith("sourceRepository")):
           let eq = s.find('=')
-          if eq > 0:
+          let key = if eq > 0: s[0 ..< eq].strip() else: ""
+          if eq > 0 and key in ["sourceRevision", "sourceRepository"]:
             let value = s[eq + 1 .. ^1].strip()
             if value.len >= 2 and value[0] == '"':
               let close = value.find('"', 1)
               if close > 0:
-                result[current].sourceRevision = value[1 ..< close]
-                result[current].sourceRevisionIsLiteral = true
+                if key == "sourceRevision":
+                  result[current].sourceRevision = value[1 ..< close]
+                  result[current].sourceRevisionIsLiteral = true
+                else:
+                  result[current].sourceRepository = value[1 ..< close]
         inc j
       i = j
       continue
@@ -840,3 +858,158 @@ proc exactSourceRevision*(c: ReproUsesConstraint;
   for e in producerVersions:
     if e.version == c.exactVersion:
       return (true, e)
+
+# ---------------------------------------------------------------------------
+# repro.nim: `uses:` entries read as TEXT, for the hooks
+# ---------------------------------------------------------------------------
+#
+# A managed hook does not compile the recipe, so it cannot hold the extracted
+# `InterfaceToolUse` list `reproUsesConstraints` reads. What it CAN read
+# without compiling is every constraint the author spelled as a string literal
+# inside a dependency block. That is exactly the set the DSL itself bakes at
+# macro time (`usesEntryAddStmt`): a literal's selector, range and line are
+# known while the macro looks at the node. Anything else the DSL accepts is
+# reported here as not readable rather than guessed:
+#
+# * an entry under a `when`, `if`, `elif`, `else`, `case` or `of` — at ANY
+#   depth, including a dependency block that is itself conditional. A `when`
+#   is a compile-time question (a platform, a define) and an `if` / `case` is
+#   a solver variant gate; whether either arm applies to the committed lock
+#   cannot be answered from the text, so such an entry is `conditional` and
+#   the callers do not check it;
+# * an entry that is not a plain string literal (a `const`, an expression):
+#   the compiler produces that string, and this reader does not.
+
+const
+  ReproDependencyBlockHeads* = ["uses", "buildDeps", "nativeBuildDeps",
+    "runtimeDeps"]
+    ## The DSL's dependency blocks (`macros_a.nim`, `DepKind*`); each one is
+    ## lowered by `lowerUsesBlock`, so each one carries `uses:`-grammar
+    ## constraints.
+
+type
+  ReproUsesDeclaration* = object
+    ## One string-literal entry of a dependency block, as written.
+    constraint*: ReproUsesConstraint
+    rawConstraint*: string ## the literal's text
+    blockHead*: string     ## `uses`, `buildDeps`, …
+    conditional*: bool
+      ## Under a `when` / `if` / `case` arm. Whether it applies to a given lock
+      ## is not decidable from the text; callers skip it.
+
+proc scanReproUsesDeclarations*(source: string; file = ""):
+    seq[ReproUsesDeclaration] =
+  ## Every string-literal entry of every dependency block of a `repro.nim`,
+  ## with its line, read as text. Pure; nothing is compiled or evaluated.
+  ##
+  ## Recognised shapes (the ones `lowerUsesBody` lowers from a literal):
+  ##
+  ##   uses:                       # block form; entries one per line
+  ##     "nim >=2.2 <3.0"
+  ##     policyName:               # a nested policy call: still unconditional
+  ##       "gcc >=12"
+  ##     when defined(macosx):     # conditional: reported, not checked
+  ##       "clang"
+  ##   uses: "reprobuild"          # inline form
+  ##
+  ## Structure is decided by indentation, as Nim's parser decides it: a line
+  ## ending in `:` opens a region that every deeper line belongs to. The scan
+  ## skips comments and the bodies of triple-quoted strings, so a shell script
+  ## inside a `"""` literal cannot open or close a region.
+  type Region = object
+    indent: int
+    conditional: bool
+    head: string           ## the dependency-block head, or ""
+  var stack: seq[Region]
+  var inTriple = false
+  let lines = source.splitLines()
+  proc indentOf(l: string): int =
+    for ch in l:
+      if ch == ' ': inc result
+      else: break
+  proc stripComment(s: string): string =
+    ## The line without a trailing `# …` comment that lies outside a string.
+    var inStr = false
+    var i = 0
+    while i < s.len:
+      let c = s[i]
+      if c == '"':
+        inStr = not inStr
+      elif c == '\\' and inStr:
+        inc i
+      elif c == '#' and not inStr:
+        return s[0 ..< i].strip()
+      inc i
+    s.strip()
+  proc literalAt(s: string): tuple[ok: bool; value: string; rest: string] =
+    ## ``s`` begins with a plain one-line string literal: its value, and what
+    ## follows it.
+    if s.len < 2 or s[0] != '"' or s.startsWith("\"\"\""): return
+    var i = 1
+    var value = ""
+    while i < s.len and s[i] != '"':
+      if s[i] == '\\' and i + 1 < s.len:
+        inc i
+      value.add(s[i])
+      inc i
+    if i >= s.len: return
+    (true, value, s[i + 1 .. ^1].strip())
+  proc enclosingHead(): string =
+    for r in stack:
+      if r.head.len > 0: result = r.head
+  proc enclosingConditional(): bool =
+    for r in stack:
+      if r.conditional: return true
+  for idx, raw in lines:
+    let lineNo = idx + 1
+    if inTriple:
+      if raw.count("\"\"\"") mod 2 == 1: inTriple = false
+      continue
+    let stripped = raw.strip()
+    if stripped.len == 0 or stripped.startsWith("#"): continue
+    let ind = indentOf(raw)
+    while stack.len > 0 and stack[^1].indent >= ind: discard stack.pop()
+    let code = stripComment(stripped)
+    if code.count("\"\"\"") mod 2 == 1:
+      # A triple-quoted string opens here and closes on a later line. Its body
+      # is not code.
+      inTriple = true
+    let head = enclosingHead()
+    if head.len > 0:
+      let lit = literalAt(code)
+      if lit.ok and (lit.rest.len == 0 or lit.rest == ","):
+        result.add(ReproUsesDeclaration(
+          constraint: parseReproUsesConstraint(lit.value, file, lineNo),
+          rawConstraint: lit.value, blockHead: head,
+          conditional: enclosingConditional()))
+        continue
+    # Does this line open a region, and of which kind?
+    let colon = code.find(':')
+    if colon <= 0: continue
+    let word = block:
+      var w = ""
+      for ch in code:
+        if ch in {'a'..'z', 'A'..'Z', '0'..'9', '_'}: w.add(ch)
+        else: break
+      w
+    if word in ReproDependencyBlockHeads and
+        code[word.len .. ^1].strip().startsWith(":"):
+      let after = code[code.find(':') + 1 .. ^1].strip()
+      if after.len == 0:
+        stack.add(Region(indent: ind, head: word))
+      else:
+        # The inline form, `uses: "x"`: one entry on the head's own line.
+        let lit = literalAt(after)
+        if lit.ok and lit.rest.len == 0:
+          result.add(ReproUsesDeclaration(
+            constraint: parseReproUsesConstraint(lit.value, file, lineNo),
+            rawConstraint: lit.value, blockHead: word,
+            conditional: enclosingConditional()))
+      continue
+    if code.endsWith(":"):
+      let conditional = word in ["when", "if", "elif", "else", "case", "of"]
+      stack.add(Region(indent: ind, conditional: conditional))
+    elif word == "case" or word == "if" or word == "when":
+      # `case x.value` with its `of` arms on the following lines at the same
+      # indent: the arms open the regions, but mark the whole statement too.
+      stack.add(Region(indent: ind, conditional: true))

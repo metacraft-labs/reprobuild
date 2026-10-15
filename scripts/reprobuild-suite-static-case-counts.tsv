@@ -1535,6 +1535,7 @@ tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim	n
 tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
+tests/integration/t_recipe_lock_consistency_refuses.nim	nim	3
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
 tests/integration/t_remote_unseal_boot.nim	nim	7
 tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim	nim	6
@@ -1960,6 +1961,7 @@ tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	4
 tests/unit/t_recipe_constraint_reader.nim	nim	32
+tests/unit/t_recipe_lock_consistency_check.nim	nim	17
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_relocation_move_ordering.nim	nim	10
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
