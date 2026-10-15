@@ -11844,6 +11844,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_engine_embeds_the_trees_source_revision.nim",
+    binary: "build/test-bin/t_engine_embeds_the_trees_source_revision",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_entrypoints.nim",
     binary: "build/test-bin/t_entrypoints",
     defines: @[],
@@ -18802,5 +18811,6 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_release_native_packages.py",
   "tests/unit/test_release_smoke_dev_exec.py",
   "tests/unit/test_reprobuild_suite_inventory.py",
+  "tests/unit/test_source_revision.py",
   "tests/unit/test_wrapper_default_provenance.py"
 ]

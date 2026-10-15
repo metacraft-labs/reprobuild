@@ -1322,6 +1322,7 @@ tests/integration/t_edge_attestation_quorum_is_k_of_n.nim	nim	21
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
 tests/integration/t_emulator_is_not_a_verifier_bypass.nim	nim	15
+tests/integration/t_engine_embeds_the_trees_source_revision.nim	nim	1
 tests/integration/t_entrypoints.nim	nim	1
 tests/integration/t_enumerated_directory_evidence_producers.nim	nim	5
 tests/integration/t_env_inheritance_census_is_reported.nim	nim	5
@@ -2100,6 +2101,7 @@ tests/unit/test_publish_surface_routing.py	python	32
 tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	3
 tests/unit/test_reprobuild_suite_inventory.py	python	94
+tests/unit/test_source_revision.py	python	16
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	7

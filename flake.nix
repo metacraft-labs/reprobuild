@@ -1210,10 +1210,12 @@
                 # note at the top of package.nix.
                 inherit version;
                 src = reprobuildSource;
-                # The commit the binaries are built from, embedded by
-                # scripts/build_apps.sh (`ReprobuildSourceRevision`). The
-                # sandbox has no .git, so the flake supplies it; a dirty tree
-                # reports `dirtyRev` (`<sha>-dirty`).
+                # The commit the binaries are built from, embedded as
+                # `ReprobuildSourceRevision` by scripts/build_apps.sh, which
+                # asks scripts/source_revision.sh (the one derivation; the
+                # variable wins over git there). The sandbox has no .git, so
+                # the flake supplies it; a dirty tree reports `dirtyRev`
+                # (`<sha>-dirty`).
                 env = old.env // {
                   REPROBUILD_SOURCE_REVISION = inputs.self.rev or inputs.self.dirtyRev or "";
                 };
