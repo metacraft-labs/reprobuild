@@ -70,13 +70,14 @@
 ## for the monitored helper edges the verb reaches; it is a collaborator here,
 ## not the entry point.
 
-import std/[exitprocs, json, os, posix, strutils, tables, unittest]
+import std/[json, os, posix, strutils, tables, unittest]
 
 import repro_cli_support
 import repro_core/cli_images
 import repro_dsl_stdlib/configurables/variants
 import repro_lock
 import repro_test_support
+import repro_test_support/process_fixtures
 
 const
   DevelopedPackage = "libfoo"
@@ -133,6 +134,11 @@ proc scratchRoot(label: string): string =
   ## `t_lock_list_without_a_build_block` gives for the same choice.
   result = repoRoot() / "build" /
     ("nlf-devrec-" & label & "-" & $getCurrentProcessId())
+  # Removed when THIS process exits, and registered before it is created. An
+  # ``addExitProc`` closure used to walk ``builtScenarios`` at exit, but under
+  # ORC that table is destroyed before exit procs run, so the walk read freed
+  # memory. See ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(result)
   removeDir(result)
   createDir(result)
 
@@ -290,9 +296,8 @@ type
     metadataPath: string  ## the document the verb reported writing
 
 var builtScenarios: Table[string, Scenario]
-  ## Label -> the scenario built for it, populated lazily by `scenario`. Also
-  ## the exit proc's work list, so a scenario no case asked for leaves no
-  ## scratch tree to remove.
+  ## Label -> the scenario built for it, populated lazily by `scenario`, so a
+  ## scenario no case asked for creates no scratch tree.
 
 proc nameTheRealCliForTheEngine() =
   ## Tell the engine which `repro` image to spawn for its monitored helper
@@ -387,13 +392,6 @@ proc variantSibling(): Scenario =
 proc unaskableSibling(): Scenario =
   ## A sibling that declares a variant and has no protocol dispatcher.
   scenario("unaskable", NoPackages, "variants-no-build")
-
-addExitProc(proc () =
-  # Reads the memo rather than the accessors: calling those at exit would
-  # BUILD a scenario in order to delete it.
-  for s in builtScenarios.values:
-    try: removeDir(s.root)
-    except CatchableError: discard)
 
 suite "the engine records the version the override replaced":
   ## `develop_sources.nim` source 1, and the first of its two KNOWN GAPs.

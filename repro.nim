@@ -231,19 +231,28 @@ const
     "libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim",
     "libs/repro_cas_store/tests/t_link_capability_facts.nim",
     "libs/repro_cas_store/tests/t_link_capability_probe.nim",
+    "libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim",
     "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
+    "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
+    "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
     "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
     "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
     "tests/integration/t_leaked_instance_is_reaped.nim",
     "tests/integration/t_measurement_manifest_cross_check.nim",
     "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
+    "tests/integration/t_snp_evidence_reaches_the_verdict.nim",
     "tests/integration/t_snp_expectation_reaches_the_manifest.nim",
+    "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
+    "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
     "tests/integration/t_teardown_runs_on_failure_path.nim",
     "tests/integration/t_verify_e2e_mock.nim",
   ]
     ## The test files that once released their fixtures only in a final
-    ## "teardown" CASE, and so leaked them from every other per-case process.
-    ## Kept in step with the gate's own list by the gate's last case.
+    ## "teardown" CASE, or acquired them at module or suite scope and never
+    ## released them, and so leaked them from every per-case process. Kept in
+    ## step with the gate's own list by the gate's last case. A subject must
+    ## sort BEFORE the gate in `reprobuildTestSpecs`, so that its build edge
+    ## has been collected when the gate's execute edge is emitted.
 
   profileCompileNimSpy = TestGraphArtifact(
     path: "build/test-bin/nim_spy",

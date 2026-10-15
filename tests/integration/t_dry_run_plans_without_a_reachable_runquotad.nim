@@ -65,7 +65,8 @@
 ## platform-independent; what cannot be made deterministic on Windows is the
 ## fault, not the fix.
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, osproc, strutils, unittest]
+import repro_test_support/process_fixtures
 import repro_test_support/reasoned_skip
 
 proc repoRoot(): string =
@@ -101,14 +102,33 @@ package dryRunRunQuotaProbe:
     discard target("greet", greet)
 """
 
-# One project, one action cache and one work root for the whole suite: a build
-# of a fresh project compiles that project's provider first, which costs over a
+# One project, one action cache and one work root per PROCESS, shared by every
+# case that process runs (all of them, in a whole-binary run): a build of a
+# fresh project compiles that project's provider first, which costs over a
 # minute. The control never reaches the engine — it dies at the RunQuota
 # handshake — so it writes nothing the other case could read, and a dry run
 # records no action result, so neither case depends on the other's state.
-let project = createTempDir("repro-dry-run-runquota-", "")
-let cacheRoot = project / "action-cache"
-let workRoot = project / "work"
+#
+# The project is created on first use from inside a case and removed when the
+# process that created it exits. The suite runner runs every case, and its
+# ``--list-json`` probe, in a process of its own; a project created at module
+# scope was created by each of them and removed by none. See
+# ``repro_test_support/process_fixtures``.
+var projectRoot = ""
+
+proc project(): string =
+  if projectRoot.len == 0:
+    let dir = getTempDir() /
+      ("repro-dry-run-runquota-" & $getCurrentProcessId())
+    # Registered before the directory exists, so no window leaves it unowned.
+    releaseDirAtProcessExit(dir)
+    removeDir(dir)
+    createDir(dir)
+    projectRoot = dir
+  projectRoot
+
+proc cacheRoot(): string = project() / "action-cache"
+proc workRoot(): string = project() / "work"
 
 type BuildRun = object
   exitCode: int
@@ -120,7 +140,7 @@ proc unmeetableRunQuota() =
   ## per case rather than once, so a case cannot pass because another one
   ## happened to set it.
   putEnv("RUNQUOTAD_BIN", findExe("false"))
-  putEnv("RUNQUOTA_SOCKET", project / "nothing-serves-this.sock")
+  putEnv("RUNQUOTA_SOCKET", project() / "nothing-serves-this.sock")
   # THE AMBIENT ENVIRONMENT CAN DISABLE WHAT THIS TEST MEASURES, so it is
   # removed rather than hoped about. Both of these make `repro build` skip the
   # handshake for EVERY build, which would leave the control case green
@@ -147,11 +167,11 @@ proc runBuild(extra: openArray[string]): BuildRun =
     args.add(arg)
   args.add(["--tool-provisioning=path", "--daemon=off", "--progress=quiet",
     "--measure=none", "--log=summary",
-    "--action-cache-root=" & cacheRoot, "--work-root=" & workRoot])
+    "--action-cache-root=" & cacheRoot(), "--work-root=" & workRoot()])
   var command = quoteShell(reproBin)
   for arg in args:
     command.add(" " & quoteShell(arg))
-  let res = execCmdEx(command, workingDir = project)
+  let res = execCmdEx(command, workingDir = project())
   BuildRun(exitCode: res.exitCode, output: res.output)
 
 proc explain(run: BuildRun): string =
@@ -187,11 +207,11 @@ suite "repro build --dry-run without a reachable runquotad":
     if missing.len > 0:
       skip(missing)
     else:
-      writeFile(project / "repro.nim", Fixture)
-      createDir(cacheRoot)
-      createDir(workRoot)
+      writeFile(project() / "repro.nim", Fixture)
+      createDir(cacheRoot())
+      createDir(workRoot())
       unmeetableRunQuota()
-      let reportPath = project / "dry-run-report.json"
+      let reportPath = project() / "dry-run-report.json"
       let run = runBuild(["--dry-run", "--write-report=" & reportPath])
       checkpoint(explain(run))
       check run.exitCode == 0
@@ -215,9 +235,9 @@ suite "repro build --dry-run without a reachable runquotad":
     if missing.len > 0:
       skip(missing)
     else:
-      writeFile(project / "repro.nim", Fixture)
-      createDir(cacheRoot)
-      createDir(workRoot)
+      writeFile(project() / "repro.nim", Fixture)
+      createDir(cacheRoot())
+      createDir(workRoot())
       unmeetableRunQuota()
       let run = runBuild(["--dry-run", "--strategy", "lowest"])
       checkpoint(explain(run))
@@ -231,9 +251,9 @@ suite "repro build --dry-run without a reachable runquotad":
     if missing.len > 0:
       skip(missing)
     else:
-      writeFile(project / "repro.nim", Fixture)
-      createDir(cacheRoot)
-      createDir(workRoot)
+      writeFile(project() / "repro.nim", Fixture)
+      createDir(cacheRoot())
+      createDir(workRoot())
       unmeetableRunQuota()
       let run = runBuild([])
       checkpoint(explain(run))
