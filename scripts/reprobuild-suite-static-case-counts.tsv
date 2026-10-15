@@ -186,7 +186,6 @@ libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	19
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
-libs/repro_daemon_core/tests/t_daemon_launchd_label.nim	nim	12
 libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	9
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	6
@@ -260,7 +259,7 @@ libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	13
-libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_windows_monitor_artifacts.nim	nim	9
@@ -273,7 +272,6 @@ libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	394
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
 libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	36
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	9
-libs/repro_home_apply/tests/t_app_bundle_records_route.nim	nim	7
 libs/repro_home_apply/tests/t_builtin_adapter.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	nim	2
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	nim	5
@@ -286,7 +284,6 @@ libs/repro_home_apply/tests/t_builtin_adapter_pre_install_runner.nim	nim	10
 libs/repro_home_apply/tests/t_home_gc.nim	nim	7
 libs/repro_home_apply/tests/t_home_profile_lock.nim	nim	10
 libs/repro_home_apply/tests/t_junction_aware_remove.nim	nim	7
-libs/repro_home_apply/tests/t_macos_archives.nim	nim	11
 libs/repro_home_apply/tests/t_plan_topological_sort.nim	nim	6
 libs/repro_home_apply/tests/t_preview_chain.nim	nim	6
 libs/repro_home_apply/tests/t_realize_honors_adapter_preference.nim	nim	4
@@ -304,7 +301,6 @@ libs/repro_home_apply/tests/test_m69_env_export.nim	nim	11
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	nim	4
 libs/repro_home_generations/tests/t_smoke_home_generations.nim	nim	7
 libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	32
-libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	18
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	5
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	163
@@ -856,8 +852,6 @@ tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim	nim	1
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
-tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	3
-tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim	nim	2
@@ -1218,7 +1212,6 @@ tests/integration/t_develop_selectors_compose_in_fixed_order.nim	nim	1
 tests/integration/t_develop_set_is_union_of_all_backends.nim	nim	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
 tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	nim	2
-tests/integration/t_dry_run_plans_without_a_reachable_runquotad.nim	nim	3
 tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim	nim	12
 tests/integration/t_e2e_cross_compilation_aarch64.nim	nim	2
 tests/integration/t_e2e_engine_shim_removed.nim	nim	2
@@ -1924,7 +1917,7 @@ tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
 tests/unit/t_measurement_axes.nim	nim	17
 tests/unit/t_msi_archive_type.nim	nim	2
-tests/unit/t_nimcache_is_worktree_local.nim	nim	0
+tests/unit/t_nimcache_is_worktree_local.nim	nim	4
 tests/unit/t_nix_daemon_spawn_wait.nim	nim	3
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
 tests/unit/t_nonredistributable_publish_gate.nim	nim	3
@@ -1980,7 +1973,7 @@ tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_generated_artifact_merge_policy.py	python	19
-tests/unit/test_graph_owned_test_artifacts.py	python	24
+tests/unit/test_graph_owned_test_artifacts.py	python	23
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_nix_daemon_descriptors.py	python	5
 tests/unit/test_package_root_anchor.py	python	3
