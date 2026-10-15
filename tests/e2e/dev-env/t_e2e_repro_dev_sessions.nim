@@ -163,7 +163,7 @@ proc writeReadinessFixture(dir: string; sleepSeconds: int;
   ]))
 
 proc writeStubbornStopFixture(dir: string; services: int) =
-  ## ``services`` services that each IGNORE SIGTERM and therefore burn the
+  ## ``services`` services that each trap SIGTERM away and therefore burn the
   ## supervisor's whole per-service stop grace before it reaches ``kill()``.
   ##
   ## Nothing here is a stub: these are real `sh` processes with a real
@@ -1272,7 +1272,7 @@ suite "e2e_repro_dev_sessions":
       # the start side's defect, one command over. `stopServices` stops
       # services ONE AT A TIME, in reverse, and allows each one
       # `DevSessionServiceStopGraceMs` (3000) between `terminate()` and
-      # `kill()`. Four services that ignore SIGTERM therefore cost the
+      # `kill()`. Four services that trap SIGTERM away therefore cost the
       # supervisor about twelve seconds of work it is entitled to, and
       # `repro down` used to abandon that at 10000 ms and report a timeout
       # for a session that stops correctly.
