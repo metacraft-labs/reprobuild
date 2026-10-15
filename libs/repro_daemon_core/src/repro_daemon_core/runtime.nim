@@ -828,9 +828,7 @@ proc releaseUserDaemonLock(lock: var UserDaemonLock) =
   lock.held = false
 
 proc statusPath(config: UserDaemonConfig): string =
-  config.stateDir / "status" /
-    (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
-      ".status")
+  statusFileForEndpoint(config.stateDir, config.endpoint)
 
 proc sessionRecordsDir(config: UserDaemonConfig): string =
   config.stateDir / "sessions"
@@ -1374,6 +1372,25 @@ proc removeEndpointFiles(config: UserDaemonConfig) =
   try: removeFile(config.endpoint) except OSError: discard
   removeStatusFile(config)
 
+proc removeLegacyStatusFile(config: UserDaemonConfig): bool =
+  ## Remove the record an older-generation daemon for ``config.endpoint``
+  ## left behind when it died uncleanly. That generation keyed the record on
+  ## the endpoint BASENAME, so the file at the legacy name may belong to any
+  ## same-basename endpoint, possibly a live one; it is removed only when its
+  ## ``endpoint=`` line names this endpoint exactly, and only from the posix
+  ## stale gate below (the endpoint refuses connections). The normal exit
+  ## path never touches it.
+  let legacy = config.stateDir / "status" /
+    (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
+      ".status")
+  try:
+    if fileExists(legacy) and
+        ("endpoint=" & config.endpoint) in readFile(legacy).splitLines():
+      removeFile(legacy)
+      result = true
+  except CatchableError:
+    discard
+
 proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
   ## Remove stale discovery files only when the endpoint does not accept a raw
   ## connection. A protocol-incompatible but live daemon must keep its state.
@@ -1389,6 +1406,8 @@ proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
     if not accepts:
       if fileExists(statusPath(config)):
         removeStatusFile(config)
+        result = true
+      if removeLegacyStatusFile(config):
         result = true
   else:
     if fileExists(statusPath(config)):
@@ -2883,14 +2902,6 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
     result.add("--state-root")
     result.add(config.leaseStoreRoot)
 
-proc endpointNameDigest(config: UserDaemonConfig): string =
-  ## The digest that makes a service-manager name identify the WHOLE
-  ## endpoint: 16 hex characters (64 bits) of blake3 over the endpoint string
-  ## VERBATIM. Shared by ``launchdLabel`` and ``systemdUnitName`` so the two
-  ## platforms cannot drift apart; ``systemdUnitName``'s docstring carries the
-  ## reasoning for each of those choices.
-  blake3.digest(config.endpoint).toHex()[0 ..< 16]
-
 proc legacyLaunchdLabel(config: UserDaemonConfig): string =
   ## The label binaries before the endpoint-keyed naming registered: the
   ## endpoint's basename alone. Kept only so the launcher and the cleanup can
@@ -2923,7 +2934,7 @@ proc launchdLabel*(config: UserDaemonConfig): string =
   ##
   ## Exported so a second derivation -- a test teardown -- asks for the name
   ## instead of restating it.
-  legacyLaunchdLabel(config) & "-" & endpointNameDigest(config)
+  legacyLaunchdLabel(config) & "-" & endpointDigest(config.endpoint)
 
 proc launchdPlistPath*(config: UserDaemonConfig): string =
   ## Where the launcher writes the plist for ``launchdLabel(config)``; it
@@ -3156,8 +3167,9 @@ proc systemdUnitName*(config: UserDaemonConfig): string =
   ## is not a risk worth a longer name. The result is bounded well under
   ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
   ## ``sun_path`` (108 bytes).
-  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
-    "-" & endpointNameDigest(config) & ".service"
+  ##
+  ## The key is ``endpointInstanceKey``, which the status record shares.
+  "repro-daemon-" & endpointInstanceKey(config.endpoint, "user") & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =

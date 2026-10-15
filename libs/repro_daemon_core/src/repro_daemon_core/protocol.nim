@@ -1,6 +1,7 @@
 import std/[os, sets, strutils, times]
 
 import repro_core
+import blake3
 
 import ./ipc
 export ipc
@@ -421,9 +422,37 @@ proc defaultUserDaemonEndpoint*(): string =
 proc defaultUserDaemonLogPath*(): string =
   userDaemonStateDir() / "logs" / "repro-daemon.log"
 
-proc statusFileForEndpoint*(endpoint: string): string =
-  userDaemonStateDir() / "status" /
-    (safePathSegment(endpoint.extractFilename, "repro-daemon") & ".status")
+proc endpointDigest*(endpoint: string): string =
+  ## The part of a per-daemon name that identifies the WHOLE endpoint: 16 hex
+  ## characters (64 bits) of blake3 over the endpoint string VERBATIM. The
+  ## one digest behind every such name -- the status record
+  ## (``endpointInstanceKey``), the systemd unit and the launchd label
+  ## (``systemdUnitName``, ``launchdLabel``) -- so they cannot drift apart.
+  ## ``systemdUnitName``'s docstring carries the reasoning for the width and
+  ## for hashing verbatim.
+  blake3.digest(endpoint).toHex()[0 ..< 16]
+
+proc endpointInstanceKey*(endpoint, fallback: string): string =
+  ## ``<readable basename>-<endpointDigest>``: the name of per-daemon objects
+  ## that live in a namespace shared by several daemons
+  ## (``systemdUnitName``, ``statusFileForEndpoint``).
+  ##
+  ## KEYED ON THE WHOLE ENDPOINT. Endpoints sit in per-run scratch
+  ## directories precisely because the basename is not unique, so a name
+  ## built from ``extractFilename`` alone is shared by every ``d.sock``. The
+  ## basename is kept in front for the human reader. See ``systemdUnitName``
+  ## for the measured failure.
+  safePathSegment(endpoint.extractFilename, fallback) & "-" &
+    endpointDigest(endpoint)
+
+proc statusFileForEndpoint*(stateDir, endpoint: string): string =
+  ## The daemon status record for ``endpoint`` under ``stateDir``. The ONE
+  ## derivation: the daemon writes, removes and stale-cleans its record
+  ## through it. It takes the state directory rather than defaulting to
+  ## ``userDaemonStateDir()``, because that default is how a reader once
+  ## disagreed with a daemon started with ``--state-dir``.
+  stateDir / "status" / (endpointInstanceKey(endpoint, "repro-daemon") &
+    ".status")
 
 proc binaryIdentity*(name, path, version: string): BinaryIdentity =
   result = BinaryIdentity(name: name, path: path, version: version)
