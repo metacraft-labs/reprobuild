@@ -508,7 +508,19 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
       c.reapCaseProcesses()
       try: removeDir(c.tempRoot) except OSError, IOError: discard
 
-  test "the owner materialises, the consumer attaches and deposits, the owner applies":
+  # ONE PROCESS PER CASE. The suite runner executes every case in a process
+  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
+  # FRESH fixture and daemon in `setup` above. The cases below are one
+  # scenario told in steps, and a later step asserts on state an earlier
+  # step created -- so each step is a template, and a case first REPLAYS the
+  # earlier steps its state depends on, assertions and all, then runs its
+  # own. Run alone, a case therefore measures exactly what it measured as
+  # part of the sequence; a prerequisite step that fails fails the dependent
+  # case too, at that step's own assertion, rather than letting it pass or
+  # fail on a fixture it never built.
+
+  template ownerAppliesTheConsumersContribution() =
+    # The steps of case "the owner materialises, the consumer attaches and deposits, the owner applies".
     # STEP 1 -- the owner's `repro up` materialises the instance and
     # registers its own member. One process.
     let ownerFirst = ownerUp(c)
@@ -575,7 +587,8 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     # THROUGH THE RESOLVER: the owner's own registration is untouched.
     check mintedFor(applied, OwnerMember) == ownerMinted
 
-  test "a second member from the same consumer lands without re-minting the first":
+  template secondMemberLandsWithoutReminting() =
+    # The steps of case "a second member from the same consumer lands without re-minting the first".
     # The same consumer's recipe grows a member. Its deposit REPLACES its
     # own rows and leaves the owner's registration byte-identical.
     let before = c.registrationSet
@@ -618,7 +631,8 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     check mintedFor(applied, SecondConsumerMember).len > 0
     check contributorFor(applied, SecondConsumerMember) == ConsumerPackage
 
-  test "the owner's definition moved and its artifact did not: a STALE LIFT":
+  template staleLiftIsRefused() =
+    # The steps of case "the owner's definition moved and its artifact did not: a STALE LIFT".
     # Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION,
     # measured END TO END THROUGH THE REAL CLI, against a real owner
     # whose recipe has just been edited.
@@ -654,7 +668,8 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     check c.contributionSet.contributions.len == 1
     check memberCount(c.registrationSet) == 3
 
-  test "a contribution to a point the RUNNING instance does not declare is refused":
+  template undeclaredPointIsRefused() =
+    # The steps of case "a contribution to a point the RUNNING instance does not declare is refused".
     # THE VERSION-SKEW CASE, measured rather than simulated.
     #
     # The instance is still the one materialised from the owner's recipe
@@ -714,3 +729,20 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     # withdraw what was already registered.
     check mintedFor(c.registrationSet, SkewMember).len == 0
     check memberCount(c.registrationSet) == 3
+
+  test "the owner materialises, the consumer attaches and deposits, the owner applies":
+    ownerAppliesTheConsumersContribution()
+
+  test "a second member from the same consumer lands without re-minting the first":
+    ownerAppliesTheConsumersContribution()
+    secondMemberLandsWithoutReminting()
+
+  test "the owner's definition moved and its artifact did not: a STALE LIFT":
+    ownerAppliesTheConsumersContribution()
+    secondMemberLandsWithoutReminting()
+    staleLiftIsRefused()
+
+  test "a contribution to a point the RUNNING instance does not declare is refused":
+    ownerAppliesTheConsumersContribution()
+    secondMemberLandsWithoutReminting()
+    undeclaredPointIsRefused()
