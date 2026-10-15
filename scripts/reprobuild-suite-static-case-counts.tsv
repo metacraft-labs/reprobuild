@@ -470,7 +470,7 @@ libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_module_imports.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	nim	11
 libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	95
-libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	29
+libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	30
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	32

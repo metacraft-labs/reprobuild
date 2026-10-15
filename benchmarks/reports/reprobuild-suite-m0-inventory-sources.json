@@ -1948,7 +1948,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 319,
+          "line": 320,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -1964,7 +1964,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 335,
+          "line": 336,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -1980,7 +1980,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 340,
+          "line": 341,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -1996,7 +1996,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 343,
+          "line": 344,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3240,7 +3240,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 193,
+          "line": 194,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3256,7 +3256,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 230,
+          "line": 231,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3272,7 +3272,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 237,
+          "line": 238,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3288,7 +3288,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 260,
+          "line": 261,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3304,7 +3304,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 290,
+          "line": 291,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3320,7 +3320,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 299,
+          "line": 300,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -15744,13 +15744,14 @@
         "repro_core",
         "repro_profile",
         "repro_profile_compile",
-        "repro_profile_intent"
+        "repro_profile_intent",
+        "repro_test_support"
       ],
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 29,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
