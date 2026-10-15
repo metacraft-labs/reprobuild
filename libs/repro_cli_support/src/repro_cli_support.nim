@@ -48454,10 +48454,14 @@ proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
       let fields = rawLine.split('\t')
       if fields.len != 2 or fields[0] != "A":
         return (false, "backend ahead chain is not additions-only at " &
-          commit & ": " & rawLine)
+          commit & ": " & rawLine & "; every ahead commit must consist " &
+          "solely of additions of canonical lock records under locks/")
       let path = fields[1]
       if not pathIsUnderLocks(path):
-        return (false, "backend ahead chain touches outside locks/: " & path)
+        return (false, "backend ahead commit " & commit &
+          " touches outside locks/: " & path &
+          "; every ahead commit must consist solely of additions of canonical " &
+          "lock records under locks/")
       var exact = none(ExpectedLockRecord)
       for item in expected:
         if item.relPath == path:
@@ -62554,23 +62558,32 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
     result.diagnostic = "lock backend is divergent from " &
       upstream.target.display & "; refusing before source publication"
     return
-  let prefix = verifiedExpectedPrefixAt(identity, plan, localOid)
-  if not prefix.ok:
-    result.diagnostic = "unverified lock backend ahead chain: " &
-      prefix.diagnostic
-    return
+  # Inspect the actual unpublished changes before interpreting HEAD's record
+  # prefix. Otherwise an ordinary backend commit can be blamed on an unrelated
+  # record already present upstream, or hidden by the absence of any prefix.
   let ahead = verifyLockOnlyAheadChain(identity, plan.root, fetched.oid,
     localOid, plan.expected, requireAllExpected = false,
-    # A partial recovery is operation-scoped and must contain only its verified
-    # prefix. A fully materialized routed operation can legitimately include
-    # earlier canonical refresh records for the same backend (its post-commit
-    # hooks write one immutable record per observed source generation).
-    rejectUnexpected = prefix.records.len < plan.expected.len,
     restrictToExpectedCoordinates = true)
   if not ahead.ok:
     result.diagnostic = "unverified lock backend ahead chain: " &
       ahead.diagnostic
     return
+  let prefix = verifiedExpectedPrefixAt(identity, plan, localOid)
+  if not prefix.ok:
+    result.diagnostic = "unverified lock backend ahead chain: " &
+      prefix.diagnostic
+    return
+  if prefix.records.len < plan.expected.len:
+    # A partial recovery remains operation-scoped: it may contain only this
+    # operation's exact prefix. Fully materialized operations may also include
+    # earlier canonical refresh records for the same backend coordinates.
+    let scoped = verifyLockOnlyAheadChain(identity, plan.root, fetched.oid,
+      localOid, plan.expected, requireAllExpected = false,
+      rejectUnexpected = true, restrictToExpectedCoordinates = true)
+    if not scoped.ok:
+      result.diagnostic = "unverified lock backend ahead chain: " &
+        scoped.diagnostic
+      return
   let proof = verifyExpectedRecordCoordinatesAt(identity, plan.root, localOid,
     prefix.records)
   if not proof.ok:

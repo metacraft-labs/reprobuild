@@ -1647,7 +1647,7 @@ tests/integration/t_repro_cli_input_matches_declared_output.nim	nim	2
 tests/integration/t_repro_core_binary_roundtrip.nim	nim	3
 tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim	nim	1
 tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim	nim	2
-tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	nim	21
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	nim	22
 tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim	nim	3
 tests/integration/t_repro_reap_verb_is_dispatched.nim	nim	3
 tests/integration/t_repro_runtime_dlopen_without_library_path.nim	nim	4
