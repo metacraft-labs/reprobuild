@@ -567,19 +567,38 @@ proc clientIdFromArgv(project: string): string =
     "no `--client-id` on the argv of " & project & ": " & $argv)
 
 suite "L9 F5 — two sessions read one instance's minted identifier":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
+  # Prepared on the first case's `setup`, NOT in the suite body. The suite
+  # body runs at registration, in every process this binary starts --
+  # including `--list` / `--list-json`, which only enumerates and is run
+  # from a scratch working directory. Preparing here made enumeration
+  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
+  # no case was listed) and start a daemon just to print case names. The
+  # runner executes each case in its own process, so a case still prepares
+  # the fixture and starts the daemon exactly once, and the deferred
+  # cleanup below still runs in that process -- only if a case prepared.
+  var prepared = false
+  var c: F5Case
+  var daemon: owned(Process)
+
+  setup:
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
+
   defer:
-    for project in [c.issuerConsumer, c.devConsumer]:
-      discard c.runRepro(project, @["down", "--activity=" & ConsumerActivity])
-    for project in [c.issuerOwner, c.devOwner]:
-      discard c.runRepro(project, @["down", "--activity=" & Activity])
-    c.closeDaemon(daemon)
-    # REAP BEFORE THE TREE IS REMOVED and AFTER the daemon is closed: the
-    # daemon's own argv names this case's `tempRoot`, so an earlier sweep
-    # would kill it out from under the graceful `repro down` calls.
-    c.reapCaseProcesses()
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+    if prepared:
+      for project in [c.issuerConsumer, c.devConsumer]:
+        discard c.runRepro(project,
+          @["down", "--activity=" & ConsumerActivity])
+      for project in [c.issuerOwner, c.devOwner]:
+        discard c.runRepro(project, @["down", "--activity=" & Activity])
+      c.closeDaemon(daemon)
+      # REAP BEFORE THE TREE IS REMOVED and AFTER the daemon is closed: the
+      # daemon's own argv names this case's `tempRoot`, so an earlier sweep
+      # would kill it out from under the graceful `repro down` calls.
+      c.reapCaseProcesses()
+      try: removeDir(c.tempRoot) except OSError, IOError: discard
 
   test "the instance is not running: the resolver refuses by name":
     # The owner's interface is LIFTED and no instance is materialised.

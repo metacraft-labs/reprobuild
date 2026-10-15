@@ -478,18 +478,38 @@ proc isLowerHex(value: string): bool =
       return false
 
 suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's argv":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
+  # Prepared on the first case's `setup`, NOT in the suite body. The suite
+  # body runs at registration, in every process this binary starts --
+  # including `--list` / `--list-json`, which only enumerates and is run
+  # from a scratch working directory. Preparing here made enumeration
+  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
+  # no case was listed) and start a daemon just to print case names. The
+  # runner executes each case in its own process, so a case still prepares
+  # the fixture and starts the daemon exactly once, and the deferred
+  # cleanup below still runs in that process -- only if a case prepared.
+  var prepared = false
+  var c: Dss72Case
+  var daemon: owned(Process)
+
+  setup:
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
+
   defer:
-    discard c.runRepro(c.offlineProject, @["down", "--activity=" & Activity])
-    discard c.runRepro(c.issuerProject, @["down", "--activity=" & Activity])
-    c.closeDaemon(daemon)
-    # REAP AFTER `closeDaemon` -- the daemon's own argv names this case's
-    # tempRoot, so the sweep would otherwise kill it out from under the
-    # graceful `repro down` calls above -- and BEFORE the tree is removed,
-    # because the path is the identity witness.
-    c.reapCaseProcesses()
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+    if prepared:
+      discard c.runRepro(c.offlineProject,
+        @["down", "--activity=" & Activity])
+      discard c.runRepro(c.issuerProject,
+        @["down", "--activity=" & Activity])
+      c.closeDaemon(daemon)
+      # REAP AFTER `closeDaemon` -- the daemon's own argv names this case's
+      # tempRoot, so the sweep would otherwise kill it out from under the
+      # graceful `repro down` calls above -- and BEFORE the tree is removed,
+      # because the path is the identity witness.
+      c.reapCaseProcesses()
+      try: removeDir(c.tempRoot) except OSError, IOError: discard
 
   test "A: with NO issuer configured the stack comes up on a MARKED development id":
     # THE OFFLINE CONTROL. §7.2 keeps the development registrar as the
