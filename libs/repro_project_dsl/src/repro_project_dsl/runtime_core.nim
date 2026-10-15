@@ -2709,6 +2709,73 @@ proc resolveCertificateExports*(owningPackage: string;
     if implicitEntry.name.len > 0:
       result.entries.add(implicitEntry)
 
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9b — ``enactCertificatePolicy <policy>``.
+#
+# Test-Certificates.md §"The policy declaration": a repository adopts a shared
+# branch policy by enacting it in its ``repro.nim``. The ``package`` macro
+# lowers the statement to ``registerEnactedCertificatePolicy`` at module
+# initialisation (and checks the policy's literal requirements at compile
+# time, ``emitEnactedCertificatePolicy``). What is registered here reaches the
+# CLI two ways, both carrying ``renderCertificatePolicyEmission``'s text:
+#
+# * written to ``$REPRO_EMIT_CERTIFICATE_POLICY`` when the recipe runs as the
+#   main module of a provider, which is how ``repro lock refresh`` and the
+#   staleness checks read it without building anything;
+# * as a ``reprobuild.certificate-policy.v1`` metadata node of the package's
+#   graph fragment (``buildPackageFragment``), which is how a certifying run's
+#   lock-update node reads it from the graph it already evaluated.
+# ---------------------------------------------------------------------------
+
+var enactedCertificatePolicies: seq[tuple[packageName: string;
+                                          policy: BranchCertificatePolicy]]
+  ## Every policy enacted by a package compiled into this provider, keyed by
+  ## the enacting package.
+var emittedCertificatePolicyPackage = ""
+  ## The main-module package whose policy was written to the emission file.
+
+proc registerEnactedCertificatePolicy*(packageName: string;
+                                       policy: BranchCertificatePolicy;
+                                       mainModule: bool) {.dynOrStatic.} =
+  ## Record ``packageName``'s enacted policy and, for the provider's main
+  ## module only, write it to ``$REPRO_EMIT_CERTIFICATE_POLICY``. A recipe
+  ## imported from a sibling (``uses:``) is not the main module, so a
+  ## sibling's own policy never reaches this repository's lock.
+  ##
+  ## The write is EAGER, at registration, for the reason
+  ## ``LockFilesEmitEnvVar`` documents: an exit proc that reads module
+  ## globals runs after they are destroyed.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      raise newException(ValueError, "package '" & packageName &
+        "' enacts a certificate policy twice")
+  enactedCertificatePolicies.add((packageName: packageName, policy: policy))
+  if not mainModule:
+    return
+  let path = getEnv(CertificatePolicyEmitEnvVar)
+  if path.len == 0:
+    return
+  if emittedCertificatePolicyPackage.len > 0 and
+      emittedCertificatePolicyPackage != packageName:
+    # repro.lock carries one policy per repository; two enacting packages
+    # in one recipe would make which one it records an accident of order.
+    raise newException(ValueError, "packages '" &
+      emittedCertificatePolicyPackage & "' and '" & packageName &
+      "' both enact a certificate policy in one recipe; repro.lock " &
+      "records one policy per repository, so enact it in one package")
+  emittedCertificatePolicyPackage = packageName
+  writeFile(path, renderCertificatePolicyEmission(policy, packageName))
+
+proc enactedCertificatePolicy*(packageName: string;
+                               policy: var BranchCertificatePolicy): bool
+    {.dynOrStatic.} =
+  ## The policy ``packageName`` enacts, if any.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      policy = entry.policy
+      return true
+  false
+
 proc resetStateGroupRegistry*() {.dynOrStatic.} =
   ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the
   ## collected named resource subgraphs.

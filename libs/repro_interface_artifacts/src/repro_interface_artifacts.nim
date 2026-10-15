@@ -5609,12 +5609,35 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     return none(ProjectInterfaceArtifact)
   processWarmInterfaceStats.metadataRevalidatedReproLibs +=
     cached.reproLibStamps.len
-  if cached.reproLibStamps != restampRecordedInputs(cached.reproLibStamps):
+  # Inside a ``beginReproLibSourcesScope`` (a dev-env computation) the library
+  # stamps were already taken once for this computation, by the fingerprint
+  # memo and the provider freshness check. Compare against THAT list rather
+  # than stat-ing every recorded path a second time: it is the same stamp
+  # check, it is free here, and because it is a fresh walk it also notices a
+  # library source that was added or removed, which re-stamping only the
+  # recorded paths cannot. Outside a scope nothing has walked the tree yet, so
+  # re-stamping the recorded paths stays the cheaper question.
+  let currentLibStamps =
+    if reproLibScopeDepth > 0: reproLibStampsForCache(context.workDir)
+    else: restampRecordedInputs(cached.reproLibStamps)
+  if cached.reproLibStamps != currentLibStamps:
     return none(ProjectInterfaceArtifact)
   try:
-    let artifact = readInterfaceArtifactWithWarm(artifactPath)
-    if artifact.interfaceFingerprint != cached.inputFingerprint:
+    # The record describes the artifact on disk only if the extraction that
+    # wrote the record also wrote the artifact. Both sidecars are written
+    # together, after the artifact, under the same INPUT fingerprint, so the
+    # ``.inputs`` sidecar is what ties the three together. This used to
+    # compare ``artifact.interfaceFingerprint`` instead, but that is the
+    # SEMANTIC digest of the extracted interface (an output), which never
+    # equals the input fingerprint: every metadata lookup missed and fell
+    # through to re-hashing the whole source closure, sibling sources
+    # included, so an unrelated file created beside the recipe re-extracted
+    # the interface and rebuilt the provider.
+    let cachePath = interfaceExtractionCachePath(artifactPath)
+    if readFile(extendedPath(cachePath)).strip() !=
+        toHex(cached.inputFingerprint.bytes):
       return none(ProjectInterfaceArtifact)
+    let artifact = readInterfaceArtifactWithWarm(artifactPath)
     if not lookup.warmHitAccounted:
       inc processWarmInterfaceStats.metadataWarmHits
     return some(artifact)
