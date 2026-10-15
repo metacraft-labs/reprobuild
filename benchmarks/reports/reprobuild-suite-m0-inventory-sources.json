@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 32,
-    "nimTestBinaries": 2068,
+    "nimTestBinaries": 2069,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
-    "staticallyDetectedRuntimeCompilerFlowTests": 119,
-    "testEntries": 2087
+    "staticallyDetectedRuntimeCompilerFlowTests": 120,
+    "testEntries": 2088
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1276,7 +1276,7 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 17,
+      "graph-fixture": 18,
       "integration": 1114,
       "platform/destructive": 126,
       "pure unit": 646,
@@ -1476,9 +1476,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2068,
+    "nimTestBinaryCount": 2069,
     "pythonTestFileCount": 19,
-    "testEntryCount": 2087
+    "testEntryCount": 2088
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1621,6 +1621,46 @@
         }
       ],
       "source": "libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "probe",
+            "r",
+            "source",
+            "tempRoot"
+          ],
+          "line": 154,
+          "path": "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim",
+          "patterns": [
+            "nim-c"
+          ],
+          "snippet": "\"nim c -r --hints:off --warnings:off --path:\" &"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "probe",
+            "r",
+            "source",
+            "tempRoot"
+          ],
+          "line": 225,
+          "path": "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim",
+          "patterns": [
+            "nim-check"
+          ],
+          "snippet": "execCmdEx(\"nim check --hints:off --warnings:off --path:\" &"
+        }
+      ],
+      "source": "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim"
     },
     {
       "class": "graph-fixture",
@@ -12611,6 +12651,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_homebrew_bridge_records",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_junction_aware_remove",
       "class": "unclassified",
       "classificationReason": "spawns a subprocess",
@@ -13208,8 +13267,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

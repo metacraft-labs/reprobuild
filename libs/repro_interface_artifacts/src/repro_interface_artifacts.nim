@@ -609,6 +609,21 @@ type
     lockIdentity*: string
     location*: SourceLocation
 
+  InterfaceHomebrewProvisioning* = object
+    ## A Homebrew bridge record (``HomebrewProvisioningDef``): the cask or
+    ## formula that installs the target package outside Reprobuild. Carried
+    ## in ``InterfaceProvisioningContribution.homebrewProvisioning`` ONLY --
+    ## ``toProjectInterface`` never adds it to a tool use's realization
+    ## candidates, so no selection can pick it (reprobuild-pm spec
+    ## Provisioning-Contributions.md §"Homebrew bridge records").
+    packageName*: string
+    contributor*: string
+    kind*: string
+      ## ``"cask"`` or ``"formula"``.
+    token*: string
+    tap*: string
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -629,6 +644,8 @@ type
     nixProvisioning*: seq[InterfaceNixProvisioning]
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
+    homebrewProvisioning*: seq[InterfaceHomebrewProvisioning]
+      ## Bridge records (v27); never realization candidates.
     location*: SourceLocation
 
   ProjectInterface* = object
@@ -1052,8 +1069,18 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 26'u16
-    ## v26 (current): Shared-Development-Services D-SS11 (§4.6) retains
+  EnvelopeVersion = 27'u16
+    ## v27 (current): a provisioning contribution also carries its Homebrew
+    ##                bridge records (``homebrewProvisioning``: kind, token,
+    ##                tap; GM5b), encoded after its Scoop records, inside
+    ##                the v13 contribution block. v26 and older payloads
+    ##                decode with none. They are bridge records for
+    ##                consumers outside Reprobuild and are never merged
+    ##                into a tool use, so the tool-use encoding is
+    ##                unchanged. (Developed as v23 against an older tip
+    ##                and renumbered above the services lane before it was
+    ##                published, for the reason the v23 note gives.)
+    ## v26: Shared-Development-Services D-SS11 (§4.6) retains
     ##                the CONTRIBUTION POINTS each ``publicServices`` row
     ##                converges -- ``contributionPoints``, a counted
     ##                string list appended after ``compatibilityMajor``
@@ -1908,6 +1935,25 @@ proc readScoopProvisioning(bytes: openArray[byte]; pos: var int;
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeHomebrewProvisioning(outp: var seq[byte];
+                               provisioning: InterfaceHomebrewProvisioning;
+                               forFingerprint = false) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.contributor)
+  outp.writeString(provisioning.kind)
+  outp.writeString(provisioning.token)
+  outp.writeString(provisioning.tap)
+  outp.writeLocation(provisioning.location, forFingerprint)
+
+proc readHomebrewProvisioning(bytes: openArray[byte]; pos: var int):
+    InterfaceHomebrewProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.contributor = readString(bytes, pos)
+  result.kind = readString(bytes, pos)
+  result.token = readString(bytes, pos)
+  result.tap = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
                   version = EnvelopeVersion;
                   forFingerprint = false) =
@@ -1980,6 +2026,10 @@ proc writeProvisioningContribution(outp: var seq[byte];
   outp.writeU32Le(uint32(contribution.scoopProvisioning.len))
   for provisioning in contribution.scoopProvisioning:
     outp.writeScoopProvisioning(provisioning, version, forFingerprint)
+  if version >= 27'u16:
+    outp.writeU32Le(uint32(contribution.homebrewProvisioning.len))
+    for provisioning in contribution.homebrewProvisioning:
+      outp.writeHomebrewProvisioning(provisioning, forFingerprint)
 
 proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
     version: uint16): InterfaceProvisioningContribution =
@@ -2003,6 +2053,12 @@ proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
   for i in 0 ..< scoopCount:
     result.scoopProvisioning[i] =
       readScoopProvisioning(bytes, pos, version)
+  if version >= 27'u16:
+    let homebrewCount = int(readU32Le(bytes, pos))
+    result.homebrewProvisioning =
+      newSeq[InterfaceHomebrewProvisioning](homebrewCount)
+    for i in 0 ..< homebrewCount:
+      result.homebrewProvisioning[i] = readHomebrewProvisioning(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface;
                              version = EnvelopeVersion;
@@ -2510,6 +2566,18 @@ proc toInterfaceScoopProvisioning(packageName: string;
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
+proc toInterfaceHomebrewProvisioning(packageName: string;
+    provisioning: HomebrewProvisioningDef; contributor: string):
+    InterfaceHomebrewProvisioning =
+  InterfaceHomebrewProvisioning(
+    packageName: packageName,
+    contributor: contributor,
+    kind: provisioning.kind,
+    token: provisioning.token,
+    tap: provisioning.tap,
+    location: SourceLocation(file: provisioning.sourceFile,
+      line: provisioning.sourceLine))
+
 proc toInterfaceToolUse(useDef: PackageUseDef;
                         packages: openArray[PackageDef]): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -2570,6 +2638,9 @@ proc toInterfaceProvisioningContribution(contribution:
       contribution.targetPackage, provisioning, contribution.contributor))
   for provisioning in contribution.scoopProvisioning:
     result.scoopProvisioning.add(toInterfaceScoopProvisioning(
+      contribution.targetPackage, provisioning, contribution.contributor))
+  for provisioning in contribution.homebrewProvisioning:
+    result.homebrewProvisioning.add(toInterfaceHomebrewProvisioning(
       contribution.targetPackage, provisioning, contribution.contributor))
 
 proc toProjectInterface*(pkg: PackageDef;
@@ -2746,6 +2817,12 @@ proc toProjectInterface*(pkg: PackageDef;
         useDef.nixProvisioning.add(projected.nixProvisioning)
         useDef.tarballProvisioning.add(projected.tarballProvisioning)
         useDef.scoopProvisioning.add(projected.scoopProvisioning)
+        # ``projected.homebrewProvisioning`` is deliberately NOT added: a
+        # Homebrew record is a bridge record for consumers that install
+        # through Homebrew themselves (the Nix helper library), not a way
+        # Reprobuild realizes the package. Leaving it out of the tool use is
+        # what keeps every selection policy from picking it
+        # (Provisioning-Contributions.md §"Homebrew bridge records").
 
 proc canonicalPackageInterfaceFingerprint*(pkg: PackageDef;
     packages: openArray[PackageDef] = []): string =
@@ -3389,6 +3466,15 @@ proc emitProvisioningContributionRegistrations(code: var string;
         $provisioning.requiresExecutionProfileChecksum &
         ", packageId: " & escForCode(provisioning.packageId) &
         ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+        ", sourceFile: " & escForCode(provisioning.location.file) &
+        ", sourceLine: " & $provisioning.location.line & ")")
+    code.add("], homebrewProvisioning: @[")
+    for i, provisioning in contribution.homebrewProvisioning:
+      if i > 0: code.add(", ")
+      code.add("HomebrewProvisioningDef(kind: " &
+        escForCode(provisioning.kind) &
+        ", token: " & escForCode(provisioning.token) &
+        ", tap: " & escForCode(provisioning.tap) &
         ", sourceFile: " & escForCode(provisioning.location.file) &
         ", sourceLine: " & $provisioning.location.line & ")")
     code.add("], sourceFile: " & escForCode(contribution.location.file) &

@@ -1911,6 +1911,14 @@ proc collectProvisioning(node: NimNode;
       tarballOutput.add(parseTarballProvisioning(node))
     elif calleeName(node).normalize == "scoopapp":
       scoopOutput.add(parseScoopProvisioning(node))
+    elif calleeName(node).normalize in ["brewcask", "brewformula"]:
+      # Homebrew records are bridge records for consumers that still install
+      # through Homebrew; Reprobuild never realizes them, so a package's own
+      # realizations cannot include one (Provisioning-Contributions.md
+      # §"Homebrew bridge records").
+      error(calleeName(node) & " is a contribution-only Homebrew bridge " &
+        "record: declare it in a provisioningFor block of a Homebrew " &
+        "contribution catalog, not in a package's provisioning:", node)
     else:
       error("unsupported provisioning form: " & node.repr, node)
   else:

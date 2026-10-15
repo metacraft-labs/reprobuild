@@ -2682,6 +2682,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim",
+    binary: "build/test-bin/t_homebrew_bridge_records",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_home_apply/tests/t_junction_aware_remove.nim",
     binary: "build/test-bin/t_junction_aware_remove",
     defines: @[],

@@ -9094,6 +9094,56 @@ macro resourceModule*(modulePath: static string; body: untyped = nil): untyped =
   discard body
   newEmptyNode()
 
+proc validHomebrewToken(token: string): bool =
+  ## Homebrew's token grammar as the cask and core taps use it: lower-case
+  ## letters and digits, with ``-``, ``.``, ``_``, ``+`` and a single
+  ## ``@<version>`` suffix (``temurin@21``). Checked at authoring time so a
+  ## typo'd or upper-cased token cannot reach a published catalog, where a
+  ## consumer would look it up and silently find nothing.
+  if token.len == 0 or token[0] notin {'a'..'z', '0'..'9'}:
+    return false
+  var ats = 0
+  for c in token:
+    case c
+    of 'a'..'z', '0'..'9', '-', '.', '_', '+': discard
+    of '@': inc ats
+    else: return false
+  ats <= 1 and token[^1] != '@'
+
+proc parseHomebrewProvisioning(node: NimNode; kind: string):
+    HomebrewProvisioningDef =
+  ## ``brewCask "<token>"`` / ``brewFormula "<token>"``, optionally with
+  ## ``tap = "<owner>/<repo>"``. The token and tap must be string LITERALS:
+  ## they are identities a Nix evaluation reads back out of the published
+  ## records, and ``stringLiteral`` would turn a ``const`` into its source
+  ## text without complaint.
+  let loc = lineFile(node)
+  let spelling = if kind == "cask": "brewCask" else: "brewFormula"
+  result = HomebrewProvisioningDef(kind: kind, sourceFile: loc.file,
+    sourceLine: loc.line)
+  if node.kind notin {nnkCall, nnkCommand} or node.len < 2:
+    error(spelling & " expects a Homebrew token: " & spelling &
+      " \"<token>\"[, tap = \"<owner>/<repo>\"]", node)
+  if node[1].kind notin {nnkStrLit..nnkTripleStrLit}:
+    error(spelling & " expects the token as a string literal", node[1])
+  result.token = node[1].strVal
+  if not validHomebrewToken(result.token):
+    error(spelling & " token \"" & result.token & "\" is not a Homebrew " &
+      "token (lower-case letters, digits, '-', '.', '_', '+', one '@')",
+      node[1])
+  for i in 2 ..< node.len:
+    let tapValue = namedValue(node[i], "tap")
+    if tapValue.isNil:
+      error(spelling & " accepts only tap = \"<owner>/<repo>\" after the " &
+        "token, got: " & node[i].repr, node[i])
+    if tapValue.kind notin {nnkStrLit..nnkTripleStrLit}:
+      error(spelling & " tap must be a string literal", tapValue)
+    let parts = tapValue.strVal.split('/')
+    if parts.len != 2 or parts[0].len == 0 or parts[1].len == 0:
+      error(spelling & " tap \"" & tapValue.strVal & "\" is not " &
+        "<owner>/<repo>", tapValue)
+    result.tap = tapValue.strVal
+
 proc provisioningContributionLiteral(
     contribution: ProvisioningContributionDef): string =
   result = "ProvisioningContributionDef(targetPackage: " &
@@ -9143,6 +9193,15 @@ proc provisioningContributionLiteral(
       ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], homebrewProvisioning: @[")
+  for i, provisioning in contribution.homebrewProvisioning:
+    if i > 0: result.add(", ")
+    # Literal values (``parseHomebrewProvisioning`` refuses expressions).
+    result.add("HomebrewProvisioningDef(kind: " & escForCode(provisioning.kind) &
+      ", token: " & escForCode(provisioning.token) &
+      ", tap: " & escForCode(provisioning.tap) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], sourceFile: " & escForCode(contribution.sourceFile) &
     ", sourceLine: " & $contribution.sourceLine & ")")
 
@@ -9177,6 +9236,12 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
       contribution.tarballProvisioning.add(parseTarballProvisioning(stmt))
     of "scoopapp", "scooppackage":
       contribution.scoopProvisioning.add(parseScoopProvisioning(stmt))
+    of "brewcask":
+      contribution.homebrewProvisioning.add(
+        parseHomebrewProvisioning(stmt, "cask"))
+    of "brewformula":
+      contribution.homebrewProvisioning.add(
+        parseHomebrewProvisioning(stmt, "formula"))
     else:
       error("unsupported provisioningFor entry: " & rawName, stmt)
   if contribution.targetPackage.len == 0:
@@ -9189,7 +9254,8 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
       target)
   if contribution.nixProvisioning.len == 0 and
       contribution.tarballProvisioning.len == 0 and
-      contribution.scoopProvisioning.len == 0:
+      contribution.scoopProvisioning.len == 0 and
+      contribution.homebrewProvisioning.len == 0:
     error("provisioningFor requires at least one realization", target)
   parseStmt("registerProvisioningContributionDef(" &
     provisioningContributionLiteral(contribution) & ")")

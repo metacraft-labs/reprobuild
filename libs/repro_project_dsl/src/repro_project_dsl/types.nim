@@ -1076,6 +1076,30 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  HomebrewProvisioningDef* = object
+    ## A Homebrew cask or formula that installs the target package OUTSIDE
+    ## Reprobuild (reprobuild-pm spec Provisioning-Contributions.md
+    ## §"Homebrew bridge records"). A bridge record: it lets a consumer that
+    ## still installs through Homebrew -- the reprobuild flake's
+    ## ``reprobuild.lib.brewRealizationOf`` and the equivalence report --
+    ## translate between Homebrew tokens and canonical package names.
+    ## Reprobuild never realizes it: it is carried in the interface
+    ## artifact's ``provisioningContributions`` only and is never merged into
+    ## a tool use's realization candidates, so no selection policy can pick
+    ## it. Declared only in a ``provisioningFor`` contribution
+    ## (``brewCask "<token>"`` / ``brewFormula "<token>"``), never in a
+    ## package's own ``provisioning:`` block.
+    kind*: string
+      ## ``"cask"`` or ``"formula"``.
+    token*: string
+      ## The Homebrew token (``brew info --cask <token>``), e.g.
+      ## ``visual-studio-code`` or ``temurin@21``.
+    tap*: string
+      ## The tap that publishes the token; empty for the default taps
+      ## (``homebrew/cask`` for casks, ``homebrew/core`` for formulae).
+    sourceFile*: string
+    sourceLine*: int
+
   ProvisioningContributionDef* = object
     ## A realization supplied independently of the package that owns the
     ## public interface. ``targetInterfaceFingerprint`` pins the contribution
@@ -1088,6 +1112,8 @@ type
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]
     scoopProvisioning*: seq[ScoopProvisioningDef]
+    homebrewProvisioning*: seq[HomebrewProvisioningDef]
+      ## Bridge records only; see ``HomebrewProvisioningDef``.
     sourceFile*: string
     sourceLine*: int
 

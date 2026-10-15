@@ -10,13 +10,18 @@
 #                      evaluated for a target system and host
 #   nixRealizationOf   canonical package -> nixpkgs attribute, from the pinned
 #                      reprobuild-nix-packages contribution records
+#   brewRealizationOf  canonical package -> Homebrew cask / formula token,
+#                      from the pinned reprobuild-brew-packages contribution
+#                      records (bridge records: Reprobuild never realizes them)
 #
 # User documentation: docs/user-guide/nix-helper-library.md.
 #
 # Arguments (supplied by flake.nix; a non-flake consumer can call this file
 # directly):
 #   catalogs  -- `[ { name; records; } ]`, published contribution-records
-#                documents (`provisioning-contributions.json`)
+#                documents (`provisioning-contributions.json`). Every reader
+#                reads every catalog and takes the records of its own kind
+#                (Nix, Homebrew), so one list serves both.
 #   pkgsFor   -- system -> nixpkgs package set, for the IFD derivation
 #   reproFor  -- system -> the `repro` package that runs in it
 {
@@ -32,6 +37,7 @@ let
   data = import ./data.nix { inherit predicate platforms; };
   intent = import ./intent.nix { inherit predicate platforms; };
   realizations = import ./realizations.nix { inherit catalogs; };
+  brew = import ./brew.nix { inherit catalogs; };
 in
 {
   inherit (data) readData;
@@ -41,6 +47,19 @@ in
   # Non-throwing form of nixRealizationOf: `{ found, attribute, attrPath,
   # record, catalog }` or `{ found = false; reason; }`.
   lookupNixRealization = realizations.lookup;
+
+  # Homebrew (nix/lib/brew.nix). `brewRealizationOf { name, system }` ->
+  # null | `{ kind, token, tap }` is the Home Manager intent module's
+  # `homebrew.realizationOf` hook; `lookupBrewRealization name` and
+  # `lookupBrewToken { kind ? "cask", token }` are the non-throwing,
+  # reporting forms (canonical name -> token, token -> canonical name);
+  # `brewRecords` lists every record.
+  inherit (brew)
+    brewRealizationOf
+    lookupBrewRealization
+    lookupBrewToken
+    brewRecords
+    ;
 
   # Evaluate an already-read export document (an attribute set) for a target
   # system and host -- what readIntent does after reading. Throws when the

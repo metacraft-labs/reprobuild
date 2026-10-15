@@ -11,6 +11,7 @@ module, `reprobuild.homeManagerModules.intent`, so a Nix configuration can
 | read a plain list (applications, tools) that the profile also reads | [`readData`](#readdata--a-data-file-selected-like-the-profile) |
 | use what the whole profile evaluates to for a host | [`readIntent`](#readintent--the-evaluated-profile) |
 | turn a canonical package name into a nixpkgs attribute | [`nixRealizationOf`](#nixrealizationof--canonical-name-to-nixpkgs-attribute) |
+| turn a canonical package name into a Homebrew token, or a Brewfile token back into a package | [`brewRealizationOf`](#brewrealizationof--canonical-name-to-homebrew-token-and-back) |
 | let Home Manager install packages, files and environment from the profile | [`homeManagerModules.intent`](#the-home-manager-module) |
 
 Nix never compiles your profile and never re-implements Reprobuild's rules
@@ -147,6 +148,40 @@ attribute is looked up in **your** nixpkgs; the catalog's pinned revision is
 in `record` if you want it. When a name is missing, the fix is a contribution
 to the catalog, not a mapping in your configuration.
 
+## `brewRealizationOf` — canonical name to Homebrew token, and back
+
+While a Mac still installs applications through Homebrew, Nix needs to know
+which cask or formula installs a canonical package, and a report comparing a
+Brewfile with a profile needs the reverse. Both directions are read from the
+[`reprobuild-brew-packages`](https://github.com/metacraft-labs/reprobuild-brew-packages)
+catalog the flake pins.
+
+```nix
+reprobuild.lib.brewRealizationOf { name = "vscode"; system = "aarch64-darwin"; }
+# => { kind = "cask"; token = "visual-studio-code"; tap = ""; }
+reprobuild.lib.brewRealizationOf { name = "vscode"; system = "x86_64-linux"; }
+# => null   (casks are macOS-only; a formula is claimed on Linux too)
+reprobuild.lib.brewRealizationOf { name = "bash"; system = "aarch64-darwin"; }
+# => null   (no Homebrew record claims it)
+
+reprobuild.lib.lookupBrewToken { token = "visual-studio-code"; }   # kind defaults to "cask"
+# => { found = true; name = "vscode"; kind = "cask"; … }
+reprobuild.lib.lookupBrewToken { token = "some-other-cask"; }
+# => { found = false; reason = "no canonical package in … is installed by Homebrew cask `some-other-cask`"; }
+reprobuild.lib.lookupBrewRealization "jdk"
+# => { found = true; kind = "cask"; token = "temurin@21"; … }
+reprobuild.lib.brewRecords   # every record: [ { name; kind; token; tap; catalog; } … ]
+```
+
+An unknown token maps to nothing and comes back with the reason; nothing is
+guessed. A name or token the catalog states twice, or with a develop-only
+interface, is refused (`lookup…` report it; `brewRealizationOf` throws).
+
+These are **bridge records**: Reprobuild itself never installs anything
+through Homebrew, and a profile cannot select a Homebrew realization. They
+exist so a Nix configuration that still uses Homebrew can name applications
+by the same canonical names as the profile.
+
 ## The Home Manager module
 
 ```nix
@@ -177,6 +212,12 @@ category at a time.
 | `files` | `fs.userFile` under `~/` | `home.file."<path>"` (`text`, `executable`) |
 | `environment` | `env.userVariable` (string values), `env.userPath` | `home.sessionVariables`, `home.sessionPath` |
 | `homebrew` | `pkg.homebrewCask` / `pkg.homebrewFormula`, and packages `homebrew.realizationOf` claims | `reprobuild.intent.homebrew.casks` / `.formulae`, for your Homebrew module (Home Manager has none) |
+
+`homebrew.realizationOf` defaults to `reprobuild.lib.brewRealizationOf`: with
+`homebrew.enable = true`, a package the Homebrew catalog claims for the
+host's system goes to the token lists instead of `home.packages` (on Linux
+only formulae claim). Set `homebrew.realizationOf = _: null;` to claim
+nothing, or your own function of `{ name, system }` to override it.
 
 **Nothing is dropped silently.** An entry of an enabled category that cannot
 be expressed in Home Manager is listed in `reprobuild.intent.unmapped` with
