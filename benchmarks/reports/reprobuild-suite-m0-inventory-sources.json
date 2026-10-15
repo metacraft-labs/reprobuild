@@ -34387,7 +34387,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_migration_refuses_when_the_hook_writer_is_not_the_hook_runner.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

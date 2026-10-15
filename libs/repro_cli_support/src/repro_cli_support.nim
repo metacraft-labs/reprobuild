@@ -58225,6 +58225,8 @@ type
   GatewayWireOutcome* = enum
     ## Per-repo verdict of ``ensureGatewayForRepo``.
     gwoWired            ## the pushurl now points at this workspace's gateway
+    gwoWouldWire        ## dry-run: would wire the pushurl to this workspace's
+                        ## gateway; nothing was written
     gwoAlreadyWired     ## it already did; nothing was written
     gwoForeignPushurl   ## a pushurl this tool did not set: REPORTED, never
                         ## overwritten (§7.3)
@@ -58301,7 +58303,7 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       "set it)"
     return
   if dryRun:
-    result.outcome = gwoWired
+    result.outcome = gwoWouldWire
     result.diagnostic = "dry-run: would wire " & repoPath & " -> " &
       result.gatewayDir
     return
@@ -58345,6 +58347,11 @@ proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
     of gwoWired:
       lines.add("reprobuild gateway: " & repo.name & ": wired -> " &
         res.gatewayDir)
+    of gwoWouldWire:
+      lines.add("reprobuild gateway: " & repo.name & ": " &
+        (if res.diagnostic.len > 0: res.diagnostic
+         else: "dry-run: would wire " & repo.repoPath & " -> " &
+           res.gatewayDir))
     of gwoAlreadyWired:
       lines.add("reprobuild gateway: " & repo.name & ": already wired")
     of gwoForeignPushurl:
