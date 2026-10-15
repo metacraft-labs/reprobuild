@@ -144,14 +144,22 @@ suite "H2: the two locks agree, by canonical repository URL":
         ")"
       let msg = renderConsistencyViolation(v)
       # The path-form pin is edited as a path component, not as `rev=`.
-      check ("change /" & ShaA & " to /" & ShaB) in msg
+      check ("changes /" & ShaA & " to /" & ShaB) in msg
       check "rev=" & ShaA notin msg
       check ("change the 'nim-stackable-hooks' entry's revision and its " &
         "git-sha1 integrity from " & ShaB & " to " & ShaA) in msg
       check "`nix flake lock /w/reprobuild`" in msg
-      check "repro lock update nim-stackable-hooks --to <rev> " &
-        "(not available yet)" in msg
-      check "`repro lock update" notin msg
+      # Both directions are the runnable `repro lock update`, one per target.
+      check ("To make both locks name " & ShaA & " (the flake's revision), " &
+        "run `repro lock update nim-stackable-hooks --to " & ShaA &
+        " --repo-root=/w/reprobuild`, which moves every resolution of the " &
+        "repository to it") in msg
+      check ("To make both locks name " & ShaB & " (the repro.lock " &
+        "revision), run `repro lock update nim-stackable-hooks-src --to " &
+        ShaB & " --repo-root=/w/reprobuild`: it changes /" & ShaA & " to /" &
+        ShaB) in msg
+      check "not available yet" notin msg
+      check "<rev>" notin msg
       check v.evidence == "rule=H2 repository=github.com/metacraft-labs/" &
         "nim-stackable-hooks repro.lock=nim-stackable-hooks@" & ShaB &
         " flake.lock=nim-stackable-hooks-src@" & ShaA &
@@ -217,9 +225,11 @@ suite "H1: a flake.lock satisfies flake.nix":
         "records " & ShaA & ")")
       check "`nix flake update nim-stackable-hooks-src --flake /w/reprobuild`" in
         msg
-      check ("change /" & ShaA & " to /" & ShaB) in msg
-      check ("repro lock update nim-stackable-hooks-src --to " & ShaB &
-        " (not available yet)") in msg
+      check ("If " & ShaB & " is the intended upgrade, run `repro lock " &
+        "update nim-stackable-hooks-src --to " & ShaB & " --repo-root=" &
+        "/w/reprobuild`: it changes /" & ShaA & " to /" & ShaB & " in that " &
+        "input's url in /w/reprobuild/flake.nix") in msg
+      check "not available yet" notin msg
       check "stale" notin msg.toLowerAscii()
 
   test "original.rev against locked.rev with no recipe pin is H1":
@@ -465,9 +475,12 @@ suite "the commit-time re-pin verdict (H3, §16.4)":
       e.overrideRepo = "lib"
       e.overrideFiles = @["/w/.repro/develop-overrides.toml"]
       let v = repinExclusionViolation(e)
-      check ("repro lock update lib --to " & ShaB & " (not available yet)") in
-        v.remedies[0]
-      check "`repro lock update" notin v.remedies[0]
+      check v.remedies[0] == "If " & ShaB & " is the intended upgrade, " &
+        "run `repro lock update lib --to " & ShaB & "`: it changes the " &
+        "uses: entry at /w/app/repro.nim:3 to the version whose " &
+        "sourceRevision is " & ShaB & " and moves both locks with it (it " &
+        "refuses when no versions: entry of /w/lib/repro.nim maps " & ShaB &
+        "; add that entry first); then commit again"
       check ("drop the develop override of 'lib' (remove its entry from " &
         "/w/.repro/develop-overrides.toml; no repro command removes a " &
         "single override yet), or check the sibling out at the pinned " &

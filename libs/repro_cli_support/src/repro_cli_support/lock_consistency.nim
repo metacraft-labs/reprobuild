@@ -73,11 +73,6 @@ const
     ## The pre-push gate property for an H1 violation.
   H2Property* = "cross_lock_revision_disagreement"
     ## The pre-push gate property for an H2 violation.
-  LockUpdateAvailabilityNote* = "not available yet"
-    ## How every message qualifies `repro lock update`: the command that does
-    ## an intended upgrade in one step is named so the operator learns it, and
-    ## it is NOT backticked because it cannot be run today (see
-    ## `flakeRevPinEditRemedy` on what backticks mean in these messages).
 
 type
   ConsistencyRule* = enum
@@ -136,40 +131,57 @@ proc hasViolations*(r: ConsistencyReport): bool = r.violations.len > 0
 proc flakeRevPinFile*(flakeRoot: string): string =
   if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
 
-proc flakeRevPinEditRemedy*(declaredRev, observedRev,
-    flakeRoot: string; pathForm = false): string =
-  ## THE single generator for "the remedy here is a FILE EDIT, not a command".
+proc lockUpdateCommand*(dependency, rev, repoRoot: string): string =
+  ## THE spelling of `repro lock update` in every message: the dependency,
+  ## the target revision when there is one, and the repo it runs against, so
+  ## the command runs unchanged from wherever the message was printed.
   ##
-  ## Every message that sends the operator to `flake.nix` prints it: the
-  ## refresh's own decline notice, NF-3's pre-push refusal over the same input,
-  ## and the H1 / H2 refusals below. They are kept on one generator for the
-  ## reason `flakeReconcileCommands` is — the messages used to disagree about
-  ## what fixes a row, and the gate named a command the refresh would decline.
+  ## It is printed in backticks, because it is a runnable command line (see
+  ## ``flakeRevPinEditRemedy`` on what backticks promise here).
+  "repro lock update " & quoteShell(dependency) &
+    (if rev.len > 0: " --to " & rev else: "") &
+    (if repoRoot.len > 0: " --repo-root=" & quoteShell(repoRoot) else: "")
+
+proc flakeRevPinEditRemedy*(input, declaredRev, observedRev,
+    flakeRoot: string; pathForm = false): string =
+  ## THE single generator for "the remedy moves a revision `flake.nix`
+  ## states".
+  ##
+  ## Every message that sends the operator to a revision written in
+  ## `flake.nix` prints it: the refresh's own decline notice, NF-3's pre-push
+  ## refusal over the same input, and the H1 / H2 / H3 refusals below. They
+  ## are kept on one generator for the reason `flakeReconcileCommands` is —
+  ## the messages used to disagree about what fixes a row, and the gate named
+  ## a command the refresh would decline.
+  ##
+  ## The remedy is `repro lock update <input> --to <observed>`
+  ## (Unified-Locking-And-Hooks.md §16.4), which replaced the hand edit this
+  ## generator used to print: it rewrites the revision in the input's url,
+  ## re-locks the node through nix — the only thing that computes the new
+  ## `narHash` — and moves every other resolution of the repository with it,
+  ## all or nothing. The hand route is still named, for an operator who wants
+  ## to make the edit themselves: after the edit ALONE `flake.nix` says one
+  ## revision and the lock's `original` the other, and nix reconciles them on
+  ## its next evaluation; `nix flake lock` is that evaluation, asked for.
   ##
   ## NOTE for anyone editing this string: backticks are reserved for RUNNABLE
   ## command lines — `backtickedCommands` lifts every one of them out and the
-  ## cases EXECUTE what they find — and the first step here is an edit to a
-  ## file. It therefore carries no backticks around the edit, and quotes only
-  ## the one thing that really is a command line: the re-lock.
-  ##
-  ## The re-lock is named because the edit ALONE does not clear the disagreement.
-  ## After it, `flake.nix` says one revision and the lock's `original` still says
-  ## the other; nix reconciles that on its next evaluation by re-locking the node
-  ## — moving `original.rev` and `locked.rev` together and computing the new
-  ## `narHash` itself, which is the one part of this no reprobuild command can
-  ## do. `nix flake lock` is that evaluation, asked for explicitly.
+  ## cases EXECUTE what they find. The hand edit is in words; the two command
+  ## lines (`repro lock update`, and the re-lock that completes a hand edit)
+  ## are quoted.
   ##
   ## ``pathForm`` spells a pin written as the URL's last path component
   ## (`github:o/r/<sha>`) instead of a `rev=` query parameter.
   let before = if pathForm: "/" & declaredRev else: "rev=" & declaredRev
   let after = if pathForm: "/" & observedRev else: "rev=" & observedRev
-  "change " & before & " to " & after &
-    " in that input's url in " & flakeRevPinFile(flakeRoot) &
-    " — the revision is the author's statement and lives there, so no refresh " &
-    "can move it — then re-lock the node so flake.lock follows the edit (`nix " &
-    "flake lock" & (if flakeRoot.len > 0: " " & flakeRoot else: "") &
-    "`, or simply re-enter the dev shell), which is also what recomputes its " &
-    "narHash"
+  "run `" & lockUpdateCommand(input, observedRev, flakeRoot) & "`: it " &
+    "changes " & before & " to " & after & " in that input's url in " &
+    flakeRevPinFile(flakeRoot) & " — the revision is the author's statement " &
+    "and lives there, so no refresh can move it — and re-locks the node " &
+    "through nix, which is what recomputes its narHash (by hand: make that " &
+    "edit, then `nix flake lock" &
+    (if flakeRoot.len > 0: " " & quoteShell(flakeRoot) else: "") &
+    "`, or simply re-enter the dev shell)"
 
 proc flakeRelockInputCommand*(input, flakeRoot: string): string =
   ## The command that re-locks ONE input from what `flake.nix` states, for a
@@ -183,12 +195,6 @@ proc flakeRelockInputCommand*(input, flakeRoot: string): string =
   ## `nix flake update <input>` re-locks it to `A`).
   "nix flake update " & input &
     (if flakeRoot.len > 0: " --flake " & flakeRoot else: "")
-
-proc lockUpdateMention(dependency, rev: string): string =
-  ## `repro lock update`, named but not backticked (it cannot run today).
-  "repro lock update " & dependency &
-    (if rev.len > 0: " --to " & rev else: "") & " (" &
-    LockUpdateAvailabilityNote & ") will do this in one step"
 
 proc isPathFormPin*(c: FlakeInputConstraint): bool =
   ## Is the exact revision written as the URL's path (`github:o/r/<sha>`)
@@ -234,8 +240,8 @@ proc checkFlakeH1(inputs: ConsistencyInputs;
         c.exactRev & "), re-lock that input so flake.lock follows " &
         "flake.nix: `" & flakeRelockInputCommand(c.input, root) & "`")
       v.remedies.add("If " & locked & " is the intended upgrade, " &
-        flakeRevPinEditRemedy(c.exactRev, locked, root, isPathFormPin(c)) &
-        "; " & lockUpdateMention(c.input, locked))
+        flakeRevPinEditRemedy(c.input, c.exactRev, locked, root,
+          isPathFormPin(c)))
       v.evidence = "rule=H1 system=flake input=" & c.input & " node=" &
         r.node & " recipe=" & flakeFile & ":" & $c.line & " rev=" &
         c.exactRev & " locked.rev=" & locked &
@@ -429,11 +435,12 @@ proc checkReproH1(inputs: ConsistencyInputs;
         v.remedies.add("To keep the version the recipe states, make the " &
           "lock name " & mapped.rev & ": " &
           reproLockEntryEdit(lockFile, c.selector, pinned, mapped.rev))
-        v.remedies.add("If " & pinned & " is the intended upgrade, change " &
-          "the uses: entry at " & where & " to the version whose " &
-          "sourceRevision is " & pinned & " (adding that versions: entry to " &
-          mapped.producerFile & " if it has none); " &
-          lockUpdateMention(c.selector, pinned))
+        v.remedies.add("If " & pinned & " is the intended upgrade, run `" &
+          lockUpdateCommand(c.selector, pinned, root) & "`: it changes the " &
+          "uses: entry at " & where & " to the version whose " &
+          "sourceRevision is " & pinned & " (it refuses when no versions: " &
+          "entry of " & mapped.producerFile & " maps " & pinned &
+          "; add that entry first)")
         v.evidence = "rule=H1 system=repro dependency=" & c.selector &
           " recipe=" & where & " constraint=" & quoteShell(decl.rawConstraint) &
           " sourceRevision=" & mapped.rev & " locked.revision=" & pinned
@@ -485,25 +492,24 @@ proc checkH2(inputs: ConsistencyInputs; constraints: FlakeRecipeConstraints;
           reproRev & " and by " & flakeLockFile & " as input '" & r.input &
           "' at " & flakeRev & " (" & flakeStatement & ")"
         v.remedies.add("To make both locks name " & flakeRev & " (the " &
-          "flake's revision): " &
-          reproLockEntryEdit(reproLockFile, dep.name, reproRev, flakeRev))
+          "flake's revision), run `" &
+          lockUpdateCommand(dep.name, flakeRev, root) & "`, which moves " &
+          "every resolution of the repository to it (by hand: " &
+          reproLockEntryEdit(reproLockFile, dep.name, reproRev, flakeRev) &
+          ")")
         if c.exactRev.len > 0:
           v.remedies.add("To make both locks name " & reproRev & " (the " &
-            "repro.lock revision): " &
-            flakeRevPinEditRemedy(c.exactRev, reproRev, root,
+            "repro.lock revision), " &
+            flakeRevPinEditRemedy(r.input, c.exactRev, reproRev, root,
               isPathFormPin(c)))
         else:
           v.remedies.add("flake.nix lets '" & r.input & "' follow a " &
             "branch, so flake.lock records whatever that branch resolves " &
-            "to: to make both locks name the branch tip, re-lock it with `" &
-            flakeRelockInputCommand(r.input, root) & "` and then move the " &
-            "repro.lock entry to the revision it records, as above; to " &
-            "make both name " & reproRev & ", pin rev=" & reproRev &
-            " in that input's url in " & flakeRevPinFile(root) & " and " &
-            "re-lock it the same way")
-        v.remedies.add("For an intended upgrade, " &
-          lockUpdateMention(dep.name, "<rev>") &
-          ", moving every resolution of the repository in both locks")
+            "to: to make both locks name " & reproRev & " (the repro.lock " &
+            "revision), run `" & lockUpdateCommand(r.input, reproRev, root) &
+            "`; to make both name the branch tip, re-lock the input with `" &
+            flakeRelockInputCommand(r.input, root) & "` and then run " &
+            "repro lock update " & dep.name & " --to the revision it records")
         v.evidence = "rule=H2 repository=" & identity & " repro.lock=" &
           dep.name & "@" & reproRev & " flake.lock=" & r.input & "@" &
           flakeRev & (if c.line > 0: " recipe=" & flakeFile & ":" & $c.line
@@ -526,11 +532,15 @@ proc checkH2(inputs: ConsistencyInputs; constraints: FlakeRecipeConstraints;
             " requires '" & decl.rawConstraint & "', which " &
             mapped.producerFile & ":" & $mapped.producerLine & " maps to " &
             mapped.rev & "; no single revision satisfies both recipes"
-          v.remedies.add("Make the two recipes name one revision: either " &
-            flakeRevPinEditRemedy(c.exactRev, mapped.rev, root,
-              isPathFormPin(c)) & ", or change the uses: entry at " & where &
-            " to the version whose sourceRevision is " & c.exactRev & "; " &
-            lockUpdateMention(dep.name, "<rev>"))
+          v.remedies.add("Make the two recipes name one revision: to keep " &
+            mapped.rev & " (the repro.nim version), " &
+            flakeRevPinEditRemedy(r.input, c.exactRev, mapped.rev, root,
+              isPathFormPin(c)) & "; to keep " & c.exactRev & " (the " &
+            "flake.nix pin), run `" &
+            lockUpdateCommand(dep.name, c.exactRev, root) & "`, which " &
+            "changes the uses: entry at " & where & " to the version whose " &
+            "sourceRevision is " & c.exactRev & " (it refuses when no " &
+            "versions: entry of " & mapped.producerFile & " maps it)")
           v.evidence = "rule=H2 kind=constraint-conflict repository=" &
             identity & " flake.nix=" & r.input & "@" & c.exactRev &
             " repro.nim=" & dep.name & "@" & mapped.rev
@@ -703,6 +713,17 @@ proc versionAtRevision(inputs: ConsistencyInputs; c: ReproUsesConstraint;
     "' — no versions: entry of " & pv.file & " maps to " & observed &
     ", so whether that range admits the checkout is not decidable")
 
+proc versionMappedTo*(inputs: ConsistencyInputs; c: ReproUsesConstraint;
+    depAbs, depUrl, rev: string):
+    tuple[found: bool; version, file: string; line: int; why: string] =
+  ## The version whose producer `versions:` entry (read from the producer's
+  ## checkout at ``depAbs``) maps to ``rev``, for `repro lock update`, which
+  ## replaces an exact `uses:` version with it. ``why`` says why nothing was
+  ## found, in the words the H3 refusal uses.
+  var report: ConsistencyReport
+  let at = versionAtRevision(inputs, c, depAbs, depUrl, rev, report)
+  (at.found, at.version, at.file, at.line, report.notChecked.join("; "))
+
 proc reproRepinVerdict*(inputs: ConsistencyInputs; dependency, depAbs,
     depUrl, observed: string): ReproRepinVerdict =
   ## Does `repro.nim` (``inputs.reproNim``) admit moving the `repro.lock`
@@ -768,9 +789,10 @@ proc repinExclusionViolation*(e: RepinConstraintExclusion):
   ## ways forward (§16.4). Rendered by ``renderConsistencyViolation`` like the
   ## H1 / H2 refusals, so the three read alike.
   ##
-  ## Backticks mark only commands that run today (see
-  ## ``flakeRevPinEditRemedy``): `repro lock update` is named and qualified as
-  ## not available yet, and the edits are in words.
+  ## Backticks mark only commands that run where the message is printed (see
+  ## ``flakeRevPinEditRemedy``): the upgrade is the backticked `repro lock
+  ## update <dependency> --to <observed>`, which rewrites the exact pin and
+  ## moves both locks; edits are in words.
   let where = e.recipeFile & ":" & $e.recipeLine
   result = ConsistencyViolation(rule: crH3,
     system: (if e.kind == rckFlakeRev: "flake" else: "repro"),
@@ -798,21 +820,20 @@ proc repinExclusionViolation*(e: RepinConstraintExclusion):
   case e.kind
   of rckFlakeRev:
     result.remedies.add("If " & e.observed & " is the intended upgrade, " &
-      lockUpdateMention(e.dependency, e.observed) & "; today, " &
-      flakeRevPinEditRemedy(e.pinnedRev, e.observed, e.repoRoot, e.pathForm) &
-      ", and commit again")
+      flakeRevPinEditRemedy(e.dependency, e.pinnedRev, e.observed, e.repoRoot,
+        e.pathForm) & "; it moves both locks with it, and then commit again")
   of rckExactVersion:
     result.remedies.add("If " & e.observed & " is the intended upgrade, " &
-      lockUpdateMention(e.dependency, e.observed) & "; today, change the " &
-      "uses: entry at " & where & " to the version whose sourceRevision is " &
-      e.observed & " (adding that versions: entry to " & e.producerFile &
-      " if it has none), and commit again")
+      "run `" & lockUpdateCommand(e.dependency, e.observed, e.repoRoot) &
+      "`: it changes the uses: entry at " & where & " to the version whose " &
+      "sourceRevision is " & e.observed & " and moves both locks with it " &
+      "(it refuses when no versions: entry of " & e.producerFile & " maps " &
+      e.observed & "; add that entry first); then commit again")
   of rckRange:
     result.remedies.add("If version " & e.observedVersion & " is the " &
       "intended upgrade, widen the range at " & where & " so it admits " &
-      e.observedVersion & ", and commit again (repro lock update, " &
-      LockUpdateAvailabilityNote & ", will not widen a range: that is the " &
-      "author's decision)")
+      e.observedVersion & ", and commit again (repro lock update will not " &
+      "widen a range: that is the author's decision)")
   # (2) The temporary experiment.
   let back = if e.pinnedRev.len > 0: e.pinnedRev else: e.lockedRev
   let checkoutCmd =

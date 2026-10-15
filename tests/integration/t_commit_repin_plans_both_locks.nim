@@ -32,9 +32,9 @@
 ##   * `t_commit_repin_never_rewrites_a_recipe_constraint` — `flake.nix` pins
 ##     `beta-src` by revision, `beta` is substituted by an explicit override
 ##     and moves ahead. The commit is refused; the refusal names the observed
-##     revision, the pinned one, the `flake.nix` line, `repro lock update
-##     beta-src --to <observed>` (named, not backticked: not available yet)
-##     and the drop-the-override remedy with the override file and a runnable
+##     revision, the pinned one, the `flake.nix` line, the runnable
+##     `repro lock update beta-src --to <observed> --repo-root=<app>` (HL-11
+##     M4) and the drop-the-override remedy with the override file and a runnable
 ##     `git -C <sibling> checkout <pinned>`. `flake.nix`, both locks and the
 ##     index are byte-identical. Running the named `git` command clears it;
 ##     moving the pin in `flake.nix` (the edit remedy) moves both locks.
@@ -66,11 +66,12 @@
 ## pin was re-pinned in `repro.lock`), and both standalone cases accept the
 ## inconsistent state (exit 0).
 ##
-## `repro lock update` is NAMED by the refusal (it arrives in a later
-## milestone) and asserted to be named WITHOUT backticks; no case runs it. The
-## backticked `git -C … checkout …` remedy IS run, through
-## `runNamedCommand`, because backticks promise a command that runs where the
-## message is printed. nix itself is not run, for the reason
+## `repro lock update <dependency> --to <observed>` is named by the refusal
+## in backticks since HL-11 M4, because it runs where the message is printed;
+## running it (it re-locks through nix) is
+## `t_the_h3_refusals_lock_update_command_runs_and_the_commit_succeeds`. The
+## backticked `git -C … checkout …` remedy IS run here, through
+## `runNamedCommand`. nix itself is not run, for the reason
 ## `nf2_flake_lock_fixture.nim` gives.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. Real bare origins, real
@@ -241,9 +242,9 @@ suite "HL-11 H3: one plan over both locks; constraints win":
         fx.app / "flake.lock" & " input 'beta-src' stays at " & betaRecipe &
         ")") in d.output
       # The whole refusal paragraph, byte for byte: the summary, then both
-      # remedies — the intended upgrade (named, not backticked: not available
-      # yet) with today's edit, and the experiment with the override's file
-      # and a command that runs as printed.
+      # remedies — the intended upgrade (the runnable `repro lock update`),
+      # and the experiment with the override's file and a command that runs
+      # as printed.
       let usesWhere = fx.app / "repro.nim" & ":" & $usesLine
       let paragraph = "repro pre-commit: " & H3Head &
         ": the sibling checkout " & siblingDir(fx, "beta") & " is at " &
@@ -253,11 +254,12 @@ suite "HL-11 H3: one plan over both locks; constraints win":
         "either lock (" & fx.app / "repro.lock" & " 'beta' stays at " &
         betaRecipe & "; " & fx.app / "flake.lock" & " input 'beta-src' " &
         "stays at " & betaRecipe & "). (1) If " & betaNext & " is the " &
-        "intended upgrade, repro lock update beta --to " & betaNext &
-        " (not available yet) will do this in one step; today, change the " &
-        "uses: entry at " & usesWhere & " to the version whose " &
-        "sourceRevision is " & betaNext & " (adding that versions: entry " &
-        "to " & betaRecipeFile & " if it has none), and commit again. " &
+        "intended upgrade, run `repro lock update beta --to " & betaNext &
+        " --repo-root=" & fx.app & "`: it changes the uses: entry at " &
+        usesWhere & " to the version whose sourceRevision is " & betaNext &
+        " and moves both locks with it (it refuses when no versions: entry " &
+        "of " & betaRecipeFile & " maps " & betaNext & "; add that entry " &
+        "first); then commit again. " &
         "(2) If " & betaNext & " was a temporary experiment, drop the " &
         "develop override of 'beta' (remove its entry from " &
         fx.ws / ".repro" / "develop-overrides.toml" & "; no repro command " &
@@ -265,7 +267,7 @@ suite "HL-11 H3: one plan over both locks; constraints win":
         "pinned revision: `git -C " & siblingDir(fx, "beta") & " checkout " &
         betaRecipe & "`; then commit again."
       check paragraph in d.output.splitLines()
-      check "`repro lock update" notin d.output
+      check "not available yet" notin d.output
       check ("flake.lock NOT refreshed because the commit is refused for a " &
         "recipe constraint the re-pin may not move (H3)") in preCommitLog(fx)
       check ("repin-constraint refused: rule=H3 system=repro " &
@@ -327,12 +329,14 @@ suite "HL-11 H3: one plan over both locks; constraints win":
         fx.app / "repro.lock" & " 'beta' stays at " & betaSeed & "; " &
         fx.app / "flake.lock" & " input 'beta-src' stays at " & betaSeed &
         ")") in c.output
-      # Remedy 1: the intended upgrade, named; today's edit spelled out.
-      check ("If " & betaNext & " is the intended upgrade, repro lock " &
-        "update beta-src --to " & betaNext & " (not available yet) will do " &
-        "this in one step; today, change rev=" & betaSeed & " to rev=" &
-        betaNext & " in that input's url in " & flakeNixPath) in c.output
-      check "`repro lock update" notin c.output
+      # Remedy 1: the intended upgrade, as the runnable one-step command.
+      let updateCmd = "repro lock update beta-src --to " & betaNext &
+        " --repo-root=" & fx.app
+      check ("If " & betaNext & " is the intended upgrade, run `" &
+        updateCmd & "`: it changes rev=" & betaSeed & " to rev=" & betaNext &
+        " in that input's url in " & flakeNixPath) in c.output
+      check updateCmd in backtickedCommands(c.output)
+      check "not available yet" notin c.output
       # Remedy 2: the experiment, with the override's file and a command
       # that runs where the message is printed.
       let checkoutCmd = "git -C " & siblingDir(fx, "beta") & " checkout " &
@@ -443,9 +447,9 @@ suite "HL-11 H3: one plan over both locks; constraints win":
         " 'beta' stays at " & betaOne & "; " & fx.app / "flake.lock" &
         " input 'beta-src' stays at " & betaOne & "). (1) If version 2.0.0 " &
         "is the intended upgrade, widen the range at " & rangeWhere &
-        " so it admits 2.0.0, and commit again (repro lock update, not " &
-        "available yet, will not widen a range: that is the author's " &
-        "decision). (2) If " & betaTwo & " was a temporary experiment, " &
+        " so it admits 2.0.0, and commit again (repro lock update will not " &
+        "widen a range: that is the author's decision). (2) If " & betaTwo &
+        " was a temporary experiment, " &
         "check the sibling out at a revision the recipe admits, such as the " &
         "one the locks name now: `" & checkoutCmd & "`; then commit again."
       check paragraph in c.output.splitLines()

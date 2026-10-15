@@ -12546,6 +12546,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_update_rewrites_exact_pin_in_both_recipes.nim",
+    binary: "build/test-bin/t_lock_update_rewrites_exact_pin_in_both_recipes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_validate_root_provenance_survives_commit.nim",
     binary: "build/test-bin/t_lock_validate_root_provenance_survives_commit",
     defines: @[],
@@ -17588,6 +17597,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_recipe_lock_consistency_check.nim",
     binary: "build/test-bin/t_recipe_lock_consistency_check",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_recipe_pin_edit.nim",
+    binary: "build/test-bin/t_recipe_pin_edit",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

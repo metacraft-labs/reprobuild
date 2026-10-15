@@ -440,6 +440,80 @@ directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be
 pasted as printed.
 
+### An intended upgrade: `repro lock update`
+
+```
+repro lock update <dependency> [--to <rev>] [--repo-root=<dir>]
+                  [--allow-pin-regression=<name>[,<name>…]]
+```
+
+A recipe states a **constraint** and a lock records a **resolution**: a
+`repro.nim` `uses:` range or exact version against a `repro.lock` entry,
+a `flake.nix` input URL (a branch, or an exact `rev=<sha>` /
+`github:o/r/<sha>`) against a `flake.lock` node. The managed `pre-commit`
+hook re-pins resolutions from your sibling checkouts on every commit, but
+it **never rewrites a constraint**: when an exact pin (or a range) excludes
+the revision a sibling is at, it refuses the commit and names this
+command, because only you know whether the newer checkout is an upgrade or
+an experiment.
+
+`repro lock update` is that upgrade, in one step and for both systems:
+
+- **The dependency** may be named by its `flake.nix` input name, its
+  `repro.lock` dependency name or its workspace repo name. All of them must
+  mean one repository, identified by canonical URL (`github:o/r`,
+  `git+https://github.com/o/r` and `https://github.com/o/r.git` are one
+  repository). A name that means two repositories is refused with every
+  candidate; name one as `input:<name>`, `dep:<name>` or `repo:<name>`.
+- **The target** is `--to <rev>` (a commit id, or a ref resolved in the
+  sibling checkout); else the sibling checkout's `HEAD`; else, for a flake
+  input that follows a branch, the tip nix resolves. A `repro.lock`
+  dependency entry with no checkout needs `--to`: the entry records a
+  checkout's revision, and the solver selects package versions, never a
+  dependency's revision.
+- **Every resolution moves**: each `flake.lock` root input and each
+  `repro.lock` dependency entry of that repository.
+- **An exact pin that excludes the target is rewritten** in whichever recipe
+  states it. In `flake.nix` the revision in the input's URL changes and
+  nothing else in the file does; the node is then re-locked through nix
+  (`nix flake update <input>`), which is what computes its new `narHash`. In
+  `repro.nim` an exact `uses:` version is replaced by the version whose
+  producer `versions:` entry maps to the target; if none does, the command
+  refuses (exit 3) and asks you to add that entry.
+- **A `uses:` range is never rewritten.** One that admits the target is left
+  alone; one that excludes it is refused (exit 3), naming the line, because
+  widening a range is the author's decision.
+- **A pin never moves backward silently**: a target behind, or diverged
+  from, a current resolution is refused (exit 4) unless
+  `--allow-pin-regression=<name>` or `REPRO_ALLOW_PIN_REGRESSION=<name>`
+  names the dependency (any of its names).
+- **A pin names published content.** A target that exists only in the
+  sibling checkout (reachable from no remote-tracking ref, judged locally,
+  never over the network) is refused (exit 1) when a `flake.lock`
+  resolution would name it, because nix cannot fetch it for anyone else;
+  the message names the `git push` that publishes it. A move of
+  `repro.lock` alone is written with a warning, and the push gate refuses
+  the push until the target is published.
+- **A modified checkout is not its `HEAD`.** When the target defaults to the
+  sibling's `HEAD` and that checkout has uncommitted changes, the command
+  refuses (exit 1); commit or stash them, or name the commit with `--to`.
+- **All or nothing.** If anything fails — nix is missing or cannot fetch
+  the target, a rewrite does not land, the result would not pass the
+  recipe/lock consistency checks — every file is put back byte for byte
+  (exit 1). The result is left in the working tree; nothing is staged or
+  committed.
+
+When the target is not what the sibling checkout is at, the command says
+so: unless a recipe pins the dependency exactly, the next commit's re-pin
+records whatever is checked out, so check the sibling out at the target
+before committing.
+
+`repro flake refresh-lock --only=<names>` does the same for each input it
+names, with the sibling's `HEAD` as the target (`--record-downgrade` allows
+a target behind the current pin). Without an explicit
+`--only`, `refresh-lock` keeps refreshing only the branch-following inputs
+and declines an exact pin.
+
 ### `locked-integrity-mismatch` (a lock that no longer verifies)
 
 This **refuses (exit 2)** for every tier, including personal (a

@@ -140,8 +140,12 @@ import repro_cli_support/recipe_constraints
 # for a revision written in `flake.nix` (`flakeRevPinEditRemedy`), which every
 # refusal that sends the operator to `flake.nix` prints.
 import repro_cli_support/lock_consistency
-export lock_consistency.flakeRevPinEditRemedy, lock_consistency.H1Property,
+export lock_consistency.flakeRevPinEditRemedy, lock_consistency.lockUpdateCommand,
+  lock_consistency.H1Property,
   lock_consistency.H2Property
+# HL-11 M4: the recipe rewrites `repro lock update` makes (an exact pin in
+# `flake.nix` or `repro.nim`) and the resolution of the name it is given.
+import repro_cli_support/recipe_pin_edit
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -75626,6 +75630,12 @@ proc runReproLockList(rest: openArray[string]): int =
     lockFileDeclarationsFromCompiledProvider(absolutePath(projectDir))))
   0
 
+proc runReproLockUpdate*(args: openArray[string]): int
+  ## HL-11 M4 — ``repro lock update <dependency> [--to <rev>]``. Forward
+  ## declaration: the implementation lives beside the `flake.lock` refresh
+  ## far below, whose rewriter it reuses and whose operator verb
+  ## (`repro flake refresh-lock`) delegates to it.
+
 proc runReproLockCommand*(args: openArray[string]): int =
   ## Top-level dispatcher for ``repro lock <verb> ...``.
   ##
@@ -75639,7 +75649,7 @@ proc runReproLockCommand*(args: openArray[string]): int =
   ## ``visualize`` (Locking-And-Solver.md §"CLI Surface") remain future work.
   if args.len == 0:
     stderr.writeLine("repro lock: error: missing verb " &
-      "(one of: list, solve, refresh, validate, explain)")
+      "(one of: list, solve, refresh, update, validate, explain)")
     return 2
   let rest =
     if args.len > 1: args[1 .. ^1]
@@ -75647,6 +75657,8 @@ proc runReproLockCommand*(args: openArray[string]): int =
   case args[0]
   of "list":
     return runReproLockList(rest)
+  of "update":
+    return runReproLockUpdate(rest)
   of "refresh":
     return runReproLockRefresh(rest)
   of "solve":
@@ -79683,7 +79695,7 @@ proc flakeDeclinedPinNotice(input, node, declaredRev, observedRev,
     "is this refresh's to choose, so the pin was LEFT ALONE, with its " &
     "narHash intact. This is a warning, not an error: nothing was written " &
     "and no operation was refused. To record " & observedRev & ", " &
-    flakeRevPinEditRemedy(declaredRev, observedRev, flakeRoot) & "."
+    flakeRevPinEditRemedy(input, declaredRev, observedRev, flakeRoot) & "."
 
 proc refreshFlakeLockText*(lockText: string;
     revisions: openArray[tuple[input, rev: string]];
@@ -80433,6 +80445,870 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   if result.withheld.len > 0:
     result.exitCode = flakeRefreshWithheldExit
 
+# ---------------------------------------------------------------------------
+# HL-11 M4 — `repro lock update <dependency> [--to <rev>]`
+# (Unified-Locking-And-Hooks.md §16.4, "An intended upgrade is one command in
+# both systems")
+#
+# The commit-time re-pin moves lock RESOLUTIONS only, and refuses where a
+# recipe CONSTRAINT excludes the observed revision (H3). This is the one
+# operation that may move a constraint, because only an explicit command
+# knows the newer revision is an intended upgrade rather than a passing
+# experiment. In one step it:
+#
+#   1. resolves the name it is given — a flake input, a `repro.lock`
+#      dependency or a workspace repo — to ONE canonical repository URL, and
+#      refuses an ambiguous name with every candidate;
+#   2. picks the target: `--to`, else the sibling checkout's `HEAD`, else (a
+#      flake input that follows a branch, with no checkout here) the branch
+#      tip nix resolves;
+#   3. applies §13.3's regression rule (`classifySiblingPin`): a target behind
+#      or diverged from a current resolution needs `--allow-pin-regression`
+#      or `REPRO_ALLOW_PIN_REGRESSION` naming the dependency;
+#   4. rewrites an exact pin that excludes the target, in whichever recipe
+#      states it: the revision in a `flake.nix` input's url, or the version
+#      of an exact `repro.nim` `uses:` entry (via the producer's `versions:`
+#      table). A `uses:` range is never rewritten: one that admits the target
+#      is left alone, one that excludes it is refused naming its line,
+#      because widening a range is the author's decision;
+#   5. moves EVERY resolution of the repository to the target: each
+#      `flake.lock` root input (an exact pin is re-locked through nix, which
+#      is the only thing that computes its new `narHash`; a branch-following
+#      input is moved by the commit refresh's own rewriter) and each
+#      `repro.lock` dependency entry.
+#
+# H3 binds it: all or nothing. Every file it may write is snapshotted first,
+# and any failure — a refused constraint found late, nix failing to fetch the
+# target, a rewrite that does not land, a consistency check that fails
+# afterwards — puts every byte back. It leaves the result in the working tree
+# and stages nothing.
+#
+# ## Why `nix flake update <input>` re-locks an edited pin
+#
+# Both `nix flake update <input>` and `nix flake lock` re-lock a node whose
+# `original.rev` no longer matches the edited `flake.nix` (verified with nix
+# 2.32.8). `update <input>` is used because it touches exactly the named
+# inputs: `nix flake lock` would also re-lock any OTHER input whose `original`
+# happens to disagree with `flake.nix` (an unrelated pending edit), which is
+# outside the one repository this command was asked to move.
+# ---------------------------------------------------------------------------
+
+const
+  LockUpdateLabel = "repro lock update"
+  LockUpdateExitFailed* = 1
+    ## Something could not be done (nix could not re-lock, a file could not
+    ## be written or edited, the result failed H1/H2, or the target is not
+    ## published and a `flake.lock` resolution would name it); every file is
+    ## as it was.
+  LockUpdateExitUsage* = 2
+    ## The invocation names nothing this command can act on: an unknown or
+    ## ambiguous dependency, no target, a target that does not resolve.
+  LockUpdateExitConstraint* = 3
+    ## A `uses:` range excludes the target, or an exact `uses:` version cannot
+    ## be mapped to it; nothing was written.
+  LockUpdateExitRegression* = 4
+    ## The target is behind or diverged from a current resolution and nothing
+    ## names the dependency as an allowed regression; nothing was written.
+    ## The same status `repro lock refresh` refuses a regression with.
+  LockUpdateUsage* = """repro lock update <dependency> [--to <rev>] [--repo-root=<dir>]
+                  [--allow-pin-regression=<name>[,<name>...]]
+
+Move every resolution of one repository, in repro.lock and in flake.lock, to
+one revision, rewriting an exact recipe pin that excludes it. This is the
+command for an INTENDED upgrade; the commit-time re-pin never moves a recipe
+pin.
+
+  <dependency>   a flake input name, a repro.lock dependency name or a
+                 workspace repo name; all of them must mean one repository
+                 (identified by canonical URL). Qualify an ambiguous name as
+                 input:<name>, dep:<name> or repo:<name>.
+  --to <rev>     the target revision (a commit id, or a ref resolved in the
+                 sibling checkout). Default: the sibling checkout's HEAD; with
+                 no checkout, the branch tip of a flake input that follows a
+                 branch.
+  --repo-root    the repo whose recipes and locks are updated (default: the
+                 git top-level of the current directory).
+  --allow-pin-regression=<names>
+                 allow a target behind, or diverged from, a current
+                 resolution. REPRO_ALLOW_PIN_REGRESSION is read too.
+
+Recipes: an exact flake.nix pin (rev=<sha> or github:o/r/<sha>) is rewritten
+and the node re-locked through nix (`nix flake update <input>`); an exact
+repro.nim uses: version is replaced by the version whose producer versions:
+entry maps to the target. A uses: range that admits the target is left alone;
+one that excludes it is refused, naming its line.
+
+A target that exists only in the sibling checkout (reachable from no
+remote-tracking ref) is refused when a flake.lock resolution would name it,
+because nix cannot fetch it for anybody else: publish it first. A move of
+repro.lock alone is written with a warning, and the push gate refuses the
+push until the target is published.
+
+Nothing is written unless everything can be. Nothing is staged or committed.
+
+Exit status: 0 done (or nothing to do), 1 failed (nothing written),
+2 nothing to act on, 3 a recipe constraint refuses the target,
+4 a pin regression was not allowed."""
+
+type
+  LockUpdateRequest* = object
+    ## One `repro lock update`, as its callers (the verb and
+    ## `repro flake refresh-lock`) state it.
+    repoRoot*: string
+    dependency*: string
+    target*: string
+      ## `--to`, or "" for the default target
+    allowRegression*: seq[string]
+      ## names (`--allow-pin-regression`, `REPRO_ALLOW_PIN_REGRESSION`) whose
+      ## regression is allowed
+    allowBehind*: bool
+      ## also allow a BEHIND target (`repro flake refresh-lock
+      ## --record-downgrade`); a diverged one still needs a name
+    label*: string          ## the prefix of every line printed
+
+  LockUpdateOutcome* = object
+    exitCode*: int
+    repository*: string     ## the canonical repository the name resolved to
+    target*: string         ## the revision everything was moved to
+    report*: seq[string]    ## what was done, one line each (stdout)
+    refusal*: seq[string]   ## why nothing was written (stderr)
+    notes*: seq[string]     ## things worth saying either way (stderr)
+    written*: seq[string]   ## the files that changed
+
+  LockUpdateSnapshot = object
+    ## The bytes of every file the command may write, as found.
+    paths: seq[string]
+    present: seq[bool]
+    texts: seq[string]
+
+proc takeLockUpdateSnapshot(paths: openArray[string]): LockUpdateSnapshot =
+  for p in paths:
+    result.paths.add(p)
+    if fileExists(extendedPath(p)):
+      result.present.add(true)
+      result.texts.add(readFile(extendedPath(p)))
+    else:
+      result.present.add(false)
+      result.texts.add("")
+
+proc restoreLockUpdateSnapshot(s: LockUpdateSnapshot): seq[string] =
+  ## Put every snapshotted file back exactly as it was. Returns the files it
+  ## could NOT restore (said by the caller: a half-applied update must never
+  ## be silent).
+  for i, p in s.paths:
+    try:
+      if s.present[i]:
+        if not fileExists(extendedPath(p)) or
+            readFile(extendedPath(p)) != s.texts[i]:
+          writeFile(extendedPath(p), s.texts[i])
+      elif fileExists(extendedPath(p)):
+        removeFile(extendedPath(p))
+    except CatchableError as err:
+      result.add(p & " (" & err.msg & ")")
+
+proc lockUpdateGitTopLevel(dir: string): string =
+  ## The git top-level of ``dir``, or "" outside a work tree.
+  let gitBin = findExe("git")
+  if gitBin.len == 0: return ""
+  try:
+    let res = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(dir) &
+      " rev-parse --show-toplevel", options = {poUsePath},
+      env = scrubbedGitRepositoryEnv())
+    if res.exitCode == 0: return res.output.strip()
+  except CatchableError:
+    discard
+  ""
+
+proc runLockUpdateNix(root: string; inputs: openArray[string]):
+    tuple[ok: bool; output: string] =
+  ## `nix flake update <inputs…> --flake <root>`: re-lock exactly the named
+  ## nodes from what `flake.nix` states. The experimental features are named
+  ## explicitly so a host whose nix.conf does not enable them still runs it.
+  ##
+  ## The ambient `nix` on purpose (hence ``uncontrolled*``): the lock it
+  ## writes is the one the operator's own nix evaluates, the same nix that
+  ## re-enters the dev shell; `flake.lock` is nix's file, not a build output
+  ## of ours.
+  let nixBin = uncontrolledFindExe("nix")
+  if nixBin.len == 0:
+    return (false, "nix is not on PATH")
+  var cmd = quoteShell(nixBin) &
+    " --extra-experimental-features 'nix-command flakes' flake update"
+  for i in inputs: cmd.add(" " & quoteShell(i))
+  cmd.add(" --flake " & quoteShell(root))
+  try:
+    let res = uncontrolledExecCmdEx(cmd,
+      options = {poStdErrToStdOut, poUsePath}, workingDir = root)
+    (res.exitCode == 0, res.output.strip())
+  except CatchableError as err:
+    (false, err.msg)
+
+proc nixSaid(output: string): string =
+  ## nix's own output, one indented line each, after a refusal's summary
+  ## line: the summary stays one greppable line, and nix's words are kept.
+  for line in output.splitLines():
+    if line.strip().len > 0: result.add("\n  nix: " & line)
+
+proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
+  ## The whole of `repro lock update` (see the section comment). Never
+  ## raises; every outcome is in the result, and every file is either fully
+  ## updated or exactly as it was.
+  let label = if req.label.len > 0: req.label else: LockUpdateLabel
+  let root = os.normalizedPath(absolutePath(req.repoRoot))
+  let flakeNixPath = root / "flake.nix"
+  let flakeLockPath = root / "flake.lock"
+  let reproNimPath = root / "repro.nim"
+  let reproLockPath = root / CommittedLockFileName
+  template refuseNow(code: int; line: string) =
+    result.exitCode = code
+    result.refusal.add(line)
+    return
+  if req.dependency.len == 0:
+    refuseNow(LockUpdateExitUsage, "missing <dependency>")
+  var git: GitToolIdentity
+  try:
+    git = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    refuseNow(LockUpdateExitFailed, "git is not resolvable (" & err.msg &
+      "); nothing was written")
+  let inputs = gatherConsistencyInputs(root, csWorktree)
+
+  # ---- (1) what the two systems resolve, and what the name means ---------
+  let haveFlake = inputs.flakeNix.present and inputs.flakeLock.present
+  var constraintOf = initTable[string, FlakeInputConstraint]()
+  var resolutions: seq[FlakeLockResolution]
+  if haveFlake:
+    for c in flakeRecipeConstraintsOf(inputs.flakeNix.text,
+        flakeNixPath).inputs:
+      constraintOf[c.input] = c
+    resolutions = flakeLockResolutions(inputs.flakeLock.text)
+  proc flakeIdentity(r: FlakeLockResolution): string =
+    let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
+    if c.canonicalRepo.len > 0: c.canonicalRepo else: r.canonicalRepo
+  var ld: LockedDependencies
+  var haveReproLock = false
+  if inputs.reproLock.present:
+    try:
+      ld = parseLockedDependencies(inputs.reproLock.text)
+      haveReproLock = true
+    except CatchableError as err:
+      refuseNow(LockUpdateExitFailed, reproLockPath & " could not be read as " &
+        "a lock (" & err.msg & "); nothing was written")
+  let pathBase = committedLockPathBase(root)
+  let membership = manifestMembershipOf(root)
+  let ws = if membership.resolved: membership.workspaceRoot else: ""
+  proc checkoutOfRepo(r: ResolvedRepo): string =
+    if ws.len == 0 or r.path.len == 0 or r.path == ".": return ""
+    os.normalizedPath(absolutePath(ws / r.path))
+  proc identityOfRepo(r: ResolvedRepo): seq[string] =
+    ## Every canonical identity a workspace repo answers to: its fetch URLs
+    ## and its checkout as a `file://` URL (how a local fixture's inputs name
+    ## it), the binding ``hookDevelopSetOf`` uses.
+    var urls = @[r.fetchUrl]
+    for remote in r.remotes: urls.add(remote.fetchUrl)
+    let co = checkoutOfRepo(r)
+    if co.len > 0: urls.add("file://" & co)
+    for u in urls:
+      if u.len == 0: continue
+      let id = canonicalRepositoryUrl(u)
+      if id.len > 0 and id notin result: result.add(id)
+  var candidates: seq[DependencyCandidate]
+  for r in resolutions:
+    let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
+    candidates.add(DependencyCandidate(kind: dckFlakeInput, name: r.input,
+      identity: flakeIdentity(r),
+      where: (if c.line > 0: flakeNixPath & ":" & $c.line
+              else: flakeLockPath)))
+  if haveReproLock:
+    for d in ld.deps:
+      if d.path == "." or d.coordinates.kind != ckVcs: continue
+      candidates.add(DependencyCandidate(kind: dckReproLockDep, name: d.name,
+        identity: canonicalRepositoryUrl(d.coordinates.url),
+        where: reproLockPath))
+  for r in membership.repos:
+    if r.name == membership.selfName: continue
+    let ids = identityOfRepo(r)
+    candidates.add(DependencyCandidate(kind: dckWorkspaceRepo, name: r.name,
+      identity: (if ids.len > 0: ids[0] else: ""),
+      where: "workspace repo at " & checkoutOfRepo(r)))
+  let named = resolveDependencyName(req.dependency, candidates)
+  if not named.ok:
+    refuseNow(LockUpdateExitUsage, named.diagnostic & "; nothing was written")
+  let identity = named.identity
+  result.repository = identity
+  # Every name the repository goes by here: any of them may name it in an
+  # allowance, and the messages use the one each file uses.
+  var namesOfRepo = @[req.dependency]
+  for c in candidates:
+    if c.identity == identity and c.name notin namesOfRepo:
+      namesOfRepo.add(c.name)
+
+  # ---- (2) every resolution of the repository ------------------------------
+  var flakeOfRepo: seq[FlakeLockResolution]
+  for r in resolutions:
+    if flakeIdentity(r) == identity: flakeOfRepo.add(r)
+  var reproOfRepo: seq[int]
+  if haveReproLock:
+    for i, d in ld.deps:
+      if d.path == "." or d.coordinates.kind != ckVcs: continue
+      if canonicalRepositoryUrl(d.coordinates.url) == identity:
+        reproOfRepo.add(i)
+  if flakeOfRepo.len == 0 and reproOfRepo.len == 0:
+    refuseNow(LockUpdateExitUsage, "repository " & identity & " ('" &
+      req.dependency & "') is resolved by neither " & flakeLockPath &
+      " nor " & reproLockPath & ", so there is no resolution to move; " &
+      "nothing was written")
+  # The sibling checkout: the workspace repo of that identity, else the
+  # checkout a `repro.lock` entry points at.
+  var checkout = ""
+  var checkoutRepo = ""
+  for r in membership.repos:
+    if r.name == membership.selfName: continue
+    if identity in identityOfRepo(r):
+      let co = checkoutOfRepo(r)
+      if co.len > 0 and co != root and isGitCheckoutDir(co):
+        checkout = co
+        checkoutRepo = r.name
+        break
+  if checkout.len == 0:
+    for i in reproOfRepo:
+      let abs = os.normalizedPath(absolutePath(pathBase / ld.deps[i].path))
+      if abs != root and isGitCheckoutDir(abs):
+        checkout = abs
+        checkoutRepo = ld.deps[i].name
+        break
+  proc revParse(dir, spec: string): string =
+    let res = gitRunPlain(git, ["-C", dir, "rev-parse", "--verify", "--quiet",
+      spec & "^{commit}"])
+    if res.code == 0 and isExactRevision(res.output.strip()):
+      res.output.strip().toLowerAscii()
+    else: ""
+
+  # ---- (3) the target -------------------------------------------------------
+  var target = ""
+  var targetSource = ""
+  var branchTip = false
+  var checkoutHead = ""
+  if checkout.len > 0: checkoutHead = revParse(checkout, "HEAD")
+  if req.target.len > 0:
+    if isExactRevision(req.target):
+      target = req.target.toLowerAscii()
+    elif checkout.len > 0:
+      target = revParse(checkout, req.target)
+      if target.len == 0:
+        refuseNow(LockUpdateExitUsage, "--to " & req.target & " does not " &
+          "resolve to a commit in " & checkout & "; nothing was written")
+    else:
+      refuseNow(LockUpdateExitUsage, "--to " & req.target & " is not a full " &
+        "commit id, and there is no checkout of " & identity & " here to " &
+        "resolve it in; pass the commit id; nothing was written")
+    targetSource = "--to"
+  elif checkoutHead.len > 0:
+    # The inherited dirty-sibling policy (Workspace-And-Develop-Mode.md
+    # §"Reproducibility And `repro check`": "if a develop-mode dependency has
+    # uncommitted modifications, the project lock file must not be
+    # updated"), which the per-input `flake.lock` refresh also obeys. A
+    # DEFAULT target is "what the checkout is", and a modified checkout is
+    # not its `HEAD`: recording `HEAD` would describe content the developer
+    # is not building. An explicit `--to` names a commit, not the checkout,
+    # so it is not affected.
+    let dirt = uncommittedChangesBlocker(git, checkout)
+    if dirt.len > 0:
+      refuseNow(LockUpdateExitFailed, "the sibling checkout " & checkout &
+        " has " & dirt.join(", ") & ", so its HEAD " & checkoutHead &
+        " is not what it holds, and a lock must not record it (a " &
+        "develop-mode dependency with uncommitted modifications does not " &
+        "update a project lock); commit or stash the changes and run this " &
+        "again, or name the commit explicitly with --to " & checkoutHead &
+        "; nothing was written")
+    target = checkoutHead
+    targetSource = "the HEAD of " & checkout
+  else:
+    var exact: seq[string]
+    for r in flakeOfRepo:
+      let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
+      if c.exactRev.len > 0:
+        exact.add(flakeNixPath & ":" & $c.line & " (input '" & r.input &
+          "', rev " & c.exactRev & ")")
+    if flakeOfRepo.len > 0 and exact.len == 0:
+      branchTip = true
+      targetSource = "the branch tip nix resolves"
+    elif exact.len > 0:
+      refuseNow(LockUpdateExitUsage, "there is no checkout of " & identity &
+        " here and " & exact.join(", ") & " pins it exactly, so there is " &
+        "no branch for nix to follow; name the target with --to <rev>; " &
+        "nothing was written")
+    else:
+      # A `repro.lock` dependency entry records a CHECKOUT (§14.2): the
+      # solver selects package versions, never a dependency's revision, so
+      # without a checkout there is no "solver's choice" to move it to.
+      refuseNow(LockUpdateExitUsage, "there is no checkout of " & identity &
+        " here, and " & reproLockPath & " resolves it as a dependency " &
+        "entry, which records a checkout's revision rather than a solver " &
+        "choice (the solver selects package versions, not a dependency's " &
+        "revision); name the target with --to <rev>; nothing was written")
+
+  # ---- (4) snapshot, then plan and apply, all or nothing --------------------
+  let snapshot = takeLockUpdateSnapshot([flakeNixPath, flakeLockPath,
+    reproNimPath, reproLockPath])
+  var flakeLockText = if haveFlake: inputs.flakeLock.text else: ""
+  template undoAll(code: int; line: string) =
+    let unrestored = restoreLockUpdateSnapshot(snapshot)
+    result.exitCode = code
+    for part in line.splitLines():
+      if part.len > 0: result.refusal.add(part)
+    if unrestored.len > 0:
+      result.refusal.add("COULD NOT RESTORE " & unrestored.join(", ") &
+        ": compare them with git and restore them by hand")
+    else:
+      result.refusal.add("nothing was written: every file is as it was")
+    result.written = @[]
+    return
+  try:
+    if branchTip:
+      # No checkout and every flake resolution follows a branch: the target
+      # IS what nix resolves that branch to. Re-locked first, then every
+      # other resolution follows it.
+      var names: seq[string]
+      for r in flakeOfRepo: names.add(r.input)
+      let ran = runLockUpdateNix(root, names)
+      if not ran.ok:
+        undoAll(LockUpdateExitFailed, "`nix flake update " &
+          names.join(" ") & " --flake " & root & "` failed; nix said:" &
+          nixSaid(ran.output))
+      flakeLockText = readFile(extendedPath(flakeLockPath))
+      var tips: seq[string]
+      for r in flakeLockResolutions(flakeLockText):
+        if r.input in names and r.lockedRev.toLowerAscii() notin tips:
+          tips.add(r.lockedRev.toLowerAscii())
+      if tips.len != 1 or not isExactRevision(tips[0]):
+        undoAll(LockUpdateExitFailed, "nix re-locked " & names.join(", ") &
+          " at " & (if tips.len == 0: "no revision" else: tips.join(" and ")) &
+          ", not one revision of " & identity)
+      target = tips[0]
+      if flakeLockText != snapshot.texts[1]:
+        result.written.add(flakeLockPath)
+        result.report.add("flake.lock " & names.join(", ") & ": re-locked " &
+          "through nix to the branch tip " & target)
+    result.target = target
+    result.report.insert(label & ": '" & req.dependency & "' is repository " &
+      identity & "; target " & target & " (" & targetSource & ")", 0)
+
+    # §13.3: a target behind, or diverged from, a current resolution.
+    if not branchTip:
+      var refused, allowed: seq[PinRegression]
+      var seen: seq[string]
+      template consider(lockArg, siblingArg, currentArg: string) =
+        let cur = currentArg.toLowerAscii()
+        if cur.len > 0 and cur != target and (lockArg & cur) notin seen:
+          seen.add(lockArg & cur)
+          var relation = sprUnknown
+          var aheadBy, behindBy = 0
+          var detail = "there is no checkout of " & identity & " here to " &
+            "decide the direction in"
+          if checkout.len > 0:
+            let cls = classifySiblingPin(git, checkout, cur, target)
+            relation = cls.relation
+            aheadBy = cls.aheadBy
+            behindBy = cls.behindBy
+            detail = cls.detail
+          if relation notin {sprAt, sprAhead}:
+            let reg = PinRegression(lock: lockArg, sibling: siblingArg,
+              repo: checkoutRepo, path: checkout, relation: relation,
+              aheadBy: aheadBy, behindBy: behindBy, pinned: cur,
+              observed: target)
+            var isNamed = false
+            for n in namesOfRepo:
+              if n in req.allowRegression: isNamed = true
+            if isNamed or (req.allowBehind and relation == sprBehind):
+              allowed.add(reg)
+            else:
+              refused.add(reg)
+              if relation == sprUnknown and detail.len > 0:
+                result.notes.add(pinRegressionSubject(reg) & ": " & detail)
+      for i in reproOfRepo:
+        consider(CommittedLockFileName, ld.deps[i].name,
+          ld.deps[i].coordinates.revision)
+      for r in flakeOfRepo:
+        consider("flake.lock", r.input, r.lockedRev)
+      if refused.len > 0:
+        var names: seq[string]
+        for r in refused:
+          if r.sibling notin names: names.add(r.sibling)
+        let rerun = lockUpdateCommand(req.dependency, target, root) &
+          " --allow-pin-regression=" & pinRegressionShellWord(names.join(","))
+        for line in renderPinRegressionRefusal(refused, ws, git,
+            action = "update", rerun = rerun):
+          result.refusal.add(line)
+        undoAll(LockUpdateExitRegression, "the update was refused by the " &
+          "regression rule (Unified-Locking-And-Hooks.md §13.3)")
+      for r in allowed:
+        result.notes.add(pinRegressionAllowedLine(r,
+          via = (if req.allowBehind and r.relation == sprBehind:
+                   "--record-downgrade"
+                 else: "--allow-pin-regression / " & PinRegressionAllowEnv)))
+
+    # Publication: is the target obtainable by anybody but this checkout?
+    # The rule, and its local-remote-tracking-refs-only strength, are
+    # `flakeClassifyPublication`'s — the one the per-input `flake.lock`
+    # refresh withholds by. A `flake.lock` pin naming a revision only this
+    # machine has makes nix answer HTTP 404 from the forge, which nix-direnv
+    # reports by silently falling back to the PREVIOUS dev shell; that harm
+    # lands on the next directory entry, long before the push gate (whose
+    # publication check §16.4 keeps) could catch it. So a target that is not
+    # published REFUSES the update when it would move any `flake.lock`
+    # resolution — all or nothing, so `repro.lock` is not moved either — and
+    # names the push that publishes it. A `repro.lock`-only move is written
+    # with a warning instead: nothing fetches a `repro.lock` dependency entry
+    # on directory entry, the commit-time re-pin records an unpublished
+    # sibling `HEAD` there in exactly the same way, and the push gate refuses
+    # the push until the revision is published.
+    if not branchTip:
+      var flakeMoves = false
+      for r in flakeOfRepo:
+        let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
+        if r.lockedRev.toLowerAscii() != target or
+            (c.exactRev.len > 0 and c.exactRev != target):
+          flakeMoves = true
+      var reproMoves = false
+      for i in reproOfRepo:
+        if ld.deps[i].coordinates.revision.toLowerAscii() != target:
+          reproMoves = true
+      if checkout.len > 0 and (flakeMoves or reproMoves):
+        let pub = flakeClassifyPublication(git, checkout, target)
+        if pub.unpublished:
+          let push = "git -C " & quoteShell(checkout) & " push " &
+            quoteShell(pub.remote) & " " & target & ":refs/heads/" &
+            quoteShell(pub.branch)
+          let fetch = "git -C " & quoteShell(checkout) & " fetch " &
+            quoteShell(pub.remote)
+          if flakeMoves:
+            undoAll(LockUpdateExitFailed, "the target " & target & " " &
+              pub.detail & ". A flake.lock resolution naming it would name " &
+              "content nix cannot fetch for anybody else (nix reports HTTP " &
+              "error 404 from the forge, and nix-direnv falls back to the " &
+              "previous dev shell instead of failing), so the update was " &
+              "refused for every resolution of " & identity & ". Publish " &
+              "it first with `" & push & "`, then run this again; or, if " &
+              "it is already published and this checkout has not seen it, " &
+              "run `" & fetch & "` first (publication is judged from local " &
+              "remote-tracking refs only, never over the network)")
+          result.notes.add("the target " & target & " " & pub.detail &
+            ": " & reproLockPath & " will name a revision nobody else can " &
+            "fetch, and the pre-push gate refuses the push until it is " &
+            "published (`" & push & "`)")
+      elif checkout.len == 0 and target.len > 0:
+        var floats: seq[string]
+        for r in flakeOfRepo:
+          let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
+          if c.exactRev.len == 0 and r.lockedRev.toLowerAscii() != target:
+            floats.add(r.input)
+        if floats.len > 0:
+          # An exact pin is re-locked by nix, which fetches the target and so
+          # proves it obtainable; a branch-following input is rewritten
+          # without a fetch, and there is no checkout here to ask.
+          result.notes.add("there is no checkout of " & identity & " here, " &
+            "so whether " & target & " is published could not be checked " &
+            "before moving " & floats.join(", ") & " in " & flakeLockPath &
+            "; nix fetches it on the next evaluation")
+
+    # The recipes: an exact pin that excludes the target is rewritten, a
+    # range is checked and never rewritten.
+    var flakeNixText = inputs.flakeNix.text
+    var relock: seq[string]
+    var floating: seq[tuple[input, rev: string]]
+    if not branchTip:
+      for r in flakeOfRepo:
+        let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
+        let locked = r.lockedRev.toLowerAscii()
+        let original = r.originalRev.toLowerAscii()
+        if c.exactRev.len > 0:
+          if c.exactRev != target:
+            let edit = rewriteFlakeInputRev(flakeNixText, r.input, c.exactRev,
+              target)
+            if not edit.ok:
+              undoAll(LockUpdateExitFailed, flakeNixPath & ": the pin of " &
+                "input '" & r.input & "' could not be rewritten: " &
+                edit.diagnostic)
+            flakeNixText = edit.text
+            result.report.add(flakeNixPath & ":" & $edit.line & " input '" &
+              r.input & "': " & edit.before & " -> " & edit.after)
+            relock.add(r.input)
+          elif locked != target or (original.len > 0 and original != target):
+            # The recipe already names the target and the lock does not
+            # follow it (an H1 state): nix re-locks it from `flake.nix`.
+            relock.add(r.input)
+        elif original.len > 0 and original != target:
+          undoAll(LockUpdateExitFailed, flakeLockPath & " node '" & r.node &
+            "' (input '" & r.input & "') records original.rev " & original &
+            ", which " & flakeNixPath & " does not state; re-lock it from " &
+            "flake.nix first (`" & flakeRelockInputCommand(r.input, root) &
+            "`) and run this again")
+        elif locked != target:
+          floating.add((input: r.input, rev: target))
+    var reproNimText = inputs.reproNim.text
+    if inputs.reproNim.present and reproOfRepo.len > 0:
+      var depOf = initTable[string, LockedDep]()
+      for i in reproOfRepo: depOf[ld.deps[i].name] = ld.deps[i]
+      var edits: seq[tuple[line: int; raw, exact, version: string]]
+      for decl in scanReproUsesDeclarations(inputs.reproNim.text,
+          reproNimPath):
+        let c = decl.constraint
+        if c.selector notin depOf: continue
+        if c.kind notin {uckRange, uckExact}: continue
+        let where = reproNimPath & ":" & $c.line
+        if decl.conditional:
+          result.notes.add(where & ": '" & decl.rawConstraint & "' is under " &
+            "a when/if/case arm, so whether it constrains '" & c.selector &
+            "' is not decidable without compiling the recipe; left alone")
+          continue
+        let dep = depOf[c.selector]
+        let depAbs = os.normalizedPath(absolutePath(pathBase / dep.path))
+        let at = versionMappedTo(inputs, c, depAbs, dep.coordinates.url,
+          target)
+        if c.kind == uckExact:
+          if at.found:
+            if at.version != c.exactVersion:
+              edits.add((line: c.line, raw: decl.rawConstraint,
+                exact: c.exactVersion, version: at.version))
+            continue
+          # No version maps to the target. Fine only when the exact version
+          # already means the target (its `sourceRevision` is the target
+          # through a mapping `versionMappedTo` filtered out); otherwise the
+          # version cannot be chosen for the author.
+          let verdict = reproRepinVerdict(inputs, c.selector, depAbs,
+            dep.coordinates.url, target)
+          if verdict.exactPin.len > 0 and verdict.exactPin == target:
+            continue
+          undoAll(LockUpdateExitConstraint, where & " requires '" &
+            decl.rawConstraint & "' exactly, and no version maps to " &
+            target & " (" & at.why & "). The exact version cannot be chosen " &
+            "for you: add a versions: entry whose sourceRevision is " &
+            target & " to the producer's repro.nim (" & depAbs / "repro.nim" &
+            ") and run this again")
+        else:
+          if at.found:
+            if c.admits(at.version):
+              result.report.add(where & " '" & decl.rawConstraint & "' " &
+                "admits version " & at.version & " (" & at.file & ":" &
+                $at.line & " maps " & target & " to it); left alone")
+            else:
+              undoAll(LockUpdateExitConstraint, where & " requires '" &
+                decl.rawConstraint & "', which does not admit version " &
+                at.version & " (" & at.file & ":" & $at.line & " maps " &
+                target & " to it). Widening a range is the author's " &
+                "decision, so this command does not rewrite it: widen the " &
+                "range at " & where & " so it admits " & at.version &
+                ", then run this again")
+          else:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' left " &
+              "alone; whether it admits " & target & " is not decidable " &
+              "here (" & at.why & ")")
+      for e in edits:
+        let edit = rewriteUsesExactVersion(reproNimText, e.line, e.raw,
+          e.exact, e.version)
+        if not edit.ok:
+          undoAll(LockUpdateExitFailed, reproNimPath & ":" & $e.line & ": '" &
+            e.raw & "' could not be rewritten: " & edit.diagnostic)
+        reproNimText = edit.text
+        result.report.add(reproNimPath & ":" & $e.line & " '" & edit.before &
+          "' -> '" & edit.after & "'")
+
+    # ---- apply: flake.nix, the nix re-lock, flake.lock, repro.lock, repro.nim
+    if relock.len > 0:
+      if uncontrolledFindExe("nix").len == 0:
+        undoAll(LockUpdateExitFailed, "nix is not on PATH, and re-locking " &
+          relock.join(", ") & " needs it: only nix computes the new narHash")
+      if flakeNixText != inputs.flakeNix.text:
+        writeFile(extendedPath(flakeNixPath), flakeNixText)
+        result.written.add(flakeNixPath)
+      let ran = runLockUpdateNix(root, relock)
+      if not ran.ok:
+        undoAll(LockUpdateExitFailed, "re-locking " &
+          relock.join(", ") & " through nix failed (`nix flake update " &
+          relock.join(" ") & " --flake " & root & "`). If " & target &
+          " is not yet pushed to the input's url, push it first. nix said:" &
+          nixSaid(ran.output))
+      flakeLockText = readFile(extendedPath(flakeLockPath))
+      var lockedAt = initTable[string, FlakeLockResolution]()
+      for r in flakeLockResolutions(flakeLockText): lockedAt[r.input] = r
+      for input in relock:
+        let r = lockedAt.getOrDefault(input, FlakeLockResolution())
+        if r.lockedRev.toLowerAscii() != target:
+          undoAll(LockUpdateExitFailed, "nix re-locked input '" & input &
+            "' at " & (if r.lockedRev.len > 0: r.lockedRev else: "nothing") &
+            ", not at " & target)
+        result.report.add("flake.lock input '" & input & "': re-locked " &
+          "through nix at " & target)
+      if flakeLockPath notin result.written:
+        result.written.add(flakeLockPath)
+    if floating.len > 0:
+      let moved = refreshFlakeLockText(flakeLockText, floating, root)
+      if moved.failed or moved.declined.len > 0 or
+          moved.rewrites.len != floating.len:
+        undoAll(LockUpdateExitFailed, flakeLockPath & " could not be moved " &
+          "to " & target & ": " &
+          (if moved.failed: moved.diagnostic
+           else: (moved.declined & moved.notices).join("; ")))
+      flakeLockText = moved.text
+      writeFile(extendedPath(flakeLockPath), flakeLockText)
+      if flakeLockPath notin result.written:
+        result.written.add(flakeLockPath)
+      for m in moved.rewrites:
+        result.report.add("flake.lock input '" & m.input & "': " & m.oldRev &
+          " -> " & m.newRev & " (follows a branch; " &
+          (if m.dropped.len > 0: m.dropped.join("/") & " dropped, as the " &
+             "commit-time refresh does"
+           else: "no derived fields to drop") & ")")
+    if reproOfRepo.len > 0:
+      var originalDepsLine = ""
+      for line in inputs.reproLock.text.splitLines():
+        if line.startsWith("deps = ["):
+          originalDepsLine = line
+          break
+      var moved = false
+      for i in reproOfRepo:
+        var d = ld.deps[i]
+        let old = d.coordinates.revision
+        if old.toLowerAscii() == target: continue
+        let depAbs = os.normalizedPath(absolutePath(pathBase / d.path))
+        let gitDir =
+          if isGitCheckoutDir(depAbs): depAbs
+          elif checkout.len > 0: checkout
+          else: ""
+        if gitDir.len > 0 and target == checkoutHead and gitDir == checkout:
+          # The sibling's HEAD: recorded exactly as the commit-time re-pin
+          # records it, so the next commit does not churn the entry.
+          let fresh = lockedDepFromCheckout(d.name, gitDir, pathBase)
+          d.coordinates.revision = fresh.coordinates.revision
+          d.coordinates.gitRef = keptPublishedRef(gitDir, d, fresh)
+          if fresh.coordinates.url.len > 0 and d.coordinates.url.len == 0:
+            d.coordinates.url = fresh.coordinates.url
+          d.integrity = fresh.integrity
+        else:
+          d.coordinates.revision = target
+          d.integrity =
+            if gitDir.len > 0: computeDepIntegrity(gitDir, target)
+            elif d.integrity.startsWith("git-sha256:"): "git-sha256:" & target
+            else: "git-sha1:" & target
+          if gitDir.len > 0 and d.coordinates.gitRef.len > 0 and
+              not publishedRefContains(gitDir, d.coordinates.gitRef, target):
+            # A `ref` is a published branch containing the revision; one
+            # that does not contain the target names nothing true any more.
+            d.coordinates.gitRef = ""
+        ld.deps[i] = d
+        moved = true
+        result.report.add("repro.lock '" & d.name & "': " & old & " -> " &
+          target)
+      if moved:
+        let depsLine = committedLockDepsLine(ld)
+        if originalDepsLine.len == 0 or depsLine.len == 0:
+          undoAll(LockUpdateExitFailed, reproLockPath & " carries no " &
+            "`deps = [...]` line to rewrite")
+        writeFile(extendedPath(reproLockPath),
+          inputs.reproLock.text.replace(originalDepsLine, depsLine))
+        result.written.add(reproLockPath)
+    if reproNimText != inputs.reproNim.text:
+      writeFile(extendedPath(reproNimPath), reproNimText)
+      result.written.add(reproNimPath)
+
+    # ---- the result must pass H1 / H2 for this repository --------------------
+    # A violation the update did not introduce (another dependency's, or one
+    # present before) is not this command's to refuse over; one it did
+    # introduce means a rewrite did not land as planned, and everything goes
+    # back.
+    if result.written.len > 0:
+      let before = checkRecipeLockConsistency(inputs)
+      let after = checkRecipeLockConsistency(
+        gatherConsistencyInputs(root, csWorktree))
+      var known: seq[string]
+      for v in before.violations: known.add(v.evidence)
+      var introduced: seq[ConsistencyViolation]
+      for v in after.violations:
+        if v.evidence in known: continue
+        if v.repository == identity or v.dependency in namesOfRepo:
+          introduced.add(v)
+      if introduced.len > 0:
+        for line in renderConsistencyRefusal(introduced):
+          result.refusal.add(line)
+        undoAll(LockUpdateExitFailed, "the updated recipes and locks would " &
+          "be inconsistent for " & identity & " (above)")
+  except CatchableError as err:
+    undoAll(LockUpdateExitFailed, "the update failed (" & err.msg & ")")
+  if result.written.len == 0:
+    result.report.add(label & ": every resolution of " & identity &
+      " already names " & target & "; nothing was written")
+  else:
+    if checkoutHead.len > 0 and target != checkoutHead:
+      result.notes.add("the sibling checkout " & checkout & " is at " &
+        checkoutHead & ", not " & target & ": unless a recipe pins it " &
+        "exactly, the commit-time re-pin records whatever is checked out, " &
+        "so check it out at " & target & " before committing (`git -C " &
+        quoteShell(checkout) & " checkout " & target & "`)")
+    result.report.add(label & ": wrote " & result.written.join(", ") &
+      "; nothing is staged or committed")
+
+proc printLockUpdateOutcome(o: LockUpdateOutcome; label: string) =
+  for line in o.report: stdout.writeLine(line)
+  for line in o.notes: stderr.writeLine(label & ": note: " & line)
+  for line in o.refusal: stderr.writeLine(label & ": " & line)
+
+proc runReproLockUpdate*(args: openArray[string]): int =
+  ## ``repro lock update <dependency> [--to <rev>] [--repo-root=<dir>]
+  ## [--allow-pin-regression=<names>]`` — see ``LockUpdateUsage`` and
+  ## ``executeLockUpdate``.
+  var req = LockUpdateRequest(label: LockUpdateLabel)
+  var i = 0
+  try:
+    while i < args.len:
+      let arg = args[i]
+      if arg == "--help" or arg == "-h":
+        stdout.writeLine(LockUpdateUsage)
+        return 0
+      elif arg == "--to" or arg.startsWith("--to="):
+        req.target = valueFromFlag(args, i, "--to")
+      elif arg == "--repo-root" or arg.startsWith("--repo-root="):
+        req.repoRoot = valueFromFlag(args, i, "--repo-root")
+      elif arg == "--allow-pin-regression" or
+          arg.startsWith("--allow-pin-regression="):
+        let parsed = parsePinRegressionAllowance(
+          valueFromFlag(args, i, "--allow-pin-regression"))
+        if parsed.rejected.len > 0:
+          stderr.writeLine(LockUpdateLabel & ": --allow-pin-regression " &
+            "names dependencies, and there is no wildcard: '" &
+            parsed.rejected.join("', '") & "' names none")
+          return LockUpdateExitUsage
+        for n in parsed.names:
+          if n notin req.allowRegression: req.allowRegression.add(n)
+      elif arg.startsWith("-"):
+        stderr.writeLine(LockUpdateLabel & ": unknown flag " & arg)
+        stderr.writeLine(LockUpdateUsage)
+        return LockUpdateExitUsage
+      elif req.dependency.len > 0:
+        stderr.writeLine(LockUpdateLabel & ": at most one <dependency> " &
+          "positional accepted (got '" & req.dependency & "' and '" & arg &
+          "')")
+        return LockUpdateExitUsage
+      else:
+        req.dependency = arg
+      inc i
+  except ValueError as err:
+    stderr.writeLine(LockUpdateLabel & ": " & err.msg)
+    return LockUpdateExitUsage
+  if req.dependency.len == 0:
+    stderr.writeLine(LockUpdateLabel & ": missing <dependency>")
+    stderr.writeLine(LockUpdateUsage)
+    return LockUpdateExitUsage
+  if req.repoRoot.len == 0:
+    let top = lockUpdateGitTopLevel(getCurrentDir())
+    req.repoRoot = if top.len > 0: top else: getCurrentDir()
+  let envAllowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
+  for n in envAllowance.names:
+    if n notin req.allowRegression: req.allowRegression.add(n)
+  let outcome = executeLockUpdate(req)
+  printLockUpdateOutcome(outcome, LockUpdateLabel)
+  outcome.exitCode
+
 proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ## ``repro flake refresh-lock [--all|--only=LIST|…every `repro develop`
   ## set-form selector] [--flake=DIR] [--strip-suffix=LIST]
@@ -80440,6 +81316,13 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ##
   ## Rewrites the `locked` node of each flake input an override substituted to
   ## that sibling's current `HEAD`, and touches nothing else.
+  ##
+  ## An explicit ``--only=<names>`` selection is the exception (HL-11 M4,
+  ## Unified-Locking-And-Hooks.md §16.4): each input it names is handed to
+  ## `repro lock update <name>` (``executeLockUpdate``) with the sibling's
+  ## `HEAD` as the target, so an exact `flake.nix` pin is rewritten and
+  ## re-locked through nix and the `repro.lock` resolution of the repository
+  ## moves too. The status is then that command's.
   ##
   ## Three statuses, and the middle one is the reason this list has three
   ## members rather than two:
@@ -80526,6 +81409,57 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
     else: defaultFlakeInputStripSuffixes
   let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
   let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
+  # HL-11 M4 (Unified-Locking-And-Hooks.md §16.4: "for an input it names it
+  # does what this command does"). The inputs an explicit `--only=<names>`
+  # selection NAMES are handed to `repro lock update`, one each, with the
+  # sibling's HEAD as the target: an exact `flake.nix` pin is rewritten and
+  # re-locked through nix, and the `repro.lock` resolution of the same
+  # repository moves with it. A bulk selection (`--all`, or none) keeps the
+  # per-input refresh below, which declines an exact pin — the same line
+  # §16.4 draws between an explicit and a bulk develop selection.
+  # `--record-downgrade` still allows a behind target, and
+  # `REPRO_ALLOW_PIN_REGRESSION` any regression it names. The two other
+  # rules the per-input refresh enforces hold there too, in all-or-nothing
+  # form: an unpublished `HEAD` is refused rather than withheld when it would
+  # land in `flake.lock`, and a modified checkout's `HEAD` is refused (see
+  # ``executeLockUpdate``).
+  var named: seq[string]
+  block:
+    var j = 0
+    while j < passthrough.len:
+      let a = passthrough[j]
+      if a.startsWith("--only="):
+        for n in parseCommaList(a["--only=".len .. ^1]):
+          if n notin named: named.add(n)
+      elif a == "--only" and j + 1 < passthrough.len:
+        for n in parseCommaList(passthrough[j + 1]):
+          if n notin named: named.add(n)
+        inc j
+      inc j
+  if named.len > 0:
+    var status = 0
+    var results = newJArray()
+    for name in named:
+      let updated = executeLockUpdate(LockUpdateRequest(repoRoot: flakeRoot,
+        dependency: name, allowRegression: allowance.names,
+        allowBehind: recordDowngrade, label: flakeRefreshLockLabel))
+      if asJson:
+        results.add(%*{"dependency": name, "repository": updated.repository,
+          "target": updated.target, "exitCode": updated.exitCode,
+          "written": %updated.written, "report": %updated.report,
+          "notes": %updated.notes, "refusal": %updated.refusal})
+      else:
+        printLockUpdateOutcome(updated, flakeRefreshLockLabel)
+      if updated.exitCode != 0 and status == 0: status = updated.exitCode
+    if asJson:
+      stdout.writeLine(pretty(%*{
+        "schemaId": "reprobuild.flake-refresh-lock.v1",
+        "workspaceRoot": workspaceRoot,
+        "flake": flakeRoot,
+        "lock": flakeRoot / "flake.lock",
+        "outcome": "lock-update",
+        "lockUpdates": results}, indent = 2))
+    return status
   let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo,
     passthrough, suffixes, toolProvisioning, recordDowngrade,
     allowRegression = allowance.names)
@@ -81023,7 +81957,8 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
       row.relation in {fprAt, fprAhead, fprDiverged}
     if authorPinned:
       let edit = "Input '" & row.input & "' is pinned BY REVISION: " &
-        flakeRevPinEditRemedy(declaredRev, row.siblingRev, flakeRoot)
+        flakeRevPinEditRemedy(row.input, declaredRev, row.siblingRev,
+          flakeRoot)
       if edit notin edits: edits.add(edit)
     for cmd in flakeReconcileCommands(row, flakeRoot, workspaceRoot):
       # The refresh is the command this row has just been shown not to have.

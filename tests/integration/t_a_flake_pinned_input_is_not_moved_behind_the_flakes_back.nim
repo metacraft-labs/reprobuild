@@ -224,10 +224,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
         "revision " & seedBeta & "; the re-pin wrote nothing for this " &
         "repository in either lock (" & fx.app / "flake.lock" & " input " &
         "'beta-src' stays at " & seedBeta & "). (1) If " & newBeta & " is " &
-        "the intended upgrade, repro lock update beta-src --to " & newBeta &
-        " (not available yet) will do this in one step; today, change rev=" &
-        seedBeta & " to rev=" & newBeta & " in that input's url in " &
-        flakeNixPath) in commit.output
+        "the intended upgrade, run `repro lock update beta-src --to " &
+        newBeta & " --repo-root=" & fx.app & "`: it changes rev=" & seedBeta &
+        " to rev=" & newBeta & " in that input's url in " & flakeNixPath) in
+        commit.output
       check ("(2) If " & newBeta & " was a temporary experiment, drop the " &
         "develop override of 'beta' (remove its entry from " &
         fx.ws / ".repro" / "develop-overrides.toml" & "; no repro command " &
@@ -774,6 +774,8 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
         check remediation.contains("merge --ff-only")
         check remediation.contains(newBeta)
         check not remediation.contains("change rev=")
+        check not remediation.contains("changes rev=")
+        check not remediation.contains("repro lock update")
         check not remediation.contains("pinned BY REVISION")
 
         # …and it is still a command that RUNS where the message says, which is

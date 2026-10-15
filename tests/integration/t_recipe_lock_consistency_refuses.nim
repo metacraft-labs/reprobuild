@@ -44,11 +44,12 @@
 ##     fetches another repository is not compared with the flake input of that
 ##     name, and repositories only one lock resolves are not compared.
 ##
-## `repro lock update` is NAMED by the messages (it is the one-step upgrade
-## command of a later milestone) and is asserted to be named WITHOUT
-## backticks, because backticks mark commands that run today. No case runs it.
-## The commands that do run today (`nix flake update <input> --flake <dir>`,
-## `nix flake lock <dir>`, `repro lock refresh`) are asserted to be backticked.
+## `repro lock update <dependency> --to <rev>` (HL-11 M4) is the one-step
+## upgrade, and the messages name it in backticks with its `--repo-root`,
+## like the other commands that run where they are printed
+## (`nix flake update <input> --flake <dir>`, `nix flake lock <dir>`,
+## `repro lock refresh`). Running it is covered by
+## `t_lock_update_rewrites_exact_pin_in_both_recipes`.
 ## nix itself is not run here, for the reason `nf2_flake_lock_fixture.nim`
 ## gives; the re-lock command was checked by hand with nix 2.32.8 against a
 ## node with `original.rev = R1`, `locked.rev = R2` under a `flake.nix`
@@ -150,13 +151,13 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       check ("locks it at " & other) in c.output
       # Remedy 1, runnable today: re-lock the input from flake.nix.
       check ("`nix flake update beta-src --flake " & fx.app & "`") in c.output
-      # Remedy 2: the intended upgrade, as an edit plus the re-lock command,
-      # and the one-step command named WITHOUT backticks.
-      check ("change rev=" & pinned & " to rev=" & other) in c.output
+      # Remedy 2: the intended upgrade, as the runnable one-step command,
+      # with the hand edit and its re-lock command beside it.
+      check ("If " & other & " is the intended upgrade, run `repro lock " &
+        "update beta-src --to " & other & " --repo-root=" & fx.app &
+        "`: it changes rev=" & pinned & " to rev=" & other) in c.output
       check ("`nix flake lock " & fx.app & "`") in c.output
-      check ("repro lock update beta-src --to " & other &
-        " (not available yet)") in c.output
-      check "`repro lock update" notin c.output
+      check "not available yet" notin c.output
       check "stale" notin c.output.toLowerAscii()
       check "lock-consistency refused: rule=H1 system=flake input=beta-src" in
         preCommitLog(fx)
@@ -178,7 +179,8 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       check (fx.app / "flake.nix" & ":" & $pinLine) in text
       check pinned in text and other in text
       check ("`nix flake update beta-src --flake " & fx.app & "`") in text
-      check ("change rev=" & pinned & " to rev=" & other) in text
+      check ("`repro lock update beta-src --to " & other & " --repo-root=" &
+        fx.app & "`: it changes rev=" & pinned & " to rev=" & other) in text
       check "stale" notin text.toLowerAscii()
 
   test "t_h1_repro_lock_outside_uses_range_refuses":
@@ -293,8 +295,10 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
         fx.app / "repro.lock" & " resolves 'beta' at " & betaTwo) in e.output
       check ("change the 'beta' entry's revision and its git-sha1 integrity " &
         "from " & betaTwo & " to " & betaSeed) in e.output
-      check ("repro lock update beta --to " & betaTwo &
-        " (not available yet)") in e.output
+      check ("If " & betaTwo & " is the intended upgrade, run `repro lock " &
+        "update beta --to " & betaTwo & " --repo-root=" & fx.app & "`: it " &
+        "changes the uses: entry at " & recipePath & ":" & $exactLine &
+        " to the version whose sourceRevision is " & betaTwo) in e.output
       discard gitIn(fx, fx.app, "reset -q")
       # 2.0.0 maps to the tag, which resolves to the locked commit: passes.
       writeFile(recipePath, recipe(">=2.0 <3", exact = "==2.0.0"))
@@ -376,11 +380,15 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       # Both directions of the repair, and the upgrade command, named.
       check ("change the 'hooks-lib' entry's revision and its git-sha1 " &
         "integrity from " & betaNext & " to " & betaSeed) in c.output
-      check ("change rev=" & betaSeed & " to rev=" & betaNext) in c.output
+      check ("To make both locks name " & betaSeed & " (the flake's " &
+        "revision), run `repro lock update hooks-lib --to " & betaSeed &
+        " --repo-root=" & fx.app & "`") in c.output
+      check ("To make both locks name " & betaNext & " (the repro.lock " &
+        "revision), run `repro lock update beta-src --to " & betaNext &
+        " --repo-root=" & fx.app & "`: it changes rev=" & betaSeed &
+        " to rev=" & betaNext) in c.output
       check ("`nix flake lock " & fx.app & "`") in c.output
-      check "repro lock update hooks-lib --to <rev> (not available yet)" in
-        c.output
-      check "`repro lock update" notin c.output
+      check "not available yet" notin c.output
       # Exactly ONE H2 violation: the same-named entry of another repository
       # was not compared.
       check c.output.count("H2 (the two locks agree)") == 1
