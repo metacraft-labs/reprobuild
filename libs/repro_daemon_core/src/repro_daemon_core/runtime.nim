@@ -833,6 +833,31 @@ proc statusPath(config: UserDaemonConfig): string =
 proc sessionRecordsDir(config: UserDaemonConfig): string =
   config.stateDir / "sessions"
 
+var sessionRecordsDirWalks = 0
+  ## How many times this process has walked `sessions/`. Incremented by
+  ## `sessionRecordFiles`, the only place the directory is enumerated.
+
+proc sessionRecordsDirWalkCount*(): int =
+  ## Exported for `t_daemon_active_session_tally.nim`, which asserts that
+  ## priming the active-session tally walks `sessions/` a bounded number of
+  ## times however many records it reclaims. The walk is the cost that
+  ## matters -- it is proportional to every record ever written -- and a
+  ## wall-clock assertion cannot see it on a test-sized fixture, so the test
+  ## counts walks instead.
+  sessionRecordsDirWalks
+
+iterator sessionRecordFiles(config: UserDaemonConfig): string =
+  ## Every `.session` file under `sessions/`, in one walk of the directory.
+  ##
+  ## ONE ENUMERATION SITE, so that `sessionRecordsDirWalkCount` counts every
+  ## walk: a second `walkDir` of this directory would be a cost the test that
+  ## bounds it cannot see.
+  if dirExists(sessionRecordsDir(config)):
+    inc sessionRecordsDirWalks
+    for kind, path in walkDir(sessionRecordsDir(config)):
+      if kind == pcFile and path.endsWith(".session"):
+        yield path
+
 proc sessionRecordPath(config: UserDaemonConfig; sessionId: string): string =
   sessionRecordsDir(config) / (safePathSegment(sessionId, "session") & ".session")
 
@@ -1130,11 +1155,7 @@ proc readSessionRecord(path: string): UserDaemonSession =
       discard
 
 proc loadSessionRecords(config: UserDaemonConfig): seq[UserDaemonSession] =
-  if not dirExists(sessionRecordsDir(config)):
-    return
-  for kind, path in walkDir(sessionRecordsDir(config)):
-    if kind != pcFile or not path.endsWith(".session"):
-      continue
+  for path in sessionRecordFiles(config):
     try:
       let session = readSessionRecord(path)
       if session.sessionId.len > 0:
@@ -1174,6 +1195,25 @@ proc countActiveSessionRecordsFromDisk*(config: UserDaemonConfig): int =
 #
 # Keyed on the records directory, so a differently-configured `stateDir`
 # re-primes instead of inheriting another daemon's tally.
+#
+# A PRIME IS ONE RECLAIM WALK AND ONE COUNT WALK, AND A WRITE NEVER STARTS
+# ONE. Priming reclaims first, and every record it reclaims is rewritten
+# through `writeSessionRecord`, which reports the write to
+# `noteSessionRecordWritten`. The cache key is not published until the prime
+# ends, and that proc used to answer a write into an unprimed directory by
+# priming -- so each reclaimed record started a nested prime, each walking
+# `sessions/` twice. The answer was still right (the outermost frame recounts
+# last), but n reclaimed records cost 2n + 2 walks of a directory that holds
+# every record ever written, at a recursion depth nothing bounded. The
+# daemon's startup reclaim took the same path on its first write, and the
+# prime that set off reclaimed the rest behind its back, so the startup log
+# said `count=1` however many records were reclaimed.
+#
+# Priming only where the tally is READ (`activeSessionTallyFor`) makes the
+# re-entry impossible rather than unlikely. A write into an unprimed directory
+# is already on disk, so the prime that eventually runs counts it; priming or
+# folding at write time adds nothing but the walk. A writer added inside a
+# prime later -- reclamation or anything else -- cannot re-enter it either.
 var activeSessionCacheDir = ""
 var activeSessionStateById = initTable[string, bool]()
 var activeSessionTally = 0
@@ -1217,11 +1257,7 @@ proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
   ## is the correct trade: reclaiming a record whose writer might still be
   ## running would let two builds believe they own one session, and a
   ## lingering record only defers a restart.
-  if not dirExists(sessionRecordsDir(config)):
-    return 0
-  for kind, path in walkDir(sessionRecordsDir(config)):
-    if kind != pcFile or not path.endsWith(".session"):
-      continue
+  for path in sessionRecordFiles(config):
     var session =
       try: readSessionRecord(path)
       except CatchableError: continue
@@ -1238,6 +1274,9 @@ proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
       discard
 
 proc primeActiveSessionTally(config: UserDaemonConfig) =
+  ## Count the active sessions in `sessions/` from disk, after reclaiming the
+  ## abandoned ones. At most two walks of the directory, whatever it holds:
+  ## see the note above `activeSessionCacheDir` for why nothing re-enters it.
   # Reclaim BEFORE counting, so the tally this produces already excludes
   # records whose writers are gone. Counting first and reclaiming later would
   # leave the first status answer of every daemon reporting phantom work.
@@ -1254,9 +1293,10 @@ proc primeActiveSessionTally(config: UserDaemonConfig) =
 proc noteSessionRecordWritten(config: UserDaemonConfig;
                               session: UserDaemonSession) =
   if activeSessionCacheDir != sessionRecordsDir(config):
-    # Not primed for this directory yet. The record is already on disk by the
-    # time this runs, so a prime counts it; do not also fold it in.
-    primeActiveSessionTally(config)
+    # Not primed for this directory -- or being primed right now, since the
+    # key is published last. The record is already on disk, so whichever
+    # prime counts this directory counts it. Neither fold it in nor prime
+    # here: see the note above `activeSessionCacheDir`.
     return
   let active = sessionStateIsActive(session.state)
   if not activeSessionStateById.hasKey(session.sessionId):
