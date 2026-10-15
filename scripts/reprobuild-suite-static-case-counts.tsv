@@ -134,7 +134,7 @@ libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	13
 libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	7
 libs/repro_cli_support/tests/t_data_file_row_selection_fixtures.nim	nim	3
-libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	17
+libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	18
 libs/repro_cli_support/tests/t_dss10_early_attribute_read_refuses_by_name.nim	nim	8
 libs/repro_cli_support/tests/t_dss72_external_registrar_protocol.nim	nim	18
 libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim	nim	16
