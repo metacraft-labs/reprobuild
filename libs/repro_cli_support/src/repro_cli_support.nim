@@ -383,6 +383,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --list-overrides\n       " &
           programName &
+      " develop --drop=DEPENDENCY[,DEPENDENCY...] [--workspace-root=PATH] [--project-root=PATH] [--json]\n       " &
+          programName &
       " develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--tag=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n       " &
           programName &
       " develop <dependency> --into=PATH\n       " &
@@ -30612,16 +30614,24 @@ type
                              ## clone, no reset, no override file write. It is
                              ## the query form of the placement step, the way
                              ## ``--list`` is the query form of the lock set.
+    skipRecipePins: bool     ## Internal, never set from argv: skip the scan
+                             ## of the workspace's recipes for exact pins
+                             ## (§16.4). Set by the flake override verbs,
+                             ## which run this composer on every shell entry
+                             ## and apply the exact pins of the ONE flake they
+                             ## bind instead (``bulkExactFlakePins``).
 
   DevelopAllNodeOutcome = object
     node: string
     path: string
     revision: string
     mode: string             ## cloned / adopted / reset / idempotent / refused
-                             ## / error, plus the ``--dry-run`` plan modes
-                             ## would-clone / would-reset
+                             ## / error / pinned-by-recipe, plus the
+                             ## ``--dry-run`` plan modes would-clone /
+                             ## would-reset
     diagnostic: string
     ok: bool
+    pinnedBy: string         ## ``<file>:<line>`` for mode pinned-by-recipe
 
 # ---------------------------------------------------------------------------
 # DS-1..DS-4 — the develop-set lock-set composer.
@@ -30719,7 +30729,26 @@ type
     revision: string
     path: string
     state: string            ## absent / at-lock / drifted / develop /
-                             ## evidence-only
+                             ## evidence-only / pinned
+    pinnedBy: string
+      ## ``<file>:<line>`` of the recipe that pins this repo by exact
+      ## revision (Unified-Locking-And-Hooks.md §16.4), or "". With state
+      ## ``pinned`` a bulk selection does not substitute it; with state
+      ## ``develop`` an explicit override does.
+
+  ExactRecipePin = object
+    ## One exact revision a recipe states for a dependency (§16.4): an input
+    ## `flake.nix` pins with `rev=` or a `/<sha>` path, or an exact `uses:`
+    ## version of `repro.nim` whose producer `versions:` entry maps it to a
+    ## revision. Identified by canonical repository URL, or by checkout path
+    ## for a `path:` input and a `repro.lock` dependency; never by a name.
+    input: string            ## the flake input, or "" for a `repro.nim` pin
+    dependency: string       ## the `repro.lock` dependency, or ""
+    identity: string         ## canonical repository URL, "" when unknown
+    path: string             ## absolute checkout, "" when unknown
+    file: string             ## the recipe that states the pin
+    line: int
+    rev: string              ## the pinned revision
 
   DevelopAllResult = object
     ## Everything one ``repro develop`` set-form invocation produced. Grown
@@ -31272,6 +31301,49 @@ proc failure(diagnostic: string; notices: seq[string]; code: int):
       diagnostic: diagnostic)],
     notices: notices, exitCode: code)
 
+proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
+    tuple[names: HashSet[string]; paths: HashSet[string];
+          notices: seq[string]; sources: Table[string, seq[string]]]
+  ## Forward declaration; defined with the hooks' develop set (§16.5).
+
+proc exactRecipePinsOf(consumer, workspaceRoot: string;
+    notices: var seq[string]): seq[ExactRecipePin]
+  ## Forward declaration; defined beside ``reproNimPinnedSiblings``, whose
+  ## `repro.nim` reading it shares.
+
+proc exactRecipePinMatching(pins: openArray[ExactRecipePin];
+    checkout, url: string): int =
+  ## The index of the pin that names the repository checked out at
+  ## ``checkout`` and fetched from ``url``, or -1. By checkout path or by
+  ## canonical repository URL — never by a name (§16.3).
+  let abs = if checkout.len > 0: os.normalizedPath(absolutePath(checkout))
+            else: ""
+  let identity = if url.len > 0: canonicalRepositoryUrl(url) else: ""
+  for i, p in pins:
+    if abs.len > 0 and p.path.len > 0 and p.path == abs: return i
+    if identity.len > 0 and p.identity.len > 0 and p.identity == identity:
+      return i
+  -1
+
+proc describeExactRecipePin(p: ExactRecipePin; base: string): string =
+  ## ``<file>:<line>``, the file relative to ``base`` when it lies inside it
+  ## (``app/flake.nix:7``), absolute otherwise.
+  var file = p.file
+  if base.len > 0 and file.isAbsolute:
+    let b = os.normalizedPath(absolutePath(base))
+    let f = os.normalizedPath(file)
+    if f.startsWith(b & DirSep):
+      file = relativePath(f, b).replace('\\', '/')
+  file & ":" & $p.line
+
+proc bulkSkipNote(name, pinnedBy: string): string =
+  ## The one sentence every bulk-selection surface prints for a dependency it
+  ## skipped because a recipe pins it exactly (§16.4).
+  "pinned by recipe at " & pinnedBy & ": '" & name & "' is not substituted " &
+    "by a bulk selection, because an exact recipe pin means that revision, " &
+    "not whatever is checked out; `repro develop --only=" & name &
+    "` substitutes it"
+
 proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
   ## L1 driver, DS-1..DS-5 shape. (1) Resolve the git tool. (2) COMPOSE the
   ## workspace lock set across EVERY backend the configuration plane resolves —
@@ -31592,6 +31664,75 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     except WorkspaceManifestParseError:
       newDevelopOverrides()
 
+  # ---- §16.4 — a bulk selection does not substitute an exact recipe pin. --
+  #
+  # Unified-Locking-And-Hooks.md §16.4: "A bulk selection (`repro develop
+  # --all`, the flake override verb's automatic mode) skips any dependency
+  # whose recipe pins an exact revision and lists it as `pinned by recipe at
+  # <file>:<line>`. … An explicit selection substitutes it. `repro develop
+  # --only <dependency>` does."
+  #
+  # WHICH recipes: those of the repos that consume the lock set's
+  # dependencies — the workspace root's own and each locked repo's checkout.
+  # A develop override is workspace-wide, so a pin stated by any consumer is
+  # a pin of that dependency. Each pin is related to a node by canonical
+  # repository URL or checkout path, never by a name (§16.3).
+  #
+  # EXPLICIT means named by ``--only``, or already substituted by an override
+  # an explicit selection recorded (``explicitDevelopOverrideTargets``): a
+  # later bulk run leaves that substitution as it is. A bulk-recorded entry
+  # (every entry written before provenance told the two apart included) is
+  # not an explicit override, so its pinned dependency is skipped like any
+  # other and the entry is reported as ignored — the hooks ignore it too.
+  var pinnedAt = initTable[string, string]()
+  let explicitOverrides = explicitDevelopOverrideTargets(root, root)
+  if not args.skipRecipePins:
+    var consumers = @[os.normalizedPath(absolutePath(root))]
+    for d in lock.deps:
+      if isRootLockedDep(d) or isEvidenceOnlyLockedDep(d): continue
+      let c = os.normalizedPath(absolutePath(d.path, root))
+      if c notin consumers and dirExists(extendedPath(c)): consumers.add(c)
+    var pins: seq[ExactRecipePin]
+    for c in consumers:
+      for p in exactRecipePinsOf(c, root, notices): pins.add(p)
+    if pins.len > 0:
+      for node in selected:
+        if isRootLockedDep(node) or isEvidenceOnlyLockedDep(node): continue
+        if pinnedAt.hasKey(node.name): continue
+        let checkout = os.normalizedPath(absolutePath(node.path, root))
+        let url =
+          if node.coordinates.kind == ckVcs: node.coordinates.url else: ""
+        let hit = exactRecipePinMatching(pins, checkout, url)
+        if hit >= 0:
+          pinnedAt[node.name] = describeExactRecipePin(pins[hit], root)
+  proc explicitlySelected(node: LockedDep): bool =
+    ## Named by this invocation's ``--only``, or substituted by an override an
+    ## explicit selection recorded.
+    if node.name in args.only: return true
+    if node.name in explicitOverrides.names: return true
+    let checkout = os.normalizedPath(absolutePath(node.path, root))
+    checkout in explicitOverrides.paths
+  proc bulkSkipped(node: LockedDep): bool =
+    pinnedAt.hasKey(node.name) and not explicitlySelected(node)
+  proc ignoredBulkOverride(node: LockedDep): string =
+    ## The sentence for a bulk-recorded override of a skipped pin, or "".
+    let prior = findOverride(overrides, node.name)
+    if prior.isNone or isExplicitDevelopOverride(prior.get()): return ""
+    "the develop override recorded for '" & node.name & "' by a bulk " &
+      "selection (" & developOverridesPath(root) & ", provenance " &
+      (if prior.get().provenance.isSome:
+         "'" & prior.get().provenance.get() & "'"
+       else: "none") & ") is IGNORED for it: a bulk selection does not " &
+      "substitute an exact recipe pin, so the managed hooks do not compare " &
+      "it with the checkout and the flake override verbs leave it on its " &
+      "pin; while the entry exists, `repro build` still binds it to the " &
+      "checkout wherever it resolves it as a cross-repo producer. Run " &
+      "`repro develop --only=" &
+      node.name & " --workspace-root=" & quoteShell(root) &
+      "` to substitute it explicitly, or `repro develop --drop=" &
+      node.name & " --workspace-root=" & quoteShell(root) &
+      "` to remove the entry"
+
   # ---- DS-6 — ``--list``: print the resolved lock set and exit. -----------
   #
   # "``--list`` is the query form of the rule at the top of this section: it
@@ -31612,12 +31753,25 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
           composed.backendOf.getOrDefault(node.name, "committed-lock")),
         revision: node.coordinates.revision,
         path: developAllTargetPath(node, root, args.intoDir))
+      row.pinnedBy = pinnedAt.getOrDefault(node.name, "")
       if isEvidenceOnlyLockedDep(node):
         # An evidence-only repo has no obtainable source by construction, so
         # neither `absent` nor `at-lock` is a truthful answer for it.
         row.state = "evidence-only"
         row.path = ""
+      elif bulkSkipped(node):
+        # §16.4 — `pinned`: a bulk selection does not substitute it, and an
+        # override a bulk selection recorded does not either, so `develop`
+        # would claim a substitution the hooks do not make.
+        row.state = "pinned"
+        notices.add(bulkSkipNote(node.name, row.pinnedBy))
+        let ignored = ignoredBulkOverride(node)
+        if ignored.len > 0: notices.add(ignored)
       else:
+        if row.pinnedBy.len > 0:
+          notices.add("pinned by recipe at " & row.pinnedBy & ": '" &
+            node.name & "' is selected explicitly (by --only, or by an " &
+            "override an explicit selection recorded), so it is substituted")
         let prior = findOverride(overrides, node.name)
         if prior.isSome:
           row.state = "develop"
@@ -31650,6 +31804,23 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     var outcome = DevelopAllNodeOutcome(node: node.name)
     if node.coordinates.kind == ckVcs:
       outcome.revision = node.coordinates.revision
+    # §16.4 — a bulk selection skips an exact recipe pin, for a real run and
+    # for ``--dry-run`` alike, before any placement question is asked: nothing
+    # is cloned, adopted or recorded for it.
+    if bulkSkipped(node):
+      outcome.mode = "pinned-by-recipe"
+      outcome.ok = true
+      outcome.pinnedBy = pinnedAt[node.name]
+      outcome.path = developAllTargetPath(node, root, args.intoDir)
+      outcome.diagnostic = bulkSkipNote(node.name, outcome.pinnedBy)
+      let ignored = ignoredBulkOverride(node)
+      if ignored.len > 0: notices.add(ignored)
+      outcomes.add(outcome)
+      continue
+    if pinnedAt.hasKey(node.name):
+      notices.add("pinned by recipe at " & pinnedAt[node.name] & ": '" &
+        node.name & "' is selected explicitly (by --only, or by an " &
+        "override an explicit selection recorded), so it is substituted")
     # Unmappable node: no reproducible source origin. FAIL LOUD (per node).
     if node.coordinates.kind != ckVcs or node.coordinates.url.len == 0 or
         node.coordinates.revision.len == 0:
@@ -31706,6 +31877,20 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       # Already in develop mode at this exact path — idempotent no-op.
       outcome.mode = "idempotent"
       outcome.ok = true
+      if node.name in args.only and not isExplicitDevelopOverride(prior.get()) and
+          not args.dryRun:
+        # The one change an idempotent run makes: ``--only`` named this
+        # dependency, and the entry on disk says a bulk selection recorded it
+        # (or predates provenance). Recording the explicit selection is what
+        # lets the hooks treat an exact recipe pin of it as substituted
+        # (§16.4) — the migration path for an entry an earlier `--only` wrote
+        # with the bulk provenance.
+        var entry = prior.get()
+        entry.provenance = some(developOverrideOnlyProvenance(node.name))
+        overrides = addOverride(overrides, entry)
+        mutated = true
+        outcome.diagnostic = "recorded as an explicit selection " &
+          "(provenance '" & entry.provenance.get() & "')"
       outcomes.add(outcome)
       continue
     if prior.isSome:
@@ -31799,7 +31984,13 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     entry.local_path = absTarget
     entry.state = "editable"
     entry.created_at = currentRfc3339Timestamp()
-    entry.provenance = some("repro develop --all")
+    # Provenance says which KIND of selection substituted the node (§16.4):
+    # ``--only=<node>`` named it, anything else selected it in bulk. The hooks
+    # read it to decide whether an exact recipe pin is substituted
+    # (``isExplicitDevelopOverride``).
+    entry.provenance = some(
+      if node.name in args.only: developOverrideOnlyProvenance(node.name)
+      else: developOverrideBulkProvenance)
     overrides = addOverride(overrides, entry)
     mutated = true
     outcomes.add(outcome)
@@ -31923,8 +32114,10 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
     if args.json:
       var rows = newJArray()
       for r in res.rows:
-        rows.add(%*{"name": r.name, "tier": r.tier, "backend": r.backend,
-          "revision": r.revision, "path": r.path, "state": r.state})
+        var row = %*{"name": r.name, "tier": r.tier, "backend": r.backend,
+          "revision": r.revision, "path": r.path, "state": r.state}
+        if r.pinnedBy.len > 0: row["pinnedByRecipe"] = %r.pinnedBy
+        rows.add(row)
       var noticeArr = newJArray()
       for n in notices: noticeArr.add(%n)
       # "Machine consumers should use ``--json``" (CLI/develop.md §"Action
@@ -31970,7 +32163,9 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
           stdout.writeLine(r.name.alignLeft(w) & "  " &
             r.tier.alignLeft(8) & "  " & r.backend.alignLeft(14) & "  " &
             (if r.revision.len > 0: r.revision else: "-").alignLeft(40) & "  " &
-            r.state.alignLeft(12) & "  " & r.path)
+            r.state.alignLeft(12) & "  " & r.path &
+            (if r.pinnedBy.len > 0: "  (pinned by recipe at " & r.pinnedBy & ")"
+             else: ""))
         if res.rows.len == 0:
           stdout.writeLine(label & ": the selection is empty")
       else:
@@ -31986,6 +32181,8 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
         "mode": o.mode, "ok": o.ok}
       if o.diagnostic.len > 0:
         node["diagnostic"] = %o.diagnostic
+      if o.pinnedBy.len > 0:
+        node["pinnedByRecipe"] = %o.pinnedBy
       arr.add(node)
     var noticeArr = newJArray()
     for n in notices: noticeArr.add(%n)
@@ -32020,7 +32217,12 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
           o.path & " (dry run; nothing was changed)")
       of "idempotent":
         stdout.writeLine("repro develop --all: " & o.node &
-          " already in develop mode at " & o.path & " (no change)")
+          " already in develop mode at " & o.path &
+          (if o.diagnostic.len > 0: " (" & o.diagnostic & ")"
+           else: " (no change)"))
+      of "pinned-by-recipe":
+        stdout.writeLine("repro develop --all: skipped " & o.node & " — " &
+          o.diagnostic)
       of "refused":
         stderr.writeLine("repro develop --all: refused " & o.node & " — " &
           o.diagnostic)
@@ -32319,6 +32521,207 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
       return false
   hasM22Marker
 
+proc runDevelopDropCommand(args: openArray[string]): int =
+  ## ``repro develop --drop=<dependency>[,<dependency>…]
+  ## [--workspace-root=PATH] [--project-root=PATH] [--json]``.
+  ##
+  ## Removes the develop override of each named dependency, wherever one is
+  ## recorded, and nothing else: no checkout is touched, no lock is written.
+  ## The override documents are the ones the managed hooks read to decide
+  ## whether a dependency is substituted (``explicitDevelopOverrideTargets``):
+  ##
+  ##   * ``<workspace>/.repro/develop-overrides.toml`` (`repro develop --all`,
+  ##     `--only`, `repro develop <dependency>`);
+  ##   * the per-project ``develop-overrides.json`` (`repro develop
+  ##     <dependency> --into`) of the workspace root and of the project at
+  ##     ``--project-root`` (default: the project containing the current
+  ##     directory, when there is one).
+  ##
+  ## An entry is dropped when it names the dependency, or when its path is the
+  ## dependency's workspace checkout (the hooks match an override either way,
+  ## so dropping by name alone could leave the substitution in place).
+  ##
+  ## Why it exists (Unified-Locking-And-Hooks.md §16.4): when the commit-time
+  ## re-pin refuses because a sibling checkout under an explicit override has
+  ## moved past an exact recipe pin, and the move was a temporary experiment,
+  ## the way back is to drop the override. Before this verb the refusal could
+  ## only tell the user to edit the file by hand: ``--except`` narrows a
+  ## selection and never removes a recorded override.
+  ##
+  ## Idempotent, as ``removeOverride`` documents for this verb: naming a
+  ## dependency with no override is reported, exits 0, and writes nothing.
+  ## Exit 1 when an override document cannot be read or written; exit 2 on a
+  ## usage error.
+  var names: seq[string]
+  var explicitWorkspace = ""
+  var explicitProject = ""
+  var asJson = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--drop" or arg.startsWith("--drop="):
+      for n in parseCommaList(valueFromFlag(args, i, "--drop")):
+        if n notin names: names.add(n)
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      explicitWorkspace = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--project-root" or arg.startsWith("--project-root="):
+      explicitProject = valueFromFlag(args, i, "--project-root")
+    elif arg == "--json":
+      asJson = true
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      # Accepted (and validated) like every other `repro develop` form, so a
+      # caller that passes it uniformly is not refused; `--drop` runs no tool.
+      try:
+        discard parseToolProvisioning(
+          valueFromFlag(args, i, "--tool-provisioning"))
+      except ValueError as err:
+        stderr.writeLine("repro develop --drop: " & err.msg)
+        return 2
+    else:
+      stderr.writeLine("repro develop --drop: unsupported argument '" & arg &
+        "' (usage: repro develop --drop=<dependency>[,<dependency>...] " &
+        "[--workspace-root=PATH] [--project-root=PATH] [--json]); --drop " &
+        "removes recorded overrides and takes no selector")
+      return 2
+    inc i
+  if names.len == 0:
+    stderr.writeLine("repro develop --drop: name the dependency whose " &
+      "develop override to remove (`repro develop --drop=<dependency>`)")
+    return 2
+  let ws = os.normalizedPath(workspaceShellFirstRoot(explicitWorkspace))
+  var projectRoot = ""
+  if explicitProject.len > 0:
+    projectRoot = os.normalizedPath(absolutePath(explicitProject))
+  else:
+    projectRoot = findDevEnvProjectRoot(getCurrentDir())
+    if projectRoot.len > 0: projectRoot = os.normalizedPath(projectRoot)
+
+  # The dependency's workspace checkout, so an entry recorded under another
+  # name for the same checkout is dropped too. Looked up in the workspace
+  # membership, else in the committed locks of the workspace root and of the
+  # project (a lock entry's path is relative to its lock's directory). A name
+  # neither resolves is matched by name only, which is said.
+  var notes: seq[string]
+  var checkoutOf = initTable[string, string]()
+  var membershipFailure = ""
+  try:
+    let resolved = resolveDevelopWorkspaceProject(ws)
+    for r in resolved.repos:
+      if r.name in names and r.path.len > 0 and r.path != ".":
+        checkoutOf[r.name] = os.normalizedPath(absolutePath(r.path, ws))
+  except CatchableError as err:
+    membershipFailure = err.msg
+  for base in [ws, projectRoot]:
+    if base.len == 0: continue
+    let lockP = committedLockPath(base)
+    if not fileExists(extendedPath(lockP)): continue
+    try:
+      let ld = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+      for d in ld.deps:
+        if d.name in names and d.name notin checkoutOf and
+            d.path.len > 0 and d.path != ".":
+          checkoutOf[d.name] = os.normalizedPath(absolutePath(d.path, base))
+    except CatchableError:
+      discard
+  for n in names:
+    if n notin checkoutOf:
+      notes.add("the checkout of '" & n & "' could not be determined " &
+        "(no workspace repo or committed lock entry of that name" &
+        (if membershipFailure.len > 0:
+           "; the workspace membership could not be resolved: " &
+             membershipFailure
+         else: "") & "), so its entries are matched by name only")
+  proc matches(name, path, base: string): string =
+    ## The dropped dependency an entry stands for, or "".
+    if name in names: return name
+    if path.len > 0:
+      let abs = os.normalizedPath(absolutePath(path, base))
+      for n, co in checkoutOf:
+        if co == abs: return n
+    ""
+
+  type Dropped = object
+    dependency, entry, path, file: string
+  var dropped: seq[Dropped]
+  var failures: seq[string]
+  var looked: seq[string]
+
+  # (1) The workspace's `.repro/develop-overrides.toml`.
+  let tomlPath = developOverridesPath(ws)
+  looked.add(tomlPath)
+  try:
+    let doc = readDevelopOverridesFile(ws)
+    if doc.isSome:
+      var updated = doc.get()
+      var changed = false
+      for e in doc.get().`override`:
+        let dep = matches(e.package, e.local_path, ws)
+        if dep.len == 0: continue
+        updated = removeOverride(updated, e.package)
+        changed = true
+        dropped.add(Dropped(dependency: dep, entry: e.package,
+          path: e.local_path, file: tomlPath))
+      if changed:
+        writeDevelopOverridesFile(ws, updated)
+  except CatchableError as err:
+    failures.add(tomlPath & ": " & err.msg)
+
+  # (2) The per-project `develop-overrides.json` documents.
+  var jsonRoots: seq[string]
+  for r in [ws, projectRoot]:
+    if r.len > 0 and r notin jsonRoots: jsonRoots.add(r)
+  for r in jsonRoots:
+    let path = developOverridesMetadataPath(r)
+    if path in looked: continue
+    looked.add(path)
+    try:
+      var kept: seq[DevelopOverrideEntry]
+      var changed = false
+      for e in readDevelopOverrides(path):
+        let dep = matches(e.node, e.path, r)
+        if dep.len == 0:
+          kept.add(e)
+          continue
+        changed = true
+        dropped.add(Dropped(dependency: dep, entry: e.node, path: e.path,
+          file: path))
+      if changed:
+        writeDevelopOverrides(path, r, kept)
+    except CatchableError as err:
+      failures.add(path & ": " & err.msg)
+
+  let exitCode = if failures.len > 0: 1 else: 0
+  var missing: seq[string]
+  for n in names:
+    var found = false
+    for d in dropped:
+      if d.dependency == n: found = true
+    if not found: missing.add(n)
+  if asJson:
+    var arr = newJArray()
+    for d in dropped:
+      arr.add(%*{"dependency": d.dependency, "entry": d.entry,
+        "path": d.path, "file": d.file})
+    stdout.writeLine(pretty(%*{"schemaId": "reprobuild.develop-drop.v1",
+      "workspaceRoot": ws, "dropped": arr, "notFound": %missing,
+      "looked": %looked, "notices": %notes, "errors": %failures,
+      "exitCode": exitCode}, indent = 2))
+    return exitCode
+  for n in notes:
+    stderr.writeLine("repro develop --drop: " & n)
+  for d in dropped:
+    stdout.writeLine("repro develop --drop: removed the develop override of '" &
+      d.dependency & "'" &
+      (if d.entry != d.dependency: " (recorded as '" & d.entry & "')" else: "") &
+      " -> " & d.path & " from " & d.file)
+  for n in missing:
+    stdout.writeLine("repro develop --drop: no develop override of '" & n &
+      "' is recorded (looked in: " & looked.join(", ") & "); nothing to drop")
+  for f in failures:
+    stderr.writeLine("repro develop --drop: error — " & f)
+  exitCode
+
 proc runDevelopCommand*(args: openArray[string]): int =
   ## `repro develop …`. Exported for the same reason `runReproLockCommand` is:
   ## a test that asserts on what the verb WRITES has to reach the verb, and
@@ -32328,6 +32731,13 @@ proc runDevelopCommand*(args: openArray[string]): int =
   # clones every selected dependency at its locked revision (CLI/develop.md
   # §"Develop Set Selection"). Checked FIRST so ``--all --into=...`` reaches the
   # set path rather than the single-dependency ``--into`` route.
+  #
+  # ``--drop`` is checked before everything: it removes recorded overrides,
+  # and a selector beside it is a usage error the drop parser reports, not a
+  # reason to route the argv somewhere that would add overrides instead.
+  for arg in args:
+    if arg == "--drop" or arg.startsWith("--drop="):
+      return runDevelopDropCommand(args)
   if looksLikeDevelopAllArgs(args):
     return runDevelopAllCommand(parseDevelopAllArgs(args))
   # M22 routing: when the argv carries an M22-distinctive flag
@@ -50324,9 +50734,18 @@ proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
     tuple[names: HashSet[string]; paths: HashSet[string];
           notices: seq[string]; sources: Table[string, seq[string]]] =
   ## Every dependency an EXPLICIT develop override substitutes: the entries of
-  ## the workspace's ``.repro/develop-overrides.toml`` (`repro develop`) and of
-  ## the per-project ``develop-overrides.json`` documents (`repro develop
-  ## <dependency> --into`), by name and by checkout path.
+  ## the workspace's ``.repro/develop-overrides.toml`` that an explicit
+  ## selection recorded (``isExplicitDevelopOverride``: `repro develop
+  ## --only=<dependency>`, `repro develop <dependency>`) and the entries of the
+  ## per-project ``develop-overrides.json`` documents (`repro develop
+  ## <dependency> --into`, which always names its dependency), by name and by
+  ## checkout path.
+  ##
+  ## An entry of ``.repro/develop-overrides.toml`` that a BULK selection
+  ## recorded (`repro develop --all`, every entry written before provenance
+  ## told the two apart, and an entry with no provenance) is NOT an explicit
+  ## override: a bulk selection does not substitute an exact recipe pin
+  ## (§16.4), so the hooks do not treat such a pin as overridden.
   ##
   ## An override is local state that a person or a `repro develop` run wrote
   ## on purpose; it is what §16.4 means by "a develop override substitutes".
@@ -50348,6 +50767,7 @@ proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
       if doc.isSome:
         for e in doc.get().`override`:
           let file = developOverridesPath(workspaceRoot)
+          if not isExplicitDevelopOverride(e): continue
           if e.package.len > 0:
             result.names.incl(e.package)
             noteSource(e.package, file)
@@ -50389,7 +50809,8 @@ proc reproNimDeclaresExactUses(root: string): bool =
   false
 
 proc reproNimPinnedSiblings(root, workspaceRoot: string;
-    ld: LockedDependencies): seq[RecipePinnedSibling] =
+    ld: LockedDependencies;
+    honourOverrides = true): seq[RecipePinnedSibling] =
   ## The `repro.lock` dependencies the repo's `repro.nim` pins by an exact
   ## `uses:` version (whose producer `versions:` entry maps it to a revision)
   ## and no explicit develop override substitutes. §16.5 applies to them as
@@ -50412,12 +50833,75 @@ proc reproNimPinnedSiblings(root, workspaceRoot: string;
     let verdict = reproRepinVerdict(inputs, d.name, depAbs,
       d.coordinates.url, d.coordinates.revision)
     if verdict.exactPin.len == 0: continue
-    if d.name in overrides.names or depAbs in overrides.paths: continue
+    if honourOverrides and
+        (d.name in overrides.names or depAbs in overrides.paths):
+      continue
     result.add(RecipePinnedSibling(input: d.name, repo: d.name, path: depAbs,
       canonicalRepo: canonicalRepositoryUrl(d.coordinates.url),
       pin: FlakeInputConstraint(input: d.name, line: verdict.exactPinLine,
         exactRev: verdict.exactPin),
       flakePath: verdict.exactPinFile))
+
+proc exactRecipePinsOf(consumer, workspaceRoot: string;
+    notices: var seq[string]): seq[ExactRecipePin] =
+  ## Every exact revision the recipes of the repo at ``consumer`` state for a
+  ## dependency (§16.4), whether or not a develop override substitutes it —
+  ## the caller decides that, because whether a selection is bulk or explicit
+  ## is its question, not the recipe's:
+  ##
+  ## * each `flake.nix` input pinned by `rev=` or a `/<sha>` path, identified
+  ##   by the canonical URL its `flake.nix` URL (else its `flake.lock` node)
+  ##   names, or by directory for a `path:` input;
+  ## * each `repro.lock` dependency an unconditional exact `uses:` version
+  ##   pins (``reproNimPinnedSiblings``, the rule the hooks apply: the
+  ##   producer's `versions:` entry must map the version to a revision).
+  ##
+  ## Reads files only (and resolves a `sourceRevision` ref with git in the
+  ## producer checkout, as the hooks do). A recipe that cannot be read adds a
+  ## notice and contributes nothing, rather than reading as "pins nothing"
+  ## silently.
+  let root = os.normalizedPath(absolutePath(consumer))
+  if fileExists(extendedPath(root / "flake.nix")):
+    let constraints = readFlakeRecipeConstraints(root)
+    if not constraints.ok:
+      notices.add("the exact pins of " & root / "flake.nix" &
+        " could not be read (" & constraints.diagnostic & ")")
+    else:
+      var resolvedBy = initTable[string, FlakeLockResolution]()
+      if fileExists(extendedPath(root / "flake.lock")):
+        try:
+          for r in flakeLockResolutions(readFile(extendedPath(
+              root / "flake.lock"))):
+            resolvedBy[r.input] = r
+        except CatchableError as err:
+          notices.add(root / "flake.lock" & " could not be read (" &
+            err.msg & "); its exact pins are identified by flake.nix alone")
+      for c in constraints.inputs:
+        if c.exactRev.len == 0: continue
+        var identity = c.canonicalRepo
+        if identity.len == 0 and c.input in resolvedBy:
+          identity = resolvedBy[c.input].canonicalRepo
+        var path = ""
+        if c.kind == frkPath and c.url.len > 0:
+          let target = parseFlakeRef(c.url).fetchUrl
+          if target.len > 0:
+            path = os.normalizedPath(absolutePath(target, root))
+        result.add(ExactRecipePin(input: c.input, identity: identity,
+          path: path, file: constraints.flakePath, line: c.line,
+          rev: c.exactRev))
+  let reproLockPath = root / CommittedLockFileName
+  if fileExists(extendedPath(reproLockPath)) and
+      reproNimDeclaresExactUses(root):
+    try:
+      for p in reproNimPinnedSiblings(root, workspaceRoot,
+          parseLockedDependencies(readFile(extendedPath(reproLockPath))),
+          honourOverrides = false):
+        result.add(ExactRecipePin(dependency: p.repo,
+          identity: p.canonicalRepo, path: p.path, file: p.flakePath,
+          line: p.pin.line, rev: p.pin.exactRev))
+    except CatchableError as err:
+      notices.add("the repro.nim exact pins of " & root &
+        " could not be read (" & err.msg & ")")
 
 proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
     repos: seq[ResolvedRepo]): HookDevelopSet =
@@ -51259,7 +51743,8 @@ proc coordinateCommitRepin(repoRoot, workspaceRoot: string;
         pinnedRev: c.exactRev, recipeFile: flakeFile, recipeLine: c.line,
         pathForm: isPathFormPin(c), repoRoot: root, lockedRev: lockedRev,
         overridden: d.repo in overrides.names or checkout in overrides.paths,
-        overrideRepo: d.repo, overrideFiles: overrideFilesOf(d.repo, checkout))
+        overrideRepo: d.repo, overrideFiles: overrideFilesOf(d.repo, checkout),
+        workspaceRoot: workspaceRoot)
       e.held = heldSentences(both)
       if e.held.len == 0:
         e.held.add(inputs.flakeLock.path & " input '" & d.input &
@@ -51284,6 +51769,7 @@ proc coordinateCommitRepin(repoRoot, workspaceRoot: string;
         e.overridden = m.name in overrides.names or depAbs in overrides.paths
         e.overrideRepo = m.name
         e.overrideFiles = overrideFilesOf(m.name, depAbs)
+        e.workspaceRoot = workspaceRoot
         e.held = heldSentences(both)
         result.exclusions.add(repinExclusionViolation(e))
         holdBoth(m.name, "")
@@ -77906,6 +78392,11 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
     return
   developArgs.list = true
   developArgs.json = false
+  # The workspace-wide recipe scan is `repro develop`'s; the flake verbs
+  # apply the exact pins of the one flake they bind (``bulkExactFlakePins``),
+  # and run on every shell entry, where a scan of every repo's recipes would
+  # be paid for nothing.
+  developArgs.skipRecipePins = true
   result.onlyNames = developArgs.only
   result.exceptNames = developArgs.exceptNames
   # `.envrc` runs in the REPO, not at the workspace root, so the workspace is
@@ -78188,6 +78679,104 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     report.add("kept on their flake.lock pins (no repo of this workspace " &
       "carries the name): " & unknownToWorkspace.join(", "))
   result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
+
+type
+  FlakeBulkPinSkip = object
+    ## One flake input the automatic mode left on its pin because a recipe of
+    ## the flake's repo pins it exactly (§16.4).
+    input: string
+    repo: string             ## the develop-set repo its name binds to
+    pinnedBy: string         ## ``<file>:<line>``
+
+proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
+    inputNames: openArray[string]; selection: FlakeDevelopSelection;
+    suffixes: openArray[string];
+    report: var seq[string]):
+    tuple[keep: seq[string]; skipped: seq[FlakeBulkPinSkip]] =
+  ## Unified-Locking-And-Hooks.md §16.4 for the flake override verbs: "A bulk
+  ## selection (`repro develop --all`, the flake override verb's automatic
+  ## mode) skips any dependency whose recipe pins an exact revision and lists
+  ## it as `pinned by recipe at <file>:<line>`." ``keep`` is ``inputNames``
+  ## minus those inputs; each one left out is named in ``report`` and in
+  ## ``skipped``.
+  ##
+  ## The recipes are the flake's own repo's — its `flake.nix` (an input
+  ## pinned by `rev=` or a `/<sha>` path) and its `repro.nim` (an exact
+  ## `uses:` version, related to a flake input by canonical repository URL or
+  ## checkout path, never by name) — read by ``exactRecipePinsOf``, the
+  ## reader `repro develop --all` uses.
+  ##
+  ## An input stays substituted when the selection is EXPLICIT about its repo:
+  ## ``--only`` names it, or an override an explicit selection recorded
+  ## substitutes it (``explicitDevelopOverrideTargets``, the set the hooks
+  ## read, so the shell builds what the hooks compare). ``useFlakeDevShell``'s
+  ## explicit ``overrideInputs`` entries are applied after this verb answers
+  ## and win over it, which is the other explicit form.
+  var notices: seq[string]
+  let pins = exactRecipePinsOf(flakeRoot, workspaceRoot, notices)
+  for n in notices: report.add(n)
+  if pins.len == 0:
+    for n in inputNames: result.keep.add(n)
+    return
+  let constraints = readFlakeRecipeConstraints(flakeRoot)
+  var identityOf = initTable[string, string]()
+  if constraints.ok:
+    for c in constraints.inputs:
+      if c.canonicalRepo.len > 0: identityOf[c.input] = c.canonicalRepo
+  if fileExists(extendedPath(flakeRoot / "flake.lock")):
+    try:
+      for r in flakeLockResolutions(readFile(extendedPath(
+          flakeRoot / "flake.lock"))):
+        if r.input notin identityOf and r.canonicalRepo.len > 0:
+          identityOf[r.input] = r.canonicalRepo
+    except CatchableError:
+      discard
+  let explicitOverrides = explicitDevelopOverrideTargets(workspaceRoot,
+    flakeRoot)
+  let base = if workspaceRoot.len > 0: workspaceRoot else: flakeRoot
+  for name in inputNames:
+    let repo = stripFlakeInputSuffix(name, suffixes)
+    let checkout = selection.checkoutOf.getOrDefault(repo, "")
+    var hit = -1
+    for i, p in pins:
+      if p.input.len > 0 and p.input == name:
+        hit = i
+        break
+    if hit < 0:
+      # A `repro.nim` pin, or a `flake.nix` pin of the same repository under
+      # another input name: by identity or by checkout, never by name.
+      let identity = identityOf.getOrDefault(name, "")
+      for i, p in pins:
+        if p.input.len > 0: continue
+        if (identity.len > 0 and p.identity == identity) or
+            (checkout.len > 0 and p.path.len > 0 and
+             p.path == os.normalizedPath(absolutePath(checkout))):
+          hit = i
+          break
+    if hit < 0 or repo notin selection.checkoutOf:
+      # Not pinned, or not substitutable in the first place (the binder names
+      # why): nothing for this rule to skip.
+      result.keep.add(name)
+      continue
+    let explicit = repo in selection.onlyNames or
+      repo in explicitOverrides.names or
+      (checkout.len > 0 and
+       os.normalizedPath(absolutePath(checkout)) in explicitOverrides.paths)
+    let pinnedBy = describeExactRecipePin(pins[hit], base)
+    if explicit:
+      report.add("pinned by recipe at " & pinnedBy & ": flake input '" & name &
+        "' is selected explicitly (by --only, or by an override an explicit " &
+        "selection recorded), so it is substituted")
+      result.keep.add(name)
+      continue
+    result.skipped.add(FlakeBulkPinSkip(input: name, repo: repo,
+      pinnedBy: pinnedBy))
+    report.add("NOT substituted: flake input '" & name & "' is pinned by " &
+      "recipe at " & pinnedBy & ", and the automatic mode does not " &
+      "substitute an exact recipe pin (it means that revision, not whatever " &
+      "is checked out), so it keeps its flake.lock pin. `repro develop " &
+      "--only=" & repo & "` substitutes it, as does an explicit " &
+      "`--only=" & repo & "` here or an explicit overrideInputs entry.")
 
 proc flakeLocalDirOfOverrideRef*(rf: string): string =
   ## The local directory a ``--override-input`` reference names, or "" when it
@@ -79262,8 +79851,12 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
     if stripGiven: parseCommaList(stripSpec)
     else: defaultFlakeInputStripSuffixes
 
+  # ---- §16.4: the automatic mode leaves an exact recipe pin alone --------
+  let pinRule = bulkExactFlakePins(flakeRoot, selection.workspaceRoot,
+    inputNames, selection, suffixes, report)
+
   # ---- bind inputs to develop-set checkouts ------------------------------
-  let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
+  let emitted = flakeBindInputsToCheckouts(pinRule.keep, checkoutOf, suffixes,
     identity, selection.workspaceRoot, report, selection.onlyNames,
     selection.exceptNames)
 
@@ -79276,6 +79869,10 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
       arr.add(%*{"input": e.input, "path": e.path, "repo": e.repo})
     var noticeArr = newJArray()
     for n in report: noticeArr.add(%n)
+    var pinnedArr = newJArray()
+    for s in pinRule.skipped:
+      pinnedArr.add(%*{"input": s.input, "repo": s.repo,
+        "pinnedByRecipe": s.pinnedBy})
     stdout.writeLine(pretty(%*{
       "schemaId": "reprobuild.flake-override-args.v1",
       "workspaceRoot": selection.workspaceRoot,
@@ -79283,6 +79880,7 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
       "developSet": %selectedNames,
       "declaredInputs": %inputNames,
       "overrides": arr,
+      "pinnedByRecipe": pinnedArr,
       "notices": noticeArr}, indent = 2))
   else:
     var words: seq[string]
@@ -82236,7 +82834,11 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
       for r in selection.refusals: refusals.add(r)
       return refuse()
     for n in selection.notices: notices.add(n)
-    bindings = flakeBindInputsToCheckouts(declared.names,
+    # §16.4 — the same automatic-mode rule `override-args` applies, so the
+    # report describes the bindings that verb emits.
+    let pinRule = bulkExactFlakePins(flakeRoot, selection.workspaceRoot,
+      declared.names, selection, suffixes, notices)
+    bindings = flakeBindInputsToCheckouts(pinRule.keep,
       selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
       notices, selection.onlyNames, selection.exceptNames)
 

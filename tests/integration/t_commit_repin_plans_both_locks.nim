@@ -261,9 +261,11 @@ suite "HL-11 H3: one plan over both locks; constraints win":
         "of " & betaRecipeFile & " maps " & betaNext & "; add that entry " &
         "first); then commit again. " &
         "(2) If " & betaNext & " was a temporary experiment, drop the " &
-        "develop override of 'beta' (remove its entry from " &
-        fx.ws / ".repro" / "develop-overrides.toml" & "; no repro command " &
-        "removes a single override yet), or check the sibling out at the " &
+        "develop override of 'beta': `repro develop --drop=beta " &
+        "--workspace-root=" & fx.ws & " --project-root=" & fx.app &
+        "` removes its entry from " &
+        fx.ws / ".repro" / "develop-overrides.toml" & " and leaves the " &
+        "checkout as it is, or check the sibling out at the " &
         "pinned revision: `git -C " & siblingDir(fx, "beta") & " checkout " &
         betaRecipe & "`; then commit again."
       check paragraph in d.output.splitLines()
@@ -342,9 +344,11 @@ suite "HL-11 H3: one plan over both locks; constraints win":
       let checkoutCmd = "git -C " & siblingDir(fx, "beta") & " checkout " &
         betaSeed
       check ("If " & betaNext & " was a temporary experiment, drop the " &
-        "develop override of 'beta' (remove its entry from " &
-        fx.ws / ".repro" / "develop-overrides.toml" & "; no repro command " &
-        "removes a single override yet), or check the sibling out at the " &
+        "develop override of 'beta': `repro develop --drop=beta " &
+        "--workspace-root=" & fx.ws & " --project-root=" & fx.app &
+        "` removes its entry from " &
+        fx.ws / ".repro" / "develop-overrides.toml" & " and leaves the " &
+        "checkout as it is, or check the sibling out at the " &
         "pinned revision: `" & checkoutCmd & "`; then commit again") in
         c.output
       check checkoutCmd in backtickedCommands(c.output)

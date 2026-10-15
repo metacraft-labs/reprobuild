@@ -142,6 +142,20 @@ proc lockUpdateCommand*(dependency, rev, repoRoot: string): string =
     (if rev.len > 0: " --to " & rev else: "") &
     (if repoRoot.len > 0: " --repo-root=" & quoteShell(repoRoot) else: "")
 
+proc developDropCommand*(dependency, workspaceRoot, repoRoot: string):
+    string =
+  ## THE spelling of `repro develop --drop` in every message: the dependency,
+  ## the workspace whose `.repro/develop-overrides.toml` holds the override,
+  ## and the repo whose per-project override document may hold one too, so
+  ## the command runs unchanged from wherever the message was printed.
+  ## Printed in backticks, like ``lockUpdateCommand``.
+  "repro develop --drop=" & quoteShell(dependency) &
+    (if workspaceRoot.len > 0: " --workspace-root=" & quoteShell(workspaceRoot)
+     else: "") &
+    (if repoRoot.len > 0 and repoRoot != workspaceRoot:
+       " --project-root=" & quoteShell(repoRoot)
+     else: "")
+
 proc flakeRevPinEditRemedy*(input, declaredRev, observedRev,
     flakeRoot: string; pathForm = false): string =
   ## THE single generator for "the remedy moves a revision `flake.nix`
@@ -667,6 +681,9 @@ type
     overrideRepo*: string   ## the workspace repo the override names
     overrideFiles*: seq[string]
       ## The develop-override documents that name it.
+    workspaceRoot*: string
+      ## The workspace whose develop overrides substitute it, for the
+      ## runnable `repro develop --drop` remedy.
 
   ReproRepinVerdict* = object
     ## What `repro.nim` says about moving one `repro.lock` dependency to an
@@ -842,11 +859,12 @@ proc repinExclusionViolation*(e: RepinConstraintExclusion):
     else: ""
   if e.overridden:
     result.remedies.add("If " & e.observed & " was a temporary experiment, " &
-      "drop the develop override of '" & e.overrideRepo & "' (remove its " &
-      "entry from " &
+      "drop the develop override of '" & e.overrideRepo & "': `" &
+      developDropCommand(e.overrideRepo, e.workspaceRoot, e.repoRoot) &
+      "` removes its entry from " &
       (if e.overrideFiles.len > 0: e.overrideFiles.join(" and ")
        else: "the workspace's develop overrides") &
-      "; no repro command removes a single override yet)" &
+      " and leaves the checkout as it is" &
       (if checkoutCmd.len > 0:
          ", or check the sibling out at the " &
            (if e.pinnedRev.len > 0: "pinned" else: "locked") &

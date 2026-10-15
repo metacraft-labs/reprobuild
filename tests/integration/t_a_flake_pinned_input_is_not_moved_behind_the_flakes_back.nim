@@ -229,9 +229,11 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
         " to rev=" & newBeta & " in that input's url in " & flakeNixPath) in
         commit.output
       check ("(2) If " & newBeta & " was a temporary experiment, drop the " &
-        "develop override of 'beta' (remove its entry from " &
-        fx.ws / ".repro" / "develop-overrides.toml" & "; no repro command " &
-        "removes a single override yet), or check the sibling out at the " &
+        "develop override of 'beta': `repro develop --drop=beta " &
+        "--workspace-root=" & fx.ws & " --project-root=" & fx.app &
+        "` removes its entry from " &
+        fx.ws / ".repro" / "develop-overrides.toml" & " and leaves the " &
+        "checkout as it is, or check the sibling out at the " &
         "pinned revision: `git -C " & siblingDir(fx, "beta") & " checkout " &
         seedBeta & "`; then commit again.") in commit.output
       check readFile(lockPath(fx)) == before

@@ -10143,6 +10143,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_bulk_develop_skips_exact_recipe_pins.nim",
+    binary: "build/test-bin/t_bulk_develop_skips_exact_recipe_pins",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim",
     binary: "build/test-bin/t_cache_key_separates_v2_and_v3_artifacts",
     defines: @[],

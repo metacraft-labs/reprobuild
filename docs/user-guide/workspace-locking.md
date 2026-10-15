@@ -514,6 +514,61 @@ a target behind the current pin). Without an explicit
 `--only`, `refresh-lock` keeps refreshing only the branch-following inputs
 and declines an exact pin.
 
+### A temporary experiment: develop overrides and exact pins
+
+```
+repro develop --only=<dependency>     # substitute one dependency, pinned or not
+repro develop --all                   # substitute the lock set, exact pins excepted
+repro develop --drop=<dependency> [--workspace-root=<dir>] [--project-root=<dir>]
+```
+
+Debugging against a sibling checkout uses a develop override, which never
+writes a recipe or a lock. How it meets an exact recipe pin depends on how
+the dependency was selected:
+
+- **A bulk selection skips an exact pin.** `repro develop --all` (and every
+  other mode or pattern selection) does not substitute a dependency whose
+  `flake.nix` pins a revision (`rev=<sha>`, `github:o/r/<sha>`) or whose
+  `repro.nim` pins an exact `uses:` version. It records no override for it
+  and lists it as `pinned by recipe at <file>:<line>`; so do `--dry-run`,
+  `--list` (state `pinned`) and their `--json` forms. The flake override
+  verb's automatic mode (`repro flake override-args --all`, which
+  `useFlakeDevShell` runs at shell entry) leaves such an input on its
+  `flake.lock` pin in the same way. A pin means "this revision, not whatever
+  is checked out", and building against the checkout anyway would quietly
+  build something the recipe disclaims. The managed hooks do not compare a
+  skipped pin with its checkout, so a sibling that has moved on neither
+  re-pins nor refuses a commit.
+- **An explicit selection substitutes it.** `repro develop --only=<dependency>`
+  does, and so does `repro flake override-args --only=<dependency>` or an
+  explicit `overrideInputs` entry of `useFlakeDevShell`. This is how a pinned
+  dependency is debugged. Once the checkout moves past the pin, the next
+  commit is refused (H3), so the experiment is not published by accident.
+- **Dropping the override ends the experiment.** `repro develop
+  --drop=<dependency>` removes that dependency's override from the
+  workspace's `.repro/develop-overrides.toml` and from the per-project
+  override documents (`repro develop <dependency> --into`) of the workspace
+  root and of `--project-root` (default: the project you are in). It matches
+  an entry by the dependency's name or by its checkout, as the hooks do. It
+  touches no checkout and no lock, and naming a dependency with no override
+  is a reported no-op. The H3 refusal prints this command, with the right
+  roots, as its "temporary experiment" remedy.
+
+Which kind of selection recorded an override is kept in its `provenance`:
+`repro develop --only=<dependency>` for an explicit one, `repro develop --all`
+for a bulk one. **Overrides recorded before this distinction existed count
+as bulk**, because `--all` and `--only` both wrote `repro develop --all`
+then and the two cannot be told apart; so does an entry with no provenance.
+After upgrading, an exact pin under such an entry is therefore not
+substituted: the hooks do not compare it with its checkout, the flake override
+verbs leave it on its pin, and `--list` shows it `pinned` and names the
+ignored entry. One consumer still follows the entry while it exists: `repro
+build` binds the dependency to the checkout wherever it resolves it as a
+cross-repo producer. To keep
+substituting it, run `repro develop --only=<dependency>` again, which
+records the explicit provenance; to clear it, run `repro develop
+--drop=<dependency>`.
+
 ### `locked-integrity-mismatch` (a lock that no longer verifies)
 
 This **refuses (exit 2)** for every tier, including personal (a

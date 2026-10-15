@@ -481,10 +481,23 @@ suite "the commit-time re-pin verdict (H3, §16.4)":
         "sourceRevision is " & ShaB & " and moves both locks with it (it " &
         "refuses when no versions: entry of /w/lib/repro.nim maps " & ShaB &
         "; add that entry first); then commit again"
-      check ("drop the develop override of 'lib' (remove its entry from " &
-        "/w/.repro/develop-overrides.toml; no repro command removes a " &
-        "single override yet), or check the sibling out at the pinned " &
-        "revision: `git -C /w/lib checkout " & ShaA & "`") in v.remedies[1]
+      # HL-11 M5: the experiment remedy names the runnable drop command.
+      check v.remedies[1] == "If " & ShaB & " was a temporary experiment, " &
+        "drop the develop override of 'lib': `repro develop --drop=lib` " &
+        "removes its entry from /w/.repro/develop-overrides.toml and " &
+        "leaves the checkout as it is, or check the sibling out at the " &
+        "pinned revision: `git -C /w/lib checkout " & ShaA & "`; then " &
+        "commit again"
+      # With the workspace and the repo known, the command names both, so
+      # it runs unchanged from wherever the refusal is printed.
+      e.workspaceRoot = "/w"
+      e.repoRoot = "/w/app"
+      check ("drop the develop override of 'lib': `repro develop --drop=lib " &
+        "--workspace-root=/w --project-root=/w/app` removes its entry from " &
+        "/w/.repro/develop-overrides.toml and leaves the checkout as it " &
+        "is, or check the sibling out at the pinned revision: `git -C " &
+        "/w/lib checkout " & ShaA & "`; then commit again") in
+        repinExclusionViolation(e).remedies[1]
     # A conditional entry is listed, never applied.
     let cond = reproRepinVerdict(repinInputs("package app:\n  uses:\n" &
       "    when defined(macosx):\n      \"lib ==1.0.0\"\n", tags), "lib",
