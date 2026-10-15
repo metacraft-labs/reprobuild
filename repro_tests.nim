@@ -9594,6 +9594,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_platform_probe_ignores_user_nimble_packages.nim",
+    binary: "build/test-bin/t_e2e_platform_probe_ignores_user_nimble_packages",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
     binary: "build/test-bin/t_e2e_profile_compile_clang_first_run_published",
     defines: @[],

@@ -1072,6 +1072,7 @@ tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim	nim	4
 tests/e2e/m83/t_e2e_nix_reads_data_like_profile.nim	nim	1
 tests/e2e/m83/t_e2e_nix_reads_intent_like_export.nim	nim	1
 tests/e2e/m83/t_e2e_phase_g_action_edges.nim	nim	4
+tests/e2e/m83/t_e2e_platform_probe_ignores_user_nimble_packages.nim	nim	1
 tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim	nim	4
 tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5

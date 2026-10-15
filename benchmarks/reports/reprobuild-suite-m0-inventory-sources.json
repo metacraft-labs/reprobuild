@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 32,
-    "nimTestBinaries": 2073,
+    "nimTestBinaries": 2074,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2092
+    "testEntries": 2093
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1277,7 +1277,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1117,
+      "integration": 1118,
       "platform/destructive": 127,
       "pure unit": 646,
       "unclassified": 184
@@ -1476,9 +1476,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2073,
+    "nimTestBinaryCount": 2074,
     "pythonTestFileCount": 19,
-    "testEntryCount": 2092
+    "testEntryCount": 2093
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -26507,6 +26507,25 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_platform_probe_ignores_user_nimble_packages",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_platform_probe_ignores_user_nimble_packages.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
