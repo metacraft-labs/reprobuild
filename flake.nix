@@ -647,10 +647,16 @@
       intentHomeManagerModule = import ./nix/modules/home-manager-intent.nix { inherit reprobuildLib; };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
+      # No x86_64-darwin: the pinned nixpkgs (26.11) dropped it, so no package,
+      # dev shell or check can be built or even evaluated there ("Nixpkgs 26.11
+      # has dropped support for x86_64-darwin";
+      # https://nixos.org/manual/nixpkgs/unstable/release-notes#x86_64-darwin-26.11),
+      # and the macOS fleet is Apple-silicon only. Profiles may still TARGET
+      # x86_64-darwin: the Nix helper library (nix/lib/platforms.nix) and
+      # `repro home export --target` describe it without nixpkgs.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
 
