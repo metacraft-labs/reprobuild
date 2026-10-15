@@ -70165,6 +70165,41 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     result.exitCode = if anyProbeFailed: 1 else: 2
     return
 
+  # Helper for WV-7 --from-mainlines target repo matching
+  proc matchSourceState(targetRepo: ResolvedRepo;
+                        states: openArray[ForkSourceState];
+                        used: var HashSet[int]): int =
+    for prior in targetRepo.previously:
+      for idx, state in states:
+        if idx in used: continue
+        if (prior.name.len > 0 and state.repo.name == prior.name) or
+            (prior.path.len > 0 and state.repo.path == prior.path) or
+            (prior.fetchUrl.len > 0 and state.repo.fetchUrl.len > 0 and
+             state.repo.fetchUrl == prior.fetchUrl):
+          used.incl(idx)
+          return idx
+    for idx, state in states:
+      if idx in used: continue
+      if state.repo.name == targetRepo.name:
+        used.incl(idx)
+        return idx
+    if targetRepo.fetchUrl.len > 0:
+      for idx, state in states:
+        if idx in used: continue
+        if state.repo.fetchUrl.len > 0 and state.repo.fetchUrl == targetRepo.fetchUrl:
+          used.incl(idx)
+          return idx
+    -1
+
+  type
+    TargetBranchState = object
+      repo: ResolvedRepo
+      srcIdx: int
+      mainlineBranch: string
+      targetTip: string
+      probeFailed: bool
+      probeReason: string
+
   # ---- materialize the new workspace ------------------------------------
   # Resuming (see the destination guard) means the root clone is already there.
   if not resuming and not dirExists(parsed.forkPath / ".git"):
@@ -70173,6 +70208,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       result.exitCode = 1
       result.repos.add(BranchRepoEntry(
         outcome: "root_clone_failed", diagnostic: rootClone.diagnostic))
+      return
+
+  if parsed.fromMainlines:
+    var co = gitRunPlain(identity,
+      ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+    if co.code != 0:
+      discard gitRunPlain(identity,
+        ["-C", parsed.forkPath, "fetch", "--quiet", "origin"])
+      co = gitRunPlain(identity,
+        ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+      if co.code != 0:
+        discard gitRunPlain(identity,
+          ["-C", parsed.forkPath, "fetch", "--quiet", parsed.workspaceRoot])
+        co = gitRunPlain(identity,
+          ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+    if co.code != 0:
+      result.exitCode = 1
+      result.repos.add(BranchRepoEntry(
+        name: "<workspace-root>", path: ".",
+        outcome: "root_checkout_failed",
+        diagnostic: "could not check out target workspace root at mainline tip '" &
+          rootMainlineTip & "': " & co.output.strip()))
       return
 
   # Member repos: reuse the M9 materialization pass verbatim — it already
@@ -70206,60 +70263,99 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # intentionally after init: guessing the remote HEAD here would bypass the
   # manifest/lock checkout rules, and could turn an invalid declaration into a
   # silently different workspace.
+  var targetResolved: ResolvedProject
+  var targetStates: seq[TargetBranchState]
   var targetBaselineProbeFailed = false
-  if not parsed.existingBranch:
-    for idx in 0 ..< states.len:
-      if not states[idx].useDeclaredBaseline:
+
+  if parsed.fromMainlines:
+    try:
+      targetResolved = resolveProjectSet(parsed.forkPath, forkProjects)
+    except CatchableError as err:
+      result.exitCode = 1
+      result.repos.add(BranchRepoEntry(
+        outcome: "project_set_unresolved",
+        diagnostic: "could not resolve target workspace project set: " & err.msg))
+      return
+
+    var usedSource = initHashSet[int]()
+    for targetRepo in targetResolved.repos:
+      var ts: TargetBranchState
+      ts.repo = targetRepo
+      ts.srcIdx = matchSourceState(targetRepo, states, usedSource)
+      ts.mainlineBranch = declaredMainlineBranch(targetResolved, targetRepo.name)
+      let targetPath = parsed.forkPath / targetRepo.path
+      if ts.mainlineBranch.len == 0:
+        ts.probeFailed = true
+        ts.probeReason = "no mainline is declared for '" & targetRepo.path & "': " &
+          "its manifest fragment sets no `branch`, its `revision` is a pin rather than a branch, " &
+          "and the project declares no `trunk`"
+        targetBaselineProbeFailed = true
+        targetStates.add(ts)
         continue
-      let targetPath = parsed.forkPath / states[idx].repo.path
-      if parsed.fromMainlines:
-        # WV-7 — the repo had no source checkout, so its mainline could not be
-        # read in pre-flight; the fresh clone carries the remote-tracking refs
-        # and is the authority now. A mainline that is missing HERE is a
-        # partial-advance failure (exit 1, tree left in place, resumable) rather
-        # than a pre-flight refusal — the clone has already happened, and
-        # claiming "nothing was created" would be a lie.
-        let remoteName = gitRemoteNameFor(states[idx].repo)
-        states[idx].mainlineTip = revParse(identity, targetPath,
-          "refs/remotes/" & remoteName & "/" & states[idx].mainlineBranch)
-        if states[idx].mainlineTip.len == 0:
+      let remoteName = gitRemoteNameFor(targetRepo)
+      if ts.srcIdx >= 0 and states[ts.srcIdx].mainlineBranch == ts.mainlineBranch and
+          states[ts.srcIdx].mainlineTip.len > 0:
+        ts.targetTip = states[ts.srcIdx].mainlineTip
+      else:
+        ts.targetTip = revParse(identity, targetPath,
+          "refs/remotes/" & remoteName & "/" & ts.mainlineBranch)
+      if ts.targetTip.len == 0:
+        ts.probeFailed = true
+        ts.probeReason = "the declared mainline '" &
+          ts.mainlineBranch & "' of '" & targetRepo.path &
+          "' has no `refs/remotes/" & remoteName & "/" &
+          ts.mainlineBranch & "` in the freshly cloned checkout at '" &
+          targetPath & "'"
+        targetBaselineProbeFailed = true
+      targetStates.add(ts)
+  else:
+    if not parsed.existingBranch:
+      for idx in 0 ..< states.len:
+        if not states[idx].useDeclaredBaseline:
+          continue
+        let targetPath = parsed.forkPath / states[idx].repo.path
+        let targetHead = queryGitState(headShaQuery(targetPath), identity)
+        if targetHead.status != gqsOk:
           states[idx].probeFailed = true
-          states[idx].probeReason = "the declared mainline '" &
-            states[idx].mainlineBranch & "' of '" & states[idx].repo.path &
-            "' has no `refs/remotes/" & remoteName & "/" &
-            states[idx].mainlineBranch & "` in the freshly cloned checkout " &
-            "at '" & targetPath & "'"
+          states[idx].probeReason =
+            "target declared-checkout HEAD probe failed: " &
+              targetHead.diagnostic
           targetBaselineProbeFailed = true
         else:
-          states[idx].headSha = states[idx].mainlineTip
-        continue
-      let targetHead = queryGitState(headShaQuery(targetPath), identity)
-      if targetHead.status != gqsOk:
-        states[idx].probeFailed = true
-        states[idx].probeReason =
-          "target declared-checkout HEAD probe failed: " &
-            targetHead.diagnostic
-        targetBaselineProbeFailed = true
-      else:
-        states[idx].headSha = targetHead.headSha
+          states[idx].headSha = targetHead.headSha
 
   if targetBaselineProbeFailed:
-    for state in states:
-      var entry = BranchRepoEntry(
-        name: state.repo.name,
-        path: state.repo.path,
-        headSha: state.headSha,
-        baselineSource: state.baselineSource,
-        mainlineBranch: state.mainlineBranch,
-        publication:
-          (if state.publicationAsked: $state.publication.status else: ""),
-        sourceBranch: state.sourceBranch)
-      if state.probeFailed:
-        entry.outcome = "probe_failed"
-        entry.diagnostic = state.probeReason
-      else:
-        entry.outcome = "ready"
-      result.repos.add(entry)
+    if parsed.fromMainlines:
+      for ts in targetStates:
+        var entry = BranchRepoEntry(
+          name: ts.repo.name,
+          path: ts.repo.path,
+          headSha: ts.targetTip,
+          baselineSource: "mainline_head",
+          mainlineBranch: ts.mainlineBranch)
+        if ts.probeFailed:
+          entry.outcome = "probe_failed"
+          entry.diagnostic = ts.probeReason
+        else:
+          entry.outcome = "ready"
+        result.repos.add(entry)
+    else:
+      for state in states:
+        var entry = BranchRepoEntry(
+          name: state.repo.name,
+          path: state.repo.path,
+          headSha: state.headSha,
+          baselineSource: state.baselineSource,
+          mainlineBranch: state.mainlineBranch,
+          publication:
+            (if state.publicationAsked: $state.publication.status else: ""),
+          sourceBranch: state.sourceBranch)
+        if state.probeFailed:
+          entry.outcome = "probe_failed"
+          entry.diagnostic = state.probeReason
+        else:
+          entry.outcome = "ready"
+        result.repos.add(entry)
     result.exitCode = 1
     return
 
@@ -70318,37 +70414,61 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     actions.add(rootAction)
     actionRepoIndex[rootActionId] = RootEntryIndex
 
-  for idx, state in states:
-    let receiptRel = ".repro" / "workspace" / "receipts" /
-      ("start-fork-" & safeRepoIdSegment(state.repo.name) & "-" & $idx &
-       ".receipt")
-    let actionId = "workspace-start-fork-" &
-      safeRepoIdSegment(state.repo.name) & "-" & $idx
-    var action =
-      if parsed.existingBranch:
-        # The repo was just cloned, so the branch is reachable as a
-        # remote-tracking ref; `git switch <name>` DWIMs the tracking branch
-        # off ``refs/remotes/origin/<name>`` — the same path `repro switch`
-        # relies on for a remote-only branch.
-        gitSwitchAction(actionId, identity,
-          branchName = parsed.branchName,
-          repoPath = state.repo.path,
-          receiptPath = receiptRel)
-      else:
-        let baselineRepoPath =
-          if state.useDeclaredBaseline: parsed.forkPath / state.repo.path
-          else: state.srcPath
-        gitForkBranchAction(actionId, identity,
-          branchName = parsed.branchName,
-          sourceRepoPath = baselineRepoPath,
-          targetSha = state.headSha,
-          repoPath = state.repo.path,
-          receiptPath = receiptRel)
-    action.cwd = parsed.forkPath
-    action.pool = "vcs/fetch"
-    action.poolUnits = 1'u32
-    actions.add(action)
-    actionRepoIndex[actionId] = idx
+  if parsed.fromMainlines:
+    for idx, ts in targetStates:
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("start-fork-" & safeRepoIdSegment(ts.repo.name) & "-" & $idx &
+         ".receipt")
+      let actionId = "workspace-start-fork-" &
+        safeRepoIdSegment(ts.repo.name) & "-" & $idx
+      let baselineRepoPath =
+        if ts.srcIdx >= 0 and states[ts.srcIdx].sourcePresent:
+          states[ts.srcIdx].srcPath
+        else:
+          parsed.forkPath / ts.repo.path
+      var action = gitForkBranchAction(actionId, identity,
+        branchName = parsed.branchName,
+        sourceRepoPath = baselineRepoPath,
+        targetSha = ts.targetTip,
+        repoPath = ts.repo.path,
+        receiptPath = receiptRel)
+      action.cwd = parsed.forkPath
+      action.pool = "vcs/fetch"
+      action.poolUnits = 1'u32
+      actions.add(action)
+      actionRepoIndex[actionId] = idx
+  else:
+    for idx, state in states:
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("start-fork-" & safeRepoIdSegment(state.repo.name) & "-" & $idx &
+         ".receipt")
+      let actionId = "workspace-start-fork-" &
+        safeRepoIdSegment(state.repo.name) & "-" & $idx
+      var action =
+        if parsed.existingBranch:
+          # The repo was just cloned, so the branch is reachable as a
+          # remote-tracking ref; `git switch <name>` DWIMs the tracking branch
+          # off ``refs/remotes/origin/<name>`` — the same path `repro switch`
+          # relies on for a remote-only branch.
+          gitSwitchAction(actionId, identity,
+            branchName = parsed.branchName,
+            repoPath = state.repo.path,
+            receiptPath = receiptRel)
+        else:
+          let baselineRepoPath =
+            if state.useDeclaredBaseline: parsed.forkPath / state.repo.path
+            else: state.srcPath
+          gitForkBranchAction(actionId, identity,
+            branchName = parsed.branchName,
+            sourceRepoPath = baselineRepoPath,
+            targetSha = state.headSha,
+            repoPath = state.repo.path,
+            receiptPath = receiptRel)
+      action.cwd = parsed.forkPath
+      action.pool = "vcs/fetch"
+      action.poolUnits = 1'u32
+      actions.add(action)
+      actionRepoIndex[actionId] = idx
 
   var outcomeById = initTable[string, ActionResult]()
   if actions.len > 0:
@@ -70395,73 +70515,104 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
             (if parsed.fromMainlines: "branched_from_mainline"
              else: "branched")))
       continue
-    let state = states[idx]
-    var entry = BranchRepoEntry(
-      name: state.repo.name,
-      path: state.repo.path,
-      headSha: state.headSha,
-      baselineSource: state.baselineSource,
-      mainlineBranch: state.mainlineBranch,
-      publication:
-        (if state.publicationAsked: $state.publication.status else: ""),
-      sourceBranch: state.sourceBranch)
-    if not ok:
-      inc failures
-      entry.outcome = "fork_failed"
-      entry.diagnostic = "status=" & $outcome.status & " reason=" &
-        outcome.reason & " " & outcome.stderr
+    if parsed.fromMainlines:
+      let ts = targetStates[idx]
+      var entry = BranchRepoEntry(
+        name: ts.repo.name,
+        path: ts.repo.path,
+        headSha: ts.targetTip,
+        baselineSource: "mainline_head",
+        mainlineBranch: ts.mainlineBranch,
+        publication: "",
+        sourceBranch: (if ts.srcIdx >= 0: states[ts.srcIdx].sourceBranch else: ""))
+      if not ok:
+        inc failures
+        entry.outcome = "fork_failed"
+        entry.diagnostic = "status=" & $outcome.status & " reason=" &
+          outcome.reason & " " & outcome.stderr
+      else:
+        entry.outcome = "branched_from_mainline"
+        # ---- optional WIP carry-over ------------------------------------
+        if parsed.includeChanges and ts.srcIdx >= 0 and not states[ts.srcIdx].isClean:
+          let copied = copyWorkingTreeChanges(identity, states[ts.srcIdx].srcPath,
+            parsed.forkPath / ts.repo.path,
+            parsed.forkPath / ".repro" / "workspace",
+            safeRepoIdSegment(ts.repo.name))
+          if not copied.ok:
+            inc failures
+            entry.outcome = "changes_failed"
+            entry.diagnostic = copied.diagnostic
+          elif copied.changed:
+            entry.outcome = "branched_with_changes"
+      result.repos.add(entry)
     else:
-      entry.outcome =
-        if state.baselineSource == "mainline_head":
-          "branched_from_mainline"
-        elif state.baselineSource == "declared_checkout":
-          "branched_from_declared_baseline"
-        else:
-          "branched"
-      # ---- F0.3: attribution for carried unpublished work --------------
-      # The commits are here only because ``--unpublished=carry`` said so, and
-      # the branch they are now on is named after the DESTINATION DIRECTORY.
-      # That is what threw away the meaning last time: six repos arrived on a
-      # branch called `reproos` and nothing recorded that they had been
-      # `migrate-to-self-hosted-runners`, `live`, `codetracer` and so on.
-      #
-      # So re-create the source branch name here, pointing at the same commit.
-      # It is a plain local ref — HEAD stays on the workspace branch — but
-      # `git branch --contains` names it, and pushing it publishes the work
-      # under the name it was written with. Recorded in the report either way.
-      if state.publicationAsked and
-          state.publication.status in {hpsUnpublished, hpsUnknown} and
-          not state.useDeclaredBaseline and
-          state.sourceBranch.len > 0 and
-          state.sourceBranch != parsed.branchName:
-        let targetRepo = parsed.forkPath / state.repo.path
-        let existing = gitRunPlain(identity,
-          ["-C", targetRepo, "rev-parse", "--verify", "--quiet",
-           "refs/heads/" & state.sourceBranch])
-        if existing.code != 0 or existing.output.strip().len == 0:
-          let made = gitRunPlain(identity,
-            ["-C", targetRepo, "branch", state.sourceBranch, state.headSha])
-          if made.code != 0:
-            # Attribution is additive: failing to record the name must not
-            # undo a fork whose commits are already in place. Say so and move
-            # on rather than failing the repo.
-            entry.diagnostic = "carried unpublished work, but could not " &
-              "record the source branch name '" & state.sourceBranch &
-              "': git branch exited " & $made.code & ": " &
-              made.output.strip()
-      # ---- optional WIP carry-over ------------------------------------
-      if parsed.includeChanges and not state.isClean:
-        let copied = copyWorkingTreeChanges(identity, state.srcPath,
-          parsed.forkPath / state.repo.path,
-          parsed.forkPath / ".repro" / "workspace",
-          safeRepoIdSegment(state.repo.name))
-        if not copied.ok:
-          inc failures
-          entry.outcome = "changes_failed"
-          entry.diagnostic = copied.diagnostic
-        elif copied.changed:
-          entry.outcome = "branched_with_changes"
-    result.repos.add(entry)
+      let state = states[idx]
+      var entry = BranchRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        baselineSource: state.baselineSource,
+        mainlineBranch: state.mainlineBranch,
+        publication:
+          (if state.publicationAsked: $state.publication.status else: ""),
+        sourceBranch: state.sourceBranch)
+      if not ok:
+        inc failures
+        entry.outcome = "fork_failed"
+        entry.diagnostic = "status=" & $outcome.status & " reason=" &
+          outcome.reason & " " & outcome.stderr
+      else:
+        entry.outcome =
+          if state.baselineSource == "mainline_head":
+            "branched_from_mainline"
+          elif state.baselineSource == "declared_checkout":
+            "branched_from_declared_baseline"
+          else:
+            "branched"
+        # ---- F0.3: attribution for carried unpublished work --------------
+        # The commits are here only because ``--unpublished=carry`` said so, and
+        # the branch they are now on is named after the DESTINATION DIRECTORY.
+        # That is what threw away the meaning last time: six repos arrived on a
+        # branch called `reproos` and nothing recorded that they had been
+        # `migrate-to-self-hosted-runners`, `live`, `codetracer` and so on.
+        #
+        # So re-create the source branch name here, pointing at the same commit.
+        # It is a plain local ref — HEAD stays on the workspace branch — but
+        # `git branch --contains` names it, and pushing it publishes the work
+        # under the name it was written with. Recorded in the report either way.
+        if state.publicationAsked and
+            state.publication.status in {hpsUnpublished, hpsUnknown} and
+            not state.useDeclaredBaseline and
+            state.sourceBranch.len > 0 and
+            state.sourceBranch != parsed.branchName:
+          let targetRepo = parsed.forkPath / state.repo.path
+          let existing = gitRunPlain(identity,
+            ["-C", targetRepo, "rev-parse", "--verify", "--quiet",
+             "refs/heads/" & state.sourceBranch])
+          if existing.code != 0 or existing.output.strip().len == 0:
+            let made = gitRunPlain(identity,
+              ["-C", targetRepo, "branch", state.sourceBranch, state.headSha])
+            if made.code != 0:
+              # Attribution is additive: failing to record the name must not
+              # undo a fork whose commits are already in place. Say so and move
+              # on rather than failing the repo.
+              entry.diagnostic = "carried unpublished work, but could not " &
+                "record the source branch name '" & state.sourceBranch &
+                "': git branch exited " & $made.code & ": " &
+                made.output.strip()
+        # ---- optional WIP carry-over ------------------------------------
+        if parsed.includeChanges and not state.isClean:
+          let copied = copyWorkingTreeChanges(identity, state.srcPath,
+            parsed.forkPath / state.repo.path,
+            parsed.forkPath / ".repro" / "workspace",
+            safeRepoIdSegment(state.repo.name))
+          if not copied.ok:
+            inc failures
+            entry.outcome = "changes_failed"
+            entry.diagnostic = copied.diagnostic
+          elif copied.changed:
+            entry.outcome = "branched_with_changes"
+      result.repos.add(entry)
 
   if failures > 0 or rootFailed:
     result.exitCode = 1

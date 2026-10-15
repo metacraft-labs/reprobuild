@@ -28389,7 +28389,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_branch_from_mainlines.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

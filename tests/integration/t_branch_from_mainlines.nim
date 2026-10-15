@@ -41,6 +41,11 @@
 ##   6. ``test_wv7_fetch_requires_from_mainlines`` — ``--fetch`` / ``--no-fetch``
 ##      on their own would be a flag that silently does nothing, so they are a
 ##      usage error without ``--from-mainlines``.
+##   7. ``test_wv7_from_mainlines_adopts_renamed_mainline_member_path`` — a
+##      repository renamed in the mainline manifest adopts its new target
+##      mainline path in the forked workspace rather than requiring the source
+##      checkout's old path, and uncommitted edits under ``--include-changes``
+##      are transferred to the renamed path.
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
 ## real filesystem, and the real engine-built ``build/bin/repro`` spawned as a
@@ -67,6 +72,7 @@
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -455,3 +461,89 @@ suite "WV-7 — repro branch --from-mainlines":
       check res.code != 0
       check not dirExists(forkPath)
       check res.output.contains("--from-mainlines")
+
+  test "test_wv7_from_mainlines_adopts_renamed_mainline_member_path":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a real git working tree")
+    else:
+      let fx = setupFixture(gitBin, "rename")
+      defer: removeDirEventually(fx.scratch)
+
+      # In the root bare repo, commit a rename of lib-a to lib-renamed on main.
+      let workPath = fx.scratch / "rename-work"
+      removeDir(workPath)
+      discard requireGit(q(gitBin) & " clone --branch main " &
+        q(fileUrl(fx.rootBare)) & " " & q(workPath))
+      gitConfig(gitBin, workPath)
+
+      # Update project toml to include repos/lib-renamed.toml instead of repos/lib-a.toml
+      let projContent = readFile(workPath / "projects" / "wv7.toml")
+      writeFile(workPath / "projects" / "wv7.toml",
+        projContent.replace("\"repos/lib-a.toml\"", "\"repos/lib-renamed.toml\""))
+
+      # Remove repos/lib-a.toml and add repos/lib-renamed.toml with [extensions] previously
+      removeFile(workPath / "repos" / "lib-a.toml")
+      writeFile(workPath / "repos" / "lib-renamed.toml",
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\n" &
+        "name = \"lib-renamed\"\n" &
+        "path = \"lib-renamed\"\n" &
+        "remote = \"lib-a-origin\"\n" &
+        "revision = \"dev\"\n" &
+        "branch = \"dev\"\n\n" &
+        "[extensions]\n" &
+        "previously = [{ name = \"lib-a\", path = \"lib-a\" }]\n")
+
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) &
+        " commit -m 'rename lib-a to lib-renamed'")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " push origin main")
+
+      # Source workspace still has the old lib-a checkout and manifest
+      check dirExists(fx.workspaceRoot / "lib-a")
+      check fileExists(fx.workspaceRoot / "repos" / "lib-a.toml")
+      check not fileExists(fx.workspaceRoot / "repos" / "lib-renamed.toml")
+
+      # First: repro branch <forkPath> --from-mainlines
+      let forkPath = fx.scratch / "fork-renamed"
+      let res = invokeFork(fx, "feature-renamed", forkPath, @["--from-mainlines"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      # lib-renamed was cloned and branched at mainline tip, lib-a is absent
+      check dirExists(forkPath / "lib-renamed" / ".git")
+      check not dirExists(forkPath / "lib-a")
+      check currentBranch(gitBin, forkPath / "lib-renamed") == "feature-renamed"
+      check headSha(gitBin, forkPath / "lib-renamed") == fx.libAMainline
+      check readWorkspaceFeatureStarted(forkPath)
+
+      let report = readReport(forkPath)
+      check report["exitCode"].getInt() == 0
+      let entry = entryByPath(report, "lib-renamed")
+      check entry != newJNull()
+      check entry["outcome"].getStr() == "branched_from_mainline"
+      check entry["baselineSource"].getStr() == "mainline_head"
+      check entry["mainlineBranch"].getStr() == "dev"
+      check entryByPath(report, "lib-a") == newJNull()
+
+      # Second: also test --include-changes with the rename
+      # Make an uncommitted edit in lib-a in the source workspace
+      writeFile(fx.workspaceRoot / "lib-a" / "DIRTY.md", "uncommitted edit\n")
+
+      let forkChangesPath = fx.scratch / "fork-with-changes"
+      let resChanges = invokeFork(fx, "feature-changes", forkChangesPath,
+        @["--from-mainlines", "--include-changes"])
+      if resChanges.code != 0:
+        checkpoint("output: " & resChanges.output)
+      check resChanges.code == 0
+      check fileExists(forkChangesPath / "lib-renamed" / "DIRTY.md")
+      check readFile(forkChangesPath / "lib-renamed" / "DIRTY.md") == "uncommitted edit\n"
+      check readWorkspaceFeatureStarted(forkChangesPath)
+
+      let reportChanges = readReport(forkChangesPath)
+      check reportChanges["exitCode"].getInt() == 0
+      let entryChanges = entryByPath(reportChanges, "lib-renamed")
+      check entryChanges != newJNull()
+      check entryChanges["outcome"].getStr() == "branched_with_changes"
