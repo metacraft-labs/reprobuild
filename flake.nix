@@ -241,7 +241,7 @@
       #
       # Pinned to the nim-shm-queue rev that adds the Layer-1 EmbeddedRing
       # (repro_shm_index's action-cache ring embeds it in the control region).
-      url = "github:metacraft-labs/nim-shm-queue/5a8e43b52fa202859658692c9f8432967f3971ea";
+      url = "github:metacraft-labs/nim-shm-queue/a3564c13e0b7d0c6a092c19c998cd3faee5ce20a";
       flake = false;
     };
     nimcrypto-src = {
@@ -346,7 +346,7 @@
       # 600f2a8 additionally carries caller/target Windows injection diagnostics.
       # Keep this pin aligned with the synced, published workspace dependency;
       # the pre-push gate rejects a pin that lags that checkout.
-      url = "github:metacraft-labs/nim-stackable-hooks/600f2a80c9e582e860d36be20c04b9c74263458d";
+      url = "github:metacraft-labs/nim-stackable-hooks/3af63afc5c0b55a27fc5e0a26f3a32833caf8873";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
