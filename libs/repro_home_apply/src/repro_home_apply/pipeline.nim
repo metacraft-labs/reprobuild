@@ -30,7 +30,7 @@ import repro_homebrew_adapter
 import repro_local_store
 
 import ./app_activation
-from ./builtin_adapter import appBundleLeaf
+from ./builtin_adapter import appPlacedItem, isMacosInstallerApp
 import ./dep_graph
 import ./env_binding
 import ./errors
@@ -2046,10 +2046,14 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # The resource preview below leaves these addresses to this section: they
   # are synthesized from realized packages, which a plan does not realize.
   var plannedAppAddresses: HashSet[string]
+  # A macOS installer application places the product its installer
+  # produced -- a bundle, or the folder holding it -- exactly as an
+  # `app-bundle` record places its bundle (§ Installer applications).
   for pp in packagePreviews:
     if pp.resolved and pp.resolution.selection.kind == rkTarball and
         pp.resolution.archiveRoute == arInstaller and
-        pp.resolution.archive.installMethod == imAppBundle:
+        (pp.resolution.archive.installMethod == imAppBundle or
+         isMacosInstallerApp(pp.resolution.archive)):
       plannedAppAddresses.incl(appBundleAddress(pp.packageId))
   if not opts.recordOnlyGeneratedFiles and targetIsThisHost(opts):
     var owned: HashSet[string]
@@ -2069,7 +2073,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
           discard
       let address = appBundleAddress(pp.packageId)
       let target = applicationsDir(apsHome, opts.homeDir) /
-        appBundleLeaf(pp.resolution.archive)
+        appPlacedItem(pp.resolution.archive).item
       var item = PlanItem(category: "app-bundle", name: target)
       let present = symlinkExists(target) or fileExists(target) or
         dirExists(target)
@@ -3040,15 +3044,24 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # only when this profile placed it (checked above as well).
             # A refusal of the staged copy, or a failed copy or rename, is
             # an apply failure naming the package, the bundle and the
-            # check; `placeAppBundle` has already removed the staged copy
-            # and left the target as it was.
+            # check; `stageAppBundle` / `commitStagedAppBundle` have already
+            # removed the staged copy and left the target as it was.
+            #
+            # The placed item may be a FOLDER (an installer application's
+            # product folder, Store-And-Installation-Layout.md § Installer
+            # applications): it is staged and verified as a whole, and what
+            # is recorded is the placed item's identity -- the folder
+            # identity for a folder, the bundle's for a bundle.
             let placed =
               try:
-                placeAppBundle(desired.appBundleSource,
+                let staged = stageAppBundle(desired.appBundleSource,
                   desired.appBundleTargetDir, desired.appBundleName,
                   desired.appBundleExpectation, desired.appBundleTrust,
                   managedPrior = managesAppBundle(action.address),
-                  pinned = desired.appBundleIdentity)
+                  pinned = desired.appBundleIdentity,
+                  mainBundle = desired.appBundleMainPath)
+                discard commitStagedAppBundle(staged)
+                staged.itemIdentity
               except EAppBundleRefused as err:
                 raiseAppBundleFailed(
                   packageIdOfAppBundleAddress(action.address),
@@ -3061,7 +3074,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
                   action.address, desired.appBundleName,
                   desired.appBundleTargetDir / desired.appBundleName,
                   "placement", err.msg)
-            postWriteBytes = appBundleCanonicalBytes(placed)
+            postWriteBytes = placed
             payloadKindStr = "app-bundle-identity"
           let rb = toResourceBinding(action.address, desired.kind,
             identity, preWrite, postWriteBytes, payloadKindStr,

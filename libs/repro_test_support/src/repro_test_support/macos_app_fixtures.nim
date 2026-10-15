@@ -14,6 +14,18 @@
 ## (the Developer ID chain, notarization), which tests either assert as real
 ## refusals or relax through ``AppTrustPolicy``.
 ##
+## Installer applications (Store-And-Installation-Layout.md § Installer
+## applications) are built the same way: ``makeFixtureProductFolder`` makes
+## the folder an installer produces (a main bundle, a second top-level
+## bundle, a bundle nested in a hidden support directory and a plain file,
+## the OpenWebStart layout), and ``makeFixtureInstallerApp`` a signed
+## installer bundle that carries that folder in its ``Resources`` and copies
+## it to the directory named by ``-dir`` when run -- install4j's unattended
+## protocol (``-q -dir <d>``). Its main executable is a shell script, so a
+## test can make the installer misbehave in a precise way (write outside its
+## prefix, write a preference, open a connection, exit without installing)
+## by passing ``extraScript``.
+##
 ## The archives are made with the tools vendors use: ``hdiutil create``
 ## (HFS+ or APFS disk images, with the ``Applications -> /Applications``
 ## symlink a vendor image carries), ``ditto -c -k`` (zip), ``pkgbuild`` +
@@ -86,6 +98,92 @@ proc makeFixtureApp*(dir, name, bundleId, version: string;
   if sign:
     runChecked("/usr/bin/codesign", ["--force", "-s", "-",
       "--team-identifier", teamId, app])
+  app
+
+proc makeFixtureProductFolder*(dir, item, mainName, bundleId, version: string;
+                               teamId = FixtureTeamId;
+                               helperTeamId = ""): string =
+  ## Build ``dir/<item>``, the folder an installer application produces, and
+  ## return its path: ``<mainName>.app`` (the product bundle, ``bundleId`` /
+  ## ``version``), ``<item> Helper.app`` (another top-level bundle, signed by
+  ## ``helperTeamId``, default ``teamId``), ``.support/<item> Update.app``
+  ## (a bundle nested in a hidden directory, the way install4j keeps its
+  ## updater in ``.install4j/``) and ``readme.txt`` (a file outside every
+  ## bundle).
+  result = dir / item
+  createDir(result / ".support")
+  discard makeFixtureApp(result, mainName, bundleId, version, teamId)
+  discard makeFixtureApp(result, item & " Helper", bundleId & ".helper",
+    version, if helperTeamId.len > 0: helperTeamId else: teamId)
+  discard makeFixtureApp(result / ".support", item & " Update",
+    bundleId & ".update", version, teamId)
+  writeFile(result / "readme.txt", item & " " & version & "\n")
+
+proc makeFixtureInstallerApp*(dir, name, payload: string;
+                              teamId = FixtureTeamId;
+                              extraScript = ""; install = true): string =
+  ## Build ``dir/<name>.app``, an ad-hoc signed installer application whose
+  ## ``Resources/payload/<leaf>`` is a copy of ``payload`` (a product folder
+  ## or bundle; "" for none), and return its path. Its main executable is a
+  ## ``/bin/sh`` script implementing the subset of install4j's unattended
+  ## protocol the realizer uses: ``-dir <d>`` names the installation
+  ## directory, which it creates by copying the payload there with
+  ## ``ditto``; ``-q`` and unknown options are ignored. Two more options let
+  ## ``extraScript`` misbehave on request: ``-outside <path>`` and
+  ## ``-report <file>`` set ``$outside`` and ``$report``. ``extraScript``
+  ## runs after the arguments are parsed and before the copy; with
+  ## ``install = false`` the script exits 0 without copying anything.
+  let app = dir / (name & ".app")
+  let contents = app / "Contents"
+  createDir(contents / "MacOS")
+  createDir(contents / "Resources" / "payload")
+  writeFile(contents / "Info.plist",
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" &
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" " &
+    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" &
+    "<plist version=\"1.0\"><dict>\n" &
+    "<key>CFBundleIdentifier</key><string>dev.reprobuild.fixture.installer" &
+      "</string>\n" &
+    "<key>CFBundleName</key><string>" & name & "</string>\n" &
+    "<key>CFBundleExecutable</key><string>install</string>\n" &
+    "<key>CFBundleShortVersionString</key><string>1.0</string>\n" &
+    "<key>CFBundleVersion</key><string>1.0</string>\n" &
+    "<key>CFBundlePackageType</key><string>APPL</string>\n" &
+    "</dict></plist>\n")
+  if payload.len > 0:
+    runChecked("/usr/bin/ditto", [payload, contents / "Resources" /
+      "payload" / extractFilename(payload)])
+  else:
+    writeFile(contents / "Resources" / "payload" / ".empty", "")
+  let exe = contents / "MacOS" / "install"
+  writeFile(exe, "#!/bin/sh\n" &
+    "# Reprobuild fixture installer (install4j's -q -dir protocol).\n" &
+    "payload=\"$(cd \"$(dirname \"$0\")/../Resources/payload\" && pwd)\"\n" &
+    "dest=''; outside=''; report=''\n" &
+    "while [ $# -gt 0 ]; do\n" &
+    "  case \"$1\" in\n" &
+    "    -dir) dest=\"$2\"; shift 2 ;;\n" &
+    "    -outside) outside=\"$2\"; shift 2 ;;\n" &
+    "    -report) report=\"$2\"; shift 2 ;;\n" &
+    "    *) shift ;;\n" &
+    "  esac\n" &
+    "done\n" &
+    "if [ -z \"$dest\" ]; then echo 'fixture installer: no -dir' >&2; " &
+      "exit 2; fi\n" &
+    extraScript & "\n" &
+    (if install:
+       "for item in \"$payload\"/*; do\n" &
+       "  [ -e \"$item\" ] || continue\n" &
+       "  /usr/bin/ditto \"$item\" \"$dest\" || exit 4\n" &
+       "done\n" &
+       "echo \"fixture installer: installed into $dest\"\n"
+     else:
+       "echo 'fixture installer: installing nothing'\n") &
+    "exit 0\n")
+  setFilePermissions(exe, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  runChecked("/usr/bin/codesign", ["--force", "-s", "-",
+    "--team-identifier", teamId, app])
   app
 
 proc tamperFixtureApp*(app: string) =

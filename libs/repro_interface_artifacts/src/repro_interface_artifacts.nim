@@ -1069,8 +1069,17 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 27'u16
-    ## v27 (current): a provisioning contribution also carries its Homebrew
+  EnvelopeVersion = 28'u16
+    ## v28 (current): ``TarballArchiveDetail`` also retains
+    ##                ``installerApp``, the installer application of a macOS
+    ##                ``installer-silent`` record (Store-And-Installation-
+    ##                Layout.md § Installer applications), encoded after
+    ##                ``teamId``. v27 and older payloads decode with it
+    ##                empty, which is a record that names no installer
+    ##                application. (Developed as v23 against an older tip
+    ##                and renumbered above v27 before it was published, for
+    ##                the reason the v23 note gives.)
+    ## v27: a provisioning contribution also carries its Homebrew
     ##                bridge records (``homebrewProvisioning``: kind, token,
     ##                tap; GM5b), encoded after its Scoop records, inside
     ##                the v13 contribution block. v26 and older payloads
@@ -1786,8 +1795,9 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
 proc writeTarballArchiveDetail(outp: var seq[byte];
                                detail: TarballArchiveDetail;
                                version: uint16) =
-  ## GM4b (v21), GM4c (v22). Field order is the declaration order of
-  ## ``TarballArchiveDetail``; ``readTarballArchiveDetail`` mirrors it.
+  ## GM4b (v21), GM4c (v22), installer applications (v28). Field order is
+  ## the declaration order of ``TarballArchiveDetail``;
+  ## ``readTarballArchiveDetail`` mirrors it.
   outp.writeString(detail.version)
   outp.writeString(detail.sha512)
   outp.writeString(detail.sha1)
@@ -1809,6 +1819,8 @@ proc writeTarballArchiveDetail(outp: var seq[byte];
     outp.writeString(detail.appBundle)
     outp.writeString(detail.bundleId)
     outp.writeString(detail.teamId)
+  if version >= 28'u16:
+    outp.writeString(detail.installerApp)
 
 proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
                               version: uint16): TarballArchiveDetail =
@@ -1833,6 +1845,8 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
     result.appBundle = readString(bytes, pos)
     result.bundleId = readString(bytes, pos)
     result.teamId = readString(bytes, pos)
+  if version >= 28'u16:
+    result.installerApp = readString(bytes, pos)
 
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
@@ -3383,7 +3397,8 @@ proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
     ", cpuFeatures: " & escForCode(detail.cpuFeatures) &
     ", appBundle: " & escForCode(detail.appBundle) &
     ", bundleId: " & escForCode(detail.bundleId) &
-    ", teamId: " & escForCode(detail.teamId) & ")"
+    ", teamId: " & escForCode(detail.teamId) &
+    ", installerApp: " & escForCode(detail.installerApp) & ")"
 
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =

@@ -905,9 +905,12 @@ type
       ## GM4c: the macOS application bundle the archive delivers -- its path
       ## inside the archive (``Ghostty.app``; a component naming a flat
       ## ``.pkg`` is expanded and the path continues inside it). Set with
-      ## ``installMethod = "app-bundle"`` (and on the two declared-only macOS
-      ## installer shapes, ``pkg-install`` and ``installer-silent``).
-      ## Store-And-Installation-Layout.md § macOS Application Bundles.
+      ## ``installMethod = "app-bundle"`` (and on the declared-only
+      ## ``pkg-install`` shape). For a macOS ``installer-silent`` record it
+      ## is the PRODUCT bundle's path inside the realized prefix instead
+      ## (``OpenWebStart/OpenWebStart javaws.app``); its first component is
+      ## the placed item. Store-And-Installation-Layout.md § macOS
+      ## Application Bundles.
     bundleId*: string
       ## GM4c: the bundle's ``CFBundleIdentifier``; checked before the bundle
       ## is published to the store and again before it is activated.
@@ -915,6 +918,13 @@ type
       ## GM4c: the Apple team identifier that signs the bundle. Required with
       ## ``appBundle``: the realization proves the signature chains to an
       ## Apple Developer ID certificate of this team.
+    installerApp*: string
+      ## The installer application's path inside the archive
+      ## (``OpenWebStart Installer.app``) for a macOS ``installer-silent``
+      ## record: the realizer copies it out, verifies it is signed by
+      ## ``teamId`` and runs it confined, with ``installerArgs``, into the
+      ## staging prefix. Store-And-Installation-Layout.md § Installer
+      ## applications.
 
   TarballProvisioningDef* = object
     url*: string

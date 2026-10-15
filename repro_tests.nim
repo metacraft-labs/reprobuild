@@ -2709,6 +2709,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_home_apply/tests/t_macos_installer_app_realize.nim",
+    binary: "build/test-bin/t_macos_installer_app_realize",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_home_apply/tests/t_plan_topological_sort.nim",
     binary: "build/test-bin/t_plan_topological_sort",
     defines: @[],
@@ -2873,6 +2882,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim",
     binary: "build/test-bin/t_macos_app_bundle_placement",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_home_resources/tests/t_macos_app_folder_placement.nim",
+    binary: "build/test-bin/t_macos_app_folder_placement",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -8300,6 +8318,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim",
     binary: "build/test-bin/t_e2e_home_profile_reaches_catalog_apps",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim",
+    binary: "build/test-bin/t_e2e_installer_app_install_and_rollback",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

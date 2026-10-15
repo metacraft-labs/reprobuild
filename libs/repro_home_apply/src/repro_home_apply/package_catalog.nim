@@ -40,6 +40,7 @@ import repro_dsl_stdlib/package_registry
 import repro_tool_profiles/realization_selection
 
 import ./catalog_projection
+from repro_home_resources/drivers/app_bundle import installerProductPathError
 
 export packages_schema
 export catalog_projection
@@ -112,9 +113,15 @@ type
       ## GM4c: the ``.app`` bundle's path inside the archive, for an
       ## ``imAppBundle`` record (Store-And-Installation-Layout.md § macOS
       ## Application Bundles). With ``bundleId`` / ``teamId`` and the
-      ## record's version it is what the realizer verifies.
+      ## record's version it is what the realizer verifies. For a macOS
+      ## installer application it is the product bundle's path inside the
+      ## installed prefix (§ Installer applications).
     bundleId*: string
     teamId*: string
+    installerApp*: string
+      ## The installer application's path inside the archive, for a macOS
+      ## ``imInstallerSilent`` record (Store-And-Installation-Layout.md
+      ## § Installer applications); "" for a Windows installer.
 
   ArchiveRoute* = enum
     ## Which realizer a ``tarball`` selection goes to (see
@@ -1239,16 +1246,17 @@ const
     "no system-scope realizer runs macOS installer packages yet"
     ## The reason a ``pkg-install`` record is refused, quoted verbatim in the
     ## refusal so tests and callers can recognise it.
-  MacosInstallerAppRefusal* =
-    "no realizer runs macOS installer applications yet"
-    ## The reason a macOS ``installer-silent`` record is refused.
 
 proc refuseUnrealizableMacosShape(packageId: string;
                                   record: InterfaceTarballProvisioning) =
   ## GM4c: the macOS vendor shapes a contribution may DECLARE but nothing
   ## realizes (Store-And-Installation-Layout.md § macOS Application Bundles,
-  ## "Shapes this does not cover"). Refused at resolution, so ``--plan``
-  ## names the reason before anything is downloaded.
+  ## "Shapes this does not cover"), and the application shapes declared for
+  ## another os. Refused at resolution, so ``--plan`` names the reason
+  ## before anything is downloaded. A macOS ``installer-silent`` record is
+  ## an installer application and IS realized (§ Installer applications);
+  ## ``archiveRealizationOf`` refuses one that lacks a field the realizer
+  ## verifies.
   let detail = record.detail
   let os = parsePlatformOsToken(record.os)
   let macos = os.ok and os.os == poMacos
@@ -1260,18 +1268,17 @@ proc refuseUnrealizableMacosShape(packageId: string;
       "are what install the product, which makes it system scope (P3). " &
       "A home profile cannot realize it, and " & MacosPkgInstallRefusal &
       ". Install it outside Reprobuild until one does.")
-  if detail.installMethod == $imInstallerSilent and macos:
-    raise newException(ValueError,
-      "the tarball realization of package '" & packageId & "' (" &
-      record.url & ") is a macOS installer application (installMethod " &
-      "installer-silent): its product exists only after the vendor's " &
-      "installer runs, and " & MacosInstallerAppRefusal & ". Install it " &
-      "outside Reprobuild until one does.")
   if detail.installMethod == $imAppBundle and not macos:
     raise newException(ValueError,
       "the tarball realization of package '" & packageId & "' (" &
       record.url & ") declares installMethod app-bundle for os '" &
       record.os & "'; an application bundle is a macOS realization")
+  if detail.installerApp.len > 0 and not macos:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") names the installer application " &
+      detail.installerApp.escape & " for os '" & record.os & "'; an " &
+      "installer application is a macOS realization")
 
 proc archiveRouteFor*(packageId: string;
                       record: InterfaceTarballProvisioning): ArchiveRoute =
@@ -1365,6 +1372,58 @@ proc archiveRealizationOf*(packageId: string;
   result.appBundle = detail.appBundle
   result.bundleId = detail.bundleId
   result.teamId = detail.teamId
+  result.installerApp = detail.installerApp
+  if result.installMethod == imInstallerSilent and
+      (result.installerApp.len > 0 or result.appBundle.len > 0 or
+       result.bundleId.len > 0 or result.teamId.len > 0):
+    # An installer-silent record that names an installer application or
+    # any application field is a macOS installer APPLICATION
+    # (Store-And-Installation-Layout.md § Installer applications): the
+    # realizer verifies the installer against teamId and the product it
+    # produced against appBundle / bundleId / version / teamId, so a record
+    # missing any of them cannot be realized. One that names none of them
+    # is a Windows installer (NSIS / MSI), realized as before.
+    var missing: seq[string] = @[]
+    if result.installerApp.len == 0: missing.add("installerApp")
+    if result.appBundle.len == 0: missing.add("appBundle")
+    if result.bundleId.len == 0: missing.add("bundleId")
+    if result.teamId.len == 0: missing.add("teamId")
+    if result.builtinVersion.len == 0: missing.add("version")
+    if missing.len > 0:
+      raise newException(ValueError, "package '" & packageId &
+        "': the tarball realization " & record.url & " is a macOS " &
+        "installer application (installMethod installer-silent) and must " &
+        "declare installerApp (the installer's path inside the archive), " &
+        "appBundle (the product bundle in the installed prefix), bundleId, " &
+        "teamId and version; it lacks " & missing.join(", "))
+    # The paths the realizer walks, checked before anything is downloaded
+    # (§ Installer applications, "Declaring it"): the product path has one
+    # or two components and the first is the placed item, never a bundle
+    # holding another; the installer is a bundle inside the archive.
+    let productError = installerProductPathError(result.appBundle)
+    if productError.len > 0:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " declares " &
+        "appBundle " & result.appBundle.escape & ", the product bundle in " &
+        "the installed prefix; " & productError)
+    let installerPath = result.installerApp.replace('\\', '/')
+    var installerOk = not installerPath.startsWith("/") and
+      installerPath.endsWith(".app")
+    for part in installerPath.split('/'):
+      if part.len == 0 or part == "." or part == "..":
+        installerOk = false
+    if not installerOk:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " declares " &
+        "installerApp " & result.installerApp.escape & "; it must be a " &
+        "relative path inside the archive naming a .app bundle")
+    if result.archiveFormat notin {afDmg, afZip, afTarGz, afTarXz,
+        afTarBz2}:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " is delivered " &
+        "as " & $result.archiveFormat & "; an installer application is " &
+        "copied out of a dmg, zip, tar.gz, tar.xz or tar.bz2 (a flat " &
+        "installer package that must run is installMethod pkg-install)")
   if result.installMethod == imAppBundle and (result.appBundle.len == 0 or
       result.bundleId.len == 0 or result.teamId.len == 0 or
       result.builtinVersion.len == 0):

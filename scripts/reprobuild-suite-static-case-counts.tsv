@@ -279,7 +279,7 @@ libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	13
-libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_windows_monitor_artifacts.nim	nim	9
@@ -292,7 +292,7 @@ libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	394
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
 libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	35
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	9
-libs/repro_home_apply/tests/t_app_bundle_records_route.nim	nim	7
+libs/repro_home_apply/tests/t_app_bundle_records_route.nim	nim	11
 libs/repro_home_apply/tests/t_builtin_adapter.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	nim	2
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	nim	6
@@ -307,6 +307,7 @@ libs/repro_home_apply/tests/t_home_profile_lock.nim	nim	10
 libs/repro_home_apply/tests/t_homebrew_bridge_records.nim	nim	7
 libs/repro_home_apply/tests/t_junction_aware_remove.nim	nim	7
 libs/repro_home_apply/tests/t_macos_archives.nim	nim	11
+libs/repro_home_apply/tests/t_macos_installer_app_realize.nim	nim	15
 libs/repro_home_apply/tests/t_plan_topological_sort.nim	nim	6
 libs/repro_home_apply/tests/t_preview_chain.nim	nim	6
 libs/repro_home_apply/tests/t_realize_honors_adapter_preference.nim	nim	4
@@ -326,6 +327,7 @@ libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	nim	4
 libs/repro_home_generations/tests/t_smoke_home_generations.nim	nim	7
 libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	34
 libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
+libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	5
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	163
@@ -336,7 +338,7 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
-libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	8
+libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	9
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
 libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim	nim	15
@@ -929,6 +931,7 @@ tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
 tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	5
 tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
+tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim	nim	2
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim	nim	2

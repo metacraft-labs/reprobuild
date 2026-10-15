@@ -348,6 +348,7 @@ proc archiveInstallerFeatures*(record: InterfaceTarballProvisioning):
   if detail.nested7z: result.add("nested7z")
   if detail.msiAdminInstall: result.add("msiAdminInstall")
   if detail.appBundle.len > 0: result.add("appBundle")
+  if detail.installerApp.len > 0: result.add("installerApp")
   if record.sha256.len == 0 and
       (detail.sha512.len > 0 or detail.sha1.len > 0):
     result.add("a digest other than sha256")
