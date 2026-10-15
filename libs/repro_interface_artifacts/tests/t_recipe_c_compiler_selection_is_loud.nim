@@ -258,3 +258,32 @@ when defined(macosx):
         check not invalid.usable
         check "unknown argument" in invalid.detail
         check "-i" & includeDir in invalid.detail
+
+    test "an unwrapped Nix clang that relies on ambient SDKROOT is refused while its wrapper succeeds":
+      let wrappedClang = findExe("clang")
+      doAssert wrappedClang.len > 0 and fileExists(wrappedClang) and
+        cCompilerFamily(wrappedClang) == "clang"
+      let origCcPath = wrappedClang.parentDir.parentDir / "nix-support" / "orig-cc"
+      doAssert fileExists(origCcPath)
+      let unwrappedClang = readFile(origCcPath).strip() / "bin" / "clang"
+      doAssert fileExists(unwrappedClang) and
+        cCompilerFamily(unwrappedClang) == "clang"
+      doAssert getEnv("SDKROOT").len > 0
+      check probeCCompiler(wrappedClang).usable
+      let probe = probeCCompiler(unwrappedClang)
+      check not probe.usable
+      check "stdlib.h" in probe.detail
+      var raised = false
+      try:
+        requireUsableCCompiler(unwrappedClang,
+          bootstrapCCompilerEnv & " (set in the environment)")
+      except CCompilerUnusableError as err:
+        raised = true
+        check unwrappedClang in err.msg
+        check bootstrapCCompilerEnv & " (set in the environment)" in err.msg
+        check "stdlib.h" in err.msg
+        check "clang-wrapper" in err.msg
+      check raised
+      check probeCCompiler(unwrappedClang,
+        extraArgs = @["-isysroot", getEnv("SDKROOT")]).usable
+

@@ -82,8 +82,12 @@ does not fall back to a `nim` or `gcc` on `PATH`.
 
 The sanctioned way to supply the toolchain yourself is explicit:
 `REPRO_NIM_COMPILER` (an absolute path, or a bare `nim` to use the one on
-`PATH` on purpose) and `REPRO_BOOTSTRAP_CC` (an absolute path; it is probed,
-and an unusable one is refused by name). The installed packages and the flake
+`PATH` on purpose) and `REPRO_BOOTSTRAP_CC` (an absolute path; it is probed
+with ambient SDK and header search-path variables such as `SDKROOT`,
+`DEVELOPER_DIR`, `CPATH`, and `C_INCLUDE_PATH` scrubbed just as isolated build
+actions scrub them, and an unusable one is refused by name — under Nix, it must
+point to a wrapped `clang-wrapper-*` or `gcc-wrapper-*` store path, not an
+unwrapped `clang-*` or `gcc-*` binary). The installed packages and the flake
 set `REPRO_NIM_COMPILER` to the Nim they ship. These overrides do not waive
 monitoring: a compiler that cannot be monitored still cannot produce a
 normally cacheable interface extraction. Windows also raises the stack reserve
