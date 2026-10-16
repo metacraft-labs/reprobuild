@@ -149,6 +149,17 @@ suite "reprobuild's own Nim records satisfy the ranges it asks for":
       check tarballAcquisitionPlan(single, target = ownTarget(record)).url ==
         record.url
 
+  test "the bootstrap Nim records' version is the one their ids name":
+    # The version the range check reads and the version the lock identity
+    # names must be the same release, or a lock written for one archive
+    # would be satisfied by the range check for another.
+    for record in bootstrapNimToolUse().tarballProvisioning:
+      checkpoint record.url
+      check record.detail.version == BootstrapNimVersion
+      check record.packageId.endsWith("@" & BootstrapNimVersion)
+      check ("@" & BootstrapNimVersion & ":") in record.lockIdentity
+      check BootstrapNimVersion in record.url
+
   test "the bootstrap Nim plans on this host":
     let useDef = bootstrapNimToolUse()
     if useDef.tarballProvisioning.len > 0:

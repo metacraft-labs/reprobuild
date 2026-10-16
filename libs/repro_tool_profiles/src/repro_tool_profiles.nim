@@ -2267,7 +2267,39 @@ proc validateTarEntries(archivePath, archiveType: string) =
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
   let tarExe = requireHostTar()
   requireTarDecompressor(tarExe, archivePath, archiveType)
-  let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
+  # The listing below is read through ``execCmdExCloseOnce``, which merges
+  # stderr into stdout, so every line tar prints is checked as an entry name.
+  # GNU tar warns on stderr about pax keywords it does not know — notably the
+  # ``LIBARCHIVE.xattr.*`` keywords macOS ``/usr/bin/tar`` writes for every
+  # file's xattrs (``com.apple.provenance``) — and that line begins with tar's
+  # own absolute path, so the check below refused every macOS-built archive
+  # as "unsafe" (reprobuild-pm issue 2026-10-16-tar-listing-preflight-reads-
+  # tar-warnings-as-archive-entries). Two GNU-only flags keep tar's own
+  # messages out of the listing on the GNU attempt:
+  #
+  #   * ``--warning=none`` silences GNU tar's warning class
+  #     (https://www.gnu.org/software/tar/manual/html_node/warnings.html).
+  #     Warnings never change tar's exit status, and errors are not warnings,
+  #     so a truncated, unreadable or undecompressable archive still exits
+  #     non-zero and is still refused below (GNU tar 1.35: exit 2).
+  #   * ``--absolute-names`` (``-P``): ``Removing leading `/' from member
+  #     names`` is NOT in that warning class and survives ``--warning=none``.
+  #     In list mode ``-P`` only stops that message: tar prints member names
+  #     as stored either way (measured on GNU tar 1.35, an ``/etc/hosts`` and
+  #     a ``../x`` entry list identically with and without it), so an unsafe
+  #     entry still reaches the check below — and the refusal now names the
+  #     entry instead of tar's diagnostic about it.
+  #
+  # Neither flag can hide an entry: they only REMOVE diagnostic lines, and
+  # entry names are on stdout regardless, so the unsafe-entry check is not
+  # weakened. Filtering lines by a ``tar:`` prefix instead would be, because
+  # an entry may be named like that. Reading stdout apart from stderr is the
+  # more general fix, but it needs both pipes drained concurrently (a quiet
+  # stdout with a full stderr pipe deadlocks), which no exec helper here
+  # provides. bsdtar refuses both flags, falls through to the plain attempt
+  # and needs neither: libarchive reads ``LIBARCHIVE.xattr`` natively.
+  let res = runTarTwice(tarExe,
+    ["--force-local", "--warning=none", "--absolute-names"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
       execCmdExCloseOnce(command))
   if res.exitCode != 0:
@@ -4382,6 +4414,14 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
 # ---------------------------------------------------------------------------
 
 const
+  BootstrapNimVersion* = "2.2.10"
+    ## The Nim release every bootstrap archive below is. The URLs and
+    ## digests are measured for this release, so changing it means
+    ## re-measuring them. Package ids, lock identities and the version the
+    ## records carry (which the ``uses`` range check reads) are spelled from
+    ## it, so they cannot disagree with one another.
+  BootstrapNimPackageId = "nim@" & BootstrapNimVersion
+  BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
     "https://nim-lang.org/download/nim-2.2.10_x64.zip"
   BootstrapNimTarballSha256 =
@@ -4426,7 +4466,7 @@ const
 proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "nim >=2.2 <3.0",
-    packageSelector: "nim@2.2.10",
+    packageSelector: BootstrapNimPackageId,
     executableName: "nim")
   when defined(windows):
     result.tarballProvisioning = @[
@@ -4437,8 +4477,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "zip",
         executablePath: "bin/nim.exe",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:sha256:" & BootstrapNimTarballSha256,
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId & ":sha256:" &
+          BootstrapNimTarballSha256,
         cpu: "x86_64",
         os: "windows")]
   elif defined(macosx):
@@ -4452,8 +4493,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-aarch64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-aarch64:sha256:" &
           BootstrapNimTarballMacosArm64Sha256,
         cpu: "aarch64",
         os: "macos"),
@@ -4466,8 +4508,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-x86_64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-x86_64:sha256:" &
           BootstrapNimTarballMacosX64Sha256,
         cpu: "x86_64",
         os: "macos")]
@@ -4502,17 +4545,19 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "build.sh",
         stripComponents: 1,
-        packageId: "nim-source@2.2.10",
-        lockIdentity: "tarball:nim-source@2.2.10:sha256:" &
+        packageId: BootstrapNimSourcePackageId,
+        lockIdentity: "tarball:" & BootstrapNimSourcePackageId & ":sha256:" &
           BootstrapNimSourceTarballSha256)]
-  # Every record above is the 2.2.10 release, and says so. Acquisition holds
-  # a request to its ``uses`` range (``selectTarballRecord``'s
-  # ``versionRange``) and admits an unversioned record only for an
-  # unversioned request, so these records -- built here rather than by the
-  # ``tarball`` DSL statement, which records ``version`` -- must carry it, or
-  # this host's only route refuses the bootstrap's own ``nim >=2.2 <3.0``.
+  # Every record above is the ``BootstrapNimVersion`` release, and says so --
+  # from the constant its package ids are spelled from, so the two cannot
+  # drift apart. Acquisition holds a request to its ``uses`` range
+  # (``selectTarballRecord``'s ``versionRange``) and admits an unversioned
+  # record only for an unversioned request, so these records -- built here
+  # rather than by the ``tarball`` DSL statement, which records ``version``
+  # -- must carry it, or this host's only route refuses the bootstrap's own
+  # ``nim >=2.2 <3.0``.
   for record in result.tarballProvisioning.mitems:
-    record.detail.version = "2.2.10"
+    record.detail.version = BootstrapNimVersion
 
 proc bootstrapGccToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -5183,7 +5228,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
       if cc.len == 0:
         raise newException(OSError, "there is no bootstrap C compiler to " &
           "build it with")
-      result = buildNimFromSourceThroughEdges("2.2.10",
+      result = buildNimFromSourceThroughEdges(BootstrapNimVersion,
         BootstrapNimSourceTarballUrl, BootstrapNimSourceTarballSha256,
         storeRoot, cc, "")
     if result.len == 0:
@@ -5191,7 +5236,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
   except CatchableError as err:
     raise newException(BootstrapNimError,
       "could not provision the Nim compiler that compiles the recipe" &
-      "\n  package: nim 2.2.10" &
+      "\n  package: nim " & BootstrapNimVersion &
       "\n  route: " & describeBootstrapNimRoute(route) &
       "\n  tool store: " & storeRoot &
       "\n  failure: " & indentDetail(err.msg) &
