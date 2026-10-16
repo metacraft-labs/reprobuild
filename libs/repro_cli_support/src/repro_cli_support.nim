@@ -17345,6 +17345,29 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
         "of the two flags.")
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
+  # Shared-Development-Services F1 / D-SS15: the dev-env artifact's own
+  # ERROR DIAGNOSTICS, before anything in this session is started.
+  #
+  # WHY THIS LINE DID NOT EXIST AND HAD TO. `repro run`, `repro exec`,
+  # `repro shell`, `repro tasks`, `repro dev-env export` and the native
+  # shell helper all call `emitDevEnvDiagnostics` and exit non-zero on a
+  # `dedsError`; `up` and `dev` were the two surfaces that read the
+  # artifact and never asked it for diagnostics. That was invisible for
+  # as long as NOTHING produced a `dedsError` -- the severity and the
+  # emitter both existed with no producer anywhere in the tree -- and
+  # F1's unconsumed-action check is the first one. So the first error a
+  # recipe can raise would have been silent on exactly the command F1
+  # measured its defect on: `repro up --activity sso` reported the
+  # session up with `etc/sso/` never created.
+  #
+  # BEFORE the supervisor, for `convergeSharedServiceInstances`' stated
+  # reason: a refusal has to stop the session rather than arrive after
+  # it published `session.up`. Read from the artifact rather than from
+  # the provider's return, because a cached dev-env edge is answered
+  # from the artifact and a check that lived on the provider wire would
+  # fire on a cold evaluation and silently never again.
+  if emitDevEnvDiagnostics(readDevEnvArtifact(edge.artifactPath)):
+    return 1
   # Shared-Development-Services L7 (§4.5): converge the shared service
   # instances this project declares before anything in this session is
   # started. A refusal returns here, with nothing launched.

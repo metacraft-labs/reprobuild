@@ -561,6 +561,7 @@ libs/repro_project_dsl/tests/t_dsl_run_target_named_and_listed.nim	nim	4
 libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
 libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim	nim	26
 libs/repro_project_dsl/tests/t_dss498_cross_activity_contribution_is_order_independent.nim	nim	13
+libs/repro_project_dsl/tests/t_dssf1_dev_env_actions_reach_the_caller.nim	nim	11
 libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5
@@ -2023,6 +2024,7 @@ tests/unit/t_nonredistributable_publish_gate.nim	nim	3
 tests/unit/t_npm_vendor_action.nim	nim	2
 tests/unit/t_prefix_env_ops.nim	nim	4
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
+tests/unit/t_provider_graph_snapshot_version_skew.nim	nim	11
 tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
 tests/unit/t_provider_startup_body_containment.nim	nim	14
 tests/unit/t_python3_provides_its_own_name.nim	nim	2

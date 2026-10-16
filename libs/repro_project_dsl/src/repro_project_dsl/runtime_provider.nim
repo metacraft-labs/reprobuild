@@ -630,6 +630,12 @@ when defined(reproProviderMode):
     # case.
     resetProviderEvaluationInputRegistry()
     resetDevEnvRegistry()
+    # Shared-Development-Services F1: the action registry is reset HERE
+    # for the same reason `buildPackageFragment` resets it at its own
+    # start -- so the actions this evaluation reports are exactly the
+    # ones this `devEnv:` body registered, and not a previous request's
+    # in the same provider process.
+    resetBuildActionRegistry()
     currentProviderProjectRoot = request.arguments
     try:
       if devEnvProc != nil:
@@ -658,6 +664,81 @@ when defined(reproProviderMode):
     # same process would read.
     discard foldDeferredServiceArgv(pkg.packageName)
 
+    # ── Shared-Development-Services F1 — THE ACTIONS CHANNEL ─────────
+    #
+    # L9's F1: `renderConfigFile` registers a build ACTION, and
+    # `DevEnvResult` had no actions field, "so an action registered
+    # while the `devEnv:` body runs reaches nothing". Observed end to
+    # end: the session came up, the daemon reported `Materialise ok`,
+    # and `etc/sso/` did not exist -- the path reached argv and the file
+    # never did. F1's own closing sentence names the fix: "an actions
+    # channel on the dev-env entry point".
+    #
+    # The actions travel as the `gnkAction` nodes the BUILD lane already
+    # produces, from the same `actionPayload` codec and the same
+    # `actionNode` id derivation, so there is one representation of an
+    # action and nothing for a second one to drift from.
+    let devEnvActions = registeredBuildActions()
+    var devEnvActionNodes: seq[GraphNode] = @[]
+    for action in devEnvActions:
+      devEnvActionNodes.add(GraphNode(
+        id: actionNode(request.namespace, action.id),
+        kind: gnkAction,
+        stableName: action.id,
+        payload: actionPayload(action)))
+    # AN ACTION NOTHING CONSUMES IS AN ERROR, NAMED. This campaign's
+    # dominant failure is a construct declared, apparently wired and
+    # silently dropped, and carrying the actions without this check
+    # would move that failure one hop downstream instead of closing it:
+    # a recipe would declare a `renderConfigFile`, the node would reach
+    # the caller, nothing would reference its output, and the file would
+    # again not be there at launch.
+    #
+    # CONSUMPTION IS READ FROM THE TYPED EDGE, not from a path string.
+    # `args <buildOutput>.path` and `runtimeFile <buildOutput>` both
+    # record the producing action's id on the service record
+    # (`ServiceArgDef.producerActionId` /
+    # `ServiceRuntimeFileDef.producerActionId`), so "consumed" is an
+    # identifier match and a renamed output cannot satisfy it by
+    # accident.
+    #
+    # EVERY SERVICE THIS PACKAGE REGISTERED COUNTS, not only those of
+    # the selected activity. That direction is deliberate: it
+    # OVER-counts consumption, so the diagnostic cannot fire for an
+    # action that some other activity of the same package legitimately
+    # consumes. Narrowing it to the selected activity would make the
+    # error depend on `--activity`, which is a different claim than the
+    # one this check makes.
+    var consumedActionIds: seq[string] = @[]
+    for typed in registeredServices(pkg.packageName):
+      for arg in typed.typedArgs:
+        if arg.producerActionId.len > 0 and
+           arg.producerActionId notin consumedActionIds:
+          consumedActionIds.add(arg.producerActionId)
+      for runtimeFile in typed.runtimeFiles:
+        if runtimeFile.producerActionId.len > 0 and
+           runtimeFile.producerActionId notin consumedActionIds:
+          consumedActionIds.add(runtimeFile.producerActionId)
+    for action in devEnvActions:
+      if action.id in consumedActionIds:
+        continue
+      diagnostic(
+        "dev-env action `" & action.id & "` of package `" &
+        pkg.packageName & "` is PRODUCED AND NEVER CONSUMED: nothing " &
+        "this dev-env declares reaches it. A build action registered " &
+        "inside a `devEnv:` body exists to produce a file something " &
+        "else then uses -- a service's `args <output>.path` or its " &
+        "`runtimeFile <output>` -- and no service of this package " &
+        "names it, so the file would be built for nobody or (before " &
+        "Shared-Development-Services F1's actions channel existed) not " &
+        "built at all while its path still reached argv. Refused as an " &
+        "ERROR rather than reported as information: this is the " &
+        "declared-looks-wired-silently-dropped shape, and an `info` " &
+        "line in a log is how it stayed invisible. Pass the output on " &
+        "a service's argv, declare it as a `runtimeFile`, or delete " &
+        "the action.",
+        dedsError)
+
     let selectedActivities = selectedActivityList(request.activity)
     result = DevEnvResult(
       schemaVersion: 1'u32,
@@ -674,7 +755,11 @@ when defined(reproProviderMode):
       services: mergeTypedServiceFacts(pkg.packageName,
         selectedActivities, activeServices(selectedActivities)),
       diagnostics: devEnvDiagnosticRegistry,
-      sharedResolutions: providerSharedResolutions(pkg.packageName))
+      sharedResolutions: providerSharedResolutions(pkg.packageName),
+      # F1: the actions channel. Collected above -- before this
+      # constructor, because the unconsumed-action check RECORDS A
+      # DIAGNOSTIC and `diagnostics:` above reads the registry.
+      actions: devEnvActionNodes)
     if fileExists(extendedPath(pkg.sourceFile)):
       let input = fileReadInput(pkg.sourceFile)
       result.evaluationInputs.add(input)

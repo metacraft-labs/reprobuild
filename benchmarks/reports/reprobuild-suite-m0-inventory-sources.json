@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 2059,
+    "nimTestBinaries": 2061,
     "pureUnitConsolidationGroups": 61,
-    "pureUnitTests": 646,
+    "pureUnitTests": 647,
     "staticallyDetectedRuntimeCompilerFlowTests": 119,
-    "testEntries": 2077
+    "testEntries": 2079
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,8 +1279,8 @@
       "graph-fixture": 17,
       "integration": 1104,
       "platform/destructive": 126,
-      "pure unit": 646,
-      "unclassified": 184
+      "pure unit": 647,
+      "unclassified": 185
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1470,9 +1470,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2059,
+    "nimTestBinaryCount": 2061,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2077
+    "testEntryCount": 2079
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17223,6 +17223,27 @@
       "source": "libs/repro_project_dsl/tests/t_dss498_cross_activity_contribution_is_order_independent.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dssf1_dev_env_actions_reach_the_caller",
+      "class": "unclassified",
+      "classificationReason": "imports `dssf1_action_fixtures`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_dssf1_dev_env_actions_reach_the_caller.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -43277,6 +43298,24 @@
       "source": "tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provider_graph_snapshot_version_skew",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_provider_graph_snapshot_version_skew.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

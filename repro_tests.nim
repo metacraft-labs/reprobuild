@@ -4995,6 +4995,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_dssf1_dev_env_actions_reach_the_caller.nim",
+    binary: "build/test-bin/t_dssf1_dev_env_actions_reach_the_caller",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim",
     binary: "build/test-bin/t_engine_path_expression_uses_flag_value",
     defines: @[],
@@ -18128,6 +18137,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim",
     binary: "build/test-bin/t_provider_compile_cache_entry_is_content_addressed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_provider_graph_snapshot_version_skew.nim",
+    binary: "build/test-bin/t_provider_graph_snapshot_version_skew",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
