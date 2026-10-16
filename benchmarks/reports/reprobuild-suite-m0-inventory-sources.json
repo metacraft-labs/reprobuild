@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2122,
+    "nimTestBinaries": 2123,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 654,
     "staticallyDetectedRuntimeCompilerFlowTests": 122,
-    "testEntries": 2143
+    "testEntries": 2144
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1294,7 +1294,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1150,
+      "integration": 1151,
       "platform/destructive": 130,
       "pure unit": 654,
       "unclassified": 190
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2122,
+    "nimTestBinaryCount": 2123,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2143
+    "testEntryCount": 2144
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -39115,6 +39115,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_suite_artifact_generator_refuses_arguments_it_cannot_honour",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_switch_mainline_and_fetch",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -45660,7 +45675,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 94,
+      "staticCaseCount": 98,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
