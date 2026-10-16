@@ -57,6 +57,7 @@ import std/[os, strutils, unittest]
 import repro_project_dsl
 import repro_dsl_stdlib/types    # Executable, for the artifact slot var
 import repro_resources/service_identity
+import repro_test_support/process_fixtures
 
 const ConfigPath = "etc/sso/config.toml"
 
@@ -105,6 +106,12 @@ proc svc(name: string): DslServiceDef =
 
 let scratch = getTempDir() /
   ("repro-l5-environment-key-" & $getCurrentProcessId())
+# Removed when THIS process exits, whichever cases it ran. The suite runner
+# runs every case in a process of its own, so a final "teardown" case removed
+# only its own process's tree and left every other one behind. Registering a
+# path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 const WorkspaceProject = "sdsL5"
 
@@ -136,21 +143,35 @@ let projB = wsB / "infra"
 proc ctxA(): ServiceScopeContext = discoverServiceScopeContext(projA)
 proc ctxB(): ServiceScopeContext = discoverServiceScopeContext(projB)
 
+var scratchTreeBuilt = false
+
+proc buildScratchTree() =
+  ## Build the scratch tree once per PROCESS, from whichever case needs it
+  ## first. The suite runner runs every case in a process of its own, so a
+  ## tree built only by the first case was missing from every other case's
+  ## process, and the cases that read it failed when run alone.
+  if scratchTreeBuilt:
+    return
+  scratchTreeBuilt = true
+  for root in [projA, projB]:
+    createDir(root)
+  writeWorkspace(wsA, WorkspaceProject)
+  writeWorkspace(wsB, WorkspaceProject)
+  createDir(store)
+  # The two checkouts render the configuration the SELECTED
+  # environment binds. `dev` in both, so the negative control has
+  # identical closures to work with.
+  writeConfigured(projA, "issuer = \"https://login.metacraft-labs.test\"\n")
+  writeConfigured(projB, "issuer = \"https://login.metacraft-labs.test\"\n")
+
 suite "L5 — the fixture really is what every clause below assumes":
   ## THE POSITIVE CONTROL for this file. If any of these reddens, every
   ## assertion after it is about something other than what it names.
 
+  setup:
+    buildScratchTree()
+
   test "the scratch tree is built, on a real filesystem":
-    for root in [projA, projB]:
-      createDir(root)
-    writeWorkspace(wsA, WorkspaceProject)
-    writeWorkspace(wsB, WorkspaceProject)
-    createDir(store)
-    # The two checkouts render the configuration the SELECTED
-    # environment binds. `dev` in both, so the negative control has
-    # identical closures to work with.
-    writeConfigured(projA, "issuer = \"https://login.metacraft-labs.test\"\n")
-    writeConfigured(projB, "issuer = \"https://login.metacraft-labs.test\"\n")
     for root in [projA, projB, store]:
       check dirExists(root)
 
@@ -174,6 +195,9 @@ suite "L5 — the fixture really is what every clause below assumes":
     check registeredEnvironmentNames("l5KeyPkg") == @["dev", "production"]
 
 suite "L5 §6.5 — two environments are two instances":
+
+  setup:
+    buildScratchTree()
 
   test "the key's environment element carries the selection, verbatim":
     let dev = serviceInstanceKey(svc("ssoStable"), ctxA(),
@@ -242,6 +266,9 @@ suite "L5 §6.5 — two environments are two instances":
 
 suite "L5 — a build under one environment cannot obtain the other's":
 
+  setup:
+    buildScratchTree()
+
   test "a value written under `dev` is absent under `production`":
     # On a real filesystem, through the real state roots. This is the
     # gate's "unable to obtain the other's bindings" stated as the thing
@@ -264,6 +291,9 @@ suite "L5 — a build under one environment cannot obtain the other's":
 suite "L5 — the negative control: ONE environment is ONE instance":
   ## Without this suite every assertion above would be satisfied by a
   ## function that returned a fresh value on every call.
+
+  setup:
+    buildScratchTree()
 
   test "two worktrees under the SAME environment resolve to one key":
     let fromA = serviceInstanceKey(svc("ssoStable"), ctxA(),
@@ -307,6 +337,9 @@ suite "L5 — the negative control: ONE environment is ONE instance":
 
 suite "L5 — the UNSELECTED case is a key of its own":
 
+  setup:
+    buildScratchTree()
+
   test "no environment selected is `no-environment`, not an empty component":
     # An empty component collapses in a path join, which would put an
     # unselected resolution's state exactly where the pre-L5 layout put
@@ -335,9 +368,3 @@ suite "L5 — the UNSELECTED case is a key of its own":
       environment = "dev")
     check padded.environment == "dev"
     check serviceStateRoot(store, padded) == serviceStateRoot(store, plain)
-
-suite "L5 — teardown":
-
-  test "the throwaway tree is removed":
-    removeDir(scratch)
-    check not dirExists(scratch)

@@ -149,7 +149,7 @@ libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim	nim	4
 libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim	nim	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	nim	4
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
-libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	13
+libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	12
 libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim	nim	19
 libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim	nim	11
 libs/repro_cli_support/tests/t_l9_a_typed_service_is_supervised_without_a_placeholder.nim	nim	17
@@ -207,7 +207,7 @@ libs/repro_daemon_core/tests/t_daemon_missing_feature_refusal.nim	nim	2
 libs/repro_daemon_core/tests/t_daemon_status_binary_identity.nim	nim	6
 libs/repro_daemon_core/tests/t_daemon_status_file_per_endpoint.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim	nim	7
-libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	20
+libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	21
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	13
 libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim	nim	6
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
@@ -603,8 +603,8 @@ libs/repro_resources/tests/t_f5_the_durable_row_carries_its_provenance.nim	nim	7
 libs/repro_resources/tests/t_l1_state_store.nim	nim	7
 libs/repro_resources/tests/t_l2_lease_edge.nim	nim	13
 libs/repro_resources/tests/t_l3_reaper.nim	nim	21
-libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	46
-libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	17
+libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	45
+libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	16
 libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	40
 libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim	nim	14
 libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim	nim	35
@@ -1822,7 +1822,7 @@ tests/integration/t_v3_artifact_refused_on_a_v2_host.nim	nim	1
 tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	nim	1
 tests/integration/t_verdict_enumerates_checks.nim	nim	29
 tests/integration/t_verify_e2e_mock.nim	nim	14
-tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim	nim	19
+tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim	nim	25
 tests/integration/t_working_tree_certificate_covers_the_commit_made_from_it.nim	nim	1
 tests/integration/t_workspace_bootstrap_provisions_toolchain_on_windows.nim	nim	6
 tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim	nim	1
@@ -2087,7 +2087,7 @@ tests/unit/t_tarball_mode_falls_through_to_from_source.nim	nim	5
 tests/unit/t_tarball_non_redistributable.nim	nim	4
 tests/unit/t_tarball_provisioning_edges.nim	nim	8
 tests/unit/t_tarball_prune_paths.nim	nim	3
-tests/unit/t_tarball_refuses_binary_host_cannot_start.nim	nim	4
+tests/unit/t_tarball_refuses_binary_host_cannot_start.nim	nim	7
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
