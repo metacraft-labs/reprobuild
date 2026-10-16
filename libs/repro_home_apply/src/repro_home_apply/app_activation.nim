@@ -54,6 +54,7 @@ proc appBundleActivationResource*(record: RealizedRecord;
     appBundleSource: record.appBundle.storeBundlePath,
     appBundleTargetDir: applicationsDir,
     appBundleName: record.appBundle.bundleName,
+    appBundleMainPath: record.appBundle.mainBundlePath,
     appBundleExpectation: record.appBundle.expectation,
     appBundleTrust: record.appBundle.trust,
     appBundleIdentity: record.appBundle.identity)

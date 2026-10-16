@@ -609,6 +609,21 @@ type
     lockIdentity*: string
     location*: SourceLocation
 
+  InterfaceHomebrewProvisioning* = object
+    ## A Homebrew bridge record (``HomebrewProvisioningDef``): the cask or
+    ## formula that installs the target package outside Reprobuild. Carried
+    ## in ``InterfaceProvisioningContribution.homebrewProvisioning`` ONLY --
+    ## ``toProjectInterface`` never adds it to a tool use's realization
+    ## candidates, so no selection can pick it (reprobuild-pm spec
+    ## Provisioning-Contributions.md §"Homebrew bridge records").
+    packageName*: string
+    contributor*: string
+    kind*: string
+      ## ``"cask"`` or ``"formula"``.
+    token*: string
+    tap*: string
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -629,6 +644,8 @@ type
     nixProvisioning*: seq[InterfaceNixProvisioning]
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
+    homebrewProvisioning*: seq[InterfaceHomebrewProvisioning]
+      ## Bridge records (v27); never realization candidates.
     location*: SourceLocation
 
   ProjectInterface* = object
@@ -1052,8 +1069,27 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 26'u16
-    ## v26 (current): Shared-Development-Services D-SS11 (§4.6) retains
+  EnvelopeVersion = 28'u16
+    ## v28 (current): ``TarballArchiveDetail`` also retains
+    ##                ``installerApp``, the installer application of a macOS
+    ##                ``installer-silent`` record (Store-And-Installation-
+    ##                Layout.md § Installer applications), encoded after
+    ##                ``teamId``. v27 and older payloads decode with it
+    ##                empty, which is a record that names no installer
+    ##                application. (Developed as v23 against an older tip
+    ##                and renumbered above v27 before it was published, for
+    ##                the reason the v23 note gives.)
+    ## v27: a provisioning contribution also carries its Homebrew
+    ##                bridge records (``homebrewProvisioning``: kind, token,
+    ##                tap; GM5b), encoded after its Scoop records, inside
+    ##                the v13 contribution block. v26 and older payloads
+    ##                decode with none. They are bridge records for
+    ##                consumers outside Reprobuild and are never merged
+    ##                into a tool use, so the tool-use encoding is
+    ##                unchanged. (Developed as v23 against an older tip
+    ##                and renumbered above the services lane before it was
+    ##                published, for the reason the v23 note gives.)
+    ## v26: Shared-Development-Services D-SS11 (§4.6) retains
     ##                the CONTRIBUTION POINTS each ``publicServices`` row
     ##                converges -- ``contributionPoints``, a counted
     ##                string list appended after ``compatibilityMajor``
@@ -1759,8 +1795,9 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
 proc writeTarballArchiveDetail(outp: var seq[byte];
                                detail: TarballArchiveDetail;
                                version: uint16) =
-  ## GM4b (v21), GM4c (v22). Field order is the declaration order of
-  ## ``TarballArchiveDetail``; ``readTarballArchiveDetail`` mirrors it.
+  ## GM4b (v21), GM4c (v22), installer applications (v28). Field order is
+  ## the declaration order of ``TarballArchiveDetail``;
+  ## ``readTarballArchiveDetail`` mirrors it.
   outp.writeString(detail.version)
   outp.writeString(detail.sha512)
   outp.writeString(detail.sha1)
@@ -1782,6 +1819,8 @@ proc writeTarballArchiveDetail(outp: var seq[byte];
     outp.writeString(detail.appBundle)
     outp.writeString(detail.bundleId)
     outp.writeString(detail.teamId)
+  if version >= 28'u16:
+    outp.writeString(detail.installerApp)
 
 proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
                               version: uint16): TarballArchiveDetail =
@@ -1806,6 +1845,8 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
     result.appBundle = readString(bytes, pos)
     result.bundleId = readString(bytes, pos)
     result.teamId = readString(bytes, pos)
+  if version >= 28'u16:
+    result.installerApp = readString(bytes, pos)
 
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
@@ -1908,6 +1949,25 @@ proc readScoopProvisioning(bytes: openArray[byte]; pos: var int;
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeHomebrewProvisioning(outp: var seq[byte];
+                               provisioning: InterfaceHomebrewProvisioning;
+                               forFingerprint = false) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.contributor)
+  outp.writeString(provisioning.kind)
+  outp.writeString(provisioning.token)
+  outp.writeString(provisioning.tap)
+  outp.writeLocation(provisioning.location, forFingerprint)
+
+proc readHomebrewProvisioning(bytes: openArray[byte]; pos: var int):
+    InterfaceHomebrewProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.contributor = readString(bytes, pos)
+  result.kind = readString(bytes, pos)
+  result.token = readString(bytes, pos)
+  result.tap = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
                   version = EnvelopeVersion;
                   forFingerprint = false) =
@@ -1980,6 +2040,10 @@ proc writeProvisioningContribution(outp: var seq[byte];
   outp.writeU32Le(uint32(contribution.scoopProvisioning.len))
   for provisioning in contribution.scoopProvisioning:
     outp.writeScoopProvisioning(provisioning, version, forFingerprint)
+  if version >= 27'u16:
+    outp.writeU32Le(uint32(contribution.homebrewProvisioning.len))
+    for provisioning in contribution.homebrewProvisioning:
+      outp.writeHomebrewProvisioning(provisioning, forFingerprint)
 
 proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
     version: uint16): InterfaceProvisioningContribution =
@@ -2003,6 +2067,12 @@ proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
   for i in 0 ..< scoopCount:
     result.scoopProvisioning[i] =
       readScoopProvisioning(bytes, pos, version)
+  if version >= 27'u16:
+    let homebrewCount = int(readU32Le(bytes, pos))
+    result.homebrewProvisioning =
+      newSeq[InterfaceHomebrewProvisioning](homebrewCount)
+    for i in 0 ..< homebrewCount:
+      result.homebrewProvisioning[i] = readHomebrewProvisioning(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface;
                              version = EnvelopeVersion;
@@ -2510,6 +2580,18 @@ proc toInterfaceScoopProvisioning(packageName: string;
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
+proc toInterfaceHomebrewProvisioning(packageName: string;
+    provisioning: HomebrewProvisioningDef; contributor: string):
+    InterfaceHomebrewProvisioning =
+  InterfaceHomebrewProvisioning(
+    packageName: packageName,
+    contributor: contributor,
+    kind: provisioning.kind,
+    token: provisioning.token,
+    tap: provisioning.tap,
+    location: SourceLocation(file: provisioning.sourceFile,
+      line: provisioning.sourceLine))
+
 proc toInterfaceToolUse(useDef: PackageUseDef;
                         packages: openArray[PackageDef]): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -2570,6 +2652,9 @@ proc toInterfaceProvisioningContribution(contribution:
       contribution.targetPackage, provisioning, contribution.contributor))
   for provisioning in contribution.scoopProvisioning:
     result.scoopProvisioning.add(toInterfaceScoopProvisioning(
+      contribution.targetPackage, provisioning, contribution.contributor))
+  for provisioning in contribution.homebrewProvisioning:
+    result.homebrewProvisioning.add(toInterfaceHomebrewProvisioning(
       contribution.targetPackage, provisioning, contribution.contributor))
 
 proc toProjectInterface*(pkg: PackageDef;
@@ -2746,6 +2831,12 @@ proc toProjectInterface*(pkg: PackageDef;
         useDef.nixProvisioning.add(projected.nixProvisioning)
         useDef.tarballProvisioning.add(projected.tarballProvisioning)
         useDef.scoopProvisioning.add(projected.scoopProvisioning)
+        # ``projected.homebrewProvisioning`` is deliberately NOT added: a
+        # Homebrew record is a bridge record for consumers that install
+        # through Homebrew themselves (the Nix helper library), not a way
+        # Reprobuild realizes the package. Leaving it out of the tool use is
+        # what keeps every selection policy from picking it
+        # (Provisioning-Contributions.md §"Homebrew bridge records").
 
 proc canonicalPackageInterfaceFingerprint*(pkg: PackageDef;
     packages: openArray[PackageDef] = []): string =
@@ -3306,7 +3397,8 @@ proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
     ", cpuFeatures: " & escForCode(detail.cpuFeatures) &
     ", appBundle: " & escForCode(detail.appBundle) &
     ", bundleId: " & escForCode(detail.bundleId) &
-    ", teamId: " & escForCode(detail.teamId) & ")"
+    ", teamId: " & escForCode(detail.teamId) &
+    ", installerApp: " & escForCode(detail.installerApp) & ")"
 
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =
@@ -3389,6 +3481,15 @@ proc emitProvisioningContributionRegistrations(code: var string;
         $provisioning.requiresExecutionProfileChecksum &
         ", packageId: " & escForCode(provisioning.packageId) &
         ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+        ", sourceFile: " & escForCode(provisioning.location.file) &
+        ", sourceLine: " & $provisioning.location.line & ")")
+    code.add("], homebrewProvisioning: @[")
+    for i, provisioning in contribution.homebrewProvisioning:
+      if i > 0: code.add(", ")
+      code.add("HomebrewProvisioningDef(kind: " &
+        escForCode(provisioning.kind) &
+        ", token: " & escForCode(provisioning.token) &
+        ", tap: " & escForCode(provisioning.tap) &
         ", sourceFile: " & escForCode(provisioning.location.file) &
         ", sourceLine: " & $provisioning.location.line & ")")
     code.add("], sourceFile: " & escForCode(contribution.location.file) &
@@ -4095,10 +4196,11 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ## recipe compile will run the compiler.
   var identity = cCompilerIdentity(cc)
   when defined(macosx):
-    # Old success markers only tested standard headers. Never reuse them for
-    # the framework probe, or across changes to SDK/compiler-wrapper inputs.
-    identity.add("|darwin-framework-probe-v1")
-    for name in ["SDKROOT", "DEVELOPER_DIR", "NIX_CFLAGS_COMPILE",
+    # Old success markers only tested standard headers or probed with ambient
+    # SDKROOT/DEVELOPER_DIR set. Never reuse them for the framework probe, or
+    # across changes to compiler-wrapper inputs.
+    identity.add("|darwin-framework-probe-v2")
+    for name in ["NIX_CFLAGS_COMPILE",
                  "NIX_CFLAGS_COMPILE_FOR_BUILD", "NIX_LDFLAGS",
                  "NIX_LDFLAGS_FOR_BUILD"]:
       identity.add("|" & name & "=" & getEnv(name))
@@ -4118,6 +4220,15 @@ proc probeCCompiler*(cc: string; cacheDir = "";
     result.usable = true
     cachedCCompilerProbes[identity] = result
     return
+  const scrubbedProbeEnvVars = [
+    "SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
+    "LIBRARY_PATH", "LIB"
+  ]
+  var savedEnv: seq[tuple[name: string; present: bool; value: string]] = @[]
+  for name in scrubbedProbeEnvVars:
+    savedEnv.add((name: name, present: existsEnv(name), value: getEnv(name)))
+    delEnv(name)
   var scratch = ""
   try:
     scratch = createTempDir("repro-cc-probe-", "")
@@ -4136,6 +4247,11 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   except CatchableError, OSError:
     result.detail = "could not run it: " & getCurrentExceptionMsg()
   finally:
+    for entry in savedEnv:
+      if entry.present:
+        putEnv(entry.name, entry.value)
+      else:
+        delEnv(entry.name)
     if scratch.len > 0:
       try: removeDir(extendedPath(scratch))
       except CatchableError, OSError: discard
@@ -4273,6 +4389,9 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
     result.add("REPRO_NIM_COMPILER=" & nim)
   if cc.len > 0 and cc.isAbsolute:
     result.add(bootstrapCCompilerEnv & "=" & cc)
+  let sdk = getEnv(bootstrapSdkRootEnv)
+  if sdk.len > 0:
+    result.add(bootstrapSdkRootEnv & "=" & sdk)
   if dirs.len > 0:
     result.add("PATH=" & dirs.join($PathSep))
   result.add("TERM=dumb")
@@ -5490,12 +5609,35 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     return none(ProjectInterfaceArtifact)
   processWarmInterfaceStats.metadataRevalidatedReproLibs +=
     cached.reproLibStamps.len
-  if cached.reproLibStamps != restampRecordedInputs(cached.reproLibStamps):
+  # Inside a ``beginReproLibSourcesScope`` (a dev-env computation) the library
+  # stamps were already taken once for this computation, by the fingerprint
+  # memo and the provider freshness check. Compare against THAT list rather
+  # than stat-ing every recorded path a second time: it is the same stamp
+  # check, it is free here, and because it is a fresh walk it also notices a
+  # library source that was added or removed, which re-stamping only the
+  # recorded paths cannot. Outside a scope nothing has walked the tree yet, so
+  # re-stamping the recorded paths stays the cheaper question.
+  let currentLibStamps =
+    if reproLibScopeDepth > 0: reproLibStampsForCache(context.workDir)
+    else: restampRecordedInputs(cached.reproLibStamps)
+  if cached.reproLibStamps != currentLibStamps:
     return none(ProjectInterfaceArtifact)
   try:
-    let artifact = readInterfaceArtifactWithWarm(artifactPath)
-    if artifact.interfaceFingerprint != cached.inputFingerprint:
+    # The record describes the artifact on disk only if the extraction that
+    # wrote the record also wrote the artifact. Both sidecars are written
+    # together, after the artifact, under the same INPUT fingerprint, so the
+    # ``.inputs`` sidecar is what ties the three together. This used to
+    # compare ``artifact.interfaceFingerprint`` instead, but that is the
+    # SEMANTIC digest of the extracted interface (an output), which never
+    # equals the input fingerprint: every metadata lookup missed and fell
+    # through to re-hashing the whole source closure, sibling sources
+    # included, so an unrelated file created beside the recipe re-extracted
+    # the interface and rebuilt the provider.
+    let cachePath = interfaceExtractionCachePath(artifactPath)
+    if readFile(extendedPath(cachePath)).strip() !=
+        toHex(cached.inputFingerprint.bytes):
       return none(ProjectInterfaceArtifact)
+    let artifact = readInterfaceArtifactWithWarm(artifactPath)
     if not lookup.warmHitAccounted:
       inc processWarmInterfaceStats.metadataWarmHits
     return some(artifact)
@@ -6183,6 +6325,7 @@ const
   ProviderCompileEnvironmentPassthrough* = [
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",
+    "REPRO_BOOTSTRAP_SDKROOT",
     "CC",
     "REPRO_PROVIDER_NIMCACHE_MODE",
     ProviderParallelBuildEnv,

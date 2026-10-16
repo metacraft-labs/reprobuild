@@ -66,14 +66,21 @@ type
     ## GM4c: a realized macOS application bundle — what activation copies
     ## into the Applications directory (``app_activation``).
     storeBundlePath*: string
-      ## The verified bundle at the prefix root.
+      ## The verified placed item at the prefix root: the bundle, or -- for
+      ## an installer application whose product lives in a folder -- that
+      ## folder (Store-And-Installation-Layout.md § Installer applications).
     bundleName*: string
-      ## ``<Name>.app``; the name it is placed under.
+      ## ``<Name>.app`` or the folder's name; the name it is placed under.
+    mainBundlePath*: string
+      ## For a folder, the product bundle's path inside it; "" when the
+      ## placed item is the bundle.
     expectation*: AppBundleExpectation
-      ## The record's declarations, re-checked on the placed copy.
+      ## The record's declarations, re-checked on the placed copy (its
+      ## product bundle, for a folder).
     identity*: seq[byte]
-      ## ``appBundleCanonicalBytes`` of the store bundle; the placed copy
-      ## must carry exactly this identity.
+      ## ``readPlacedItemIdentityBytes`` of the store item (a bundle's
+      ## ``appBundleCanonicalBytes``, or the folder identity); the placed
+      ## copy must carry exactly this identity.
     trust*: AppTrustPolicy
       ## The trust policy the realization ran under (``{}`` in production).
 
@@ -334,6 +341,8 @@ proc realizeBuiltinAdapter(store: var Store;
       raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
     except EAppArchive as err:
       raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
+    except EInstallerApp as err:
+      raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
   result.packageId = resolution.packageId
   result.adapter = akBuiltin
   result.prefixId = outcome.prefixId
@@ -355,6 +364,7 @@ proc realizeBuiltinAdapter(store: var Store;
     result.appBundle = AppBundleRealization(
       storeBundlePath: outcome.appBundlePath,
       bundleName: extractFilename(outcome.appBundlePath),
+      mainBundlePath: outcome.appBundleMainPath,
       expectation: appBundleExpectationOf(resolution),
       identity: outcome.appBundleIdentity,
       trust: appTrust)

@@ -267,14 +267,31 @@ proc resourceValidationError*(r: Resource): string =
   of rkMacosAppBundle:
     # GM4c. The driver runs `ditto`, `codesign` and `spctl` through an
     # argument vector (never a shell), so the check here is about paths:
-    # a bundle name that is not a single `.app` component, or relative
+    # a placed-item name that is not a single component, or relative
     # directories, would place something somewhere other than
-    # `<Applications>/<Name>.app`.
+    # `<Applications>/<Name>.app` (or `<Applications>/<Folder>`, the
+    # product folder of an installer application -- Store-And-Installation-
+    # Layout.md § Installer applications, "Activation").
     let name = r.appBundleName
-    if name.len == 0 or '/' in name or name == ".." or
-        not name.endsWith(".app") or name.startsWith("."):
-      return "macos.appBundle resource '" & r.address & "' has bundle " &
-        "name '" & name & "', which is not a single '<Name>.app' component"
+    if name.len == 0 or '/' in name or name == ".." or name.startsWith("."):
+      return "macos.appBundle resource '" & r.address & "' has placed " &
+        "item '" & name & "', which is not a single component " &
+        "('<Name>.app' or a folder name)"
+    let main = r.appBundleMainPath
+    if name.endsWith(".app"):
+      if main.len > 0:
+        return "macos.appBundle resource '" & r.address & "' places the " &
+          "bundle '" & name & "' itself but names a main bundle '" & main &
+          "' inside it"
+    else:
+      # One component: the folder identity covers only the bundles
+      # directly in the folder, so the main bundle must be one of them.
+      let mainOk = main.len > 0 and '/' notin main and '\\' notin main and
+        main != ".." and not main.startsWith(".") and main.endsWith(".app")
+      if not mainOk:
+        return "macos.appBundle resource '" & r.address & "' places the " &
+          "folder '" & name & "' and must name its main bundle, a '.app' " &
+          "directly inside it (got '" & main & "')"
     if not r.appBundleSource.startsWith("/"):
       return "macos.appBundle resource '" & r.address & "' has a " &
         "non-absolute source bundle '" & r.appBundleSource & "'"

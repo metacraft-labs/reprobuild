@@ -525,10 +525,10 @@ stdenv.mkDerivation (finalAttrs: {
     license = lib.licenses.mit;
     mainProgram = "repro";
     maintainers = [ ];
+    # nixpkgs 26.11 dropped x86_64-darwin (see flake.nix `systems`).
     platforms = [
       "x86_64-linux"
       "aarch64-linux"
-      "x86_64-darwin"
       "aarch64-darwin"
     ];
   };

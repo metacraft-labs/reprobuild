@@ -119,9 +119,113 @@ let
         record = only.realization;
         catalog = only.catalog.name;
       };
+
+  # The reverse direction, for the equivalence report (spec §Identity across
+  # ecosystems): which canonical package is a derivation a Nix configuration
+  # installs? A contribution names an ATTRIBUTE; a derivation in
+  # `home.packages` carries no attribute path, so each attribute is looked
+  # up in the configuration's own package set and the derivation is matched
+  # on the package name (`pname`, else the name part of `name`) that
+  # attribute has there. Matching on the name rather than the store path is
+  # what identity-only comparison means (spec Open question 2): the same
+  # package taken from another nixpkgs instance (an unstable overlay) or
+  # rebuilt with an override is the same canonical package. A derivation
+  # whose name no attribute shares maps to nothing (unmapped -- catalog
+  # work, never a guess), and a name two canonical packages' attributes
+  # share is refused as ambiguous.
+  packageNameOf =
+    drv:
+    let
+      r = builtins.tryEval (drv.pname or (builtins.parseDrvName (drv.name or "")).name);
+    in
+    if r.success && builtins.isString r.value && r.value != "" then r.value else null;
+
+  # pkgs -> { "<package name>" = [ { name; attribute; } ... ]; }
+  reverseIndex =
+    pkgs:
+    builtins.foldl' (
+      acc: name:
+      let
+        r = lookup name;
+        drv =
+          if r.found then
+            let
+              t = builtins.tryEval (
+                builtins.foldl' (s: p: if s != null && builtins.isAttrs s then s.${p} or null else null) pkgs r.attrPath
+              );
+            in
+            if t.success then t.value else null
+          else
+            null;
+        pname = if drv != null && builtins.isAttrs drv then packageNameOf drv else null;
+      in
+      if pname == null then
+        acc
+      else
+        acc
+        // {
+          ${pname} = (acc.${pname} or [ ]) ++ [
+            {
+              inherit name;
+              inherit (r) attribute;
+            }
+          ];
+        }
+    ) { } realizedNames;
+
+  realizedNames = builtins.attrNames (
+    builtins.listToAttrs (
+      map (r: {
+        name = r.contribution.targetPackage;
+        value = true;
+      }) realizations
+    )
+  );
+
+  # { pkgs, drv } -> { found = true; name; attribute; packageName; }
+  #                | { found = false; reason; packageName; }
+  #
+  # `index` (`reverseIndex pkgs`) may be passed in by a caller that looks up
+  # many derivations, so the index is computed once.
+  lookupCanonical =
+    {
+      pkgs,
+      drv,
+      index ? reverseIndex pkgs,
+    }:
+    let
+      pname = packageNameOf drv;
+      claims = if pname == null then [ ] else index.${pname} or [ ];
+    in
+    if pname == null then
+      {
+        found = false;
+        packageName = null;
+        reason = "the derivation has no package name (`pname` or `name`) to match a catalog attribute on";
+      }
+    else if claims == [ ] then
+      {
+        found = false;
+        packageName = pname;
+        reason = "no Nix contribution in ${concatStringsSep ", " (map (c: c.name) catalogs)} names an attribute whose package is `${pname}`";
+      }
+    else if length claims > 1 then
+      {
+        found = false;
+        packageName = pname;
+        reason = "package `${pname}` is the attribute of ${toString (length claims)} canonical packages (${
+          concatStringsSep ", " (map (c: "${c.name} -> ${c.attribute}") claims)
+        }); nothing selects one";
+      }
+    else
+      {
+        found = true;
+        packageName = pname;
+        inherit (head claims) name attribute;
+      };
 in
 {
-  inherit lookup;
+  inherit lookup lookupCanonical reverseIndex;
 
   # reprobuild.lib.nixRealizationOf name -> "attribute.path"
   # Throws (with the reason) for a name no catalog realizes unambiguously.
@@ -133,12 +237,5 @@ in
     if r.found then r.attribute else throw "reprobuild.lib.nixRealizationOf: ${r.reason}";
 
   # The canonical names every catalog realizes, for reports.
-  realizedNames = builtins.attrNames (
-    builtins.listToAttrs (
-      map (r: {
-        name = r.contribution.targetPackage;
-        value = true;
-      }) realizations
-    )
-  );
+  inherit realizedNames;
 }

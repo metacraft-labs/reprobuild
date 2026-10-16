@@ -28,6 +28,7 @@
 ## into a direct test-binary invocation and the test exits 0.
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 
@@ -53,11 +54,15 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotad = requireBinary(repoRoot / "build" / "test-fixtures" /
+    "runquota" / addFileExt("runquotad", ExeExt),
+    "reprobuild.test_fixtures.runquotad")
+  let runquotaBin = runquotad.parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
   let oldPath = env.getOrDefault("PATH")
+  env["RUNQUOTAD_BIN"] = runquotad
   env["PATH"] = runquotaBin & $PathSep & oldPath
   execCmdEx(cmd, env = env, workingDir = repoRoot)
 
@@ -101,99 +106,87 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
 
   test "behavioural: engine lowers + executes the buildNimUnittest.run edge end-to-end":
     let repoRoot = findRepoRoot()
-    let reproBin = repoRoot / "build" / "bin" /
-      addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
+    let reproBin = requireBinary(repoRoot / "build" / "bin" /
+      addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+    # ``.#`` prefix tells the CLI's target resolver to interpret the
+    # tail as an action id selector (the engine then matches it
+    # against the registered action set). Bare-name selection
+    # routes through the implicit-target-name table which today
+    # picks the BUILD edge by binary basename, not the EXECUTE
+    # edge.
+    # TEST ISOLATION. The assertions below describe a COLD execution of
+    # ``reprobuild.test_execute.t_dsl_outputs_statement_basic_accepted``, and
+    # ``t_b3_test_execute_edge_cache_hit`` asserts a cold execution of the
+    # very same action id. Sharing the run-wide
+    # ``REPROBUILD_ACTION_CACHE_ROOT`` that ``scripts/run_tests.sh`` exports
+    # made the outcome depend on which of the two the runner scheduled first:
+    # whichever ran first launched the action and warmed it for the other,
+    # which then read ``asUpToDate`` / ``launched=false`` / ``cdHit``. A
+    # private cache root per case — the pattern
+    # ``t_local_daemons_control_plane_m11``/``buildCommand`` already uses —
+    # means neither test can decide the other's result.
+    let cacheRoot = createTempDir("repro-d1-execute-cache-", "")
+    defer: removeDir(cacheRoot)
+    # THE REPORT NEEDED THE SAME SCOPING THE CACHE ROOT GOT, and did not
+    # have it. A bare ``--write-report`` lands on
+    # ``<outDir>/build-report.json``; ``outDir`` comes from
+    # ``outputDirForTarget`` (``libs/repro_cli_support/src/
+    # repro_cli_support.nim:1103``) and for EVERY ``.#<fragment>`` selector
+    # anchored at this repo the fragment branch falls through to
+    # ``resolveProjectFile(".")``, setting ``outputName`` to
+    # ``splitFile("repro.nim").name`` = ``repro`` (same file, 726-729).
+    # ``REPROBUILD_WORK_ROOT`` is unset in ``scripts/run_tests.sh``, so the
+    # worktree-scoped branch never fires either. Every self-hosted case in
+    # this suite therefore wrote and read ONE path,
+    # ``<repoRoot>/.repro/build/repro/build-report.json`` — and THIS case is
+    # already in the parallel pool, so it shared that path with whatever
+    # else the pool happened to be running. The private cache root above
+    # stopped the two D1/B3 cases deciding each other's CACHE outcome; it
+    # never stopped them reading each other's REPORT.
+    let reportDir = createTempDir("repro-d1-execute-report-", "")
+    defer: removeDir(reportDir)
+    let reportPath = reportDir / "build-report.json"
+    let selector = ".#" & ExecuteActionId
+    let cmd = @[
+      reproBin.quoteShell,
+      "build",
+      selector,
+      "--tool-provisioning=path",
+      "--daemon=off",
+      "--action-cache-root=" & cacheRoot.quoteShell,
+      "--write-report=" & reportPath.quoteShell,
+      "--log=actions",
+      "--progress=quiet"].join(" ")
+    checkpoint("running: " & cmd)
+    let (output, exitCode) = runWithRunquotaOnPath(cmd, repoRoot)
+    checkpoint("exit=" & $exitCode)
+    if exitCode != 0:
+      checkpoint(output)
+    # The D1 contract: tool-resolution succeeds for buildNimUnittest.
+    check "no tool profile was resolved" notin output
+    check "references executable ct_test_nim_unittest.buildNimUnittest" notin output
+    check exitCode == 0
 
-    if not fileExists(reproBin):
-      checkpoint("skipped — " & reproBin &
-        " is missing; run `just build` first")
-      skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
-    else:
-      # ``.#`` prefix tells the CLI's target resolver to interpret the
-      # tail as an action id selector (the engine then matches it
-      # against the registered action set). Bare-name selection
-      # routes through the implicit-target-name table which today
-      # picks the BUILD edge by binary basename, not the EXECUTE
-      # edge.
-      # TEST ISOLATION. The assertions below describe a COLD execution of
-      # ``reprobuild.test_execute.t_dsl_outputs_statement_basic_accepted``, and
-      # ``t_b3_test_execute_edge_cache_hit`` asserts a cold execution of the
-      # very same action id. Sharing the run-wide
-      # ``REPROBUILD_ACTION_CACHE_ROOT`` that ``scripts/run_tests.sh`` exports
-      # made the outcome depend on which of the two the runner scheduled first:
-      # whichever ran first launched the action and warmed it for the other,
-      # which then read ``asUpToDate`` / ``launched=false`` / ``cdHit``. A
-      # private cache root per case — the pattern
-      # ``t_local_daemons_control_plane_m11``/``buildCommand`` already uses —
-      # means neither test can decide the other's result.
-      let cacheRoot = createTempDir("repro-d1-execute-cache-", "")
-      defer: removeDir(cacheRoot)
-      # THE REPORT NEEDED THE SAME SCOPING THE CACHE ROOT GOT, and did not
-      # have it. A bare ``--write-report`` lands on
-      # ``<outDir>/build-report.json``; ``outDir`` comes from
-      # ``outputDirForTarget`` (``libs/repro_cli_support/src/
-      # repro_cli_support.nim:1103``) and for EVERY ``.#<fragment>`` selector
-      # anchored at this repo the fragment branch falls through to
-      # ``resolveProjectFile(".")``, setting ``outputName`` to
-      # ``splitFile("repro.nim").name`` = ``repro`` (same file, 726-729).
-      # ``REPROBUILD_WORK_ROOT`` is unset in ``scripts/run_tests.sh``, so the
-      # worktree-scoped branch never fires either. Every self-hosted case in
-      # this suite therefore wrote and read ONE path,
-      # ``<repoRoot>/.repro/build/repro/build-report.json`` — and THIS case is
-      # already in the parallel pool, so it shared that path with whatever
-      # else the pool happened to be running. The private cache root above
-      # stopped the two D1/B3 cases deciding each other's CACHE outcome; it
-      # never stopped them reading each other's REPORT.
-      let reportDir = createTempDir("repro-d1-execute-report-", "")
-      defer: removeDir(reportDir)
-      let reportPath = reportDir / "build-report.json"
-      let selector = ".#" & ExecuteActionId
-      let cmd = @[
-        reproBin.quoteShell,
-        "build",
-        selector,
-        "--tool-provisioning=path",
-        "--daemon=off",
-        "--action-cache-root=" & cacheRoot.quoteShell,
-        "--write-report=" & reportPath.quoteShell,
-        "--log=actions",
-        "--progress=quiet"].join(" ")
-      checkpoint("running: " & cmd)
-      let (output, exitCode) = runWithRunquotaOnPath(cmd, repoRoot)
-      checkpoint("exit=" & $exitCode)
-      if exitCode != 0:
-        checkpoint(output)
-      # The D1 contract: tool-resolution succeeds for buildNimUnittest.
-      check "no tool profile was resolved" notin output
-      check "references executable ct_test_nim_unittest.buildNimUnittest" notin output
-      check exitCode == 0
+    let announced = valueAfter(output, "buildReport:")
+    check announced.len > 0
+    check fileExists(reportPath)
 
-      let announced = valueAfter(output, "buildReport:")
-      check announced.len > 0
-      check fileExists(reportPath)
-
-      let report = parseFile(reportPath)
-      let actions = reportActions(report)
-      var executeAction: JsonNode = nil
-      for action in actions:
-        if action{"id"}.getStr() == ExecuteActionId:
-          executeAction = action
-          break
-      check not executeAction.isNil
-      if executeAction != nil:
-        let status = executeAction{"status"}.getStr()
-        let launched = executeAction{"launched"}.getBool()
-        let reason = executeAction{"reason"}.getStr()
-        checkpoint(ExecuteActionId & " status=" & status &
-          " launched=" & $launched & " reason=" & reason)
-        # The execute action must have succeeded — the test binary
-        # was invoked directly and exited 0.
-        check status == "asSucceeded"
-        check launched
-        check "exit=0" in reason
+    let report = parseFile(reportPath)
+    let actions = reportActions(report)
+    var executeAction: JsonNode = nil
+    for action in actions:
+      if action{"id"}.getStr() == ExecuteActionId:
+        executeAction = action
+        break
+    check not executeAction.isNil
+    if executeAction != nil:
+      let status = executeAction{"status"}.getStr()
+      let launched = executeAction{"launched"}.getBool()
+      let reason = executeAction{"reason"}.getStr()
+      checkpoint(ExecuteActionId & " status=" & status &
+        " launched=" & $launched & " reason=" & reason)
+      # The execute action must have succeeded — the test binary
+      # was invoked directly and exited 0.
+      check status == "asSucceeded"
+      check launched
+      check "exit=0" in reason

@@ -127,6 +127,14 @@ type
     ##     dispatches via the discovered ``innounp.exe``.
     imExtract = "extract"
     imInstallerSilent = "installer-silent"
+      ## A Windows installer run with its silent flags (``installerArgs``),
+      ## or -- on macOS, a ``tarball`` record that names ``installerApp`` --
+      ## an installer APPLICATION: the installer is copied out of the
+      ## archive, verified against ``teamId``, run confined under
+      ## ``sandbox-exec`` into the staging prefix, and the product bundle it
+      ## produced (``appBundle``, a path in the prefix) verified before the
+      ## prefix is published. Store-And-Installation-Layout.md § Installer
+      ## applications.
     imMsys2Pacman = "msys2-pacman"
       ## M6 (Realize-Closure-And-Catalog-Expansion spec): provenance-
       ## labelled variant of ``imExtract`` for ``.pkg.tar.zst`` payloads
@@ -1090,8 +1098,9 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
         " requires at least one bin_relpath entry")
   of imAppBundle, imPkgInstall:
     # GM4c: macOS application shapes are authored as `tarball` records
-    # (`appBundle` / `bundleId` / `teamId`), never harvested into this parse
-    # model; the catalog harvester has no source that produces them.
+    # (`appBundle` / `bundleId` / `teamId`, and `installerApp` for a macOS
+    # installer application), never harvested into this parse model; the
+    # catalog harvester has no source that produces them.
     result.add("install_method=" & $vp.install_method &
       " is authored as a tarball realization with appBundle / bundleId / " &
       "teamId, not as a VersionedProvisioning record")

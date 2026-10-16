@@ -18,6 +18,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 proc q(value: string): string = quoteShell(value)
 
@@ -160,3 +161,86 @@ suite "RA-5 — repro workspace shared-clones":
       let report2 = parseJson(rewire2.output)
       check report2["repos"][0]["wired"].getBool() == true
       check report2["repos"][0]["rewired"].getBool() == false
+
+  test "test_ra5_shared_clones_verdict_refspec_without_safety":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case drives the real git binary")
+    else:
+      let scratch = createTempDir("repro-ra5-sc-verdict-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+
+      let origin = scratch / "origin-lib.git"
+      discard seedGitOrigin(gitBin, origin, scratch / "seed-lib")
+      let libUrl = fileUrl(origin)
+
+      let cacheDir = scratch / "clones-cache"
+      let env = @[("REPRO_WORKSPACE_CLONES", cacheDir)]
+      let ws = seedWorkspace(scratch, libUrl)
+
+      # 1. Bare not present -> verdict is "no-bare"
+      let listBefore = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws, "--json",
+      ], env))
+      check listBefore.code == 0
+      let reportBefore = parseJson(listBefore.output)
+      check reportBefore["repos"].len == 1
+      check reportBefore["repos"][0].hasKey("verdict")
+      check reportBefore["repos"][0]["verdict"].getStr() == "no-bare"
+
+      let listBeforeText = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws,
+      ], env))
+      check listBeforeText.code == 0
+      check "verdict=no-bare" in listBeforeText.output
+
+      # 2. Hand-configure bare into refspec-without-safety
+      let barePath = reportBefore["repos"][0]["sharedBarePath"].getStr()
+      createDir(barePath)
+      discard requireGit(q(gitBin) & " init --bare -q " & q(barePath))
+      discard requireGit(q(gitBin) & " -C " & q(barePath) &
+        " config --replace-all remote.origin.fetch \"+refs/heads/*:refs/heads/*\"")
+
+      let listRefspecOnly = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws, "--json",
+      ], env))
+      check listRefspecOnly.code == 0
+      let reportRefspecOnly = parseJson(listRefspecOnly.output)
+      check reportRefspecOnly["repos"][0].hasKey("verdict")
+      check reportRefspecOnly["repos"][0]["verdict"].getStr() == "refspec-without-safety"
+
+      let listRefspecOnlyText = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws,
+      ], env))
+      check listRefspecOnlyText.code == 0
+      check "verdict=refspec-without-safety" in listRefspecOnlyText.output
+
+      # 3. Configure safety keys -> verdict is "ok"
+      discard requireGit(q(gitBin) & " -C " & q(barePath) & " config --replace-all gc.auto 0")
+      discard requireGit(q(gitBin) & " -C " & q(barePath) & " config --replace-all maintenance.auto false")
+      discard requireGit(q(gitBin) & " -C " & q(barePath) & " config --replace-all maintenance.strategy none")
+      discard requireGit(q(gitBin) & " -C " & q(barePath) & " config --replace-all gc.writeCommitGraph false")
+      discard requireGit(q(gitBin) & " -C " & q(barePath) & " config --replace-all fetch.writeCommitGraph false")
+      discard requireGit(q(gitBin) & " -C " & q(barePath) & " config --replace-all gc.pruneExpire never")
+
+      let listOk = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws, "--json",
+      ], env))
+      check listOk.code == 0
+      let reportOk = parseJson(listOk.output)
+      check reportOk["repos"][0].hasKey("verdict")
+      check reportOk["repos"][0]["verdict"].getStr() == "ok"
+
+      let listOkText = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws,
+      ], env))
+      check listOkText.code == 0
+      check "verdict=ok" in listOkText.output
+

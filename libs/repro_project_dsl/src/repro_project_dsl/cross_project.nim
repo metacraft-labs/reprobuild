@@ -458,6 +458,11 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # "whose DSL constructors do I import". A package can be
                  # either, both, or neither.
                  "dsldeps",
+                 # Test-Certificates TC-9b: ``enactCertificatePolicy <p>``,
+                 # the repository's choice of shared branch policy. The
+                 # ``package`` macro lowers it (``emitEnactedCertificatePolicy``);
+                 # left unlisted it would be emitted as a call to nothing.
+                 "enactcertificatepolicy",
                  # Shared-Development-Services L5 (§6): the package-level
                  # `environment <name>:` binding set, and the consumer's
                  # `instanceOverrides <package>.<service>:` block (§6.6).

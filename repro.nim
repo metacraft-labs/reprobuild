@@ -219,6 +219,46 @@ const
     ## The SC-7 capstone's checked-in producer and consumer recipes; see
     ## ``tests/fixtures/sc7-capstone/README.md``.
 
+  hcrReplayGateSource* =
+    "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
+  hcrCtMcrFixtureRoot* = "build/test-fixtures/hcr-ct-mcr"
+  hcrCtMcrBundleActionId* = "reprobuild.test_fixtures.hcr_ct_mcr_bundle"
+  hcrCtMcrBundle* = [
+    "build/test-fixtures/hcr-ct-mcr/ct_cli",
+    "build/test-fixtures/hcr-ct-mcr/libct_interpose.so",
+    "build/test-fixtures/hcr-ct-mcr/libct_interpose_static.so",
+    "build/test-fixtures/hcr-ct-mcr/libct_license_ffi.so",
+    "build/test-fixtures/hcr-ct-mcr/libct_clr_profiler.so",
+    "build/test-fixtures/hcr-ct-mcr/libgl_passthrough.so",
+    "build/test-fixtures/hcr-ct-mcr/libct_vk_layer.so",
+    "build/test-fixtures/hcr-ct-mcr/vk_layer_manifest.json",
+    "build/test-fixtures/hcr-ct-mcr/ct-dwarf-paths",
+    "build/test-fixtures/hcr-ct-mcr/ct-test-license.dat",
+  ]
+    ## The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
+    ## records and replays with: `ct_cli` and every file the recorder's
+    ## `just build-ct-mcr` places beside it (the binary resolves each of them
+    ## next to its own executable first), plus the recorder's signed test
+    ## licence, which keeps every replay off the free tier's daily cap.
+    ##
+    ## Every path is spelled out under `hcrCtMcrFixtureRoot` so that this one
+    ## list is both the producing edge's `extraOutputs` and the gate's typed
+    ## inputs. Built by edge `hcrCtMcrBundleActionId` (declared in the build block,
+    ## Linux x86-64 only, like the gate) through
+    ## `scripts/build_hcr_ct_mcr_fixture.sh`, which runs the RECORDER'S OWN
+    ## recipe in the RECORDER'S OWN flake dev shell and stages the result
+    ## here. The script's `BUNDLE` list names the same files by their place
+    ## in the recorder checkout; `tests/unit/test_hcr_replay_gate_ct_mcr_
+    ## fixture_edge.py` holds the two lists equal, and holds the gate's
+    ## lookup to `hcrCtMcrFixtureRoot`.
+    ##
+    ## Before this edge the gate read a hand-built `ct_cli` from the
+    ## hard-coded sibling path `../codetracer-native-recorder/ct_cli/ct_cli`
+    ## that nothing in this graph produced, so every run that had not built
+    ## the recorder by hand failed at `fileExists(ctMcr)` for a reason
+    ## unrelated to HCR (reprobuild-pm issue 2026-09-25,
+    ## "hcr-replay-gate-needs-a-ct-mcr-no-edge-builds").
+
   M4ConsolidationVerificationTest* =
     "tests/integration/t_m4_pure_unit_consolidation.nim"
     ## Suite-Modernization M4. The one test whose execute edge takes EVERY
@@ -288,7 +328,8 @@ const
                  "t_e2e_nix_reads_data_like_profile",
                  "t_e2e_nix_reads_intent_like_export",
                  "t_e2e_profile_compile_clang_first_run_published",
-                 "t_e2e_profile_compile_ignores_ancestor_membership"]:
+                 "t_e2e_profile_compile_ignores_ancestor_membership",
+                 "t_e2e_home_facts_from_isolated_plan"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
     # The clang first-run gate's positive control compiles through a "clang"
@@ -308,6 +349,16 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/test-fixtures/macos-no-bundle/no_bundle_launch",
         actionId: "reprobuild.test_fixtures.macos_no_bundle_launch")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
+      artifacts: @[
+        TestGraphArtifact(path: "build/test-fixtures/runquota/runquotad",
+          actionId: "reprobuild.test_fixtures.runquotad")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
+      artifacts: @[
+        TestGraphArtifact(path: "build/test-fixtures/runquota/runquotad",
+          actionId: "reprobuild.test_fixtures.runquotad")]),
     TestGraphArtifacts(
       source: "tests/integration/t_runner_exclusive_phase_budget.nim",
       artifacts: @[
@@ -400,6 +451,21 @@ const
           actionId: "reprobuild.test_fixtures.codetracer_tool_stylus"),
         TestGraphArtifact(path: codeTracerToolFixtureRoot & "/clang-bin/clang",
           actionId: "reprobuild.test_fixtures.codetracer_tool_clang")])]
+    else: @[]) & (when defined(linux) and defined(amd64): @[
+    # Linux x86-64 only, exactly where the gate records (its body is
+    # `when defined(linux) and defined(amd64)`) and where the producing edge
+    # is declared. EVERY bundle file is a typed input, not only `ct_cli`: the
+    # recorder loads its companions from beside itself at run time, so a
+    # rebuilt `libct_interpose.so` must re-run the gate as surely as a
+    # rebuilt `ct_cli` does.
+    TestGraphArtifacts(
+      source: hcrReplayGateSource,
+      artifacts: block:
+        var bundle: seq[TestGraphArtifact]
+        for path in hcrCtMcrBundle:
+          bundle.add TestGraphArtifact(path: path,
+            actionId: hcrCtMcrBundleActionId)
+        bundle)]
     else: @[])
 
 # Project-DSL-Composition M6: the generated test-edge table.
@@ -1761,7 +1827,11 @@ package reprobuild:
             when defined(windows): artifact.path & ".exe"
             else: artifact.path
           requiredBinaries.add(artifactPath)
-          executeDeps.add(artifact.actionId)
+          # One edge may produce several of a test's artifacts (the
+          # `hcr_ct_mcr_bundle` row lists ten files of one edge); order on
+          # it once.
+          if artifact.actionId notin executeDeps:
+            executeDeps.add(artifact.actionId)
       when defined(linux) or defined(macosx):
         if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim":
           # These cases load a shared library, not an executable fixture.
@@ -1955,6 +2025,7 @@ package reprobuild:
       let pyActionId = pythonTestActionId(source)
       let hookScopeTest = source == "tests/unit/test_dev_shell_hook_scope.py"
       let nixCacheTest = source == "tests/integration/test_nix_daemon_cache.py"
+      let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
       let pyExecute = pythonUnittest.run(
         source = source,
         actionId = pyActionId,
@@ -1964,12 +2035,23 @@ package reprobuild:
           @["tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
             "tests/fixtures/nix-daemon-local-flake/flake.nix",
             "tests/fixtures/nix-daemon-local-flake/flake.lock"]
+        elif sourceRevisionTest:
+          # The script under test, and the two callers whose sources the
+          # single-derivation cases read.
+          @["scripts/source_revision.sh", "scripts/build_apps.sh", "repro.nim"]
         else: @[])
       when not defined(windows):
         if hookScopeTest:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
         if nixCacheTest:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["nix"])
+      # On every OS, unlike the hook-scope test: the script it runs is the one
+      # the `reprobuild.apps.source-revision` probe runs on Windows too. The
+      # same three tools as that probe -- its `--nim-module` cases run
+      # `mkdir`, which a declared-tools PATH does not otherwise carry.
+      if sourceRevisionTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id,
+          ["bash", "git", "mkdir"])
       if hookScopeTest:
         discard target("test-dev-shell-hook-scope", pyExecute)
       if nixCacheTest:
@@ -2036,20 +2118,66 @@ package reprobuild:
     # probe is `<its own dir>/reprobuild`. Moving the engine to `libexec`
     # would have broken both silently, which is why this is a rename in place
     # rather than a move.
+    #
+    # The source revision the engine embeds -- an environment FACT, built as
+    # the probe-edge pattern of docs/user-guide/idiomatic-reprobuild.md §7.
+    #
+    # `ReprobuildSourceRevision` (repro_core) names the commit the engine is
+    # built from; `repro home export` records it as provenance.
+    # `scripts/source_revision.sh` is the one derivation of it, shared with
+    # `scripts/build_apps.sh`: `$REPROBUILD_SOURCE_REVISION` when set (the
+    # release workflow sets it), else `git rev-parse HEAD` of this tree with
+    # `-dirty` for uncommitted tracked changes, else unknown.
+    #
+    # It is NOT read here. This edge used to pass `getEnv(...)` of the
+    # variable as a define, which had two faults: nothing on the suite route
+    # sets the variable (no git fallback, so `repro build '.#test#…'` produced
+    # an engine with no revision), and a value read at recipe evaluation is
+    # snapshotted with the provider and served to later builds (§4.4). The
+    # probe below runs the script at ACTION time instead -- the variable
+    # reaches it because the launcher layers an action's declared environment
+    # over the inherited one -- and writes the answer as a Nim module.
+    #
+    # The probe is `cacheable = false`: its whole job is to re-observe the
+    # tree, and it is two git calls. The engine edge lists the module in
+    # `extraInputs` (which orders it after the probe and mixes the file's
+    # content digest into its key) and actually imports it (repro_core, under
+    # `-d:reproGeneratedSourceRevision`), so its monitored read set covers it
+    # too. A build at an unchanged revision rewrites identical bytes and the
+    # engine stays a cache hit; a new commit, or the tree turning dirty or
+    # clean, changes the bytes and rebuilds the engine -- and with it re-runs
+    # every test execute edge that declares the engine as an input.
+    const sourceRevisionModuleDir = "build/generated/source-revision"
+    const sourceRevisionModule =
+      sourceRevisionModuleDir & "/reprobuild_source_revision.nim"
+    let reprobuildSourceRevision = shell(
+      command = "bash scripts/source_revision.sh --nim-module " &
+        sourceRevisionModule,
+      actionId = "reprobuild.apps.source-revision",
+      extraInputs = @["scripts/source_revision.sh"],
+      extraOutputs = @[sourceRevisionModule],
+      cacheable = false)
+    # Exactly what the script runs (its header says so): `bash`, `git`, and
+    # `mkdir` for the module's directory. All three are `uses:` entries on
+    # every OS -- Git for Windows supplies `bash` and `git` there -- and
+    # naming them is what puts their directories on the action's PATH under
+    # --tool-provisioning=path.
+    appendRegisteredActionToolIdentityRefs(reprobuildSourceRevision.id,
+      ["bash", "git", "mkdir"])
+
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/reprobuild",
-      # `ReprobuildSourceRevision` (repro_core) names the commit the engine
-      # is built from; `repro home export` records it as provenance. It is
-      # taken from $REPROBUILD_SOURCE_REVISION, which the release workflow
-      # sets; unset, the engine reports the revision as unknown.
-      # `scripts/build_apps.sh` makes the same choice (plus a git fallback).
+      # `reproGeneratedSourceRevision` makes repro_core import the probe's
+      # module (see above); the module's directory is the last `paths` entry.
+      # No `-d:ReprobuildSourceRevision=` here: that spelling is
+      # `scripts/build_apps.sh`'s route, and it would win over the module.
+      # (The entrypoint triple stays spelled as one literal:
+      # `t_b1_repro_build_apps_collection` pins it to keep `ssl` here.)
       defines = @["release", "reproVendoredHash", "ssl"] &
-        (if getEnv("REPROBUILD_SOURCE_REVISION").len > 0:
-           @["ReprobuildSourceRevision=" &
-             getEnv("REPROBUILD_SOURCE_REVISION")]
-         else: @[]),
-      paths = ioMonNimPaths & sourceOnlyNimPaths,
+        @["reproGeneratedSourceRevision"],
+      paths = ioMonNimPaths & sourceOnlyNimPaths & @[sourceRevisionModuleDir],
+      extraInputs = @[sourceRevisionModule],
       # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto`` AND the ``-L``
       # that resolves them (M8). Nothing OpenSSL-shaped belongs in this list:
       # the reason this edge once carried one is that the search path was
@@ -2657,6 +2785,20 @@ package reprobuild:
       nimcache = "build/nimcache/macos_no_bundle_launch",
       actionId = "reprobuild.test_fixtures.macos_no_bundle_launch"))
 
+    var runquotaFixtureSource = ""
+    for entry in sourceOnlyEnv:
+      if entry[0] == "RUNQUOTA_SRC":
+        runquotaFixtureSource = entry[1]
+    doAssert runquotaFixtureSource.len > 0, "runquota fixture source is required"
+    reprobuildTestFixturesActions.add(nim.c(
+      source = runquotaFixtureSource / "apps/runquotad/runquotad.nim",
+      binary = "build/test-fixtures/runquota/runquotad",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/test-fixture-runquotad",
+      actionId = "reprobuild.test_fixtures.runquotad"))
+
     reprobuildTestFixturesActions.add(nim.c(
       source = "tests/fixtures/exclusive-phase/probe.nim",
       binary = "build/test-fixtures/exclusive-phase/exclusive_phase_probe",
@@ -2905,6 +3047,65 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/ct_shim_fixture_m4_parity_suite",
       actionId = "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite"))
+
+    # The `ct-mcr` recorder bundle behind `e2e_hcr_linux_replay_of_patched_
+    # recording` (`hcrCtMcrBundle`, at file scope, says what is in it and
+    # why the gate needs each file).
+    #
+    # A CROSS-REPO FIXTURE, and shaped the way
+    # metacraft-dev-guidelines `policies/cross-repo-builds.md` §2.3 says one
+    # is: the recorder checkout is found through
+    # `$CT_CODETRACER_NATIVE_RECORDER_SIBLING`, falling back to the canonical
+    # sibling path, and the bundle is built by THE RECORDER'S OWN recipe
+    # (`just build-ct-mcr`) in THE RECORDER'S OWN flake dev shell — never in
+    # this repository's shell, and never by restating that recipe here (§5,
+    # patterns 2 and 5). The script then stages the bundle under
+    # `hcrCtMcrFixtureRoot`, so this edge declares repo-relative outputs the
+    # gate's execute edge can take as typed inputs. Not `repro build` in the
+    # recorder: its graph stops at `codetracer-native-recorder.ct-cli`, short
+    # of the licence cdylib and the libraries copied beside `ct_cli`, and its
+    # `repro.nim` says why.
+    #
+    # NOT CACHEABLE, deliberately. What this edge reads is a second checkout
+    # this repository's lock does not pin, built in an environment its own
+    # `flake.lock` fetches through the nix daemon, by a recipe that resolves
+    # cargo and nimble dependencies over the network. The monitor sees the
+    # file reads, but not what a daemon-side fetch brought in, so a cached
+    # result could be served after the recorder moved. The recorder's recipe
+    # is incremental itself (cargo, nim's own cache), so re-running it costs
+    # its no-op rebuild, not a cold one. The OUTPUTS are still fingerprinted
+    # as the gate's typed inputs: a bundle that comes back byte-identical does
+    # not re-run the gate.
+    #
+    # Linux x86-64 only: the gate's recording arm is `when defined(linux) and
+    # defined(amd64)`, it is declared `unsupported` elsewhere in
+    # `scripts/hcr-lane-manifest.tsv`, and the bundle's file names are the
+    # Linux ones.
+    #
+    # The tools named below are what the script runs: `nix` enters the
+    # recorder's shell, the coreutils directory (`mkdir`, `cp`, and `uname`,
+    # `mv`, `basename` with them) stages the files, `git` names the recorder
+    # revision in the log. Everything the recipe itself runs comes from the
+    # recorder's shell, which is the point.
+    when defined(linux) and defined(amd64):
+      let hcrCtMcrBundleEdge = shell(
+        command = "bash scripts/build_hcr_ct_mcr_fixture.sh",
+        actionId = hcrCtMcrBundleActionId,
+        extraInputs = @["scripts/build_hcr_ct_mcr_fixture.sh"],
+        extraOutputs = @hcrCtMcrBundle,
+        cacheable = false)
+      appendRegisteredActionToolIdentityRefs(hcrCtMcrBundleEdge.id,
+        ["bash", "nix", "git", "mkdir", "cp"])
+      # Its own collection, NOT `test-fixtures`. `scripts/run_tests.sh`
+      # refuses to run any test when `.#test-fixtures` fails, which is right
+      # for fixtures built from this tree and wrong for one built from a
+      # sibling checkout: a workspace without the recorder (the `reprobuild`
+      # project does not include it), or a host that cannot fetch its private
+      # dependencies, would then run nothing at all instead of failing this
+      # one gate. run_tests.sh builds this collection separately and re-raises
+      # its failure at the end; `repro build test` and a focused build of the
+      # gate still reach the edge through the execute edge's dependency.
+      discard collect("test-cross-repo-fixtures", @[hcrCtMcrBundleEdge])
 
     let ioMonSrc = block:
       let fromEnv = CompileTimeIoMonSrc

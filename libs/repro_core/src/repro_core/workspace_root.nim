@@ -31,7 +31,9 @@
 ##        * a state file — ``.repro/workspace-state.toml`` or the old
 ##          ``.repro/workspace.toml``;
 ##        * a resolved manifest checkout inside a ``.repro/`` shell
-##          (``hasResolvedManifestCheckout``).
+##          (``hasResolvedManifestCheckout``) — which a lock RECORD STORE's
+##          top-level ``projects/`` + ``locks/`` is not, even once the store
+##          has acquired a ``.repro/`` directory.
 ##      Nearest wins, so a NESTED workspace (a workspace root below another
 ##      one) is its own root for every path under it. A MEMBER REPO of a
 ##      workspace carries none of these markers — its own build ``.repro/``
@@ -166,7 +168,8 @@ proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
   ## True iff ``workspaceRoot``'s ``.repro/`` SHELL carries at least one
   ## resolved membership manifest (a ``projects/*.toml`` or a
   ## ``variants/*.toml``) — either flat at the root beside that shell, or in
-  ## the materialized checkout under ``.repro/manifests``.
+  ## the materialized checkout under ``.repro/manifests`` — and, for the flat
+  ## form, the root is not shaped like a lock RECORD STORE (see below).
   ##
   ## THE ``.repro/`` REQUIREMENT ON THE FLAT LAYOUT IS THE POINT. Without it
   ## the LOCK RECORD STORE — the manifests repo itself, which carries
@@ -179,15 +182,56 @@ proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
   ## ``.repro/`` shell is the line, drawn one notch weaker than a state file
   ## because a workspace may resolve from its ``projects/*.toml`` before a
   ## metadata-only state file has been written.
+  ##
+  ## AND A TOP-LEVEL ``locks/`` TAKES THE FLAT LAYOUT BACK OUT AGAIN — unless
+  ## the root records a workspace marker of its own. The shell alone is not a
+  ## reliable line, because a record store ACQUIRES one: engines before the
+  ## report move filed ``.repro/workspace/post-commit-*`` into it, deleting
+  ## those files by hand leaves ``.repro/workspace/`` behind, and any
+  ## ``repro`` command run inside the store can create the directory too.
+  ## Read as a workspace from then on, every commit there filed its hook
+  ## reports into the store's working tree, the lock publisher refused the
+  ## store as "dirty outside locks/", and the publisher's own next commit
+  ## fired the hook that regenerated the dirt — a self-sustaining wedge on
+  ## every push of the workspace. What separates the two shapes is
+  ## Workspace-Manifests.md §"Metadata and records are separate
+  ## repositories": the metadata repo and the record store are never the
+  ## same repository, so a root with membership and ``locks/`` side by side
+  ## and NOTHING ELSE claiming it is a workspace is the store.
+  ##
+  ## "Nothing else" is a settings file or a state file IN THIS ROOT, and the
+  ## exemption is checked HERE rather than left to ``workspaceMarkerIn`` /
+  ## ``isInitializedWorkspace`` (which do accept those first) because this
+  ## predicate is also consulted ALONE: the MO-2 committed-lock fallbacks in
+  ## ``resolveWorkspaceProjectShared`` / ``resolveWorkspaceLockedDeps`` and
+  ## the pre-push gate read "false" as "resolve membership from
+  ## ``repro.lock`` instead". A workspace repo that still carries the legacy
+  ## co-located ``locks/`` beside its committed settings file — and so every
+  ## fresh clone of one, before ``init`` writes state — must keep resolving
+  ## from its manifests there. A record store carries neither file:
+  ## it is written by reprobuild alone and holds no workspace settings.
+  ##
+  ## The test is on the DIRECTORY, not its content: a store that has filed no
+  ## record yet is still a store. Git does not keep an empty directory, so a
+  ## fresh clone of an EMPTY store has no ``locks/`` — but it has no
+  ## ``.repro/`` either, and the shell requirement already excludes it.
   if workspaceRoot.len == 0:
     return false
-  # The flat layout: ``projects/``/``repos/`` beside a ``.repro/`` shell.
+  # The flat layout: ``projects/``/``repos/`` beside a ``.repro/`` shell, and
+  # NOT the record-store shape (membership + ``locks/`` with no workspace
+  # marker of the root's own).
   if dirExists(workspaceRoot / ".repro") and
       firstMembershipManifestPath(workspaceRoot).len > 0:
-    return true
+    let recordStoreShape = dirExists(workspaceRoot / "locks") and
+      settingsFileIn(workspaceRoot).len == 0 and
+      stateFileIn(workspaceRoot).len == 0
+    if not recordStoreShape:
+      return true
   # The materialized sub-layout: an ``init --manifest-url`` shared-cache
   # symlink, or the git-checkout store backend. Unconditional — the path
-  # spells the ``.repro/`` shell itself, so there is nothing to require.
+  # spells the ``.repro/`` shell itself, so there is nothing to require, and
+  # a ``locks/`` inside that checkout is the store the workspace keeps there,
+  # which says nothing about whether the ROOT is a workspace.
   firstMembershipManifestPath(workspaceRoot / ".repro" / "manifests").len > 0
 
 proc hasCommittedLockWorkspaceMarker*(workspaceRoot: string): bool =

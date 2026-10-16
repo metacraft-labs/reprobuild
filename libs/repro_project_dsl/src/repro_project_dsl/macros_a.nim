@@ -1541,6 +1541,7 @@ proc parseTarballArchiveDetail(node: NimNode;
   of "appbundle": detail.appBundle = exprCode(value)
   of "bundleid": detail.bundleId = exprCode(value)
   of "teamid": detail.teamId = exprCode(value)
+  of "installerapp": detail.installerApp = exprCode(value)
   else:
     return false
   true
@@ -1548,13 +1549,18 @@ proc parseTarballArchiveDetail(node: NimNode;
 const
   MacosAppInstallMethods = ["app-bundle", "pkg-install", "installer-silent"]
     ## GM4c: the install methods a record that names an ``appBundle`` may
-    ## declare. ``app-bundle`` is realized by the home archive realizer;
-    ## the other two are vendor shapes declared for completeness and refused
-    ## at realization (Store-And-Installation-Layout.md § macOS Application
-    ## Bundles, "Shapes this does not cover").
+    ## declare. ``app-bundle`` and ``installer-silent`` (an installer
+    ## application, with ``installerApp``) are realized by the home archive
+    ## realizer; ``pkg-install`` is a vendor shape declared for completeness
+    ## and refused at realization (Store-And-Installation-Layout.md § macOS
+    ## Application Bundles, "Installer applications" and "Shapes this does
+    ## not cover").
   AppBundleArchiveTypes = ["dmg", "pkg", "zip", "tar.gz", "tar.xz",
     "tar.bz2"]
     ## GM4c: the archive types an ``app-bundle`` realization unpacks.
+  InstallerAppArchiveTypes = ["dmg", "zip", "tar.gz", "tar.xz", "tar.bz2"]
+    ## The archive types an installer application is copied out of. Not
+    ## ``pkg``: a flat installer package that must run is ``pkg-install``.
 
 proc validMacosTeamId(text: string): bool =
   ## Apple team identifiers are ten upper-case letters and digits.
@@ -1571,8 +1577,14 @@ proc validateMacosAppRecord(node: NimNode) =
   ## signs it, because realization refuses anything it cannot verify against
   ## those declarations. Only LITERAL values are inspected; an expression is
   ## validated where it is evaluated (the realizer re-checks every rule).
+  ##
+  ## A macOS ``installer-silent`` record (an installer application,
+  ## Store-And-Installation-Layout.md § Installer applications) also names
+  ## the installer (``installerApp``) and its unattended arguments, and its
+  ## ``appBundle`` / ``executablePath`` are paths in the INSTALLED prefix.
   var methodNode, appBundleNode, bundleIdNode, teamIdNode, versionNode,
-    archiveNode, exeNode, sha256Node: NimNode = nil
+    archiveNode, exeNode, sha256Node, installerAppNode: NimNode = nil
+  var installerArgCount = 0
   for i in 1 ..< node.len:
     let arg = node[i]
     if arg.kind != nnkExprEqExpr:
@@ -1586,11 +1598,23 @@ proc validateMacosAppRecord(node: NimNode) =
     of "archivetype": archiveNode = arg[1]
     of "executablepath": exeNode = arg[1]
     of "sha256": sha256Node = arg[1]
+    of "installerapp": installerAppNode = arg[1]
+    of "installerarg": inc installerArgCount
     else: discard
   let methodText = litText(methodNode)
-  let wantsApp = methodText == "app-bundle" or methodText == "pkg-install"
   let anyAppField = not appBundleNode.isNil or not bundleIdNode.isNil or
     not teamIdNode.isNil
+  # An installer-silent record is an installer APPLICATION when it names one
+  # or any application field; one without either is a Windows installer.
+  let installerApp = methodText == "installer-silent" and
+    (not installerAppNode.isNil or anyAppField)
+  let wantsApp = methodText == "app-bundle" or
+    methodText == "pkg-install" or installerApp
+  if not installerAppNode.isNil and methodText != "installer-silent":
+    error("tarball installerApp names the installer application of a " &
+      "macOS installer-silent record; declare installMethod = " &
+      "\"installer-silent\"" &
+      (if methodText.len > 0: ", not '" & methodText & "'" else: ""), node)
   if not wantsApp and not anyAppField:
     return
   if anyAppField and methodNode.isNil:
@@ -1602,6 +1626,10 @@ proc validateMacosAppRecord(node: NimNode) =
     error("tarball appBundle / bundleId / teamId describe a macOS " &
       "application; installMethod must be one of " &
       MacosAppInstallMethods.join("|") & ", got '" & methodText & "'", node)
+  if installerApp and installerAppNode.isNil:
+    error("a macOS installer-silent tarball is an installer application: " &
+      "it needs installerApp = \"<Installer>.app\", the installer's path " &
+      "inside the archive", node)
   if appBundleNode.isNil or bundleIdNode.isNil or teamIdNode.isNil:
     error("a macOS application tarball needs appBundle = \"<Name>.app\", " &
       "bundleId = \"<CFBundleIdentifier>\" and teamId = \"<signing team>\"; " &
@@ -1615,6 +1643,12 @@ proc validateMacosAppRecord(node: NimNode) =
     error("a macOS application tarball needs sha256 = \"<digest>\"; " &
       "sha512 / sha1 alone are not accepted for an application archive",
       node)
+  if installerApp and installerArgCount == 0:
+    # Nothing is appended to the declared arguments, so an installer run
+    # without any would install interactively, or to its default location.
+    error("a macOS installer application tarball needs its unattended " &
+      "arguments as installerArg = \"...\" (install4j: \"-q\", \"-dir\", " &
+      "\"${install_dir}/<Product>\")", node)
   let teamText = litText(teamIdNode)
   if teamIdNode.isStrLit and not validMacosTeamId(teamText):
     error("tarball teamId must be a 10-character Apple team identifier " &
@@ -1638,6 +1672,45 @@ proc validateMacosAppRecord(node: NimNode) =
         error("an app-bundle tarball's executablePath is relative to the " &
           "realized prefix, which holds the bundle at its root: it must " &
           "start with '" & leaf & "/'; got '" & exeText & "'", node)
+  if installerApp:
+    let archiveText = litText(archiveNode)
+    if archiveNode.isNil or (archiveNode.isStrLit and
+        archiveText.toLowerAscii() notin InstallerAppArchiveTypes):
+      error("an installer application tarball's archiveType must be one " &
+        "of " & InstallerAppArchiveTypes.join("|") & " (a flat installer " &
+        "package that must run is installMethod pkg-install); got '" &
+        archiveText & "'", node)
+    let installerText = litText(installerAppNode)
+    if installerAppNode.isStrLit and (installerText.unsafeRelativePath or
+        not installerText.endsWith(".app")):
+      error("tarball installerApp must be a relative path inside the " &
+        "archive that names a .app bundle; got '" & installerText & "'",
+        node)
+    if appBundleNode.isStrLit:
+      # The first component is the placed item: the bundle itself, or the
+      # folder holding it -- never a bundle with another bundle inside. One
+      # or two components: the folder identity pins only the bundles
+      # directly in the placed folder, so the product must be one of them.
+      let parts = bundleText.replace('\\', '/').split('/')
+      if parts.len > 2:
+        error("an installer application's appBundle is the product bundle " &
+          "in the installed prefix, as '<Name>.app' or '<Folder>/<Name>.app' " &
+          "(one or two components); got '" & bundleText & "'", node)
+      for part in parts:
+        if part.len == 0 or part == "." or part.startsWith("."):
+          error("an installer application's appBundle has an empty, '.' or " &
+            "hidden component; got '" & bundleText & "'", node)
+      if parts.len > 1 and parts[0].endsWith(".app"):
+        error("an installer application's appBundle is the product bundle " &
+          "in the installed prefix; its first component is the placed item " &
+          "(the bundle, or the folder holding it), which must not itself " &
+          "be a .app bundle; got '" & bundleText & "'", node)
+    let exeText = litText(exeNode)
+    if appBundleNode.isStrLit and exeNode.isStrLit and
+        not exeText.startsWith(bundleText & "/"):
+      error("an installer application's executablePath is relative to the " &
+        "installed prefix and lies inside the product bundle: it must " &
+        "start with '" & bundleText & "/'; got '" & exeText & "'", node)
 
 proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   let loc = lineFile(node)
@@ -1911,6 +1984,14 @@ proc collectProvisioning(node: NimNode;
       tarballOutput.add(parseTarballProvisioning(node))
     elif calleeName(node).normalize == "scoopapp":
       scoopOutput.add(parseScoopProvisioning(node))
+    elif calleeName(node).normalize in ["brewcask", "brewformula"]:
+      # Homebrew records are bridge records for consumers that still install
+      # through Homebrew; Reprobuild never realizes them, so a package's own
+      # realizations cannot include one (Provisioning-Contributions.md
+      # §"Homebrew bridge records").
+      error(calleeName(node) & " is a contribution-only Homebrew bridge " &
+        "record: declare it in a provisioningFor block of a Homebrew " &
+        "contribution catalog, not in a package's provisioning:", node)
     else:
       error("unsupported provisioning form: " & node.repr, node)
   else:
@@ -2851,7 +2932,8 @@ proc tarballArchiveDetailLiteral*(detail: TarballArchiveDetail): string =
     ", cpuFeatures: " & codeOrEmpty(detail.cpuFeatures) &
     ", appBundle: " & codeOrEmpty(detail.appBundle) &
     ", bundleId: " & codeOrEmpty(detail.bundleId) &
-    ", teamId: " & codeOrEmpty(detail.teamId) & ")"
+    ", teamId: " & codeOrEmpty(detail.teamId) &
+    ", installerApp: " & codeOrEmpty(detail.installerApp) & ")"
 
 proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
   ## The ``TarballProvisioningDef(...)`` literal for a macro-time record.
@@ -4267,7 +4349,16 @@ const BundledStdlibSelectors* = [
   "xdotool",
   "xvfb-run",
   "yarn",
-  "zstd"
+  "zstd",
+  # The CLI tool and the development channel are two selectors, exactly as
+  # ``python3`` / ``python-dev`` are. ``zstd`` realizes nixpkgs' DEFAULT
+  # output (``bin`` -- ``bin/zstd`` and nothing else); ``zstd-dev`` realizes
+  # every output, so ``zstd.h`` (``dev``) and ``libzstd`` (``out``) reach the
+  # consumer's include and library channels. A recipe that compiles against
+  # the header names ``zstd-dev``; one that runs the binary names ``zstd``.
+  # See ``repro_dsl_stdlib/packages/zstd_dev.nim`` for why the dev package
+  # declares a HEADER as its ``executablePath``.
+  "zstd-dev"
   ]
   ## The stdlib package selectors a recipe's ``uses:`` reaches by name alone:
   ## ``usesImportCode`` auto-imports ``repro_dsl_stdlib/packages/<module>``

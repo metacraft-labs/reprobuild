@@ -1032,9 +1032,11 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
 # the events either side of the boundary reproduce the body that produced them.
 # Campaigns: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org HLX-M7;
 #            reprobuild-specs/HCR-Per-Platform-Handoff.milestones.org HX-S-2.
-# Needs the sibling codetracer-native-recorder checkout built
-# (`just build-ct-mcr` there); the gate fails loudly naming that if it is not.
-e2e_hcr_linux_replay_of_patched_recording:
+# Records and replays with the `ct-mcr` bundle that `hcr_ct_mcr_fixture`
+# (below) builds -- the same script the graph edge
+# `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs -- so the HCR lane, which
+# runs this recipe, has the recorder without anyone building it by hand.
+e2e_hcr_linux_replay_of_patched_recording: hcr_ct_mcr_fixture
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
         --threads:on \
@@ -1043,6 +1045,15 @@ e2e_hcr_linux_replay_of_patched_recording:
         --out:build/test-bin/e2e_hcr_linux_replay_of_patched_recording \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_replay_of_patched_recording.log
+
+# The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
+# needs, staged into build/test-fixtures/hcr-ct-mcr: the recorder's own
+# `just build-ct-mcr`, run in the recorder's own flake dev shell (sibling from
+# $CT_CODETRACER_NATIVE_RECORDER_SIBLING, else ../codetracer-native-recorder).
+# The graph edge `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs this same
+# script; see its header. A no-op that says so off Linux x86_64.
+hcr_ct_mcr_fixture:
+    bash ./scripts/build_hcr_ct_mcr_fixture.sh
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.

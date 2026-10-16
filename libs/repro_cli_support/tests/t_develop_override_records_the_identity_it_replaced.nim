@@ -345,6 +345,58 @@ proc nameTheRealCliForTheEngine() =
     requireBinary(repoRoot() / "build" / "bin" / reprobuildEngineExeName(),
       "reprobuild.apps.reprobuild"))
 
+proc testActionCacheRoot(): string =
+  ## The action-cache root this file's engine runs use when nobody chose one:
+  ## under the checkout's own ``build/``, never the per-user default
+  ## (``~/.cache/repro/action-cache`` on Linux) that every session on the host
+  ## shares.
+  ##
+  ## STABLE across processes, unlike ``scratchRoot``: the runner executes each
+  ## case as its own process, and the sibling checkouts sit at fixed paths (see
+  ## ``SiblingCheckouts``) so that the engine's cache serves every case after
+  ## the first. A per-process root would make every case compile the sibling's
+  ## provider from scratch again. Sharing the root between this file's own
+  ## concurrent cases is what an action-cache root is built for; sharing it
+  ## with unrelated sessions, and leaving records in the user's cache, is what
+  ## this avoids.
+  repoRoot() / "build" / "nlf-devrec-action-cache"
+
+proc scopeTheEngineToThisFilesActionCache() =
+  ## Point the engine at ``testActionCacheRoot`` through
+  ## ``REPROBUILD_ACTION_CACHE_ROOT`` — the variable ``resolveActionCacheRoot``
+  ## reads first, and the one the helper processes the engine spawns inherit —
+  ## the same way this file names its own overrides file and its own CLI.
+  ##
+  ## A root the caller already chose is kept, as ``nameTheRealCliForTheEngine``
+  ## keeps a chosen CLI. ``scripts/run_tests.sh`` exports one per run and
+  ## empties it first, so under the suite this file's cases still share their
+  ## provider compiles through it and start from the clean cache that script
+  ## promises every test. Overriding it would only swap that for a root that
+  ## persists between runs. What must not happen is the engine's FALLBACK, and
+  ## setting the variable here is what rules it out.
+  if getEnv("REPROBUILD_ACTION_CACHE_ROOT").len > 0:
+    return
+  createDir(testActionCacheRoot())
+  putEnv("REPROBUILD_ACTION_CACHE_ROOT", testActionCacheRoot())
+
+proc fallbackActionCacheRoot(): string =
+  ## The root the engine falls back to when no variable names one: the
+  ## per-user cache (or the user's store, when ``REPROBUILD_STORE_ROOT`` or
+  ## ``REPRO_STORE_ROOT`` is set). Asked of the real resolver with the three
+  ## variables it reads cleared, then restored, rather than re-deriving the
+  ## platform paths here.
+  const Vars = ["REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_STORE_ROOT",
+                "REPRO_STORE_ROOT"]
+  var saved: seq[(string, bool, string)]
+  for v in Vars:
+    saved.add((v, existsEnv(v), getEnv(v)))
+    delEnv(v)
+  try:
+    result = resolveActionCacheRoot()
+  finally:
+    for (v, wasSet, value) in saved:
+      if wasSet: putEnv(v, value)
+
 proc scenario(label: string; lockedPackages: openArray[LockedPackage];
               shape: string): Scenario =
   ## Build `label`'s scenario, or return the one already built for it. Every
@@ -352,6 +404,7 @@ proc scenario(label: string; lockedPackages: openArray[LockedPackage];
   ## happens exactly once per process no matter how many cases read it.
   if not builtScenarios.hasKey(label):
     nameTheRealCliForTheEngine()
+    scopeTheEngineToThisFilesActionCache()
     var built: Scenario
     built.root = scratchRoot(label)
     writeConsumer(built.root / "app", lockedPackages)
@@ -392,6 +445,30 @@ proc variantSibling(): Scenario =
 proc unaskableSibling(): Scenario =
   ## A sibling that declares a variant and has no protocol dispatcher.
   scenario("unaskable", NoPackages, "variants-no-build")
+
+suite "the engine's work stays out of the user's action cache":
+  ## The verb compiles the sibling's provider, and the probe keeps that
+  ## compile's artifacts, depfiles and compile locks under
+  ## ``<action-cache-root>/lock-provider-metadata``. A test that leaves the
+  ## root to the engine's fallback puts them in the per-user cache, where they
+  ## contend with every other session on the host and outlive the run.
+
+  test "the provider probe writes under a root this file scoped":
+    let built = lockedSibling()
+    check fileExists(built.metadataPath)
+    # The engine resolves the root the way production does, so this is the
+    # root every edge the verb ran was handed, and the one the helper
+    # processes it spawned inherited. It is named by the variable, and it is
+    # not the per-user fallback.
+    let root = resolveActionCacheRoot()
+    check getEnv("REPROBUILD_ACTION_CACHE_ROOT").len > 0
+    check root == getEnv("REPROBUILD_ACTION_CACHE_ROOT")
+    check root != fallbackActionCacheRoot()
+    # And the probe wrote there. This is corroboration, not the proof: the
+    # standalone root persists between runs, so an earlier run may have left
+    # the directory behind. The checks above are what fail when the
+    # scoping is missing.
+    check dirExists(root / "lock-provider-metadata" / "providers")
 
 suite "the engine records the version the override replaced":
   ## `develop_sources.nim` source 1, and the first of its two KNOWN GAPs.
