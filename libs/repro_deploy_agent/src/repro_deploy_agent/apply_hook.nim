@@ -15,6 +15,7 @@ import std/[os, strutils]
 
 import repro_elevation
 import repro_infra
+from repro_core/source_root import publicCliImagePath
 import repro_profile_compile
 # For `ProfileBuildAction`, which the resolver signature below names
 # explicitly. It was previously reachable only implicitly, through the typed
@@ -72,7 +73,8 @@ proc mkRunInfraApplyHook*(stateDir: string;
   let capturedStateDir = stateDir
   let capturedCacheRoot = cacheRoot
   let capturedHost = hostIdentity
-  let capturedReproExe = if reproExe.len > 0: reproExe else: getAppFilename()
+  let capturedReproExe =
+    if reproExe.len > 0: reproExe else: publicCliImagePath()
   let capturedResolver = profileResolver
   result = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     {.cast(gcsafe).}:

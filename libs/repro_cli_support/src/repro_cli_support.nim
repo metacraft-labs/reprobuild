@@ -3131,7 +3131,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       node.payload
     ].join("\n")
     var argv = @[
-      getAppFilename(), "hcr", "prepare-object",
+      publicCliImagePath(), "hcr", "prepare-object",
       "--input", argValue("input"),
       "--output", argValue("output"),
       "--segment", argValue("segment")
@@ -7800,22 +7800,11 @@ proc buildMaxParallelism(): uint32 =
   buildMaxParallelismResolved().value
 
 proc stablePublicCliPath(): string =
-  let configured = getEnv("REPRO_PUBLIC_CLI_PATH")
-  if configured.len > 0:
-    if configured.isAbsolute:
-      return os.normalizedPath(configured)
-    return os.normalizedPath(getCurrentDir() / configured)
-  let app = getAppFilename()
-  if app.isAbsolute:
-    return os.normalizedPath(app)
-  if app.contains(DirSep) or app.contains(AltSep):
-    return os.normalizedPath(getCurrentDir() / app)
-  let resolved = findExe(app)
-  if resolved.len > 0:
-    if resolved.isAbsolute:
-      return os.normalizedPath(resolved)
-    return os.normalizedPath(getCurrentDir() / resolved)
-  os.normalizedPath(getCurrentDir() / app)
+  ## The path that re-enters this engine. The one definition is
+  ## ``publicCliImagePath`` in `repro_core/source_root`, because the recipe
+  ## interface compile in `repro_interface_artifacts`, below this library,
+  ## needs the same answer for its ``-d:reproBin``.
+  publicCliImagePath()
 
 var runningImageIsReproCliFlag = false
   ## Set by ``markRunningImageAsReproCli`` — see ``runningImageIsReproCli``.
@@ -7993,13 +7982,7 @@ proc selfSpawnIoMonitorPath*(publicCliPath = ""): string =
     if publicCliPath.len > 0:
       os.normalizedPath(publicCliPath)
     else:
-      let configured = getEnv("REPRO_PUBLIC_CLI_PATH")
-      if configured.len == 0:
-        stablePublicCliPath()
-      elif configured.isAbsolute:
-        os.normalizedPath(configured)
-      else:
-        os.normalizedPath(getCurrentDir() / configured)
+      stablePublicCliPath()
   if spawnableWithInternalVerb(candidate):
     return candidate
   ""
@@ -20543,7 +20526,7 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
   ## is re-anchored, exactly as the author path is.
   vcsManagedHookBody(hookName, managedHookContract(hookName),
     ManagedHookSite(
-      authorBin: getAppFilename(),
+      authorBin: publicCliImagePath(),
       refusalRecordDir: guard.refusalRecordDir(repoRoot)))
 
 type
@@ -20724,8 +20707,11 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
   ## hook body's own text warns against, the command running ambiently from the
   ## generated ``.envrc`` on every directory entry, and the command whose
   ## effect is to delete the diagnostic rather than the defect.
+  # `publicCliImagePath`, not `getAppFilename()`: the identity runs
+  # `<path> --version`, and under the portable Linux launcher the raw image is
+  # the glibc loader, which would answer with ITS version.
   let writer = reproBuildIdentity(
-    try: getAppFilename() except CatchableError: "")
+    try: publicCliImagePath() except CatchableError: "")
   let runner = reproBuildIdentity(interpreterPath)
   let author = managedHookAuthorBin(existingBody)
   let repoRoot = parentDir(parentDir(hooksDir))
@@ -21821,7 +21807,7 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
         stderr.writeLine(line)
       return 1
     if protocol != PrePushProtocolVersion:
-      let resolvedRepro = getAppFilename()
+      let resolvedRepro = publicCliImagePath()
       let candidate = if repoRoot.len > 0: repoRoot else: getCurrentDir()
       let discoveredRepo = gitTopLevel(candidate)
       let remedyRepo =
@@ -35461,7 +35447,7 @@ proc requireHcrDir(path, name: string) =
 proc runHcrBuildCycle(project, target, logPath: string): string =
   let targetArg = project & "#" & target
   let command = shellCommand([
-    getAppFilename(), "build", targetArg,
+    publicCliImagePath(), "build", targetArg,
     "--tool-provisioning=path",
     "--progress=none",
     "--log=actions"])
@@ -48790,7 +48776,7 @@ proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     tuple[code: int; output: string] =
   let hook = effectivePrePushHook(identity, repoRoot)
   if hook.kind == ephReproIncompatible:
-    return (1, hook.diagnostic & "; run '" & getAppFilename() &
+    return (1, hook.diagnostic & "; run '" & publicCliImagePath() &
       " hooks ensure --vcs " & repoRoot & "'")
   var capability = ""
   if hook.kind == ephReproV2:
@@ -51431,7 +51417,7 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ##     parser. See ``spawnDetachedNoShell``.
   if workspaceName.len == 0:
     return
-  let myExe = getAppFilename()
+  let myExe = publicCliImagePath()
   if myExe.len == 0:
     return
   when defined(windows):
@@ -58970,8 +58956,10 @@ proc assessHookWriterRunnerSkew*(repoRoot: string;
   ## build — so this is a probe, not a survey. ``post-commit`` is the default
   ## because it is the token §1.6b's measurements were taken against.
   result.contract = managedHookContract(hookName)
+  # The path that re-enters this engine, not the raw image: see the writer in
+  # `hookContractWriteRefusal`.
   result.writer = reproBuildIdentity(
-    try: getAppFilename() except CatchableError: "")
+    try: publicCliImagePath() except CatchableError: "")
   let resolved = resolveManagedHookInterpreter(repoRoot)
   result.runnerSource =
     if resolved.source.len > 0: resolved.source
@@ -62442,17 +62430,17 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       of ephReproIncompatible: hook.diagnostic
       of ephThirdParty: "effective pre-push hook is not Reprobuild protocol v2"
       of ephReproV2: ""
-    return (false, reason & "; run '" & getAppFilename() &
+    return (false, reason & "; run '" & publicCliImagePath() &
       " hooks ensure --vcs " & repoRoot & "'")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
     return (false, "the hook-resolved repro executable is unavailable; run '" &
-      getAppFilename() & " hooks ensure --vcs " & repoRoot & "'")
+      publicCliImagePath() & " hooks ensure --vcs " & repoRoot & "'")
   let probe = execCmdEx(shellCommand(@[hookCli, "hooks", "protocol",
     "--require=2"]), options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitChildEnv())
   if probe.exitCode != 0 or probe.output.strip() != "2":
-    return (false, "hook protocol mismatch; run '" & getAppFilename() &
+    return (false, "hook protocol mismatch; run '" & publicCliImagePath() &
       " hooks ensure --vcs " & repoRoot & "' and retry")
   (true, "")
 
@@ -63049,7 +63037,7 @@ proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
   let hook = protocolV2HookReady(identity, repoAbs)
   if not hook.ok:
     return (false, PushPreflightRepo(), "hook-preflight", hook.diagnostic,
-      getAppFilename() & " hooks ensure --vcs " & repoAbs)
+      publicCliImagePath() & " hooks ensure --vcs " & repoAbs)
   let head = gitRunPlainQuery(identity,
     ["-C", repoAbs, "rev-parse", "--verify", "HEAD^{commit}"])
   if head.code != 0 or head.output.strip().len == 0:
@@ -63541,7 +63529,7 @@ proc executePush(args: PushArgs): PushReport =
       result.lockDiagnostic = diagnostic
       result.retryCommand =
         if "hook" in backend.diagnostic.toLowerAscii():
-          getAppFilename() & " hooks ensure --vcs " & plan.root
+          publicCliImagePath() & " hooks ensure --vcs " & plan.root
         else:
           "repair the lock backend and retry 'repro push --sync --rebase'"
       result.exitCode = 2
@@ -63647,7 +63635,7 @@ proc executePush(args: PushArgs): PushReport =
         result.lockDiagnostic = diagnostic
         result.retryCommand =
           if "hook" in backend.diagnostic.toLowerAscii():
-            getAppFilename() & " hooks ensure --vcs " & plan.root
+            publicCliImagePath() & " hooks ensure --vcs " & plan.root
           else:
             "repair the lock backend and retry " &
               "'repro push --sync --rebase'"
@@ -64859,7 +64847,7 @@ proc reproSelfPath(): string =
   ## Best-effort absolute path to the running ``repro`` binary, used to
   ## render copy-pasteable remedy commands that don't depend on PATH.
   try:
-    result = getAppFilename()
+    result = publicCliImagePath()
   except CatchableError:
     result = ""
   if result.len == 0:
