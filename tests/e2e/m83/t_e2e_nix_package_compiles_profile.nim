@@ -162,7 +162,7 @@ else:
 
     test "e2e_nix_package_compiles_profile: negative control - a source " &
         "checkout's repro still compiles against that checkout":
-      let repro = ProjectRoot / "build" / "bin" / "repro"
+      let repro = ProjectRoot / "build" / "bin" / "repro".addFileExt(ExeExt)
       doAssert fileExists(repro),
         "repro binary not found at " & repro & "; build with `just build`"
       # `nim` stays on PATH: a checkout build has no wrapper to name one.

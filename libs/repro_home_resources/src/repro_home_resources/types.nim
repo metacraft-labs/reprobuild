@@ -103,9 +103,12 @@ type
       ## prefix (`drivers/app_bundle.placeAppBundle`), the staged copy
       ## verified before it is renamed into place. Not written in a
       ## profile: the apply synthesizes one per realized `app-bundle`
-      ## package (`repro_home_apply/app_activation`), at address
-      ## `home.package.<id>.app`. The recorded payload is the bundle's
-      ## identity (`appBundleCanonicalBytes`); a path the previous
+      ## package or macOS installer application
+      ## (`repro_home_apply/app_activation`), at address
+      ## `home.package.<id>.app`. The placed item is the bundle, or the
+      ## folder an installer application's product bundle lives in. The
+      ## recorded payload is its identity (`readPlacedItemIdentityBytes`);
+      ## a path the previous
       ## generation did not record is never replaced. Store-And-
       ## Installation-Layout.md § macOS Application Bundles.
 
@@ -341,20 +344,29 @@ type
         ## verbatim via `dconf write`.
     of rkMacosAppBundle:
       appBundleSource*: string
-        ## The verified bundle in the store prefix (`<prefix>/<Name>.app`).
+        ## The verified placed item in the store prefix
+        ## (`<prefix>/<Name>.app`, or `<prefix>/<Folder>` for an installer
+        ## application whose product bundle lives in a folder).
       appBundleTargetDir*: string
         ## The Applications directory: `~/Applications` at home scope
         ## (`applicationsDir(apsHome, homeDir)`).
       appBundleName*: string
-        ## `<Name>.app`, the name it is placed under.
+        ## The name it is placed under: `<Name>.app`, or a folder name.
+      appBundleMainPath*: string
+        ## For a folder, the product bundle's path inside it
+        ## (`OpenWebStart javaws.app`), which the expectation describes;
+        ## "" when the placed item is the bundle itself.
+        ## Store-And-Installation-Layout.md § Installer applications.
       appBundleExpectation*: AppBundleExpectation
         ## The contribution's declarations (bundle id, version, team),
-        ## re-checked on the staged copy.
+        ## re-checked on the staged copy (its product bundle, for a
+        ## folder).
       appBundleTrust*: AppTrustPolicy
         ## `{}` in production; only a test relaxes the Developer ID and
         ## notarization checks.
       appBundleIdentity*: seq[byte]
-        ## `appBundleCanonicalBytes` of the store bundle: the desired
+        ## `readPlacedItemIdentityBytes` of the store item (a bundle's
+        ## `appBundleCanonicalBytes`, or a folder's identity): the desired
         ## state, and the identity the placed copy must carry.
     of rkHomebrewCask:
       caskName*: string

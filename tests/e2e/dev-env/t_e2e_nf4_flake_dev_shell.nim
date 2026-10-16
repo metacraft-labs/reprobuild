@@ -398,10 +398,25 @@ proc declareNixDaemonTrust(f: Fixture) =
 
 suite "e2e_nf4_flake_dev_shell":
   when isIoMonitorSupported:
-    let fixture = prepareFixture()
-    fixture.declareNixDaemonTrust()
-    let monitor = prepareMonitorTools(fixture.repoRoot,
-      fixture.root / "monitor", "nf4-flake")
+    # Prepared on the first case's `setup`, NOT in the suite body. The suite
+    # body runs at registration, in every process this binary starts --
+    # including `--list` / `--list-json`, which only enumerates and is run
+    # from a scratch working directory. Preparing here made enumeration lock
+    # a flake, check the nix daemon and resolve `<cwd>/build/bin/repro`; from
+    # a scratch directory that last step raised, so the binary listed no cases
+    # at all. The runner executes each case in its own process, so a case
+    # still prepares the template exactly once.
+    var prepared = false
+    var fixture: Fixture
+    var monitor: MonitorTools
+
+    setup:
+      if not prepared:
+        fixture = prepareFixture()
+        fixture.declareNixDaemonTrust()
+        monitor = prepareMonitorTools(fixture.repoRoot,
+          fixture.root / "monitor", "nf4-flake")
+        prepared = true
 
     test "activating_a_changed_flake_preserves_the_committed_lock":
       let project = fixture.cloneProject("preserve-lock")
