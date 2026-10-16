@@ -33,6 +33,8 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
 
 # TC-5 reconciliation: the gate now requires a VALID REGISTERED SIGNATURE, not
 # just coverage. The covering cert must be daemon-signed (ed25519) by a key
@@ -335,3 +337,57 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       check unionReport["exitCode"].getInt() == 0
       for f in unionReport["failures"]:
         check f["property"].getStr() != "certificate-coverage"
+
+      # ---- (d) TC-9c: the same requirement declared as a POLICY ----------
+      # The pushed commit's `repro.lock` carries a `[certificate_policy]`
+      # whose rule for `main` requires t-unit on both platforms. The project's
+      # `[certificates]` table is removed: the snapshot alone decides, and it
+      # is read from the pushed commit, under the rule for the destination.
+      writeProjectManifest(fx, "")
+      let snapshot = renderCertificatePolicySnapshot(BranchCertificatePolicy(
+        name: "tc3-policy", package: "certpolicy",
+        rules: @[PolicyRule(branches: @["main"], gateMode: pmRequired,
+          commitGate: pmRequired, requires: @[PolicyRequirement(
+            certificate: "t-unit",
+            platforms: @[currentPlatformTag(), otherPlatform])])]))
+      writeFile(fx.libAPath / "repro.lock", replaceCertificatePolicySection(
+        serializeLockedDependencies(LockedDependencies(
+          schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " add repro.lock")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " commit -q --no-verify -m policy")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " push -q --no-verify origin main")
+      let policySha = requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " rev-parse HEAD").strip()
+      seedLock(fx)
+      writeRefsFile(refsFile, policySha)
+      let policyRefused = invokeCheckPrePush(fx, refsFile)
+      checkpoint("(d) uncovered output: " & policyRefused.output)
+      check policyRefused.code == 2
+      var policyEvidence = ""
+      for f in readReport(fx)["failures"]:
+        if f["property"].getStr() == "certificate-coverage":
+          policyEvidence = f["evidence"].getStr() & " " &
+            f["remediation"].getStr()
+      check "rule \"main\"" in policyEvidence
+      check otherPlatform in policyEvidence
+      check ("run 'repro certify t-unit' on a " & otherPlatform & " host") in
+        policyEvidence
+      # Both platforms' certificates for the policy commit's content: passes.
+      let policyFixture = fx.scratch / "fixture-policy.json"
+      writeTestFixtureJson(policyFixture, "t-unit", "exit 0")
+      let policyIssued = issueRealCert(fx, policyFixture)
+      checkpoint("(d) issuance: " & policyIssued.output)
+      check policyIssued.code == 0
+      let policyContent = treeContentId("git", fx.libAPath, policySha)
+      var policyCert2 = issuedCertificate(fx.certStore, policyContent,
+        currentPlatformTag()).cert
+      policyCert2.platform = otherPlatform
+      policyCert2.signature = TestCertificateSignature()
+      signCertificateOnIssuance(policyCert2, tc3KeyId, fx.daemonKey)
+      check publishCertificateToLocalStore(policyCert2, fx.libAPath).written
+      let policyPassed = invokeCheckPrePush(fx, refsFile)
+      checkpoint("(d) covered output: " & policyPassed.output)
+      check policyPassed.code == 0

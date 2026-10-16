@@ -56,6 +56,21 @@ type
     ## operator can detach it by hand.
     device*: string
 
+  EInstallerApp* = object of CatchableError
+    ## A macOS installer application could not be run, or did not produce
+    ## what its record declares (``macos_installer``;
+    ## Store-And-Installation-Layout.md § Installer applications). Nothing
+    ## is published. Declared here, beside ``EAppArchive``, so callers on
+    ## every platform can name it.
+    check*: string
+      ## "sandbox" (no ``sandbox-exec``), "executable" (no main
+      ## executable), "timeout", "exit-status", "product" (``appBundle``
+      ## missing from the prefix, or reached through a symlink),
+      ## "prefix-contents" (something besides the placed item in the prefix
+      ## root).
+    output*: string
+      ## What the installer wrote to stdout and stderr (its last 64 KiB).
+
   AttachedImage* = object
     imagePath*: string
     device*: string            ## the image's whole-disk device (/dev/diskN)

@@ -118,6 +118,9 @@ type
     cpu*: string
     verdict*: ArmConformanceVerdict
     detail*: string
+      ## Why the verdict is not ``acvOk``; on an ``acvOk`` verdict, a note
+      ## that this host could not start the realized executable (see
+      ## ``conformTarballArm``), or "".
     prefix*: string
     resolvedExecutablePath*: string
 
@@ -194,16 +197,26 @@ proc conformTarballArm*(useDef: InterfaceToolUse;
 
   var single = useDef
   single.tarballProvisioning = @[arm]
-  var profile: PathOnlyToolProfile
+  var hostNote = ""
   try:
-    profile = resolveTarballTool(single, storeRoot)
+    let profile = resolveTarballTool(single, storeRoot)
+    result.prefix = profile.selectedStorePath
+    result.resolvedExecutablePath = profile.resolvedExecutablePath
+  except TarballHostLoaderMissing as err:
+    # Realization succeeded and the bytes are in a sealed prefix; only THIS
+    # host's dynamic loader cannot start them (NixOS's stub-ld, or no FHS
+    # loader at all). That is a property of the host, decided by the
+    # realizer's refusal at resolution, not of the arm: a generic-Linux
+    # arm is still judged on what it extracted, so a NixOS run checks the
+    # same claims an FHS run does.
+    result.prefix = err.prefix
+    result.resolvedExecutablePath = err.executable
+    hostNote = "this host cannot start the realized executable: " &
+      err.msg.splitLines()[0]
   except CatchableError as err:
     result.verdict = acvRealizeFailed
     result.detail = err.msg.splitLines()[0]
     return
-
-  result.prefix = profile.selectedStorePath
-  result.resolvedExecutablePath = profile.resolvedExecutablePath
 
   # The realizer's own probe, re-applied to the sealed prefix. Asking the
   # prefix again rather than trusting the receipt is the point: a receipt is
@@ -277,4 +290,4 @@ proc conformTarballArm*(useDef: InterfaceToolUse;
       return
 
   result.verdict = acvOk
-  result.detail = ""
+  result.detail = hostNote

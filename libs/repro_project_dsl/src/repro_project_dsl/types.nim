@@ -905,9 +905,12 @@ type
       ## GM4c: the macOS application bundle the archive delivers -- its path
       ## inside the archive (``Ghostty.app``; a component naming a flat
       ## ``.pkg`` is expanded and the path continues inside it). Set with
-      ## ``installMethod = "app-bundle"`` (and on the two declared-only macOS
-      ## installer shapes, ``pkg-install`` and ``installer-silent``).
-      ## Store-And-Installation-Layout.md § macOS Application Bundles.
+      ## ``installMethod = "app-bundle"`` (and on the declared-only
+      ## ``pkg-install`` shape). For a macOS ``installer-silent`` record it
+      ## is the PRODUCT bundle's path inside the realized prefix instead
+      ## (``OpenWebStart/OpenWebStart javaws.app``); its first component is
+      ## the placed item. Store-And-Installation-Layout.md § macOS
+      ## Application Bundles.
     bundleId*: string
       ## GM4c: the bundle's ``CFBundleIdentifier``; checked before the bundle
       ## is published to the store and again before it is activated.
@@ -915,6 +918,13 @@ type
       ## GM4c: the Apple team identifier that signs the bundle. Required with
       ## ``appBundle``: the realization proves the signature chains to an
       ## Apple Developer ID certificate of this team.
+    installerApp*: string
+      ## The installer application's path inside the archive
+      ## (``OpenWebStart Installer.app``) for a macOS ``installer-silent``
+      ## record: the realizer copies it out, verifies it is signed by
+      ## ``teamId`` and runs it confined, with ``installerArgs``, into the
+      ## staging prefix. Store-And-Installation-Layout.md § Installer
+      ## applications.
 
   TarballProvisioningDef* = object
     url*: string
@@ -1076,6 +1086,30 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  HomebrewProvisioningDef* = object
+    ## A Homebrew cask or formula that installs the target package OUTSIDE
+    ## Reprobuild (reprobuild-pm spec Provisioning-Contributions.md
+    ## §"Homebrew bridge records"). A bridge record: it lets a consumer that
+    ## still installs through Homebrew -- the reprobuild flake's
+    ## ``reprobuild.lib.brewRealizationOf`` and the equivalence report --
+    ## translate between Homebrew tokens and canonical package names.
+    ## Reprobuild never realizes it: it is carried in the interface
+    ## artifact's ``provisioningContributions`` only and is never merged into
+    ## a tool use's realization candidates, so no selection policy can pick
+    ## it. Declared only in a ``provisioningFor`` contribution
+    ## (``brewCask "<token>"`` / ``brewFormula "<token>"``), never in a
+    ## package's own ``provisioning:`` block.
+    kind*: string
+      ## ``"cask"`` or ``"formula"``.
+    token*: string
+      ## The Homebrew token (``brew info --cask <token>``), e.g.
+      ## ``visual-studio-code`` or ``temurin@21``.
+    tap*: string
+      ## The tap that publishes the token; empty for the default taps
+      ## (``homebrew/cask`` for casks, ``homebrew/core`` for formulae).
+    sourceFile*: string
+    sourceLine*: int
+
   ProvisioningContributionDef* = object
     ## A realization supplied independently of the package that owns the
     ## public interface. ``targetInterfaceFingerprint`` pins the contribution
@@ -1088,6 +1122,8 @@ type
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]
     scoopProvisioning*: seq[ScoopProvisioningDef]
+    homebrewProvisioning*: seq[HomebrewProvisioningDef]
+      ## Bridge records only; see ``HomebrewProvisioningDef``.
     sourceFile*: string
     sourceLine*: int
 

@@ -212,7 +212,50 @@
         # identity where it touches the descriptor instead of once per record,
         # and the Linux close hook lets a tracee's close of a replaced
         # descriptor number reach the kernel.
-      url = "github:metacraft-labs/io-mon/6e7d2cf28c6bceec5ec0174fd829524770b17ad7";
+        # Bumped to 51228b5 (2026-10-15), io-mon's `agents` tip; 6e7d2cf is an
+        # ancestor. 51228b5 lets small-stack threads start and run under the
+        # Linux shim; the macOS and Windows capture paths are unchanged.
+        # Bumped to 6453936 (2026-10-15), io-mon's `agents` tip; 51228b5 is an
+        # ancestor. Under full action monitoring Node 24 started (51228b5) but
+        # Chromium 143 headless still hung: recording a call the host made
+        # under its allocator lock allocated from that same allocator.
+        # cb1db14 moved the shim's private heap to glibc's allocator, which
+        # broke every nixpkgs gcc-wrapper (bash 5.2's bundled sbrk malloc and
+        # glibc's main arena both moved the program break, and the exec hooks
+        # handed bash an `environ` from the shim's heap), so it is not pinned
+        # on its own. 6453936 gives the shim its own mmap-backed allocator that
+        # touches neither the break nor `environ`, makes execvp search PATH only
+        # (never `./name`), and keeps raw-clone children of multi-threaded
+        # hosts off shim locks. cb1db14 also adds the probe/enumeration entry
+        # points Node and Chromium call and per-architecture raw-syscall
+        # numbers.
+        # Bumped to 9576b79 (2026-10-15), io-mon's `agents` tip; 6453936 is an
+        # ancestor. On macOS, re-propagates capture seed variables across
+        # clean-env spawns, keeps only the last co-loaded shim image active
+        # while routing internal forwarders and raw syscalls past sibling shim
+        # wrappers, and reads `syscall(2)` variadic arguments from the stack per
+        # the arm64 Apple Darwin ABI.
+        # Bumped to 3ccdd4b (2026-10-15), io-mon's `agents` tip; 9576b79 is an
+        # ancestor. On Linux, children of an inline `syscall` clone and of
+        # glibc's clone(3) reclaim inherited shim locks; a vfork child's
+        # successful exec no longer leaks the prepared environment into the
+        # parent; and realpath, canonicalize_file_name and the readlink family
+        # record every symbolic link they follow and the path they end at.
+        # Bumped to 414a3de (2026-10-15), io-mon's `agents` tip; 3ccdd4b is an
+        # ancestor. On Linux, that replay also records each directory it walks
+        # through, the first absent component, and the link the readlink
+        # family reads with its target, so a directory replaced by a link and
+        # a retargeted link change a recorded input.
+        # Bumped to 527368e (2026-10-16), io-mon's `agents` tip; 414a3de is an
+        # ancestor. Test-only: the macOS nesting fixtures give their second
+        # shim its own install name, so they run two distinct shim images.
+        # Bumped to 2801e94 (2026-10-16), io-mon's `agents` tip; 527368e is an
+        # ancestor. Linux records path mutations, the directories glob(3)
+        # scans, and the files and directories mkstemp and mkdtemp create;
+        # the writer closes a byte-capped fragment once on a key change.
+        # Trapped inline syscalls are classified from what they named when
+        # they trapped; the engine folds the new records (`monitorRemovals`).
+      url = "github:metacraft-labs/io-mon/2801e948810673bbb0fcbc7adb222943d4e7de50";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -449,7 +492,23 @@
       # the incremental adapter and trace-format resolution are unchanged.
       # 47eda1fd adds native recording navigation; ct-test and the incremental
       # adapter are unchanged. Align the pin with the published workspace.
-      url = "github:metacraft-labs/codetracer/47eda1fd580a17099541ead32f5528cb2e37bdc0";
+      # At 272a09ad5 (2026-10-15, the published `agents` tip; 47eda1fd is an
+      # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
+      # ``src/ct_incremental_adapter.nim`` are unchanged; the ``repro.lock``
+      # now names trace-format 5b32588b, so ``ct-trace-format-src`` moves
+      # with it.
+      #
+      # At 23d5af70f (2026-10-15, the published `agents` tip; 272a09ad5 is an
+      # ancestor) ``config.nims``, ``src/Tuprules.tup``, ``src/ct_test/ct_test.nim``
+      # and ``src/ct_incremental_adapter.nim`` are unchanged. ``repro.nim`` does
+      # change -- it declares the Zstandard headers through the new ``zstd-dev``
+      # selector -- and that revision's ``repro.lock`` names trace-format d8cd2ed5,
+      # so ``ct-trace-format-src`` moves to it in the same step.
+      #
+      # At 6b6d05a08 (2026-10-15, the published `agents` tip; 23d5af70f is its
+      # parent) only ``flake.lock`` and ``repro.lock`` change, and the latter
+      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays.
+      url = "github:metacraft-labs/codetracer/6b6d05a081287ae66cd875ece212e5e713a9f9e3";
       flake = false;
     };
 
@@ -550,7 +609,14 @@
       # 17c111fb2's ``repro.lock`` names (7b8b587c is an ancestor; adds the ten
       # exact I/O event kinds of trace format version 7 and a step count that
       # counts step records only).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/808ffdb4507634c3aba0661d96cbc353420ed856";
+      # Moved with ``codetracer-src`` to 5b32588b, the revision CodeTracer
+      # 272a09ad5's ``repro.lock`` names (808ffdb4 is an ancestor; refuses a
+      # container that carries only some of the interning tables).
+      # Moved with ``codetracer-src`` to d8cd2ed5, the revision CodeTracer
+      # 23d5af70f's ``repro.lock`` names (5b32588b is an ancestor; extends the
+      # partial-interning-table refusal to every container writer and reads a
+      # MaxRootEntries of 0 as the auto-filled root in every reader).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/d8cd2ed542b9cdd990eef8a1cda5c89b539f8d4e";
       flake = false;
     };
     nim-stew-src = {
@@ -595,7 +661,25 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/842fd4718fa2381e17f32b1b4eeeec1735538d3c";
+      url = "github:metacraft-labs/reprobuild-nix-packages/8eaa8520008e3cc3da6d081a1547c51c6f632632";
+      flake = false;
+    };
+
+    # The Homebrew contribution catalog `reprobuild.lib.brewRealizationOf`
+    # reads (milestone GM5b): which Homebrew cask or formula installs a
+    # canonical package, for hosts whose Home Manager still installs macOS
+    # applications through Homebrew, and the reverse map the equivalence
+    # report needs. Same arrangement as `reprobuild-nix-packages-src` above,
+    # for the same reasons: the library's pin, inherited by consumers through
+    # their one reprobuild pin; `flake = false` (only the published
+    # `provisioning-contributions.json` is read); the catalog is flake-free,
+    # so a sibling checkout is tried with `--override-input
+    # reprobuild-brew-packages-src git+file:<checkout>` (declared in
+    # scripts/dev-shell-pinned-siblings.tsv). Reprobuild never realizes a
+    # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
+    # records"). Move the pin when the catalog's records change.
+    reprobuild-brew-packages-src = {
+      url = "github:metacraft-labs/reprobuild-brew-packages/49f4057f05b2ebd69d764208279ad5c8b1379fab";
       flake = false;
     };
   };
@@ -622,6 +706,7 @@
       nim-checksums-src,
       nim-nimony-src,
       reprobuild-nix-packages-src,
+      reprobuild-brew-packages-src,
       bundlers,
       ...
     }:
@@ -638,19 +723,43 @@
           pkgsFor = system: inputs.nixpkgs.legacyPackages.${system};
           reproFor = system: inputs.self.packages.${system}.repro;
         };
+      nixCatalog = {
+        name = "reprobuild-nix-packages";
+        records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+      };
       reprobuildLib = reprobuildLibFor [
+        nixCatalog
         {
-          name = "reprobuild-nix-packages";
-          records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+          name = "reprobuild-brew-packages";
+          records = "${reprobuild-brew-packages-src}/provisioning-contributions.json";
         }
       ];
       intentHomeManagerModule = import ./nix/modules/home-manager-intent.nix { inherit reprobuildLib; };
+      # The same module over the Nix catalog plus a fixture Homebrew catalog
+      # whose records claim packages of the neutral export fixture
+      # (tests/fixtures/brew-catalog), so `lib-home-manager` sees the module's
+      # DEFAULT `homebrew.realizationOf` hook move them into the token lists.
+      brewFixtureHomeManagerModule = import ./nix/modules/home-manager-intent.nix {
+        reprobuildLib = reprobuildLibFor [
+          nixCatalog
+          {
+            name = "gm5b-brew-fixture";
+            records = ./tests/fixtures/brew-catalog/provisioning-contributions.json;
+          }
+        ];
+      };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
+      # No x86_64-darwin: the pinned nixpkgs (26.11) dropped it, so no package,
+      # dev shell or check can be built or even evaluated there ("Nixpkgs 26.11
+      # has dropped support for x86_64-darwin";
+      # https://nixos.org/manual/nixpkgs/unstable/release-notes#x86_64-darwin-26.11),
+      # and the macOS fleet is Apple-silicon only. Profiles may still TARGET
+      # x86_64-darwin: the Nix helper library (nix/lib/platforms.nix) and
+      # `repro home export --target` describe it without nixpkgs.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
 
@@ -1167,10 +1276,12 @@
                 # note at the top of package.nix.
                 inherit version;
                 src = reprobuildSource;
-                # The commit the binaries are built from, embedded by
-                # scripts/build_apps.sh (`ReprobuildSourceRevision`). The
-                # sandbox has no .git, so the flake supplies it; a dirty tree
-                # reports `dirtyRev` (`<sha>-dirty`).
+                # The commit the binaries are built from, embedded as
+                # `ReprobuildSourceRevision` by scripts/build_apps.sh, which
+                # asks scripts/source_revision.sh (the one derivation; the
+                # variable wins over git there). The sandbox has no .git, so
+                # the flake supplies it; a dirty tree reports `dirtyRev`
+                # (`<sha>-dirty`).
                 env = old.env // {
                   REPROBUILD_SOURCE_REVISION = inputs.self.rev or inputs.self.dirtyRev or "";
                 };
@@ -1944,6 +2055,7 @@
               inherit (pkgs) lib;
               homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
               intentModule = intentHomeManagerModule;
+              brewIntentModule = brewFixtureHomeManagerModule;
               root = ./.;
             };
             # readIntent's IFD mode: the packaged `repro` exports the fixture
@@ -1957,6 +2069,26 @@
             lib-intent-ifd = import ./nix/tests/intent-ifd.nix {
               inherit pkgs system reprobuildLib;
               buildSystem = builtins.currentSystem or system;
+              root = ./.;
+            };
+            # ── Host facts (GM6) ──────────────────────────────────────────
+            # `homeManagerFacts` over a real Home Manager configuration:
+            # its evaluated half is decided at evaluation time, its
+            # digests when built on this check's system.
+            lib-host-facts = import ./nix/tests/host-facts.nix {
+              inherit pkgs system reprobuildLib;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
+              root = ./.;
+            };
+            # `homeEquivalenceCheck` end to end: the packaged `repro home
+            # facts` / `repro home compare` against `homeManagerFacts`, an
+            # equivalent pair that must pass and a diverged one that must
+            # fail.
+            lib-home-equivalence = import ./nix/tests/home-equivalence.nix {
+              inherit pkgs system reprobuildLib;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
               root = ./.;
             };
             repo-requirements =

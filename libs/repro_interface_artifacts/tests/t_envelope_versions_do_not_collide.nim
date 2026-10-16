@@ -118,7 +118,12 @@ proc bothLanesInterface(): ProjectInterface =
         appBundle: AppBundle,
         bundleId: BundleId,
         teamId: TeamId),
-      location: SourceLocation(file: "repro.nim", line: 22))])]
+      location: SourceLocation(file: "repro.nim", line: 22))],
+    # --- GM5b: v27 Homebrew bridge records, after the Scoop records ---
+    homebrewProvisioning: @[InterfaceHomebrewProvisioning(
+      packageName: "target", contributor: "collision", kind: "cask",
+      token: "zed", tap: "", location: SourceLocation(file: "repro.nim",
+      line: 23))])]
 
 proc atVersion(pi: ProjectInterface; version: uint16): ProjectInterface =
   ## Encode at `version` with the REAL encoder and read it back with the
@@ -228,6 +233,64 @@ suite "envelope lanes -- OUR blocks begin at v23, one at a time":
     check dflt.publicServices == back.publicServices
     check dflt.publicActivities == back.publicActivities
     check tarballOf(dflt).detail == tarball.detail
+
+suite "envelope lanes -- the Homebrew block begins at v27":
+
+  test "v27 adds the Homebrew records; v21..v26 decode without them":
+    # GM5b was developed as v23 against an older tip, when v23 was still
+    # free; that number is the services lane's here. Every earlier version
+    # must decode with no Homebrew record and with both other lanes intact,
+    # and v27 (the default) must carry it beside everything else.
+    let pi = bothLanesInterface()
+    for v in 21'u16 .. 26'u16:
+      let back = atVersion(pi, v)
+      check back.provisioningContributions[0].homebrewProvisioning.len == 0
+      check tarballOf(back).closureManifest == ClosureManifest
+    let back = atVersion(pi, 27'u16)
+    let brew = back.provisioningContributions[0].homebrewProvisioning
+    check brew.len == 1
+    check brew[0].token == "zed"
+    check brew[0].kind == "cask"
+    check back.publicServices[0].contributionPoints ==
+      @[PointRelyingParties, PointUsers]
+    check tarballOf(back).detail.appBundle == AppBundle
+    let dflt = decodeInterfacePayload(encodeInterfacePayload(pi))
+    check dflt.provisioningContributions[0].homebrewProvisioning == brew
+
+suite "envelope lanes -- the installer application begins at v28":
+
+  test "v28 adds installerApp inside the detail; v21..v27 decode without " &
+      "it and with every other block intact":
+    # The macOS installer-application field (Store-And-Installation-
+    # Layout.md § Installer applications) was developed as v23 against an
+    # older tip, where v23 was free; here v23 is the services lane's. A gate
+    # left at 23 would make a v23..v27 reader take the next string of the
+    # stream as `installerApp` and desynchronize every later field.
+    var pi = bothLanesInterface()
+    pi.provisioningContributions[0].tarballProvisioning[0].detail
+      .installerApp = "Zed Installer.app"
+    for v in 21'u16 .. 27'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check tarballOf(back).detail.installerApp == ""
+      check tarballOf(back).closureManifest == ClosureManifest
+      check tarballOf(back).location.line == 22
+      if v >= 22'u16:
+        check tarballOf(back).detail.teamId == TeamId
+      if v >= 27'u16:
+        check back.provisioningContributions[0].homebrewProvisioning.len == 1
+    let back = atVersion(pi, 28'u16)
+    check tarballOf(back).detail.installerApp == "Zed Installer.app"
+    check tarballOf(back).detail.teamId == TeamId
+    check back.provisioningContributions[0].homebrewProvisioning[0].token ==
+      "zed"
+    check back.publicServices[0].contributionPoints ==
+      @[PointRelyingParties, PointUsers]
+    # v28 is the default.
+    # version-literal-ok: a pin that must fail when the envelope moves past v28, so this matrix is extended
+    check interfaceEnvelopeVersion() == 28'u16
+    let dflt = decodeInterfacePayload(encodeInterfacePayload(pi))
+    check tarballOf(dflt).detail == tarballOf(back).detail
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

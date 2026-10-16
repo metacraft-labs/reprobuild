@@ -65,10 +65,13 @@ metacraft-labs/nim-shm-gset	public
 metacraft-labs/nim-shm-lease	public
 metacraft-labs/nim-shm-queue	public
 metacraft-labs/nim-stackable-hooks	public
+metacraft-labs/reprobuild-brew-packages	public
 metacraft-labs/reprobuild-ct-test-runner	public
 metacraft-labs/reprobuild-nix-packages	public
+metacraft-labs/reprobuild-packages	public
 metacraft-labs/reprobuild-test-adapters	public
 metacraft-labs/runquota	public
+metacraft-labs/stackable-hooks-macos-tools	public
 mitchellh/zig-overlay	public
 nim-lang/checksums	public
 nim-lang/csources_v3	public

@@ -238,17 +238,17 @@
     "codetracer-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791980144,
-        "narHash": "sha256-NCo4cE84K6qeuUsJxhjWuMojq20nBmaE/oEmtdcR2UA=",
+        "lastModified": 1792095082,
+        "narHash": "sha256-hwwsCpg0pkJBAOWCzCUk4MQI5Y6ITtQw5/y10U6fSD8=",
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "47eda1fd580a17099541ead32f5528cb2e37bdc0",
+        "rev": "6b6d05a081287ae66cd875ece212e5e713a9f9e3",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "47eda1fd580a17099541ead32f5528cb2e37bdc0",
+        "rev": "6b6d05a081287ae66cd875ece212e5e713a9f9e3",
         "type": "github"
       }
     },
@@ -331,17 +331,17 @@
     "ct-trace-format-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791769767,
-        "narHash": "sha256-ZKkKNbi9AGJmqPwv6MjbR2EoJm8ytfCikub7r7iAnSg=",
+        "lastModified": 1792065015,
+        "narHash": "sha256-97afSAcZc4Kl3KEAxYafhrLQ3ILaBuPRMdTR8N+Ay4w=",
         "owner": "metacraft-labs",
         "repo": "codetracer-trace-format-nim",
-        "rev": "808ffdb4507634c3aba0661d96cbc353420ed856",
+        "rev": "d8cd2ed542b9cdd990eef8a1cda5c89b539f8d4e",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "codetracer-trace-format-nim",
-        "rev": "808ffdb4507634c3aba0661d96cbc353420ed856",
+        "rev": "d8cd2ed542b9cdd990eef8a1cda5c89b539f8d4e",
         "type": "github"
       }
     },
@@ -1247,17 +1247,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792016514,
-        "narHash": "sha256-7MEx8uRcijVRGBEHNr0R7ZShRKvdJaZFF26tQ7YwlWI=",
+        "lastModified": 1792117257,
+        "narHash": "sha256-iDzljb1hp8dX2nQELtVG6Ac0Y+EUDXXpPqjJMVR8qB0=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "6e7d2cf28c6bceec5ec0174fd829524770b17ad7",
+        "rev": "2801e948810673bbb0fcbc7adb222943d4e7de50",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "6e7d2cf28c6bceec5ec0174fd829524770b17ad7",
+        "rev": "2801e948810673bbb0fcbc7adb222943d4e7de50",
         "type": "github"
       }
     },
@@ -2470,6 +2470,23 @@
         "type": "github"
       }
     },
+    "reprobuild-brew-packages-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792046294,
+        "narHash": "sha256-xPElj3SBoCxg+pXSrEhpL2AZqrlV2Qqp69ZeqH9Sv+A=",
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-brew-packages",
+        "rev": "49f4057f05b2ebd69d764208279ad5c8b1379fab",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-brew-packages",
+        "rev": "49f4057f05b2ebd69d764208279ad5c8b1379fab",
+        "type": "github"
+      }
+    },
     "reprobuild-ct-test-runner-src": {
       "flake": false,
       "locked": {
@@ -2487,17 +2504,17 @@
     "reprobuild-nix-packages-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791989213,
-        "narHash": "sha256-YgmMv7qcRdKClHQwsMxozwICrYEjPZrO+NQ31KOPWeQ=",
+        "lastModified": 1792046276,
+        "narHash": "sha256-0lddkYYj0X2muAiuiq5Wv2ZfuS837cQxYqFiJIWqQ0g=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "842fd4718fa2381e17f32b1b4eeeec1735538d3c",
+        "rev": "8eaa8520008e3cc3da6d081a1547c51c6f632632",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "842fd4718fa2381e17f32b1b4eeeec1735538d3c",
+        "rev": "8eaa8520008e3cc3da6d081a1547c51c6f632632",
         "type": "github"
       }
     },
@@ -2545,6 +2562,7 @@
           "nixos-modules",
           "nixpkgs-unstable"
         ],
+        "reprobuild-brew-packages-src": "reprobuild-brew-packages-src",
         "reprobuild-ct-test-runner-src": "reprobuild-ct-test-runner-src",
         "reprobuild-nix-packages-src": "reprobuild-nix-packages-src",
         "reprobuild-test-adapters-src": "reprobuild-test-adapters-src",

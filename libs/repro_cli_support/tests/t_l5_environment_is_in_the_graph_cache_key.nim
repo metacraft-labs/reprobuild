@@ -73,6 +73,7 @@ import repro_interface_artifacts
 import repro_tool_profiles     # ToolProvisioningMode / tpmPathOnly
 import repro_build_engine      # BuildAction, for the empty record
 import repro_cli_support
+import repro_test_support/process_fixtures
 
 package l5CacheKeyPkg:
   config:
@@ -107,6 +108,12 @@ proc withEnvironment(name: string; body: proc (): string): string =
 
 let scratch = getTempDir() /
   ("repro-l5-cache-key-" & $getCurrentProcessId())
+# Removed when THIS process exits, whichever cases it ran. The suite runner
+# runs every case in a process of its own, so a final "teardown" case removed
+# only its own process's tree and left the one the MISS case below creates.
+# Registering a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 suite "L5 §6.4 — the fixture really is what the clauses assume":
 
@@ -229,9 +236,3 @@ suite "L5 §6.4 — the provider-graph snapshot store is isolated too":
         proc (): string = providerGraphStoreRootForTest(base)) ==
       withEnvironment("dev",
         proc (): string = providerGraphStoreRootForTest(base))
-
-suite "L5 — teardown":
-
-  test "the throwaway tree is removed":
-    removeDir(scratch)
-    check not dirExists(scratch)

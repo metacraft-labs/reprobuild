@@ -117,8 +117,8 @@
       "No runner exists and none is planned. metacraft-dev-guidelines",
       "policies/ci-workflow-standards.md marks macOS AMD64 'N/A -- no Intel-Mac",
       "runner': the macOS fleet is Apple-silicon only (eph-macos-arm64 on m3).",
-      "flake.nix still lists x86_64-darwin among its systems, which is what makes",
-      "this leg look available; it is not."
+      "flake.nix no longer lists x86_64-darwin among its systems either: the",
+      "pinned nixpkgs (26.11) dropped it, so nothing can be built there."
     ],
     "windows-aarch64": [
       "A runner DOES exist (eph-win-arm64, m3, qemu-windows-arm + swtpm,",

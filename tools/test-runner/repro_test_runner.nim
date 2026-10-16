@@ -165,8 +165,7 @@ const
   ]
 
   ## These tests intentionally drive self-hosted ``repro build`` actions
-  ## against shared workspace state. The B0/D2 cases mutate the sibling
-  ## ``../runquota/build/bin/runquotad`` prerequisite; the B1/D5 cases rebuild
+  ## against shared workspace state. The B1/D5 cases rebuild
   ## or probe shared ``build/bin`` app artifacts, including the single public
   ## ``repro`` CLI; the B2/B3 cases inspect
   ## the global ``.repro/build/.../build-report.json`` emitted by those builds.
@@ -611,14 +610,12 @@ const
   ExclusiveStems = [
     "t_a2_5_p3_streaming_sink",
     "t_a2_5_p8_throughput_bench",
-    "t_b0_repro_build_runquota_daemon",
     "t_b1_apps_action_cache_hit",
     "t_b1_repro_build_apps_collection",
     "t_b2_helper_invalidation",
     "t_b3_test_execute_edge_cache_hit",
     "t_b3_test_invalidation_rebuilds_repro",
     "t_d1_pythonunittest_resolves_in_path_mode",
-    "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",
     "t_e2e_native_shell_hooks",
     # Its arms assert how OFTEN unsafe publication tears a running thread
