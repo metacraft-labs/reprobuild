@@ -1379,6 +1379,7 @@ tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1
 tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim	nim	1
 tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	18
 tests/integration/t_hooks_ensure_refuses_to_strand_a_hook_the_runner_can_service.nim	nim	1
+tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim	nim	5
 tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim	nim	1
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	4
 tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
