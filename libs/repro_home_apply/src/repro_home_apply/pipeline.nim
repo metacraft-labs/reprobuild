@@ -1898,6 +1898,76 @@ proc placesApplication*(pp: PackagePreview): bool =
     (pp.resolution.archive.installMethod == imAppBundle or
      isMacosInstallerApp(pp.resolution.archive))
 
+proc addApplicationCommands*(plan: var ApplyPlan;
+                             previews: seq[PackagePreview]) =
+  ## Add a launcher for every command an application package's selected
+  ## record declares (``extraExecutable``), and refuse what the plan cannot
+  ## honour, before anything is realized (Store-And-Installation-Layout.md
+  ## § macOS Application Bundles, "Command line"):
+  ##
+  ## * a declared command path that is not inside the placed bundle
+  ##   (reason ``command-path``);
+  ## * a ``binaries`` name the profile gives an application reference that
+  ##   its record does not provide (reason ``undeclared-binary``) -- the
+  ##   name used to be read only as a PATH probe and silently dropped once
+  ##   an application was selected (Core-Invariants.md §Unrecognised Input
+  ##   Is Rejected, Not Skipped);
+  ## * two packages exporting the same command (``command-collision``).
+  ##
+  ## Called by ``--plan`` and by the apply, after resolution and before the
+  ## generation id is derived, so the commands are part of the plan bytes
+  ## and the preview lists what the apply writes.
+  var planned = initTable[string, PlannedPackage]()
+  for p in plan.packages:
+    planned[p.packageId] = p
+  for pp in previews:
+    if not placesApplication(pp):
+      continue
+    let archive = pp.resolution.archive
+    let realization =
+      if pp.resolution.selection.lockIdentity.len > 0:
+        pp.resolution.selection.lockIdentity
+      else: archive.urlUsed
+    var provided = @[pp.packageId]
+    for rel in applicationCommandPaths(archive):
+      let problem = applicationCommandPathError(archive, rel)
+      let name = commandNameOf(rel)
+      if problem.len > 0:
+        raisePackageCommandRefused(pp.packageId, name, realization,
+          "command-path", "", "the realization " & realization &
+          " declares the command " & rel.escape & "; " & problem)
+      provided.add(name)
+      if name == pp.packageId:
+        # The declared command and the package launcher share a name: the
+        # declared command is what that name runs.
+        for l in plan.launchers.mitems:
+          if l.fromPackageId == pp.packageId and l.commandName == name:
+            l.executableRelPath = rel
+        continue
+      plan.launchers.add(PlannedLauncher(commandName: name,
+        fromPackageId: pp.packageId, executableRelPath: rel))
+    if pp.packageId in planned:
+      for binary in planned[pp.packageId].binaries:
+        if binary notin provided:
+          raisePackageCommandRefused(pp.packageId, binary, realization,
+            "undeclared-binary", "", "the profile declares binaries " &
+            "containing '" & binary & "', but the selected realization " &
+            realization & " places an application that provides only " &
+            provided.join(", ") & ". Declare the command on the " &
+            "application record (extraExecutable = \"<Name>.app/...\") " &
+            "or remove it from binaries")
+  var owner = initTable[string, string]()
+  for l in plan.launchers:
+    if l.commandName in owner and owner[l.commandName] != l.fromPackageId:
+      raisePackageCommandRefused(l.fromPackageId, l.commandName, "",
+        "command-collision", owner[l.commandName], "the command '" &
+        l.commandName & "' is exported by package " & owner[l.commandName] &
+        " and by package " & l.fromPackageId & "; a home profile bin " &
+        "directory can hold only one")
+    owner[l.commandName] = l.fromPackageId
+  plan.launchers.sort(proc(a, b: PlannedLauncher): int =
+    cmp(a.commandName, b.commandName))
+
 proc packageConcern*(pp: PackagePreview): HomeConcern =
   ## A package reference's concern: `applications` when its selected
   ## realization places an application, `packages` otherwise — including a
@@ -2238,7 +2308,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # discovery (`planDesiredState`, shared with the host-facts producer) --
   let state = planDesiredState(opts)
   let profile = state.profile
-  let applyPlan = state.plan
+  var applyPlan = state.plan
   let stowDiscovery = state.stowDiscovery
   let stowEntries = stowDiscovery.entries
   var packageIds: seq[string]
@@ -2268,6 +2338,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   let resolutionCtx = packageResolutionContext(opts, applyPlan, catalog)
   let packagePreviews = previewPackageResolutions(applyPlan.packages,
     resolutionCtx)
+  addApplicationCommands(applyPlan, packagePreviews)
   # GM7: on a host that splits `packages` from `applications`, the Nix side
   # reads the export's classification; refuse a package this host would put
   # in the other concern.
@@ -2766,6 +2837,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       let resolutionCtx = packageResolutionContext(opts, applyPlan, catalog)
       let packagePreviews = previewPackageResolutions(applyPlan.packages,
         resolutionCtx)
+      # The commands application packages declare become launchers (and
+      # part of the generation id); see `addApplicationCommands`.
+      addApplicationCommands(applyPlan, packagePreviews)
       # GM7: see `refuseClassificationDisagreement` (`runApplyPlan`).
       refuseClassificationDisagreement(opts, applyPlan, packagePreviews,
         applied, catalog)
@@ -3106,8 +3180,13 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       let perGenBin = generationBinDir(opts.stateDir,
         generationIdHex(candidateId))
       createDir(extendedPath(perGenBin))
+      # An application's launchers run its placed copy in ~/Applications
+      # (`app_activation.launcherExecutablePath`); a remote bundle build
+      # places nothing, so its launchers keep the store path.
       let launchers = materializeLaunchers(store, perGenBin, realized,
-        ownedLaunchers)
+        ownedLaunchers,
+        if opts.recordOnlyGeneratedFiles: ""
+        else: applicationsDir(apsHome, opts.homeDir))
       if shouldKillAfter(9):
         raiseKilledByTestHook(9)
 

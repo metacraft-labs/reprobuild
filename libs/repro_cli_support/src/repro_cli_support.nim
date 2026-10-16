@@ -32224,6 +32224,23 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       selectedRoots: selectedRoots)
     let daemonResult = requestUserDaemonWatchStart(request, config.endpoint,
       renderDaemonWatchEvent)
+    # An unsupported terminal answer means "run it yourself", exactly as for
+    # `runDaemonBuild`: the caller below falls back to a direct watch. It
+    # used to be returned as exit 64 instead, so a daemon that declined a
+    # watch sent for another engine (`foreignEngineVerdict`) ended the watch.
+    #
+    # Except under `--detach`: a direct watch runs in the foreground and
+    # cannot detach, so falling back would turn a command that returns at
+    # once into one that blocks its caller for as long as the watch runs
+    # (forever, with no `--max-cycles`). A detached watch keeps the exit 64
+    # and says why; retrying it reaches a daemon on the caller's own engine.
+    if not daemonResult.supported:
+      if detach:
+        stderr.writeLine("repro watch: daemon watch unsupported; a " &
+          "detached watch cannot fall back to direct mode: " &
+          daemonResult.message)
+        return daemonResult.exitCode
+      raise newException(DaemonBuildUnsupported, daemonResult.message)
     if detach:
       echo "repro watch: detached session=" & daemonResult.sessionId
     daemonResult.exitCode
@@ -51629,6 +51646,77 @@ proc toJsonNode*(report: PostCommitReport): JsonNode =
   result["pendingRecords"] = %report.pendingRecords
   result["strandedRecords"] = %report.strandedRecords
 
+proc mainWorktreeRootFor(startPath: string; gitBin = ""): string =
+  ## HL-1 (§4.3) — the MAIN worktree's root for a path inside a LINKED git
+  ## worktree, or "" when ``startPath`` is not inside one.
+  ##
+  ## A linked worktree's ``.git`` is a FILE and its VCS-private dir is the
+  ## COMMON dir, so ``git rev-parse --git-common-dir`` is what walks a linked
+  ## worktree back to the repository it belongs to. Its parent is the main
+  ## worktree's root — the canonical worktree identity the push-hook
+  ## publication protocol binds.
+  ##
+  ## This exists because a path ascent alone cannot find a workspace from a
+  ## linked worktree: the worktree is checked out ANYWHERE (commonly a scratch
+  ## dir outside the workspace entirely), so no ancestor of it carries the
+  ## workspace marker and every marker probe is a stat of a path that is not
+  ## there. The gate then concluded "not a workspace" and no-oped, which is
+  ## fail-OPEN — the one direction a publication gate must never fail.
+  ##
+  ## Returns "" — meaning "nothing new to try" — for every non-linked case, so
+  ## a caller's behaviour outside a linked worktree is unchanged:
+  ##   * not a git repo, or no git on PATH;
+  ##   * a MAIN worktree (``--git-dir`` == ``--git-common-dir``), whose root is
+  ##     already on the ancestor walk;
+  ##   * a BARE repository's worktree, whose common dir has no working tree
+  ##     above it — taking its parent would escalate to an unrelated directory,
+  ##     so only the standard layout (common dir named ``.git``) is accepted.
+  if startPath.len == 0:
+    return ""
+  let start = absolutePath(startPath)
+  if not dirExists(start):
+    return ""
+  let git = if gitBin.len > 0: gitBin else: findExe("git")
+  if git.len == 0:
+    return ""
+  proc revParse(flag: string): string =
+    ## ``git -C start rev-parse <flag>``, resolved to an absolute, normalized
+    ## path. Relative output is joined against ``start`` (git answers relative
+    ## to its own ``-C`` directory) rather than requiring ``--path-format``,
+    ## which predates the git versions this still has to run on.
+    let res = execCmdEx(quoteShell(git) & " -C " & quoteShell(start) &
+      " rev-parse " & flag,
+      options = {poStdErrToStdOut, poUsePath},
+      env = scrubbedGitRepositoryEnv())
+    if res.exitCode != 0:
+      return ""
+    var value = res.output.strip()
+    if value.len == 0:
+      return ""
+    if not isAbsolute(value):
+      value = start / value
+    try:
+      os.normalizedPath(expandFilename(value))
+    except OSError, CatchableError:
+      os.normalizedPath(absolutePath(value))
+  let commonDir = revParse("--git-common-dir")
+  let gitDir = revParse("--git-dir")
+  if commonDir.len == 0 or gitDir.len == 0:
+    return ""
+  # A MAIN worktree has --git-dir == --git-common-dir. A LINKED worktree's
+  # --git-dir is <common>/worktrees/<name>, so the inequality IS the test for
+  # "linked", and it needs no parsing of that path.
+  if gitDir == commonDir:
+    return ""
+  if lastPathPart(commonDir) != ".git":
+    return ""
+  let mainRoot = parentDir(commonDir)
+  if mainRoot.len == 0 or not dirExists(mainRoot):
+    return ""
+  if mainRoot == start:
+    return ""
+  mainRoot
+
 proc selfAndAncestors(startPath: string): seq[string] =
   ## ``startPath`` and every directory above it, nearest first.
   result = @[]
@@ -51641,9 +51729,21 @@ proc selfAndAncestors(startPath: string): seq[string] =
     if parent == probe: break
     probe = parent
 
-proc enclosingWorkspaceRoot*(startPath: string): string =
+proc enclosingWorkspaceRoot*(startPath: string;
+                             followWorktree = true): string =
   ## The nearest ancestor of ``startPath`` (inclusive) that is a WORKSPACE, or
   ## "" when there is none.
+  ##
+  ## When the ascent finds nothing and ``startPath`` is inside a LINKED git
+  ## worktree, the walk is retried from the MAIN worktree's root
+  ## (``mainWorktreeRootFor``, HL-1 §4.3). A linked worktree is checked out
+  ## anywhere — typically outside the workspace — so the ascent from it passes
+  ## through no workspace at all, and the gate that consults this resolver
+  ## concluded "not a workspace" and no-oped. Resolving the common dir walks
+  ## back to the repo the worktree belongs to, from which the ascent reaches
+  ## the workspace above it and the gate ENFORCES. ``followWorktree`` is the
+  ## recursion guard: the retry resolves a main worktree, which by definition
+  ## has no further worktree to follow.
   ##
   ## A managed hook fires inside a participating repo and has to walk up to the
   ## workspace. The marker for that walk is the WORKSPACE, never a ``.repro/``
@@ -51680,10 +51780,18 @@ proc enclosingWorkspaceRoot*(startPath: string): string =
   ## workspace that owns the ``.repro/`` it sits in.
   ##
   ## All of this is the shared ``discoverWorkspaceRoot``
-  ## (``repro_core/workspace_root``) — the one walk every workspace-root
+  ## (``repro_core/workspace_root``) -- the one walk every workspace-root
   ## lookup uses, whose marker set also includes the settings file
   ## (Workspace-Settings-Files.md §6) and honours ``REPRO_WORKSPACE_CONFIG``.
-  findWorkspaceRoot(startPath)
+  result = findWorkspaceRoot(startPath)
+  if result.len == 0 and followWorktree:
+    # The linked-worktree retry documented above. `agents` replaced the inline
+    # ascent with the shared walk, which does not follow worktrees; `dev`
+    # carries the retry. Keeping both is the union -- dropping either would
+    # lose the shared marker set or lose HL-1 §4.3.
+    let mainRoot = mainWorktreeRootFor(startPath)
+    if mainRoot.len > 0:
+      return enclosingWorkspaceRoot(mainRoot, followWorktree = false)
 
 proc enclosingReproShell*(startPath: string): string =
   ## The nearest ancestor of ``startPath`` (inclusive) holding a ``.repro/``
@@ -56771,11 +56879,80 @@ proc parseCheckMode(value: string): CheckMode =
       "unsupported --mode value for `repro check`: " & value &
         " (expected: pre-push)")
 
+proc pathIsAtOrUnder(path, root: string): bool =
+  ## Is ``path`` the directory ``root`` or nested anywhere beneath it?
+  ##
+  ## Both sides go through ``canonicalDiscoveredGitPath`` — the
+  ## canonicalization applied to what Git reports — because one side here IS
+  ## Git's answer (`rev-parse --show-toplevel` prints symlink-resolved paths)
+  ## and the other is whatever spelling the operator typed; `/tmp/x` and its
+  ## resolved `/private/tmp/x` must not read as two places. Ancestors are
+  ## compared with ``cmpPaths``, which is case-insensitive where the
+  ## filesystem is.
+  if path.len == 0 or root.len == 0:
+    return false
+  let canonicalRoot = canonicalDiscoveredGitPath(root, root)
+  var probe = canonicalDiscoveredGitPath(path, path)
+  while probe.len > 0:
+    if cmpPaths(probe, canonicalRoot) == 0:
+      return true
+    let parent = parentDir(probe)
+    if parent.len == 0 or parent == probe:
+      break
+    probe = parent
+  false
+
+proc defaultCheckCurrentRepo(explicitWorkspaceRoot: string): string =
+  ## The repository `repro check` judges when ``--current-repo`` is omitted:
+  ## the top level of the git worktree containing the current directory, or ""
+  ## for no default (CLI/check.md §"Scope: the same verdict by hand and from
+  ## the hook").
+  ##
+  ## The managed pre-push hook always passes ``--current-repo=<the repository
+  ## being pushed>``. A hand run used to pass nothing, fall back to the bare
+  ## current directory as the "workspace", and skip every current-repository
+  ## stage — the `flake.lock` and `repro.lock` verification among them — so it
+  ## reported only publication while the hook refused the same push (issue
+  ## `2026-10-08-no-reprobuild-push-can-pass-the-pre-push-gate-from-this-
+  ## workspace`). Defaulting to the worktree the operator is standing in is
+  ## what makes the two scopes the same.
+  ##
+  ## The TOP LEVEL, not the current directory: the closure is seeded by
+  ## matching a declared repo's path, which a subdirectory does not match.
+  ## `rev-parse --show-toplevel` answers for a linked worktree too (its `.git`
+  ## is a file), and it is asked with the repository-selecting variables
+  ## scrubbed (``gitTopLevel``) so a `GIT_DIR` inherited from an outer git
+  ## process cannot answer for a different repository. `repro push` resolves
+  ## its default pushed repo the same way.
+  ##
+  ## No default when:
+  ##   * the current directory is in no git worktree, or git cannot be run —
+  ##     there is no repository to judge, and the old workspace-only
+  ##     behaviour stands;
+  ##   * ``--workspace-root`` was given and the worktree lies OUTSIDE it. The
+  ##     workspace being checked is then not the one this repository belongs
+  ##     to (the shape of a test or tool that drives a fixture workspace from
+  ##     an unrelated checkout), and judging the cwd's repository against it
+  ##     would be judging the wrong thing.
+  let top =
+    try: gitTopLevel(getCurrentDir())
+    except CatchableError: ""
+  if top.len == 0:
+    return ""
+  if explicitWorkspaceRoot.len > 0 and
+      not pathIsAtOrUnder(top, absolutePath(explicitWorkspaceRoot)):
+    return ""
+  top
+
 proc parseCheckArgs*(args: openArray[string]): CheckArgs =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
   ## [--current-repo=PATH] [--pushed-refs=FILE]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. ``--mode``
   ## is REQUIRED — there is no implicit mode in the M18 surface.
+  ##
+  ## An omitted ``--current-repo`` defaults to the git worktree containing the
+  ## current directory (``defaultCheckCurrentRepo``), so a hand run and the
+  ## managed hook judge the same repository.
   result.toolProvisioning = tpmPathOnly
   var modeSet = false
   var i = 0
@@ -56809,6 +56986,12 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
     raise newException(ValueError,
       "`repro check` requires --mode=pre-push (no other modes are " &
         "supported yet)")
+  if result.currentRepo.len == 0:
+    # A hand run must judge the commit the hook judges (CLI/check.md §"Scope:
+    # the same verdict by hand and from the hook"), so the repository is
+    # defaulted BEFORE the workspace walk below and that walk then runs
+    # exactly as it does for the hook.
+    result.currentRepo = defaultCheckCurrentRepo(result.workspaceRoot)
   if result.workspaceRoot.len == 0:
     # When invoked from inside a participating repo (the usual hook
     # call site) we walk up from ``--current-repo`` to discover the
@@ -71608,18 +71791,31 @@ type
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec      ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc ascendToWorkspaceRoot(startDir: string): string =
+proc ascendToWorkspaceRoot(startDir: string;
+                           followWorktree = true): string =
   ## Walk up from ``startDir`` to the workspace root that owns it, so the
   ## prompt and the workspace-wide verbs work from any subdirectory of a
   ## workspace (like ``__git_ps1``). Returns "" when there is none. Pure
-  ## filesystem stat walk — no git, bounded by the path depth.
+  ## filesystem stat walk -- no git, bounded by the path depth -- except for
+  ## the linked-worktree retry below, which is the one place git is consulted.
   ##
   ## The shared ``discoverWorkspaceRoot`` (``repro_core/workspace_root``), so
   ## a member repo's own committed ``repro.lock`` no longer makes the member
   ## its own workspace when a workspace root sits above it. FINDING a root is
   ## not the root being initialized: a caller that needs state asks
   ## ``isInitializedWorkspace`` of the answer (the prompt does).
-  findWorkspaceRoot(startDir)
+  ##
+  ## ``followWorktree`` retries the walk from the MAIN worktree's root when
+  ## ``startDir`` is inside a LINKED git worktree -- the same HL-1 §4.3
+  ## resolution ``enclosingWorkspaceRoot`` performs, so a cwd-based verb run
+  ## from a worktree resolves the same workspace the hook-based gate does.
+  ## Without it, `repro ws status` / `branch` / `switch` silently acted on the
+  ## worktree dir instead of the workspace.
+  result = findWorkspaceRoot(startDir)
+  if result.len == 0 and followWorktree:
+    let mainRoot = mainWorktreeRootFor(startDir)
+    if mainRoot.len > 0:
+      return findWorkspaceRoot(mainRoot)
 
 proc resolveInvokedWorkspaceRoot(explicit: string): string =
   ## The workspace root a workspace-wide verb should act on.
@@ -86188,10 +86384,24 @@ proc flakeReconcileCommands(row: FlakeOverrideStateRow;
     @["git -C " & row.path & " merge --ff-only " & row.pinnedRev]
   of fprUnfetched:
     # Nothing can be reconciled before anything can be CONCLUDED, and the one
-    # thing missing is the object. This is the only remedy in this proc that
-    # answers a question rather than closing a gap, and it is first for that
-    # reason: after it, the row classifies and its real remedy is knowable.
-    @["git -C " & row.path & " fetch --all"]
+    # thing missing is the object, so the fetch comes first and stays this
+    # row's head (`flakeReconcileCommand`): the renderings that quote one
+    # command name the step that makes the row classifiable.
+    #
+    # The fetch alone does not CLEAR the row, though. After it the row is
+    # ahead, behind or diverged, and the common case by far is behind — the
+    # pin was refreshed elsewhere and this checkout had not fetched since. A
+    # remedy that stopped at the fetch left the operator facing a second
+    # refusal for the row it had only just made classifiable (issue
+    # `2026-10-08-no-reprobuild-push-can-pass-the-pre-push-gate-from-this-
+    # workspace`). So the fast-forward to the pin follows, and it is safe to
+    # name before the direction is known: it moves a behind checkout onto the
+    # pin, changes nothing for an ahead one (the pin is already its ancestor),
+    # and fails visibly for a diverged one, so no direction is decided without
+    # the evidence (Nix-Flake-Coexistence.md §4, "The remedy follows the
+    # direction").
+    @["git -C " & row.path & " fetch --all",
+      "git -C " & row.path & " merge --ff-only " & row.pinnedRev]
   of fprDiverged:
     # The refresh does not record a diverged sibling on its own any more
     # (§4 "Regressions"), so naming it alone would print a command that exits
@@ -89252,6 +89462,9 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # pin itself moved to a published revision, which only the author can pick.
   let refreshCommand = flakeRefreshLockCommand(flakeRoot, workspaceRoot)
   var remedies: seq[string]
+    ## The checkout-moving commands only; the refresh is appended after the
+    ## loop, when ``needsRefresh`` (see the ORDER note there).
+  var needsRefresh = false
   var edits: seq[string]
   var blocked: seq[string]
   for row in offenders:
@@ -89279,9 +89492,25 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
           flakeRoot)
       if edit notin edits: edits.add(edit)
     for cmd in flakeReconcileCommands(row, flakeRoot, workspaceRoot):
-      # The refresh is the command this row has just been shown not to have.
-      if authorPinned and cmd == refreshCommand: continue
-      if cmd notin remedies: remedies.add(cmd)
+      if cmd == refreshCommand:
+        # The refresh is the command this row has just been shown not to have.
+        if not authorPinned: needsRefresh = true
+      elif cmd notin remedies:
+        remedies.add(cmd)
+  # ORDER, not only membership, is part of the remedy, because the operator
+  # runs the commands in the order printed and the refresh repins every input
+  # at its sibling's HEAD. So every checkout move (fetch, fast-forward,
+  # `repro ws sync`, the publishing push) comes first, in the order the rows
+  # produced them, and the refresh comes LAST, once. Collected in offender-row
+  # order instead, an ahead row listed first put the refresh first: it ran
+  # while the behind rows were still behind, withheld them (status 3), and the
+  # operator met a second refusal for the row the fetch had only just made
+  # classifiable (issue `2026-10-08-no-reprobuild-push-can-pass-the-pre-push-
+  # gate-from-this-workspace`; Nix-Flake-Coexistence.md §4, "The remedy
+  # follows the direction, and it clears the refusal in one pass"). Run in
+  # this order, the refresh records only the ahead rows — the others are at
+  # their pins by then — and no pin moves backward.
+  if needsRefresh: remedies.add(refreshCommand)
   result.remediation = sentences.join("; ") &
     " — flake.lock is an IN-TREE committed lock, so this gate verifies it " &
     "and never writes it." &
