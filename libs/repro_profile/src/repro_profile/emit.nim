@@ -267,6 +267,12 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # unchanged.
   if p.catalogImports.len > 0:
     result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
+  # The concerns Reprobuild applies per host (`applies:` in a block-form
+  # `hosts:` entry), only when some host declares them, so the key set of a
+  # profile without a declaration is unchanged
+  # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+  if p.hostApplies.len > 0:
+    result.add ",\"hostApplies\":" & encodeHosts(p.hostApplies)
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -407,6 +413,13 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
   if root.hasKey("catalogImports"):
     for it in root["catalogImports"]:
       result.catalogImports.add it.getStr()
+  # Optional; absent when no host declares the concerns Reprobuild applies.
+  if root.hasKey("hostApplies"):
+    for k, v in root["hostApplies"]:
+      var concerns: seq[string] = @[]
+      for it in v:
+        concerns.add it.getStr()
+      result.hostApplies[k] = concerns
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.

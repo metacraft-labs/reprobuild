@@ -1317,8 +1317,12 @@ proc mergeRepinnedLock*(committed, generated: LockedDependencies;
   ##     not a sibling revision pin: it records the revision of the tree the
   ##     lock was solved from, which this solve has just re-read, and keeping a
   ##     stale one would make `repro lock validate` refuse the lock for source
-  ##     drift the re-pin itself observed. Every sibling revision pin is
-  ##     carried byte-for-byte.
+  ##     drift the re-pin itself observed. Every sibling revision pin the
+  ##     committed lock records is carried byte-for-byte; a sibling it does NOT
+  ##     record is ADDED from the solve, by the same rule as a package. That is
+  ##     the issue's own case: a newly declared producer has no revision pin to
+  ##     hold, and leaving it out would write a lock whose lock-pinned mode
+  ##     cannot fetch the producer whose floor the re-pin just admitted.
   ##   * ``inputsDigest`` / ``optimal``: the generated ones — they describe the
   ##     solve that produced the written lock, and a digest of the OLD inputs
   ##     would mark the lock stale against the recipe it was just solved from.
@@ -1365,11 +1369,24 @@ proc mergeRepinnedLock*(committed, generated: LockedDependencies;
     else:
       result.deps.add(d)
   for g in generated.deps:
-    if not isLiftedPackageDep(g) or g.name notin changed: continue
-    var present = false
-    for d in result.deps:
-      if isLiftedPackageDep(d) and d.name == g.name: present = true
-    if not present: result.deps.add(g)
+    if isLiftedPackageDep(g):
+      if g.name notin changed: continue
+      var present = false
+      for d in result.deps:
+        if isLiftedPackageDep(d) and d.name == g.name: present = true
+      if not present: result.deps.add(g)
+    else:
+      # A repository pin is matched by name OR path: either one already
+      # recorded means the committed lock pins that sibling, and its entry
+      # was carried above (or, for the root, refreshed). Matching against the
+      # entries written so far rather than the committed ones also keeps a
+      # sibling the solve lists twice from being added twice.
+      var present = false
+      for d in result.deps:
+        if not isLiftedPackageDep(d) and (d.name == g.name or
+            (g.path.len > 0 and d.path == g.path)):
+          present = true
+      if not present: result.deps.add(g)
 
 proc runLockRepin*(req: LockGenerationRequest;
                    committed: LockedDependencies;

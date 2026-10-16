@@ -481,8 +481,10 @@ supplied as a hard pin, the same pins a build applies. The written lock
 differs from the committed one only in the named packages' `packages`
 entries, plus **added** entries for packages the lock did not record yet
 (a newly declared producer's own package, for example). It never changes
-or removes another entry. Sibling revision pins (`deps`), provisioning
-records and the certificate-policy snapshot are carried forward. The one
+or removes another entry. Sibling revision pins (`deps`) already in the
+lock, provisioning records and the certificate-policy snapshot are carried
+forward; a sibling the lock does not pin yet (the newly declared producer
+itself) is added at the revision the solve saw. The one
 `deps` entry it rewrites is the repo's own (`path = "."`), which records
 the tree the lock was solved from.
 

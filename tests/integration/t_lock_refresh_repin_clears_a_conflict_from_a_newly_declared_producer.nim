@@ -62,8 +62,10 @@
 ##      being built counts as its own.
 ##   5. ``--repin=nim``: exit 0; the written lock differs from the committed
 ##      one ONLY in the ``nim`` entry plus ADDED entries; every other package
-##      entry, every variant, every sibling ``deps`` entry and the
-##      certificate-policy snapshot are unchanged.
+##      entry, every variant, every committed sibling ``deps`` entry and the
+##      certificate-policy snapshot are unchanged. The producer, which the
+##      committed lock did not pin, gains a ``deps`` entry at its checkout's
+##      HEAD.
 ##   6. ``repro build`` against the re-pinned lock no longer raises
 ##      ``ELockConflict`` and succeeds; ``repro lock validate`` accepts it.
 ##   6b. The build half of the 4b control.
@@ -351,14 +353,33 @@ suite "lock refresh --repin clears a conflict from a newly declared producer":
       checkpoint("added: " & added.join(", "))
       check "producer_pkg" in added
       check after.variants == before.variants
-      # Sibling revision pins and the policy snapshot are carried forward.
-      var beforeSiblings, afterSiblings: seq[LockedDep]
+      # Every sibling revision pin the committed lock records is carried
+      # forward byte-for-byte, and the policy snapshot with them.
+      var carriedSiblings, beforeSiblings: seq[LockedDep]
+      var addedSiblings: seq[LockedDep]
       for d in before.deps:
         if d.path != ".": beforeSiblings.add(d)
-      for d in after.deps:
-        if d.path != ".": afterSiblings.add(d)
-      check rendered(afterSiblings) == rendered(beforeSiblings)
+      for a in after.deps:
+        if a.path == ".": continue
+        var known = false
+        for d in beforeSiblings:
+          if d.name == a.name or d.path == a.path: known = true
+        if known: carriedSiblings.add(a)
+        else: addedSiblings.add(a)
+      check rendered(carriedSiblings) == rendered(beforeSiblings)
       check after.certificatePolicySection == before.certificatePolicySection
+      # The newly declared producer had no revision pin to hold, so the re-pin
+      # ADDS one, at the revision its checkout is at. Without it a lock-pinned
+      # build has no revision to fetch the producer at. It is the only
+      # addition: nothing else became a sibling.
+      check addedSiblings.len == 1
+      let producerHead = git(gitBin, producer, "rev-parse HEAD")
+      check producerHead.code == 0
+      for a in addedSiblings:
+        check a.name == "producer"
+        check a.path == "../producer"
+        check a.coordinates.kind == ckVcs
+        check a.coordinates.revision == producerHead.output.strip()
 
       # ---- (6) the build accepts the re-pinned lock. -----------------------
       commitAll(gitBin, consumer, "repin nim")
