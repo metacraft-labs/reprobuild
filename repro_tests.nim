@@ -13878,6 +13878,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_mutually_pinned_flake_siblings_land_through_repro_push.nim",
+    binary: "build/test-bin/t_mutually_pinned_flake_siblings_land_through_repro_push",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_named_layer_url_supplied_locally.nim",
     binary: "build/test-bin/t_named_layer_url_supplied_locally",
     defines: @[],

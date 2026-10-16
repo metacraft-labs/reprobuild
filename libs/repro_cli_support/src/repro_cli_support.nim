@@ -53082,12 +53082,127 @@ proc applyCommittedLockRepin(plan: CommittedLockRepinPlan):
     return (false, "repro-lock write-failed: " & err.msg)
   (true, plan.line)
 
-proc verifyCommittedLockSiblingPins*(repoRoot: string):
-    tuple[examined, stale: bool; evidence, remediation, summary: string] =
+# ---------------------------------------------------------------------------
+# Mutually pinned siblings — the cycle rule BOTH committed-lock gate stages
+# share (Nix-Flake-Coexistence.md §3.1a for `flake.lock`, stage 3b;
+# Unified-Locking-And-Hooks.md §13.5 for `repro.lock`, stage 3c).
+#
+# Two repos can pin each other: `reprobuild`'s flake.lock pins `codetracer`
+# (`codetracer-src`) and its committed repro.lock pins `nim-shm-queue`, while
+# each of those reaches `reprobuild` through its own `depends` closure. With a
+# new local commit on both sides, the two pushes refused each other and no
+# ordering terminated: the dependent needs the dependency published first
+# (push-hook-publication-protocol.md invariant 2 — a dependency never borrows
+# another repo's outgoing status), and the dependency's lock stage needed the
+# dependent published first — and, for flake.lock, printed exactly that push as
+# its remedy, though its own evidence (`unpublished=true`) proved it blocked.
+# Reprobuild-pm issue 2026-10-15-codetracer-and-reprobuild-pre-push-gates-
+# deadlock-and-repro-push-cannot-break-it.
+#
+# Mutual pins have no fixpoint (each commit recording the other's HEAD is a
+# newer HEAD), so nothing can be automated into agreement; ONE gate has to
+# accept a lagging lock for one push. The dependency's lock stages are the ones
+# that can, because what they would publish is still reproducible — but only in
+# a shape narrow enough that every other drift keeps refusing as before. The
+# predicate lives here, once, so the two stages cannot grow different opinions
+# about it.
+# ---------------------------------------------------------------------------
+
+type PushCycleView = object
+  ## The workspace membership the cycle question is asked against: the pushed
+  ## repo's declared name and the resolved repos whose ``depends`` edges
+  ## ``developSetClosure`` walks. ``known`` is false when there is no
+  ## membership to consult, and then NO sibling is ever treated as cyclic — the
+  ## deferral is an exception that must be proven, never assumed.
+  known: bool
+  selfName: string
+  selfHeadUnpublished: bool
+    ## The pushed repo's own ``HEAD`` is not yet reachable from a
+    ## remote-tracking ref. Only then does a dependent sibling's gate refuse it
+    ## over this repo; once this ``HEAD`` is published (say, on another
+    ## branch), the sibling CAN go first and its push is the ordinary remedy.
+  workspaceRoot: string   ## the membership's root, for remedies that name it
+  repos: seq[ResolvedRepo]
+
+proc developSetClosure(repos: seq[ResolvedRepo];
+    pushedRepoName: string): HashSet[string]
+  ## Forward declaration; defined beside ``manifestDevelopSiblings``.
+
+proc flakeClassifyPublication(identity: GitToolIdentity;
+    dir, headRev: string):
+    tuple[unpublished: bool; detail, remote, branch: string]
+  ## Forward declaration; defined with the NF-2 publication axis. The one
+  ## "is this revision obtainable from a remote" probe both stages ask.
+
+proc pushCycleViewOf(repoRoot, workspaceRoot: string;
+    identity: GitToolIdentity): PushCycleView
+  ## Forward declaration; defined beside ``manifestMembershipOf``.
+
+proc siblingAwaitsThisPush(view: PushCycleView; sibling: string;
+    siblingHeadUnpublished: bool): bool =
+  ## Is ``sibling`` one that CANNOT be published before the pushed repo?
+  ##
+  ## True when its HEAD is unpublished, its own develop closure contains the
+  ## pushed repo, and the pushed repo's HEAD is itself unpublished: its
+  ## pre-push gate then refuses it over the pushed repo's unpublished HEAD, so
+  ## "publish the sibling first" is proven not to work.
+  view.known and view.selfHeadUnpublished and siblingHeadUnpublished and
+    sibling.len > 0 and sibling != view.selfName and
+    view.selfName in developSetClosure(view.repos, sibling)
+
+proc pinDefersToMutualPin(view: PushCycleView; identity: GitToolIdentity;
+    sibling, siblingDir, pinnedRev: string;
+    ahead, siblingHeadUnpublished: bool): bool =
+  ## The ONE pin disagreement a committed-lock stage defers instead of
+  ## refusing. All of:
+  ##
+  ##   * `ahead` — the pin is an ancestor of the sibling's HEAD, so the
+  ##     published lock is merely OLDER than what was built against, never a
+  ##     different line of history (diverged) or a downgrade (behind);
+  ##   * the sibling awaits this push (``siblingAwaitsThisPush``);
+  ##   * the PINNED revision is itself published, so the lock this push
+  ##     publishes names content anybody can obtain. A pin that exists only in
+  ##     the local checkout is a lock nobody can reproduce, cycle or no cycle.
+  ahead and pinnedRev.len > 0 and
+    siblingAwaitsThisPush(view, sibling, siblingHeadUnpublished) and
+    not flakeClassifyPublication(identity, siblingDir, pinnedRev).unpublished
+
+proc mutualPinDeferralSentence(sibling, selfName, siblingDir, pinnedRev,
+    recordClause: string): string =
+  ## The shared body of a deferral notice: why the row is deferred and the
+  ## whole order that terminates, because the operator's next two steps are
+  ## not on this repo's screen. ``recordClause`` is the lock-specific last step.
+  "and that HEAD is unpublished — but '" & sibling & "' depends on '" &
+    selfName & "' (its develop closure contains it), so its own pre-push " &
+    "gate refuses it until this push lands, and no order publishes it first. " &
+    "The pinned revision " & shortRev(pinnedRev) & " IS published, so the " &
+    "lock this push publishes is reproducible. The order that terminates: " &
+    "publish this repo now; then publish '" & sibling &
+    "' (`repro push --current-repo=" & siblingDir & "`); then, on the next " &
+    "commit here, record its new revision — " & recordClause
+
+proc mutualPinBlockedSentence(sibling, selfName: string): string =
+  ## Why a refused row whose sibling awaits this push names no push of it.
+  "'" & sibling & "' depends on '" & selfName & "' and its HEAD is " &
+    "unpublished, so it cannot be published before this push (its own " &
+    "pre-push gate refuses it until '" & selfName & "' is published) — " &
+    "pushing it first is not a remedy, and neither is recording that " &
+    "unpublished revision here"
+
+proc verifyCommittedLockSiblingPins*(repoRoot: string;
+    workspaceRoot = ""):
+    tuple[examined, stale: bool; evidence, remediation, summary: string;
+          notices: seq[string]] =
   ## §13.5 — the pre-push stage for a committed ``repro.lock``. Refuses a pin
   ## that differs from the sibling checkout and a manifest-declared sibling
   ## the lock does not carry. A sibling that is not checked out is not
   ## refused: its committed pin is what CI builds.
+  ##
+  ## One disagreement is DEFERRED to a notice instead (§13.5 "Mutually pinned
+  ## siblings", ``pinDefersToMutualPin``): an ahead pin of an unpublished
+  ## sibling that depends on this repo, whose pinned revision is published.
+  ## ``workspaceRoot`` names the membership that question is asked against;
+  ## empty walks up from ``repoRoot``.
   let root = absolutePath(repoRoot)
   let lockPath = root / CommittedLockFileName
   if not fileExists(extendedPath(lockPath)): return
@@ -53100,22 +53215,76 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string):
     return
   result.examined = true
   let obs = observeCommittedLockSiblings(root, ld)
+  let pathBase = committedLockPathBase(root)
   var bad: seq[string] = @[]
+  var blocked: seq[string] = @[]
+  var refreshable = 0
+  # Resolved lazily — only a disagreeing row needs the membership or a
+  # publication probe, so a clean push pays nothing for the cycle rule.
+  var cycle: PushCycleView
+  var cycleResolved = false
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   for o in obs.observations:
     if o.pinned.len == 0 and o.declared:
       bad.add(o.name & " (" & o.path & "): declared in the develop set but " &
         "not pinned" & (if o.observed.len > 0: "; checkout at " & o.observed
                         else: ""))
+      inc refreshable
     elif o.observed.len > 0 and o.pinned.len > 0 and o.observed != o.pinned:
+      let dir = absolutePath(pathBase / o.path)
+      # The publication axis is asked of exactly the relations NF-2 asks it of
+      # (ahead and diverged): a behind sibling is published whenever its pin
+      # is, and unfetched/unknown rows have no direction to defer.
+      let headUnpublished = o.relation in {sprAhead, sprDiverged} and
+        flakeClassifyPublication(identity, dir, o.observed).unpublished
+      if headUnpublished and not cycleResolved:
+        cycle = pushCycleViewOf(root, workspaceRoot, identity)
+        cycleResolved = true
+      if pinDefersToMutualPin(cycle, identity, o.name, dir, o.pinned,
+          o.relation == sprAhead, headUnpublished):
+        result.notices.add("repro.lock pin DEFERRED, not refused: sibling '" &
+          o.name & "' (" & o.path & ") is " & $o.aheadBy & " commit(s) " &
+          "AHEAD of the revision repro.lock pins (pin " & shortRev(o.pinned) &
+          ", HEAD " & shortRev(o.observed) & "), " &
+          mutualPinDeferralSentence(o.name, cycle.selfName, dir, o.pinned,
+            "the pre-commit hook re-pins it, or run `repro lock refresh " &
+            root & "`") &
+          " [sibling=" & o.name & " pinned=" & o.pinned & " observed=" &
+          o.observed & " relation=ahead unpublished=true deferred=mutual-pin]")
+        continue
       bad.add(o.name & " (" & o.path & "): repro.lock pins " & o.pinned &
         ", checkout is at " & o.observed & " (" &
-        siblingPinRelationTag(o.relation) & ")")
+        siblingPinRelationTag(o.relation) & ")" &
+        (if headUnpublished: "; HEAD unpublished" else: ""))
+      if not siblingAwaitsThisPush(cycle, o.name, headUnpublished):
+        inc refreshable
+      else:
+        # The refresh named below would record that unpublished HEAD, which
+        # is exactly the unobtainable pin this rule exists not to publish.
+        blocked.add(mutualPinBlockedSentence(o.name, cycle.selfName) &
+          (if o.relation == sprDiverged:
+             ". Bring it onto its pin's line instead (`" &
+               pinRegressionSyncCommand(cycle.workspaceRoot, o.name) &
+               "`); it is then ahead of the pin and this stage defers it"
+           else:
+             ". The pinned revision " & shortRev(o.pinned) & " is itself " &
+               "not published: re-pin '" & o.name & "' to a revision that " &
+               "IS published (one reachable from its remote-tracking refs), " &
+               "commit, and re-push"))
   if bad.len == 0: return
   result.stale = true
   result.evidence = bad.join("; ")
-  result.remediation = "run `repro lock refresh " & root & "`, commit " &
-    "repro.lock, then re-push (the managed pre-commit hook re-pins siblings " &
-    "on every commit once it is installed: `repro hooks ensure --vcs`)"
+  # The refresh is named only when some offending row is one it can fix; a
+  # row whose sibling awaits this push gets its own sentence instead, because
+  # the refresh would record that sibling's unpublished HEAD.
+  var remedyParts: seq[string] = @[]
+  if blocked.len > 0: remedyParts.add(blocked.join(". ") & ".")
+  if refreshable > 0:
+    remedyParts.add("run `repro lock refresh " & root & "`, commit " &
+      "repro.lock, then re-push (the managed pre-commit hook re-pins " &
+      "siblings on every commit once it is installed: " &
+      "`repro hooks ensure --vcs`)")
+  result.remediation = remedyParts.join(" ")
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
 
@@ -60343,7 +60512,8 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
-proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
+proc manifestMembershipOf(repoRoot: string;
+    workspaceRootHint = ""): tuple[resolved: bool;
     workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string] =
   ## The enclosing workspace's resolved membership and the name it gives the
   ## repo at ``repoRoot``: the lookup ``manifestDevelopSiblings`` and the lock
@@ -60351,9 +60521,16 @@ proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
   ## same conditions ``manifestDevelopSiblings`` documents (no workspace, a
   ## workspace that is the repo itself, a membership that fails to resolve or
   ## does not contain this repo).
+  ##
+  ## ``workspaceRootHint`` is for a caller that has already been TOLD which
+  ## workspace it serves (the pre-push gate's ``--workspace-root``): it is used
+  ## instead of the upward walk, so the membership answered is the one the rest
+  ## of that caller's verdict was computed over.
   result = (false, "", @[], "")
   let root = committedLockPathBase(repoRoot)
-  let ws = enclosingWorkspaceRoot(root)
+  let ws =
+    if workspaceRootHint.len > 0: workspaceRootHint
+    else: enclosingWorkspaceRoot(root)
   if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
     return
   var repos: seq[ResolvedRepo]
@@ -60364,6 +60541,26 @@ proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
   for r in repos:
     if cmpPaths(absolutePath(ws / r.path), root) == 0:
       return (true, absolutePath(ws), repos, r.name)
+
+proc pushCycleViewOf(repoRoot, workspaceRoot: string;
+    identity: GitToolIdentity): PushCycleView =
+  ## The membership the mutual-pin rule (``pinDefersToMutualPin``) is asked
+  ## against: the gate's own ``--workspace-root`` when it has one, so the answer
+  ## is computed over the same workspace as the rest of its verdict.
+  let membership = manifestMembershipOf(repoRoot, workspaceRoot)
+  result = PushCycleView(
+    known: membership.resolved and membership.selfName.len > 0,
+    selfName: membership.selfName, workspaceRoot: membership.workspaceRoot,
+    repos: membership.repos)
+  if not result.known: return
+  # The pushed repo's HEAD, asked with the same publication probe as the
+  # sibling's. A HEAD that cannot be read leaves the flag false, so the
+  # deferral is not granted on an unproven premise.
+  let head = gitRunPlain(identity,
+    ["-C", absolutePath(repoRoot), "rev-parse", "--verify", "HEAD"])
+  if head.code == 0 and head.output.strip().len > 0:
+    result.selfHeadUnpublished = flakeClassifyPublication(identity,
+      absolutePath(repoRoot), head.output.strip()).unpublished
 
 proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
     workspaceRoot: string; siblings: seq[ResolvedRepo]] =
@@ -61927,16 +62124,20 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # or a sibling moved after the commit.
   if parsed.currentRepo.len > 0:
     var pins: tuple[examined, stale: bool;
-                    evidence, remediation, summary: string]
+                    evidence, remediation, summary: string;
+                    notices: seq[string]]
     try:
-      pins = verifyCommittedLockSiblingPins(parsed.currentRepo)
+      pins = verifyCommittedLockSiblingPins(parsed.currentRepo,
+        parsed.workspaceRoot)
     except CatchableError as err:
       pins = (examined: true, stale: true,
         evidence: "committed-lock-verify-failed: " & err.msg,
         remediation: "investigate the repro.lock verification failure (" &
           err.msg & "), then re-push",
         summary: "repro.lock could not be verified against the sibling " &
-          "checkouts: " & err.msg)
+          "checkouts: " & err.msg, notices: newSeq[string]())
+    # A deferred mutual pin (§13.5) is said out loud even when the stage passes.
+    for n in pins.notices: result.notices.add(n)
     if pins.stale:
       result.failures.add(CheckFailure(
         repo: currentRepoPath,
@@ -63236,27 +63437,91 @@ proc parsePushArgs(args: openArray[string]): PushArgs =
     result.syncMode = psmMerge
   elif not wantSync and not explicitFlavor:
     result.syncMode = psmNone
-  if result.workspaceRoot.len == 0:
-    # Same walk as the gate: key on the WORKSPACE, not on a ``.repro/``
-    # directory a built repo carries of its own.
-    if result.currentRepo.len > 0:
-      result.workspaceRoot = enclosingWorkspaceRoot(result.currentRepo)
-      if result.workspaceRoot.len == 0:
-        result.workspaceRoot = enclosingReproShell(result.currentRepo)
-    if result.workspaceRoot.len == 0:
-      result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  # The pushed repo is resolved FIRST, and the workspace is found by walking
+  # up from it — the walk the managed hook makes for the gate
+  # (``parseCheckArgs``), so the closure this command orders and the scope its
+  # own hooks enforce are computed over the SAME workspace.
+  #
+  # They used not to be. With no ``--current-repo`` the workspace root fell
+  # back to the bare current directory, and a repo carrying its own committed
+  # ``repro.lock`` IS a workspace marker (MO-2). So `repro push` typed inside
+  # `codetracer` resolved `codetracer` as a standalone workspace whose
+  # membership came from codetracer's committed lock — 25 repos, `reprobuild`
+  # not among them — while the hook fired by its own `git push` walked up to the
+  # real workspace, whose 37-repo closure does contain `reprobuild` (through
+  # `nim-shm-queue`). The command published nothing and the gate refused over a
+  # repo the command had never considered (reprobuild-pm issue
+  # 2026-10-15-codetracer-and-reprobuild-pre-push-gates-deadlock-…; CLI/push.md
+  # §"The closure is what the gate requires published").
+  #
+  # The default pushed repo is the root of the git worktree containing the
+  # current directory, not the directory itself: closure seeding matches a
+  # declared repo by its path, and from a subdirectory that match would fail
+  # and widen the push to the whole workspace.
   if result.currentRepo.len == 0:
-    result.currentRepo = getCurrentDir()
+    let top = gitTopLevel(getCurrentDir())
+    result.currentRepo = if top.len > 0: top else: getCurrentDir()
   result.currentRepo = absolutePath(result.currentRepo)
+  if result.workspaceRoot.len == 0:
+    # Key on the WORKSPACE, not on a ``.repro/`` directory a built repo
+    # carries of its own.
+    result.workspaceRoot = enclosingWorkspaceRoot(result.currentRepo)
+    if result.workspaceRoot.len == 0:
+      result.workspaceRoot = enclosingReproShell(result.currentRepo)
+    if result.workspaceRoot.len == 0:
+      result.workspaceRoot = result.currentRepo
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc developOverrideRepoNames(workspaceRoot: string;
+    repos: seq[ResolvedRepo]): seq[string] =
+  ## The declared workspace repos that ``.repro/develop-overrides.toml`` points
+  ## at, in override order and de-duplicated.
+  ##
+  ## The pre-push gate's stage 3 refuses over EVERY override entry that is
+  ## dirty or unpublished — the whole file, not only the entries inside the
+  ## pushed repo's ``depends`` closure — so `repro push` has to publish those
+  ## too, or the command whose job is to satisfy the gate cannot (CLI/push.md
+  ## §"The closure is what the gate requires published"). An override is matched
+  ## to a repo by its SOURCE PATH, because that is the checkout the gate
+  ## inspects; the ``package`` name of an override need not be a repo name.
+  ##
+  ## An override that is not a declared repo is NOT returned: it has no
+  ## manifest remote to publish to, so this command cannot discharge it and
+  ## the gate's refusal (which names the path) stays the remedy. An unreadable
+  ## override file contributes nothing here for the same reason — the gate
+  ## itself refuses over the parse error and names it, which is the better
+  ## place for that diagnostic than a second copy of it from this command.
+  var overrides: Option[DevelopOverrides]
+  try:
+    overrides = readDevelopOverridesFile(workspaceRoot)
+  except CatchableError:
+    return
+  if overrides.isNone:
+    return
+  for entry in listOverrides(overrides.get()):
+    let sourcePath =
+      if isAbsolute(entry.local_path): entry.local_path
+      else: absolutePath(workspaceRoot / entry.local_path)
+    for repo in repos:
+      if sameFilesystemPath(workspaceRoot / repo.path, sourcePath):
+        if repo.name notin result:
+          result.add(repo.name)
+        break
 
 proc topoSortClosure(repos: seq[ResolvedRepo];
-                     closure: HashSet[string]): seq[string] =
+                     closure: HashSet[string];
+                     extraDepends: Table[string, seq[string]] =
+                       initTable[string, seq[string]]()): seq[string] =
   ## Kahn topological sort of the closure over the per-repo ``depends``
   ## edges, DEPENDENCY-FIRST: a repo is emitted only after every dependency
   ## it names (that is also in the closure) has been emitted. This is the
   ## load-bearing guarantee of ``repro push`` — a dependent is NEVER pushed
   ## before its dependency (CLI/push.md High-Level Rules).
+  ##
+  ## ``extraDepends`` adds edges the manifest does not declare but the gate
+  ## enforces: each member of the pushed repo's closure "depends on" every
+  ## develop override `repro push` brought in, because each member's own gate
+  ## refuses until that override is published (``developOverrideRepoNames``).
   ##
   ## Edges are restricted to the closure (an out-of-closure ``depends``
   ## target cannot gate a member). Ties are broken by declaration order so
@@ -63276,7 +63541,10 @@ proc topoSortClosure(repos: seq[ResolvedRepo];
   for name in declOrder:
     indeg[name] = 0
   for name in declOrder:
-    for dep in byName[name].depends:
+    var deps = byName[name].depends
+    for extra in extraDepends.getOrDefault(name):
+      if extra notin deps: deps.add(extra)
+    for dep in deps:
       if dep.len > 0 and dep in byName:
         inc indeg[name]
         dependents.mgetOrPut(dep, @[]).add(name)
@@ -64176,9 +64444,33 @@ proc executePush(args: PushArgs): PushReport =
         pushedRepoName = repo.name
         break
 
+  # The closure is everything this push's own gate will require to be
+  # published ALREADY (CLI/push.md §"The closure is what the gate requires
+  # published"): the gate's stage-2 scope (the ``depends`` closure, computed by
+  # the same ``developSetClosure``) plus every develop override that is a
+  # declared repo (stage 3 checks the whole override file). An override comes
+  # in with its own ``depends`` closure, because its gate checks that closure
+  # when it is pushed.
+  #
+  # It is ordered before EVERY member of the pushed repo's closure, not only
+  # before the pushed repo: stage 3 is workspace-wide, so each member's own
+  # pre-push gate refuses while the override is unpublished. (Members the
+  # override itself depends on are the exception — they must go first, and
+  # ``developSetClosure`` already puts them in the override's own closure.)
   var closure: HashSet[string]
+  var extraDepends = initTable[string, seq[string]]()
   if pushedRepoName.len > 0:
     closure = developSetClosure(resolved.repos, pushedRepoName)
+    let dependsClosure = closure
+    for name in developOverrideRepoNames(args.workspaceRoot, resolved.repos):
+      if name in dependsClosure:
+        continue
+      let overrideClosure = developSetClosure(resolved.repos, name)
+      for member in overrideClosure:
+        closure.incl(member)
+      for member in dependsClosure:
+        if member notin overrideClosure:
+          extraDepends.mgetOrPut(member, @[]).add(name)
   else:
     # No single trunk repo resolves (a ``repro push <project>`` whose project
     # name is not also a repo name, or a cwd outside any declared repo): the
@@ -64191,7 +64483,7 @@ proc executePush(args: PushArgs): PushReport =
       result.closure.add(repo.name)
 
   # Topological (dependency-first) push order over ``depends``.
-  result.order = topoSortClosure(resolved.repos, closure)
+  result.order = topoSortClosure(resolved.repos, closure, extraDepends)
 
   var byName = initTable[string, ResolvedRepo]()
   for repo in resolved.repos:
@@ -84827,6 +85119,43 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     result.failure = "flake-lock error: " & err.msg
 
 
+# Mutually pinned siblings, `flake.lock` half (Nix-Flake-Coexistence.md §3.1a).
+# The rule itself is ``pinDefersToMutualPin``, shared with the `repro.lock`
+# stage; these wrappers only map a flake row onto it.
+
+proc flakeSiblingAwaitsThisPush(view: PushCycleView;
+    row: FlakeOverrideStateRow): bool =
+  ## ``row.unpublished`` is only ever set on ahead/diverged rows
+  ## (``flakeAnnotatePublication``), so behind/unfetched/unknown rows — whose
+  ## remedies move the CHECKOUT, not the remote — are never cyclic here.
+  siblingAwaitsThisPush(view, row.repo, row.unpublished)
+
+proc flakeRowIsDeferredCycle(view: PushCycleView; row: FlakeOverrideStateRow;
+    identity: GitToolIdentity): bool =
+  ## Rev-pinned inputs are deferred on the same terms: the `flake.nix` edit
+  ## their refusal would otherwise name moves the pin to the same unpublished
+  ## revision the refresh declines to record.
+  pinDefersToMutualPin(view, identity, row.repo, row.path, row.pinnedRev,
+    row.relation == fprAhead, row.unpublished)
+
+proc flakeDeferredCycleNotice(row: FlakeOverrideStateRow; selfName,
+    declaredRev, flakeRoot, workspaceRoot: string): string =
+  ## The notice for a deferred flake row.
+  let record =
+    if declaredRev.len > 0:
+      "in flake.lock; the input is pinned BY REVISION, so " &
+        flakeRevPinEditRemedy(declaredRev, row.siblingRev, flakeRoot)
+    else:
+      "in flake.lock; the pre-commit refresh records it once that revision " &
+        "is published, or run `" &
+        flakeRefreshLockCommand(flakeRoot, workspaceRoot) & "`"
+  "flake.lock pin DEFERRED, not refused: " & flakeRowSentence(row) & ", " &
+    mutualPinDeferralSentence(row.repo, selfName, row.path, row.pinnedRev,
+      record) &
+    " [input=" & row.input & " repo=" & row.repo & " pinned=" & row.pinnedRev &
+    " sibling=" & row.siblingRev & " relation=ahead ahead=" & $row.aheadBy &
+    " unpublished=true deferred=mutual-pin]"
+
 proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     identity: GitToolIdentity;
     toolProvisioning: ToolProvisioningMode): FlakeGateVerdict =
@@ -84979,6 +85308,21 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     # says something else. The counts are still in the structured verdict for
     # anyone who asks.
     return
+  # §3.1a — set aside the one disagreement this gate defers. The membership is
+  # resolved only now, when there IS a disagreement to classify, so a clean push
+  # pays nothing for it.
+  let declaredRevs = flakeLockDeclaredRevisions(lockText)
+  let cycle = pushCycleViewOf(flakeRoot, workspaceRoot, identity)
+  var refused: seq[FlakeOverrideStateRow]
+  for row in offenders:
+    if flakeRowIsDeferredCycle(cycle, row, identity):
+      result.notices.add(flakeDeferredCycleNotice(row, cycle.selfName,
+        declaredRevs.getOrDefault(row.input, ""), flakeRoot, workspaceRoot))
+    else:
+      refused.add(row)
+  offenders = refused
+  if offenders.len == 0:
+    return
   result.stale = true
   for n in skipped: result.notices.add(n)
   var sentences: seq[string]
@@ -85037,11 +85381,34 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # a file that is already correct. An UNPUBLISHED rev-pinned row needs BOTH:
   # the publishing push still has to happen, and the refresh that follows it
   # would still decline, so the push is kept and the refresh is replaced.
-  let declaredRevs = flakeLockDeclaredRevisions(lockText)
+  #
+  # AND never a push this gate's own evidence proves blocked (§3.1a). A refused
+  # row whose sibling depends on the pushed repo and is unpublished cannot be
+  # published first — its gate refuses it over THIS repo — so its push is not
+  # named, nor is a rev-pin edit or refresh that would record that same
+  # unpublished revision. What is named instead is the step that can run: a
+  # diverged sibling is brought onto its pin's line (after which the row is
+  # ahead and deferred); an ahead sibling whose PIN is unpublished needs the
+  # pin itself moved to a published revision, which only the author can pick.
   let refreshCommand = flakeRefreshLockCommand(flakeRoot, workspaceRoot)
   var remedies: seq[string]
   var edits: seq[string]
+  var blocked: seq[string]
   for row in offenders:
+    if flakeSiblingAwaitsThisPush(cycle, row):
+      let why = mutualPinBlockedSentence(row.repo, cycle.selfName)
+      if row.relation == fprDiverged:
+        blocked.add(why & ". Bring it onto its pin's line instead; it is then " &
+          "ahead of the pin and this gate defers it")
+        let sync = pinRegressionSyncCommand(workspaceRoot, row.repo)
+        if sync notin remedies: remedies.add(sync)
+      else:
+        blocked.add(why & ". The pinned revision " & shortRev(row.pinnedRev) &
+          " is itself not published, so the lock this push would publish " &
+          "names content nobody can obtain: re-pin '" & row.input &
+          "' to a revision of '" & row.repo & "' that IS published (one " &
+          "reachable from its remote-tracking refs), commit, and re-push")
+      continue
     let declaredRev = declaredRevs.getOrDefault(row.input, "")
     let authorPinned = declaredRev.len > 0 and
       declaredRev != row.siblingRev and
@@ -85057,6 +85424,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   result.remediation = sentences.join("; ") &
     " — flake.lock is an IN-TREE committed lock, so this gate verifies it " &
     "and never writes it." &
+    (if blocked.len > 0: " " & blocked.join(". ") & "." else: "") &
     (if edits.len > 0: " " & edits.join(". ") & "." else: "") &
     (if remedies.len > 0:
        " From " & flakeRoot & " run: `" & remedies.join("` and `") &
