@@ -200,7 +200,8 @@ io-mon=f33311ea06be5fe1569172ade9a6cd27b480e9af
 # resumed mid-injection (it is waited for, and past a hard deadline the spawn
 # fails cleanly). 5125869 is an ancestor of 72f5782.
 # Match the shared SIP resolver used by the engine and monitor shim.
-nim-stackable-hooks=3af63afc5c0b55a27fc5e0a26f3a32833caf8873
+# Moved 3af63afc -> ff7eb18 (2026-10-16) with `nim-stackable-hooks-src`.
+nim-stackable-hooks=ff7eb18af166f9355c5e62bf1434ba5f9fd2c99e
 runquota=dev
 nim-shm-queue=5a8e43b52fa202859658692c9f8432967f3971ea
 nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27

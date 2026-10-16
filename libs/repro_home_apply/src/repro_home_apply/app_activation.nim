@@ -15,31 +15,14 @@
 ## ``home.package.<id>.bin`` PATH resources of ``env_binding``, the
 ## ``home.package.`` namespace is reserved for synthesized resources.
 
-import std/strutils
 
 import repro_home_resources
 
 import ./realize
 
-const
-  AppBundleAddressPrefix = "home.package."
-  AppBundleAddressSuffix = ".app"
-
-proc appBundleAddress*(packageId: string): string =
-  ## The resource address of ``packageId``'s placed application bundle.
-  AppBundleAddressPrefix & packageId & AppBundleAddressSuffix
-
-proc packageIdOfAppBundleAddress*(address: string): string =
-  ## The inverse of ``appBundleAddress``; "" for any other address. Rollback
-  ## uses it to find the package whose store prefix holds the bundle to
-  ## re-place.
-  if address.startsWith(AppBundleAddressPrefix) and
-      address.endsWith(AppBundleAddressSuffix) and
-      address.len > AppBundleAddressPrefix.len + AppBundleAddressSuffix.len:
-    address[AppBundleAddressPrefix.len ..< address.len -
-      AppBundleAddressSuffix.len]
-  else:
-    ""
+# The address helpers (`appBundleAddress`, `packageIdOfAppBundleAddress`)
+# live in `repro_home_resources/concerns`, beside the concern classification
+# that reads the same namespace.
 
 proc appBundleActivationResource*(record: RealizedRecord;
                                   applicationsDir: string): Resource =

@@ -41,6 +41,21 @@ Cases:
 - `compile-time` — a `when defined(macosx)` in `resources:`: exported on
   Linux, the darwin targets are `differs` and must be refused; the Linux and
   Windows targets are evaluated.
+- `concerns` (GM7) — `hosts:` entries in block form: `m1` declares
+  `applies: [applications, environment]`, `server` declares
+  `applies: [packages]`, `home-pc` declares nothing. The export carries
+  `intent.hostApplies` and the `concerns` classification, including the
+  per-system package classification (`concerns.packages`): `gm7app`, defined
+  by the fixture catalog `reprobuild-packages/` beside the profile as a disk
+  image, is an application on the darwin targets only. The declaring hosts'
+  evaluations carry `applies` and each package's `concern` / `resolved`; the
+  Home Manager module's switches default to the complement of the
+  declaration and packages are routed by their concern (`lib-home-manager`);
+  `lib-intent-ifd` exports the profile in the build sandbox with the fixture
+  catalog as `packagesCatalog`. Runtime predicates only: every platform
+  `same`. Exported on aarch64-darwin (m1) with `$REPROBUILD_PACKAGES_ROOT`
+  pointing at the fixture catalog; `--check` and the evaluations do not
+  depend on the exporting platform.
 
 The snapshots are produced on x86_64-linux. `export.json`'s `provenance`
 records the producing `repro`; `--check` never compares provenance, so a
