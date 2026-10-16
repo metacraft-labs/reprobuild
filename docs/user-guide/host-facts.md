@@ -66,6 +66,11 @@ Every entry has a **logical id** both sides can produce:
   change to either configuration.
 - **`uncategorized`** entries are ones no category covers (dconf keys, user
   defaults, VS Code extensions, …). They are listed and never compared.
+- **`concerns`** (Reprobuild side only, informational): `{ "declared": true,
+  "applied": ["applications"] }` when the host's `hosts:` entry declares which
+  concerns Reprobuild applies, `declared: false` and every concern otherwise.
+  The categories always describe everything Reprobuild *would* apply, so a
+  concern can be measured before the declaration hands it to Reprobuild.
 
 ## The Reprobuild side: `repro home facts`
 
@@ -133,7 +138,11 @@ Give one document of each side for the same host and system; the order does
 not matter. For every category the report lists each id as `same`,
 `only-in-nix`, `only-in-reprobuild` or `different` (naming the differing
 fields with both values), then the unmapped entries; uncategorized entries are
-listed at the end. The text form counts `same` entries (`--show-same` lists
+listed at the end. When the Reprobuild document says its host declares the
+concerns Reprobuild applies, each category line ends with the side that
+applies it there (`-- applied by reprobuild on m1`, `nix`, or for packages
+`split (applications: reprobuild, packages: nix)`), and the JSON form carries
+it as `owner`; it never changes a verdict. The text form counts `same` entries (`--show-same` lists
 them); the JSON form lists everything.
 
 Exit status: **0** — no difference outside the allowlist and no stale

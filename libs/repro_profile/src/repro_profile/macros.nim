@@ -71,6 +71,7 @@ import ./predicates
 import ./emit
 import ./data_refs
 import ./catalog_refs
+import ./concerns
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -490,9 +491,57 @@ proc parseConfigSection(body: NimNode; profileVar: NimNode): NimNode =
           body)
   result = rewriteConfigBody(body, profileVar)
 
+proc hostsNameList(listSrc: NimNode; what: string): seq[string] =
+  ## A `[a, b]` list of identifiers / string literals, as written after a
+  ## host name or after `activities:` / `applies:`. `what` names the list in
+  ## the diagnostics.
+  var listNode: NimNode
+  case listSrc.kind
+  of nnkStmtList:
+    if listSrc.len != 1:
+      error("hosts " & what & " must be a single bracket list", listSrc)
+    listNode = listSrc[0]
+  else:
+    listNode = listSrc
+  if listNode.kind notin {nnkBracket, nnkPrefix}:
+    error("hosts " & what & " must be a `[name1, name2]` bracket list",
+          listNode)
+  let items = if listNode.kind == nnkPrefix and listNode.len == 2 and
+                   listNode[1].kind == nnkBracket: listNode[1]
+              else: listNode
+  if items.kind != nnkBracket:
+    error("hosts " & what & " must be a `[name1, name2]` bracket list",
+          listNode)
+  for item in items:
+    case item.kind
+    of nnkIdent: result.add $item
+    of nnkStrLit: result.add item.strVal
+    else:
+      error("hosts " & what & " entry must be an identifier or string " &
+            "literal", item)
+
+proc isHostsBlockForm(value: NimNode): bool =
+  ## Whether a host entry's value is the block form (`activities:` /
+  ## `applies:` lines) rather than the one-line `[activities]` list.
+  value.kind == nnkStmtList and value.len > 0 and
+    value[0].kind in {nnkCall, nnkCommand} and value[0].len == 2 and
+    value[0][0].kind == nnkIdent
+
 proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
-  ## `hosts:` body is a list of `"hostname": [activity1, activity2]`
-  ## entries.
+  ## `hosts:` body is a list of host entries, each either
+  ##
+  ##   "hostname": [activity1, activity2]
+  ##
+  ## or the block form, which can also say which concerns Reprobuild applies
+  ## on the host (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+  ## apply):
+  ##
+  ##   "hostname":
+  ##     activities: [activity1, activity2]   # omitted: `default` only
+  ##     applies: [applications]              # omitted: every concern
+  ##
+  ## An unknown key, a repeated key, an unknown concern and a concern named
+  ## twice are compile errors naming the host.
   result = newNimNode(nnkStmtList)
   if body.kind != nnkStmtList:
     error("hosts: expects an indented block of host -> activity-list " &
@@ -507,29 +556,37 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
     else:
       error("hosts entry key must be a string literal or identifier",
             entry[0])
-    let listSrc = entry[1]
-    var activitySeq: NimNode
-    case listSrc.kind
-    of nnkStmtList:
-      if listSrc.len != 1:
-        error("hosts entry body must be a single bracket list", listSrc)
-      activitySeq = listSrc[0]
-    else:
-      activitySeq = listSrc
-    if activitySeq.kind notin {nnkBracket, nnkPrefix}:
-      error("hosts entry value must be a `[activity1, activity2]` " &
-            "bracket list", activitySeq)
     var actNames: seq[string] = @[]
-    let actNode = if activitySeq.kind == nnkPrefix and activitySeq.len == 2 and
-                       activitySeq[1].kind == nnkBracket: activitySeq[1]
-                  else: activitySeq
-    for item in actNode:
-      case item.kind
-      of nnkIdent: actNames.add $item
-      of nnkStrLit: actNames.add item.strVal
-      else:
-        error("hosts activity list entry must be an identifier or " &
-              "string literal", item)
+    var applies: seq[string] = @[]
+    var hasApplies = false
+    let value = entry[1]
+    if isHostsBlockForm(value):
+      var seenKeys: seq[string] = @[]
+      for item in value:
+        if item.kind notin {nnkCall, nnkCommand} or item.len != 2 or
+            item[0].kind != nnkIdent:
+          error("hosts entry \"" & hostName & "\": expected " &
+                "`activities: [...]` or `applies: [...]`", item)
+        let key = $item[0]
+        if key in seenKeys:
+          error("hosts entry \"" & hostName & "\": `" & key &
+                ":` is given twice", item)
+        seenKeys.add key
+        case key
+        of "activities":
+          actNames = hostsNameList(item[1], "entry `activities:`")
+        of "applies":
+          hasApplies = true
+          applies = hostsNameList(item[1], "entry `applies:`")
+          let problem = concernListProblem(applies)
+          if problem.len > 0:
+            error("hosts entry \"" & hostName & "\": applies: " & problem,
+                  item)
+        else:
+          error("hosts entry \"" & hostName & "\": unknown key `" & key &
+                ":` (expected `activities:` or `applies:`)", item)
+    else:
+      actNames = hostsNameList(value, "entry value")
     let hostLit = newStrLitNode(hostName)
     var addCalls = newNimNode(nnkStmtList)
     let tmpSym = genSym(nskVar, "hostActs")
@@ -541,6 +598,16 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
         `tmpSym`.add `aLit`
     addCalls.add quote do:
       `profileVar`.hosts[`hostLit`] = `tmpSym`
+    if hasApplies:
+      let appliesSym = genSym(nskVar, "hostApplies")
+      addCalls.add quote do:
+        var `appliesSym`: seq[string] = @[]
+      for c in applies:
+        let cLit = newStrLitNode(c)
+        addCalls.add quote do:
+          `appliesSym`.add `cLit`
+      addCalls.add quote do:
+        `profileVar`.hostApplies[`hostLit`] = `appliesSym`
     let blk = newNimNode(nnkBlockStmt)
     blk.add newEmptyNode()
     blk.add addCalls
