@@ -15921,6 +15921,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim",
+    binary: "build/test-bin/t_suite_artifact_generator_refuses_arguments_it_cannot_honour",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_switch_mainline_and_fetch.nim",
     binary: "build/test-bin/t_switch_mainline_and_fetch",
     defines: @[],
