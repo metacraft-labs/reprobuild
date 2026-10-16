@@ -2086,7 +2086,7 @@ tests/unit/t_tarball_mode_falls_through_to_from_source.nim	nim	5
 tests/unit/t_tarball_non_redistributable.nim	nim	4
 tests/unit/t_tarball_provisioning_edges.nim	nim	8
 tests/unit/t_tarball_prune_paths.nim	nim	3
-tests/unit/t_tarball_refuses_binary_host_cannot_start.nim	nim	4
+tests/unit/t_tarball_refuses_binary_host_cannot_start.nim	nim	7
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
