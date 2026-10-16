@@ -1087,6 +1087,86 @@ proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
       return companionDigest
   fileDigestHex(sourceExe)
 
+type ForeignEngineVerdict* = object
+  ## What `foreignEngineVerdict` found. `decline` is true only when a
+  ## mismatch is PROVEN; the two digests are carried for the decline's
+  ## payload and the daemon log.
+  decline*: bool
+  requestImageHash*: string
+  daemonImageHash*: string
+
+proc foreignEngineVerdict*(config: UserDaemonConfig;
+                           requestPublicCliPath, daemonRunningHash: string):
+    ForeignEngineVerdict =
+  ## Whether a build or watch request was sent for an engine OTHER than the
+  ## one this daemon is running, and must therefore be declined.
+  ##
+  ## WHY THE CLIENT'S OWN CHECK IS NOT ENOUGH. `startUserDaemon` compares the
+  ## daemon's running-image digest with the client's engine and restarts a
+  ## daemon that differs. But every checkout on a host shares ONE per-user
+  ## endpoint, and that check runs before the request is sent. A second
+  ## workspace whose reprobuild is a different build runs the same check
+  ## against the same endpoint, finds the daemon "outdated" from its side, and
+  ## restarts it onto its own engine. A request sent in between is served by
+  ## that other engine, which then reads THIS checkout's build state -- and an
+  ## interface artifact written in a newer envelope version than it knows
+  ## fails the build with `unsupported interface envelope version`
+  ## (reprobuild-pm issue 2026-10-16, shared-daemon dry-run). No client-side
+  ## check can close the window, because the daemon can always be swapped
+  ## after it. The request, however, names the engine it was sent for
+  ## (`publicCliPath`), so the daemon can close it at the only point that
+  ## is not racy: when it holds the request.
+  ##
+  ## THE SAME COMPARISON AS `startUserDaemon`, on purpose: the request's image
+  ## through the memoized `cachedImageDigestHex` (which the client has
+  ## normally just warmed for exactly this path, so this is a stat and a
+  ## small read rather than a hash of the whole image), against the
+  ## daemon's `runningHash`. A request that passed the client's check against
+  ## an un-swapped daemon therefore always passes this one.
+  ##
+  ## FAIL SAFE, LIKE `startUserDaemon`: an empty, relative or missing path
+  ## (an older client, or an engine deleted since) or an unavailable digest
+  ## proves nothing, and the request is served as before.
+  result.daemonImageHash = daemonRunningHash
+  if requestPublicCliPath.len == 0 or not isAbsolute(requestPublicCliPath) or
+      not fileExists(requestPublicCliPath) or daemonRunningHash.len == 0:
+    return
+  result.requestImageHash = cachedImageDigestHex(config, requestPublicCliPath)
+  result.decline = result.requestImageHash.len > 0 and
+    result.requestImageHash != daemonRunningHash
+
+proc foreignEngineDeclineEvent(command, runId, projectRoot,
+                               requestPublicCliPath, daemonImagePath: string;
+                               verdict: ForeignEngineVerdict):
+    UserDaemonBuildEvent =
+  ## The single terminal event that declines a foreign engine's request:
+  ## unsupported, fallback allowed. Both clients already treat that as "run
+  ## it yourself": the full CLI's `runDaemonBuild` / watch path fall back to
+  ## a direct run, and the thin client hands over to its engine, whose own
+  ## `startUserDaemon` then restarts the daemon onto the matching image. So
+  ## the decline costs the race's loser one direct build; serving it cost a
+  ## wrong answer.
+  UserDaemonBuildEvent(
+    schemaId: BuildEventSchemaId,
+    schemaVersion: BuildEventSchemaVersion,
+    eventId: 1'u64,
+    occurredAtUnixMs: nowUnixMs(),
+    runId: runId,
+    projectRoot: projectRoot,
+    command: command,
+    kind: bekUnsupported,
+    severity: "warning",
+    message: "daemon-hosted " & command & " declined: the request was sent " &
+      "for engine " & requestPublicCliPath & " (" & verdict.requestImageHash &
+      ") but this repro-daemon runs " & daemonImagePath & " (" &
+      verdict.daemonImageHash & "); another reprobuild build sharing this " &
+      "endpoint restarted it",
+    terminal: true,
+    exitCode: 64,
+    payloadJson: "{\"fallbackAllowed\":true,\"reason\":\"engine-mismatch\"," &
+      "\"requestImageHash\":\"" & verdict.requestImageHash & "\"," &
+      "\"daemonImageHash\":\"" & verdict.daemonImageHash & "\"}")
+
 proc writeSessionRecord*(config: UserDaemonConfig; session: UserDaemonSession) =
   ## Exported for `t_daemon_active_session_tally.nim`. It is the daemon's
   ## SINGLE write funnel for session records -- creation and every state
@@ -2386,16 +2466,42 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
         "repro-daemon development restart is in progress; retry by run id " &
         "after reconnect where supported"))
       return
-    handleBuildRequest(socket, config, parseBuildRequestBody(frame.body),
-      sessions)
+    let request = parseBuildRequestBody(frame.body)
+    # Before the request is accepted, and before anything (the parent
+    # prewarm included) reads its project: a request sent for another
+    # engine is declined here, with no session record, because no session
+    # ever ran. See `foreignEngineVerdict` for why only the daemon can do it.
+    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+      devRestart.runningHash)
+    if verdict.decline:
+      logLine(config.logPath, "build request declined reason=engine-mismatch" &
+        " request-image=" & request.publicCliPath & " request-hash=" &
+        verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
+      socket.writeFrame(udkBuildEvent, buildEventBody(
+        foreignEngineDeclineEvent("build", request.runId, request.projectRoot,
+          request.publicCliPath, devRestart.runningImagePath, verdict)))
+      return
+    handleBuildRequest(socket, config, request, sessions)
   of udkWatchStartRequest:
     if devRestart.restartPending:
       socket.writeFrame(udkError, errorBody(
         "repro-daemon development restart is in progress; retry by run id " &
         "after reconnect where supported"))
       return
-    handleWatchStart(socket, config, parseWatchRequestBody(frame.body),
-      sessions)
+    let request = parseWatchRequestBody(frame.body)
+    # Same decline as a build request, for the same reason: every watch
+    # cycle is a build run by this daemon's engine.
+    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+      devRestart.runningHash)
+    if verdict.decline:
+      logLine(config.logPath, "watch request declined reason=engine-mismatch" &
+        " request-image=" & request.publicCliPath & " request-hash=" &
+        verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
+      socket.writeFrame(udkWatchEvent, buildEventBody(
+        foreignEngineDeclineEvent("watch", request.runId, request.projectRoot,
+          request.publicCliPath, devRestart.runningImagePath, verdict)))
+      return
+    handleWatchStart(socket, config, request, sessions)
   of udkWatchAttachRequest:
     handleWatchAttach(socket, config, parseWatchSessionRequestBody(frame.body))
   of udkWatchStopRequest:
