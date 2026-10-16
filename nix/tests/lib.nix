@@ -115,7 +115,13 @@ let
         };
         case = "readData ${name}: ${e.host} @ ${e.system}";
       in
-      if hasResourceRows dir then
+      if e.undeclaredHost or false then
+        # A host the case's hosts: registry does not declare is refused, as
+        # the planner refuses it (hosts.nix; spec Open question 6).
+        expectTrue "${case} refuses the undeclared host" (
+          contains "host `${e.host}` is not declared in the profile's hosts: registry" (r.error or "")
+        )
+      else if hasResourceRows dir then
         # Resource rows are refused, never ignored (data.nix header).
         expectTrue "${case} refuses the resource rows" (contains resourceRefusal (r.error or ""))
       else
@@ -167,9 +173,13 @@ let
 
   # --- readIntent / evaluateExport -----------------------------------------
   intentRoot = root + "/tests/fixtures/intent-exports";
+  # The order `repro home export` refuses in: an undeclared host first (the
+  # export itself fails), then a target the document does not describe.
   evaluateOrRefuse =
     doc: system: host:
-    if reprobuildLib.internal.refusalReason doc system != null then
+    if reprobuildLib.internal.hostRefusalReason doc host != null then
+      { undeclaredHost = true; }
+    else if reprobuildLib.internal.refusalReason doc system != null then
       { refused = true; }
     else
       reprobuildLib.evaluateExport doc system host;
@@ -197,7 +207,7 @@ let
         expect "intent ${name}: ${host} @ ${system}" want (evaluateOrRefuse doc system host)
         # readIntent refuses (throws) exactly where the evaluation is refused.
         ++ expect "readIntent ${name}: ${host} @ ${system} refuses iff Reprobuild refused" (
-          want ? refused
+          want ? refused || want ? undeclaredHost
         ) viaReadIntent
       ) (attrNames expected.${host})
     ) (attrNames expected)

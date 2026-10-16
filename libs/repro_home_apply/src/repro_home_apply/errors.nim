@@ -21,6 +21,17 @@ type
     ## Step 1: could not parse `home.nim` or its predicate modules.
     profilePath*: string
 
+  EUndeclaredHost* = object of EApplyIntentLoad
+    ## The profile declares a `hosts:` registry and the selected host is not
+    ## in it. Refused rather than planned with `default` alone: a misspelt or
+    ## forgotten host would otherwise get a valid-looking, much smaller home
+    ## while the run reports success (Core-Invariants.md §Unrecognised Input
+    ## Is Rejected, Not Skipped; Gradual-Nix-To-Reprobuild-Migration.md Open
+    ## question 6). A host that should run `default` alone says so with an
+    ## entry naming only `default`.
+    host*: string
+    declaredHosts*: seq[string]
+
   EApplyConfigurableFinalize* = object of EHomeApply
     ## Step 2: configurable graph could not be resolved.
     configurableKey*: string

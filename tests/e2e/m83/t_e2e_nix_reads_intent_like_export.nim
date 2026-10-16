@@ -10,7 +10,10 @@
 ## * for every host (`m1`, `home-pc`, `server`) and every target system,
 ##   `repro home export --target` (Reprobuild's `evaluateHomeExport`) gives
 ##   exactly the committed `evaluations.json` entry -- an evaluation, packages
-##   sorted by name, or `{ "refused": true }` for exit 3;
+##   sorted by name, `{ "refused": true }` for exit 3, or
+##   `{ "undeclaredHost": true }` when the export refuses the host because the
+##   profile's `hosts:` registry does not name it (`server`; spec Open
+##   question 6, answered by GM8);
 ## * the Nix library, reading only `export.json`, evaluates every pair to the
 ##   same value and refuses exactly the refused ones (`nix eval` of this
 ##   checkout's `nix/lib`).
@@ -125,6 +128,9 @@ when defined(linux) or defined(macosx):
                 $r.exitCode & "\n" & r.stderr)
               if r.exitCode == 3:
                 evaluations[host][system] = %*{"refused": true}
+              elif r.exitCode == 1 and r.stderr.contains("is not declared " &
+                  "in the profile's hosts: registry"):
+                evaluations[host][system] = %*{"undeclaredHost": true}
               else:
                 require r.exitCode == 0
                 evaluations[host][system] =
@@ -166,13 +172,15 @@ when defined(linux) or defined(macosx):
             value = builtins.listToAttrs (map (system: {
               name = system;
               value =
-                if lib.internal.refusalReason doc system != null
+                if lib.internal.hostRefusalReason doc host != null
+                then { undeclaredHost = true; }
+                else if lib.internal.refusalReason doc system != null
                 then { refused = true; }
                 else lib.evaluateExport doc system host;
             }) args.systems);
           }) args.hosts)
           """, %*{"snapshot": snapshot, "hosts": Hosts, "systems": Systems})
-        var refused, evaluated = 0
+        var refused, evaluated, undeclared = 0
         for host in Hosts:
           for system in Systems:
             let want = evaluations[host][system]
@@ -181,16 +189,28 @@ when defined(linux) or defined(macosx):
             check nixResults[host][system] == want
             if want.hasKey("refused"):
               inc refused
+            elif want.hasKey("undeclaredHost"):
+              inc undeclared
             else:
               inc evaluated
 
-        # Vacuity.
+        # Vacuity. Where the case's profile declares a hosts: registry
+        # (`neutral`), `server` is undeclared: refused on every system, on
+        # both sides. The `compile-time` profile has no registry, so there
+        # `server` is evaluated with `default` alone -- the host-agnostic
+        # control.
         check evaluated > 0
+        if committedDoc["intent"]["hosts"].len > 0:
+          check undeclared == Systems.len
+          for system in Systems:
+            check evaluations["server"][system].hasKey("undeclaredHost")
+        else:
+          check undeclared == 0
         if name == "compile-time":
           check refused > 0
         else:
           check refused == 0
-          for host in Hosts:
+          for host in ["m1", "home-pc"]:
             let e = evaluations[host]["x86_64-linux"]
             check e["packages"].len > 0
             check e["resources"].len > 0

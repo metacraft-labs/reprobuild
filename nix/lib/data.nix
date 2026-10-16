@@ -37,7 +37,11 @@
 # Both implementations are tested against `tests/fixtures/data-files/`
 # (`t_data_file_row_selection_fixtures` for the planner, `lib-tests` and
 # `e2e_nix_reads_data_like_profile` for this file).
-{ predicate, platforms }:
+{
+  predicate,
+  platforms,
+  hostSelection,
+}:
 let
   inherit (builtins)
     attrNames
@@ -305,7 +309,15 @@ let
     }:
     let
       parsed = parseRows name (builtins.readFile path);
-      enabled = [ "default" ] ++ (if activities != null then activities else hosts.${host} or [ ]);
+      # With a `hosts:` map the planner's host rule applies, refusal of an
+      # undeclared host included (hosts.nix); `activities` is a selection
+      # already made (e.g. by readIntent).
+      undeclared = if activities != null then null else hostSelection.undeclaredHostReason hosts host;
+      enabled =
+        if activities != null then
+          [ "default" ] ++ activities
+        else
+          hostSelection.enabledActivities hosts host;
       selected = selectRows {
         inherit (parsed) rows;
         inherit system host;
@@ -314,6 +326,8 @@ let
     in
     if activities != null && hosts != { } then
       { error = "readData: pass either `hosts` or `activities`, not both"; }
+    else if undeclared != null then
+      { error = "readData: ${undeclared}"; }
     else if parsed ? error then
       parsed
     else
@@ -340,8 +354,9 @@ in
   # `path`: the data file. `system`: a target system (`x86_64-linux`, …,
   # `aarch64-windows`). `host`: the host name the guards' `host` is. The
   # enabled activities are `default` plus either `hosts.${host}` (the
-  # profile's `hosts:` map) or `activities` (e.g. a `readIntent` result's
-  # `evaluation.activities`). Returns `{ packages, names, rows, activities,
+  # profile's `hosts:` map; a non-empty map that does not name `host` is
+  # refused, as the planner refuses an undeclared host) or `activities`
+  # (e.g. a `readIntent` result's `evaluation.activities`). Returns `{ packages, names, rows, activities,
   # system, host }`: `packages` are the selected rows' `{ name, version,
   # binaries, activity }`, one per package, sorted by name; `rows` every
   # validated row. Throws with the planner's diagnostic for a file the

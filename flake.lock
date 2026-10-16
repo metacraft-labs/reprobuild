@@ -1247,17 +1247,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792128859,
-        "narHash": "sha256-r36JqRbIcJYb9WJu0lk49G5mEPRC3XD/hJQhG4Ilxv4=",
+        "lastModified": 1792136266,
+        "narHash": "sha256-0lKsgyRaMaho3TgPTrsk4B8Sy6yiLJ9+xhANi8auWXA=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "a4378d9400f209924cf6591d7c794654eb5f7906",
+        "rev": "f33311ea06be5fe1569172ade9a6cd27b480e9af",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "a4378d9400f209924cf6591d7c794654eb5f7906",
+        "rev": "f33311ea06be5fe1569172ade9a6cd27b480e9af",
         "type": "github"
       }
     },
@@ -2504,17 +2504,17 @@
     "reprobuild-nix-packages-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792046276,
-        "narHash": "sha256-0lddkYYj0X2muAiuiq5Wv2ZfuS837cQxYqFiJIWqQ0g=",
+        "lastModified": 1792132841,
+        "narHash": "sha256-X1dTtmSa73F2vitRrqFopwex+JaBHoZGyr6tNU1DSa8=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "8eaa8520008e3cc3da6d081a1547c51c6f632632",
+        "rev": "507bffbe53673caebb686017e76910e321fd9175",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "8eaa8520008e3cc3da6d081a1547c51c6f632632",
+        "rev": "507bffbe53673caebb686017e76910e321fd9175",
         "type": "github"
       }
     },

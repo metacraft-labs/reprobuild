@@ -30,7 +30,12 @@
 #     `format` or `schemaVersion` is refused; so is an intent that still names
 #     data files (an export always carries them expanded);
 #   * activities: `default` plus the host's `hosts:` entry, reported in
-#     declaration order (`enabledActivitiesFor`, `hostSelection`);
+#     declaration order (`enabledActivitiesFor`, `hostSelection`). A host the
+#     profile's `hosts:` registry does not name is refused when the profile
+#     has a registry (`hostRefusalReason`; spec Open question 6, answered by
+#     GM8: an unknown host is an error, and `"<host>": [default]` is the
+#     explicit opt-in for `default` alone); a profile without one selects
+#     `default` everywhere;
 #   * packages: the `packageRef`s of enabled activities, a `whenGuard`'s only
 #     when its predicate holds, one per package (first occurrence wins);
 #     sorted by name (the planner's order is a topological sort over
@@ -46,7 +51,11 @@
 # out): it keeps every resource whose guard holds, and a document that does
 # carry a kind the Home Manager module does not know -- hand-edited, or
 # newer than this library -- reaches the module as `unmapped`, never dropped.
-{ predicate, platforms }:
+{
+  predicate,
+  platforms,
+  hostSelection,
+}:
 let
   inherit (builtins)
     concatMap
@@ -91,6 +100,10 @@ let
         if probe == null then "platforms.${system} is ${toJSON entry}" else probe
       }). Export on ${system} instead";
 
+  # Why `host` cannot be selected from `doc`, or null: the planner's rule
+  # (`enabledActivitiesFor` raising `EUndeclaredHost`; hosts.nix).
+  hostRefusalReason = doc: host: hostSelection.undeclaredHostReason (doc.intent.hosts or { }) host;
+
   holdsFor = facts: guard: predicate.holds facts guard;
 
   # The packages an activity body contributes on `facts`
@@ -125,11 +138,17 @@ let
   evaluate =
     doc: system: host:
     let
-      reason = refusalReason doc system;
       selectedHost = if host != null then host else doc.selection.host;
+      # The host first, as `repro home export` does: the export of an
+      # undeclared host fails before any target is evaluated.
+      reason =
+        let
+          r = hostRefusalReason doc selectedHost;
+        in
+        if r != null then r else refusalReason doc system;
       facts = platforms.factsFor system selectedHost;
       intent = doc.intent;
-      enabled = [ "default" ] ++ (intent.hosts.${selectedHost} or [ ]);
+      enabled = hostSelection.enabledActivities (intent.hosts or { }) selectedHost;
       declared = map (a: a.name) intent.activities;
       activities = filter (a: elem a enabled) declared;
       raw = concatMap (
@@ -209,6 +228,7 @@ in
   inherit
     evaluate
     refusalReason
+    hostRefusalReason
     exportDerivation
     format
     knownSchemaVersions
@@ -252,7 +272,11 @@ in
               inherit profileDir host;
             })
           );
-      reason = refusalReason document system;
+      reason =
+        let
+          r = hostRefusalReason document host;
+        in
+        if r != null then r else refusalReason document system;
     in
     # Refused as a whole, not only on access to `evaluation`: a consumer that
     # reads `document` for a target it does not describe is as wrong as one
