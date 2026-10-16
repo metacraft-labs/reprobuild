@@ -246,7 +246,17 @@
         # through, the first absent component, and the link the readlink
         # family reads with its target, so a directory replaced by a link and
         # a retargeted link change a recorded input.
-      url = "github:metacraft-labs/io-mon/414a3de4f5912f498f6adea0994458b776884a26";
+        # Bumped to 2801e94 (2026-10-16), io-mon's `agents` tip; 414a3de is
+        # an ancestor. On Linux the shim records unlink, rmdir, remove, mkdir,
+        # symlink (and their *at forms) as path mutations, truncate as a
+        # write, creat and the mkstemp family as opens and mkdtemp as a created
+        # directory, through libc, syscall(2) and trapped inline syscalls
+        # (7b6f7d2, 2801e94); it also records the directories glob(3) scans
+        # (349c3a1) and closes a byte-capped fragment once (4888064). Trapped inline
+        # syscalls are classified from what they named when they trapped, and
+        # before an exec or a raw exit, instead of from stale arguments at
+        # exit. The engine folds the new records (see `monitorRemovals`).
+      url = "github:metacraft-labs/io-mon/2801e948810673bbb0fcbc7adb222943d4e7de50";
       flake = false;
     };
     nim-shm-gset-src = {

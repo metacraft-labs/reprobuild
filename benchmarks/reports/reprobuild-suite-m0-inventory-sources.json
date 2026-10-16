@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2092,
+    "nimTestBinaries": 2093,
     "pureUnitConsolidationGroups": 61,
-    "pureUnitTests": 648,
+    "pureUnitTests": 649,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2113
+    "testEntries": 2114
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1280,7 +1280,7 @@
       "graph-fixture": 19,
       "integration": 1131,
       "platform/destructive": 129,
-      "pure unit": 648,
+      "pure unit": 649,
       "unclassified": 186
     },
     "graphOwnedTestArtifacts": [
@@ -1483,9 +1483,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2092,
+    "nimTestBinaryCount": 2093,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2113
+    "testEntryCount": 2114
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4473,6 +4473,7 @@
             "refSites",
             "refs",
             "rel",
+            "removals",
             "repoRoot",
             "res",
             "rest",
@@ -4507,7 +4508,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1328,
+          "line": 1339,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -8603,6 +8604,25 @@
       "source": "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_path_mutation_evidence",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_path_mutation_evidence.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

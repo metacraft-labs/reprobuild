@@ -5592,6 +5592,7 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
     "depfileInputs": jsonStringSeq(evidence.depfileInputs.paths),
     "monitorReads": jsonStringSeq(evidence.monitorReads.paths),
     "monitorWrites": jsonStringSeq(evidence.monitorWrites.paths),
+    "monitorRemovals": jsonStringSeq(evidence.monitorRemovals.paths),
     "monitorProbes": jsonStringSeq(evidence.monitorProbes.paths),
     "provisionerReportedInputs":
       jsonStringSeq(evidence.provisionerReportedInputs),
