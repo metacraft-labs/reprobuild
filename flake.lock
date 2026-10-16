@@ -239,7 +239,7 @@
       "flake": false,
       "locked": {
         "lastModified": 1792141908,
-        "narHash": "sha256-h9WiiqntvC9+O14N1pKNLAebyOM96UH2hmf0/nN8qxE=",
+        "narHash": "sha256-XANtEw1SAs0GH1fpO3f5ILAmT4P6tBs9gLmPvl1Z8J8=",
         "owner": "metacraft-labs",
         "repo": "codetracer",
         "rev": "2097ae648aa03198727c402b5bfbede548d068a9",
@@ -2123,11 +2123,9 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
-        "lastModified": 1791500872,
-        "narHash": "sha256-7mVUoFnyrBsdT7uJqEXIaRUPOESwFp+aRznQRGgEd4o=",
         "owner": "metacraft-labs",
         "repo": "devops-modules",
-        "rev": "073f57599af78eef3afbcb72c78555a78612311c",
+        "rev": "5a0fe76d193ede95438769fb3b7bba4b2139b24c",
         "type": "github"
       },
       "original": {

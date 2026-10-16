@@ -3339,6 +3339,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim",
+    binary: "build/test-bin/t_content_keyed_comparison_includes_file_kind",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim",
     binary: "build/test-bin/t_fingerprint_metadata_classifies_every_posix_entity",
     defines: @[],
