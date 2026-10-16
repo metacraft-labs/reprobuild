@@ -150,3 +150,39 @@ suite "mergeRepinnedLock":
       of ckStore: deps.add(d.name & "#" & d.coordinates.storeHash)
       else: deps.add(d.name)
     check deps == @["app@cccc", "producer@bbbb", "nim#new"]
+
+  test "a sibling the committed lock does not pin is added, not dropped":
+    # The issue's case: the producer was declared after the lock was written,
+    # so the lock holds no revision pin for it. The re-pin must record one,
+    # or a lock-pinned build has no revision to fetch the producer at.
+    let committed = lockWith({"app": "0.1.0", "nim": "1.6.0"}, [],
+      @[vcsDep("app", ".", "aaaa"), vcsDep("other", "../other", "eeee")])
+    let generated = lockWith(
+      {"app": "0.1.0", "nim": "2.2.0", "producer_pkg": "0.1.0"}, [],
+      @[vcsDep("app", ".", "aaaa"), vcsDep("other", "../other", "ffff"),
+        vcsDep("producer", "../producer", "dddd")])
+    let merged = mergeRepinnedLock(committed, generated, ["nim"])
+    var deps: seq[string]
+    for d in merged.deps: deps.add(d.name & "@" & d.coordinates.revision)
+    # `other` is carried at its committed revision; `producer` is added.
+    check deps == @["app@aaaa", "other@eeee", "producer@dddd"]
+
+  test "a sibling recorded under another name or path is not added again":
+    # Name OR path identifies a committed pin: a renamed checkout at the same
+    # path, or the same repo at a moved path, is the committed sibling, held
+    # at its committed revision rather than recorded a second time. The root
+    # entry is refreshed, never duplicated.
+    let committed = lockWith({"app": "0.1.0", "nim": "1.6.0"}, [],
+      @[vcsDep("app", ".", "aaaa"), vcsDep("other", "../other", "eeee"),
+        vcsDep("tools", "../tools", "1111")])
+    let generated = lockWith({"app": "0.1.0", "nim": "2.2.0"}, [],
+      @[vcsDep("app", ".", "cccc"), vcsDep("other-renamed", "../other", "ffff"),
+        vcsDep("tools", "../moved/tools", "2222"),
+        vcsDep("producer", "../producer", "dddd"),
+        vcsDep("producer", "../producer", "dddd")])
+    let merged = mergeRepinnedLock(committed, generated, ["nim"])
+    var deps: seq[string]
+    for d in merged.deps:
+      deps.add(d.name & ":" & d.path & "@" & d.coordinates.revision)
+    check deps == @["app:.@cccc", "other:../other@eeee",
+      "tools:../tools@1111", "producer:../producer@dddd"]

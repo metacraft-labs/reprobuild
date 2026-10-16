@@ -414,7 +414,7 @@ libs/repro_lock_gen/tests/t_strategy_false_minimum_is_caught.nim	nim	3
 libs/repro_lock_gen/tests/t_strategy_lowest_and_highest_differ.nim	nim	6
 libs/repro_lock_gen/tests/t_strategy_lowest_vs_lowest_direct.nim	nim	6
 libs/repro_lock_gen/tests/t_strategy_without_candidates_is_reported.nim	nim	7
-libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim	nim	5
+libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim	nim	7
 libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim	nim	10
 libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim	nim	1
