@@ -404,7 +404,10 @@
       # 600f2a8 additionally carries caller/target Windows injection diagnostics.
       # Keep this pin aligned with the synced, published workspace dependency;
       # the pre-push gate rejects a pin that lags that checkout.
-      url = "github:metacraft-labs/nim-stackable-hooks/3af63afc5c0b55a27fc5e0a26f3a32833caf8873";
+      # ff7eb18 (2026-10-16, the published `agents`/`dev` tip; 3af63afc is an
+      # ancestor) brings ab71ccb (2026-10-15), which rejects protected symlink
+      # hops in SIP tool resolution; only ``propagation.nim`` changes.
+      url = "github:metacraft-labs/nim-stackable-hooks/ff7eb18af166f9355c5e62bf1434ba5f9fd2c99e";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -527,7 +530,16 @@
       # At 6b6d05a08 (2026-10-15, the published `agents` tip; 23d5af70f is its
       # parent) only ``flake.lock`` and ``repro.lock`` change, and the latter
       # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays.
-      url = "github:metacraft-labs/codetracer/6b6d05a081287ae66cd875ece212e5e713a9f9e3";
+      #
+      # At 2097ae648 (2026-10-16, the published `agents` tip; 6b6d05a08 is an
+      # ancestor) ``src/ct_test/`` and ``src/ct_incremental_adapter.nim`` are
+      # unchanged; ``repro.nim``, ``config.nims`` and ``src/Tuprules.tup`` each
+      # add the vendored ``libs/nim-regex/src`` search path (a new submodule,
+      # absent from this submodule-less input and unused by ``ct-test``; the
+      # ``addPathIfDir`` form skips it). Its ``repro.lock``
+      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays
+      # (``checks.<system>.ct-trace-format-pin-coherence`` confirms it).
+      url = "github:metacraft-labs/codetracer/2097ae648aa03198727c402b5bfbede548d068a9";
       flake = false;
     };
 

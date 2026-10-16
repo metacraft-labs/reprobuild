@@ -51,6 +51,18 @@
 ##     gate refuses over every override (stage 3), not only those inside the
 ##     `depends` closure.
 ##
+## ## Develop overrides and linked worktrees (third suite)
+##
+## Stage 3 reads the WHOLE override file, so two unpublished overrides — or an
+## override whose `depends` reaches a closure member or the pushed repo — refused
+## each other in every order at reprobuild a8a6e51f58. The gate now defers such
+## an override exactly when it provably cannot go first, is outside the pushed
+## repo's closure, and is not pinned at its unpublished HEAD by the pushed repo's
+## committed locks (Workspace-And-Develop-Mode.md §"Develop overrides that wait
+## on the push"); any other unpublished override still refuses. And
+## `repro push` from a linked worktree outside the declared path used to widen
+## to the whole workspace and never push the worktree (CLI/push.md §"Scope").
+##
 ## ## Test-double policy: NO mocks, doubles or fakes
 ##
 ## Real bare origins, real clones, real commits, the real `flake.lock` on-disk
@@ -86,11 +98,12 @@ proc reproBinary(): string =
   requireBinary(root() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-const Repos = ["app", "lib", "core", "other"]
+const Repos = ["app", "lib", "core", "other", "extra"]
+  ## `extra` is a second repo outside every closure, used as a develop override.
 
 type Fixture = object
   git, repro, scratch, workspace, manifests: string
-  seed: array[4, string]   ## seed revision of each repo, in `Repos` order
+  seed: array[Repos.len, string]   ## seed revision of each repo, in `Repos` order
 
 proc dir(fx: Fixture; name: string): string = fx.workspace / name
 proc bare(fx: Fixture; name: string): string = fx.scratch / (name & ".git")
@@ -171,7 +184,8 @@ proc repoToml(name: string; depends: seq[string]): string =
   if depends.len > 0:
     result.add("depends = [\"" & depends.join("\", \"") & "\"]\n")
 
-proc setup(slug: string; libDependsOnCore = true): Fixture =
+proc setup(slug: string; libDependsOnCore = true;
+    extraDependsOnCore = false): Fixture =
   ## The published starting state: every repo at its seed, `core`'s flake
   ## pinning the seeds of `app` and `other`, and every pin AT its sibling.
   result.git = findExe("git")
@@ -213,7 +227,7 @@ proc setup(slug: string; libDependsOnCore = true): Fixture =
     project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
       fx.url(name) & "\"\n\n")
   project.add("includes = [\"repos/app.toml\", \"repos/lib.toml\", " &
-    "\"repos/core.toml\", \"repos/other.toml\"]\n")
+    "\"repos/core.toml\", \"repos/other.toml\", \"repos/extra.toml\"]\n")
   writeFile(result.manifests / "projects" / "app.toml", project)
   writeFile(result.manifests / "repos" / "app.toml", repoToml("app", @["lib"]))
   # `libDependsOnCore = false` breaks the cycle, for the `repro.lock` stage's
@@ -222,6 +236,10 @@ proc setup(slug: string; libDependsOnCore = true): Fixture =
     repoToml("lib", if libDependsOnCore: @["core"] else: @[]))
   writeFile(result.manifests / "repos" / "core.toml", repoToml("core", @[]))
   writeFile(result.manifests / "repos" / "other.toml", repoToml("other", @[]))
+  # `extraDependsOnCore` makes `extra` an override whose own `depends` reaches a
+  # member of `app`'s closure.
+  writeFile(result.manifests / "repos" / "extra.toml",
+    repoToml("extra", if extraDependsOnCore: @["core"] else: @[]))
   discard require(q(fx.git) & " init -q --bare -b main " &
     q(fx.scratch / "manifest.git"))
   discard require(q(fx.git) & " init -q -b main " & q(fx.manifests))
@@ -303,6 +321,15 @@ proc reproPush(fx: Fixture; name: string; explicit: bool):
     args.add("--workspace-root=" & fx.workspace)
     args.add("--current-repo=" & fx.dir(name))
   runShell(shellCommand(args), cwd = fx.dir(name))
+
+proc registerOverrides(fx: Fixture; names: openArray[string]) =
+  ## Register declared checkouts as develop overrides, as `repro develop` does.
+  var overrides = newDevelopOverrides()
+  for name in names:
+    overrides = addOverride(overrides, DevelopOverrideEntry(package: name,
+      local_path: fx.dir(name), state: "editable",
+      created_at: "2026-10-16T00:00:00Z"))
+  writeDevelopOverridesFile(fx.workspace, overrides)
 
 proc pushReport(fx: Fixture): JsonNode =
   let path = fx.workspace / ".repro" / "build" / "reports" / "push-report.json"
@@ -620,3 +647,200 @@ suite "mutually pinned repro.lock siblings (stage 3c) land through repro push":
     check gateRefused(core.output, "committed_lock_sibling_pin_stale", "core")
     check "(behind)" in core.output
     check "DEFERRED" notin core.output
+
+suite "develop overrides and worktrees land through repro push":
+
+  test "two unpublished develop overrides land through repro push":
+    # Each override's gate refuses over every OTHER unpublished override
+    # (stage 3), so without the deferral no order of pushes passes.
+    let fx = setup("two-overrides")
+    defer: fx.release()
+    let otherHead = fx.commitFile(fx.dir("other"), "work.txt", "other\n",
+      "other: unpublished override")
+    let extraHead = fx.commitFile(fx.dir("extra"), "work.txt", "extra\n",
+      "extra: unpublished override")
+    # `core`'s flake pins `other`; record its HEAD so stage 3b agrees.
+    fx.writeCoreFlake(fx.seedOf("app"), otherHead)
+    let coreHead = fx.commitFile(fx.dir("core"), "work.txt", "core\n",
+      "core work")
+    fx.registerOverrides(["other", "extra"])
+    fx.installHooks()
+    let pushed = fx.reproPush("core", explicit = true)
+    checkpoint("repro push output:\n" & pushed.output)
+    check pushed.code == 0
+    check fx.remoteHead("other") == otherHead
+    check fx.remoteHead("extra") == extraHead
+    check fx.remoteHead("core") == coreHead
+    let order = fx.pushReport().orderOf()
+    check order.len == 3 and order[^1] == "core"
+
+  test "an override whose depends reaches a closure member lands":
+    # `extra` depends on `core`, which is in `app`'s closure: `core`'s gate
+    # refuses over the unpublished override, and `extra`'s gate refuses until
+    # `core` is published.
+    let fx = setup("override-depends", extraDependsOnCore = true)
+    defer: fx.release()
+    let heads = fx.arrangeTheDeadlock()
+    let extraHead = fx.commitFile(fx.dir("extra"), "work.txt", "extra\n",
+      "extra: unpublished override depending on core")
+    fx.registerOverrides(["extra"])
+    fx.installHooks()
+    let pushed = fx.reproPush("app", explicit = true)
+    checkpoint("repro push output:\n" & pushed.output)
+    check pushed.code == 0
+    check fx.remoteHead("core") == heads.core
+    check fx.remoteHead("extra") == extraHead
+    check fx.remoteHead("app") == heads.app
+    check fx.pushReport().orderOf() == @["core", "extra", "lib", "app"]
+
+  test "an override that depends on the pushed repo lands after it":
+    # `app` (an override) depends on `lib`, the pushed repo.
+    let fx = setup("override-on-pushed")
+    defer: fx.release()
+    let heads = fx.arrangeTheDeadlock()
+    fx.registerOverrides(["app"])
+    fx.installHooks()
+    let pushed = fx.reproPush("lib", explicit = true)
+    checkpoint("repro push output:\n" & pushed.output)
+    check pushed.code == 0
+    check fx.remoteHead("core") == heads.core
+    check fx.remoteHead("lib") == heads.lib
+    check fx.remoteHead("app") == heads.app
+    check fx.pushReport().orderOf() == @["core", "lib", "app"]
+
+  test "raw push of one of two unpublished overrides defers the other":
+    # The gate's own output: the deferral is a NOTICE naming the order.
+    let fx = setup("two-overrides-raw")
+    defer: fx.release()
+    let otherHead = fx.commitFile(fx.dir("other"), "work.txt", "other\n",
+      "other: unpublished override")
+    discard fx.commitFile(fx.dir("extra"), "work.txt", "extra\n",
+      "extra: unpublished override")
+    fx.registerOverrides(["other", "extra"])
+    fx.installHooks()
+    let other = fx.rawPush("other")
+    checkpoint("raw other push:\n" & other.output)
+    check other.code == 0
+    check fx.remoteHead("other") == otherHead
+    check "develop override DEFERRED" in other.output
+    check "deferred=override-awaits-push" in other.output
+    check ("repro push --current-repo=" & fx.dir("extra")) in other.output
+    let extra = fx.rawPush("extra")
+    checkpoint("raw extra push:\n" & extra.output)
+    check extra.code == 0
+
+  test "an unpublished override the pushed repo does not block still refuses":
+    # `core` is no override and `other` does not depend on it, so `other` CAN
+    # be published first: the gate keeps refusing, as before.
+    let fx = setup("override-unrelated")
+    defer: fx.release()
+    discard fx.commitFile(fx.dir("extra"), "work.txt", "extra\n",
+      "extra: unpublished override")
+    discard fx.commitFile(fx.dir("core"), "work.txt", "core\n", "core work")
+    fx.registerOverrides(["extra"])
+    fx.installHooks()
+    let core = fx.rawPush("core")
+    checkpoint("raw core push:\n" & core.output)
+    check core.code != 0
+    check "develop_override_unpublished" in core.output
+    check "DEFERRED" notin core.output
+
+  test "repro push from a linked worktree publishes that worktree's closure":
+    # A linked worktree of `lib` inside the workspace but not at the declared
+    # path: the gate identifies it by its git common directory, so `repro push`
+    # (typed in the worktree, no location flags) must too.
+    let fx = setup("linked-worktree")
+    defer: fx.release()
+    let coreHead = fx.commitFile(fx.dir("core"), "work.txt", "core\n",
+      "core work")
+    let wt = fx.workspace / "lib-feature"
+    discard fx.gitIn(fx.dir("lib"), "worktree add -q -b feature " & q(wt))
+    let wtHead = fx.commitFile(wt, "work.txt", "lib feature\n",
+      "lib: feature work in a linked worktree")
+    # `extra`, not `other`: `core`'s flake pins `other`, so unpublished work
+    # there would (rightly) stop `core` at the flake stage.
+    let extraHead = fx.commitFile(fx.dir("extra"), "unrelated.txt", "x\n",
+      "extra: unrelated unpublished work")
+    fx.installHooks()
+    let pushed = runShell(shellCommand(@[fx.repro, "push", "--no-certify",
+      "--write-report"]), cwd = wt)
+    checkpoint("repro push output:\n" & pushed.output)
+    check pushed.code == 0
+    check fx.pushReport().orderOf() == @["core", "lib"]
+    check fx.remoteHead("core") == coreHead
+    # Not `gitIn`: an absent branch is a FAILED check, not a fixture abort.
+    check run(q(fx.git) & " -C " & q(fx.bare("lib")) &
+      " rev-parse --verify -q refs/heads/feature").output.strip() == wtHead
+    # The unrelated repo is outside the closure and must not be published.
+    check fx.remoteHead("extra") != extraHead
+
+  test "repro push refuses a worktree outside the workspace before pushing":
+    # Its own pre-push hook resolves no workspace from there and gates nothing,
+    # so publishing workspace state from it would bypass the gate.
+    let fx = setup("outside-worktree")
+    defer: fx.release()
+    let coreHead = fx.commitFile(fx.dir("core"), "work.txt", "core\n",
+      "core work")
+    let wt = fx.scratch / "lib-outside"
+    discard fx.gitIn(fx.dir("lib"), "worktree add -q -b outside " & q(wt))
+    discard fx.commitFile(wt, "work.txt", "lib outside\n", "lib: outside")
+    let extraHead = fx.commitFile(fx.dir("extra"), "unrelated.txt", "x\n",
+      "extra: unrelated unpublished work")
+    fx.installHooks()
+    let pushed = runShell(shellCommand(@[fx.repro, "push", "--no-certify",
+      "--write-report", "--workspace-root=" & fx.workspace,
+      "--current-repo=" & wt]), cwd = wt)
+    checkpoint("repro push output:\n" & pushed.output)
+    check pushed.code == 2
+    check fx.remoteHead("core") != coreHead
+    check fx.remoteHead("extra") != extraHead
+    check run(q(fx.git) & " -C " & q(fx.bare("lib")) &
+      " rev-parse --verify -q refs/heads/outside").code != 0
+
+  test "an override the pushed repo's flake.lock pins at its unpublished HEAD still refuses":
+    # `core` and `other` are both unpublished overrides, so the deferral's
+    # other conditions hold — but `core`'s flake.lock names `other`'s HEAD,
+    # which stage 3b sees as agreeing. Deferring would publish a lock nobody
+    # can fetch; publishing `other` first is the order that works.
+    let fx = setup("override-flake-pinned")
+    defer: fx.release()
+    let otherHead = fx.commitFile(fx.dir("other"), "work.txt", "other\n",
+      "other: unpublished override")
+    fx.writeCoreFlake(fx.seedOf("app"), otherHead)
+    let coreHead = fx.commitFile(fx.dir("core"), "work.txt", "core\n",
+      "core: unpublished override pinning other")
+    fx.registerOverrides(["other", "core"])
+    fx.installHooks()
+    let coreFirst = fx.rawPush("core")
+    checkpoint("raw core push:\n" & coreFirst.output)
+    check coreFirst.code != 0
+    check gateRefused(coreFirst.output, "develop_override_unpublished", "other")
+    check "DEFERRED" notin coreFirst.output
+    check fx.remoteHead("core") != coreHead
+    let other = fx.rawPush("other")
+    checkpoint("raw other push:\n" & other.output)
+    check other.code == 0
+    check fx.remoteHead("other") == otherHead
+    let core = fx.rawPush("core")
+    checkpoint("raw core push after other:\n" & core.output)
+    check core.code == 0
+    check fx.remoteHead("core") == coreHead
+
+  test "an override the pushed repo's repro.lock pins at its unpublished HEAD still refuses":
+    let fx = setup("override-lock-pinned")
+    defer: fx.release()
+    let extraHead = fx.commitFile(fx.dir("extra"), "work.txt", "extra\n",
+      "extra: unpublished override")
+    writeFile(fx.dir("core") / "repro.lock", committedLock(@[
+      fx.lockDep("core", ".", "0000000000000000000000000000000000000001", ""),
+      fx.lockDep("extra", "../extra", extraHead, "")]))
+    let coreHead = fx.commitFile(fx.dir("core"), "work.txt", "core\n",
+      "core: unpublished override pinning extra")
+    fx.registerOverrides(["extra", "core"])
+    fx.installHooks()
+    let coreFirst = fx.rawPush("core")
+    checkpoint("raw core push:\n" & coreFirst.output)
+    check coreFirst.code != 0
+    check gateRefused(coreFirst.output, "develop_override_unpublished", "extra")
+    check "DEFERRED" notin coreFirst.output
+    check fx.remoteHead("core") != coreHead
