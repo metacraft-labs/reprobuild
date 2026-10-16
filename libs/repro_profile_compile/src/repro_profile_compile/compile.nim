@@ -31,6 +31,9 @@ import repro_profile_intent
 import ./sources
 
 const nullDevice = when defined(windows): "NUL" else: "/dev/null"
+const ProfileDepfileTarget* = "repro-profile"
+  ## The `-MT` target of the profile compile's dependency report, which goes
+  ## to the null device (`profileCompileCFlags`); clang requires one.
 
 # ---------------------------------------------------------------------------
 # Errors.
@@ -160,14 +163,24 @@ proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
   # which clang writes directly. Empty filenames are unsafe here: Nim and
   # compiler wrappers can drop an empty argument and make cc1 consume the
   # next option as a report path. The action's monitor owns header freshness.
+  #
+  # The flags carry their own `-MD -MT`: cc1 refuses `-dependency-file`
+  # without a target ("-dependency-file requires at least one -MT or -MQ
+  # option", upstream and Apple clang alike), and whether the driver supplies
+  # one depends on the Nim that runs. The fork in reprobuild's dev shell and
+  # Nix package passes `-MD -MF <file>.d`; the official 2.2.10 archive the
+  # recipe bootstrap provisions passes neither, and with it every clang
+  # profile compile failed (measured on m1, 2026-10-15). With the target here
+  # the flags are self-contained: in either order against the fork's
+  # `-MD -MF`, and without it, the compile succeeds and no `.d` is written.
+  # The probe is the same shape, so it answers for exactly what is passed.
   if cCompilerFamily(effective) == "clang":
-    let noDeps = @["-Xclang", "-dependency-file", "-Xclang", nullDevice]
-    # Probe exactly the dependency-producing shape (upstream clang requires
-    # a target), retaining direct object output so the probe itself does not
+    let depsToNull = @["-MD", "-MT", ProfileDepfileTarget, "-Xclang",
+      "-dependency-file", "-Xclang", nullDevice]
+    # Direct object output is retained, so the probe itself does not
     # introduce the entropy the real compile is being changed to avoid.
-    if cCompilerAcceptsFlags(effective,
-        result & @["-MD", "-MT", "repro-profile-probe"] & noDeps, scratchDir):
-      result.add "-Xclang -dependency-file -Xclang " & nullDevice
+    if cCompilerAcceptsFlags(effective, result & depsToNull, scratchDir):
+      result.add depsToNull.join(" ")
 
 proc requireReprobuildSources*(repoRoot: string) =
   ## Refuse a source root that holds no reprobuild libs, naming the

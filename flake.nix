@@ -246,7 +246,10 @@
         # through, the first absent component, and the link the readlink
         # family reads with its target, so a directory replaced by a link and
         # a retargeted link change a recorded input.
-        # Bumped to 2801e94 (2026-10-16), io-mon's `agents` tip; 414a3de is
+        # Bumped to 527368e (2026-10-16), io-mon's `agents` tip; 414a3de is an
+        # ancestor. Test-only: the macOS nesting fixtures give their second
+        # shim its own install name, so they run two distinct shim images.
+        # Bumped to 2801e94 (2026-10-16), io-mon's `agents` tip; 527368e is
         # an ancestor. On Linux the shim records unlink, rmdir, remove, mkdir,
         # symlink (and their *at forms) as path mutations, truncate as a
         # write, creat and the mkstemp family as opens and mkdtemp as a created
