@@ -130,22 +130,56 @@ type
 # Activity expansion
 # ---------------------------------------------------------------------------
 
+proc declaredHosts*(profile: Profile): seq[string] =
+  ## The hosts the profile's `hosts:` registry names, in declaration order;
+  ## empty for a profile without a registry (or with an empty one).
+  let hostsOpt = findHostsBlock(profile)
+  if hostsOpt.isNone:
+    return
+  for entry in hostsOpt.get.hostsEntries:
+    result.add entry.hostName
+
 proc enabledActivitiesFor*(profile: Profile; host: string): HashSet[string] =
   ## `default` is always active; `hosts:` adds host-specific ones.
   ##
   ## THE host-selection rule. `buildPlan` applies it, and every other caller
   ## that needs to know which activities a host runs — `repro home list` /
-  ## `why`, `repro home export` — calls this proc rather than keeping its own
-  ## copy, so what they report is what the planner does.
+  ## `why`, `repro home export` / `facts` — calls this proc rather than
+  ## keeping its own copy, so what they report is what the planner does.
+  ##
+  ## Undeclared hosts (Gradual-Nix-To-Reprobuild-Migration.md Open question
+  ## 6, answered by GM8): a profile that declares a `hosts:` registry
+  ## declares every host it may be applied to. A host it does not name is
+  ## refused with `EUndeclaredHost` instead of getting `default` alone --
+  ## a typo or a new machine must not silently plan a much smaller home
+  ## (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped). The
+  ## explicit opt-in for `default` alone is an entry naming only `default`.
+  ## A profile with no registry (or an empty one) is host-agnostic and
+  ## selects `default` on every host. The Nix reader of the export
+  ## (`nix/lib/intent.nix`, `evaluate`) applies the same rule.
   result = initHashSet[string]()
   result.incl "default"
-  let hostsOpt = findHostsBlock(profile)
-  if hostsOpt.isNone:
+  let declared = declaredHosts(profile)
+  if declared.len == 0:
     return
+  let hostsOpt = findHostsBlock(profile)
   for entry in hostsOpt.get.hostsEntries:
     if entry.hostName == host:
       for a in entry.hostActivities:
         result.incl a
+      return
+  var e = newException(EUndeclaredHost, "host `" & host &
+    "` is not declared in the profile's hosts: registry (declared: " &
+    sorted(declared).join(", ") & "). Add an entry for it -- `\"" & host &
+    "\": [default]` selects only the `default` activity, `repro home " &
+    "enable <activity> --host " & host & " --no-apply` adds one -- or " &
+    "select a declared host with --host / $REPRO_HOST")
+  e.step = 1
+  e.stepName = "load_intent"
+  e.profilePath = profile.path
+  e.host = host
+  e.declaredHosts = declared
+  raise e
 
 proc evaluateHostPredicate*(predicateAst: PredNode; ctx: HostContext): bool =
   ## Evaluate a profile predicate against the host facts selected for

@@ -1,6 +1,6 @@
 {
   "description": "Inline arrays of inline tables are rows like [[package]] headers; an empty array is no rows.",
-  "hosts": { "dev-box": ["dev"] },
+  "hosts": { "dev-box": ["dev"], "other": ["default"] },
   "evaluations": [
     { "host": "dev-box", "system": "x86_64-linux", "packages": ["jq", "nvim"] },
     { "host": "dev-box", "system": "aarch64-darwin", "packages": ["jq"] },

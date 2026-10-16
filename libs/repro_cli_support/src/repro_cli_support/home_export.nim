@@ -63,13 +63,6 @@ const
   MaxReportedDifferences* = 40
 
 type
-  HostSource* = enum
-    ## How the host identity in `selection.host` was chosen, in the
-    ## documented precedence (`$REPRO_HOST`, `--host`, the OS hostname).
-    hsEnv = "env"
-    hsFlag = "flag"
-    hsHostname = "hostname"
-
   HostSelection* = object
     host*: string
     hostDeclared*: bool

@@ -37,8 +37,9 @@
 let
   predicate = import ./predicate.nix;
   platforms = import ./platforms.nix;
-  data = import ./data.nix { inherit predicate platforms; };
-  intent = import ./intent.nix { inherit predicate platforms; };
+  hostSelection = import ./hosts.nix;
+  data = import ./data.nix { inherit predicate platforms hostSelection; };
+  intent = import ./intent.nix { inherit predicate platforms hostSelection; };
   realizations = import ./realizations.nix { inherit catalogs; };
   brew = import ./brew.nix { inherit catalogs; };
   hostFacts = import ./host-facts.nix {
@@ -102,6 +103,6 @@ in
   # Failure-as-value forms used by the library's own tests.
   internal = {
     inherit (data) readDataResult;
-    inherit (intent) refusalReason;
+    inherit (intent) refusalReason hostRefusalReason;
   };
 }
