@@ -13770,6 +13770,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_orphaned_lock_draft_is_swept_never_published.nim",
+    binary: "build/test-bin/t_orphaned_lock_draft_is_swept_never_published",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_output_cleanup_executor.nim",
     binary: "build/test-bin/t_output_cleanup_executor",
     defines: @[],
