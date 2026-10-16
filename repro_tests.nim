@@ -5004,6 +5004,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_dssj2_two_resolvers_do_not_collide.nim",
+    binary: "build/test-bin/t_dssj2_two_resolvers_do_not_collide",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim",
     binary: "build/test-bin/t_engine_path_expression_uses_flag_value",
     defines: @[],

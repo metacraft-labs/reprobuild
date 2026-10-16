@@ -562,6 +562,7 @@ libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
 libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim	nim	26
 libs/repro_project_dsl/tests/t_dss498_cross_activity_contribution_is_order_independent.nim	nim	13
 libs/repro_project_dsl/tests/t_dssf1_dev_env_actions_reach_the_caller.nim	nim	11
+libs/repro_project_dsl/tests/t_dssj2_two_resolvers_do_not_collide.nim	nim	11
 libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5

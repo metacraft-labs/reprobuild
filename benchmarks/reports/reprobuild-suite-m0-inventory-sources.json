@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 2061,
+    "nimTestBinaries": 2062,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 647,
     "staticallyDetectedRuntimeCompilerFlowTests": 119,
-    "testEntries": 2079
+    "testEntries": 2080
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1280,7 +1280,7 @@
       "integration": 1104,
       "platform/destructive": 126,
       "pure unit": 647,
-      "unclassified": 185
+      "unclassified": 186
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1470,9 +1470,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2061,
+    "nimTestBinaryCount": 2062,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2079
+    "testEntryCount": 2080
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17242,6 +17242,28 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_dssf1_dev_env_actions_reach_the_caller.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dssj2_two_resolvers_do_not_collide",
+      "class": "unclassified",
+      "classificationReason": "imports `dssj2_two_resolver_fixtures`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_dssj2_two_resolvers_do_not_collide.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
