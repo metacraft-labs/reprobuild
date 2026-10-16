@@ -393,6 +393,20 @@ proc runApplyInline*(commandName: string;
       stderr.writeLine(renderRecovered(r))
     for d in outcome.diagnostics:
       stderr.writeLine(renderStowDiagnostic(d))
+    # GM7: on a host that declares the concerns Reprobuild applies, say which
+    # ones ran, how much of the profile was left to the other tool, and what
+    # a narrowed set released (left in place, no longer managed).
+    if outcome.applied.declared:
+      echo "apply: concerns applied: " &
+        describeAppliedConcerns(outcome.applied,
+          if opts.host.len > 0: opts.host else: currentHost())
+      echo "apply: not applied: " & $outcome.notAppliedCount &
+        " operation(s) of other concerns"
+    if outcome.released.len > 0:
+      echo "apply: released " & $outcome.released.len & " item(s) of " &
+        "concerns no longer applied (left in place, no longer managed):"
+      for r in outcome.released:
+        echo "  release  " & r
     case outcome.kind
     of aokFreshApplied:
       # Stable log line that exposes step 11 eager-GC execution to
@@ -1469,6 +1483,12 @@ proc runHomeApply(args: openArray[string]): int =
       echo "Run the home-profile apply pipeline against the current"
       echo "intent (`home.nim`), producing a new generation and"
       echo "rotating the `current` pointer."
+      echo ""
+      echo "When this host's `hosts:` entry declares `applies: [...]`, only"
+      echo "those concerns (packages, applications, files, environment,"
+      echo "services, settings) are applied; the rest are planned and"
+      echo "shown, never executed. A concern dropped from the list is"
+      echo "released: what Reprobuild placed for it is left in place."
       echo ""
       echo "  --plan             Non-mutating preview of the full apply"
       echo "                     (packages, stow, generated files,"
@@ -3159,7 +3179,21 @@ proc runHomePlan(args: openArray[string]): int =
     # none), as for every other `repro home` command that plans: the one
     # selection rule raises `EUndeclaredHost` otherwise.
     discard enabledActivitiesFor(prof, identity.name)
-    let desired = composeDesiredResources(prof, homeDir, identity.name)
+    # GM7: only the resources of the concerns this host applies are planned;
+    # the rest are listed as not applied, and a recorded binding of a concern
+    # no longer applied is released, never destroyed
+    # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+    let host = identity.name
+    let applied = appliedConcernsFor(prof, host)
+    var desired = initDesiredSet()
+    var notApplied: seq[string]
+    for address, res in composeDesiredResources(prof, homeDir,
+        host).resources:
+      if concernOfResourceKind(res.kind) in applied.concerns:
+        desired.resources[address] = res
+      else:
+        notApplied.add($concernOfResourceKind(res.kind) & "  " & address)
+    var released: seq[string]
     # Load recorded bindings from the active generation's manifest.
     var recorded = initOrderedTable[string, RecordedBinding]()
     let activeId = readCurrentGenerationId(stateDir)
@@ -3176,8 +3210,14 @@ proc runHomePlan(args: openArray[string]): int =
             try: store.close() except CatchableError: discard
           let manifestBytes = readCasBlob(store, manifestKey)
           let manifest = decodeManifestBytes(manifestBytes)
+          let apps = applicationPackagesOf(manifest)
           for rb in manifest.resourceBindings:
             if rb.resourceKind.len == 0: continue
+            let concern = concernOfBinding(rb, apps)
+            if concern notin applied.concerns:
+              if not isZeroDigest(rb.postWriteDigest):
+                released.add($concern & "  " & rb.resourceAddress)
+              continue
             recorded[rb.resourceAddress] = toRecorded(rb)
         except CatchableError:
           discard
@@ -3193,6 +3233,13 @@ proc runHomePlan(args: openArray[string]): int =
       enforcePreventDestroy: true)
     let report = composePlan(desired, recorded, opts)
     stdout.write(renderPlan(report))
+    if applied.declared:
+      echo "  concerns applied: " & describeAppliedConcerns(applied, host)
+    for line in notApplied:
+      echo "  not applied (concern not in hosts." & host & ".applies): " &
+        line
+    for line in released:
+      echo "  release (concern no longer applied; left in place): " & line
     if report.driftCount > 0 and not allowDrift and not reconcileFlag:
       return 1
     return 0
@@ -3374,6 +3421,13 @@ proc runHomeRollback(args: openArray[string]): int =
       " (" & $outcome.fileOpsApplied & " file op(s), " &
       $outcome.blockOpsApplied & " block op(s), " &
       $outcome.launcherOpsApplied & " launcher op(s))"
+    # GM7: what the target generation does not apply stays in place.
+    if outcome.released.len > 0:
+      echo "repro home rollback: released " & $outcome.released.len &
+        " item(s) of concerns the target generation does not apply " &
+        "(left in place, no longer managed):"
+      for r in outcome.released:
+        echo "  release  " & r
     return 0
   except EUserEditDetected as err:
     stderr.writeLine("repro home rollback: user edit detected at " &
@@ -3898,7 +3952,7 @@ proc runHomeExport(args: openArray[string]): int =
         return 1
     let intent = decodeRbpi(artifact.rbpiBytes)
     doc = buildHomeExport(intent, artifact, probe, profilePath, host,
-      hostSource)
+      hostSource, stateDir)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except CatchableError as e:

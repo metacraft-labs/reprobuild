@@ -89,11 +89,32 @@
 ## boundary of the first: a rev-pinned input can disagree with its sibling
 ## because the CHECKOUT is stale, and there the author's flake is already right.
 ##
+## ## Every case substitutes `beta` EXPLICITLY
+##
+## Since HL-11 (Unified-Locking-And-Hooks.md §16.5) the managed hooks do not
+## compare an input `flake.nix` pins by exact revision with its checkout unless
+## an explicit develop override substitutes it: a sibling ahead of a release
+## pin is ordinary, and is covered by
+## `t_hooks_consult_only_the_repos_own_dependencies`. Every case here is about
+## the comparison itself, so each one first substitutes `beta` with the real
+## `repro develop --only=beta` (`overrideExplicitly`) — the way a developer
+## debugging a pinned dependency does — and the behaviour pinned below is the
+## behaviour §16.5 keeps for an overridden input.
+##
+## Since HL-11 M3 (§16.4) that behaviour includes a refused COMMIT: while the
+## override substitutes `beta` and its checkout is past the revision
+## `flake.nix` states, the commit-time re-pin writes nothing for it in either
+## lock and refuses the commit, because the re-pin moves lock resolutions
+## only, never a recipe constraint. The refresh itself still declines per
+## input, so the first case asks the operator verb (`repro flake refresh-lock`)
+## for the write it inspects, and the push case commits past the hook to reach
+## the gate it is about.
+##
 ## Test-double policy: NO mocks, doubles or fakes. Real git repositories, a
 ## real `git commit`, the real installed `pre-commit` hook and the real `repro`
 ## binary — see the header of `nf2_flake_lock_fixture.nim` for the inventory.
 
-import std/[json, os, strutils, unittest]
+import std/[json, os, sequtils, strutils, unittest]
 
 # The NF-2 fixture, plus the published workspace and `gatePrePush` that the two
 # cases at the bottom of this file need. `nf3_override_state_fixture` re-exports
@@ -147,6 +168,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedAlpha = fx.seedSha[0]
       let seedBeta = fx.seedSha[1]
@@ -174,11 +199,56 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       check newAlpha.len == 40 and newAlpha != seedAlpha
       check newBeta.len == 40 and newBeta != seedBeta
 
+      # ---- (0) the COMMIT is refused, and writes nothing (§16.4). ---------
+      # The overridden sibling is past the revision `flake.nix` states, and
+      # the commit-time re-pin moves lock resolutions only, never a recipe
+      # constraint. A refused commit writes neither lock — not even the
+      # floating input that could have moved.
       let commit = tryCommitInApp(fx, "work against both siblings")
-      if commit.code != 0:
-        checkpoint("git commit failed:\n" & commit.output & "\nlog:\n" &
-          preCommitLog(fx))
-      check commit.code == 0
+      checkpoint("git commit:\n" & commit.output & "\nlog:\n" &
+        preCommitLog(fx))
+      check commit.code != 0
+      # What the refusal names: the observed and pinned revisions, the
+      # `flake.nix` line, the lock resolution left alone, both remedies.
+      var pinLine = 0
+      for i, line in flakeNix.splitLines().toSeq():
+        if "beta-src.url" in line:
+          pinLine = i + 1
+          break
+      check pinLine > 0
+      let flakeNixPath = fx.app / "flake.nix"
+      check ("repro pre-commit: H3 (the commit-time re-pin moves lock " &
+        "resolutions, never a recipe constraint): the sibling checkout " &
+        siblingDir(fx, "beta") & " is at " & newBeta & ", but " &
+        flakeNixPath & ":" & $pinLine & " pins input 'beta-src' at " &
+        "revision " & seedBeta & "; the re-pin wrote nothing for this " &
+        "repository in either lock (" & fx.app / "flake.lock" & " input " &
+        "'beta-src' stays at " & seedBeta & "). (1) If " & newBeta & " is " &
+        "the intended upgrade, run `repro lock update beta-src --to " &
+        newBeta & " --repo-root=" & fx.app & "`: it changes rev=" & seedBeta &
+        " to rev=" & newBeta & " in that input's url in " & flakeNixPath) in
+        commit.output
+      check ("(2) If " & newBeta & " was a temporary experiment, drop the " &
+        "develop override of 'beta': `repro develop --drop=beta " &
+        "--workspace-root=" & fx.ws & " --project-root=" & fx.app &
+        "` removes its entry from " &
+        fx.ws / ".repro" / "develop-overrides.toml" & " and leaves the " &
+        "checkout as it is, or check the sibling out at the " &
+        "pinned revision: `git -C " & siblingDir(fx, "beta") & " checkout " &
+        seedBeta & "`; then commit again.") in commit.output
+      check readFile(lockPath(fx)) == before
+
+      # ---- the refresh itself, through the operator verb. -----------------
+      # The verb keeps the per-input decision: it declines `beta-src` and
+      # records the floating `alpha-src`, exiting non-zero because a decline
+      # leaves the lock disagreeing with a substituted sibling (see
+      # `t_a_declined_refresh_exits_non_zero`). Everything (1)-(4) asserts is
+      # about what the refresh WRITES, which only the verb now does here.
+      let verb = run(q(fx.repro) & " flake refresh-lock --flake=" & q(fx.app) &
+        " --workspace-root=" & q(fx.ws) & " --tool-provisioning=path",
+        cwd = fx.app)
+      checkpoint("refresh-lock -> " & $verb.code & "\n" & verb.output)
+      check verb.code == 3
 
       let after = readFile(lockPath(fx))
       let doc = parseJson(after)
@@ -250,6 +320,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedBeta = fx.seedSha[1]
       let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
@@ -324,15 +398,17 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
     ##   3. a refresh that withholds NOTHING still exits 0. Without this arm the
     ##      whole case is satisfied by making the verb always fail, which is the
     ##      obvious mutation;
-    ##   4. THE COMMIT PATH IS UNAFFECTED. A commit must not start failing
-    ##      merely because a pin is author-owned: `runPreCommitLockCommand`
-    ##      refuses a commit for one reason only, a pin that would move
-    ##      backward (Unified-Locking-And-Hooks.md §13.3), and an author-owned
-    ##      pin is not one; it reaches this refresh through
-    ##      `refreshFlakeLockAtCommit`, whose result carries no exit code at
-    ##      all. Asserted rather than assumed, because a fix that routed the
-    ##      status through the hook would break every commit in a workspace with
-    ##      an author-pinned input.
+    ##   4. THE VERB'S STATUS DOES NOT REACH THE COMMIT PATH. The hook reaches
+    ##      this refresh through `refreshFlakeLockAtCommit`, whose result
+    ##      carries no exit code at all. Since HL-11 (Unified-Locking-And-Hooks.md
+    ##      §16.4) a commit IS refused over a declined pin while an explicit
+    ##      develop override substitutes the sibling — for the recipe
+    ##      constraint, named as such — and a commit with no override over the
+    ##      same author-owned pin passes, because an exact pin nothing
+    ##      overrides is not compared with its checkout (§16.5). Both are
+    ##      asserted, because a fix that routed the verb's status through the
+    ##      hook would break every commit in a workspace with an author-pinned
+    ##      input.
     if not nf2Prerequisites("t_a_declined_refresh_exits_non_zero"):
       skip()
     else:
@@ -340,6 +416,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedAlpha = fx.seedSha[0]
       let seedBeta = fx.seedSha[1]
@@ -399,7 +479,7 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       check lockedRevOf(parseJson(afterClean), "alpha-src") == laterAlpha
       check lockedRevOf(parseJson(afterClean), "beta-src") == seedBeta
 
-      # ---- (4) the COMMIT path still succeeds over a live decline. --------
+      # ---- (4) the verb's status does not reach the COMMIT path. ----------
       # `beta` goes back to the published revision arm (1) declined, which puts
       # the decline back in play without needing a push: the revision is
       # already on the origin, so it stays lockable-for-other-people and the
@@ -409,19 +489,38 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       check againBeta == newBeta
       check againBeta != seedBeta
       check siblingRevIsPublished(fx, "beta", againBeta)
+      # (4a) Under the explicit override the commit IS refused — for the
+      # recipe constraint (§16.4), named as such, not for the verb's exit
+      # status, which the hook never reads.
       let commit = tryCommitInApp(fx, "commit over an author-owned pin")
-      if commit.code != 0:
-        checkpoint("git commit FAILED over a declined pin — the exit status " &
-          "reached the hook:\n" & commit.output & "\nlog:\n" & preCommitLog(fx))
-      check commit.code == 0
-      # …and the commit path still ANNOUNCED the decline. A commit that
-      # succeeded because the refresh stopped running would satisfy the line
-      # above and lose the whole NF-2 guarantee.
+      checkpoint("git commit:\n" & commit.output & "\nlog:\n" &
+        preCommitLog(fx))
+      check commit.code != 0
+      check ("H3 (the commit-time re-pin moves lock resolutions, never a " &
+        "recipe constraint)") in commit.output
+      check ("pins input 'beta-src' at revision " & seedBeta) in commit.output
+      check "skipped-unrecordable-sibling" notin commit.output
+      # …and the commit path still ANNOUNCED the decline. A commit refused
+      # because the refresh stopped running would satisfy the lines above and
+      # lose the whole NF-2 guarantee.
       let log = lastFlakeLogLine(fx)
       checkpoint("pre-commit log line: " & log)
       check log.contains("skipped-unrecordable-sibling")
       check log.contains("beta-src")
       check log.contains(againBeta)
+      discard gitIn(fx, fx.app, "reset -q")
+      # (4b) A commit does not start failing merely because a pin is
+      # author-owned: with the override dropped, the pinned input is not
+      # compared with its checkout at all (§16.5) and the same commit passes.
+      removeFile(fx.ws / ".repro" / "develop-overrides.toml")
+      let plain = tryCommitInApp(fx, "commit over an author-owned pin")
+      checkpoint("git commit:\n" & plain.output & "\nlog:\n" &
+        preCommitLog(fx))
+      check plain.code == 0
+      check ("pinned by recipe, not compared: beta-src=beta@") in
+        preCommitLog(fx)
+      check lockedRevOf(parseJson(readFile(lockPath(fx))), "beta-src") ==
+        seedBeta
 
   test "t_a_push_over_a_rev_pinned_input_names_the_flake_edit":
     ## **(b)** the pre-push gate's remedy for a rev-pinned input must be the
@@ -478,6 +577,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       let seedBeta = fx.seedSha[1]
       let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
@@ -485,14 +588,18 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       check newBeta.len == 40 and newBeta != seedBeta
       publishAll(fx)
 
-      # ---- the loop's step 1: the commit succeeds, printing the decline. ---
+      # ---- the loop's step 1. Since HL-11 M3 the commit is REFUSED over --
+      # this decline (§16.4: the re-pin never moves past a recipe constraint),
+      # still printing it; the gate is reached the way it exists to be
+      # reached, by a commit made past the hook.
       let commit = tryCommitInApp(fx, "work against the author-pinned beta")
-      if commit.code != 0:
-        checkpoint("git commit failed:\n" & commit.output & "\nlog:\n" &
-          preCommitLog(fx))
-      check commit.code == 0
+      checkpoint("git commit:\n" & commit.output & "\nlog:\n" &
+        preCommitLog(fx))
+      check commit.code != 0
+      check ("H3 (the commit-time re-pin moves lock resolutions, never a " &
+        "recipe constraint)") in commit.output
       check lastFlakeLogLine(fx).contains("skipped-unrecordable-sibling")
-      publishRepo(fx, fx.app)
+      commitLockAndPublish(fx, "work against the author-pinned beta")
 
       let lockBefore = readFile(lockPath(fx))
       check lockedRevOf(parseJson(lockBefore), "beta-src") == seedBeta
@@ -604,6 +711,10 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
+      # `beta` is substituted by an EXPLICIT develop override, so its
+      # rev-pinned input is still compared with the checkout (§16.5: an
+      # exact recipe pin nothing overrides is not compared at all).
+      overrideExplicitly(fx, "beta")
 
       # The pin is moved FORWARD (flake.nix and both halves of the lock node),
       # then the checkout is wound back to where it started. The objects stay in
@@ -665,6 +776,8 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
         check remediation.contains("merge --ff-only")
         check remediation.contains(newBeta)
         check not remediation.contains("change rev=")
+        check not remediation.contains("changes rev=")
+        check not remediation.contains("repro lock update")
         check not remediation.contains("pinned BY REVISION")
 
         # …and it is still a command that RUNS where the message says, which is

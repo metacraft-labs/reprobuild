@@ -610,6 +610,11 @@ type
       ## The policy steps consulted — the selection's trace, or the failed
       ## selection's ``steps``.
     resolvedVersion*: string
+    unknownDefinition*: bool
+      ## The reference is unresolved because no package definition this
+      ## process can see names it at all (`unknown-package`), as opposed to a
+      ## known definition that offers nothing for the target. A catalog that
+      ## was not reachable might define it.
 
 proc contributorSuffix(selection: RealizationSelection): string =
   if selection.contributor.len > 0:
@@ -709,6 +714,8 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
         preview.resolvedVersion = resolution.selection.version
       except CatchableError as err:
         let failure = previewResolutionFailure(err)
+        preview.unknownDefinition = err of EMissingRealization and
+          not (ref EMissingRealization)(err).definitionKnown
         preview.kind = ppkMissing
         preview.detail = failure.detail
         preview.steps = failure.steps

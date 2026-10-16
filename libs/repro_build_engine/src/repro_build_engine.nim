@@ -2279,8 +2279,8 @@ type
       ## ``toolIdentityRefs`` name this tool (section 3, step 5), so
       ## re-realizing the tool invalidates its consumers through the ordinary
       ## declared-input path. Empty for a tool no provisioning edge realized
-      ## (a host ``PATH`` tool, a Nix realization outside the dev-env graph,
-      ## a from-source build).
+      ## (a host ``PATH`` tool, a from-source build, a Nix realization
+      ## resolved with no tool store).
     # M9.R.14e.3 — auxiliary search-path channels. The engine threads
     # each list onto a dedicated env var at action-launch time (see
     # ``resolvedToolAuxPaths`` / ``applyEnvSearchLists``):
@@ -16122,7 +16122,43 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        let exchange = requestNixDaemon($req, action.cwd)
+        # An edge MAY carry a JSON object in ``builtinText``
+        # (``repro_tool_profiles``' ``nixToolProvisioningEdges``) naming
+        #   * ``workspaceRoot``: the directory the selector is resolved
+        #     against, when it is not the edge's ``cwd``. A tool edge's
+        #     ``cwd`` is its tool store, so that the run ledger (keyed by id
+        #     and ``cwd``) keeps ONE manifest per tool request and releases a
+        #     superseded realization's GC root, while a ``.#…`` selector
+        #     still names the project's flake;
+        #   * ``expressionFile``: the Nix expression file the selector is
+        #     realized from (a ``nixPackage`` declared with
+        #     ``expressionFile``); the helper builds that file instead.
+        # An edge with no text -- the dev-env and extractor edges -- sends
+        # the request it always sent.
+        #
+        # The helper itself is resolved against the same directory the
+        # selector is (``requestNixDaemon``'s ``cwd`` anchors the candidates
+        # for a build run from the reprobuild tree): a tool edge's ``cwd``,
+        # its tool store, is no place to look for one, and before the edge
+        # existed tool resolution resolved it from the project directory.
+        var helperRoot = action.cwd
+        if action.builtinText.len > 0:
+          let spec =
+            try: parseJson(action.builtinText)
+            except CatchableError as err:
+              raiseEngine("bakForeignProvision: the nix edge's text is not " &
+                "a JSON object (" & err.msg & "): " & action.id)
+          if spec.kind != JObject:
+            raiseEngine("bakForeignProvision: the nix edge's text is not " &
+              "a JSON object: " & action.id)
+          let workspaceRoot = spec{"workspaceRoot"}.getStr()
+          if workspaceRoot.len > 0:
+            req["workspaceRoot"] = %workspaceRoot
+            helperRoot = workspaceRoot
+          let expressionFile = spec{"expressionFile"}.getStr()
+          if expressionFile.len > 0:
+            req["expressionFile"] = %expressionFile
+        let exchange = requestNixDaemon($req, helperRoot)
         if not exchange.connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " &
             exchange.socketPath & ": " & exchange.diagnostic)
@@ -16141,10 +16177,25 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if paths.len == 0:
           raiseEngine("Daemon returned no materialized paths for selector: " & selector)
         
-        let outPath = paths[0].getStr()
+        # THE RECEIPT NAMES EVERY REALIZED OUTPUT, one store path per line,
+        # in the helper's order: its first line is the output carrying the
+        # package's executable (``put_executable_output_first``), which is
+        # all this receipt used to hold. A tool's other outputs (a split
+        # ``-dev`` or ``-lib``) feed its consumers' include and library
+        # paths, so a receipt that dropped them could not stand for the
+        # realization. A single-output realization writes the same bytes as
+        # before, so no existing edge's record changes.
+        var outPaths: seq[string] = @[]
+        for pathNode in paths:
+          let outPath = pathNode.getStr()
+          if outPath.len > 0:
+            outPaths.add(outPath)
+        if outPaths.len == 0:
+          raiseEngine("Daemon returned no materialized paths for selector: " &
+            selector)
         createDir(extendedPath(receiptPath.splitPath.head))
         prepareBuiltinFileOutput(receiptPath)
-        writeFile(extendedPath(receiptPath), outPath)
+        writeFile(extendedPath(receiptPath), outPaths.join("\n"))
         
         # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
         # assigned to `monitorReads`, the MONITOR's channel, which is the
