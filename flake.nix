@@ -261,7 +261,12 @@
         # before exec, a thread trapping after the exit drain) are reported as
         # event-loss instead of vanishing; execveat and fexecve run the exec
         # hook, so their child is monitored and the exec is recorded.
-      url = "github:metacraft-labs/io-mon/a4378d9400f209924cf6591d7c794654eb5f7906";
+        # Bumped to f33311e (2026-10-16), io-mon's `agents` tip; a4378d9 is an
+        # ancestor. A fork child of a multi-threaded process records what it
+        # reads before exec when no shim lock was held at the fork; otherwise
+        # (and after a raw clone or _Fork) it reports the evidence it skips
+        # as event-loss instead of grading complete without it.
+      url = "github:metacraft-labs/io-mon/f33311ea06be5fe1569172ade9a6cd27b480e9af";
       flake = false;
     };
     nim-shm-gset-src = {
