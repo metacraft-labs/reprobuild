@@ -8550,6 +8550,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim",
+    binary: "build/test-bin/t_integration_hcr_linux_concurrent_patch_gate_conditions",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim",
     binary: "build/test-bin/t_integration_hcr_linux_on_stack_function_reported_skipped",
     defines: @[],
@@ -14492,6 +14501,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_provider_compile_follows_the_recipe.nim",
     binary: "build/test-bin/t_provider_compile_follows_the_recipe",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_provider_compile_key_ignores_the_callers_shell.nim",
+    binary: "build/test-bin/t_provider_compile_key_ignores_the_callers_shell",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

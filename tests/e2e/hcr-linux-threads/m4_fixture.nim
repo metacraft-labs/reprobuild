@@ -164,3 +164,19 @@ proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
 proc hex*(bytes: seq[byte]): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
+
+proc hostLoadPerCpu*(): float =
+  ## The host condition the HLX-M4 gate's statistical thresholds are
+  ## calibrated against (`m4_verdict.MaxLoadPerCpu`): the 1-minute load average
+  ## from `/proc/loadavg` (proc(5)) divided by the online CPU count. An
+  ## unreadable or unparsable reading is reported as +Inf — "outside the
+  ## conditions" — so a host this cannot measure never has its runs counted as
+  ## calibrated evidence.
+  try:
+    let fields = readFile("/proc/loadavg").splitWhitespace()
+    let cpus = countProcessors()
+    if fields.len == 0 or cpus <= 0:
+      return Inf
+    parseFloat(fields[0]) / float(cpus)
+  except CatchableError:
+    Inf
