@@ -1,0 +1,1 @@
+Fixes reprobuild-pm issue 2026-10-15-macos-repro-build-cannot-provision-the-recipe-nim-after-the-uses-range-check.md (macOS completion of the fix: 31edb0e26b).
