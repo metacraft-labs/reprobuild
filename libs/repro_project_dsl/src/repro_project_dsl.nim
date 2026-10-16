@@ -77,6 +77,15 @@ import repro_project_dsl/compile_time_shell
 # is what lets the emitted code resolve those names inside a recipe.
 import repro_lock_files
 import repro_lock_files/ct_registry
+# Test-Certificates TC-9b: the branch-policy model, for `enactCertificatePolicy`
+# (the `package` macro's compile-time check, the runtime registry and the
+# provider's emission). A `std`-only leaf. Imported by name and NOT
+# re-exported: a recipe that writes a policy imports `repro_certificates`, and
+# every other recipe keeps its namespace free of the policy vocabulary.
+from repro_lock/certificate_policy import BranchCertificatePolicy,
+  CertificatePolicyEmitEnvVar, CertificatePolicyGraphStableName,
+  renderCertificatePolicyEmission, undeclaredRequirement,
+  withDeclaredInRelativeTo
 export cache_key, bcsTypes, install_mirror_resolver, shell_fetch
 export repro_lock_files, ct_registry
 

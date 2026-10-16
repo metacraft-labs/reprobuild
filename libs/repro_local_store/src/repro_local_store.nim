@@ -1153,6 +1153,47 @@ when defined(windows):
     GetFileExInfoStandard = 0'i32
     FileTimeEpochDiff100Ns = 116_444_736_000_000_000'i64
 
+const LinkedDirectoryIdentityDomain = "reprobuild.linked-directory.v1"
+  ## Leads the bytes `linkedDirectoryIdentity` hashes, so the word cannot
+  ## collide with any other identity derived from the same text.
+
+proc linkedDirectoryIdentity(path: string): uint64 =
+  ## The `sizeBytes` word recorded for a symbolic link that resolves to a
+  ## directory: a digest of its `readlink` text, never 0.
+  ##
+  ## A real directory records `sizeBytes = 0` and `mtimeNs = 0` (see the end
+  ## of `fingerprintMetadata`), and `mtimeNs` is already taken on directories
+  ## by the membership digest (`membershipTrackedDirectory`). Before this word
+  ## existed a link to a directory recorded exactly what the directory did, so
+  ## two transitions were invisible to every policy:
+  ##
+  ## * a directory on a resolved path REPLACED by a link to another directory
+  ##   holding the same names. `realpath` now answers differently, and the
+  ##   files reached through the path may be different files;
+  ## * a link to a directory RETARGETED at another directory. `readlink`
+  ##   answers differently, whatever the two directories hold.
+  ##
+  ## The monitor records each component a path resolution walks through as a
+  ## probe, so with this word both transitions change a recorded input. The
+  ## target text, not the link's own mtime, is what is hashed: a retarget with
+  ## the mtime restored (`utimensat(..., AT_SYMLINK_NOFOLLOW)`) still moves it.
+  ##
+  ## 0 is reserved for "not a link", so a digest of 0 is escaped. A link that
+  ## vanished between the `lstat` and this call hashes the empty text, which
+  ## differs from the stable state's identity: the conservative direction.
+  var target = ""
+  try:
+    target = expandSymlink(extendedPath(path))
+  except OSError:
+    target = ""
+  let text = LinkedDirectoryIdentityDomain & "\0" & target
+  var payload = newSeq[byte](text.len)
+  for i, ch in text:
+    payload[i] = byte(ord(ch))
+  result = localHash(payload).value
+  if result == 0'u64:
+    result = 1'u64
+
 proc fingerprintMetadata(path: string): FileMetadata =
   let fsPath = extendedPath(path)
   when defined(posix):
@@ -1177,6 +1218,7 @@ proc fingerprintMetadata(path: string): FileMetadata =
     var stat: Stat
     if lstat(fsPath.cstring, stat) != 0:
       return FileMetadata(kind: ffkMissing)
+    var linkToDirectory = false
     result.kind =
       if S_ISREG(stat.st_mode):
         ffkRegular
@@ -1219,6 +1261,7 @@ proc fingerprintMetadata(path: string): FileMetadata =
         if posix.stat(fsPath.cstring, target) != 0:
           ffkUnresolvedSymlink
         elif S_ISDIR(target.st_mode):
+          linkToDirectory = true
           ffkDirectory
         else:
           ffkRegular
@@ -1279,6 +1322,11 @@ proc fingerprintMetadata(path: string): FileMetadata =
     # miss whenever their own output directory is touched.
     result.sizeBytes = 0
     result.mtimeNs = 0
+    when defined(posix):
+      if linkToDirectory:
+        # A link to a directory is not the directory: see
+        # `linkedDirectoryIdentity`.
+        result.sizeBytes = linkedDirectoryIdentity(path)
 
 type
   OutputWitness* = object
@@ -2116,6 +2164,42 @@ proc unresolvedSymlinkIdentity(path: string): seq[byte] =
   for i, ch in text:
     result[i] = byte(ord(ch))
 
+const LinkedFileIdentityDomain = "reprobuild.linked-file.v1"
+  ## Leads the `readlink` text `linkedFileIdentity` prepends to a linked
+  ## file's content, so a link's identity cannot collide with file bytes.
+
+proc linkedFileIdentity(path: string): seq[byte] =
+  ## Empty for a path that is not itself a symbolic link; for a link that
+  ## resolves to a regular file, its `readlink` text in a namespace of its own.
+  ##
+  ## A content-keyed policy used to hash only the bytes the link leads to, so
+  ## retargeting it at another file with the same content compared equal --
+  ## `ffpChecksum` directly, `ffpHybrid` once its metadata check fell through
+  ## to the hash. An action that READ the link (`readlink`, `realpath`; the
+  ## monitor records those as probes of the link) answered differently, and
+  ## the record kept being served. `ffpTimestamp` already sees the retarget in
+  ## the link's own size and mtime, which is what its metadata carries.
+  ##
+  ## Hashing the link text as well costs a retarget-to-identical-content
+  ## re-execution for an action that only opened through the link: the
+  ## conservative direction.
+  when defined(posix):
+    var st: Stat
+    if lstat(extendedPath(path).cstring, st) != 0 or not S_ISLNK(st.st_mode):
+      return @[]
+  else:
+    if not symlinkExists(extendedPath(path)):
+      return @[]
+  var target = ""
+  try:
+    target = expandSymlink(extendedPath(path))
+  except OSError:
+    target = ""
+  let text = LinkedFileIdentityDomain & "\0" & target & "\0"
+  result = newSeq[byte](text.len)
+  for i, ch in text:
+    result[i] = byte(ord(ch))
+
 proc fileBytesForHash(path: string; metadata: FileMetadata):
     tuple[readable: bool; payload: seq[byte]] =
   ## The bytes a content-keyed policy hashes for `path`, or `readable =
@@ -2130,7 +2214,8 @@ proc fileBytesForHash(path: string; metadata: FileMetadata):
   case metadata.kind
   of ffkRegular:
     try:
-      (readable: true, payload: bytes(readFile(extendedPath(path))))
+      (readable: true,
+       payload: linkedFileIdentity(path) & bytes(readFile(extendedPath(path))))
     except IOError, OSError:
       (readable: false, payload: newSeq[byte]())
   of ffkUnresolvedSymlink:

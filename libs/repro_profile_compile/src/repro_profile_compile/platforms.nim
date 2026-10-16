@@ -109,6 +109,8 @@ type
     ## `nim dump` reports them after reading the profile's (staged)
     ## `config.nims` and every other configuration file.
     searchPaths*: seq[string]
+      ## The explicit search paths (`nim dump`'s `lib_paths`), never the
+      ## lazy Nimble package paths.
 
 proc resolveProfileNimConfig*(nimExe, profileRoot, repoRootAbs: string;
                               env: StringTableRef): ProfileNimConfig =
@@ -152,10 +154,18 @@ proc resolveProfileNimConfig*(nimExe, profileRoot, repoRootAbs: string;
       ")"
     err.stderrText = output
     raise err
-  for key in ["lib_paths", "lazyPaths"]:
-    if doc.hasKey(key):
-      for path in doc[key]:
-        result.searchPaths.add path.getStr
+  # Only the explicit search paths (`lib_paths`). `lazyPaths` are Nimble
+  # package directories (`~/.nimble/pkgs2/*`, ...), which Nim searches only
+  # after every explicit path. Passing them to the probe as `--path:` would
+  # promote them above the profile's own paths -- Nim searches the newest
+  # `--path` first -- so a stale package in the user's Nimble directory
+  # would shadow a module the compile resolves elsewhere, and the probe
+  # would report the platform `unevaluated` where the compile succeeds. The
+  # probe's `nim check` still finds them lazily, as the compile does: it
+  # reads the same configuration files and the same Nimble directories.
+  if doc.hasKey("lib_paths"):
+    for path in doc["lib_paths"]:
+      result.searchPaths.add path.getStr
 
 proc profileProbeArgv*(nimExe, profileRoot, nimcacheDir: string;
                        config: ProfileNimConfig;

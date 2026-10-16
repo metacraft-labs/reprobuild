@@ -828,12 +828,35 @@ proc releaseUserDaemonLock(lock: var UserDaemonLock) =
   lock.held = false
 
 proc statusPath(config: UserDaemonConfig): string =
-  config.stateDir / "status" /
-    (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
-      ".status")
+  statusFileForEndpoint(config.stateDir, config.endpoint)
 
 proc sessionRecordsDir(config: UserDaemonConfig): string =
   config.stateDir / "sessions"
+
+var sessionRecordsDirWalks = 0
+  ## How many times this process has walked `sessions/`. Incremented by
+  ## `sessionRecordFiles`, the only place the directory is enumerated.
+
+proc sessionRecordsDirWalkCount*(): int =
+  ## Exported for `t_daemon_active_session_tally.nim`, which asserts that
+  ## priming the active-session tally walks `sessions/` a bounded number of
+  ## times however many records it reclaims. The walk is the cost that
+  ## matters -- it is proportional to every record ever written -- and a
+  ## wall-clock assertion cannot see it on a test-sized fixture, so the test
+  ## counts walks instead.
+  sessionRecordsDirWalks
+
+iterator sessionRecordFiles(config: UserDaemonConfig): string =
+  ## Every `.session` file under `sessions/`, in one walk of the directory.
+  ##
+  ## ONE ENUMERATION SITE, so that `sessionRecordsDirWalkCount` counts every
+  ## walk: a second `walkDir` of this directory would be a cost the test that
+  ## bounds it cannot see.
+  if dirExists(sessionRecordsDir(config)):
+    inc sessionRecordsDirWalks
+    for kind, path in walkDir(sessionRecordsDir(config)):
+      if kind == pcFile and path.endsWith(".session"):
+        yield path
 
 proc sessionRecordPath(config: UserDaemonConfig; sessionId: string): string =
   sessionRecordsDir(config) / (safePathSegment(sessionId, "session") & ".session")
@@ -1132,11 +1155,7 @@ proc readSessionRecord(path: string): UserDaemonSession =
       discard
 
 proc loadSessionRecords(config: UserDaemonConfig): seq[UserDaemonSession] =
-  if not dirExists(sessionRecordsDir(config)):
-    return
-  for kind, path in walkDir(sessionRecordsDir(config)):
-    if kind != pcFile or not path.endsWith(".session"):
-      continue
+  for path in sessionRecordFiles(config):
     try:
       let session = readSessionRecord(path)
       if session.sessionId.len > 0:
@@ -1176,6 +1195,25 @@ proc countActiveSessionRecordsFromDisk*(config: UserDaemonConfig): int =
 #
 # Keyed on the records directory, so a differently-configured `stateDir`
 # re-primes instead of inheriting another daemon's tally.
+#
+# A PRIME IS ONE RECLAIM WALK AND ONE COUNT WALK, AND A WRITE NEVER STARTS
+# ONE. Priming reclaims first, and every record it reclaims is rewritten
+# through `writeSessionRecord`, which reports the write to
+# `noteSessionRecordWritten`. The cache key is not published until the prime
+# ends, and that proc used to answer a write into an unprimed directory by
+# priming -- so each reclaimed record started a nested prime, each walking
+# `sessions/` twice. The answer was still right (the outermost frame recounts
+# last), but n reclaimed records cost 2n + 2 walks of a directory that holds
+# every record ever written, at a recursion depth nothing bounded. The
+# daemon's startup reclaim took the same path on its first write, and the
+# prime that set off reclaimed the rest behind its back, so the startup log
+# said `count=1` however many records were reclaimed.
+#
+# Priming only where the tally is READ (`activeSessionTallyFor`) makes the
+# re-entry impossible rather than unlikely. A write into an unprimed directory
+# is already on disk, so the prime that eventually runs counts it; priming or
+# folding at write time adds nothing but the walk. A writer added inside a
+# prime later -- reclamation or anything else -- cannot re-enter it either.
 var activeSessionCacheDir = ""
 var activeSessionStateById = initTable[string, bool]()
 var activeSessionTally = 0
@@ -1219,11 +1257,7 @@ proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
   ## is the correct trade: reclaiming a record whose writer might still be
   ## running would let two builds believe they own one session, and a
   ## lingering record only defers a restart.
-  if not dirExists(sessionRecordsDir(config)):
-    return 0
-  for kind, path in walkDir(sessionRecordsDir(config)):
-    if kind != pcFile or not path.endsWith(".session"):
-      continue
+  for path in sessionRecordFiles(config):
     var session =
       try: readSessionRecord(path)
       except CatchableError: continue
@@ -1240,6 +1274,9 @@ proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
       discard
 
 proc primeActiveSessionTally(config: UserDaemonConfig) =
+  ## Count the active sessions in `sessions/` from disk, after reclaiming the
+  ## abandoned ones. At most two walks of the directory, whatever it holds:
+  ## see the note above `activeSessionCacheDir` for why nothing re-enters it.
   # Reclaim BEFORE counting, so the tally this produces already excludes
   # records whose writers are gone. Counting first and reclaiming later would
   # leave the first status answer of every daemon reporting phantom work.
@@ -1256,9 +1293,10 @@ proc primeActiveSessionTally(config: UserDaemonConfig) =
 proc noteSessionRecordWritten(config: UserDaemonConfig;
                               session: UserDaemonSession) =
   if activeSessionCacheDir != sessionRecordsDir(config):
-    # Not primed for this directory yet. The record is already on disk by the
-    # time this runs, so a prime counts it; do not also fold it in.
-    primeActiveSessionTally(config)
+    # Not primed for this directory -- or being primed right now, since the
+    # key is published last. The record is already on disk, so whichever
+    # prime counts this directory counts it. Neither fold it in nor prime
+    # here: see the note above `activeSessionCacheDir`.
     return
   let active = sessionStateIsActive(session.state)
   if not activeSessionStateById.hasKey(session.sessionId):
@@ -1374,9 +1412,33 @@ proc removeEndpointFiles(config: UserDaemonConfig) =
   try: removeFile(config.endpoint) except OSError: discard
   removeStatusFile(config)
 
-proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
+proc removeLegacyStatusFile(config: UserDaemonConfig): bool =
+  ## Remove the record an older-generation daemon for ``config.endpoint``
+  ## left behind when it died uncleanly. That generation keyed the record on
+  ## the endpoint BASENAME, so the file at the legacy name may belong to any
+  ## same-basename endpoint, possibly a live one; it is removed only when its
+  ## ``endpoint=`` line names this endpoint exactly, and only from the posix
+  ## stale gate below (the endpoint refuses connections). The normal exit
+  ## path never touches it.
+  let legacy = config.stateDir / "status" /
+    (safePathSegment(config.endpoint.extractFilename, "repro-daemon") &
+      ".status")
+  try:
+    if fileExists(legacy) and
+        ("endpoint=" & config.endpoint) in readFile(legacy).splitLines():
+      removeFile(legacy)
+      result = true
+  except CatchableError:
+    discard
+
+proc cleanupStaleUserDaemonDiscovery*(requested: UserDaemonConfig): bool =
   ## Remove stale discovery files only when the endpoint does not accept a raw
   ## connection. A protocol-incompatible but live daemon must keep its state.
+  ##
+  ## The paths are anchored first, as ``cleanupPlatformBackgroundRegistration``
+  ## anchors them: the daemon keyed its record on the ABSOLUTE endpoint and
+  ## state directory, and `repro daemon status|stop` pass the flags as typed.
+  let config = withAnchoredDaemonPaths(requested)
   when defined(posix):
     let endpointPresent = userDaemonEndpointExists(config.endpoint)
     let accepts = userDaemonEndpointAcceptsConnections(config.endpoint)
@@ -1389,6 +1451,8 @@ proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
     if not accepts:
       if fileExists(statusPath(config)):
         removeStatusFile(config)
+        result = true
+      if removeLegacyStatusFile(config):
         result = true
   else:
     if fileExists(statusPath(config)):
@@ -2883,14 +2947,6 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
     result.add("--state-root")
     result.add(config.leaseStoreRoot)
 
-proc endpointNameDigest(config: UserDaemonConfig): string =
-  ## The digest that makes a service-manager name identify the WHOLE
-  ## endpoint: 16 hex characters (64 bits) of blake3 over the endpoint string
-  ## VERBATIM. Shared by ``launchdLabel`` and ``systemdUnitName`` so the two
-  ## platforms cannot drift apart; ``systemdUnitName``'s docstring carries the
-  ## reasoning for each of those choices.
-  blake3.digest(config.endpoint).toHex()[0 ..< 16]
-
 proc legacyLaunchdLabel(config: UserDaemonConfig): string =
   ## The label binaries before the endpoint-keyed naming registered: the
   ## endpoint's basename alone. Kept only so the launcher and the cleanup can
@@ -2923,7 +2979,7 @@ proc launchdLabel*(config: UserDaemonConfig): string =
   ##
   ## Exported so a second derivation -- a test teardown -- asks for the name
   ## instead of restating it.
-  legacyLaunchdLabel(config) & "-" & endpointNameDigest(config)
+  legacyLaunchdLabel(config) & "-" & endpointDigest(config.endpoint)
 
 proc launchdPlistPath*(config: UserDaemonConfig): string =
   ## Where the launcher writes the plist for ``launchdLabel(config)``; it
@@ -3156,8 +3212,9 @@ proc systemdUnitName*(config: UserDaemonConfig): string =
   ## is not a risk worth a longer name. The result is bounded well under
   ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
   ## ``sun_path`` (108 bytes).
-  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
-    "-" & endpointNameDigest(config) & ".service"
+  ##
+  ## The key is ``endpointInstanceKey``, which the status record shares.
+  "repro-daemon-" & endpointInstanceKey(config.endpoint, "user") & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =

@@ -35,7 +35,8 @@
 ## the helper subprocess) lives at
 ## `tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim`.
 
-import std/[os, strtabs, strutils, tempfiles, unittest]
+import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 from repro_core/paths import extendedPath
 from repro_core/source_root import InstalledSourceRootSubdir,
   InstalledSourceTreesSubdir
@@ -535,7 +536,8 @@ suite "installed repro: profile compile source root and compiler":
       check cCompilerAcceptsFlag(clangExe, clangNoTempFileFlag, scratch)
       check clangNoTempFileCFlags(clangExe, scratch) == @[clangNoTempFileFlag]
       check profileCompileCFlags(clangExe, scratch) ==
-        @[clangNoTempFileFlag, "-Xclang -dependency-file -Xclang " & nullDevice]
+        @[clangNoTempFileFlag, "-MD -MT " & ProfileDepfileTarget &
+          " -Xclang -dependency-file -Xclang " & nullDevice]
       check not cCompilerAcceptsFlag(clangExe, "-fno-repro-no-such-flag",
         scratch)
     if gccExe.len > 0:
@@ -552,6 +554,52 @@ suite "installed repro: profile compile source root and compiler":
     check clangNoTempFileCFlags("", scratch).len == 0
     # The probe cleans up after itself.
     check not dirExists(scratch / "cc-flag-probe")
+
+  test "the clang profile flags compile whatever dependency flags Nim adds":
+    # Nim hands `--passC` to the C compiler split on spaces, beside its own
+    # options. reprobuild's Nim fork (dev shell, Nix package) adds
+    # `-MD -MF <file>.d`; the official 2.2.10 archive the recipe bootstrap
+    # provisions adds neither, and cc1 refuses `-dependency-file` without a
+    # target, so the profile compile failed outright under that Nim
+    # (measured on m1, 2026-10-15, with Apple and Nix clang alike). Each
+    # shape must compile and must write no `.d`: the report goes to the null
+    # device. Real compilers, as in the probe test above.
+    var clangExe = ""
+    for name in ["clang", "cc"]:
+      let exe = findExe(name)
+      if exe.len > 0 and cCompilerFamily(exe) == "clang":
+        clangExe = exe
+        break
+    if clangExe.len == 0:
+      skip("no clang on PATH; the dependency-report flags are clang-only")
+    else:
+      checkpoint("clang: " & clangExe)
+      let scratch = createTempDir("repro-profile-cflags-", " dir")
+      defer: removeDir(scratch)
+      let flags = profileCompileCFlags(clangExe, scratch)
+      var passC: seq[string] = @[]
+      for flag in flags:
+        passC.add flag.splitWhitespace()
+      check "-dependency-file" in passC
+      let source = scratch / "unit.c"
+      let objectFile = scratch / "unit.o"
+      writeFile(source, "int repro_unit(void) { return 0; }\n")
+      let forkDeps = @["-MD", "-MF", scratch / "unit.d"]
+      for (shape, options) in [("official Nim", passC),
+                               ("fork, its -MD first", forkDeps & passC),
+                               ("fork, its -MD last", passC & forkDeps)]:
+        checkpoint(shape)
+        if fileExists(objectFile): removeFile(objectFile)
+        let p = startProcess(clangExe, args = @["-c"] & options &
+          @[source, "-o", objectFile], options = {poStdErrToStdOut})
+        let output = p.outputStream.readAll()
+        let code = p.waitForExit()
+        p.close()
+        checkpoint(output)
+        check code == 0
+        check fileExists(objectFile)
+        for path in walkDir(scratch):
+          check not path.path.endsWith(".d")
 
 # ---------------------------------------------------------------------------
 # An installed layout's source-only inputs (Gradual-Nix-To-Reprobuild-Migration

@@ -24,12 +24,43 @@ proc run*(exe: string; args: openArray[string]; cwd: string;
   p.close()
   (exitCode: code, output: output)
 
+proc runRelayingOutput(exe: string; args: openArray[string];
+                        cwd: string): RunResult =
+  ## `run`, except every line the child prints is also written to this
+  ## process's stdout as it arrives.
+  ##
+  ## WHY THE BUILD LOG IS RELAYED. The work of a `nix build` happens in the
+  ## nix daemon's builder, which is not in this case's process group. The
+  ## test runner decides liveness from output and from the group's CPU, so
+  ## a build that is compiling steadily reads as a case that is doing
+  ## nothing: run 33 killed this gate on its IDLE TIMEOUT after 1800 s with
+  ## 9.8 s of group CPU while the builder had compiled two of the package's
+  ## fifteen binaries under a load average of ~90. The builder's own log
+  ## (`-L`) is the honest progress signal: it advances exactly as fast as
+  ## the build does, and a wedged build stops producing it.
+  let p = startProcess(exe, workingDir = cwd, args = @args,
+    options = {poStdErrToStdOut, poUsePath})
+  let stream = p.outputStream
+  var output = ""
+  var line = ""
+  while stream.readLine(line):
+    output.add(line)
+    output.add('\n')
+    stdout.writeLine("nix build: " & line)
+    stdout.flushFile()
+  let code = p.waitForExit()
+  p.close()
+  (exitCode: code, output: output)
+
 proc buildNixPackage*(): string =
   ## `nix build` of this checkout's `#default`, returning the store path.
   ## The flake is a git tree, so nix builds the working tree's tracked (and
   ## staged) files — the code under test, not a pinned release.
-  let res = run("nix", ["build", "--no-link", "--print-out-paths",
-    ProjectRoot & "#default"], ProjectRoot)
+  ##
+  ## `--print-build-logs` and the relay: see `runRelayingOutput`.
+  let res = runRelayingOutput("nix", ["build", "--no-link",
+    "--print-out-paths", "--print-build-logs", ProjectRoot & "#default"],
+    ProjectRoot)
   doAssert res.exitCode == 0, "nix build failed:\n" & res.output
   for line in res.output.splitLines:
     if line.strip().startsWith("/nix/store/"):

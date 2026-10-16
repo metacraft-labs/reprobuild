@@ -37,6 +37,7 @@ import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock/certificate_policy
 
 include tc5_cert_signing_helpers
 
@@ -369,3 +370,60 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
       @["a", "b"], state).len == 0
     check uncoveredPlatforms(@[], @["*"], @["a"], state) ==
       @["any platform (missing: <no certificate>)"]
+
+  test "a policy's any-platform requirement beside a concrete one (TC-9c)":
+    ## TC-9c reconciliation of P6.c. The policy declares ``platforms`` per
+    ## ``requires``, so one rule can hold an any-platform name and a concrete
+    ## one at once — which the ``[certificates]`` table above (one platform
+    ## list for every target) cannot say. The gate's evaluator judges each
+    ## platform set on its own, through the production verifier (registered
+    ## signatures by the real ``ssh-keygen``):
+    ##
+    ##   requires pre-commit (any platform), unit-suite (linux/amd64)
+    ##
+    ##   * pre-commit on macos/arm64 + unit-suite on linux/amd64 → covered:
+    ##     the any-platform name is met by ONE platform alone, and the
+    ##     concrete name by its own platform;
+    ##   * pre-commit and unit-suite both on macos/arm64: pre-commit is met
+    ##     (any platform), but unit-suite on macos/arm64 does not stand in for
+    ##     linux/amd64 → not covered, naming unit-suite on linux/amd64.
+    if findExe("ssh-keygen").len == 0:
+      skip("ssh-keygen not on PATH; this case signs certificates")
+    else:
+      const content = "git-tree-sha1:c0ffee0000000000000000000000000000c0ffee"
+      let scratch = createTempDir("repro-tc9c-anyplatform-", "")
+      defer: removeDir(scratch)
+      let key = genEd25519Key(scratch / "keys", "tc9c-key", "tc9c-any-key")
+      writeRegistry(scratch, @[RegisteredKey(keyId: "tc9c-any-key",
+        publicKey: key.pub, status: rksActive)])
+      let keys = readRegisteredKeyStoreChecked(registeredKeyStorePath(scratch))
+      proc signed(platform: string; targets: seq[string]): FoundCertificate =
+        var cert = TestCertificate(schema: testCertificateSchemaV1,
+          framework: reprobuildFrameworkId, project: "lib-a",
+          platform: platform, targets: targets, result: tcrPassed,
+          issuedAt: "2026-10-15T00:00:00Z", issuer: "tc9c-fixture",
+          vcs: TestCertificateVcs(repo: "lib-a", content: content),
+          commands: @[TestCertificateCommand(argv: @["sh", "-c", "exit 0"])])
+        signCertificateOnIssuance(cert, "tc9c-any-key", key.priv)
+        FoundCertificate(name: platform & ":" & targets.join(","),
+          read: CertificateReadResult(status: crsOk, cert: cert))
+      let state = stateWithKnownContent(
+        [KnownContentId(algorithm: "git-tree-sha1", id: content)])
+      let requires = @[
+        PolicyRequirement(certificate: "pre-commit", platforms: @["*"]),
+        PolicyRequirement(certificate: "unit-suite",
+          platforms: @["linux/amd64"])]
+      # D8: a state that is not a commit is not looked up in a record store.
+      let lockSource = recordStoreLockSource("")
+      let covered = evaluateRequirementCoverage(
+        @[signed("macos/arm64", @["pre-commit"]),
+          signed("linux/amd64", @["unit-suite"])],
+        state, requires, keys, lockSource)
+      checkpoint(describeCoverageVerdict(covered))
+      check covered.outcome == voCovered
+      let short = evaluateRequirementCoverage(
+        @[signed("macos/arm64", @["pre-commit", "unit-suite"])],
+        state, requires, keys, lockSource)
+      checkpoint(describeCoverageVerdict(short))
+      check short.outcome == voNotCovered
+      check short.unmet == @[(name: "unit-suite", platform: "linux/amd64")]

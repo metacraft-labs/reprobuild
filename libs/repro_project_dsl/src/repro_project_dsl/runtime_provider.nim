@@ -236,6 +236,29 @@ when defined(reproProviderMode):
         kind: gnkMetadata,
         stableName: "reprobuild.certificate-export-table.v1",
         payload: certificateExportTablePayload(certificateExports)))
+    # Test-Certificates TC-9b: the enacted branch policy. Every name it
+    # requires must be one this package's table now holds: the compile-time
+    # check covered the literal declarations, and this one covers `test`
+    # (possibly the implicit marking) and names computed by the body. The
+    # policy then travels as a metadata node carrying the same emission the
+    # lock writer reads, so a reader holding this graph (the certifying
+    # run's lock-update node) needs no second provider run. Root fragment
+    # only: a structural member is not the package.
+    var enactedPolicy: BranchCertificatePolicy
+    if isRootFragment and
+        enactedCertificatePolicy(pkg.packageName, enactedPolicy):
+      var certificateNames: seq[string]
+      for entry in certificateExports.entries:
+        certificateNames.add(entry.name)
+      let undeclared = undeclaredRequirement(enactedPolicy, certificateNames)
+      if undeclared.len > 0:
+        raise newException(ValueError, undeclared)
+      result.nodes.add(GraphNode(
+        id: request.namespace & ":metadata:certificate-policy",
+        kind: gnkMetadata,
+        stableName: CertificatePolicyGraphStableName,
+        payload: renderCertificatePolicyEmission(enactedPolicy,
+          pkg.packageName)))
     # Named-Runnable-Edges N2: carry the resource-lane graph (the
     # ``stateGroup`` resource subgraph + membership) that this package's
     # ``buildProc()`` collected to the CLI, so the ``repro run`` leased-

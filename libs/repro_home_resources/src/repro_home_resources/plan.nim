@@ -160,9 +160,11 @@ proc observeHomebrewCaskR*(r: Resource): ObservedState {.nimcall.} =
 
 proc observeAppBundleAt*(targetPath: string): ObservedState =
   ## GM4c: what is at an Applications-directory path. Absent when nothing
-  ## is there; otherwise its identity bytes (`appBundleCanonicalBytes`), or
-  ## a marker for a path that is not a readable bundle, so any such object
-  ## differs from every recorded bundle and is never mistaken for one.
+  ## is there; otherwise its identity bytes (`readPlacedItemIdentityBytes`:
+  ## a bundle's `appBundleCanonicalBytes`, or a folder's identity for an
+  ## installer application's product folder), or a marker for a path that
+  ## is not a readable bundle or folder, so any such object differs from
+  ## every recorded item and is never mistaken for one.
   if not (symlinkExists(targetPath) or fileExists(targetPath) or
       dirExists(targetPath)):
     result.present = false
@@ -171,7 +173,7 @@ proc observeAppBundleAt*(targetPath: string): ObservedState =
   result.present = true
   var bytes: seq[byte]
   try:
-    bytes = appBundleCanonicalBytes(readAppBundleIdentity(targetPath))
+    bytes = readPlacedItemIdentityBytes(targetPath)
   except EAppBundleRefused:
     let marker = AppBundleIdentityFormat & "\nnot-a-bundle\n"
     bytes = newSeq[byte](marker.len)

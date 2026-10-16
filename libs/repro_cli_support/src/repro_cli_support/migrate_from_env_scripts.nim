@@ -2,7 +2,8 @@
 ##
 ## One-shot migration command that reads a Windows-flavoured
 ## ``toolchain-versions.env`` (the ``VAR=VERSION`` pin file consumed by
-## ``D:/metacraft/env.ps1`` + the ``windows/ensure-*.ps1`` modules) and
+## the workspace's ``env.ps1`` (``$METACRAFT_ROOT/env.ps1``) + the
+## ``windows/ensure-*.ps1`` modules) and
 ## synthesizes ``package(<tool>, "<version>")`` lines into the user's
 ## ``home.nim``. Once migrated, the user can keep ``env.ps1`` only as a
 ## thin PATH-priming shim — the home profile's apply pipeline owns

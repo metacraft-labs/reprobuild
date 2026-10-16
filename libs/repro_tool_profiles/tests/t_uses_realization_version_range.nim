@@ -121,3 +121,64 @@ suite "uses realization version ranges":
     check selectScoopRecord(useDef.scoopProvisioning, windows,
       contributor = some("missing")).status ==
       kcContributorNotOffered
+
+proc ownTarget(record: InterfaceTarballProvisioning): RealizationTarget =
+  ## The target a record declares for itself; a record without coordinates
+  ## (the Linux source archive) serves every host, so the host stands in.
+  if record.cpu.len == 0 or record.os.len == 0:
+    return hostRealizationTarget()
+  let cpu = parseEnum[PlatformCpu](record.cpu)
+  realizationTargetFor(cpu, parseEnum[PlatformOs](record.os),
+    level = (if cpu == pcX86_64: mlX86_64_v1 else: mlNone))
+
+suite "reprobuild's own Nim records satisfy the ranges it asks for":
+  # The range check above holds every caller to its range, reprobuild's own
+  # bootstrap included. The bootstrap asks for `nim >=2.2 <3.0` and the
+  # source build for `nim ==<version>`; records built in code rather than
+  # through the `tarball` DSL statement carried no version, so after the
+  # range check every macOS and Windows host, and every Linux host without
+  # Nix, could no longer provision the Nim that compiles recipes (measured on
+  # m1 at reprobuild 9530a77f and 8554984c: "offered: unversioned").
+  test "the bootstrap Nim plans on every target it declares":
+    let useDef = bootstrapNimToolUse()
+    for record in useDef.tarballProvisioning:
+      checkpoint record.url
+      check record.detail.version.len > 0
+      var single = useDef
+      single.tarballProvisioning = @[record]
+      check tarballAcquisitionPlan(single, target = ownTarget(record)).url ==
+        record.url
+
+  test "the bootstrap Nim records' version is the one their ids name":
+    # The version the range check reads and the version the lock identity
+    # names must be the same release, or a lock written for one archive
+    # would be satisfied by the range check for another.
+    for record in bootstrapNimToolUse().tarballProvisioning:
+      checkpoint record.url
+      check record.detail.version == BootstrapNimVersion
+      check record.packageId.endsWith("@" & BootstrapNimVersion)
+      check ("@" & BootstrapNimVersion & ":") in record.lockIdentity
+      check BootstrapNimVersion in record.url
+
+  test "the bootstrap Nim plans on this host":
+    let useDef = bootstrapNimToolUse()
+    if useDef.tarballProvisioning.len > 0:
+      check tarballAcquisitionPlan(useDef).url.len > 0
+      check "of which" notin describeBootstrapNimRoute(bnrArchive)
+
+  test "the Nim source archive satisfies its own exact constraint":
+    let useDef = nimSourceToolUse("2.2.10", BootstrapNimSourceTarballUrl,
+      BootstrapNimSourceTarballSha256)
+    check tarballAcquisitionPlan(useDef).url == BootstrapNimSourceTarballUrl
+    let other = nimSourceToolUse("2.2.9", BootstrapNimSourceTarballUrl,
+      BootstrapNimSourceTarballSha256)
+    check tarballAcquisitionPlan(other).url == BootstrapNimSourceTarballUrl
+
+  test "a pinned binary Nim archive satisfies its own exact constraint":
+    # `provisionPinnedNim`'s binary route (a lock-pinned official archive).
+    let useDef = pinnedNimArchiveToolUse("2.2.10",
+      "https://nim-lang.org/download/nim-2.2.10_x64.zip", repeat('a', 64),
+      "zip")
+    check useDef.tarballProvisioning[0].detail.version == "2.2.10"
+    check tarballAcquisitionPlan(useDef).url ==
+      "https://nim-lang.org/download/nim-2.2.10_x64.zip"

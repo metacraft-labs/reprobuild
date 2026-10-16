@@ -50,6 +50,7 @@ import repro_attest_verify
 import repro_attest_verify/tdx_quote
 import repro_attest_verify/tdx_collateral
 import repro_cli_support/attest
+import repro_test_support/process_fixtures
 
 include ./tdx_launch_vectors
 
@@ -66,6 +67,11 @@ proc documentOf(c: TdxLaunchCase): string =
   v.quote[0 ..< v.documentBytes]
 
 let scratch = getTempDir() / ("tdx-expectation-" & $getCurrentProcessId())
+# Removed when THIS process exits. Module-level code runs in every process the
+# runner starts -- one per case, plus its ``--list-json`` probe -- and nothing
+# removed this directory in any of them. Registered before it is created. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 createDir(scratch)
 
 proc scratchFile(name, content: string): string =

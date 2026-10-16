@@ -11,7 +11,11 @@
 #   reprobuild.intent.packages.enable     -> home.packages
 #   reprobuild.intent.homebrew.enable     -> reprobuild.intent.homebrew.{casks,formulae}
 #                                            (read by the host's Homebrew module;
-#                                            Home Manager has no Homebrew option)
+#                                            Home Manager has no Homebrew option):
+#                                            pkg.homebrewCask / pkg.homebrewFormula
+#                                            resources, and the packages
+#                                            `homebrew.realizationOf` claims
+#                                            (default: reprobuild.lib.brewRealizationOf)
 #   reprobuild.intent.files.enable        -> home.file
 #   reprobuild.intent.environment.enable  -> home.sessionVariables / home.sessionPath
 #
@@ -125,9 +129,11 @@ in
           enable = lib.mkEnableOption "Homebrew token lists from pkg.homebrewCask / pkg.homebrewFormula resources and Homebrew-realized packages";
           realizationOf = lib.mkOption {
             type = lib.types.functionTo (lib.types.nullOr (lib.types.attrsOf lib.types.str));
-            default = _: null;
-            defaultText = lib.literalExpression "_: null";
-            description = "Hook: `{ name, system }` -> null or `{ kind = \"cask\" | \"formula\"; token; }`, the Homebrew realization of a canonical package (filled from the Homebrew contribution catalog). A package it claims goes to the token lists instead of home.packages.";
+            # The pinned Homebrew contribution catalog (reprobuild-brew-packages),
+            # read by `reprobuild.lib.brewRealizationOf`.
+            default = reprobuildLib.brewRealizationOf;
+            defaultText = lib.literalExpression "reprobuild.lib.brewRealizationOf";
+            description = "Hook: `{ name, system }` -> null or `{ kind = \"cask\" | \"formula\"; token; tap; }`, the Homebrew realization of a canonical package. Defaults to `reprobuild.lib.brewRealizationOf`, which reads the Homebrew contribution catalog the reprobuild flake pins (reprobuild-brew-packages): a cask claims a package on darwin systems, a formula on darwin and Linux. A package it claims goes to the token lists instead of home.packages; set `_: null` to claim nothing.";
           };
           casks = lib.mkOption {
             type = lib.types.listOf lib.types.str;

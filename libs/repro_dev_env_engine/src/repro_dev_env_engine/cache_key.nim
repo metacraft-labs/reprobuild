@@ -51,11 +51,13 @@ proc canonicalProjectFilePath(projectRoot: string): string =
     # SYNTHESISED one (`repro_dsl_stdlib/foreign_env/auto_load`), whose body
     # names which foreign environment is activated. It has to be in the key:
     # without it, flipping an auto-load flag from `.envrc` to `flake.nix`
-    # would leave the previous decision's cached interface artifact in place,
-    # and the shell would keep activating the environment the operator just
-    # turned off. Spelled literally rather than imported for the same reason
-    # the two project-file names above are: this module is the prompt-time
-    # fast path and takes no dependency it does not have to.
+    # would be answered as a prompt-time no-op, and the shell would keep the
+    # environment the operator just turned off. (When this key still gated
+    # interface reuse in `computeDevEnvEdge`, it also left the previous
+    # decision's cached interface artifact in place.) Spelled literally
+    # rather than imported for the same reason the two project-file names
+    # above are: this module is the prompt-time fast path and takes no
+    # dependency it does not have to.
     let synthesized = projectRoot / ".repro" / "foreign-env" /
       CanonicalProjectFileName
     if fastFileExists(synthesized): synthesized else: ""
@@ -184,10 +186,12 @@ proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     envVarPart("REPRO_STORE_ROOT"),
     # WHICH reprobuild libs the recipe is compiled against. The interface
     # extraction and the provider compile both read these
-    # (`reprobuildLibsRootFromEnv`), and the extracted interface is reused
-    # whenever this key matches -- so without them, setting the override
-    # after one activation replayed an interface extracted from the OTHER
-    # libs, naming stdlib modules the requested checkout no longer has.
+    # (`reprobuildLibsRootFromEnv`), so an activation under one value is not
+    # current under another, and a prompt that answered "no-op" across the
+    # change would keep an environment built from the OTHER libs. (When this
+    # key still gated interface reuse in `computeDevEnvEdge`, setting the
+    # override replayed an interface naming stdlib modules the requested
+    # checkout no longer has.)
     # Spelled out rather than imported: this module stays free of the
     # interface-artifact library so the prompt-time path stays cheap.
     envVarPart("REPROBUILD_LIBS_DIR"),
