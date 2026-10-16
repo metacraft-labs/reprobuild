@@ -5905,6 +5905,11 @@ proc nixPrefix(namePattern, header: string;
   if not dirExists(extendedPath("/nix/store")):
     return ""
   let needle = namePattern.replace("*", "")
+  # Visit candidates in sorted order, as `config.nims`'s `nixPrefix` does
+  # (it sorts its `find` output) and as `nixLibDirIn` does: an unsorted
+  # `walkDir` makes the chosen prefix depend on directory order, so the
+  # helper and the source build could pick different store builds.
+  var prefixes: seq[string] = @[]
   # TODO(win-longpath): walk results escape; needs review
   for kind, path in walkDir("/nix/store"):
     if kind != pcDir:
@@ -5912,6 +5917,9 @@ proc nixPrefix(namePattern, header: string;
     let tail = splitPath(path).tail
     if needle.len > 0 and tail.find(needle) < 0:
       continue
+    prefixes.add(path)
+  prefixes.sort()
+  for path in prefixes:
     if not fileExists(extendedPath(path / header)):
       continue
     for libraryName in libraryNames:
