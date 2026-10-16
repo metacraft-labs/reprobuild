@@ -2279,8 +2279,8 @@ type
       ## ``toolIdentityRefs`` name this tool (section 3, step 5), so
       ## re-realizing the tool invalidates its consumers through the ordinary
       ## declared-input path. Empty for a tool no provisioning edge realized
-      ## (a host ``PATH`` tool, a Nix realization outside the dev-env graph,
-      ## a from-source build).
+      ## (a host ``PATH`` tool, a from-source build, a Nix realization
+      ## resolved with no tool store).
     # M9.R.14e.3 — auxiliary search-path channels. The engine threads
     # each list onto a dedicated env var at action-launch time (see
     # ``resolvedToolAuxPaths`` / ``applyEnvSearchLists``):
@@ -4133,6 +4133,45 @@ proc cachedResultReusableInPlace(action: BuildAction;
   ## edge with nothing to restore from being treated as one that failed to.
   action.declaresNoOutputs() or declaredOutputsPresent
 
+proc containerDirectoryOutputs*(action: BuildAction): seq[string] =
+  ## The declared outputs of `action` that are CONTAINER directories: a
+  ## directory the action declares only to say it exists, while other
+  ## writers fill it. Incremental-Invalidation.md §"Non-regular outputs",
+  ## "Container directory outputs".
+  ##
+  ## * `bakEnsureDir` — its one output. It creates the directory and writes
+  ##   nothing into it; CodeTracer's C compiles write `build/c/*.o` into its
+  ##   `fs.ensureDir("build/c")`.
+  ## * `bakPreserveTree` — the output ROOT (second line of `builtinText`).
+  ##   Every entry it copies, and its manifest, is declared as an output of
+  ##   its own and keeps its own revalidation; the root's other entries are
+  ##   not its to own (CodeTracer copies `public/ui.js` into the
+  ##   `frontend-public-resources` root).
+  ##
+  ## The classification is a property of the ACTION's kind, so it is decided
+  ## here and handed to every revalidation path (the per-edge lookup, its
+  ## metadata-only hot path, the whole-graph no-op scan, and the restore-mode
+  ## "already in place" check) rather than stored in the record. A process
+  ## action's directory output is never a container: it is opaque, and its
+  ## tree digest is the only check that says anything about it.
+  ##
+  ## The paths are returned as the action spells them; the store resolves
+  ## both sides against the action's cwd (`ownedOutputKey`) before comparing.
+  case action.kind
+  of bakEnsureDir:
+    if action.outputs.len == 1:
+      result.add(action.outputs[0])
+  of bakPreserveTree:
+    # Read directly rather than through `builtinRoots`, which raises on a
+    # malformed text: a lookup is not the place to fail an action the
+    # executor rejects with its own diagnostic. A malformed action simply
+    # has no container.
+    let lines = action.builtinText.splitLines()
+    if lines.len >= 2 and lines[1].len > 0:
+      result.add(lines[1])
+  else:
+    discard
+
 proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
                                           record: ActionResultRecord): bool =
   ## "Is every declared output already exactly what this record describes?"
@@ -4181,7 +4220,8 @@ proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
     return false
   if not action.allOutputsExist():
     return false
-  outputStateMismatch(record, action.cwd).len == 0
+  outputStateMismatch(record, action.cwd,
+    action.containerDirectoryOutputs()).len == 0
 
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
@@ -16082,7 +16122,43 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        let exchange = requestNixDaemon($req, action.cwd)
+        # An edge MAY carry a JSON object in ``builtinText``
+        # (``repro_tool_profiles``' ``nixToolProvisioningEdges``) naming
+        #   * ``workspaceRoot``: the directory the selector is resolved
+        #     against, when it is not the edge's ``cwd``. A tool edge's
+        #     ``cwd`` is its tool store, so that the run ledger (keyed by id
+        #     and ``cwd``) keeps ONE manifest per tool request and releases a
+        #     superseded realization's GC root, while a ``.#…`` selector
+        #     still names the project's flake;
+        #   * ``expressionFile``: the Nix expression file the selector is
+        #     realized from (a ``nixPackage`` declared with
+        #     ``expressionFile``); the helper builds that file instead.
+        # An edge with no text -- the dev-env and extractor edges -- sends
+        # the request it always sent.
+        #
+        # The helper itself is resolved against the same directory the
+        # selector is (``requestNixDaemon``'s ``cwd`` anchors the candidates
+        # for a build run from the reprobuild tree): a tool edge's ``cwd``,
+        # its tool store, is no place to look for one, and before the edge
+        # existed tool resolution resolved it from the project directory.
+        var helperRoot = action.cwd
+        if action.builtinText.len > 0:
+          let spec =
+            try: parseJson(action.builtinText)
+            except CatchableError as err:
+              raiseEngine("bakForeignProvision: the nix edge's text is not " &
+                "a JSON object (" & err.msg & "): " & action.id)
+          if spec.kind != JObject:
+            raiseEngine("bakForeignProvision: the nix edge's text is not " &
+              "a JSON object: " & action.id)
+          let workspaceRoot = spec{"workspaceRoot"}.getStr()
+          if workspaceRoot.len > 0:
+            req["workspaceRoot"] = %workspaceRoot
+            helperRoot = workspaceRoot
+          let expressionFile = spec{"expressionFile"}.getStr()
+          if expressionFile.len > 0:
+            req["expressionFile"] = %expressionFile
+        let exchange = requestNixDaemon($req, helperRoot)
         if not exchange.connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " &
             exchange.socketPath & ": " & exchange.diagnostic)
@@ -16101,10 +16177,25 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if paths.len == 0:
           raiseEngine("Daemon returned no materialized paths for selector: " & selector)
         
-        let outPath = paths[0].getStr()
+        # THE RECEIPT NAMES EVERY REALIZED OUTPUT, one store path per line,
+        # in the helper's order: its first line is the output carrying the
+        # package's executable (``put_executable_output_first``), which is
+        # all this receipt used to hold. A tool's other outputs (a split
+        # ``-dev`` or ``-lib``) feed its consumers' include and library
+        # paths, so a receipt that dropped them could not stand for the
+        # realization. A single-output realization writes the same bytes as
+        # before, so no existing edge's record changes.
+        var outPaths: seq[string] = @[]
+        for pathNode in paths:
+          let outPath = pathNode.getStr()
+          if outPath.len > 0:
+            outPaths.add(outPath)
+        if outPaths.len == 0:
+          raiseEngine("Daemon returned no materialized paths for selector: " &
+            selector)
         createDir(extendedPath(receiptPath.splitPath.head))
         prepareBuiltinFileOutput(receiptPath)
-        writeFile(extendedPath(receiptPath), outPath)
+        writeFile(extendedPath(receiptPath), outPaths.join("\n"))
         
         # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
         # assigned to `monitorReads`, the MONITOR's channel, which is the
@@ -18065,7 +18156,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # makes: a record of another location's outputs is not this
           # action's record. See `recordOutputsNotOwnedBy`.
           enforceOwnedOutputs: true,
-          ownedOutputs: action.outputs))
+          ownedOutputs: action.outputs,
+          # A built-in's container directory is checked for existence, not
+          # by tree digest, on this path exactly as on the per-edge lookup.
+          # See `containerDirectoryOutputs`.
+          containerOutputs: action.containerDirectoryOutputs()))
         hotEnvResolvers.add(action.actionEnvResolver(unsafeAddr config))
       let lookupStart = statStart()
       let navigatorStart = statStart()
@@ -18130,8 +18225,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # Step 3.3). Fall back to the full scheduler when it is not.
       # Timing is accumulated inside `outputStateMismatch` and reported once
       # as "repro output revalidate"; a timer here would have measured this
-      # call site only.
-      if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
+      # call site only. Container directories are checked for existence
+      # only, as on the probe arm above (`containerDirectoryOutputs`).
+      if outputStateMismatch(hotRecord.get(), action.cwd,
+          action.containerDirectoryOutputs()).len > 0:
         return none(BuildRunResult)
       # The other whole-graph arm, and the same reason as the probe field
       # above: reaching `hmssHit` here also means the scheduler never runs, so
@@ -19517,7 +19614,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             outputRoot = action.cwd,
             retention = action.effectiveRetention,
             nowUnix = config.nowUnix,
-            buildEpoch = config.buildEpoch)
+            buildEpoch = config.buildEpoch,
+            containerOutputs = action.containerDirectoryOutputs())
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
@@ -19552,7 +19650,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   outputRoot = action.cwd,
                   retention = action.effectiveRetention,
                   nowUnix = config.nowUnix,
-                  buildEpoch = config.buildEpoch)
+                  buildEpoch = config.buildEpoch,
+                  containerOutputs = action.containerDirectoryOutputs())
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
               else:

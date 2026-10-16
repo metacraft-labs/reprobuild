@@ -151,7 +151,23 @@ A document always describes the platform that compiled it.
     "resources": [ { "kind": "fs.userFile", "address": "…", "fields": { … },
                      "dependsOn": [], "guard": null }, … ],
     "buildActions": [ … ],
-    "adapterPreference": { … }
+    "adapterPreference": { … },
+    "hostApplies": { "laptop": ["applications"] }   // only when a host declares
+  },
+  "concerns": {                                     // only when a host declares
+    "names": ["packages", "applications", "files", "environment", "services", "settings"],
+    "resourceKinds": { "fs.userFile": "files", "env.userPath": "environment", … },
+    "configOverrides": "files",
+    "packages": {                                   // per target system
+      "aarch64-darwin": { "applications": ["ghostty"], "unresolved": [] },
+      "x86_64-linux":   { "applications": [], "unresolved": ["ghostty"] }, …
+    },
+    "profileBin": {                                 // per target system
+      "aarch64-darwin": { "base": "home",
+                          "path": "Library/Application Support/repro/home/current/bin" },
+      "x86_64-linux":   { "base": "xdgStateHome", "path": "repro/home/current/bin" },
+      "x86_64-windows": { "base": "localAppData", "path": "repro/home/bin" }, …
+    }
   },
   "platforms": {
     "x86_64-linux": "same", "aarch64-linux": "same",
@@ -184,6 +200,8 @@ A document always describes the platform that compiled it.
 | `selection.unknownActivities` | Activities the host's `hosts:` entry names that the profile never declares (they contribute nothing). |
 | `intent` | The whole evaluated profile, exactly as the planner consumes it — every activity, not only the selected ones, and every platform's guarded elements. A `when`/`if` guard inside an activity stays a `whenGuard` element carrying its predicate text. Resources are profile-wide, and home-scope only: a home profile that declares a system-scope resource (`fsSystemFile`, `systemdSystemUnit`, … — those belong in a system profile applied by `repro infra apply`) is refused, naming the resource. Rows of the profile's [data files](#data-files) are already expanded into the activities they name, so you never read the data files yourself; `intent` has no `dataFiles` key. |
 | `intent.resources[].guard`, `intent.configOverrides[].guard` | The runtime predicate under which the element applies, as text in the [predicate grammar](#predicates), or `null` for "every host". Nested `when` blocks are conjoined (`arm64 and macos`); an `elif` / `else` branch carries the negation of the earlier conditions. Two resources may share an `address` when their guards never hold together. |
+| `intent.hostApplies` | Present only when some `hosts:` entry declares `applies:` (block form, below): host → the concerns Reprobuild applies on that host. A host absent from it lets Reprobuild apply every concern. |
+| `concerns` | Present only with `intent.hostApplies`: the concern names, every home-scope resource kind's concern, the concern of a `config:` override, and `packages` — for every target system, the package references (keyed `name`, or `name@version` when pinned) whose selected realization there places an application (`applications`), and those that resolve to nothing there (`unresolved`); every other reference is a plain package. It is Reprobuild's classification, made with the same selection `repro home apply` makes but without the host's `PATH` / Scoop inventory, so a consumer never restates it. `--check` compares it, so a catalog or lock change that reclassifies a package shows up. `profileBin` says, for every target system, where the launchers of the active generation are reached on a host that uses the default state directory: a `base` (`home` = `$HOME`, `xdgStateHome` = `$XDG_STATE_HOME` or `$HOME/.local/state`, `localAppData` = `%LOCALAPPDATA%`) and a `/`-separated `path` below it. |
 | `platforms` | For each target platform, whether this document describes it: `same` (the profile evaluated for that platform declares exactly this intent), `differs` (a compile-time `when defined(...)` changed it — refuse the document for that platform), or `unevaluated` (the profile could not be evaluated for that platform — treat as `differs`; the reason is in `provenance.compile.probe`). The compiling platform is always described, whatever its entry says. |
 | `provenance.repro.version` | The `repro` release that produced the document. |
 | `provenance.repro.sourceRevision` | The commit that `repro` was built from (`…-dirty` if the tree had uncommitted changes), or `null` if the build did not record it. The version alone does not identify a build. |
@@ -196,7 +214,58 @@ A document always describes the platform that compiled it.
 | `provenance.compile.os`, `.cpu` | The same platform in Nim's names (`linux`, `macosx`, `windows`; `amd64`, `arm64`). A `when defined(...)` in the profile was decided for this platform. |
 | `provenance.compile.defines` | Extra `-d:` symbols the profile compile passes (none today). |
 | `provenance.compile.probe` | For each `unevaluated` platform, why: the end of the compiler's diagnostic. |
-| `evaluation` | Present only with `--target`: `target`, `host`, `activities`, `packages` (`name`, `version`, `binaries`, `activity`), and the `resources` and `configOverrides` from `intent` whose guards hold — what the home planner would use for that host on that platform. |
+| `evaluation` | Present only with `--target`: `target`, `host`, `activities`, `packages` (`name`, `version`, `binaries`, `activity`), and the `resources` and `configOverrides` from `intent` whose guards hold — what the home planner would use for that host on that platform — plus `applies`, the concerns the host's entry declares, when it declares any; then every package also carries `concern` (`applications` or `packages`, from `concerns.packages`) and `resolved`, and -- when the host gives Reprobuild `packages` or `applications` but not `environment` -- `profileBin`, that system's row of `concerns.profileBin`, which the side that writes the shell environment puts on `PATH`. |
+
+### Applying some concerns of a host
+
+A host can hand some concerns to another tool (Home Manager, during a
+migration) and let Reprobuild apply the rest. Its `hosts:` entry says which
+ones Reprobuild applies:
+
+```nim
+hosts:
+  "home-pc": [default, develop_software]   # Reprobuild applies everything
+  "m1":
+    activities: [default, desktop_apps]
+    applies: [applications]                # everything else is Nix's
+```
+
+Concerns: `packages` (packages whose realization is not an application, and
+packages with no realization), `applications` (packages realized as app
+bundles; Homebrew token resources), `files` (stow links, generated files,
+`fsUserFile`, `config:` overrides), `environment` (variables, PATH entries,
+shell integration, managed blocks), `services` (systemd, launchd, Windows
+startup), `settings` (user defaults, gsettings, dconf, KDE, registry, VS Code
+extensions). On such a host `repro home apply` executes only the listed
+concerns; everything else is planned and printed under `not applied on
+<host>`, never executed, and never fails the apply. A concern removed from the
+list is *released*: what Reprobuild placed for it stays where it is and is no
+longer managed. The Home Manager module derives its category switches from
+the declaration and routes each package by the concern Reprobuild classified
+it into ([nix-helper-library.md](./nix-helper-library.md#the-home-manager-module)).
+
+To classify the packages, `repro home export` resolves every package
+reference for every target system. A reference no definition it can see
+names at all might be an application defined in the `reprobuild-packages`
+catalog, so when there is one and no catalog checkout is reachable (beside
+the profile, beside the `reprobuild` checkout, or `$REPROBUILD_PACKAGES_ROOT`),
+the export fails instead of guessing. On a host that gives Reprobuild one of
+`packages` / `applications` and Nix the other, `repro home apply` refuses a
+package whose selection on this host — which can use the host's `PATH` —
+would put it in a different concern than the export says.
+
+The commands of the packages Reprobuild applies -- including the ones an
+application bundle carries, such as `code` or `utmctl` -- are launchers in
+the profile bin directory (`~/Library/Application Support/repro/home/current/bin`
+on macOS, `~/.local/state/repro/home/current/bin` on Linux). When the host
+leaves `environment` to the other tool, Reprobuild cannot put that
+directory on `PATH` itself, so the export tells the other side where it is
+(`evaluation.profileBin`): the Home Manager module's `environment` category
+puts it first on `home.sessionPath`
+([nix-helper-library.md](./nix-helper-library.md#the-home-manager-module)).
+Shell start-up code that prepends another directory later (`eval "$(brew
+shellenv)"`) must prepend this one again after it, or a stale copy of a
+command (a Homebrew cask's link) wins.
 
 ### Data files
 

@@ -361,6 +361,46 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
 # Plan composition.
 # ---------------------------------------------------------------------------
 
+proc appBundleFacts*(state: var ResourceState) =
+  ## The facts the lifecycle needs about a placed application beyond its
+  ## identity (Store-And-Installation-Layout.md § macOS Application
+  ## Bundles, "Vendor updates", "Running applications"): whether what is
+  ## there is its vendor's update of the recorded bundle, and whether it is
+  ## running. Only the observation is read; nothing is changed.
+  let kind =
+    if state.hasDesired: state.desired.kind
+    elif state.hasRecorded: state.recorded.kind
+    else: return
+  if kind != rkMacosAppBundle or not state.observed.present:
+    return
+  let path =
+    if state.hasDesired: realWorldIdentity(state.desired)
+    else: state.recorded.resourceId
+  if state.hasRecorded and
+      state.observed.digest != state.recorded.postWriteDigest and
+      (not state.hasDesired or
+       state.observed.digest != digestOfResource(state.desired)):
+    let policy =
+      if state.hasDesired: state.desired.appBundleTrust
+      else: {}
+    if isAcceptedVendorUpdate(state.recorded.payloadBytes,
+        state.observed.rawBytes, path, policy):
+      state.vendorUpdate = true
+      if state.hasDesired:
+        var desiredId, observedId: AppBundleIdentity
+        if parseAppBundleIdentityBytes(state.desired.appBundleIdentity,
+              desiredId) and
+            parseAppBundleIdentityBytes(state.observed.rawBytes, observedId):
+          state.desiredSupersedesObserved =
+            compareBundleVersions(desiredId, observedId) > 0
+  let pids = processesRunningFrom(path)
+  if pids.len > 0:
+    var ids: seq[string]
+    for pid in pids:
+      ids.add $pid
+    state.busy = "running process" & (if pids.len == 1: " " else: "es ") &
+      ids.join(", ")
+
 proc composePlan*(desired: DesiredSet;
                  recorded: OrderedTable[string, RecordedBinding];
                  options: DecisionOptions = DecisionOptions(
@@ -382,6 +422,7 @@ proc composePlan*(desired: DesiredSet;
     if addr1 in recorded:
       state.recorded = recorded[addr1]
       state.hasRecorded = true
+    appBundleFacts(state)
     let action = decideAction(state, options)
     result.actions.add(action)
     seen[addr1] = true
@@ -396,6 +437,7 @@ proc composePlan*(desired: DesiredSet;
     state.recorded = binding
     state.hasRecorded = true
     state.observed = observeRecorded(addr1, binding)
+    appBundleFacts(state)
     let action = decideAction(state, options)
     result.actions.add(action)
 

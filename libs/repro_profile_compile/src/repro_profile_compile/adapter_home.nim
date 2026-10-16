@@ -34,6 +34,7 @@
 import std/[tables]
 
 import repro_profile
+import repro_profile/concerns
 import repro_home_intent
 import ./resource_scope
 
@@ -184,15 +185,32 @@ proc buildConfigBlock(overrides: seq[ConfigOverride]): IntentNode =
           startLine: 0, endLine: 0, indent: 0)))
     result.configPackages.add(pkgNode)
 
-proc buildHostsBlock(hosts: Table[string, seq[string]]): IntentNode =
+proc buildHostsBlock(hosts, hostApplies: Table[string, seq[string]]):
+    IntentNode =
+  ## One `nkHostsEntry` per host. A host in `hostApplies` declares the
+  ## concerns Reprobuild applies there (Gradual-Nix-To-Reprobuild-Migration.md
+  ## §Concern-scoped apply). The macro validates the names; an intent that
+  ## reaches here by another route (a hand-edited export) is checked again,
+  ## and a declaration for a host `hosts:` does not list is refused rather
+  ## than attached to nothing.
   result = IntentNode(kind: nkHostsBlock,
     hostsHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
+  for hostName, concerns in hostApplies.pairs:
+    if not hosts.hasKey(hostName):
+      raise newException(ValueError, "hostApplies names host `" & hostName &
+        "`, which the profile's `hosts:` does not list")
+    let problem = concernListProblem(concerns)
+    if problem.len > 0:
+      raise newException(ValueError, "hosts entry \"" & hostName &
+        "\": applies: " & problem)
   for hostName, acts in hosts.pairs:
     result.hostsEntries.add(IntentNode(kind: nkHostsEntry,
       hostName: hostName,
       hostActivities: acts,
       hostEntryLine: 0,
+      hostAppliesDeclared: hostApplies.hasKey(hostName),
+      hostApplies: hostApplies.getOrDefault(hostName),
       startLine: 0, endLine: 0, indent: 0))
 
 proc mapHomeFieldName(resourceKind, fieldName: string): string =
@@ -291,8 +309,8 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
     root.children.add(buildActivity(act))
   if p.configOverrides.len > 0:
     root.children.add(buildConfigBlock(p.configOverrides))
-  if p.hosts.len > 0:
-    root.children.add(buildHostsBlock(p.hosts))
+  if p.hosts.len > 0 or p.hostApplies.len > 0:
+    root.children.add(buildHostsBlock(p.hosts, p.hostApplies))
   # The resources block is always present (even if empty) so the
   # apply pipeline's `findResourcesBlock` returns a stable shape; an
   # empty block degenerates to a no-op desired set just like an

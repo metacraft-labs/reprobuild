@@ -2057,6 +2057,8 @@ package reprobuild:
       let hookScopeTest = source == "tests/unit/test_dev_shell_hook_scope.py"
       let nixCacheTest = source == "tests/integration/test_nix_daemon_cache.py"
       let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
+      let ciLockCredentialsTest =
+        source == "tests/unit/test_ci_reconcile_lock_credentials.py"
       let pyExecute = pythonUnittest.run(
         source = source,
         actionId = pyActionId,
@@ -2070,6 +2072,11 @@ package reprobuild:
           # The script under test, and the two callers whose sources the
           # single-derivation cases read.
           @["scripts/source_revision.sh", "scripts/build_apps.sh", "repro.nim"]
+        elif ciLockCredentialsTest:
+          # The script under test, and the workflow whose reconcile step the
+          # contract cases read.
+          @["scripts/ci_lock_source_credentials.py",
+            ".github/workflows/ci.yml"]
         else: @[])
       when not defined(windows):
         if hookScopeTest:
@@ -2083,6 +2090,11 @@ package reprobuild:
       if sourceRevisionTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id,
           ["bash", "git", "mkdir"])
+      # Real git throughout: `git config --get-urlmatch` for the scope cases,
+      # and `git clone` plus `git http-backend` (shipped in git's exec-path)
+      # for the loopback-forge cases.
+      if ciLockCredentialsTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
       if hookScopeTest:
         discard target("test-dev-shell-hook-scope", pyExecute)
       if nixCacheTest:

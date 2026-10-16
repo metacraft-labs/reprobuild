@@ -118,7 +118,11 @@ so an export never carries one.
   (`buildSystem`, which defaults to `builtins.currentSystem` when the
   evaluation is impure — pass it explicitly in a pure flake evaluation), not
   on the target: a Linux machine can describe your Mac. It costs a profile
-  compile per profile change, during evaluation.
+  compile per profile change, during evaluation. For a profile whose `hosts:`
+  entries declare `applies:`, also pass `packagesCatalog` (a
+  `reprobuild-packages` checkout, e.g. a flake input): the sandbox has no
+  workspace to find it in, and the export needs it to tell which packages
+  are applications.
 
 **When `readIntent` refuses** (throws):
 
@@ -220,6 +224,50 @@ by the same canonical names as the profile.
 Each category is opt-in on its own, so a host can let Home Manager apply its
 packages from the profile while Reprobuild applies its files, and move one
 category at a time.
+
+When the host's `hosts:` entry declares which concerns Reprobuild applies
+(`applies: [...]`, see [home-export.md](./home-export.md#applying-some-concerns-of-a-host)),
+every switch **defaults to the complement**: a category is on unless
+Reprobuild applies its concern (`packages` ↔ `packages`, `homebrew` ↔
+`applications`, `files` ↔ `files`, `environment` ↔ `environment`). You can
+still set any switch; enabling one whose concern Reprobuild also applies
+produces a warning (both sides would apply it). Uncategorized entries of a
+concern Reprobuild applies there are not reported — Reprobuild applies them.
+Without a declaration every switch defaults off, as before.
+
+Packages follow the same declaration. Which of them is an application is
+Reprobuild's choice of realization for the target system (a disk image on
+macOS is an application, a nixpkgs attribute is not), so the export carries
+it and every evaluated package of a declaring host has a `concern`:
+
+- a package whose concern Reprobuild applies on the host is left out;
+- an application Nix applies goes to the `homebrew` category when it is on
+  (its Homebrew hook claims the cask), otherwise through nixpkgs when
+  `packages` is on; with `homebrew` on and neither taking it, it is reported
+  in `reprobuild.intent.unmapped`;
+- any other package is mapped as without a declaration.
+
+So a host that gives Reprobuild its applications and Nix its packages (or
+the reverse) needs no application list on the Nix side.
+
+The commands of what Reprobuild applies there -- including the ones an
+application carries, such as `code` or `utmctl` -- are launchers in
+Reprobuild's profile bin directory. When the host gives Reprobuild
+`packages` or `applications` and leaves `environment` to Nix, the evaluation
+names that directory (`evaluation.profileBin`), and the `environment`
+category puts it **first** on `home.sessionPath`
+(`reprobuild.intent.profileBin` shows the resolved path). Outside the
+module, resolve it with `reprobuild.lib.profileBinPath { evaluation;
+homeDirectory = config.home.homeDirectory; xdgStateHome =
+config.xdg.stateHome; }`, which returns null when there is nothing to add.
+If your shell start-up prepends another directory after Home Manager's
+session variables -- `eval "$(brew shellenv)"`, `path_helper` -- prepend
+this one again after it, or a stale copy of a command (a Homebrew cask's
+link) wins. A host that moves Reprobuild's state directory with
+`$REPRO_HOME_STATE_DIR` adds `<that>/current/bin` itself. In IFD mode, pass
+`reprobuild.intent.packagesCatalog` (a `reprobuild-packages` checkout): the
+sandboxed export cannot classify packages that catalog defines without it,
+and refuses rather than guess.
 
 | Category | From the profile | To |
 |---|---|---|

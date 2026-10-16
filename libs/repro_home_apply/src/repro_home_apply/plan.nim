@@ -21,6 +21,7 @@
 import std/[algorithm, options, os, sets, strutils, tables]
 
 import repro_home_intent
+import repro_profile/concerns
 
 import ./errors
 import ./package_catalog
@@ -47,6 +48,11 @@ type
                                        ## binary name. Empty seq preserves
                                        ## pre-2026-06 behavior: the adapter
                                        ## probes the package id itself.
+                                       ## When the selection places an
+                                       ## application, every name must be
+                                       ## a command the record declares,
+                                       ## or the apply is refused
+                                       ## (`pipeline.addApplicationCommands`).
 
   PlannedGeneratedFileSource* = enum
     pgfsPackageOutput = "package-output"
@@ -70,11 +76,18 @@ type
                                        ## materialization is a link).
 
   PlannedLauncher* = object
-    ## A user-visible command this profile exports. For Phase A every
-    ## installed package contributes one launcher named after its
-    ## package id (the typical case for the fixture profile).
+    ## A user-visible command this profile exports. Every installed
+    ## package contributes one launcher named after its package id
+    ## (``buildPlan``). An application package additionally contributes
+    ## one launcher per command its realization declares
+    ## (``extraExecutable`` on an ``app-bundle`` record), added once the
+    ## references are resolved (``pipeline.addApplicationCommands``).
     commandName*: string
     fromPackageId*: string
+    executableRelPath*: string
+      ## The executable this launcher runs, relative to the realized
+      ## prefix (``Visual Studio Code.app/Contents/Resources/app/bin/code``).
+      ## "" runs the package's resolved executable (``executablePath``).
 
   EPlanCycleDetected* = object of CatchableError
     ## M0 (Realize-Layer-Plumbing-Closures spec): the planner's
@@ -180,6 +193,46 @@ proc enabledActivitiesFor*(profile: Profile; host: string): HashSet[string] =
   e.host = host
   e.declaredHosts = declared
   raise e
+
+type
+  AppliedConcerns* = object
+    ## The concerns `repro home apply` applies on one host
+    ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+    concerns*: ConcernSet
+    declared*: bool
+      ## The host's `hosts:` entry declares `applies:`. False: every concern
+      ## (the behaviour of a profile without a declaration).
+
+proc appliedConcernsFor*(profile: Profile; host: string): AppliedConcerns =
+  ## THE concern-selection rule: the concerns the host's `hosts:` entry lists
+  ## under `applies:`, or every concern when it lists none (or the host has
+  ## no entry). `repro home apply`, `--plan`, `repro home plan`, the host
+  ## facts and the export all call this, so they cannot disagree. A name the
+  ## vocabulary does not know raises `ValueError` (the macro and the adapter
+  ## already refuse one; this is the last line for a profile that reached
+  ## the planner another way).
+  result = AppliedConcerns(concerns: AllHomeConcerns, declared: false)
+  let hostsOpt = findHostsBlock(profile)
+  if hostsOpt.isNone:
+    return
+  for entry in hostsOpt.get.hostsEntries:
+    if entry.hostName == host and entry.hostAppliesDeclared:
+      let problem = concernListProblem(entry.hostApplies)
+      if problem.len > 0:
+        raise newException(ValueError, "hosts entry \"" & host &
+          "\": applies: " & problem)
+      return AppliedConcerns(concerns: toConcernSet(entry.hostApplies),
+        declared: true)
+
+proc describeAppliedConcerns*(applied: AppliedConcerns; host: string): string =
+  ## One line for plan / apply output: which concerns are applied and why.
+  if not applied.declared:
+    "all (hosts entry for " & host & " declares no `applies:`)"
+  elif applied.concerns.card == 0:
+    "none (hosts." & host & ".applies is empty)"
+  else:
+    concernNames(applied.concerns).join(", ") & " (hosts." & host &
+      ".applies)"
 
 proc evaluateHostPredicate*(predicateAst: PredNode; ctx: HostContext): bool =
   ## Evaluate a profile predicate against the host facts selected for
@@ -513,7 +566,14 @@ proc canonicalPlanBytes*(plan: ApplyPlan): seq[byte] =
       result.add(b)
   result.addU32(plan.launchers.len)
   for l in plan.launchers:
-    result.addStr(l.commandName)
+    # A launcher that runs a declared command rather than the package's
+    # executable carries its path after a NUL, which no command name
+    # contains, so the encoding stays unambiguous while every pre-existing
+    # plan (no such launchers) keeps its bytes and its generation id.
+    if l.executableRelPath.len > 0:
+      result.addStr(l.commandName & "\0" & l.executableRelPath)
+    else:
+      result.addStr(l.commandName)
     result.addStr(l.fromPackageId)
 
 proc samePlan*(a, b: ApplyPlan): bool =
