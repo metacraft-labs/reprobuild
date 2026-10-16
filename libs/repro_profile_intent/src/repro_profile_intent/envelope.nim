@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 6'u16            ## Current envelope schema version.
+  RbpiSchemaVersion* = 7'u16            ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -75,6 +75,12 @@ const
     ##     imports. Bumped because a build that did not know the key would
     ##     resolve the profile's packages without those catalogs'
     ##     contributions.
+    ##   7 (GM7, concern-scoped apply): ProfileIntent gains an OPTIONAL
+    ##     top-level ``"hostApplies"`` map (host -> concern names) -- the
+    ##     concerns a block-form ``hosts:`` entry says Reprobuild applies on
+    ##     that host. Bumped because a build that did not know the key would
+    ##     apply every concern on a host that hands some of them to another
+    ##     tool.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

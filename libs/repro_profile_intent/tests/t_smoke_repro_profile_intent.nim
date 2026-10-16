@@ -362,6 +362,26 @@ suite "ProfileIntent CBOR body round-trip":
     check q.hosts["zeta"] == @["develop"]
     check q.hosts["middle"].len == 0
 
+  test "hostApplies round-trips, and is absent from the wire when empty":
+    # GM7 (envelope schema 7): the per-host concern declaration. A profile
+    # without one encodes exactly as a schema-6 profile did -- no key -- so
+    # its action-cache identity is unchanged apart from the version.
+    var p: ProfileIntent
+    p.name = "ha"
+    p.hosts["m1"] = @["desktop"]
+    p.hosts["home-pc"] = @["desktop"]
+    let plain = encodeProfileIntentToBytes(p)
+    var plainText = ""
+    for b in plain: plainText.add char(b)
+    check "hostApplies" notin plainText
+    p.hostApplies["m1"] = @["applications", "environment"]
+    p.hostApplies["home-pc"] = @[]
+    let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
+    check q.hostApplies.len == 2
+    check q.hostApplies["m1"] == @["applications", "environment"]
+    check q.hostApplies["home-pc"].len == 0
+    check decodeProfileIntentFromBytes(plain).hostApplies.len == 0
+
   test "full fixture round-trips structurally":
     let p = fixtureFull()
     let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))

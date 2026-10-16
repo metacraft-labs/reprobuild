@@ -198,6 +198,22 @@ proc parseFlagValue(args: openArray[string]; i: var int;
     return cur[flag.len + 1 .. ^1]
   raise newException(ValueError, "internal: parseFlagValue called for " & flag)
 
+proc resolveCommandHost(command, hostFlag: string; flagGiven: bool;
+                        identity: var HostIdentity): bool =
+  ## The host identity of one `repro home` subcommand, resolved by the one
+  ## resolver every subcommand shares (`selectHost`: `$REPRO_HOST`, then
+  ## `--host`, then the OS hostname; a `--host` that `$REPRO_HOST` would
+  ## override is refused). It installs the result as the process-wide
+  ## override, so the planner, the apply pipeline and the export / facts
+  ## producers all see this host. False (after a diagnostic naming the
+  ## command) when the host cannot be resolved; callers exit 2.
+  try:
+    identity = selectHost(hostFlag, flagGiven)
+    true
+  except EHostIdentity as err:
+    stderr.writeLine("repro home " & command & ": " & err.msg)
+    false
+
 proc parseCliBool(raw, flag: string): bool =
   case raw.toLowerAscii()
   of "1", "true", "yes", "on":
@@ -377,6 +393,20 @@ proc runApplyInline*(commandName: string;
       stderr.writeLine(renderRecovered(r))
     for d in outcome.diagnostics:
       stderr.writeLine(renderStowDiagnostic(d))
+    # GM7: on a host that declares the concerns Reprobuild applies, say which
+    # ones ran, how much of the profile was left to the other tool, and what
+    # a narrowed set released (left in place, no longer managed).
+    if outcome.applied.declared:
+      echo "apply: concerns applied: " &
+        describeAppliedConcerns(outcome.applied,
+          if opts.host.len > 0: opts.host else: currentHost())
+      echo "apply: not applied: " & $outcome.notAppliedCount &
+        " operation(s) of other concerns"
+    if outcome.released.len > 0:
+      echo "apply: released " & $outcome.released.len & " item(s) of " &
+        "concerns no longer applied (left in place, no longer managed):"
+      for r in outcome.released:
+        echo "  release  " & r
     case outcome.kind
     of aokFreshApplied:
       # Stable log line that exposes step 11 eager-GC execution to
@@ -1008,7 +1038,20 @@ proc parseEnableDisableFlags(name: string; args: openArray[string]):
       "[--target-arch ARCH] [--target-wsl[=true|false]]")
     return
   result.activity = positional
-  result.host = if hostOverride.len > 0: hostOverride else: currentHost()
+  # `--host` here names the TARGET host -- the `hosts:` entry to edit, and
+  # with `--now` the host to apply remotely -- not this machine's identity,
+  # so it may differ from $REPRO_HOST (CLI/home/enable.md). Without it the
+  # target is this machine, resolved by the shared resolver.
+  if result.hostGiven:
+    if hostOverride.len == 0:
+      stderr.writeLine("repro home " & name & ": --host needs a non-empty name")
+      return
+    result.host = hostOverride
+  else:
+    var identity: HostIdentity
+    if not resolveCommandHost(name, "", false, identity):
+      return
+    result.host = identity.name
   result.ok = true
   result.exitCode = 0
 
@@ -1052,7 +1095,7 @@ proc runHomeEnable(args: openArray[string]): int =
     return 1
   if parsed.noApply:
     return 0
-  if parsed.hostGiven and parsed.host != currentHost():
+  if parsed.hostGiven and parsed.host != machineHost():
     if parsed.now:
       return runRemoteApplyAfterEdit("enable", parsed)
     return 0
@@ -1088,7 +1131,7 @@ proc runHomeDisable(args: openArray[string]): int =
     return 1
   if parsed.noApply:
     return 0
-  if parsed.hostGiven and parsed.host != currentHost():
+  if parsed.hostGiven and parsed.host != machineHost():
     if parsed.now:
       return runRemoteApplyAfterEdit("disable", parsed)
     return 0
@@ -1145,11 +1188,13 @@ proc collectPackageOrigins(prof: Profile;
 
 proc runHomeList(args: openArray[string]): int =
   var hostOverride = ""
+  var hostGiven = false
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--host" or a.startsWith("--host="):
       hostOverride = parseFlagValue(args, i, "--host")
+      hostGiven = true
     elif a.startsWith("--"):
       stderr.writeLine("repro home list: unknown flag: " & a)
       return 2
@@ -1157,10 +1202,13 @@ proc runHomeList(args: openArray[string]): int =
       stderr.writeLine("repro home list: unexpected positional: " & a)
       return 2
     inc i
+  var identity: HostIdentity
+  if not resolveCommandHost("list", hostOverride, hostGiven, identity):
+    return 2
   try:
     let profilePath = loadProfilePath()
     let prof = loadProfile(profilePath)
-    let host = if hostOverride.len > 0: hostOverride else: currentHost()
+    let host = identity.name
     let origins = collectPackageOrigins(prof, host)
     let active = enabledActivitiesFor(prof, host)
     echo "repro home list: profile=" & profilePath & " host=" & host
@@ -1200,11 +1248,13 @@ proc runHomeWhy(args: openArray[string]): int =
     return 2
   var pkg = ""
   var hostOverride = ""
+  var hostGiven = false
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--host" or a.startsWith("--host="):
       hostOverride = parseFlagValue(args, i, "--host")
+      hostGiven = true
     elif a.startsWith("--"):
       stderr.writeLine("repro home why: unknown flag: " & a)
       return 2
@@ -1217,10 +1267,13 @@ proc runHomeWhy(args: openArray[string]): int =
   if pkg.len == 0:
     stderr.writeLine("repro home why: missing <package>")
     return 2
+  var identity: HostIdentity
+  if not resolveCommandHost("why", hostOverride, hostGiven, identity):
+    return 2
   try:
     let profilePath = loadProfilePath()
     let prof = loadProfile(profilePath)
-    let host = if hostOverride.len > 0: hostOverride else: currentHost()
+    let host = identity.name
     let origins = collectPackageOrigins(prof, host)
     let active = enabledActivitiesFor(prof, host)
     if pkg notin origins:
@@ -1417,11 +1470,13 @@ proc runHomeApply(args: openArray[string]): int =
   var relock = false
   var targetPlatform = ""
   var targetArch = ""
+  var hostFlag = ""
+  var hostGiven = false
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--help" or a == "-h":
-      echo "usage: repro home apply [--plan] [--allow-drift] " &
+      echo "usage: repro home apply [--plan] [--host NAME] [--allow-drift] " &
         "[--reconcile-drift | --accept-overwrite] [--relock] " &
         "[--target-platform linux|macos|windows] [--target-arch x86_64|arm64]"
       echo ""
@@ -1429,10 +1484,21 @@ proc runHomeApply(args: openArray[string]): int =
       echo "intent (`home.nim`), producing a new generation and"
       echo "rotating the `current` pointer."
       echo ""
+      echo "When this host's `hosts:` entry declares `applies: [...]`, only"
+      echo "those concerns (packages, applications, files, environment,"
+      echo "services, settings) are applied; the rest are planned and"
+      echo "shown, never executed. A concern dropped from the list is"
+      echo "released: what Reprobuild placed for it is left in place."
+      echo ""
       echo "  --plan             Non-mutating preview of the full apply"
       echo "                     (packages, stow, generated files,"
       echo "                     managed blocks, launchers, resources)."
       echo "                     Mutates nothing; runs no `scoop install`."
+      echo "  --host NAME        Plan / apply the activities hosts: selects"
+      echo "                     for NAME, on this machine. $REPRO_HOST takes"
+      echo "                     precedence; passing both with different"
+      echo "                     values is refused. Default: $REPRO_HOST,"
+      echo "                     then the OS host name."
       echo "  --allow-drift      With --plan: exit 0 even when drift is"
       echo "                     detected."
       echo "  --reconcile-drift  Replace a drifted stow target / resource"
@@ -1460,6 +1526,13 @@ proc runHomeApply(args: openArray[string]): int =
       reconcileDrift = true
     elif a == "--relock":
       relock = true
+    elif a == "--host" or a.startsWith("--host="):
+      try:
+        hostFlag = parseFlagValue(args, i, "--host")
+      except ValueError as err:
+        stderr.writeLine("repro home apply: " & err.msg)
+        return 2
+      hostGiven = true
     elif a == "--target-platform" or a.startsWith("--target-platform="):
       targetPlatform = parseFlagValue(args, i, "--target-platform")
     elif a == "--target-arch" or a.startsWith("--target-arch="):
@@ -1475,6 +1548,10 @@ proc runHomeApply(args: openArray[string]): int =
     stderr.writeLine("repro home apply: --target-platform / --target-arch " &
       "plan for another platform and need --plan; a real apply for another " &
       "host goes through `repro home enable <activity> --host NAME --now`")
+    return 2
+  var identity: HostIdentity
+  if not resolveCommandHost(if planMode: "apply --plan" else: "apply",
+                            hostFlag, hostGiven, identity):
     return 2
   if planMode:
     return runHomeApplyPlan(allowDrift, reconcileDrift, relock,
@@ -3047,25 +3124,42 @@ proc runHomePlan(args: openArray[string]): int =
   ## non-zero when drift is detected unless `--allow-drift` was passed.
   var allowDrift = false
   var reconcileFlag = false
-  for a in args:
+  var hostFlag = ""
+  var hostGiven = false
+  var i = 0
+  while i < args.len:
+    let a = args[i]
     if a == "--help" or a == "-h":
-      echo "usage: repro home plan [--allow-drift] [--reconcile-drift]"
+      echo "usage: repro home plan [--host NAME] [--allow-drift] [--reconcile-drift]"
       echo ""
       echo "Show what `repro home apply` would do without making"
       echo "any changes. Lists per-resource create / update /"
       echo "destroy / no-op decisions plus any drift detected."
       echo "Exits non-zero on drift unless --allow-drift."
+      echo "--host NAME plans for NAME ($REPRO_HOST takes precedence;"
+      echo "passing both with different values is refused)."
       return 0
     elif a == "--allow-drift":
       allowDrift = true
     elif a == "--reconcile-drift":
       reconcileFlag = true
+    elif a == "--host" or a.startsWith("--host="):
+      try:
+        hostFlag = parseFlagValue(args, i, "--host")
+      except ValueError as err:
+        stderr.writeLine("repro home plan: " & err.msg)
+        return 2
+      hostGiven = true
     elif a.startsWith("--"):
       stderr.writeLine("repro home plan: unknown flag: " & a)
       return 2
     else:
       stderr.writeLine("repro home plan: unexpected positional: " & a)
       return 2
+    inc i
+  var identity: HostIdentity
+  if not resolveCommandHost("plan", hostFlag, hostGiven, identity):
+    return 2
   try:
     let homeDir = getHomeDir()
     # M78: the desired set is the profile's `resources:` block, with
@@ -3081,7 +3175,25 @@ proc runHomePlan(args: openArray[string]): int =
         "repro home plan", profilePath, outcomeCompile))
       return 1
     let prof = outcomeCompile.profile
-    let desired = composeDesiredResources(prof, homeDir, currentHost())
+    # The host must be one the profile declares (or the profile declares
+    # none), as for every other `repro home` command that plans: the one
+    # selection rule raises `EUndeclaredHost` otherwise.
+    discard enabledActivitiesFor(prof, identity.name)
+    # GM7: only the resources of the concerns this host applies are planned;
+    # the rest are listed as not applied, and a recorded binding of a concern
+    # no longer applied is released, never destroyed
+    # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+    let host = identity.name
+    let applied = appliedConcernsFor(prof, host)
+    var desired = initDesiredSet()
+    var notApplied: seq[string]
+    for address, res in composeDesiredResources(prof, homeDir,
+        host).resources:
+      if concernOfResourceKind(res.kind) in applied.concerns:
+        desired.resources[address] = res
+      else:
+        notApplied.add($concernOfResourceKind(res.kind) & "  " & address)
+    var released: seq[string]
     # Load recorded bindings from the active generation's manifest.
     var recorded = initOrderedTable[string, RecordedBinding]()
     let activeId = readCurrentGenerationId(stateDir)
@@ -3098,8 +3210,14 @@ proc runHomePlan(args: openArray[string]): int =
             try: store.close() except CatchableError: discard
           let manifestBytes = readCasBlob(store, manifestKey)
           let manifest = decodeManifestBytes(manifestBytes)
+          let apps = applicationPackagesOf(manifest)
           for rb in manifest.resourceBindings:
             if rb.resourceKind.len == 0: continue
+            let concern = concernOfBinding(rb, apps)
+            if concern notin applied.concerns:
+              if not isZeroDigest(rb.postWriteDigest):
+                released.add($concern & "  " & rb.resourceAddress)
+              continue
             recorded[rb.resourceAddress] = toRecorded(rb)
         except CatchableError:
           discard
@@ -3115,6 +3233,13 @@ proc runHomePlan(args: openArray[string]): int =
       enforcePreventDestroy: true)
     let report = composePlan(desired, recorded, opts)
     stdout.write(renderPlan(report))
+    if applied.declared:
+      echo "  concerns applied: " & describeAppliedConcerns(applied, host)
+    for line in notApplied:
+      echo "  not applied (concern not in hosts." & host & ".applies): " &
+        line
+    for line in released:
+      echo "  release (concern no longer applied; left in place): " & line
     if report.driftCount > 0 and not allowDrift and not reconcileFlag:
       return 1
     return 0
@@ -3296,6 +3421,13 @@ proc runHomeRollback(args: openArray[string]): int =
       " (" & $outcome.fileOpsApplied & " file op(s), " &
       $outcome.blockOpsApplied & " block op(s), " &
       $outcome.launcherOpsApplied & " launcher op(s))"
+    # GM7: what the target generation does not apply stays in place.
+    if outcome.released.len > 0:
+      echo "repro home rollback: released " & $outcome.released.len &
+        " item(s) of concerns the target generation does not apply " &
+        "(left in place, no longer managed):"
+      for r in outcome.released:
+        echo "  release  " & r
     return 0
   except EUserEditDetected as err:
     stderr.writeLine("repro home rollback: user edit detected at " &
@@ -3728,6 +3860,7 @@ proc runHomeExport(args: openArray[string]): int =
   ## unreadable or non-JSON `--check` file and an unknown `--target`; 3 the
   ## export cannot describe the `--target` platform.
   var hostFlag = ""
+  var hostGiven = false
   var format = "json"
   var checkFile = ""
   var target = ""
@@ -3740,9 +3873,7 @@ proc runHomeExport(args: openArray[string]): int =
         return 0
       elif a == "--host" or a.startsWith("--host="):
         hostFlag = parseFlagValue(args, i, "--host")
-        if hostFlag.len == 0:
-          stderr.writeLine("repro home export: --host needs a non-empty name")
-          return 2
+        hostGiven = true
       elif a == "--format" or a.startsWith("--format="):
         format = parseFlagValue(args, i, "--format")
       elif a == "--check" or a.startsWith("--check="):
@@ -3775,28 +3906,16 @@ proc runHomeExport(args: openArray[string]): int =
       "combine (a snapshot is checked as exported, unevaluated)")
     return 2
 
-  # Host identity, in the precedence every `repro home` command documents
-  # ($REPRO_HOST, then --host, then the OS hostname), resolved by the same
-  # `currentHost()` the planner calls. A --host that $REPRO_HOST would
-  # silently override is refused instead: an export for the wrong host is a
-  # valid-looking document with the wrong activities in it.
-  let envHost = getEnv(HomeHostEnvVar)
-  if envHost.len > 0 and hostFlag.len > 0 and envHost != hostFlag:
-    stderr.writeLine("repro home export: --host " & hostFlag &
-      " conflicts with $" & HomeHostEnvVar & "=" & envHost &
-      " (which takes precedence); unset one of them")
+  # Host identity, resolved by the resolver every `repro home` command
+  # shares ($REPRO_HOST, then --host, then the OS hostname). A --host that
+  # $REPRO_HOST would silently override is refused instead: an export for
+  # the wrong host is a valid-looking document with the wrong activities in
+  # it.
+  var identity: HostIdentity
+  if not resolveCommandHost("export", hostFlag, hostGiven, identity):
     return 2
-  setHostOverride(hostFlag)
-  defer: setHostOverride("")
-  let host = currentHost()
-  let hostSource =
-    if envHost.len > 0: hsEnv
-    elif hostFlag.len > 0: hsFlag
-    else: hsHostname
-  if host.len == 0:
-    stderr.writeLine("repro home export: could not determine the host " &
-      "name; pass --host NAME")
-    return 2
+  let host = identity.name
+  let hostSource = identity.source
 
   var snapshot: JsonNode = nil
   if checkFile.len > 0:
@@ -3833,7 +3952,7 @@ proc runHomeExport(args: openArray[string]): int =
         return 1
     let intent = decodeRbpi(artifact.rbpiBytes)
     doc = buildHomeExport(intent, artifact, probe, profilePath, host,
-      hostSource)
+      hostSource, stateDir)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except CatchableError as e:
@@ -3929,6 +4048,7 @@ same side, different hosts or systems, an invalid allowlist)."""
 proc runHomeFacts(args: openArray[string]): int =
   ## `repro home facts` -- see `HomeFactsUsage`.
   var hostFlag = ""
+  var hostGiven = false
   var target = ""
   var output = ""
   var i = 0
@@ -3940,9 +4060,7 @@ proc runHomeFacts(args: openArray[string]): int =
         return 0
       elif a == "--host" or a.startsWith("--host="):
         hostFlag = parseFlagValue(args, i, "--host")
-        if hostFlag.len == 0:
-          stderr.writeLine("repro home facts: --host needs a non-empty name")
-          return 2
+        hostGiven = true
       elif a == "--target" or a.startsWith("--target="):
         target = parseFlagValue(args, i, "--target")
         if findTargetPlatform(target) < 0:
@@ -3971,20 +4089,12 @@ proc runHomeFacts(args: openArray[string]): int =
         ", which is not a profile target platform; pass --target")
       return 2
 
-  # Host identity, in the precedence `repro home export` documents.
-  let envHost = getEnv(HomeHostEnvVar)
-  if envHost.len > 0 and hostFlag.len > 0 and envHost != hostFlag:
-    stderr.writeLine("repro home facts: --host " & hostFlag &
-      " conflicts with $" & HomeHostEnvVar & "=" & envHost &
-      " (which takes precedence); unset one of them")
+  # Host identity, resolved by the resolver every `repro home` command
+  # shares (see `repro home export`).
+  var identity: HostIdentity
+  if not resolveCommandHost("facts", hostFlag, hostGiven, identity):
     return 2
-  setHostOverride(hostFlag)
-  defer: setHostOverride("")
-  let host = currentHost()
-  if host.len == 0:
-    stderr.writeLine("repro home facts: could not determine the host " &
-      "name; pass --host NAME")
-    return 2
+  let host = identity.name
 
   # The private home and state directory: the facts must not depend on, or
   # touch, the home of the machine running this command.
@@ -4161,10 +4271,17 @@ proc runHomeCommand*(args: seq[string]): int =
   var i = 0
   var sub = ""
   # First positional is the subcommand; everything else passes through
-  # to the subcommand handler. We do NOT intercept `--profile-dir` /
-  # `--host` here because users may pass them after the subcommand —
-  # subcommands recognize `--host` locally where it makes sense (list,
-  # why, enable, disable). `--profile-dir` is handled globally.
+  # to the subcommand handler. We do NOT intercept `--host` here because
+  # users may pass it after the subcommand: the subcommands that act AS a
+  # host (list, why, apply, apply --plan, plan, export, facts) parse it
+  # themselves and resolve it through the one shared resolver
+  # (`resolveCommandHost` -> `selectHost`), which refuses a `--host` that
+  # `$REPRO_HOST` would override. `enable` / `disable` take `--host` as the
+  # TARGET entry (and remote-apply host), which may differ from this
+  # machine's identity. The rest act on this machine's identity
+  # ($REPRO_HOST, else the OS hostname) through the same `currentHost()`.
+  # `--profile-dir` is handled globally.
+  defer: setHostOverride("")
   while i < args.len:
     let a = args[i]
     if a == "--profile-dir" or a.startsWith("--profile-dir="):

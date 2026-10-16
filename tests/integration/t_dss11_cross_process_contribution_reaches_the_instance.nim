@@ -472,25 +472,55 @@ proc memberCount(value: ServiceRegistrationSet): int =
   value.registrations.len
 
 suite "D-SS11 §4.6 — a consumer in another process contributes to the instance":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
-  defer:
-    discard c.runRepro(c.consumerProject,
-      @["down", "--activity=" & ConsumerActivity])
-    discard c.runRepro(c.ownerProject,
-      @["down", "--activity=" & OwnerActivity])
-    c.closeDaemon(daemon)
-    # REAP BEFORE THE TREE IS REMOVED, and after the daemon is closed.
-    # Before the removal because the identity witness is the path: a
-    # process whose cwd has been deleted still answers, but the argv
-    # witness is the stronger of the two and reading it is free while
-    # the tree exists. After `closeDaemon` because the daemon's own argv
-    # names this case's `tempRoot`, so the sweep would otherwise kill
-    # the daemon out from under the graceful `repro down` calls above.
-    c.reapCaseProcesses()
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+  # Prepared on the first case's `setup`, NOT in the suite body. The suite
+  # body runs at registration, in every process this binary starts --
+  # including `--list` / `--list-json`, which only enumerates and is run
+  # from a scratch working directory. Preparing here made enumeration
+  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
+  # no case was listed) and start a daemon just to print case names. The
+  # runner executes each case in its own process, so a case still prepares
+  # the fixture and starts the daemon exactly once, and the deferred
+  # cleanup below still runs in that process -- only if a case prepared.
+  var prepared = false
+  var c: Dss11Case
+  var daemon: owned(Process)
 
-  test "the owner materialises, the consumer attaches and deposits, the owner applies":
+  setup:
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
+
+  defer:
+    if prepared:
+      discard c.runRepro(c.consumerProject,
+        @["down", "--activity=" & ConsumerActivity])
+      discard c.runRepro(c.ownerProject,
+        @["down", "--activity=" & OwnerActivity])
+      c.closeDaemon(daemon)
+      # REAP BEFORE THE TREE IS REMOVED, and after the daemon is closed.
+      # Before the removal because the identity witness is the path: a
+      # process whose cwd has been deleted still answers, but the argv
+      # witness is the stronger of the two and reading it is free while
+      # the tree exists. After `closeDaemon` because the daemon's own argv
+      # names this case's `tempRoot`, so the sweep would otherwise kill
+      # the daemon out from under the graceful `repro down` calls above.
+      c.reapCaseProcesses()
+      try: removeDir(c.tempRoot) except OSError, IOError: discard
+
+  # ONE PROCESS PER CASE. The suite runner executes every case in a process
+  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
+  # FRESH fixture and daemon in `setup` above. The cases below are one
+  # scenario told in steps, and a later step asserts on state an earlier
+  # step created -- so each step is a template, and a case first REPLAYS the
+  # earlier steps its state depends on, assertions and all, then runs its
+  # own. Run alone, a case therefore measures exactly what it measured as
+  # part of the sequence; a prerequisite step that fails fails the dependent
+  # case too, at that step's own assertion, rather than letting it pass or
+  # fail on a fixture it never built.
+
+  template ownerAppliesTheConsumersContribution() =
+    # The steps of case "the owner materialises, the consumer attaches and deposits, the owner applies".
     # STEP 1 -- the owner's `repro up` materialises the instance and
     # registers its own member. One process.
     let ownerFirst = ownerUp(c)
@@ -557,7 +587,8 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     # THROUGH THE RESOLVER: the owner's own registration is untouched.
     check mintedFor(applied, OwnerMember) == ownerMinted
 
-  test "a second member from the same consumer lands without re-minting the first":
+  template secondMemberLandsWithoutReminting() =
+    # The steps of case "a second member from the same consumer lands without re-minting the first".
     # The same consumer's recipe grows a member. Its deposit REPLACES its
     # own rows and leaves the owner's registration byte-identical.
     let before = c.registrationSet
@@ -600,7 +631,8 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     check mintedFor(applied, SecondConsumerMember).len > 0
     check contributorFor(applied, SecondConsumerMember) == ConsumerPackage
 
-  test "the owner's definition moved and its artifact did not: a STALE LIFT":
+  template staleLiftIsRefused() =
+    # The steps of case "the owner's definition moved and its artifact did not: a STALE LIFT".
     # Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION,
     # measured END TO END THROUGH THE REAL CLI, against a real owner
     # whose recipe has just been edited.
@@ -636,7 +668,8 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     check c.contributionSet.contributions.len == 1
     check memberCount(c.registrationSet) == 3
 
-  test "a contribution to a point the RUNNING instance does not declare is refused":
+  template undeclaredPointIsRefused() =
+    # The steps of case "a contribution to a point the RUNNING instance does not declare is refused".
     # THE VERSION-SKEW CASE, measured rather than simulated.
     #
     # The instance is still the one materialised from the owner's recipe
@@ -696,3 +729,20 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     # withdraw what was already registered.
     check mintedFor(c.registrationSet, SkewMember).len == 0
     check memberCount(c.registrationSet) == 3
+
+  test "the owner materialises, the consumer attaches and deposits, the owner applies":
+    ownerAppliesTheConsumersContribution()
+
+  test "a second member from the same consumer lands without re-minting the first":
+    ownerAppliesTheConsumersContribution()
+    secondMemberLandsWithoutReminting()
+
+  test "the owner's definition moved and its artifact did not: a STALE LIFT":
+    ownerAppliesTheConsumersContribution()
+    secondMemberLandsWithoutReminting()
+    staleLiftIsRefused()
+
+  test "a contribution to a point the RUNNING instance does not declare is refused":
+    ownerAppliesTheConsumersContribution()
+    secondMemberLandsWithoutReminting()
+    undeclaredPointIsRefused()

@@ -44,6 +44,7 @@ import toml_serialization
 import toml_serialization/types as toml_types
 
 import repro_home_apply/host_facts
+import repro_profile/concerns
 
 const
   AllowStatuses* = ["only-in-nix", "only-in-reprobuild", "different"]
@@ -69,6 +70,11 @@ type
 
   CategoryResult* = object
     category*: string
+    owner*: string                  ## GM7: which side applies the category
+                                    ## on the host -- `reprobuild`, `nix`,
+                                    ## or `split (...)` for packages -- when
+                                    ## the Reprobuild document says its host
+                                    ## declares `applies:`; "" otherwise
     entries*: seq[EntryResult]      ## sorted by id
     unmapped*: seq[JsonNode]        ## both sides' unmapped entries, each
                                     ## with a `side` field added
@@ -136,6 +142,25 @@ proc validateFacts*(doc: JsonNode; source: string) =
       if id in seen:
         fail(source & ": two `" & c & "` entries with id `" & id & "`")
       seen.incl id
+  # GM7: the informational `concerns` field (Reprobuild side). Optional; when
+  # present it must be well formed, since the report reads ownership from it.
+  let concernsNode = doc.getOrDefault("concerns")
+  if not concernsNode.isNil:
+    if concernsNode.kind != JObject or
+        concernsNode.getOrDefault("declared").isNil or
+        concernsNode["declared"].kind != JBool or
+        concernsNode.getOrDefault("applied").isNil or
+        concernsNode["applied"].kind != JArray:
+      fail(source & ": `concerns` must be an object with a boolean " &
+        "`declared` and an `applied` array")
+    var names: seq[string]
+    for n in concernsNode["applied"]:
+      if n.kind != JString:
+        fail(source & ": `concerns.applied` must hold concern names")
+      names.add n.getStr
+    let problem = concernListProblem(names)
+    if problem.len > 0:
+      fail(source & ": `concerns.applied`: " & problem)
   for listKey in ["unmapped", "uncategorized"]:
     let list = doc.getOrDefault(listKey)
     if list.isNil or list.kind != JArray:
@@ -256,6 +281,31 @@ proc indexById(list: JsonNode): OrderedTable[string, JsonNode] =
   for e in list:
     result[e["id"].getStr] = e
 
+proc categoryOwner(reproDoc: JsonNode; category: string): string =
+  ## Which side applies `category` on the host, from the Reprobuild
+  ## document's `concerns` (Gradual-Nix-To-Reprobuild-Migration.md
+  ## §Concern-scoped apply, "Host facts and the report"); "" when its host
+  ## declares nothing (Reprobuild applies everything there, as before).
+  let node = reproDoc.getOrDefault("concerns")
+  if node.isNil or not node["declared"].getBool:
+    return ""
+  var names: seq[string]
+  for n in node["applied"]:
+    names.add n.getStr
+  let applied = toConcernSet(names)
+  proc side(c: HomeConcern): string =
+    if c in applied: "reprobuild" else: "nix"
+  case category
+  of "packages":
+    let a = side(hcApplications)
+    let p = side(hcPackages)
+    if a == p: a
+    else: "split (applications: " & a & ", packages: " & p & ")"
+  of "files": side(hcFiles)
+  of "environment": side(hcEnvironment)
+  of "services": side(hcServices)
+  else: ""
+
 proc compareFacts*(a, b: JsonNode; sourceA, sourceB: string;
                    allow: seq[AllowEntry] = @[]): CompareReport =
   ## Compare two validated-or-not facts documents (validated here). The
@@ -283,7 +333,7 @@ proc compareFacts*(a, b: JsonNode; sourceA, sourceB: string;
   result.allow = allow
 
   for c in HostFactsCategories:
-    var cat = CategoryResult(category: c)
+    var cat = CategoryResult(category: c, owner: categoryOwner(reproDoc, c))
     let nixIdx = indexById(nixDoc["categories"][c])
     let reproIdx = indexById(reproDoc["categories"][c])
     var ids: seq[string]
@@ -360,7 +410,9 @@ proc renderCompareText*(r: CompareReport; showSame = false): string =
       $counts["only-in-nix"] & " only in Nix, " &
       $counts["only-in-reprobuild"] & " only in Reprobuild, " &
       $counts["different"] & " different, " & $cat.unmapped.len &
-      " unmapped\n"
+      " unmapped" &
+      (if cat.owner.len > 0: " -- applied by " & cat.owner & " on " & r.host
+       else: "") & "\n"
     for e in cat.entries:
       if e.status == "same" and not showSame:
         continue
@@ -418,6 +470,8 @@ proc renderCompareJson*(r: CompareReport): JsonNode =
         item["allowedBy"] = %r.allow[e.allowedBy].index
       c[e.status].add item
     c["unmapped"] = %cat.unmapped
+    if cat.owner.len > 0:
+      c["owner"] = %cat.owner
     cats[cat.category] = c
   result["categories"] = cats
   result["uncategorized"] = %r.uncategorized

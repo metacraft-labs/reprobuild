@@ -895,8 +895,33 @@ proc emitLockFileDesignations(pkg: PackageDef; site: NimNode): NimNode =
       newLit(entry.line)))
   discard site
 
+const
+  reproBin* {.strdefine.} = ""
+    ## Absolute path to the engine binary, handed in by the recipe compile.
+    ## Empty outside that compile (a plain `nim c` of a recipe), which is
+    ## exactly when the `dslDeps:` import emission must stay silent.
+  reproConsumerRoot* {.strdefine.} = ""
+    ## The consumer repo the recipe belongs to. The macro cannot derive it:
+    ## it expands in the extraction scratch directory, so `getProjectPath()`
+    ## points there rather than at the project.
+
+proc recipeIsUnderConsumerRoot(recipeFile: string): bool =
+  ## Whether ``recipeFile`` lies inside ``reproConsumerRoot``, the project the
+  ## interface compile is extracting. That compile's main module is a
+  ## generated runner that IMPORTS the recipe, so ``isMainModule`` is false in
+  ## the recipe there and cannot tell the project's own recipe from a sibling
+  ## producer's; the consumer root can. Empty outside an interface compile.
+  ## The comparison is textual (``normalizedPath``) because the VM has no
+  ## ``realpath``: a spelling mismatch reads as "not under", which only costs
+  ## the cross-repo sentence's accuracy, never a pin.
+  if reproConsumerRoot.len == 0 or recipeFile.len == 0: return false
+  let root = normalizedPath(reproConsumerRoot).replace('\\', '/')
+  let file = normalizedPath(recipeFile).replace('\\', '/')
+  file.startsWith(root.strip(leading = false, chars = {'/'}) & "/")
+
 proc emitVariantDeclarations(variants: seq[VariantDecl];
-                              pkg: PackageDef): NimNode =
+                              pkg: PackageDef;
+                              recipeFile = ""): NimNode =
   ## Spec-Implementation M1/M2d: lower the parsed ``VariantDecl`` list
   ## into Nim source code. Emits a single ``import`` of the
   ## configurables umbrella (when variants OR solver-bound dependencies
@@ -988,6 +1013,29 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
   # `nativeBuildDeps:` and `buildDeps:` is asking for exactly the two
   # instances NLF-PROP-4 asserts. Collapsing them here would silently answer
   # "one".
+  #
+  # Each edge also carries WHERE it was declared
+  # (`variants.SolverDeclarationSite`), so a lock-conflict diagnostic can say
+  # the declaring package is a cross-repo producer rather than one of the
+  # consuming project's own (`Locking-And-Solver.md` §"Targeted re-pin").
+  # `isMainModule` is resolved by the compiler in the module this expansion
+  # lands in — the recipe being evaluated is the provider's main module, and a
+  # sibling recipe reaching it is imported. An INTERFACE compile is the
+  # exception: its main module is a generated runner that imports the recipe,
+  # so there the recipe is recognised by lying under `reproConsumerRoot`
+  # instead (without this every own-package conflict a build reports from
+  # interface extraction was called a cross-repo producer's). Whether any
+  # other module is another project's recipe or a library module is decided
+  # here from the file name: every project recipe is `repro.nim` or
+  # `reprobuild.nim`, while a bundled package lives at
+  # `repro_dsl_stdlib/packages/<name>.nim`.
+  let recipeName = extractFilename(recipeFile)
+  let importedSite =
+    if recipeIsUnderConsumerRoot(recipeFile): "sdsRootRecipe"
+    elif recipeName in ["repro.nim", "reprobuild.nim"]: "sdsSiblingRecipe"
+    else: "sdsLibraryModule"
+  let siteExpr = "(when isMainModule: sdsRootRecipe else: " & importedSite &
+    ")"
   var emitted: seq[string] = @[]
   for (uses, kind) in [(pkg.toolUses, DepKindTarget),
                        (pkg.nativeBuildDeps, DepKindNative),
@@ -1005,7 +1053,8 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
         escForCode(useDef.rawConstraint) &
         ", gateVariant = " & escForCode(useDef.gateVariant) &
         ", gateValue = " & escForCode(useDef.gateValue) &
-        ", depKind = " & escForCode(kind) & ")\n"))
+        ", depKind = " & escForCode(kind) &
+        ", declarationSite = " & siteExpr & ")\n"))
   # ``finalizeVariantsAtModuleInit`` rather than ``finalizeVariants``: this
   # call sits at MODULE SCOPE, and the imports emitted above it mean one runs
   # per recipe in the transitive closure, over a registry that only grows. The
@@ -3827,7 +3876,10 @@ proc dss10RefuseRegistrationWithoutReadiness(packageName, serviceName: string;
     "REGISTRATION RESOURCE ordered on this service. " &
     dss10DegradationRule & " " & dss10ReadinessRemedy, anchor)
 
-proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
+proc m5ServiceEmission(packageName: string; stmt: NimNode;
+                       contributionPoints:
+                         seq[tuple[bareName, key: string]] = @[]):
+    NimNode =
   ## Lower ONE ``service <name>:`` statement to its wrap-and-register
   ## block, or return ``nil`` when ``stmt`` is not a recognised service
   ## entry.
@@ -3893,8 +3945,40 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
     tryBody.add(quote do:
       addActiveServiceConvergePoint(`pointLit`))
   for argExpr in parsedBody.argExprs:
-    tryBody.add(quote do:
-      addActiveServiceArg(`argExpr`))
+    # Shared-Development-Services, reprobuild issue #498: `args <point>`
+    # where `<point>` is a bare identifier naming an ordered-collection
+    # `config:` key of the ENCLOSING activity (or of the package, at
+    # package level) emits a DEFERRED slot instead of the folded
+    # tokens.
+    #
+    # WHY THE MACRO AND NOT THE RUNTIME. `addActiveServiceArg` receives
+    # a `seq[string]`; the key it came from is gone by then, and a
+    # runtime that guessed the key by matching the value against every
+    # point's current fold would be the "assertion satisfied by the
+    # wrong text" shape in executable form -- two points folding to the
+    # same members would be indistinguishable. The macro is the only
+    # place that still has the author's own identifier.
+    #
+    # The EAGER value is passed too, and `addActiveServiceArgPoint`
+    # documents what it is for: an `enable <activity>(<point> = ...)`
+    # site supplies the argument explicitly and the parameter default
+    # -- the read of the fold -- is never evaluated, so deferring such
+    # a value would let a later contribution overwrite an explicit
+    # argument.
+    var pointKey = ""
+    if argExpr.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      let bare = identText(argExpr).normalize
+      for point in contributionPoints:
+        if point.bareName.normalize == bare:
+          pointKey = point.key
+          break
+    if pointKey.len > 0:
+      let keyLit = newLit(pointKey)
+      tryBody.add(quote do:
+        addActiveServiceArgPoint(`keyLit`, `argExpr`))
+    else:
+      tryBody.add(quote do:
+        addActiveServiceArg(`argExpr`))
   for fileExpr in parsedBody.runtimeFileExprs:
     tryBody.add(quote do:
       addActiveServiceRuntimeFile(`fileExpr`))
@@ -4091,10 +4175,27 @@ proc emitM5Services*(packageName: string;
   ## The per-entry lowering itself lives in ``m5ServiceEmission``, which
   ## L2's dev-env ``activity`` walker shares.
   result = newStmtList()
+  # Shared-Development-Services #498: the PACKAGE-LEVEL contribution
+  # points, so `args <point>` in a package-level `service` body defers
+  # exactly as it does in an activity's. Collected here rather than
+  # inside `m5ServiceEmission` because the emitter is shared with L2's
+  # dev-env walker, which has a DIFFERENT key shape
+  # (`<pkg>.<activity>.<name>` against `<pkg>.<name>`) -- one emitter,
+  # two callers, each supplying its own key.
+  var packagePoints: seq[tuple[bareName, key: string]] = @[]
+  for entry in classified:
+    if entry.ownership != soM2Config:
+      continue
+    if entry.stmt.len < 2:
+      continue
+    for cfg in collectM2ConfigEntries(entry.stmt[entry.stmt.len - 1]):
+      if m2TypeReprIsOrderedCollection(cfg.typeNode.repr):
+        packagePoints.add((bareName: cfg.name,
+          key: packageName & "." & cfg.name))
   for entry in classified:
     if entry.ownership != soM5Service:
       continue
-    let emission = m5ServiceEmission(packageName, entry.stmt)
+    let emission = m5ServiceEmission(packageName, entry.stmt, packagePoints)
     if emission == nil:
       continue
     result.add(emission)
@@ -4809,13 +4910,24 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
     formal.add(nnkIdentDefs.newTree(ident(c.name), c.typeNode.copyNimTree(),
       default))
 
+  # Shared-Development-Services #498: this activity's ordered-collection
+  # `config:` keys, fully qualified. `args <point>` inside one of this
+  # activity's `service` bodies lowers to a DEFERRED slot filled at
+  # finalization, so a contribution made by ANOTHER activity's body
+  # reaches the command line whichever order the two are declared in.
+  var activityPoints: seq[tuple[bareName, key: string]] = @[]
+  for c in config:
+    if m2TypeReprIsOrderedCollection(c.typeNode.repr):
+      activityPoints.add((bareName: c.name,
+        key: packageName & "." & parsed.activityName & "." & c.name))
+
   let procBody = newStmtList()
   procBody.add(l2MemberCheckStmts(parsed.activityName, params, parsed.body))
   for entry in parsed.body:
     if l2IsHeadNamed(entry, "config"):
       continue
     if l2IsHeadNamed(entry, "service"):
-      let emission = m5ServiceEmission(packageName, entry)
+      let emission = m5ServiceEmission(packageName, entry, activityPoints)
       if emission != nil:
         procBody.add(emission)
         continue
@@ -9348,16 +9460,6 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
     provisioningContributionLiteral(contribution) & ")")
 
 
-const
-  reproBin* {.strdefine.} = ""
-    ## Absolute path to the engine binary, handed in by the recipe compile.
-    ## Empty outside that compile (a plain `nim c` of a recipe), which is
-    ## exactly when the import emission below must stay silent.
-  reproConsumerRoot* {.strdefine.} = ""
-    ## The consumer repo the recipe belongs to. The macro cannot derive it:
-    ## it expands in the extraction scratch directory, so `getProjectPath()`
-    ## points there rather than at the project.
-
 proc collectDslDeps(sectionStmts: NimNode): seq[string] =
   ## Package names listed in a top-level ``dslDeps:`` block, in declaration
   ## order, deduplicated.
@@ -9641,7 +9743,8 @@ macro packageImpl*(name: untyped;
   # ``declareVariant`` template lives in
   # ``repro_dsl_stdlib/configurables/variants.nim``; the import below
   # is gated so packages without variants don't pull the stdlib in.
-  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
+  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg,
+    recipeFile = name.lineInfoObj.filename)
   # ── Named-Lock-Files NLF-M7: §4.9's compile error, §4.3's registration ──
   let lockFileEmission = emitLockFileDesignations(pkg, name)
   # ── Test-Certificates TC-9b: `enactCertificatePolicy` ─────────────

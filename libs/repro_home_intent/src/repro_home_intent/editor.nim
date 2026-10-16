@@ -111,6 +111,8 @@ proc insertLine(p: Profile; atIdx: int; line: string) =
       for ch in node.hostsEntries: shift(ch, from1)
     of nkHostsEntry:
       if node.hostEntryLine >= from1: inc node.hostEntryLine
+      if node.hostActivitiesLine > 0 and node.hostActivitiesLine >= from1:
+        inc node.hostActivitiesLine
     of nkResourcesBlock:
       if node.resourcesHeaderLine >= from1: inc node.resourcesHeaderLine
       for ch in node.resourcesEntries: shift(ch, from1)
@@ -155,6 +157,7 @@ proc deleteLine(p: Profile; atIdx: int) =
       for ch in node.hostsEntries: shift(ch, from1)
     of nkHostsEntry:
       if node.hostEntryLine > from1: dec node.hostEntryLine
+      if node.hostActivitiesLine > from1: dec node.hostActivitiesLine
     of nkResourcesBlock:
       if node.resourcesHeaderLine > from1: dec node.resourcesHeaderLine
       for ch in node.resourcesEntries: shift(ch, from1)
@@ -841,7 +844,19 @@ proc setHostActivities*(profilePath, host: string;
   let line = indentStr(entryIndent) & "\"" & host & "\": " &
     renderHostList(activities)
   let existingIdx = findHostsEntry(hostsBlk, host)
-  if existingIdx >= 0:
+  if existingIdx >= 0 and hostsBlk.hostsEntries[existingIdx].hostBlockForm:
+    # Block form: rewrite (or add) the `activities:` line under the host,
+    # leaving `applies:` and the host line as they are.
+    let entry = hostsBlk.hostsEntries[existingIdx]
+    let childLine = indentStr(entryIndent + prof.indentStep) &
+      "activities: " & renderHostList(activities)
+    if entry.hostActivitiesLine > 0:
+      prof.lines[entry.hostActivitiesLine - 1] = childLine
+    else:
+      insertLine(prof, entry.hostEntryLine, childLine)
+      entry.hostActivitiesLine = entry.hostEntryLine + 1
+    entry.hostActivities = activities
+  elif existingIdx >= 0:
     let entry = hostsBlk.hostsEntries[existingIdx]
     prof.lines[entry.hostEntryLine - 1] = line
     entry.hostActivities = activities

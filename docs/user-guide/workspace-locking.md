@@ -457,6 +457,50 @@ it) and refresh again. A sibling checked out without any recipe declares
 no constraints and is not a reason to refuse. `repro lock solve` without
 `--write` prints the same finding as a warning.
 
+#### `ELockConflict`: re-pin one package, not the whole lock
+
+A committed lock is a pin, so a build refuses with `ELockConflict` when
+the recipe now declares a range the lock's version does not satisfy. The
+usual cause is a **new** constraint: a `uses:` line added to the project,
+or a sibling it consumes, after the lock was written. A sibling consumed
+as a pure-Nim-source library counts: this project's compiler compiles
+its modules, so its toolchain floor (`nim >=2.2 <3.0`) binds this lock.
+When the declaring package belongs to such a sibling, the diagnostic
+says it is a **cross-repo producer**, so look for the constraint in that
+repo's recipe, not in yours.
+
+The first remedy the diagnostic names is the targeted re-pin:
+
+```
+repro lock refresh --repin=<package>[,<package>…]
+```
+
+It re-solves only the named packages and holds every other entry. The
+solve runs with every other committed package version and variant value
+supplied as a hard pin, the same pins a build applies. The written lock
+differs from the committed one only in the named packages' `packages`
+entries, plus **added** entries for packages the lock did not record yet
+(a newly declared producer's own package, for example). It never changes
+or removes another entry. Sibling revision pins (`deps`) already in the
+lock, provisioning records and the certificate-policy snapshot are carried
+forward; a sibling the lock does not pin yet (the newly declared producer
+itself) is added at the revision the solve saw. The one
+`deps` entry it rewrites is the repo's own (`path = "."`), which records
+the tree the lock was solved from.
+
+- When another held pin **also** contradicts a declared range, the
+  re-pin fails with that pin's `ELockConflict` and writes nothing. Add
+  that package to `--repin` and run it again. The flag never re-solves a
+  package you did not name.
+- It needs a committed lock and package names the solve actually has.
+  If either is missing it exits 2 and writes nothing.
+- The incomplete-solve refusal (exit 5) and the pin-regression gate
+  (exit 4) apply as they do to a full refresh.
+
+A full `repro lock refresh` (every version pin and every sibling
+revision pin re-solved) and relaxing the declared constraint are still
+available. Use them when that is the change you want.
+
 `repro workspace lock` resolves a bare invocation against the **current
 directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be

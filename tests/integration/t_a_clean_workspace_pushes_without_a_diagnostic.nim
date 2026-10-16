@@ -128,25 +128,39 @@ suite "NF-3: a clean workspace pushes without a diagnostic":
       check noFlakeJson.code == 0
       check not parseJson(noFlakeJson.stdout)["examined"].getBool()
 
-      # ---- (5) an `unpinned` input is not drift, so the gate stays quiet ----
+      # ---- (5) a `follows`-routed input is not drift, so the gate stays quiet
       # A `follows`-routed input resolves to another input's node and carries
       # no pin of its own, so "the pin disagrees with the sibling" is not a
       # proposition that can be false about it. Refusing here would produce a
       # gate no command can satisfy — `repro flake refresh-lock` deliberately
       # declines to move a `follows` input, because following it is a re-solve
-      # rather than an observation. The decision is recorded in
-      # `flakeOverrideStateReport`'s header.
+      # rather than an observation.
+      #
+      # Since spec/Nix-Flake-Coexistence.md §5b ("Input identity before input
+      # aliases") the binder does not substitute such an input at all: it has
+      # no independent lock node, so it keeps its pin and the report NAMES why
+      # rather than guessing a sibling from the alias. It is therefore no
+      # longer an `unpinned` ROW; quiet-but-not-silent is now carried by the
+      # named skip in the report's `notices`, which the gate keeps out of a
+      # clean push exactly as it keeps out arm (4)'s.
       var lock = parseJson(readFile(lockPath(fx)))
       lock["nodes"]["root"]["inputs"]["beta-src"] = %*["alpha-src"]
       writeFile(lockPath(fx), pretty(lock, indent = 2))
       commitLockAndPublish(fx, "route beta-src through a follows path")
       let followsStatus = flakeStatus(fx, "--json")
+      checkpoint("follows override-status --json:\n" & followsStatus.stdout)
       check followsStatus.code == 0
-      check parseJson(followsStatus.stdout)["counts"]["unpinned"].getInt() == 1
+      let followsDoc = parseJson(followsStatus.stdout)
+      check followsDoc["counts"]["unpinned"].getInt() == 0
+      let followsNotices = $followsDoc["notices"]
+      check followsNotices.contains("NOT substituted: flake input 'beta-src'")
+      check followsNotices.contains(
+        "a follows path has no independent lock node")
       let followsGate = gatePrePush(fx)
       checkpoint("follows gate output:\n" & followsGate.output)
       check not hasGateFailure(followsGate.report, "flake_lock_stale")
       check not gateMentionsFlake(followsGate.report)
+      check not ($followsGate.report).contains("NOT substituted")
 
       # ---- (6) …but "could not determine" is NOT quiet ---------------------
       # There is exactly one derivation of the override set — `repro develop`'s

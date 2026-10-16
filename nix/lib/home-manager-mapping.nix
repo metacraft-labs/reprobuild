@@ -23,6 +23,31 @@
 #   environment  env.userVariable -> home.sessionVariables,
 #                env.userPath -> home.sessionPath
 #
+# Concerns (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply):
+# each category covers the entries of one Reprobuild concern
+# (`categoryConcerns`). When the evaluated host's `hosts:` entry declares the
+# concerns Reprobuild applies (`evaluation.applies`), every entry's concern is
+# read from Reprobuild's classification -- a resource's from the export's
+# `concerns.resourceKinds`, a package's from its `concern` (the realization
+# Reprobuild selects for the system), never restated here -- and:
+#
+#   * an entry of a concern Reprobuild applies is excluded (Reprobuild
+#     applies it);
+#   * an application Nix applies goes to the Homebrew hook when `homebrew` is
+#     enabled, else through nixpkgs when `packages` is; with `homebrew`
+#     enabled and neither taking it, it is `unmapped` (Nix's to apply, and no
+#     enabled category can);
+#   * a package Nix applies is mapped as without a declaration; when
+#     Reprobuild resolved it to nothing for the system (`resolved = false`),
+#     an `unmapped` reason says so.
+#
+# A package Reprobuild resolves to nothing is in `packages`, as for the
+# apply. The export cannot mistake a catalog it did not reach for "nothing":
+# it refuses to classify when a reference is defined nowhere it can see and
+# no `reprobuild-packages` catalog was reachable (IFD: `packagesCatalog`).
+#
+# Without a declaration nothing changes.
+#
 # Nothing is dropped. An entry of an ENABLED category that cannot be mapped
 # faithfully lands in `unmapped` with the reason (a package no catalog
 # realizes, a version pin the attribute does not satisfy, a file mode
@@ -229,12 +254,23 @@ let
           token = fieldValue r "name";
         };
       };
+  # The Reprobuild concern each category's entries belong to. The module
+  # derives each switch's default from it: on unless Reprobuild applies the
+  # concern on the host.
+  categoryConcerns = {
+    packages = "packages";
+    homebrew = "applications";
+    files = "files";
+    environment = "environment";
+  };
 in
 {
-  inherit resourceCategory uncategorizedKinds;
+  inherit resourceCategory uncategorizedKinds categoryConcerns;
 
   # mapIntent { evaluation, pkgs, system, categories, lookupNixRealization,
-  #             brewRealizationOf ? (_: null) }
+  #             brewRealizationOf ? (_: null), concerns ? null }
+  # `concerns`: the export document's `concerns` object (required when
+  # `evaluation.applies` is present).
   # `categories`: { packages, homebrew, files, environment } booleans.
   # `brewRealizationOf { name, system }` -> null | { kind = "cask" | "formula"; token; }
   mapIntent =
@@ -245,8 +281,16 @@ in
       categories,
       lookupNixRealization,
       brewRealizationOf ? (_: null),
+      concerns ? null,
     }:
     let
+      applies = evaluation.applies or null;
+      # Whether Reprobuild applies `concern` on this host by its declaration
+      # (never true without one).
+      reprobuildApplies = concern: applies != null && concern != null && elem concern applies;
+      noClassification = throw "reprobuild.intent: the evaluated host declares the concerns Reprobuild applies, but the document carries no `concerns` classification; re-export";
+      kindConcern = kind: if concerns == null then noClassification else concerns.resourceKinds.${kind} or null;
+      configOverrideConcern = _: if concerns == null then noClassification else concerns.configOverrides or null;
       # --- packages (and packages Homebrew claims) -------------------------
       brewOf =
         p:
@@ -264,32 +308,56 @@ in
           r = lookupNixRealization p.name;
           drv = if r.found or false then lib.attrByPath r.attrPath null pkgs else null;
           id = "package:${p.name}";
+          # Concern-scoped apply: the package's concern, from Reprobuild's
+          # classification (`evaluation.packages[].concern`); null without a
+          # declaration.
+          concern =
+            if applies == null then
+              null
+            else
+              p.concern
+                or (throw "reprobuild.intent: package ${p.name} of host ${evaluation.host} carries no `concern`, although the host declares the concerns Reprobuild applies; the evaluation was not produced by this library's readIntent -- re-export");
+          unresolved = applies != null && !(p.resolved or true);
+          unresolvedNote = if unresolved then "Reprobuild resolved it to nothing for ${system} when the export was made; " else "";
         in
-        if brew != null then
+        if concern != null && reprobuildApplies concern then
+          { }
+        else if brew != null then
           { inherit brew; }
+        else if concern == "applications" && !categories.packages then
+          (
+            if categories.homebrew then
+              {
+                unmapped =
+                  report "homebrew" id
+                    "an application this host leaves to Nix (`applications` is not in its `applies:`), and the Homebrew hook claims nothing for it on ${system}";
+              }
+            else
+              { }
+          )
         else if !categories.packages then
           { }
         else if !(r.found or false) then
-          { unmapped = report "packages" id r.reason; }
+          { unmapped = report "packages" id (unresolvedNote + r.reason); }
         else if drv == null then
           {
             unmapped =
               report "packages" id
-                "the catalog names nixpkgs attribute `${r.attribute}`, which this package set does not have";
+                (unresolvedNote + "the catalog names nixpkgs attribute `${r.attribute}`, which this package set does not have");
           }
         else if !(drv.meta.available or true) then
           {
             unmapped =
               report "packages" id
-                "pkgs.${r.attribute} is not available on ${system} (meta.platforms / meta.broken)";
+                (unresolvedNote + "pkgs.${r.attribute} is not available on ${system} (meta.platforms / meta.broken)");
           }
         else if p.version != "" && (drv.version or null) != p.version then
           {
             unmapped =
               report "packages" id
-                "pinned to version ${p.version}, but pkgs.${r.attribute} is ${
+                (unresolvedNote + "pinned to version ${p.version}, but pkgs.${r.attribute} is ${
                   toString (drv.version or "unversioned")
-                }";
+                }");
           }
         else
           { package = drv; }
@@ -301,7 +369,9 @@ in
         let
           category = resourceCategory r.kind;
         in
-        if category == null && elem r.kind uncategorizedKinds then
+        if category == null && elem r.kind uncategorizedKinds && applies != null && reprobuildApplies (kindConcern r.kind) then
+          { }
+        else if category == null && elem r.kind uncategorizedKinds then
           {
             uncategorized = report "none" r.address "resource kind `${r.kind}` has no Home Manager mapping";
           }
@@ -327,11 +397,17 @@ in
           mapHomebrew r
       ) (evaluation.resources or [ ]);
 
-      overrideResults = map (o: {
-        uncategorized =
-          report "none" "config:${o.pkg}.${o.key}"
-            "a config override has no Home Manager mapping";
-      }) (evaluation.configOverrides or [ ]);
+      overrideResults = map (
+        o:
+        if applies != null && reprobuildApplies (configOverrideConcern null) then
+          { }
+        else
+          {
+            uncategorized =
+              report "none" "config:${o.pkg}.${o.key}"
+                "a config override has no Home Manager mapping";
+          }
+      ) (evaluation.configOverrides or [ ]);
 
       all = packageResults ++ resourceResults ++ overrideResults;
       pick = attr: concatMap (x: if x ? ${attr} then [ x.${attr} ] else [ ]) all;

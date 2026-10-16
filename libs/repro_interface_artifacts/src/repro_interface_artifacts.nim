@@ -5780,44 +5780,136 @@ proc nixLibFile(prefix, libraryName: string): string =
   ""
 
 proc soMatchesHostArch(libFile: string): bool =
-  ## Guard ``nixPrefix``'s ``/nix/store`` glob against picking a
-  ## wrong-architecture build. The fleet's shared store holds BOTH x86-64 and
-  ## aarch64 copies of libraries like xxHash under indistinguishable
-  ## ``*-xxHash-*`` store-path names, so a bare glob can return the aarch64
-  ## ``libxxhash.so`` on an x86-64 runner — the extract-runner link then fails
-  ## with ``ld: … libxxhash.so is incompatible with elf64-x86-64``. Reject an
-  ## ELF whose machine differs from the build host. A non-ELF file (macOS
-  ## Mach-O ``.dylib``), a static archive (``.a``), or an unreadable/short file
-  ## is treated as a match — let the platform/linker decide.
+  ## Guard the ``/nix/store`` globs (``nixPrefix``, ``nixLibDirIn``) and the
+  ## other fallback candidates against picking a library this host's loader
+  ## cannot map. A store is not single-architecture: the fleet's shared store
+  ## holds x86-64, aarch64 AND i686 copies of libraries like xxHash and
+  ## OpenSSL under store-path names that differ only in their hash, so a bare
+  ## glob can return any of them. Observed failures: the aarch64
+  ## ``libxxhash.so`` on an x86-64 runner (``ld: … libxxhash.so is
+  ## incompatible with elf64-x86-64``), and a 32-bit OpenSSL baked into a
+  ## 64-bit helper's RPATH (``libcrypto.so.3: wrong ELF class: ELFCLASS32``,
+  ## reprobuild-pm issue 2026-10-03 "source interface extraction cannot load
+  ## OpenSSL").
+  ##
+  ## "Host" is the architecture this binary was compiled for, which is also
+  ## the target of every helper it compiles for itself: those compiles pass no
+  ## ``--cpu``. A file is rejected when its header names something the host
+  ## loader cannot map:
+  ##
+  ## * an ELF whose class (``EI_CLASS``, byte 4: 32/64-bit), data encoding
+  ##   (``EI_DATA``, byte 5) or ``e_machine`` (bytes 18–19) differs from the
+  ##   host — the class check is not redundant with the machine check: the
+  ##   x32 and aarch64-ILP32 ABIs are ``ELFCLASS32`` objects carrying the
+  ##   64-bit family's ``EM_X86_64`` / ``EM_AARCH64``; or any ELF on macOS,
+  ##   whose dyld cannot load one;
+  ## * a thin Mach-O of the wrong word size or ``cputype``, a universal
+  ##   (fat) Mach-O with no slice for the host ``cputype``, or any Mach-O on a
+  ##   non-Darwin host.
+  ##
+  ## Header layouts: the System V gABI ELF header
+  ## (https://www.sco.com/developers/gabi/latest/ch4.eheader.html) and
+  ## ``<mach-o/loader.h>`` / ``<mach-o/fat.h>`` / ``<mach/machine.h>``.
+  ##
+  ## Anything the header does not identify — a static archive (``.a``), a
+  ## linker script (glibc's ``libc.so`` is one), an unreadable or short file,
+  ## or a host machine absent from the tables below — is treated as a match:
+  ## the linker or loader decides, as it did before this guard existed.
+  # The size of the largest prefix this reads: a fat header plus the slice
+  # table of any realistic universal binary (each ``fat_arch`` is 20 bytes).
+  const HeaderBytes = 512
   var f: File
   if not open(f, extendedPath(libFile)):
     return true
   defer: close(f)
-  var hdr: array[20, byte]
-  if readBytes(f, hdr, 0, 20) < 20:
+  var hdr: array[HeaderBytes, byte]
+  let got = readBytes(f, hdr, 0, HeaderBytes)
+  if got < 8:
     return true
-  if not (hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and
-          hdr[2] == byte('L') and hdr[3] == byte('F')):
-    return true                       # not ELF -> not our concern
-  if hdr[5] != 1'u8:                   # EI_DATA: only handle little-endian
-    return true
-  let eMachine = uint16(hdr[18]) or (uint16(hdr[19]) shl 8)
+  proc le32(at: int): uint32 =
+    uint32(hdr[at]) or (uint32(hdr[at + 1]) shl 8) or
+      (uint32(hdr[at + 2]) shl 16) or (uint32(hdr[at + 3]) shl 24)
+  proc be32(at: int): uint32 =
+    (uint32(hdr[at]) shl 24) or (uint32(hdr[at + 1]) shl 16) or
+      (uint32(hdr[at + 2]) shl 8) or uint32(hdr[at + 3])
   const
+    EM_386 = 0x03'u16
     EM_X86_64 = 0x3E'u16
     EM_AARCH64 = 0xB7'u16
-  let hostMachine =
-    when hostCPU == "amd64": EM_X86_64
-    elif hostCPU == "arm64": EM_AARCH64
-    else: 0'u16
-  if hostMachine == 0'u16:
-    return true                       # unknown host arch -> don't reject
-  eMachine == hostMachine
+    CPU_TYPE_X86_64 = 0x01000007'u32
+    CPU_TYPE_ARM64 = 0x0100000C'u32
+    hostIs64 = sizeof(pointer) == 8
+    hostMachine =
+      when hostCPU == "amd64": EM_X86_64
+      elif hostCPU == "arm64": EM_AARCH64
+      elif hostCPU == "i386": EM_386
+      else: 0'u16
+    hostCpuType =
+      when hostCPU == "amd64": CPU_TYPE_X86_64
+      elif hostCPU == "arm64": CPU_TYPE_ARM64
+      else: 0'u32
+
+  if hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and
+     hdr[2] == byte('L') and hdr[3] == byte('F'):
+    when defined(macosx):
+      return false                    # dyld cannot load an ELF at all
+    else:
+      if got < 20:
+        return true
+      # EI_CLASS: 1 = ELFCLASS32, 2 = ELFCLASS64.
+      if hdr[4] != (if hostIs64: 2'u8 else: 1'u8):
+        return false
+      # EI_DATA: 1 = little-endian, 2 = big-endian.
+      if hdr[5] != (if cpuEndian == littleEndian: 1'u8 else: 2'u8):
+        return false
+      if hostMachine == 0'u16:
+        return true                   # unknown host machine -> class only
+      let eMachine =
+        if cpuEndian == littleEndian:
+          uint16(hdr[18]) or (uint16(hdr[19]) shl 8)
+        else:
+          (uint16(hdr[18]) shl 8) or uint16(hdr[19])
+      return eMachine == hostMachine
+
+  # Mach-O magics as they appear in the file's first four bytes.
+  let thin64 = hdr[0] == 0xCF'u8 and hdr[1] == 0xFA'u8 and
+    hdr[2] == 0xED'u8 and hdr[3] == 0xFE'u8      # MH_MAGIC_64, little-endian
+  let thin32 = hdr[0] == 0xCE'u8 and hdr[1] == 0xFA'u8 and
+    hdr[2] == 0xED'u8 and hdr[3] == 0xFE'u8      # MH_MAGIC, little-endian
+  let fat = hdr[0] == 0xCA'u8 and hdr[1] == 0xFE'u8 and
+    hdr[2] == 0xBA'u8 and hdr[3] == 0xBE'u8      # FAT_MAGIC, big-endian
+  if not (thin64 or thin32 or fat):
+    return true                       # not an object header we classify
+  when not defined(macosx):
+    return false                      # no non-Darwin loader maps a Mach-O
+  else:
+    if thin32:
+      return not hostIs64
+    if thin64:
+      return hostCpuType == 0'u32 or le32(4) == hostCpuType
+    # FAT_MAGIC is also the Java class-file magic; there bytes 4..7 are a
+    # class-file version (>= 45), never a plausible slice count. Leave such a
+    # file, and a slice table longer than the bytes read, to the loader.
+    let slices = int(be32(4))
+    if slices <= 0 or slices > 32 or 8 + slices * 20 > got:
+      return true
+    if hostCpuType == 0'u32:
+      return true
+    for i in 0 ..< slices:
+      if be32(8 + i * 20) == hostCpuType:
+        return true
+    false
 
 proc nixPrefix(namePattern, header: string;
                libraryNames: openArray[string]): string =
   if not dirExists(extendedPath("/nix/store")):
     return ""
   let needle = namePattern.replace("*", "")
+  # Visit candidates in sorted order, as `config.nims`'s `nixPrefix` does
+  # (it sorts its `find` output) and as `nixLibDirIn` does: an unsorted
+  # `walkDir` makes the chosen prefix depend on directory order, so the
+  # helper and the source build could pick different store builds.
+  var prefixes: seq[string] = @[]
   # TODO(win-longpath): walk results escape; needs review
   for kind, path in walkDir("/nix/store"):
     if kind != pcDir:
@@ -5825,6 +5917,9 @@ proc nixPrefix(namePattern, header: string;
     let tail = splitPath(path).tail
     if needle.len > 0 and tail.find(needle) < 0:
       continue
+    prefixes.add(path)
+  prefixes.sort()
+  for path in prefixes:
     if not fileExists(extendedPath(path / header)):
       continue
     for libraryName in libraryNames:
@@ -5846,51 +5941,96 @@ const InterfaceLibSubdirs = [
   ## a `-L` search must probe (plain `lib`, `lib64`, Debian-multiarch triples)
   ## so a bare prefix like `/usr` resolves regardless of host layout.
 
+proc holdsLibrary(libDir, dylibName: string; hostArchOnly: bool): bool =
+  ## Whether `libDir/dylibName` exists and — when `hostArchOnly` — is a file
+  ## this host's loader can map (see `soMatchesHostArch`).
+  let path = libDir / dylibName
+  fileExists(extendedPath(path)) and
+    (not hostArchOnly or soMatchesHostArch(path))
+
 proc firstExistingPrefixLibDir(prefix: string;
-                               dylibNames: openArray[string]): string =
+                               dylibNames: openArray[string];
+                               hostArchOnly = false): string =
   ## Mirror of `config.nims`'s `firstExistingPrefixLibDir`: return the
   ## absolute libdir under `prefix` that holds one of `dylibNames`, or "".
   for libSub in InterfaceLibSubdirs:
     let candidate = prefix / libSub
     for dylibName in dylibNames:
-      if fileExists(extendedPath(candidate / dylibName)):
+      if holdsLibrary(candidate, dylibName, hostArchOnly):
         return candidate
   ""
 
 proc firstExistingLibDir(candidates: openArray[string];
-                         dylibNames: openArray[string]): string =
+                         dylibNames: openArray[string];
+                         hostArchOnly = false): string =
   ## Mirror of `config.nims`'s `firstExistingLibDir`: probe each candidate
   ## directly (it may already be a libdir like `/usr/lib64`) and then walk
   ## the standard lib subdirectories so a candidate like `/usr` resolves on
   ## `/usr/lib`, `/usr/lib64`, or a Debian-multiarch host.
+  ##
+  ## `hostArchOnly` is for candidates nobody chose for this build — a
+  ## conventional prefix, a store glob — where the directory's existence says
+  ## nothing about its architecture. An explicitly named prefix is taken as
+  ## given: a caller who names one owns that choice.
   for candidate in candidates:
     let path = candidate.strip()
     if path.len == 0:
       continue
     for dylibName in dylibNames:
-      if fileExists(extendedPath(path / dylibName)):
+      if holdsLibrary(path, dylibName, hostArchOnly):
         return path
-    let resolved = firstExistingPrefixLibDir(path, dylibNames)
+    let resolved = firstExistingPrefixLibDir(path, dylibNames, hostArchOnly)
     if resolved.len > 0:
       return resolved
   ""
 
-proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
-  ## Mirror of `config.nims`'s `nixLibDir`: scan `/nix/store` for a store
-  ## path matching `namePattern` whose libdir holds one of `dylibNames`.
-  if not dirExists(extendedPath("/nix/store")):
+proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `nixLdflagsLibDir`: the first `-L<dir>` in
+  ## `NIX_LDFLAGS` (the active Nix dev shell's own link inputs) that carries
+  ## one of `dylibNames`. Unlike a store glob this is the shell's deliberate
+  ## choice for its target, so it needs no architecture filter.
+  for token in getEnv("NIX_LDFLAGS").splitWhitespace():
+    if token.startsWith("-L") and token.len > 2:
+      let dir = token[2 .. ^1]
+      for dylibName in dylibNames:
+        if fileExists(extendedPath(dir / dylibName)):
+          return dir
+  ""
+
+proc nixLibDirIn*(storeRoot, namePattern: string;
+                  dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `nixLibDir`: scan `storeRoot` for a store
+  ## path matching `namePattern` whose libdir holds one of `dylibNames` built
+  ## for the host target.
+  ##
+  ## Candidates are visited in sorted order — `config.nims` sorts its `find`
+  ## output, and an unsorted `walkDir` would make the choice depend on
+  ## directory order — and each is filtered by `soMatchesHostArch`. Without
+  ## the filter "the first sorted match" is an arbitrary architecture on a
+  ## mixed store: CI's first `*-openssl-*` was a 32-bit build, baked into a
+  ## 64-bit helper's RPATH. `storeRoot` is a parameter so the selection can be
+  ## tested against a store-shaped directory; production passes `/nix/store`
+  ## through `nixLibDir`.
+  if not dirExists(extendedPath(storeRoot)):
     return ""
   let needle = namePattern.replace("*", "")
-  for kind, path in walkDir("/nix/store"):
+  var prefixes: seq[string] = @[]
+  for kind, path in walkDir(storeRoot):
     if kind != pcDir:
       continue
     let tail = splitPath(path).tail
     if needle.len > 0 and tail.find(needle) < 0:
       continue
-    let libDir = firstExistingLibDir([path], dylibNames)
+    prefixes.add(path)
+  prefixes.sort()
+  for path in prefixes:
+    let libDir = firstExistingLibDir([path], dylibNames, hostArchOnly = true)
     if libDir.len > 0:
       return libDir
   ""
+
+proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
+  nixLibDirIn("/nix/store", namePattern, dylibNames)
 
 proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
                             candidates: openArray[string]; marker: string) =
@@ -6094,6 +6234,17 @@ proc stageHostDynlibsBesideBinary*(destDir: string): seq[string]
     # by `runtimeRpathCompilerFlags`, so there is nothing to stage.
     discard
 
+proc isHostSystemLibDir(dir: string): bool =
+  ## Mirror of `config.nims`'s `isHostSystemLibDir`: a directory of the HOST
+  ## distribution (`/usr/lib`, `/lib64`, a Debian multiarch triple, ...), as
+  ## opposed to a Nix store path or a prefix the caller named. Such a
+  ## directory is used for `-L` but never baked into RPATH: RPATH outranks the
+  ## loader's own defaults, so a Nix-linked binary would find the host's libc
+  ## there first and die before reading the recipe.
+  let d = dir.strip()
+  d == "/usr" or d.startsWith("/usr/") or d == "/lib" or
+    d.startsWith("/lib/") or d == "/lib64" or d.startsWith("/lib64/")
+
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
   # The reprobuild repo vendors portable C sources for both inside the
@@ -6193,6 +6344,43 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
     result.add("--passL:-lxxhash")
 
+  # OpenSSL: a recipe may load it at module init (`std/net` under `-d:ssl`,
+  # or a direct `loadLib`) even when the host recipe declares no ssl link
+  # flags, and Nim's OpenSSL wrapper `dlopen`s it rather than linking it. The
+  # helpers run in a scrubbed environment and a source-built repro has no
+  # installed wrapper publishing `REPROBUILD_RUNTIME_LIBRARY_PATH`, so without
+  # a baked search path the helper died with `could not load: libcrypto…` —
+  # Distribution-And-Packaging §5 requires the runtime closure to include
+  # OpenSSL. Only the RPATH is added: there is nothing to link, and `-lssl`
+  # stays the business of the edges that declare `-d:ssl`.
+  #
+  # Resolution mirrors `config.nims`'s OpenSSL block, in its order: an
+  # explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev shell sets the
+  # former to its own target OpenSSL); the dev shell's own `-L` link inputs;
+  # the Homebrew prefixes; and last the store glob. The last two are
+  # filtered by target architecture — `/usr/local` on Apple Silicon is
+  # commonly an x86-64 Homebrew, and the store holds every architecture the
+  # host has ever built for.
+  let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
+  let opensslLibDir = block:
+    var dir = firstExistingLibDir(
+      [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
+    if dir.len == 0:
+      dir = nixLdflagsLibDir(opensslNames)
+    if dir.len == 0:
+      dir = firstExistingLibDir(
+        ["/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl",
+         "/usr/local/opt/openssl@3", "/usr/local/opt/openssl"],
+        opensslNames, hostArchOnly = true)
+    if dir.len == 0:
+      dir = nixLibDir("*-openssl-*", opensslNames)
+    dir
+  # A host distribution directory is not written into RPATH, for the reason
+  # given at the SQLite block below: the host loader already searches it, and
+  # an RPATH entry for it would let a Nix-linked helper load the host's libc.
+  if opensslLibDir.len > 0 and not isHostSystemLibDir(opensslLibDir):
+    result.add(runtimeRpathCompilerFlags(@[opensslLibDir], hostRuntimeLinkTarget()))
+
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init
   # time through a ``{.dynlib.}`` const. When repro runs as a CLI against an
   # arbitrary project, the extract_runner links repro's DSL (which pulls in
@@ -6232,7 +6420,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # config.nims's `when not defined(windows) and not defined(macosx)`).
   #
   # Resolution order and the RPATH rule match `config.nims` exactly: an
-  # explicit SQLITE_LIBDIR/SQLITE_PREFIX, then a Nix store SQLite whenever a
+  # explicit SQLITE_LIBDIR/SQLITE_PREFIX, then a Nix store SQLite built for
+  # the host target (`nixLibDir` filters the glob by architecture) whenever a
   # Nix toolchain is present, and the distribution's directories only on a
   # host with no Nix at all. A HOST directory is used for `-L` but never
   # written into RPATH: this edge runs with an allowlisted environment, so
@@ -6261,10 +6450,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
           sqliteNames)
     if sqliteLibDir.len > 0:
       result.add("--passL:-L" & sqliteLibDir)
-      let d = sqliteLibDir.strip()
-      let hostDir = d == "/usr" or d.startsWith("/usr/") or d == "/lib" or
-        d.startsWith("/lib/") or d == "/lib64" or d.startsWith("/lib64/")
-      if not hostDir:
+      if not isHostSystemLibDir(sqliteLibDir):
         result.add("--passL:-Wl,-rpath," & sqliteLibDir)
 
 proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
@@ -6379,7 +6565,8 @@ const
 
 proc positionKeyedNimcacheKey*(declaredCache, producingProject,
                                workDir: string;
-                               hostFlags, libFlags: openArray[string]): string =
+                               hostFlags, libFlags: openArray[string];
+                               compileFlags: openArray[string] = []): string =
   ## POSITION-KEYED nimcache identity: producing project x declared cache x
   ## variant (Tool-Owned-Caches.md, "Identity").
   ##
@@ -6433,10 +6620,19 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
   ##   lives elsewhere: ``interfaceExtractionContext`` still folds
   ##   ``reproLibSourceFingerprint`` into ``interfaceExtractionFingerprint``.
   ##
-  ## WHAT REMAINS: the toolchain and library set. A nimcache holds objects
-  ## produced by one Nim + one host C compiler against one ``--path`` set;
-  ## mixing them in one directory is unsound independently of position.
-  ## These are flag strings, not content, so they are stable across edits.
+  ## WHAT REMAINS: the toolchain, the library set and the COMPILE
+  ## CONFIGURATION. A nimcache holds objects produced by one Nim + one host
+  ## C compiler against one ``--path`` set under one set of ``--define``s and
+  ## code-generation options; mixing them in one directory is unsound
+  ## independently of position. ``compileFlags`` carries every compile option
+  ## of the command (see ``nimcacheKeyedCompileFlags``: the whole flag list
+  ## minus the location-only ``--out:`` / ``--nimcache:`` and the module
+  ## argument). Without it one recipe compiled as a plain provider and as a
+  ## ``-d:useNimRtl -d:reproNimRtlShared`` library shared one directory, and
+  ## Nim reused C generated under the other configuration (clang: "incomplete
+  ## definition of type 'Exception'" in ``@pjson.nim.c``). These are flag
+  ## strings, not content, so they are stable across edits and identical for
+  ## identical configurations.
   ##
   ## SCOPE (Compiles-Are-Normal-Edges.md): this selects a SCRATCH DIRECTORY
   ## for Nim's own incremental cache. It is NOT the cache key of any
@@ -6453,7 +6649,29 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
     parts.add(f)
   for f in libFlags:
     parts.add(f)
+  if compileFlags.len > 0:
+    # Domain-separated so a compile flag is never read as a library flag.
+    parts.add("compile-flags")
+    for f in compileFlags:
+      parts.add(f)
   fnvHex64(parts)
+
+proc nimcacheKeyedCompileFlags*(command: openArray[string];
+                                moduleArg: string): seq[string] =
+  ## The options of a ``nim c`` command that select the C it generates:
+  ## everything after the compiler and its subcommand, minus the
+  ## location-only ``--out:`` / ``--nimcache:`` and the module argument
+  ## (which ``positionKeyedNimcacheKey`` already keys as the producing
+  ## project). ``--parallelBuild:`` and ``--listCmd`` only schedule or echo
+  ## the C compiles, so they stay out: an environment tuning knob must not
+  ## cost a cold cache.
+  for i in 2 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg.startsWith("--parallelBuild:") or arg == "--listCmd" or
+        arg == moduleArg:
+      continue
+    result.add(arg)
 
 proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
@@ -7031,23 +7249,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "--define:reproConsumerRoot=" & effectiveConsumerRoot,
   ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
          @["--define:reproDslDepsDebug"] else: @[])
-  let nimcache =
-    if providerNimcacheMode() == "per-binary":
-      tempRoot / "nimcache"
-    else:
-      when defined(windows):
-        tempParent / "nimcache-interface" /
-          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
-            hostFlags, libFlags)
-      else:
-        buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
-          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
-            hostFlags, libFlags)
+  # The `--nimcache:` argument is filled in once the command is complete: its
+  # position key folds in every compile option (defines, producer paths), so
+  # two configurations of one recipe never share generated C.
   var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
     "--path:" & moduleDir,
-    "--nimcache:" & nimcache,
+    "--nimcache:",
     "--out:" & runnerBin,
     runnerPath
   ])
@@ -7082,6 +7291,22 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # (index 2), never after `runnerPath`, or nim treats it as a second input file.
   if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
     command.insert(@["--listCmd"], 2)
+  block:
+    let nimcache =
+      if providerNimcacheMode() == "per-binary":
+        tempRoot / "nimcache"
+      else:
+        let key = positionKeyedNimcacheKey(InterfaceCacheName, modulePath,
+          workDir, hostFlags, libFlags,
+          nimcacheKeyedCompileFlags(command, runnerPath))
+        when defined(windows):
+          tempParent / "nimcache-interface" / key
+        else:
+          buildScratchRoot(workDir, scratchDir) / "nimcache-interface" / key
+    for i in 0 ..< command.len:
+      if command[i] == "--nimcache:":
+        command[i] = "--nimcache:" & nimcache
+        break
   # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
   # packages deliberately point it at their immutable source closure, so it is
   # not a valid compiler working directory: Nim writes relative linker response
@@ -7920,7 +8145,15 @@ proc rtlModeDefines*(mode: ReproRtlMode): seq[string] =
 
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
                              workDir = getCurrentDir();
-                             scratchDir = ""): seq[string] =
+                             scratchDir = "";
+                             extraFlags: openArray[string] = []): seq[string] =
+  # `extraFlags` are further compile options (a library build's `--app:lib`
+  # and RTL defines, a caller's `--passL`/`--define`s). They are placed
+  # before the module argument and, like every other compile option of the
+  # command, key the nimcache: a caller must pass them HERE rather than
+  # inserting them into the returned command, or two configurations would
+  # share one directory of generated C.
+  #
   # The Nim provider nimcache holds generated C/object files with long
   # `@m..@s..nim.c` names. When `outputBinaryPath` lands deep inside a
   # CMake TryCompile scratch tree, a nimcache placed next to it overflows
@@ -7965,12 +8198,8 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # TryCompile scratch trees hit (Nim's mkdir does not use the \\?\
   # extended-length prefix).
   let nimcacheRoot = getTempDir() / "repro-nimcache-provider"
-  let nimcache =
-    if providerNimcacheMode() == "per-binary":
-      nimcacheRoot / providerNimcacheKey(outputBinaryPath)
-    else:
-      nimcacheRoot / positionKeyedNimcacheKey(ProviderCacheName, modulePath,
-        workDir, hostFlags, libFlags)
+  # The position key folds in the finished command's compile options, so the
+  # `--nimcache:` argument is filled in last (see the end of this proc).
   result = boundedNimCompileCommand()
   result.add(@[
     # Provider compiles are often nested inside latency-sensitive graph
@@ -7982,7 +8211,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # in its directory; its search path is then that directory, `.`.
     "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)
                  else: "."),
-    "--nimcache:" & nimcache,
+    "--nimcache:",
     "--out:" & outputBinaryPath,
     modulePath
   ])
@@ -8021,6 +8250,20 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       dynamicFlags.add("--passL:-Wl,-rpath," & libDir)
     for flag in dynamicFlags:
       result.insert(flag, 2)
+  # Flags after the module argument are run arguments, so these go before it.
+  for flag in extraFlags:
+    result.insert(flag, result.len - 1)
+  let nimcache =
+    if providerNimcacheMode() == "per-binary":
+      nimcacheRoot / providerNimcacheKey(outputBinaryPath)
+    else:
+      nimcacheRoot / positionKeyedNimcacheKey(ProviderCacheName, modulePath,
+        workDir, hostFlags, libFlags,
+        nimcacheKeyedCompileFlags(result, modulePath))
+  for i in 0 ..< result.len:
+    if result[i] == "--nimcache:":
+      result[i] = "--nimcache:" & nimcache
+      break
 
 proc providerCompileConfigurationIdentity*(command: openArray[string]):
     ContentDigest =
@@ -8040,7 +8283,9 @@ proc providerCompileConfigurationIdentity*(command: openArray[string]):
 proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
                                     mode: ReproRtlMode;
                                     workDir = getCurrentDir();
-                                    scratchDir = ""): seq[string] =
+                                    scratchDir = "";
+                                    extraFlags: openArray[string] = []):
+    seq[string] =
   ## The provider-LIBRARY compile command (M4c). Same base as
   ## ``providerCompileCommand`` (full repro ``--path`` set + host flags +
   ## ``-d:reproProviderMode``), rendered as a shared library in the requested
@@ -8049,10 +8294,10 @@ proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
   ## so they land in ``providerCompileOptions`` and re-key the compile action
   ## per mode — a nimRtl-shared artifact and a standalone C-ABI artifact are
   ## DISTINCT cache entries (§4.4).
+  ## They and ``extraFlags`` also key the nimcache, so the two modes never
+  ## share a directory of generated C.
   result = providerCompileCommand(modulePath, outputBinaryPath, workDir,
-    scratchDir)
-  for flag in rtlModeDefines(mode):
-    result.insert(flag, result.len - 1)
+    scratchDir, rtlModeDefines(mode) & @extraFlags)
 
 proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
                                       interfaceFingerprint: ContentDigest;
@@ -8595,6 +8840,79 @@ proc decodeInterfaceFingerprintArg*(text: string): ContentDigest =
   result.domain = HashDomain(parseInt(parts[1]))
   for i in 0 ..< 32:
     result.bytes[i] = byte(parseHexInt(parts[2][2 * i .. 2 * i + 1]))
+
+const RelocatableProviderVerdict* = "relocatable"
+  ## The whole content (plus a newline) of a recipe-relative provider
+  ## compile's verdict file when its binary does not embed the recipe's
+  ## location. Anything else names the location-bound string it found.
+
+proc recipeRelativeProviderVerdictPath*(edgeArtifactPath: string): string =
+  ## Where the recipe-relative provider-compile edge records whether its
+  ## binary may be served to another location of the recipe. A declared
+  ## output of the edge, beside its artifact, so a cache hit restores the
+  ## verdict together with the binary it describes.
+  parentDir(edgeArtifactPath) / "relocation-verdict"
+
+proc isComponentByte(c: char): bool =
+  ## A byte that continues a path component. Deliberately not `@`: Nim
+  ## stores a string literal behind a capacity word whose last byte is `@`
+  ## (the literal flag), so every literal in a binary is preceded by one.
+  c in {'a'..'z', 'A'..'Z', '0'..'9', '.', '_', '-', '+', '~'}
+
+proc isEmbeddedPathByte(c: char): bool =
+  c == '/' or isComponentByte(c)
+
+proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
+  ## The first string in a compiled provider that names the directory it was
+  ## compiled in, or "" when it names none.
+  ##
+  ## WHY THIS IS CHECKED. A recipe-relative provider compile is shared by
+  ## every copy of a byte-identical recipe (`recipeCompileOutputDir`), which
+  ## is only sound if the binary does not depend on where it was compiled.
+  ## The DSL names its own source sites relative to the recipe, but Nim
+  ## makes `currentSourcePath()` and `instantiationInfo(fullPaths = true)`
+  ## absolute, and a recipe may bake them into the graph it evaluates:
+  ## CodeTracer's recipe computes `projectRootPath = parentDir(
+  ## currentSourcePath())` in a `const` and puts `projectRootPath / "libs/..."`
+  ## on every `nim js` command line. Served at another location, that
+  ## binary evaluated to the OTHER copy's absolute paths, so the copy's
+  ## actions compiled against the other copy's tree, and the shared binary
+  ## changed under it whenever another copy recompiled it — an action key
+  ## that moved between two builds of an unchanged tree.
+  ##
+  ## WHAT IS EXEMPT. A string `<recipeDir>/<file>.nim` (or `.nims`) naming a
+  ## source file that exists in the recipe directory: every provider carries
+  ## its main module's absolute path as compiler line information. Any other
+  ## spelling — the directory itself, a path under it that is not a source
+  ## file — is a location the provider can act on, and binds it.
+  if recipeDir.len == 0:
+    return ""
+  let dir = recipeDir.strip(leading = false, chars = {'/'})
+  if dir.len == 0:
+    return ""
+  var start = 0
+  while true:
+    let at = binaryBytes.find(dir, start)
+    if at < 0:
+      return ""
+    start = at + 1
+    # Only a whole path component: `/a/proj` must not match `/a/projX`, nor
+    # `/x/a/proj` (a longer path that merely ends in the same components).
+    if at > 0 and isComponentByte(binaryBytes[at - 1]):
+      continue
+    var stop = at + dir.len
+    if stop < binaryBytes.len and binaryBytes[stop] != '/' and
+        isEmbeddedPathByte(binaryBytes[stop]):
+      continue
+    while stop < binaryBytes.len and isEmbeddedPathByte(binaryBytes[stop]):
+      inc stop
+    let embedded = binaryBytes[at ..< stop]
+    if embedded.len > dir.len + 1:
+      let rel = embedded[dir.len + 1 .. ^1]
+      if (rel.endsWith(".nim") or rel.endsWith(".nims")) and
+          fileExists(extendedPath(dir / rel)):
+        continue
+    return embedded
 
 proc publishRecipeRelativeProviderCompile*(plan: ProviderCompilePlan;
     edgeArtifactPath, artifactPath, modulePath: string;

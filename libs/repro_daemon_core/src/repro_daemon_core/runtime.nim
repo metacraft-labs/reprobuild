@@ -897,7 +897,7 @@ proc atomicWriteTextFile(path, content: string) =
     raise
 
 const AbandonedSessionState* = "abandoned"
-  ## A session whose WRITER PROVABLY NO LONGER EXISTS.
+  ## A session whose writer is gone, or whose legacy record expired.
   ##
   ## Distinct from `cancelled` on purpose: a user cancelling a build and a
   ## build process vanishing are different events, and a reader looking at
@@ -1218,59 +1218,79 @@ var activeSessionCacheDir = ""
 var activeSessionStateById = initTable[string, bool]()
 var activeSessionTally = 0
 
-proc abandonedRecord(session: UserDaemonSession): UserDaemonSession =
-  ## The `abandoned` rewrite of one record whose writer is provably gone.
-  ##
-  ## ONE DEFINITION, because two sites reclaim: the startup sweep
-  ## (`reclaimAbandonedSessions`) and the tally reconciliation
-  ## (`refreshBelievedActiveSessions`). A second spelling of the same rewrite
-  ## is how the two would come to disagree about what a reclaimed record
-  ## looks like, and `repro daemon sessions` reads both.
+const LegacySessionInactivitySeconds = 7'i64 * 24 * 60 * 60
+
+type SessionReclamation = enum
+  srNone, srDeadWriter, srLegacyInactive
+
+proc sessionReclamation(session: UserDaemonSession; path: string;
+                        nowUnix: int64): SessionReclamation =
+  # Unknown nonempty identities are never aged out. Only the pre-identity
+  # population needs a bounded inactivity policy; an identified writer's
+  # ownership must instead be settled by the actual liveness probe.
+  if session.writer.len > 0:
+    if writerLiveness(session.writer) == wlDead:
+      return srDeadWriter
+    return srNone
+  if session.startedAtUnix <= 0 or nowUnix < LegacySessionInactivitySeconds:
+    return srNone
+  let modified =
+    try: getLastModificationTime(path).toUnix
+    except CatchableError: return srNone
+  # The later timestamp protects a recently updated old session and a
+  # recently started backdated file. Comparing with a cutoff also avoids
+  # overflowing on corrupt/future start times. Exactly seven days qualifies.
+  if modified <= 0:
+    return srNone
+  if max(session.startedAtUnix, modified) <=
+      nowUnix - LegacySessionInactivitySeconds:
+    return srLegacyInactive
+  srNone
+
+proc abandonedRecord(session: UserDaemonSession;
+                     reason: SessionReclamation): UserDaemonSession =
+  ## The shared terminal rewrite for startup and query reconciliation.
+  ## Keep history and an existing message; supply the reason only when empty.
   result = session
   result.state = AbandonedSessionState
   result.endedAtUnix = getTime().toUnix
   if result.message.len == 0:
-    result.message = "writer process no longer exists"
+    result.message =
+      if reason == srLegacyInactive:
+        "no writer identity or activity for seven days"
+      else:
+        "writer process no longer exists"
 
 proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
-  ## Rewrite every non-terminal record whose writer PROVABLY no longer exists
-  ## as `abandoned`. Returns how many were reclaimed.
+  ## Rewrite active records with provably dead writers, and legacy records
+  ## with no writer identity and at least seven days of inactivity.
+  ## Returns how many records were successfully reclaimed.
   ##
-  ## WHY THIS EXISTS. A `repro build` that is killed leaves its record
-  ## `running` forever, and nothing distinguished that from a build still in
-  ## flight. Measured on a developer machine: 19 such records, writers dead
-  ## for up to three weeks, which `restartCandidateReady` counted as live work
-  ## -- so the dev self-restart was permanently deferred and said so 949,394
-  ## times in an 82 MB log.
+  ## Killed workers never write a terminal state, so records can otherwise
+  ## defer development self-restart forever. Writer liveness alone does not
+  ## settle pre-field records: the historical 16,788-deferral flood included
+  ## records without writer identities. The legacy inactivity rule covers
+  ## that population while preserving recent records and unknown nonempty
+  ## identities. File mtime and start time must both meet the age bound.
   ##
-  ## WHERE IT IS CALLED FROM, AND WHERE IT MUST NOT BE. Daemon startup and the
-  ## active-tally prime, both of which happen ONCE per daemon process. NOT on
-  ## the status request path: a per-request scan is exactly the cost that was
-  ## just removed from it -- `sessions/` had grown to 2,177 records and
-  ## walking it cost 37.6 ms of every build. Reclamation reads the same
-  ## directory, so it has to be as rare as priming is.
-  ##
-  ## UNKNOWN IDENTITY IS TREATED AS LIVE. Records written before this field
-  ## existed carry no writer, and `writerLiveness` answers `wlUnknown` for
-  ## them and for anything it cannot parse or probe. Those are left alone.
-  ## That means the fix is not retroactive for pre-existing records -- which
-  ## is the correct trade: reclaiming a record whose writer might still be
-  ## running would let two builds believe they own one session, and a
-  ## lingering record only defers a restart.
+  ## This full directory sweep runs at startup/prime only. Status queries
+  ## reconcile only believed-active records, avoiding a walk of every record
+  ## ever written on every build.
+  let nowUnix = getTime().toUnix
   for path in sessionRecordFiles(config):
-    var session =
+    let session =
       try: readSessionRecord(path)
       except CatchableError: continue
     if session.sessionId.len == 0 or not sessionStateIsActive(session.state):
       continue
-    if writerLiveness(session.writer) != wlDead:
+    let reason = sessionReclamation(session, path, nowUnix)
+    if reason == srNone:
       continue
     try:
-      writeSessionRecord(config, abandonedRecord(session))
+      writeSessionRecord(config, abandonedRecord(session, reason))
       inc result
     except CatchableError:
-      # A record that cannot be rewritten stays as it was; the next daemon
-      # start tries again. Never fatal to startup.
+      # Preserve the record on write failure; startup is never fatal.
       discard
 
 proc primeActiveSessionTally(config: UserDaemonConfig) =
@@ -1278,7 +1298,7 @@ proc primeActiveSessionTally(config: UserDaemonConfig) =
   ## abandoned ones. At most two walks of the directory, whatever it holds:
   ## see the note above `activeSessionCacheDir` for why nothing re-enters it.
   # Reclaim BEFORE counting, so the tally this produces already excludes
-  # records whose writers are gone. Counting first and reclaiming later would
+  # dead writers and expired legacy records. Counting first and reclaiming later would
   # leave the first status answer of every daemon reporting phantom work.
   discard reclaimAbandonedSessions(config)
   activeSessionStateById = initTable[string, bool]()
@@ -1336,8 +1356,9 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
   ## that it is active and the tally keeps blocking the dev self-restart --
   ## for the whole life of the daemon process, because
   ## `reclaimAbandonedSessions` runs only at prime/startup. Measured on this
-  ## workstation: a daemon deferring its restart 16,788 consecutive times,
-  ## and a live per-user daemon holding a tally that never came down.
+  ## workstation: a daemon deferring its restart 16,788 consecutive times.
+  ## Dead-writer probing alone did not cover that flood's pre-field records;
+  ## those require the narrowly scoped legacy inactivity rule below.
   ##
   ## So the reconciliation happens WHERE THE ANSWER WOULD BLOCK AN ACTION
   ## rather than only at startup. It costs nothing extra: the record has just
@@ -1347,12 +1368,14 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
   ## the record, and every other process that reads `sessions/` now sees
   ## `abandoned` instead of a lie.
   ##
-  ## UNKNOWN IDENTITY IS STILL TREATED AS LIVE, exactly as in
-  ## `reclaimAbandonedSessions` and for the same reason: only `wlDead` is
-  ## provable, and reclaiming a record out from under a running writer would
-  ## let two builds believe they own one session.
+  ## Nonempty unknown identities remain live. Records without any identity
+  ## instead expire after seven days without activity, using the same
+  ## timestamp checks as startup. A failed legacy rewrite keeps the tally
+  ## active for retry, because age is policy rather than proof of death.
   var ended: seq[string] = @[]
-  var abandoned: seq[UserDaemonSession] = @[]
+  var abandoned: seq[tuple[record: UserDaemonSession,
+                           reason: SessionReclamation]] = @[]
+  let nowUnix = getTime().toUnix
   for sessionId, active in activeSessionStateById.pairs:
     if not active:
       continue
@@ -1368,28 +1391,31 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
       continue
     if not sessionStateIsActive(record.state):
       ended.add(sessionId)
-    elif writerLiveness(record.writer) == wlDead:
-      abandoned.add(record)
+    else:
+      let reason = sessionReclamation(record, path, nowUnix)
+      if reason != srNone:
+        abandoned.add((record, reason))
   for sessionId in ended:
     activeSessionStateById[sessionId] = false
     dec activeSessionTally
   # After the loop, never inside it: `writeSessionRecord` folds the record
   # into `activeSessionStateById` through `noteSessionRecordWritten`, and a
   # table must not be mutated while it is being iterated.
-  for record in abandoned:
+  for (record, reason) in abandoned:
     try:
-      writeSessionRecord(config, abandonedRecord(record))
+      writeSessionRecord(config, abandonedRecord(record, reason))
     except CatchableError:
-      # The record stays as it is on disk and the next reconciliation tries
-      # again -- but this process stops counting it either way, because the
-      # writer is provably gone whether or not the rewrite landed.
-      discard
+      # A proved-dead writer is no longer work even if persistence fails.
+      # For legacy expiry ownership is unknown, so keep the belief active
+      # until the terminal rewrite succeeds and is shared with other readers.
+      if reason == srLegacyInactive:
+        continue
     if activeSessionStateById.getOrDefault(record.sessionId, false):
       activeSessionStateById[record.sessionId] = false
       dec activeSessionTally
 
 proc activeSessionTallyFor*(config: UserDaemonConfig): int =
-  ## The number `statusFor` reports. O(1) after the first call.
+  ## The number `statusFor` reports; refresh cost is believed-active records.
   ##
   ## Exported for `t_daemon_active_session_tally.nim`, which asserts the
   ## invariant this exists to preserve: it equals a fresh from-disk
@@ -2549,21 +2575,11 @@ proc restartCandidateReady(config: UserDaemonConfig;
     return false
   let active = activeSessionTallyFor(config)
   if active > 0:
-    # The SECOND re-read loop reachable from this proc, and it used to be
-    # worse than the digest one: the count opened and parsed EVERY
-    # ``*.session`` record in the state directory (1343 of them on the host
-    # this was found on), and at the 250 ms poll cadence that was thousands
-    # of opens a second plus one repeated log line per pass, for as long as
-    # a candidate stayed deferred. The count is now maintained rather than
-    # recounted (``activeSessionTallyFor``), so the re-read is gone; the
-    # cadence and log-on-change below are kept because they are still the
-    # right shape and because nothing here should depend on the count being
-    # cheap. Sessions that block a restart are
-    # long-lived by nature — and records stuck non-terminal by a crashed
-    # writer never clear at all — so re-asking on the poll cadence buys
-    # nothing. Re-ask on the stability cadence, and log only when the
-    # answer changes, so a permanently-deferred restart is stated once
-    # instead of flooding the log.
+    # Reconciliation reads only believed-active records, rather than every
+    # historical session. Dead writers and inactive legacy records can now
+    # clear a deferral; live sessions may remain active for a long time.
+    # Re-ask on the stability cadence, and bound repeated diagnostics so a
+    # persistent deferral stays visible without flooding the log.
     state.deferredUntilMs = nowMs + devRestartStableMs()
     if state.deferralLogDue(nowMs, devRestartDeferralLogWindowMs()):
       let suppressed = state.deferralPollsSuppressed
