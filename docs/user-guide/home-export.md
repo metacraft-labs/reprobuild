@@ -27,7 +27,16 @@ The document describes one host: the one `repro home plan` would use.
 
 Passing `--host` while `$REPRO_HOST` names a different host is an error,
 because the environment would otherwise win silently and you would get a
-valid-looking document for the wrong machine.
+valid-looking document for the wrong machine. Every `repro home` command that
+acts as a host (`apply`, `apply --plan`, `plan`, `list`, `why`, `export`,
+`facts`) resolves it the same way. (`enable` / `disable --host NAME` name the
+host entry to edit -- and, with `--now`, the host to apply remotely -- so
+their `--host` may differ from `$REPRO_HOST`.)
+
+When the profile declares a `hosts:` registry, the host must be in it: a host
+the registry does not name is refused (exit 1) instead of being given the
+`default` activity alone. Declare a host that should run only `default` as
+`"<host>": [default]`.
 
 ```sh
 repro home export --host laptop > home-export.laptop.json
@@ -170,7 +179,7 @@ A document always describes the platform that compiled it.
 | `format` | Always `repro.home.export`. Refuse any other value. |
 | `schemaVersion` | `2`. Adding a field does not change it; changing the meaning or shape of an existing one does. Refuse versions you do not know. Version 2 added guards on resources and config overrides — a version-1 reader would apply a guarded resource everywhere — and `platforms`. |
 | `selection.host` | The host the document was produced for. |
-| `selection.hostDeclared` | Whether the profile's `hosts:` block has an entry for that host. An undeclared host gets `default` only. |
+| `selection.hostDeclared` | Whether the profile's `hosts:` block has an entry for that host. A profile with a `hosts:` registry declares every host it may be applied to: exporting (or planning, applying, `repro home facts`) for a host it does not name is refused, so in a document from such a profile this is always `true`. A profile without a registry is host-agnostic: every host gets `default`, and this is `false`. |
 | `selection.activities` | The activities `repro home plan` enables on that host, in the order the profile declares them. Computed by the planner's own rule. Platform-independent. |
 | `selection.unknownActivities` | Activities the host's `hosts:` entry names that the profile never declares (they contribute nothing). |
 | `intent` | The whole evaluated profile, exactly as the planner consumes it — every activity, not only the selected ones, and every platform's guarded elements. A `when`/`if` guard inside an activity stays a `whenGuard` element carrying its predicate text. Resources are profile-wide, and home-scope only: a home profile that declares a system-scope resource (`fsSystemFile`, `systemdSystemUnit`, … — those belong in a system profile applied by `repro infra apply`) is refused, naming the resource. Rows of the profile's [data files](#data-files) are already expanded into the activities they name, so you never read the data files yourself; `intent` has no `dataFiles` key. |

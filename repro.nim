@@ -259,6 +259,30 @@ const
     ## unrelated to HCR (reprobuild-pm issue 2026-09-25,
     ## "hcr-replay-gate-needs-a-ct-mcr-no-edge-builds").
 
+  nixPackageFixtureActionId* = "reprobuild.test_fixtures.nix_package"
+  nixPackageOutPathFixture* = "build/test-fixtures/nix-package/out-path"
+    ## The store path of `nix build <this checkout>#default`, recorded by edge
+    ## `nixPackageFixtureActionId` (`scripts/build_nix_package_fixture.sh`,
+    ## Linux and macOS, `test-package-fixtures` collection) for the gates that
+    ## run the INSTALLED package (`nixPackageGateSources`).
+    ##
+    ## Each of those gates' cases used to run the `nix build` itself. The
+    ## build runs in the nix daemon's builder, outside the case's process
+    ## group, and nix serialises concurrent builds of one derivation, so every
+    ## case but one waited silently and the runner killed it on its IDLE
+    ## TIMEOUT (full-suite runs 33 and 34). The cases now read this file
+    ## (`tests/e2e/m83/nix_package_support.nim`, `nixPackageUnderTest`),
+    ## check it against their own `nix eval` of the tree's `outPath`, and
+    ## build only when it is absent or names a different tree's package.
+
+  nixPackageFixtureArtifact = TestGraphArtifact(
+    path: nixPackageOutPathFixture, actionId: nixPackageFixtureActionId)
+
+  nixPackageGateSources* = [
+    "tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim",
+    "tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim",
+  ]
+
   M4ConsolidationVerificationTest* =
     "tests/integration/t_m4_pure_unit_consolidation.nim"
     ## Suite-Modernization M4. The one test whose execute edge takes EVERY
@@ -466,6 +490,13 @@ const
           bundle.add TestGraphArtifact(path: path,
             actionId: hcrCtMcrBundleActionId)
         bundle)]
+    else: @[]) & (when defined(linux) or defined(macosx): @[
+    # Linux and macOS, where the producing edge is declared (there is no Nix
+    # package on Windows; both gates skip there).
+    TestGraphArtifacts(source: nixPackageGateSources[0],
+      artifacts: @[nixPackageFixtureArtifact]),
+    TestGraphArtifacts(source: nixPackageGateSources[1],
+      artifacts: @[nixPackageFixtureArtifact])]
     else: @[])
 
 # Project-DSL-Composition M6: the generated test-edge table.
@@ -3106,6 +3137,41 @@ package reprobuild:
       # its failure at the end; `repro build test` and a focused build of the
       # gate still reach the edge through the execute edge's dependency.
       discard collect("test-cross-repo-fixtures", @[hcrCtMcrBundleEdge])
+
+    # The Nix package of THIS checkout (`nixPackageOutPathFixture`, at file
+    # scope, says who reads it and why it is an edge): one `nix build
+    # <checkout>#default`, before the test phase, instead of one per case.
+    #
+    # Its own collection, `test-package-fixtures`, for the reason the
+    # cross-repo bundle has one: the build can fail for reasons that say
+    # nothing about the cases in `.#test-fixtures` (a flake input the host
+    # cannot fetch, a daemon that is down), and run_tests.sh must still run
+    # the suite. It builds this collection separately and re-raises its
+    # failure at the end; a gate whose fixture did not build falls back to
+    # building the package itself and fails on its own.
+    #
+    # NOT CACHEABLE, and that is the engine's own verdict, not a shortcut:
+    # declared cacheable, every run was refused publication for
+    # `monitor-loss` (the client hands the build to the nix daemon over
+    # `/nix/var/nix/daemon-socket/socket`, a peer outside the monitored tree)
+    # and `unblessed-entropy` (`nix` itself draws getrandom), so the edge
+    # re-ran on every build anyway. What keys the work on the tree's content
+    # is nix's store: the package's output path is a function of the tracked
+    # tree, its revision and `flake.lock`, so an unchanged tree re-evaluates
+    # to a path that is already built and the edge finishes in seconds
+    # (measured 2 s warm, against ~70 min cold under a loaded host). The
+    # OUTPUT is still fingerprinted as the gates' typed input, so a re-run
+    # that records the same path does not re-run them.
+    when defined(linux) or defined(macosx):
+      let nixPackageEdge = shell(
+        command = "bash scripts/build_nix_package_fixture.sh",
+        actionId = nixPackageFixtureActionId,
+        extraInputs = @["scripts/build_nix_package_fixture.sh"],
+        extraOutputs = @[nixPackageOutPathFixture],
+        cacheable = false)
+      appendRegisteredActionToolIdentityRefs(nixPackageEdge.id,
+        ["bash", "nix", "mkdir", "mv", "rm"])
+      discard collect("test-package-fixtures", @[nixPackageEdge])
 
     let ioMonSrc = block:
       let fromEnv = CompileTimeIoMonSrc

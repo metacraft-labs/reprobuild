@@ -1,9 +1,9 @@
 {
-  "description": "A row applies when its activity is default or selected by the host's hosts entry; an undeclared host gets default only.",
+  "description": "A row applies when its activity is default or selected by the host's hosts entry; a host the hosts: registry does not declare is refused by the planner and by readData (spec Open question 6).",
   "hosts": { "m1": ["desktop", "cli"], "server": ["cli"] },
   "evaluations": [
     { "host": "m1", "system": "aarch64-darwin", "packages": ["ghostty", "jq", "ripgrep"] },
     { "host": "server", "system": "x86_64-linux", "packages": ["jq", "ripgrep"] },
-    { "host": "unknown-host", "system": "x86_64-linux", "packages": ["ripgrep"] }
+    { "host": "unknown-host", "system": "x86_64-linux", "undeclaredHost": true }
   ]
 }

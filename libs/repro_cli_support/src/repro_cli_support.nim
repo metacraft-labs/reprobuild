@@ -5592,6 +5592,7 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
     "depfileInputs": jsonStringSeq(evidence.depfileInputs.paths),
     "monitorReads": jsonStringSeq(evidence.monitorReads.paths),
     "monitorWrites": jsonStringSeq(evidence.monitorWrites.paths),
+    "monitorRemovals": jsonStringSeq(evidence.monitorRemovals.paths),
     "monitorProbes": jsonStringSeq(evidence.monitorProbes.paths),
     "provisionerReportedInputs":
       jsonStringSeq(evidence.provisionerReportedInputs),
@@ -9922,7 +9923,10 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
     inputs = inputs,
     # No freshness sidecar: the caller's artifact and sidecar are written by
     # the CLI from the caller's plan (`publishRecipeRelativeProviderCompile`).
-    outputs = @[edge.edgePlan.outputBinaryPath, edge.edgeArtifactPath],
+    # The verdict says whether the binary may be served to another copy of
+    # the recipe (`providerLocationEmbedding`); it travels with the binary.
+    outputs = @[edge.edgePlan.outputBinaryPath, edge.edgeArtifactPath,
+      recipeRelativeProviderVerdictPath(edge.edgeArtifactPath)],
     commandStatsId = "repro provider compile edge",
     cacheable = true,
     weakFingerprint = edge.edgePlan.providerCompileActionKey,
@@ -9939,6 +9943,19 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
       providerCompileIgnoredInputPrefixes(scratchDir)),
     relocatable = true,
     relocationAnchors = edge.anchors)
+
+proc recipeRelativeProviderLocationBound(
+    edge: RecipeRelativeProviderCompile): bool =
+  ## Whether the recipe-relative edge's binary may NOT be served to another
+  ## copy of the recipe: its verdict (`providerLocationEmbedding`) names an
+  ## embedded location. A verdict that is absent or unreadable is treated
+  ## as binding — sharing is the optimisation, and a binary nobody vouched
+  ## for is not shared.
+  let path = recipeRelativeProviderVerdictPath(edge.edgeArtifactPath)
+  try:
+    readFile(extendedPath(path)).strip() != RelocatableProviderVerdict
+  except IOError, OSError:
+    true
 
 proc runProviderCompileEdge(plan: ProviderCompilePlan;
     modulePath, interfacePath, artifactPath, helperCliPath, workDir,
@@ -9958,6 +9975,7 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
       config)
   # Every copy of the recipe shares the edge's outputs; hold them from
   # execution until this caller has its own copy.
+  var locationBound = false
   var edgeLock = acquireInterfaceArtifactLock(edge.edgeArtifactPath)
   try:
     result = runBuild(graph([recipeRelativeProviderCompileAction(edge,
@@ -9965,10 +9983,19 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
     if not result.hasFailedActions() and not config.dryRun and
         fileExists(extendedPath(edge.edgeArtifactPath)) and
         fileExists(extendedPath(edge.edgePlan.outputBinaryPath)):
-      discard publishRecipeRelativeProviderCompile(plan,
-        edge.edgeArtifactPath, artifactPath, modulePath, workDir)
+      locationBound = recipeRelativeProviderLocationBound(edge)
+      if not locationBound:
+        discard publishRecipeRelativeProviderCompile(plan,
+          edge.edgeArtifactPath, artifactPath, modulePath, workDir)
   finally:
     releaseInterfaceArtifactLock(edgeLock)
+  if locationBound:
+    # The shared binary names the directory it was compiled in, so it
+    # evaluates THAT copy's paths. This copy gets its own location-bound
+    # compile, keyed (and cached) at this location.
+    result = runBuild(graph([providerCompileBuildAction(plan, modulePath,
+      interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
+      config)
 
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
@@ -13136,6 +13163,17 @@ proc runProviderCompileHelper(args: openArray[string]): int =
       (if scratchDir.len > 0: absolutePath(scratchDir) else: ""),
       useFreshnessCache = false, recipeRelative = recipeRelative,
       relocationAnchors = anchors)
+    if recipeRelative:
+      # The edge runs with its cwd at the recipe. Whether the binary it just
+      # produced may be served to another copy of the recipe is a fact about
+      # these bytes, so it is recorded beside them as a declared output.
+      let embedded = providerLocationEmbedding(
+        readFile(extendedPath(absolutePath(outputPath))), getCurrentDir())
+      let verdict =
+        if embedded.len == 0: RelocatableProviderVerdict
+        else: "location-bound: the binary names " & embedded
+      writeFile(extendedPath(recipeRelativeProviderVerdictPath(
+        absolutePath(artifactPath))), verdict & "\n")
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
@@ -17686,6 +17724,29 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
         "of the two flags.")
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
+  # Shared-Development-Services F1 / D-SS15: the dev-env artifact's own
+  # ERROR DIAGNOSTICS, before anything in this session is started.
+  #
+  # WHY THIS LINE DID NOT EXIST AND HAD TO. `repro run`, `repro exec`,
+  # `repro shell`, `repro tasks`, `repro dev-env export` and the native
+  # shell helper all call `emitDevEnvDiagnostics` and exit non-zero on a
+  # `dedsError`; `up` and `dev` were the two surfaces that read the
+  # artifact and never asked it for diagnostics. That was invisible for
+  # as long as NOTHING produced a `dedsError` -- the severity and the
+  # emitter both existed with no producer anywhere in the tree -- and
+  # F1's unconsumed-action check is the first one. So the first error a
+  # recipe can raise would have been silent on exactly the command F1
+  # measured its defect on: `repro up --activity sso` reported the
+  # session up with `etc/sso/` never created.
+  #
+  # BEFORE the supervisor, for `convergeSharedServiceInstances`' stated
+  # reason: a refusal has to stop the session rather than arrive after
+  # it published `session.up`. Read from the artifact rather than from
+  # the provider's return, because a cached dev-env edge is answered
+  # from the artifact and a check that lived on the provider wire would
+  # fire on a cold evaluation and silently never again.
+  if emitDevEnvDiagnostics(readDevEnvArtifact(edge.artifactPath)):
+    return 1
   # Shared-Development-Services L7 (§4.5): converge the shared service
   # instances this project declares before anything in this session is
   # started. A refusal returns here, with nothing launched.
@@ -19002,6 +19063,172 @@ proc moveFileReplacing(source, dest: string) =
     removeFile(extendedPath(dest))
   moveFile(extendedPath(source), extendedPath(dest))
 
+const PreCommitProtectedStashPrefix* =
+  "reprobuild pre-commit: unstaged work protected while hooks ran"
+  ## The message every stash entry the ``pre-commit`` dispatcher records
+  ## starts with (safeguard 5 of ``vcsDispatcherContent``). It is the text an
+  ## operator finds in ``git stash list`` after a killed commit, and the text
+  ## the next commit's notice searches for, so it is a user-facing contract:
+  ## changing it orphans every entry an older dispatcher left behind.
+
+const PreCommitUnstagedWorkProtection =
+  "PROTECT_PREFIX='" & PreCommitProtectedStashPrefix & "'\n" & """
+PROTECT_W=
+PROTECT_I_TREE=
+PROTECT_W_TREE=
+PROTECT_TMP_INDEX=
+protect_stash_ref() {
+  git reflog show --format=%H refs/stash 2>/dev/null |
+    awk -v w="$1" '$0 == w { print "stash@{" NR - 1 "}"; exit }'
+}
+protect_patch() {
+  git diff-tree -p --binary --no-color --no-ext-diff --ignore-submodules \
+    "$PROTECT_I_TREE" "$PROTECT_W_TREE"
+}
+protect_drop() {
+  protect_ref=$(protect_stash_ref "$1")
+  [ -n "$protect_ref" ] || return 0
+  git stash drop -q "$protect_ref" >/dev/null 2>&1 ||
+    echo "repro hooks: could not drop $protect_ref ($1); it holds a copy of unstaged changes that are still in the working tree" >&2
+}
+protect_notice_leftovers() {
+  protect_left=$(git stash list 2>/dev/null | grep -F "$PROTECT_PREFIX" |
+    sed 's/:.*//' | tr '\n' ' ')
+  [ -n "$protect_left" ] || return 0
+  echo "repro hooks: an interrupted pre-commit run left unstaged work in the stash: ${protect_left% } -- inspect with 'git stash show -p <entry>', restore with 'git stash apply <entry>', then 'git stash drop <entry>'" >&2
+}
+protect_unstaged_work_failed() {
+  if [ -n "$PROTECT_TMP_INDEX" ]; then rm -f "$PROTECT_TMP_INDEX"; PROTECT_TMP_INDEX=; fi
+  echo "repro hooks: $1; the chained pre-commit hook runs WITHOUT a stash copy of your unstaged changes" >&2
+}
+protect_unstaged_work() {
+  [ -x "$LOCAL_HOOK" ] || return 0
+  if [ "$RUNNING_AS_LEGACY" = 1 ] && grep -Eq '^# File generated by (pre-commit|prek):' "$LOCAL_HOOK" 2>/dev/null; then
+    return 0
+  fi
+  protect_head=$(git rev-parse -q --verify HEAD 2>/dev/null) || return 0
+  protect_index=${GIT_INDEX_FILE:-}
+  if [ -z "$protect_index" ]; then
+    protect_index=$(git rev-parse --git-path index 2>/dev/null) || return 0
+  fi
+  case "$protect_index" in
+    /* | [A-Za-z]:*) ;;
+    *) protect_index="$(pwd -P)/$protect_index" ;;
+  esac
+  [ -f "$protect_index" ] || return 0
+  PROTECT_TMP_INDEX=$(mktemp "${TMPDIR:-/tmp}/reprobuild-pre-commit-index.XXXXXX") || return 0
+  if ! cp "$protect_index" "$PROTECT_TMP_INDEX" 2>/dev/null; then
+    protect_unstaged_work_failed "could not copy the index"; return 0
+  fi
+  GIT_INDEX_FILE=$PROTECT_TMP_INDEX git update-index -q --refresh >/dev/null 2>&1 || :
+  if GIT_INDEX_FILE=$PROTECT_TMP_INDEX git diff-files --quiet --ignore-submodules >/dev/null 2>&1; then
+    rm -f "$PROTECT_TMP_INDEX"; PROTECT_TMP_INDEX=; return 0
+  fi
+  if ! protect_i_tree=$(GIT_INDEX_FILE=$PROTECT_TMP_INDEX git write-tree 2>/dev/null) ||
+     ! GIT_INDEX_FILE=$PROTECT_TMP_INDEX git add -u -- . >/dev/null 2>&1 ||
+     ! protect_w_tree=$(GIT_INDEX_FILE=$PROTECT_TMP_INDEX git write-tree 2>/dev/null); then
+    protect_unstaged_work_failed "could not snapshot the working tree"; return 0
+  fi
+  rm -f "$PROTECT_TMP_INDEX"; PROTECT_TMP_INDEX=
+  [ "$protect_i_tree" != "$protect_w_tree" ] || return 0
+  protect_branch=$(git symbolic-ref --short -q HEAD 2>/dev/null) || protect_branch='detached HEAD'
+  protect_short=$(git rev-parse --short "$protect_head" 2>/dev/null) || protect_short=$protect_head
+  protect_msg="$PROTECT_PREFIX (on $protect_branch at $protect_short)"
+  if ! protect_base=$(git commit-tree -p "$protect_head" -m "index on $protect_branch: $protect_short" "$protect_i_tree" 2>/dev/null) ||
+     ! protect_index_commit=$(git commit-tree -p "$protect_base" -m "index on $protect_branch: $protect_short" "$protect_i_tree" 2>/dev/null) ||
+     ! protect_w=$(git commit-tree -p "$protect_base" -p "$protect_index_commit" -m "$protect_msg [dispatcher $$]" "$protect_w_tree" 2>/dev/null); then
+    protect_unstaged_work_failed "could not record the snapshot"; return 0
+  fi
+  if [ -n "$(protect_stash_ref "$protect_w")" ]; then
+    protect_unstaged_work_failed "an identical snapshot is already in the stash, and it is not this run's to drop"; return 0
+  fi
+  PROTECT_I_TREE=$protect_i_tree
+  PROTECT_W_TREE=$protect_w_tree
+  if ! git stash store -m "$protect_msg" "$protect_w" >/dev/null 2>&1; then
+    protect_unstaged_work_failed "could not add the snapshot to the stash"; return 0
+  fi
+  PROTECT_W=$protect_w
+}
+protect_finish() {
+  if [ -n "$PROTECT_TMP_INDEX" ]; then rm -f "$PROTECT_TMP_INDEX"; PROTECT_TMP_INDEX=; fi
+  [ -n "$PROTECT_W" ] || return 0
+  protect_w=$PROTECT_W
+  PROTECT_W=
+  if protect_patch | git apply -R --check >/dev/null 2>&1; then
+    protect_drop "$protect_w"
+  elif protect_patch | git apply --check >/dev/null 2>&1 &&
+       protect_patch | git apply >/dev/null 2>&1; then
+    echo "repro hooks: the chained pre-commit hook did not put your unstaged changes back; restored them from $protect_w" >&2
+    protect_drop "$protect_w"
+  else
+    protect_ref=$(protect_stash_ref "$protect_w")
+    protect_ref=${protect_ref:-$protect_w}
+    echo "repro hooks: the working tree no longer holds the unstaged changes this commit started with, and they could not be re-applied automatically. A copy is in the stash as $protect_ref ($protect_w): see 'git stash list', inspect with 'git stash show -p $protect_ref', restore with 'git stash apply $protect_ref'" >&2
+  fi
+}
+"""
+  ## Safeguard 5 of ``vcsDispatcherContent``: the shell functions that keep a
+  ## chained ``pre-commit.repro-local`` hook from losing unstaged work. POSIX
+  ## ``sh`` only (dash, bash, Git-for-Windows bash): the dispatcher runs under
+  ## ``set -eu``, so every command that may fail sits in an ``if`` / ``||``.
+  ##
+  ## ``protect_unstaged_work`` — the snapshot. All of it is done on a
+  ## temporary COPY of the index git handed the hook (``$GIT_INDEX_FILE`` —
+  ## ``index.lock`` for ``git commit``, ``next-index-*.lock`` for
+  ## ``git commit <path>`` — else ``.git/index``), never on the index itself:
+  ## TC-8g requires the index the commit records to be byte-identical to the
+  ## one git handed the hooks, and a ``git stash push`` would rewrite it. The
+  ## copy is refreshed and asked whether any tracked file differs from it;
+  ## only then are two trees written from it (I: the index; W: the index after
+  ## ``git add -u``, i.e. the working tree's tracked content), and recorded as
+  ## a stash entry with ``git stash store`` — a ref update, so it survives a
+  ## SIGKILL of every process involved and is where ``git stash list`` looks.
+  ##
+  ## The entry's SHAPE is not ``git stash push``'s (W with parents HEAD and
+  ## I). That shape makes ``git stash apply`` a three-way merge against HEAD,
+  ## and here the index still HOLDS the staged half when the operator
+  ## recovers: measured with git 2.54, a file both staged and further edited
+  ## comes back as a CONFLICT. Instead W's first parent is a commit of the
+  ## index tree (``protect_base``), and its index parent is a second commit
+  ## of the same tree. Then ``git stash show`` is exactly the unstaged delta,
+  ## and ``git stash apply`` (with or without ``--index``) restores it over
+  ## the index the commit left behind without touching that index.
+  ##
+  ## ``protect_finish`` — the outcome, run once the chained hook returns, and
+  ## from the EXIT/HUP/INT/TERM traps if the dispatcher is interrupted first.
+  ## If the delta I→W still reverse-applies to the working tree, the work is
+  ## where it was (the hook passed, failed, or restored it itself — the
+  ## framework restores on SIGINT) and the entry is dropped. If instead it
+  ## forward-applies, the hook removed it and died before putting it back —
+  ## the issue's scenario — so it is applied and the entry dropped. Otherwise
+  ## the tree has moved under both (a hook that rewrites unstaged files, for
+  ## one), so nothing is guessed: the entry stays and stderr names it.
+  ## Drops find the entry by W's object id, so an entry the user made, or an
+  ## older one of ours, is never the one dropped. That needs W to be new:
+  ## ``commit-tree`` is deterministic to the second, so a run that snapshots
+  ## exactly what an earlier, killed run left in the stash (the operator
+  ## applied that entry and committed again) would rebuild the SAME object,
+  ## ``git stash store`` of an unchanged ref writes no reflog entry, and the
+  ## drop would remove the earlier entry. W's message therefore carries the
+  ## dispatcher's PID, and a W already in the stash is refused rather than
+  ## owned. The delta comes from the
+  ## plumbing ``git diff-tree``, not porcelain ``git diff``: the porcelain
+  ## honours ``diff.noprefix`` / ``diff.srcPrefix`` / ``diff.dstPrefix`` and
+  ## textconv drivers, and a patch shaped by them is one ``git apply`` cannot
+  ## match, so every check above would fail and nothing would be restored
+  ## (the pre-commit framework uses plumbing ``git diff-index`` likewise).
+  ##
+  ## ``protect_notice_leftovers`` — an entry that outlived its run (only a
+  ## SIGKILL of the dispatcher, or a crash, gets past the traps) is named on
+  ## the next commit, so recovery does not depend on anyone thinking to look.
+  ##
+  ## Not protected: an unborn HEAD (there is no stash-shaped base, and the
+  ## framework's own stash refuses it too), and a local hook that is skipped
+  ## because the framework that displaced the dispatcher is its caller (the
+  ## framework stashes only after its legacy hook — us — has returned). A
+  ## snapshot that cannot be taken is announced and the commit proceeds
+  ## exactly as before: protection must not become a new way to block one.
+
 proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ## RA-4: the dispatcher coexists with the pre-commit framework's
   ## ``hook-impl`` shim. Two safeguards (modelled on repo-workspaces
@@ -19037,6 +19264,18 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ##      generated shim of that same framework (its caller already ran those
   ##      checks, and re-entering it is what trips the migration guard), and
   ##      says how to restore the canonical layout.
+  ##   5. ``pre-commit`` only: the chained hook cannot lose unstaged work.
+  ##      On a partial commit the pre-commit framework writes the unstaged
+  ##      half to a patch under ``~/.cache/pre-commit``, ``git checkout``s it
+  ##      away, runs its hooks and only then applies the patch back; a hook
+  ##      killed in between (reprobuild-pm issue 2026-09-27: a forty-minute
+  ##      ``just lint`` killed mid-run) silently reverted ten files, with
+  ##      ``git stash list`` empty. The dispatcher therefore records the
+  ##      unstaged work as a stash entry BEFORE the chained hook runs, puts it
+  ##      back (or confirms it is still there) when the hook returns or the
+  ##      dispatcher is signalled, and names any entry a SIGKILL left behind
+  ##      on the next commit. See ``PreCommitUnstagedWorkProtection``.
+  ##      Signal traps exit 128+n, so an interrupted commit still fails.
   result = "#!/usr/bin/env sh\n"
   result.add("# " & VcsDispatcherMarker & "\n")
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
@@ -19107,8 +19346,26 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
       "export " & HookDispatcherProtocolEnv & "=2 " & HookCapabilityEnv &
       "=\"$REPROBUILD_CAPTURED_CAPABILITY\"; " &
       "exec \"$MANAGED_HOOK\" \"$@\") < \"$TMP_FILE\" || exit $?\n")
+  elif hookName == "pre-commit":
+    # (5) Snapshot the unstaged work into the stash before the chained hook
+    # can remove it; settle it as soon as that hook returns — before the
+    # managed body, whose lock refresh may legitimately change the tree — or
+    # from a trap if the dispatcher is signalled first. The traps exit with
+    # the conventional 128+n so the interrupted commit still fails.
+    result.add(PreCommitUnstagedWorkProtection)
+    result.add("protect_notice_leftovers\n")
+    result.add("trap 'protect_finish' EXIT\n")
+    result.add("trap 'protect_finish; exit 129' HUP\n")
+    result.add("trap 'protect_finish; exit 130' INT\n")
+    result.add("trap 'protect_finish; exit 143' TERM\n")
+    result.add("protect_unstaged_work\n")
+    result.add("LOCAL_HOOK_STATUS=0\n")
+    result.add("run_local_hook \"$@\" || LOCAL_HOOK_STATUS=$?\n")
+    result.add("protect_finish\n")
+    result.add("[ \"$LOCAL_HOOK_STATUS\" -eq 0 ] || exit \"$LOCAL_HOOK_STATUS\"\n")
   else:
     result.add("run_local_hook \"$@\" || exit $?\n")
+  if hookName != "pre-push":
     result.add("if [ -x \"$MANAGED_HOOK\" ]; then " &
       "(unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
       "export " & InternalHookContextEnv &
@@ -47203,6 +47460,14 @@ type
       ## Host-local elaboration (the absolute path probed, a git
       ## diagnostic). Report- and terminal-only; never serialized.
 
+  SweptLockDraft* = object
+    ## One untracked lock draft ``sweepOrphanedLockDrafts`` deleted, with the
+    ## evidence that justified it.
+    relPath*: string ## store-relative path, forward slashes
+    repo*: string ## the record's decoded ``<repo>`` component
+    sha*: string ## its trigger commit, reachable from no ref
+    repoRoot*: string ## the checkout in which reachability was decided
+
   WorkspaceLockReport* = object
     ## Structured outcome of one ``repro workspace lock`` invocation.
     ## ``lockFilePath`` is the absolute path the writer landed on;
@@ -47246,6 +47511,12 @@ type
       ## `participation` is filled only on the non-deferred path, so "empty
       ## participation" cannot by itself distinguish "public-only" from "the
       ## participation writes were deferred to the gate".
+    sweptDrafts*: seq[SweptLockDraft]
+      ## Untracked drafts this write DELETED because their trigger commit is
+      ## reachable from no ref (``sweepOrphanedLockDrafts``). Every surface
+      ## that runs the writer reports them; nothing reads them back.
+    sweepDiagnostics*: seq[string]
+      ## Sweep probes that failed and therefore left their drafts in place.
     exitCode*: int
 
   WorkspaceLockOutcome* = object
@@ -47292,6 +47563,16 @@ proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
     obj["detail"] = %entry.detail
     unmaterialized.add(obj)
   result["unmaterialized"] = unmaterialized
+  var swept = newJArray()
+  for entry in report.sweptDrafts:
+    var obj = newJObject()
+    obj["relPath"] = %entry.relPath
+    obj["repo"] = %entry.repo
+    obj["sha"] = %entry.sha
+    obj["repoRoot"] = %entry.repoRoot
+    swept.add(obj)
+  result["sweptDrafts"] = swept
+  result["sweepDiagnostics"] = %report.sweepDiagnostics
   result["exitCode"] = %report.exitCode
 
 proc unmaterializedLockNotice*(
@@ -47760,6 +48041,222 @@ proc pickTriggerRepo(resolved: ResolvedProject;
         "' declares no repos; cannot pick a trigger anchor")
   resolved.repos[0]
 
+proc nulSeparatedPaths(output: string): seq[string] =
+  ## Split the output of a ``-z`` git query into paths.
+  ##
+  ## ``-z`` NUL-TERMINATES each path, and the captured output still carries the
+  ## trailing newline the child wrote after the last record. Splitting on NUL
+  ## therefore yields a final element that is ``"\n"`` rather than ``""``, and a
+  ## plain ``if raw.len == 0: continue`` does not drop it. That element then
+  ## flows on as if it were a path: it is not under ``locks/``, so the repair
+  ## planner read it as "this branch touches something outside locks/" and
+  ## refused every store it was pointed at, naming a path that renders as
+  ## nothing at all.
+  ##
+  ## Strip the trailing newlines ONCE, from the whole output, before splitting;
+  ## every element is then either a real path or empty. Not a per-element
+  ## ``strip``: a path may legitimately begin or end with a byte ``strip``
+  ## would eat.
+  for raw in output.strip(leading = false, chars = {'\n', '\r'}).split('\0'):
+    if raw.len == 0: continue
+    result.add(raw.replace('\\', '/'))
+
+# ---- Orphaned lock drafts: swept, never published -------------------------
+#
+# push-hook-publication-protocol.md §"A draft whose commit no ref reaches is
+# swept, never published".
+#
+# A lock record's key is the trigger commit's SHA, and at ``post-commit`` that
+# SHA is PROVISIONAL. The workflow this project prescribes — sync the mainline
+# before measuring, which on a branch that has moved means rebasing, or simply
+# ``git commit --amend`` — rewrites the commit minutes later, and the draft
+# ``locks/<project>/<repo>/<sha>.toml`` written for it then names a commit that
+# exists on no branch. Nothing removed it, and an UNSCOPED publication (an
+# explicit ``repro workspace lock`` names no records, so the publisher stages
+# every untracked canonical record it finds) committed and pushed it. A
+# published record is immutable, so the store then carried, for good, a record
+# of a workspace state at a commit that never existed on any branch. Observed
+# three times in one session (reprobuild-pm issue 2026-09-29).
+#
+# Deleting the draft is allowed because a draft is NOT history: the
+# "Corollary — immutability binds published records, not local drafts" of the
+# same spec. Only an UNTRACKED file is a draft. A tracked record is published
+# history, or a routed backend's record that ``putLock`` committed, and neither
+# is ever touched here.
+#
+# Every lock WRITE sweeps (post-commit, the pre-push gate, an explicit
+# ``repro workspace lock``), and every publication is preceded by a write or by
+# the gate's own sweep, so an orphan is gone before any staging step can see
+# it. The sweep does not depend on a publication happening at all: in a
+# workspace that never publishes, the draft readers ("the latest draft" for an
+# unpushed HEAD) would otherwise keep reading the debris.
+
+type
+  LockDraftSweep* = object
+    swept*: seq[SweptLockDraft]
+    diagnostics*: seq[string]
+      ## Probes that FAILED, each of which left its drafts in place. An
+      ## unresolvable repo or a missing commit object is not a failure — it is
+      ## the ordinary "cannot prove it, so keep it" answer — and is not listed.
+
+proc isFullObjectIdText(value: string): bool =
+  ## A full SHA-1 or SHA-256 object id in hex. Anything else in the filename
+  ## stem is not handed to git as a revision at all: a stem such as ``main`` or
+  ## ``HEAD@{1}`` would be RESOLVED by ``rev-list``, and the sweep would then
+  ## be deciding about whatever commit that name happens to denote today.
+  (value.len == 40 or value.len == 64) and value.allIt(it in HexDigits)
+
+proc sweptLockDraftLine*(item: SweptLockDraft): string =
+  ## The one-line, factual account of a sweep, shared by every surface that
+  ## reports one (the post-commit log, ``repro workspace lock``'s stderr, the
+  ## pre-push gate's notices) so they cannot drift apart.
+  "swept orphaned lock draft '" & item.relPath & "': commit " & item.sha &
+    " is reachable from no ref in " & item.repoRoot
+
+proc sweepOrphanedLockDrafts*(identity: GitToolIdentity;
+    recordStoreRoot: string; repoRoots: Table[string, string];
+    keepRelPaths: openArray[string] = []): LockDraftSweep =
+  ## Delete every UNTRACKED canonical record under ``<recordStoreRoot>/locks``
+  ## whose trigger commit is PROVABLY ORPHANED, and return what was deleted.
+  ##
+  ## ``repoRoots`` maps a record's decoded ``<repo>`` component (the declared
+  ## repo NAME) to that repo's checkout in this workspace. ``keepRelPaths``
+  ## names records the caller has just written and must not lose — never
+  ## needed for correctness (a record keyed at a checkout's HEAD is reachable),
+  ## but it makes "the sweep never deletes the record its own writer filed" a
+  ## property of the call rather than of the repository's state.
+  ##
+  ## Provably orphaned means all three hold, and anything less leaves the file:
+  ##
+  ## * the record's repo resolves through ``repoRoots`` (records of repos this
+  ##   workspace does not have checked out are somebody else's question);
+  ## * the commit object exists in that checkout — a draft for a commit the
+  ##   checkout never had (fetched elsewhere, or a different clone's work)
+  ##   cannot be judged here; and
+  ## * no ref and no HEAD reaches it. ``--all`` is every ref under ``refs/``
+  ##   (branches, remote-tracking refs, tags, ``refs/stash``) plus ``HEAD``,
+  ##   and by default every linked worktree's ``HEAD`` too. A commit that only
+  ##   a REFLOG still names counts as orphaned: the reflog records where a ref
+  ##   WAS, it is local and expires, and no publication ever ships from it —
+  ##   that is exactly the state an amend or a rebase leaves the old commit in.
+  ##
+  ## A commit that is mid-rewrite is not orphaned yet: while a rebase is in
+  ## progress the original branch ref still reaches the pre-rewrite commits.
+  ## (``post-commit`` additionally stands down for the whole operation.)
+  ##
+  ## One ``rev-list`` per repo, not per record:
+  ## ``git rev-list --ignore-missing <sha>^{commit}… --not --all`` prints the
+  ## commits reachable from the drafts' SHAs and from no ref, so a SHA is
+  ## orphaned exactly when it is printed. ``--ignore-missing`` drops a SHA whose
+  ## object is absent instead of failing the whole batch, and ``^{commit}``
+  ## makes a SHA that names a non-commit object drop out the same way — both
+  ## then simply are not printed, so they are kept.
+  ##
+  ## Best-effort by construction: it never raises. Any failed probe leaves that
+  ## repo's drafts where they are and is recorded in ``diagnostics``.
+  if recordStoreRoot.len == 0 or repoRoots.len == 0:
+    return
+  try:
+    if not dirExists(extendedPath(recordStoreRoot / "locks")):
+      return
+    # The store must be its OWN checkout root (``discoverGitWorktree`` refuses
+    # a plain directory nested in another checkout), for the reason
+    # ``publishWorkspaceLock`` gives: Git's upward discovery would otherwise
+    # answer "untracked" from whatever repository encloses the directory, and
+    # the sweep would be classifying files that repository does not own.
+    if not discoverGitWorktree(identity, recordStoreRoot).ok:
+      return
+    # ``--others`` WITHOUT ``--exclude-standard``: the publisher enumerates the
+    # same way (an operator may ignore the whole manifest layer), and a draft
+    # the publisher would stage is exactly a draft the sweep must see.
+    let listing = gitRunPlainQuery(identity,
+      ["-C", recordStoreRoot, "ls-files", "-z", "--others", "--", "locks"])
+    if listing.code != 0:
+      result.diagnostics.add("could not list untracked lock records in '" &
+        recordStoreRoot & "': " & listing.diagnostic)
+      return
+    var keep = initHashSet[string]()
+    for rel in keepRelPaths:
+      keep.incl(rel.replace('\\', '/'))
+    var byRepo = initOrderedTable[string, seq[LockRecordPath]]()
+    for rel in nulSeparatedPaths(listing.output):
+      if rel in keep: continue
+      let parsed = parseLockRecordRelPath(rel)
+      # A non-canonical file under ``locks/`` is not a draft this tool wrote;
+      # the publisher reports those and ``migrate-locks`` repairs them.
+      if not parsed.ok: continue
+      if not isFullObjectIdText(parsed.sha): continue
+      if parsed.repo notin repoRoots: continue
+      byRepo.mgetOrPut(parsed.repo, @[]).add(parsed)
+    # Drafts of commits that stay REACHABLE are never swept, and every commit
+    # that was not itself the pushed HEAD leaves one behind, so a long-lived
+    # workspace accumulates thousands per repo. Passing them all on one command
+    # line would eventually exceed the platform's limit (32 767 characters on
+    # Windows; 128 KiB for the single ``sh -c`` argument POSIX ``execCmdEx``
+    # builds), and from then on every sweep of that repo would fail and keep
+    # its orphans for good. Each SHA's orphan status is independent of the
+    # others, so asking in fixed-size batches answers exactly the same question.
+    const ShasPerRevList = 200
+    for repo, drafts in byRepo:
+      let repoRoot = repoRoots[repo]
+      var unreachable = initHashSet[string]()
+      var probeFailed = false
+      var first = 0
+      while first < drafts.len:
+        let last = min(first + ShasPerRevList, drafts.len) - 1
+        var args = @["-C", repoRoot, "rev-list", "--ignore-missing"]
+        for draft in drafts[first .. last]:
+          args.add(draft.sha & "^{commit}")
+        args.add("--not")
+        args.add("--all")
+        let reach = gitRunPlainQuery(identity, args)
+        if reach.code != 0:
+          result.diagnostics.add("could not decide reachability of " &
+            $drafts.len & " lock draft(s) for '" & repo & "' in '" &
+            repoRoot & "'; left in place: " & reach.diagnostic)
+          probeFailed = true
+          break
+        for line in reach.output.splitLines():
+          let sha = line.strip().toLowerAscii()
+          if sha.len > 0: unreachable.incl(sha)
+        first = last + 1
+      # One failed batch keeps the whole repo's drafts: a partial answer is
+      # still positive evidence for the SHAs it printed, but a sweep that
+      # reports "probe failed" and deletes anyway would be harder to reason
+      # about than one that simply did nothing for that repo this time.
+      if probeFailed: continue
+      var doomed: seq[LockRecordPath]
+      for draft in drafts:
+        if draft.sha.toLowerAscii() in unreachable:
+          doomed.add(draft)
+      if doomed.len == 0: continue
+      # Re-ask "untracked?" for exactly the files about to be deleted. The
+      # listing above is a moment old, and a publisher in another process may
+      # have staged one since; a staged record is on its way into history and
+      # is no longer this sweep's to delete. One call for the batch.
+      var relPaths: seq[string]
+      for draft in doomed: relPaths.add(draft.relPath)
+      let staged = gitRunPlainQuery(identity,
+        @["-C", recordStoreRoot, "ls-files", "-z", "--cached", "--"] &
+          relPaths)
+      if staged.code != 0:
+        result.diagnostics.add("could not confirm lock drafts for '" & repo &
+          "' are untracked; left in place: " & staged.diagnostic)
+        continue
+      let nowTracked = nulSeparatedPaths(staged.output).toHashSet()
+      for draft in doomed:
+        if draft.relPath in nowTracked: continue
+        let abs = recordStoreRoot / draft.relPath.replace('/', DirSep)
+        try:
+          removeFile(extendedPath(abs))
+          result.swept.add(SweptLockDraft(relPath: draft.relPath,
+            repo: repo, sha: draft.sha, repoRoot: repoRoot))
+        except OSError as err:
+          result.diagnostics.add("could not delete orphaned lock draft '" &
+            draft.relPath & "': " & err.msg)
+  except CatchableError as err:
+    result.diagnostics.add("lock draft sweep aborted: " & err.msg)
+
 proc executeWorkspaceLock(args: WorkspaceLockArgs;
     deferParticipation = false): WorkspaceLockOutcome =
   ## End-to-end driver. (1) Resolve the project / compose layers.
@@ -47793,6 +48290,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # resolution check below.
   var headShas = initTable[string, string]()
   var currentBranches = initTable[string, string]()
+  # Declared repo NAME → the checkout this run actually observed it at (the
+  # trigger's linked worktree when one fired the hook). It is the map the
+  # orphaned-draft sweep below resolves a record's ``<repo>`` component
+  # through, so the sweep decides reachability in exactly the checkouts the
+  # lock itself was read from, and never in one it could not observe.
+  var observedRoots = initTable[string, string]()
   var dirtyEntries: seq[WorkspaceLockDirtyEntry]
   # RA-21 — the dirty refusal is scoped to ``dirtyScopeNames`` when the
   # caller supplied one (the pre-push gate passes the pushed repo's
@@ -47858,6 +48361,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
         detail: headRes.diagnostic))
       continue
     headShas[repo.path] = headRes.headSha
+    observedRoots[repo.name] = repoPath
     let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
     let isClean =
       if cleanRes.status == gqsOk: cleanRes.isClean
@@ -48215,6 +48719,32 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     else: triggerSha
   report.createdAt = createdAt
   report.workspaceBranch = workspaceBranch
+
+  # Sweep the drafts whose commit no ref reaches any more (see
+  # ``sweepOrphanedLockDrafts`` and push-hook-publication-protocol.md §"A draft
+  # whose commit no ref reaches is swept, never published"). HERE, in the one
+  # writer every surface shares, so post-commit, the pre-push gate and an
+  # explicit ``repro workspace lock`` all sweep, and the two that publish do so
+  # only after the orphans are gone — an explicit lock's publication names no
+  # records and would otherwise stage them.
+  #
+  # The record this run just wrote is excluded by name. It is keyed at the
+  # trigger checkout's HEAD and so is reachable anyway, but an operator may
+  # also lock an explicit ``--sha=`` that no ref reaches yet, and the sweep must
+  # never undo the write it follows.
+  #
+  # Best-effort: the sweep never raises, and a failed probe leaves the draft
+  # where it is. Post-commit therefore stays unable to fail on its account.
+  # Post-commit's stand-down during a rebase/sequencer run happens before this
+  # writer is invoked at all, so a commit that is mid-rewrite is never judged.
+  if recordStoreRoot.len > 0:
+    var justWritten: seq[string]
+    if lockRelForTracking.len > 0:
+      justWritten.add(lockRelForTracking)
+    let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
+      observedRoots, keepRelPaths = justWritten)
+    report.sweptDrafts = sweep.swept
+    report.sweepDiagnostics = sweep.diagnostics
 
   # MO-4 — record each repo's participation through its ASSIGNED locking
   # backend (config → per-repo backend, keyed by visibility). A no-op when the
@@ -49398,26 +49928,6 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
       return
     result.verifiedLocalHead = refreshedHead.output.strip().toLowerAscii()
 
-proc nulSeparatedPaths(output: string): seq[string] =
-  ## Split the output of a ``-z`` git query into paths.
-  ##
-  ## ``-z`` NUL-TERMINATES each path, and the captured output still carries the
-  ## trailing newline the child wrote after the last record. Splitting on NUL
-  ## therefore yields a final element that is ``"\n"`` rather than ``""``, and a
-  ## plain ``if raw.len == 0: continue`` does not drop it. That element then
-  ## flows on as if it were a path: it is not under ``locks/``, so the repair
-  ## planner read it as "this branch touches something outside locks/" and
-  ## refused every store it was pointed at, naming a path that renders as
-  ## nothing at all.
-  ##
-  ## Strip the trailing newlines ONCE, from the whole output, before splitting;
-  ## every element is then either a real path or empty. Not a per-element
-  ## ``strip``: a path may legitimately begin or end with a byte ``strip``
-  ## would eat.
-  for raw in output.strip(leading = false, chars = {'\n', '\r'}).split('\0'):
-    if raw.len == 0: continue
-    result.add(raw.replace('\\', '/'))
-
 proc publishWorkspaceLock*(identity: GitToolIdentity;
                            manifestRepoRoot: string;
                            exactExpected: seq[ExpectedLockRecord] = @[]):
@@ -50421,6 +50931,15 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
     outcome.report.toJsonNode())
   for line in renderLockTextLines(outcome.report):
     stdout.writeLine(line)
+  # A deleted file is reported, never silent: one stderr line per swept draft,
+  # naming the record and the evidence (spec §"A draft whose commit no ref
+  # reaches is swept, never published", "Each sweep is reported"). A probe
+  # that failed kept its drafts; say so too, since those drafts are still
+  # candidates for the unscoped publication below.
+  for item in outcome.report.sweptDrafts:
+    stderr.writeLine("repro: " & sweptLockDraftLine(item))
+  for diag in outcome.report.sweepDiagnostics:
+    stderr.writeLine("repro: lock draft sweep: " & diag)
   # RA-7: an explicit ``repro workspace lock`` PUBLISHES (commit + push)
   # the lock to the manifest repo. Only attempt when the write succeeded
   # (exit 0). Publication is best-effort: a refusal/failure is surfaced to
@@ -52302,6 +52821,19 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   report.triggerRepo = outcome.report.triggerRepo
   report.triggerSha = outcome.report.triggerSha
 
+  # The writer swept drafts whose commit no ref reaches (an earlier
+  # post-commit's record for a commit since amended or rebased away). That is
+  # the designed steady state, not a warning, so it goes to the log only: one
+  # line per deleted file, because a deletion nobody can trace afterwards is
+  # the thing this log exists to prevent. A failed probe kept its draft and is
+  # logged the same way.
+  for item in outcome.report.sweptDrafts:
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " " & sweptLockDraftLine(item))
+  for diag in outcome.report.sweepDiagnostics:
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " lock draft sweep: " & diag)
+
   var loud = true
   case outcome.report.exitCode
   of 0:
@@ -52825,12 +53357,127 @@ proc applyCommittedLockRepin(plan: CommittedLockRepinPlan):
     return (false, "repro-lock write-failed: " & err.msg)
   (true, plan.line)
 
-proc verifyCommittedLockSiblingPins*(repoRoot: string):
-    tuple[examined, stale: bool; evidence, remediation, summary: string] =
+# ---------------------------------------------------------------------------
+# Mutually pinned siblings — the cycle rule BOTH committed-lock gate stages
+# share (Nix-Flake-Coexistence.md §3.1a for `flake.lock`, stage 3b;
+# Unified-Locking-And-Hooks.md §13.5 for `repro.lock`, stage 3c).
+#
+# Two repos can pin each other: `reprobuild`'s flake.lock pins `codetracer`
+# (`codetracer-src`) and its committed repro.lock pins `nim-shm-queue`, while
+# each of those reaches `reprobuild` through its own `depends` closure. With a
+# new local commit on both sides, the two pushes refused each other and no
+# ordering terminated: the dependent needs the dependency published first
+# (push-hook-publication-protocol.md invariant 2 — a dependency never borrows
+# another repo's outgoing status), and the dependency's lock stage needed the
+# dependent published first — and, for flake.lock, printed exactly that push as
+# its remedy, though its own evidence (`unpublished=true`) proved it blocked.
+# Reprobuild-pm issue 2026-10-15-codetracer-and-reprobuild-pre-push-gates-
+# deadlock-and-repro-push-cannot-break-it.
+#
+# Mutual pins have no fixpoint (each commit recording the other's HEAD is a
+# newer HEAD), so nothing can be automated into agreement; ONE gate has to
+# accept a lagging lock for one push. The dependency's lock stages are the ones
+# that can, because what they would publish is still reproducible — but only in
+# a shape narrow enough that every other drift keeps refusing as before. The
+# predicate lives here, once, so the two stages cannot grow different opinions
+# about it.
+# ---------------------------------------------------------------------------
+
+type PushCycleView = object
+  ## The workspace membership the cycle question is asked against: the pushed
+  ## repo's declared name and the resolved repos whose ``depends`` edges
+  ## ``developSetClosure`` walks. ``known`` is false when there is no
+  ## membership to consult, and then NO sibling is ever treated as cyclic — the
+  ## deferral is an exception that must be proven, never assumed.
+  known: bool
+  selfName: string
+  selfHeadUnpublished: bool
+    ## The pushed repo's own ``HEAD`` is not yet reachable from a
+    ## remote-tracking ref. Only then does a dependent sibling's gate refuse it
+    ## over this repo; once this ``HEAD`` is published (say, on another
+    ## branch), the sibling CAN go first and its push is the ordinary remedy.
+  workspaceRoot: string   ## the membership's root, for remedies that name it
+  repos: seq[ResolvedRepo]
+
+proc developSetClosure(repos: seq[ResolvedRepo];
+    pushedRepoName: string): HashSet[string]
+  ## Forward declaration; defined beside ``manifestDevelopSiblings``.
+
+proc flakeClassifyPublication(identity: GitToolIdentity;
+    dir, headRev: string):
+    tuple[unpublished: bool; detail, remote, branch: string]
+  ## Forward declaration; defined with the NF-2 publication axis. The one
+  ## "is this revision obtainable from a remote" probe both stages ask.
+
+proc pushCycleViewOf(repoRoot, workspaceRoot: string;
+    identity: GitToolIdentity): PushCycleView
+  ## Forward declaration; defined beside ``manifestMembershipOf``.
+
+proc siblingAwaitsThisPush(view: PushCycleView; sibling: string;
+    siblingHeadUnpublished: bool): bool =
+  ## Is ``sibling`` one that CANNOT be published before the pushed repo?
+  ##
+  ## True when its HEAD is unpublished, its own develop closure contains the
+  ## pushed repo, and the pushed repo's HEAD is itself unpublished: its
+  ## pre-push gate then refuses it over the pushed repo's unpublished HEAD, so
+  ## "publish the sibling first" is proven not to work.
+  view.known and view.selfHeadUnpublished and siblingHeadUnpublished and
+    sibling.len > 0 and sibling != view.selfName and
+    view.selfName in developSetClosure(view.repos, sibling)
+
+proc pinDefersToMutualPin(view: PushCycleView; identity: GitToolIdentity;
+    sibling, siblingDir, pinnedRev: string;
+    ahead, siblingHeadUnpublished: bool): bool =
+  ## The ONE pin disagreement a committed-lock stage defers instead of
+  ## refusing. All of:
+  ##
+  ##   * `ahead` — the pin is an ancestor of the sibling's HEAD, so the
+  ##     published lock is merely OLDER than what was built against, never a
+  ##     different line of history (diverged) or a downgrade (behind);
+  ##   * the sibling awaits this push (``siblingAwaitsThisPush``);
+  ##   * the PINNED revision is itself published, so the lock this push
+  ##     publishes names content anybody can obtain. A pin that exists only in
+  ##     the local checkout is a lock nobody can reproduce, cycle or no cycle.
+  ahead and pinnedRev.len > 0 and
+    siblingAwaitsThisPush(view, sibling, siblingHeadUnpublished) and
+    not flakeClassifyPublication(identity, siblingDir, pinnedRev).unpublished
+
+proc mutualPinDeferralSentence(sibling, selfName, siblingDir, pinnedRev,
+    recordClause: string): string =
+  ## The shared body of a deferral notice: why the row is deferred and the
+  ## whole order that terminates, because the operator's next two steps are
+  ## not on this repo's screen. ``recordClause`` is the lock-specific last step.
+  "and that HEAD is unpublished — but '" & sibling & "' depends on '" &
+    selfName & "' (its develop closure contains it), so its own pre-push " &
+    "gate refuses it until this push lands, and no order publishes it first. " &
+    "The pinned revision " & shortRev(pinnedRev) & " IS published, so the " &
+    "lock this push publishes is reproducible. The order that terminates: " &
+    "publish this repo now; then publish '" & sibling &
+    "' (`repro push --current-repo=" & siblingDir & "`); then, on the next " &
+    "commit here, record its new revision — " & recordClause
+
+proc mutualPinBlockedSentence(sibling, selfName: string): string =
+  ## Why a refused row whose sibling awaits this push names no push of it.
+  "'" & sibling & "' depends on '" & selfName & "' and its HEAD is " &
+    "unpublished, so it cannot be published before this push (its own " &
+    "pre-push gate refuses it until '" & selfName & "' is published) — " &
+    "pushing it first is not a remedy, and neither is recording that " &
+    "unpublished revision here"
+
+proc verifyCommittedLockSiblingPins*(repoRoot: string;
+    workspaceRoot = ""):
+    tuple[examined, stale: bool; evidence, remediation, summary: string;
+          notices: seq[string]] =
   ## §13.5 — the pre-push stage for a committed ``repro.lock``. Refuses a pin
   ## that differs from the sibling checkout and a manifest-declared sibling
   ## the lock does not carry. A sibling that is not checked out is not
   ## refused: its committed pin is what CI builds.
+  ##
+  ## One disagreement is DEFERRED to a notice instead (§13.5 "Mutually pinned
+  ## siblings", ``pinDefersToMutualPin``): an ahead pin of an unpublished
+  ## sibling that depends on this repo, whose pinned revision is published.
+  ## ``workspaceRoot`` names the membership that question is asked against;
+  ## empty walks up from ``repoRoot``.
   let root = absolutePath(repoRoot)
   let lockPath = root / CommittedLockFileName
   if not fileExists(extendedPath(lockPath)): return
@@ -52843,22 +53490,76 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string):
     return
   result.examined = true
   let obs = observeCommittedLockSiblings(root, ld)
+  let pathBase = committedLockPathBase(root)
   var bad: seq[string] = @[]
+  var blocked: seq[string] = @[]
+  var refreshable = 0
+  # Resolved lazily — only a disagreeing row needs the membership or a
+  # publication probe, so a clean push pays nothing for the cycle rule.
+  var cycle: PushCycleView
+  var cycleResolved = false
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   for o in obs.observations:
     if o.pinned.len == 0 and o.declared:
       bad.add(o.name & " (" & o.path & "): declared in the develop set but " &
         "not pinned" & (if o.observed.len > 0: "; checkout at " & o.observed
                         else: ""))
+      inc refreshable
     elif o.observed.len > 0 and o.pinned.len > 0 and o.observed != o.pinned:
+      let dir = absolutePath(pathBase / o.path)
+      # The publication axis is asked of exactly the relations NF-2 asks it of
+      # (ahead and diverged): a behind sibling is published whenever its pin
+      # is, and unfetched/unknown rows have no direction to defer.
+      let headUnpublished = o.relation in {sprAhead, sprDiverged} and
+        flakeClassifyPublication(identity, dir, o.observed).unpublished
+      if headUnpublished and not cycleResolved:
+        cycle = pushCycleViewOf(root, workspaceRoot, identity)
+        cycleResolved = true
+      if pinDefersToMutualPin(cycle, identity, o.name, dir, o.pinned,
+          o.relation == sprAhead, headUnpublished):
+        result.notices.add("repro.lock pin DEFERRED, not refused: sibling '" &
+          o.name & "' (" & o.path & ") is " & $o.aheadBy & " commit(s) " &
+          "AHEAD of the revision repro.lock pins (pin " & shortRev(o.pinned) &
+          ", HEAD " & shortRev(o.observed) & "), " &
+          mutualPinDeferralSentence(o.name, cycle.selfName, dir, o.pinned,
+            "the pre-commit hook re-pins it, or run `repro lock refresh " &
+            root & "`") &
+          " [sibling=" & o.name & " pinned=" & o.pinned & " observed=" &
+          o.observed & " relation=ahead unpublished=true deferred=mutual-pin]")
+        continue
       bad.add(o.name & " (" & o.path & "): repro.lock pins " & o.pinned &
         ", checkout is at " & o.observed & " (" &
-        siblingPinRelationTag(o.relation) & ")")
+        siblingPinRelationTag(o.relation) & ")" &
+        (if headUnpublished: "; HEAD unpublished" else: ""))
+      if not siblingAwaitsThisPush(cycle, o.name, headUnpublished):
+        inc refreshable
+      else:
+        # The refresh named below would record that unpublished HEAD, which
+        # is exactly the unobtainable pin this rule exists not to publish.
+        blocked.add(mutualPinBlockedSentence(o.name, cycle.selfName) &
+          (if o.relation == sprDiverged:
+             ". Bring it onto its pin's line instead (`" &
+               pinRegressionSyncCommand(cycle.workspaceRoot, o.name) &
+               "`); it is then ahead of the pin and this stage defers it"
+           else:
+             ". The pinned revision " & shortRev(o.pinned) & " is itself " &
+               "not published: re-pin '" & o.name & "' to a revision that " &
+               "IS published (one reachable from its remote-tracking refs), " &
+               "commit, and re-push"))
   if bad.len == 0: return
   result.stale = true
   result.evidence = bad.join("; ")
-  result.remediation = "run `repro lock refresh " & root & "`, commit " &
-    "repro.lock, then re-push (the managed pre-commit hook re-pins siblings " &
-    "on every commit once it is installed: `repro hooks ensure --vcs`)"
+  # The refresh is named only when some offending row is one it can fix; a
+  # row whose sibling awaits this push gets its own sentence instead, because
+  # the refresh would record that sibling's unpublished HEAD.
+  var remedyParts: seq[string] = @[]
+  if blocked.len > 0: remedyParts.add(blocked.join(". ") & ".")
+  if refreshable > 0:
+    remedyParts.add("run `repro lock refresh " & root & "`, commit " &
+      "repro.lock, then re-push (the managed pre-commit hook re-pins " &
+      "siblings on every commit once it is installed: " &
+      "`repro hooks ensure --vcs`)")
+  result.remediation = remedyParts.join(" ")
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
 
@@ -60086,7 +60787,8 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
-proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
+proc manifestMembershipOf(repoRoot: string;
+    workspaceRootHint = ""): tuple[resolved: bool;
     workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string] =
   ## The enclosing workspace's resolved membership and the name it gives the
   ## repo at ``repoRoot``: the lookup ``manifestDevelopSiblings`` and the lock
@@ -60094,9 +60796,16 @@ proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
   ## same conditions ``manifestDevelopSiblings`` documents (no workspace, a
   ## workspace that is the repo itself, a membership that fails to resolve or
   ## does not contain this repo).
+  ##
+  ## ``workspaceRootHint`` is for a caller that has already been TOLD which
+  ## workspace it serves (the pre-push gate's ``--workspace-root``): it is used
+  ## instead of the upward walk, so the membership answered is the one the rest
+  ## of that caller's verdict was computed over.
   result = (false, "", @[], "")
   let root = committedLockPathBase(repoRoot)
-  let ws = enclosingWorkspaceRoot(root)
+  let ws =
+    if workspaceRootHint.len > 0: workspaceRootHint
+    else: enclosingWorkspaceRoot(root)
   if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
     return
   var repos: seq[ResolvedRepo]
@@ -60107,6 +60816,26 @@ proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
   for r in repos:
     if cmpPaths(absolutePath(ws / r.path), root) == 0:
       return (true, absolutePath(ws), repos, r.name)
+
+proc pushCycleViewOf(repoRoot, workspaceRoot: string;
+    identity: GitToolIdentity): PushCycleView =
+  ## The membership the mutual-pin rule (``pinDefersToMutualPin``) is asked
+  ## against: the gate's own ``--workspace-root`` when it has one, so the answer
+  ## is computed over the same workspace as the rest of its verdict.
+  let membership = manifestMembershipOf(repoRoot, workspaceRoot)
+  result = PushCycleView(
+    known: membership.resolved and membership.selfName.len > 0,
+    selfName: membership.selfName, workspaceRoot: membership.workspaceRoot,
+    repos: membership.repos)
+  if not result.known: return
+  # The pushed repo's HEAD, asked with the same publication probe as the
+  # sibling's. A HEAD that cannot be read leaves the flag false, so the
+  # deferral is not granted on an unproven premise.
+  let head = gitRunPlain(identity,
+    ["-C", absolutePath(repoRoot), "rev-parse", "--verify", "HEAD"])
+  if head.code == 0 and head.output.strip().len > 0:
+    result.selfHeadUnpublished = flakeClassifyPublication(identity,
+      absolutePath(repoRoot), head.output.strip()).unpublished
 
 proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
     workspaceRoot: string; siblings: seq[ResolvedRepo]] =
@@ -61670,16 +62399,20 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # or a sibling moved after the commit.
   if parsed.currentRepo.len > 0:
     var pins: tuple[examined, stale: bool;
-                    evidence, remediation, summary: string]
+                    evidence, remediation, summary: string;
+                    notices: seq[string]]
     try:
-      pins = verifyCommittedLockSiblingPins(parsed.currentRepo)
+      pins = verifyCommittedLockSiblingPins(parsed.currentRepo,
+        parsed.workspaceRoot)
     except CatchableError as err:
       pins = (examined: true, stale: true,
         evidence: "committed-lock-verify-failed: " & err.msg,
         remediation: "investigate the repro.lock verification failure (" &
           err.msg & "), then re-push",
         summary: "repro.lock could not be verified against the sibling " &
-          "checkouts: " & err.msg)
+          "checkouts: " & err.msg, notices: newSeq[string]())
+    # A deferred mutual pin (§13.5) is said out loud even when the stage passes.
+    for n in pins.notices: result.notices.add(n)
     if pins.stale:
       result.failures.add(CheckFailure(
         repo: currentRepoPath,
@@ -62108,6 +62841,32 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           break
   if not lockMissing and not lockStale:
     result.lockUpdate.kind = cluAlreadyCurrent
+    # This arm writes nothing, so the writer's orphaned-draft sweep does not
+    # run — yet the publication after the gate still follows. It is scoped to
+    # this push's anchored record whenever the gate resolved one
+    # (INVARIANT 13), but it is UNSCOPED when it did not (no ``--current-repo``,
+    # or a pushed repo with no observable HEAD), and an unscoped publication
+    # stages every untracked canonical record. Sweep here too, so "every
+    # publication is preceded by a sweep" holds on both arms rather than only
+    # on the one that writes. Resolved through the same checkouts this gate
+    # observed.
+    if recordStoreRoot.len > 0:
+      var observedRoots = initTable[string, string]()
+      for obs in observations:
+        if obs.hasGit and obs.headSha.len > 0:
+          observedRoots[obs.name] = obs.absPath
+      # The record this push is anchored on is keyed at the pushed repo's
+      # HEAD and so is reachable anyway; naming it makes "the gate never
+      # sweeps the record it is about to publish" a property of the call.
+      var anchored: seq[string]
+      for expectedRecord in result.expectedManifestRecords:
+        anchored.add(expectedRecord.relPath)
+      let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
+        observedRoots, keepRelPaths = anchored)
+      for item in sweep.swept:
+        result.notices.add(sweptLockDraftLine(item))
+      for diag in sweep.diagnostics:
+        result.notices.add("lock draft sweep: " & diag)
     # Surface the most-recent lock file path so the operator can audit
     # which lock backed the check. MO-3: the store's ``lockKey`` carries the
     # RA-1 identity tuple, from which the ``locks/<p>/<repo>/<sha>.toml`` path
@@ -62196,6 +62955,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       unmaterializedLockNotice(lockOutcome.report.unmaterialized)
     if unmaterializedNotice.len > 0:
       result.notices.add(unmaterializedNotice)
+    # The writer swept orphaned drafts before this gate's publication can
+    # stage anything; the gate output names each deleted file.
+    for item in lockOutcome.report.sweptDrafts:
+      result.notices.add(sweptLockDraftLine(item))
+    for diag in lockOutcome.report.sweepDiagnostics:
+      result.notices.add("lock draft sweep: " & diag)
     result.lockUpdate.kind =
       if lockMissing: cluCreated else: cluRefreshed
     # HL-3 (§6 Decision 2) — surface the per-repo, tier-tagged participation
@@ -62979,27 +63744,91 @@ proc parsePushArgs(args: openArray[string]): PushArgs =
     result.syncMode = psmMerge
   elif not wantSync and not explicitFlavor:
     result.syncMode = psmNone
-  if result.workspaceRoot.len == 0:
-    # Same walk as the gate: key on the WORKSPACE, not on a ``.repro/``
-    # directory a built repo carries of its own.
-    if result.currentRepo.len > 0:
-      result.workspaceRoot = enclosingWorkspaceRoot(result.currentRepo)
-      if result.workspaceRoot.len == 0:
-        result.workspaceRoot = enclosingReproShell(result.currentRepo)
-    if result.workspaceRoot.len == 0:
-      result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  # The pushed repo is resolved FIRST, and the workspace is found by walking
+  # up from it — the walk the managed hook makes for the gate
+  # (``parseCheckArgs``), so the closure this command orders and the scope its
+  # own hooks enforce are computed over the SAME workspace.
+  #
+  # They used not to be. With no ``--current-repo`` the workspace root fell
+  # back to the bare current directory, and a repo carrying its own committed
+  # ``repro.lock`` IS a workspace marker (MO-2). So `repro push` typed inside
+  # `codetracer` resolved `codetracer` as a standalone workspace whose
+  # membership came from codetracer's committed lock — 25 repos, `reprobuild`
+  # not among them — while the hook fired by its own `git push` walked up to the
+  # real workspace, whose 37-repo closure does contain `reprobuild` (through
+  # `nim-shm-queue`). The command published nothing and the gate refused over a
+  # repo the command had never considered (reprobuild-pm issue
+  # 2026-10-15-codetracer-and-reprobuild-pre-push-gates-deadlock-…; CLI/push.md
+  # §"The closure is what the gate requires published").
+  #
+  # The default pushed repo is the root of the git worktree containing the
+  # current directory, not the directory itself: closure seeding matches a
+  # declared repo by its path, and from a subdirectory that match would fail
+  # and widen the push to the whole workspace.
   if result.currentRepo.len == 0:
-    result.currentRepo = getCurrentDir()
+    let top = gitTopLevel(getCurrentDir())
+    result.currentRepo = if top.len > 0: top else: getCurrentDir()
   result.currentRepo = absolutePath(result.currentRepo)
+  if result.workspaceRoot.len == 0:
+    # Key on the WORKSPACE, not on a ``.repro/`` directory a built repo
+    # carries of its own.
+    result.workspaceRoot = enclosingWorkspaceRoot(result.currentRepo)
+    if result.workspaceRoot.len == 0:
+      result.workspaceRoot = enclosingReproShell(result.currentRepo)
+    if result.workspaceRoot.len == 0:
+      result.workspaceRoot = result.currentRepo
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc developOverrideRepoNames(workspaceRoot: string;
+    repos: seq[ResolvedRepo]): seq[string] =
+  ## The declared workspace repos that ``.repro/develop-overrides.toml`` points
+  ## at, in override order and de-duplicated.
+  ##
+  ## The pre-push gate's stage 3 refuses over EVERY override entry that is
+  ## dirty or unpublished — the whole file, not only the entries inside the
+  ## pushed repo's ``depends`` closure — so `repro push` has to publish those
+  ## too, or the command whose job is to satisfy the gate cannot (CLI/push.md
+  ## §"The closure is what the gate requires published"). An override is matched
+  ## to a repo by its SOURCE PATH, because that is the checkout the gate
+  ## inspects; the ``package`` name of an override need not be a repo name.
+  ##
+  ## An override that is not a declared repo is NOT returned: it has no
+  ## manifest remote to publish to, so this command cannot discharge it and
+  ## the gate's refusal (which names the path) stays the remedy. An unreadable
+  ## override file contributes nothing here for the same reason — the gate
+  ## itself refuses over the parse error and names it, which is the better
+  ## place for that diagnostic than a second copy of it from this command.
+  var overrides: Option[DevelopOverrides]
+  try:
+    overrides = readDevelopOverridesFile(workspaceRoot)
+  except CatchableError:
+    return
+  if overrides.isNone:
+    return
+  for entry in listOverrides(overrides.get()):
+    let sourcePath =
+      if isAbsolute(entry.local_path): entry.local_path
+      else: absolutePath(workspaceRoot / entry.local_path)
+    for repo in repos:
+      if sameFilesystemPath(workspaceRoot / repo.path, sourcePath):
+        if repo.name notin result:
+          result.add(repo.name)
+        break
 
 proc topoSortClosure(repos: seq[ResolvedRepo];
-                     closure: HashSet[string]): seq[string] =
+                     closure: HashSet[string];
+                     extraDepends: Table[string, seq[string]] =
+                       initTable[string, seq[string]]()): seq[string] =
   ## Kahn topological sort of the closure over the per-repo ``depends``
   ## edges, DEPENDENCY-FIRST: a repo is emitted only after every dependency
   ## it names (that is also in the closure) has been emitted. This is the
   ## load-bearing guarantee of ``repro push`` — a dependent is NEVER pushed
   ## before its dependency (CLI/push.md High-Level Rules).
+  ##
+  ## ``extraDepends`` adds edges the manifest does not declare but the gate
+  ## enforces: each member of the pushed repo's closure "depends on" every
+  ## develop override `repro push` brought in, because each member's own gate
+  ## refuses until that override is published (``developOverrideRepoNames``).
   ##
   ## Edges are restricted to the closure (an out-of-closure ``depends``
   ## target cannot gate a member). Ties are broken by declaration order so
@@ -63019,7 +63848,10 @@ proc topoSortClosure(repos: seq[ResolvedRepo];
   for name in declOrder:
     indeg[name] = 0
   for name in declOrder:
-    for dep in byName[name].depends:
+    var deps = byName[name].depends
+    for extra in extraDepends.getOrDefault(name):
+      if extra notin deps: deps.add(extra)
+    for dep in deps:
       if dep.len > 0 and dep in byName:
         inc indeg[name]
         dependents.mgetOrPut(dep, @[]).add(name)
@@ -63919,9 +64751,33 @@ proc executePush(args: PushArgs): PushReport =
         pushedRepoName = repo.name
         break
 
+  # The closure is everything this push's own gate will require to be
+  # published ALREADY (CLI/push.md §"The closure is what the gate requires
+  # published"): the gate's stage-2 scope (the ``depends`` closure, computed by
+  # the same ``developSetClosure``) plus every develop override that is a
+  # declared repo (stage 3 checks the whole override file). An override comes
+  # in with its own ``depends`` closure, because its gate checks that closure
+  # when it is pushed.
+  #
+  # It is ordered before EVERY member of the pushed repo's closure, not only
+  # before the pushed repo: stage 3 is workspace-wide, so each member's own
+  # pre-push gate refuses while the override is unpublished. (Members the
+  # override itself depends on are the exception — they must go first, and
+  # ``developSetClosure`` already puts them in the override's own closure.)
   var closure: HashSet[string]
+  var extraDepends = initTable[string, seq[string]]()
   if pushedRepoName.len > 0:
     closure = developSetClosure(resolved.repos, pushedRepoName)
+    let dependsClosure = closure
+    for name in developOverrideRepoNames(args.workspaceRoot, resolved.repos):
+      if name in dependsClosure:
+        continue
+      let overrideClosure = developSetClosure(resolved.repos, name)
+      for member in overrideClosure:
+        closure.incl(member)
+      for member in dependsClosure:
+        if member notin overrideClosure:
+          extraDepends.mgetOrPut(member, @[]).add(name)
   else:
     # No single trunk repo resolves (a ``repro push <project>`` whose project
     # name is not also a repo name, or a cwd outside any declared repo): the
@@ -63934,7 +64790,7 @@ proc executePush(args: PushArgs): PushReport =
       result.closure.add(repo.name)
 
   # Topological (dependency-first) push order over ``depends``.
-  result.order = topoSortClosure(resolved.repos, closure)
+  result.order = topoSortClosure(resolved.repos, closure, extraDepends)
 
   var byName = initTable[string, ResolvedRepo]()
   for repo in resolved.repos:
@@ -77354,7 +78210,8 @@ proc tryLoadDurableSolverProviderArtifacts(
       let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
         helperCliPath, compileWorkDir, projectRootForModule(modulePath))
       let providerAction =
-        if relocated.active:
+        if relocated.active and
+            not recipeRelativeProviderLocationBound(relocated):
           recipeRelativeProviderCompileAction(relocated, modulePath,
             helperCliPath, compileWorkDir)
         else:
@@ -84694,6 +85551,43 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     result.failure = "flake-lock error: " & err.msg
 
 
+# Mutually pinned siblings, `flake.lock` half (Nix-Flake-Coexistence.md §3.1a).
+# The rule itself is ``pinDefersToMutualPin``, shared with the `repro.lock`
+# stage; these wrappers only map a flake row onto it.
+
+proc flakeSiblingAwaitsThisPush(view: PushCycleView;
+    row: FlakeOverrideStateRow): bool =
+  ## ``row.unpublished`` is only ever set on ahead/diverged rows
+  ## (``flakeAnnotatePublication``), so behind/unfetched/unknown rows — whose
+  ## remedies move the CHECKOUT, not the remote — are never cyclic here.
+  siblingAwaitsThisPush(view, row.repo, row.unpublished)
+
+proc flakeRowIsDeferredCycle(view: PushCycleView; row: FlakeOverrideStateRow;
+    identity: GitToolIdentity): bool =
+  ## Rev-pinned inputs are deferred on the same terms: the `flake.nix` edit
+  ## their refusal would otherwise name moves the pin to the same unpublished
+  ## revision the refresh declines to record.
+  pinDefersToMutualPin(view, identity, row.repo, row.path, row.pinnedRev,
+    row.relation == fprAhead, row.unpublished)
+
+proc flakeDeferredCycleNotice(row: FlakeOverrideStateRow; selfName,
+    declaredRev, flakeRoot, workspaceRoot: string): string =
+  ## The notice for a deferred flake row.
+  let record =
+    if declaredRev.len > 0:
+      "in flake.lock; the input is pinned BY REVISION, so " &
+        flakeRevPinEditRemedy(declaredRev, row.siblingRev, flakeRoot)
+    else:
+      "in flake.lock; the pre-commit refresh records it once that revision " &
+        "is published, or run `" &
+        flakeRefreshLockCommand(flakeRoot, workspaceRoot) & "`"
+  "flake.lock pin DEFERRED, not refused: " & flakeRowSentence(row) & ", " &
+    mutualPinDeferralSentence(row.repo, selfName, row.path, row.pinnedRev,
+      record) &
+    " [input=" & row.input & " repo=" & row.repo & " pinned=" & row.pinnedRev &
+    " sibling=" & row.siblingRev & " relation=ahead ahead=" & $row.aheadBy &
+    " unpublished=true deferred=mutual-pin]"
+
 proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     identity: GitToolIdentity;
     toolProvisioning: ToolProvisioningMode): FlakeGateVerdict =
@@ -84846,6 +85740,21 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     # says something else. The counts are still in the structured verdict for
     # anyone who asks.
     return
+  # §3.1a — set aside the one disagreement this gate defers. The membership is
+  # resolved only now, when there IS a disagreement to classify, so a clean push
+  # pays nothing for it.
+  let declaredRevs = flakeLockDeclaredRevisions(lockText)
+  let cycle = pushCycleViewOf(flakeRoot, workspaceRoot, identity)
+  var refused: seq[FlakeOverrideStateRow]
+  for row in offenders:
+    if flakeRowIsDeferredCycle(cycle, row, identity):
+      result.notices.add(flakeDeferredCycleNotice(row, cycle.selfName,
+        declaredRevs.getOrDefault(row.input, ""), flakeRoot, workspaceRoot))
+    else:
+      refused.add(row)
+  offenders = refused
+  if offenders.len == 0:
+    return
   result.stale = true
   for n in skipped: result.notices.add(n)
   var sentences: seq[string]
@@ -84904,11 +85813,34 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # a file that is already correct. An UNPUBLISHED rev-pinned row needs BOTH:
   # the publishing push still has to happen, and the refresh that follows it
   # would still decline, so the push is kept and the refresh is replaced.
-  let declaredRevs = flakeLockDeclaredRevisions(lockText)
+  #
+  # AND never a push this gate's own evidence proves blocked (§3.1a). A refused
+  # row whose sibling depends on the pushed repo and is unpublished cannot be
+  # published first — its gate refuses it over THIS repo — so its push is not
+  # named, nor is a rev-pin edit or refresh that would record that same
+  # unpublished revision. What is named instead is the step that can run: a
+  # diverged sibling is brought onto its pin's line (after which the row is
+  # ahead and deferred); an ahead sibling whose PIN is unpublished needs the
+  # pin itself moved to a published revision, which only the author can pick.
   let refreshCommand = flakeRefreshLockCommand(flakeRoot, workspaceRoot)
   var remedies: seq[string]
   var edits: seq[string]
+  var blocked: seq[string]
   for row in offenders:
+    if flakeSiblingAwaitsThisPush(cycle, row):
+      let why = mutualPinBlockedSentence(row.repo, cycle.selfName)
+      if row.relation == fprDiverged:
+        blocked.add(why & ". Bring it onto its pin's line instead; it is then " &
+          "ahead of the pin and this gate defers it")
+        let sync = pinRegressionSyncCommand(workspaceRoot, row.repo)
+        if sync notin remedies: remedies.add(sync)
+      else:
+        blocked.add(why & ". The pinned revision " & shortRev(row.pinnedRev) &
+          " is itself not published, so the lock this push would publish " &
+          "names content nobody can obtain: re-pin '" & row.input &
+          "' to a revision of '" & row.repo & "' that IS published (one " &
+          "reachable from its remote-tracking refs), commit, and re-push")
+      continue
     let declaredRev = declaredRevs.getOrDefault(row.input, "")
     let authorPinned = declaredRev.len > 0 and
       declaredRev != row.siblingRev and
@@ -84924,6 +85856,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   result.remediation = sentences.join("; ") &
     " — flake.lock is an IN-TREE committed lock, so this gate verifies it " &
     "and never writes it." &
+    (if blocked.len > 0: " " & blocked.join(". ") & "." else: "") &
     (if edits.len > 0: " " & edits.join(". ") & "." else: "") &
     (if remedies.len > 0:
        " From " & flakeRoot & " run: `" & remedies.join("` and `") &

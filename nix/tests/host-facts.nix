@@ -75,6 +75,13 @@ let
             };
           };
           xdg.configFile."gm6/app.conf".text = "answer = 42\n";
+          # Home Manager installs packages of its own by default (man-db for
+          # programs.man, shared-mime-info for xdg.mime); the Nix catalog
+          # maps them (GM8), so with them on the expected package ids would
+          # depend on the catalog's size. Off: the fixture checks the
+          # packages it declares.
+          programs.man.enable = false;
+          xdg.mime.enable = false;
         }
       )
       (lib.optionalAttrs isLinux {

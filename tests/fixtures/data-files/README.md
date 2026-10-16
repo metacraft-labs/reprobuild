@@ -36,6 +36,13 @@ package names the planner selects for `host` on `system`: the rows whose
 is the evaluation's host, and `wsl` is false (WSL is a fact only a planner
 running on the host knows).
 
+An evaluation may instead carry `"undeclaredHost": true` (and no
+`packages`): its host is not in the case's non-empty `hosts` map, and both the
+planner and `readData` refuse it -- a profile with a `hosts:` registry
+declares every host it may be applied to (reprobuild-pm spec
+Gradual-Nix-To-Reprobuild-Migration.md, Open question 6). A host that should
+get the `default` activity alone is declared with `["default"]`.
+
 `resources` (present when the case has `[[resource]]` rows) is the SET
 (sorted) of addresses of the resource rows that apply: a resource row is
 profile-wide, so it applies wherever its `when` holds, whatever activities the

@@ -59,7 +59,10 @@ apps = reprobuild.lib.readData {
 
 A row is selected exactly when `repro home plan` would select it: its
 `activity` is `default` or one the host's `hosts:` entry names, and its `when`
-holds for `system` and `host` (`wsl` is false for every target). Instead of
+holds for `system` and `host` (`wsl` is false for every target). A `hosts`
+map that does not name `host` is refused, as the planner refuses a host its
+profile's `hosts:` registry does not declare (an empty map, like a profile
+without a registry, selects `default` for every host). Instead of
 `hosts` you can pass `activities = [ … ]`, for example the activities
 `readIntent` reports for the host. A package selected by several rows is
 listed once, with the version and binaries of the row the planner keeps (the
@@ -126,7 +129,18 @@ so an export never carries one.
   is `differs` or `unevaluated` — typically a `when defined(macosx)` in the
   profile, compiled on Linux. The message says why. Use runtime predicates
   (`when macos():`), or export on the target platform. The platform that
-  compiled the export is always accepted.
+  compiled the export is always accepted;
+- `host` is not declared: the profile has a `hosts:` registry and it does not
+  name `host`. Reprobuild refuses to plan or apply such a host too, rather
+  than giving it the `default` activity alone; declare it, with
+  `"<host>": [default]` if `default` is all it should run.
+
+One snapshot describes every host: `intent` carries the whole `hosts:`
+registry, and only `selection` is the exporting host's. A Nix configuration
+can therefore read each host's activities from a single committed export
+(`readIntent { snapshot; host = <each host>; … }.evaluation.activities`) —
+the `hosts:` registry is then the one host-to-activity map both sides
+read.
 
 ## `nixRealizationOf` — canonical name to nixpkgs attribute
 

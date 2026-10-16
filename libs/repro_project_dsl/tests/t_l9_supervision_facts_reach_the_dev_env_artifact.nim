@@ -333,9 +333,10 @@ suite "L9: every supervision fact survives the artifact codec":
     # something it does not.
     #
     # MOVED 3 -> 4 BY D-SS11, which appended
-    # `DevEnvArtifact.sharedResolutions`. This case is a PIN ON THE
-    # NUMBER, so it has to move with the number, and it was found by
-    # D-SS11's regression sweep rather than by reading -- which is the
-    # argument for the sweep: L9's own version bump broke the same
+    # `DevEnvArtifact.sharedResolutions`, and 4 -> 5 BY F1, which
+    # appended `DevEnvArtifact.actions`. This case is a PIN ON THE
+    # NUMBER, so it has to move with the number, and both moves were
+    # found by the regression sweep rather than by reading -- which is
+    # the argument for the sweep: L9's own version bump broke the same
     # pin in `t_dev_env_large_values` and was found the same way.
-    check DevEnvArtifactSchemaVersion == 4'u32
+    check DevEnvArtifactSchemaVersion == 5'u32

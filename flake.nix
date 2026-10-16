@@ -249,7 +249,24 @@
         # Bumped to 527368e (2026-10-16), io-mon's `agents` tip; 414a3de is an
         # ancestor. Test-only: the macOS nesting fixtures give their second
         # shim its own install name, so they run two distinct shim images.
-      url = "github:metacraft-labs/io-mon/527368ee896b58263085a116f8fffb9b3ee2d82e";
+        # Bumped to 2801e94 (2026-10-16), io-mon's `agents` tip; 527368e is an
+        # ancestor. Linux records path mutations, the directories glob(3)
+        # scans, and the files and directories mkstemp and mkdtemp create;
+        # the writer closes a byte-capped fragment once on a key change.
+        # Trapped inline syscalls are classified from what they named when
+        # they trapped; the engine folds the new records (`monitorRemovals`).
+        # Bumped to a4378d9 (2026-10-16), io-mon's `agents` tip; 2801e94 is an
+        # ancestor. Trapped inline syscalls that cannot be classified before
+        # the image ends (an exit or exec from inside a hook, a fork child
+        # before exec, a thread trapping after the exit drain) are reported as
+        # event-loss instead of vanishing; execveat and fexecve run the exec
+        # hook, so their child is monitored and the exec is recorded.
+        # Bumped to f33311e (2026-10-16), io-mon's `agents` tip; a4378d9 is an
+        # ancestor. A fork child of a multi-threaded process records what it
+        # reads before exec when no shim lock was held at the fork; otherwise
+        # (and after a raw clone or _Fork) it reports the evidence it skips
+        # as event-loss instead of grading complete without it.
+      url = "github:metacraft-labs/io-mon/f33311ea06be5fe1569172ade9a6cd27b480e9af";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -498,7 +515,11 @@
       # change -- it declares the Zstandard headers through the new ``zstd-dev``
       # selector -- and that revision's ``repro.lock`` names trace-format d8cd2ed5,
       # so ``ct-trace-format-src`` moves to it in the same step.
-      url = "github:metacraft-labs/codetracer/23d5af70f74765e0717e57aefaa453e3a1c18717";
+      #
+      # At 6b6d05a08 (2026-10-15, the published `agents` tip; 23d5af70f is its
+      # parent) only ``flake.lock`` and ``repro.lock`` change, and the latter
+      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays.
+      url = "github:metacraft-labs/codetracer/6b6d05a081287ae66cd875ece212e5e713a9f9e3";
       flake = false;
     };
 
@@ -651,7 +672,7 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/8eaa8520008e3cc3da6d081a1547c51c6f632632";
+      url = "github:metacraft-labs/reprobuild-nix-packages/507bffbe53673caebb686017e76910e321fd9175";
       flake = false;
     };
 
