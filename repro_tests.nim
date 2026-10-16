@@ -11556,6 +11556,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim",
+    binary: "build/test-bin/t_lock_refresh_never_moves_a_pin_backward",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim",
     binary: "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
     defines: @[],
@@ -12287,6 +12296,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
     binary: "build/test-bin/t_pre_push_gate_checks_only_pushed_repo_dependency_closure",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
+    binary: "build/test-bin/t_pre_push_gate_enforces_inside_a_linked_worktree",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

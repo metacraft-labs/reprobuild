@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1826,
+    "nimTestBinaries": 1828,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1842
+    "testEntries": 1844
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1064,7 +1064,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 966,
+      "integration": 968,
       "platform/destructive": 117,
       "pure unit": 593,
       "unclassified": 155
@@ -1215,9 +1215,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1826,
+    "nimTestBinaryCount": 1828,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1842
+    "testEntryCount": 1844
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7753,7 +7753,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 30,
+      "staticCaseCount": 32,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29178,6 +29178,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_lock_refresh_never_moves_a_pin_backward",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -30611,6 +30628,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_push_gate_enforces_inside_a_linked_worktree",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

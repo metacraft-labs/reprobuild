@@ -255,6 +255,21 @@ proc readRecord(path: string): MonitorRecord =
     threadId: 4242,
     path: path)
 
+proc entropyRecord(): MonitorRecord =
+  ## An UNATTRIBUTED entropy read — the Linux/macOS shape, whose detail
+  ## carries no `caller=` token. No `mrProcessExec` record in these captures
+  ## names pid 4242, so `applyEntropyBlessingPolicy` resolves no image for it,
+  ## finds no blessing, and refuses the publish with `cirUnblessedEntropy`.
+  ## Used by one case only: the one that grades what happens when that
+  ## refusal and the empty-keyed-set refusal land on the SAME action.
+  MonitorRecord(
+    kind: mrNonDeterministic,
+    observationKind: moNonDeterministic,
+    osPid: 4242,
+    threadId: 4242,
+    path: "getrandom",
+    detail: "non-deterministic entropy source")
+
 proc runEdge(f: Fixture; id: string; cacheable = true;
              rootImage = RootImage): BuildAction =
   ## `monitoredAction` preserves a monitor depfile the caller already set
@@ -1283,6 +1298,201 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     check not keyed.contains("suspect the monitor backend")
     check emptyKeyedInputSetDiagnostic("pkg.some_edge", 7, 7) !=
       zeroEvidenceDiagnostic("pkg.some_edge", MonitorHasLibraryLoadFloor)
+
+  test "the refusal NAMES its class, so no operator reads it as `unspecified`":
+    ## THE MACHINE-READABLE HALF, and it is a separate case from the one
+    ## above because the two can fail independently: the diagnostic STRING
+    ## shipped correct and informative from the day the guard landed, while
+    ## the refusal recorded no `CacheIneligibilityReason` at all for three
+    ## weeks. `traceCacheIneligibility` substitutes its defensive
+    ## `"unspecified"` placeholder for an empty reason set, so the refusal
+    ## reached an operator as
+    ##
+    ##     cache-skip-ineligible  action-cache publication skipped;
+    ##                            reasons=unspecified
+    ##
+    ## and — the consequence that matters beyond the wording — was invisible
+    ## to any per-class count over `cacheIneligibilityReasons`, which is how
+    ## DA-7's item 2 is measured. A class that never enters the set cannot
+    ## appear in such a table as a row, a zero, or a regression, whatever
+    ## its true count.
+    ##
+    ## WHY THE TRACE RATHER THAN THE SET: `cacheIneligibilityReasons` is a
+    ## module-private field of a module-private object, so the trace event
+    ## is the only place the class is observable from outside the engine —
+    ## and it is also the place an operator actually reads it, which makes
+    ## it the right assertion target rather than a concession.
+    ##
+    ## MUTATION-CHECKED (2026-10-03): deleting the
+    ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line in
+    ## `gradeKeyedInputSet` reddens this case on the `reasons=` equality and
+    ## on the `unspecified` assertion, and reddens NOTHING else in the file.
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip("no executable /nix/store bash on this host; the tool-root " &
+        "elision only recognizes a REAL content-addressed root, so there " &
+        "is no way to empty the keyed input set here")
+    else:
+      let f = makeFixture("keyed-auto-reason")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
+      let act = f.runEdge("keyed-auto-reason/run", rootImage = sh)
+      let config = testConfig(f.cacheRoot)
+
+      let run = runBuild(graph([act]), config)
+      let r0 = run.byId(act.id)
+      # The precondition: this really is the empty-keyed-set refusal and not
+      # some other one that happens to skip the publish. Both halves are
+      # named, so a fixture that stopped reaching the guard fails here rather
+      # than passing the assertions below for the wrong reason.
+      check r0.status == asSucceeded
+      check r0.evidence.monitorReads == @[sh, storeRootRead(sh)]
+      check act.cacheInputPaths(r0.evidence).len == 0
+      check r0.evidence.diagnostics.join(" ").contains("came out EMPTY")
+      check not f.hasRecord(act)
+
+      var skips: seq[SchedulerTraceEvent] = @[]
+      for item in run.trace:
+        if item.event.startsWith("cache-skip-"):
+          skips.add(item)
+      checkpoint("skips=" & $skips)
+      require skips.len == 1
+      check skips[0].actionId == act.id
+      # Not `cache-skip-monitor-loss`: this edge's monitor is healthy, and
+      # misfiling it there would point an operator at the capture backend.
+      check skips[0].event == "cache-skip-ineligible"
+      check skips[0].detail ==
+        "action-cache publication skipped; reasons=empty-keyed-input-set"
+      # Stated separately from the equality so the failure output says WHICH
+      # defect came back if the message is ever reworded around it.
+      check not skips[0].detail.contains("unspecified")
+
+  test "entropy PLUS an empty key: the determinism probe does not rescue it":
+    ## THE ONE PLACE THE MISSING REASON WAS NOT MERELY COSMETIC, and the
+    ## reason this file now asserts a publish decision about a combination
+    ## rather than only a trace string.
+    ##
+    ## `cacheIneligibilityReasons` is documented as diagnostic-only, and it
+    ## is — with exactly one exception. `determinismProbeAdmits` gates on
+    ##
+    ##     if evidence.cacheIneligibilityReasons != {cirUnblessedEntropy}:
+    ##       return false
+    ##
+    ## because its own precondition is "only an action whose SOLE refusal is
+    ## unblessed entropy is probed": a probe compares output bytes, which can
+    ## answer a determinism question and cannot answer a question about what
+    ## was SEEN. That gate is an exact-set comparison, so it is only as
+    ## truthful as the set is complete — and while `gradeKeyedInputSet`
+    ## recorded nothing, an action refused for BOTH reasons presented to the
+    ## probe as one refused for entropy alone. The probe then admitted it on
+    ## the second run and published a record keyed on NOTHING: the exact
+    ## state this whole file exists to refuse, reached through the hole the
+    ## missing reason opened.
+    ##
+    ## So recording the reason is not purely additive here. It is the single
+    ## behavioural difference in this change, it moves in the REFUSING
+    ## direction only (a set can gain a member, never lose one, so the gate
+    ## can go true->false and never false->true), and it restores the
+    ## behaviour the probe's own docstring already claimed.
+    ##
+    ## THE FIXTURE DECLARES AN OUTPUT, unlike every other case in this
+    ## suite, and that is load-bearing rather than incidental: the probe
+    ## refuses an action with no declared outputs anyway ("two runs cannot be
+    ## compared"), so a fixture built like its siblings would grade the gate
+    ## above with the gate below and pass whatever the first one did.
+    ##
+    ## MEASURED BOTH WAYS (2026-10-03), by deleting the
+    ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line and
+    ## rebuilding. The warm run's trace and the published evidence file:
+    ##
+    ## | | with the `incl` | without it |
+    ## |---|---|---|
+    ## | warm trace | `cache-skip-ineligible … reasons=unblessed-entropy,empty-keyed-input-set` | `determinism-probe-verified … caching despite unblessed entropy` |
+    ## | `dependencyEvidencePath` exists | no | **yes** |
+    ## | `hasRecord` | no | no |
+    ##
+    ## The third row is why the assertions below name the evidence file.
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip("no executable /nix/store bash on this host; the tool-root " &
+        "elision only recognizes a REAL content-addressed root, so there " &
+        "is no way to empty the keyed input set here")
+    else:
+      let f = makeFixture("keyed-auto-entropy")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh)),
+        entropyRecord()])
+      # Byte-identical output on every run, so the probe has something to
+      # compare and WOULD admit the action if the gate let it get that far.
+      # An output that varied would refuse for a second reason and hide the
+      # one under test.
+      let act = block:
+        var a = action("keyed-auto-entropy/run",
+          [sh, "-c", "echo ran >> " & f.runLogPath &
+            "; printf stable > out.txt"],
+          cwd = f.workRoot,
+          inputs = [],
+          outputs = ["out.txt"],
+          cacheable = true,
+          weakFingerprint = weak("keyed-auto-entropy/run"),
+          actionCachePolicy = ffpHybrid,
+          dependencyPolicy = automaticMonitorGatheringPolicy(),
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        a.monitorDepfile = f.rmdfPath
+        a
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: status=" & $r0.status &
+        " keyed=" & $act.cacheInputPaths(r0.evidence) &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      # Both refusals really are present on this one action — the premise of
+      # the case. Named through the trace, which is where the set is
+      # observable, and in ordinal order: entropy was declared first.
+      check act.cacheInputPaths(r0.evidence).len == 0
+      var skips: seq[string] = @[]
+      for item in first.trace:
+        if item.event.startsWith("cache-skip-"):
+          skips.add(item.detail)
+      checkpoint("skips=" & $skips)
+      require skips.len == 1
+      check skips[0] == "action-cache publication skipped; " &
+        "reasons=unblessed-entropy,empty-keyed-input-set"
+      check not f.hasRecord(act)
+      check f.runCount() == 1
+
+      # THE SECOND RUN IS THE PROBE. Pre-fix this is where the empty-keyed
+      # record appeared; the action must still re-run and still publish
+      # nothing.
+      let warm = runBuild(g, config)
+      let r1 = warm.byId(act.id)
+      var warmEvents: seq[string] = @[]
+      for item in warm.trace:
+        warmEvents.add(item.event & " :: " & item.detail)
+      checkpoint("warm: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched & " trace=" & warmEvents.join(" | "))
+      check r1.launched
+      check r1.cacheDecision notin ReuseDecisions
+      check f.runCount() == 2
+      # THE WHOLE POINT. The probe must not be reached at all: the gate
+      # above it sees a second reason and returns before any comparison.
+      for event in warmEvents:
+        check not event.startsWith("determinism-probe-verified")
+      check warmEvents.contains("cache-skip-ineligible :: " &
+        "action-cache publication skipped; " &
+        "reasons=unblessed-entropy,empty-keyed-input-set")
+      # ... and the consequence of not being reached: nothing published.
+      #
+      # `dependencyEvidencePath` AND NOT `hasRecord`, and the difference was
+      # measured rather than assumed. With the `incl` removed, the warm run
+      # here publishes and `hasRecord` STILL answers false — the weak
+      # fingerprint's hot-record read does not see this zero-input record —
+      # while the evidence file flips to true. A case that asserted only
+      # `hasRecord` would have read green through the whole defect.
+      check not fileExists(dependencyEvidencePath(f.cacheRoot, act.id))
 
 suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
   ## The five channels the guard above reads cannot answer the question the

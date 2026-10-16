@@ -403,6 +403,22 @@ compiled repro.lock-adjacent recipe, a repro.solver sidecar, or pass
 --inputs <file>)` and exits 1 — so it is never the answer to a
 team/personal backend record.
 
+`repro lock refresh` re-observes each sibling from its checkout, but it
+**never moves a committed pin backward silently**. When a sibling's
+checkout is behind the revision the lock already pins, has diverged from
+it, or lacks the pinned commit, the refresh writes nothing and exits 4,
+naming the sibling, both commits, the checkout and the command that
+brings it forward (`git -C <sibling> merge --ff-only …`, `repro ws sync
+<project>`, or a fetch). A deliberate downgrade, or a move onto another
+line of the sibling's history, is spelled out:
+`repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
+(or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
+`pre-commit` re-pin honors). Each pin's `ref` is a published branch that
+contains the pinned commit (`agents` first, then `dev`, then the
+checkout's branch, the remote's default, or any other published branch
+containing it) and is empty when no published branch contains it; a
+local-only branch name is never recorded.
+
 `repro workspace lock` resolves a bare invocation against the **current
 directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be
