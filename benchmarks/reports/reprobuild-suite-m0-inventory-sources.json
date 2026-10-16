@@ -611,7 +611,8 @@
       "dependencyShape": [
         "repro_dsl_stdlib",
         "repro_project_dsl",
-        "repro_resources"
+        "repro_resources",
+        "repro_test_support"
       ],
       "owner": "libs/repro_resources",
       "sources": [
@@ -17998,7 +17999,8 @@
       "localDependencyShape": [
         "repro_dsl_stdlib",
         "repro_project_dsl",
-        "repro_resources"
+        "repro_resources",
+        "repro_test_support"
       ],
       "owner": "libs/repro_resources",
       "requiresReproBinary": false,
@@ -18017,7 +18019,8 @@
       "localDependencyShape": [
         "repro_dsl_stdlib",
         "repro_project_dsl",
-        "repro_resources"
+        "repro_resources",
+        "repro_test_support"
       ],
       "owner": "libs/repro_resources",
       "requiresReproBinary": false,

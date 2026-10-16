@@ -53,6 +53,7 @@ import repro_project_dsl
 import repro_dsl_stdlib/types    # Executable, for the artifact slot var
 import repro_resources/lease
 import repro_resources/service_identity
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 # ---------------------------------------------------------------------------
 # The service definitions, lowered by the real macro.
@@ -197,25 +198,45 @@ let projASibling = wsA / "isonim-platform"
 let projB = wsB / "infra"
 let projNoId = wsNoId / "infra"
 
+# Built by EVERY suite's `setup`, not by a case. The suite runner executes
+# each case in a process of its own, and `scratch` is named by the pid, so
+# a tree that only the first case built was absent for every other case:
+# its workspace manifest and rendered configs were missing and the clauses
+# below measured the degradation path instead of the one they name. The
+# tree is owned by the process that builds it and removed when that
+# process exits; building it before enumeration would make `--list-json`
+# write to the filesystem.
+var scratchBuilt = false
+
+proc buildScratchTree() =
+  if scratchBuilt:
+    return
+  scratchBuilt = true
+  releaseDirAtProcessExit(scratch)
+  for root in [projA, projASibling, projB, projNoId, lone]:
+    createDir(root)
+  writeWorkspace(wsA, WorkspaceProject)
+  writeWorkspace(wsB, WorkspaceProject)
+  createDir(wsNoId / ".repro")
+  writeFile(wsNoId / ".repro" / "workspace.toml", "not valid toml ===\n")
+  createDir(store)
+  # Identical rendered configuration in the two checkouts; a different
+  # one in the sibling project, which is what makes the `derived`
+  # halves below differ for a measured reason.
+  writeConfigured(projA, "issuer = \"http://localhost:8080\"\n")
+  writeConfigured(projB, "issuer = \"http://localhost:8080\"\n")
+  writeConfigured(projASibling, "issuer = \"http://localhost:9999\"\n")
+  writeConfigured(lone, "issuer = \"http://localhost:8080\"\n")
+
 suite "L4 — the fixture really is what every clause below assumes":
   ## THE POSITIVE CONTROL for this file. If any of these reddens, every
   ## assertion after it is about something other than what it names.
 
+  setup:
+    buildScratchTree()
+
   test "the scratch tree is built, on a real filesystem":
-    for root in [projA, projASibling, projB, projNoId, lone]:
-      createDir(root)
-    writeWorkspace(wsA, WorkspaceProject)
-    writeWorkspace(wsB, WorkspaceProject)
-    createDir(wsNoId / ".repro")
-    writeFile(wsNoId / ".repro" / "workspace.toml", "not valid toml ===\n")
-    createDir(store)
-    # Identical rendered configuration in the two checkouts; a different
-    # one in the sibling project, which is what makes the `derived`
-    # halves below differ for a measured reason.
-    writeConfigured(projA, "issuer = \"http://localhost:8080\"\n")
-    writeConfigured(projB, "issuer = \"http://localhost:8080\"\n")
-    writeConfigured(projASibling, "issuer = \"http://localhost:9999\"\n")
-    writeConfigured(lone, "issuer = \"http://localhost:8080\"\n")
+    # Built by this suite's `setup`; this case is its control.
     for root in [projA, projASibling, projB, projNoId, lone, store]:
       check dirExists(root)
     check fileExists(projA / ConfigPath)
@@ -252,6 +273,9 @@ suite "L4 — the fixture really is what every clause below assumes":
     check described.executableTyped == svc("ssoDerived").executableTyped
 
 suite "L4 §4.2 — a derived identity is a digest of the definition":
+
+  setup:
+    buildScratchTree()
 
   test "identical closures at two roots give ONE identity":
     # §4.2: "Two worktrees that build the same closure share one
@@ -359,6 +383,9 @@ suite "L4 §4.2 — a derived identity is a digest of the definition":
 
 suite "L4 §4.2 — a stable identity is the author's id, untouched":
 
+  setup:
+    buildScratchTree()
+
   test "it is returned verbatim: not hashed, not qualified":
     check serviceIdentity(svc("ssoStable")) == "com.metacraft-labs.sso"
 
@@ -376,6 +403,9 @@ suite "L4 §4.2 — a stable identity is the author's id, untouched":
       serviceIdentity(svc("ssoStable"), b)
 
 suite "L4 §4.1 — scope resolves to WHICH project / workspace / user":
+
+  setup:
+    buildScratchTree()
 
   test "`workspace` scope reads the declared workspace identity":
     let ctx = discoverServiceScopeContext(projA)
@@ -432,6 +462,9 @@ suite "L4 §4.1 — scope resolves to WHICH project / workspace / user":
       check routesToSystemDaemon(scope) == (scope == sscSystem)
 
 suite "L4 §4.1 — a scope that cannot be honoured DEGRADES, and says so":
+
+  setup:
+    buildScratchTree()
 
   test "no readable workspace identity: the root path, reported":
     let ctx = discoverServiceScopeContext(projNoId)
@@ -497,6 +530,9 @@ suite "L4 — THE PAIR: one stable instance across two worktrees, two derived":
   ## identical definitions even `derived` would resolve to one instance,
   ## and the negative control would prove nothing.
 
+  setup:
+    buildScratchTree()
+
   test "STABLE: two worktrees, one instance key":
     let defA = svc("ssoStable")
     let defB = svc("ssoStableRedefined")
@@ -545,6 +581,9 @@ suite "L4 — THE PAIR: one stable instance across two worktrees, two derived":
         renderedOutputDigests(projB, defB)))
 
 suite "L4 §4.4 — the state root is addressed by identity, never by path":
+
+  setup:
+    buildScratchTree()
 
   test "a stable service's state path NAMES its identity":
     # §4.4 is the claim; this is what makes it legible rather than
@@ -603,6 +642,9 @@ suite "L4 §4.2 — a stable service's STATE survives a redefinition":
   ## directory before the change and read back from the directory the
   ## CHANGED definition resolves to.
 
+  setup:
+    buildScratchTree()
+
   test "a value written before the change is readable after it":
     let defBefore = svc("ssoStable")
     let defAfter = svc("ssoStableRedefined")
@@ -644,6 +686,9 @@ suite "L4 §4.5 — the key reaches the existing lease lane":
   ## ADDRESS and a HOLDER ID. The daemon that holds the registry is L7,
   ## and nothing here starts, attaches to or converges on anything.
 
+  setup:
+    buildScratchTree()
+
   test "two consumers take leases on ONE address with TWO holder ids":
     let defA = svc("ssoStable")
     let defB = svc("ssoStableRedefined")
@@ -677,6 +722,9 @@ suite "L4 §4.5 — the key reaches the existing lease lane":
       discard serviceLeaseHolderId("")
 
 suite "L4 — teardown":
+
+  setup:
+    buildScratchTree()
 
   test "the throwaway tree is removed":
     # Explicit rather than a `defer`: this binary's whole scratch tree is
