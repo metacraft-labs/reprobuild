@@ -257,6 +257,41 @@ suite "envelope lanes -- the Homebrew block begins at v27":
     let dflt = decodeInterfacePayload(encodeInterfacePayload(pi))
     check dflt.provisioningContributions[0].homebrewProvisioning == brew
 
+suite "envelope lanes -- the installer application begins at v28":
+
+  test "v28 adds installerApp inside the detail; v21..v27 decode without " &
+      "it and with every other block intact":
+    # The macOS installer-application field (Store-And-Installation-
+    # Layout.md § Installer applications) was developed as v23 against an
+    # older tip, where v23 was free; here v23 is the services lane's. A gate
+    # left at 23 would make a v23..v27 reader take the next string of the
+    # stream as `installerApp` and desynchronize every later field.
+    var pi = bothLanesInterface()
+    pi.provisioningContributions[0].tarballProvisioning[0].detail
+      .installerApp = "Zed Installer.app"
+    for v in 21'u16 .. 27'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check tarballOf(back).detail.installerApp == ""
+      check tarballOf(back).closureManifest == ClosureManifest
+      check tarballOf(back).location.line == 22
+      if v >= 22'u16:
+        check tarballOf(back).detail.teamId == TeamId
+      if v >= 27'u16:
+        check back.provisioningContributions[0].homebrewProvisioning.len == 1
+    let back = atVersion(pi, 28'u16)
+    check tarballOf(back).detail.installerApp == "Zed Installer.app"
+    check tarballOf(back).detail.teamId == TeamId
+    check back.provisioningContributions[0].homebrewProvisioning[0].token ==
+      "zed"
+    check back.publicServices[0].contributionPoints ==
+      @[PointRelyingParties, PointUsers]
+    # v28 is the default.
+    # version-literal-ok: a pin that must fail when the envelope moves past v28, so this matrix is extended
+    check interfaceEnvelopeVersion() == 28'u16
+    let dflt = decodeInterfacePayload(encodeInterfacePayload(pi))
+    check tarballOf(dflt).detail == tarballOf(back).detail
+
 suite "envelope lanes -- the version is the ONLY thing that varies":
 
   test "each of our four blocks appears at exactly its own version":

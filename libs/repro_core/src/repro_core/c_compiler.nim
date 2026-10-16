@@ -94,7 +94,7 @@ proc cCompilerOverrideRemedy*(): string =
   ## How to point reprobuild at a different C compiler for its own compiles.
   "Set " & bootstrapCCompilerEnv & " to the absolute path of a working " &
     (when defined(windows): "64-bit MinGW-w64 gcc.exe"
-     else: "C compiler for this host") &
+     else: "C compiler for this host (under Nix, a wrapped `clang-wrapper-*` or `gcc-wrapper-*` store path, not an unwrapped `clang-*` or `gcc-*` binary)") &
     ", or unset it to use the pinned bootstrap compiler reprobuild " &
     "provisions into its tool store."
 

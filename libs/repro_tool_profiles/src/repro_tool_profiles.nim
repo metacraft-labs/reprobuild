@@ -564,6 +564,11 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
   let deadline = epochTime() + probeTimeoutSeconds.float
   var exitCode = -1
   var timedOut = false
+  # The poll interval starts at 1 ms and doubles to 50 ms. Most probes
+  # (`--version`, the loader's `--verify`) exit within a few milliseconds,
+  # and a flat 50 ms first sleep would make each of them cost 50 ms; the
+  # cap keeps a long probe from spinning.
+  var pollMs = 1
   try:
     while true:
       let code = process.peekExitCode()
@@ -578,7 +583,8 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
         # Reap the now-killed parent so no zombie/handle leaks.
         discard process.waitForExit()
         break
-      sleep(50)
+      sleep(pollMs)
+      pollMs = min(pollMs * 2, 50)
   finally:
     process.close()
 
@@ -2261,7 +2267,39 @@ proc validateTarEntries(archivePath, archiveType: string) =
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
   let tarExe = requireHostTar()
   requireTarDecompressor(tarExe, archivePath, archiveType)
-  let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
+  # The listing below is read through ``execCmdExCloseOnce``, which merges
+  # stderr into stdout, so every line tar prints is checked as an entry name.
+  # GNU tar warns on stderr about pax keywords it does not know — notably the
+  # ``LIBARCHIVE.xattr.*`` keywords macOS ``/usr/bin/tar`` writes for every
+  # file's xattrs (``com.apple.provenance``) — and that line begins with tar's
+  # own absolute path, so the check below refused every macOS-built archive
+  # as "unsafe" (reprobuild-pm issue 2026-10-16-tar-listing-preflight-reads-
+  # tar-warnings-as-archive-entries). Two GNU-only flags keep tar's own
+  # messages out of the listing on the GNU attempt:
+  #
+  #   * ``--warning=none`` silences GNU tar's warning class
+  #     (https://www.gnu.org/software/tar/manual/html_node/warnings.html).
+  #     Warnings never change tar's exit status, and errors are not warnings,
+  #     so a truncated, unreadable or undecompressable archive still exits
+  #     non-zero and is still refused below (GNU tar 1.35: exit 2).
+  #   * ``--absolute-names`` (``-P``): ``Removing leading `/' from member
+  #     names`` is NOT in that warning class and survives ``--warning=none``.
+  #     In list mode ``-P`` only stops that message: tar prints member names
+  #     as stored either way (measured on GNU tar 1.35, an ``/etc/hosts`` and
+  #     a ``../x`` entry list identically with and without it), so an unsafe
+  #     entry still reaches the check below — and the refusal now names the
+  #     entry instead of tar's diagnostic about it.
+  #
+  # Neither flag can hide an entry: they only REMOVE diagnostic lines, and
+  # entry names are on stdout regardless, so the unsafe-entry check is not
+  # weakened. Filtering lines by a ``tar:`` prefix instead would be, because
+  # an entry may be named like that. Reading stdout apart from stderr is the
+  # more general fix, but it needs both pipes drained concurrently (a quiet
+  # stdout with a full stderr pipe deadlocks), which no exec helper here
+  # provides. bsdtar refuses both flags, falls through to the plain attempt
+  # and needs neither: libarchive reads ``LIBARCHIVE.xattr`` natively.
+  let res = runTarTwice(tarExe,
+    ["--force-local", "--warning=none", "--absolute-names"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
       execCmdExCloseOnce(command))
   if res.exitCode != 0:
@@ -3613,13 +3651,35 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
 type
   TarballHostLoaderMissing* = object of OSError
     ## A tarball-realized executable names a dynamic loader (ELF
-    ## ``PT_INTERP``) that does not exist on this host, so the kernel would
-    ## refuse to start it. NixOS is the common case: a generic-Linux binary
-    ## asks for ``/lib64/ld-linux-x86-64.so.2`` and NixOS has no such file.
+    ## ``PT_INTERP``) that cannot start it on this host: the loader does not
+    ## exist, or it exists and refuses (see ``hostLoaderRefusal``). NixOS is
+    ## the common case: a generic-Linux binary asks for
+    ## ``/lib64/ld-linux-x86-64.so.2``, which NixOS either lacks or — since
+    ## 24.05 — fills with ``stub-ld``, a stub that prints a diagnostic and
+    ## exits 127 (https://nix.dev/permalink/stub-ld).
     ## A distinct type so path-mode resolution can fall through to the
     ## package's Nix channel instead of reporting the tarball failure.
+    ##
+    ## The name predates the refusing-loader case and is kept because the
+    ## type is matched by callers and named by the specification.
     loader*: string
+      ## The ``PT_INTERP`` the executable asks for.
     executable*: string
+      ## The realized executable that cannot start.
+    prefix*: string
+      ## The sealed store prefix the executable was realized into. The bytes
+      ## are realized and verified; only this host cannot run them, so a
+      ## caller judging the archive (conformance) keeps inspecting it.
+    probeOutput*: string
+      ## What the loader printed when probed; "" when it does not exist.
+
+  HostLoaderRefusal* = object
+    ## Why this host's dynamic loader cannot start an ELF executable.
+    ## ``reason`` is "" when nothing stands in the way: the file is not a
+    ## dynamically linked ELF, or its loader accepted it.
+    loader*: string
+    reason*: string
+    probeOutput*: string
 
 proc elfProgramInterpreter*(path: string): string =
   ## The ``PT_INTERP`` string of the ELF file at ``path``, or "" when the
@@ -3678,15 +3738,82 @@ proc elfProgramInterpreter*(path: string): string =
     return interp
   ""
 
-proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
-                                       executable: string) =
-  ## Linux only: refuse a realized executable whose dynamic loader is absent
-  ## from this host. Starting it would fail with exit 127 inside whatever
-  ## action first runs it, far from the provisioning decision that caused
-  ## it; refusing here names the tool, the loader and the remedy.
+const LoaderCouldNotStartExitCodes = {126, 127}
+  ## Exit statuses that mean the loader refused to start anything. 127 is
+  ## what NixOS's ``stub-ld`` returns for every invocation
+  ## (https://nix.dev/permalink/stub-ld), and the shell's "command not
+  ## found"; 126 is the shell's "found but cannot execute" (no execute
+  ## permission, or an ELF for another architecture). The probe runs through
+  ## ``/bin/sh -c`` (``runProbe``), so both are what a loader the kernel
+  ## cannot run looks like. A real glibc ``ld.so --verify`` answers 0 (a
+  ## dynamic executable with an interpreter), 2 (a dynamic object without
+  ## one, such as a shared library) or 1 (static, not ELF, or not loadable)
+  ## -- the codes glibc's own ``ldd`` script branches on
+  ## (https://sourceware.org/git/?p=glibc.git;a=blob;f=elf/ldd.bash.in) --
+  ## and a loader that does not know ``--verify`` (musl's) prints its usage
+  ## and exits 1, so none of them is mistaken for a refusal.
+
+proc hostLoaderRefusal*(executable: string): HostLoaderRefusal =
+  ## Whether this host's dynamic loader can start the ELF ``executable``.
+  ##
+  ## Checking that ``PT_INTERP`` exists is not enough. NixOS 24.05 and later
+  ## put ``stub-ld`` at ``/lib64/ld-linux-x86-64.so.2``: the file the
+  ## generic-Linux binary asks for is present, and it refuses every program
+  ## with exit 127 ("NixOS cannot run dynamically linked executables
+  ## intended for generic linux environments out of the box"). So an
+  ## existing loader is asked: ``<loader> --verify <executable>`` is glibc
+  ## ld.so's "can you load this?" query (the one ``ldd`` asks before it
+  ## lists anything), which inspects the object without running it. The
+  ## loader is the one the kernel would run for this executable anyway, so
+  ## probing it executes nothing the realized tool would not. A probe that
+  ## cannot be started, that exits with one of
+  ## ``LoaderCouldNotStartExitCodes``, or that does not answer within
+  ## ``probeTimeoutSeconds`` is a refusal.
+  ##
+  ## The probe goes through ``runProbe``, the bounded launcher every tool
+  ## probe uses, not a blocking exec: a real ld.so answers ``--verify`` at
+  ## once, but ``PT_INTERP`` is whatever path the archive's author wrote,
+  ## and realization must not hang on whatever that path names.
+  ##
+  ## Linux only; elsewhere (and for a static binary, a script or a non-ELF
+  ## payload) the result carries no reason.
   when defined(linux):
-    let loader = elfProgramInterpreter(executable)
-    if loader.len == 0 or fileExists(loader):
+    result.loader = elfProgramInterpreter(executable)
+    if result.loader.len == 0:
+      return
+    if not fileExists(result.loader):
+      result.reason = "which this host does not have"
+      return
+    let probe = runProbe(result.loader, ToolProbeSpec(kind: tpkCapability,
+      name: "loader-verify", args: @["--verify", executable]))
+    result.probeOutput = probe.output
+    if probe.timedOut:
+      result.reason = "which on this host does not answer (`" &
+        result.loader & " --verify` was killed after " &
+        $probeTimeoutSeconds & "s)"
+    elif probe.exitCode == -1:
+      # ``runProbe`` reports a launch failure as -1, its error as output.
+      result.reason = "which this host cannot run (`" & result.loader &
+        " --verify` could not be started: " & probe.output.strip() & ")"
+    elif probe.exitCode in LoaderCouldNotStartExitCodes:
+      let firstLine = probe.output.strip().splitLines()
+      result.reason = "which on this host refuses to start it (`" &
+        result.loader & " --verify` exited " & $probe.exitCode &
+        (if firstLine.len > 0 and firstLine[0].len > 0:
+           ": " & firstLine[0].strip() else: "") & ")"
+  else:
+    discard executable
+
+proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
+                                       executable, prefix: string) =
+  ## Linux only: refuse a realized executable that this host's dynamic
+  ## loader cannot start (``hostLoaderRefusal``). Starting it would fail
+  ## with exit 127 inside whatever action first runs it, far from the
+  ## provisioning decision that caused it; refusing here names the tool,
+  ## the loader and the remedy, and lets path mode fall through to Nix.
+  when defined(linux):
+    let refusal = hostLoaderRefusal(executable)
+    if refusal.reason.len == 0:
       return
     let name =
       if useDef.executableName.len > 0: useDef.executableName
@@ -3694,14 +3821,21 @@ proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
     var err = newException(TarballHostLoaderMissing,
       "tool-resolution failed: the tarball-provisioned `" & name &
       "` (" & executable & ") is a dynamically linked generic-Linux " &
-      "binary that needs the loader " & loader & ", which this host does " &
-      "not have (NixOS and other hosts without an FHS loader cannot run " &
-      "it). Provide `" & name & "` on PATH (e.g. from the project's dev " &
-      "shell), or use Nix provisioning: --tool-provisioning=nix or " &
+      "binary that needs the loader " & refusal.loader & ", " &
+      refusal.reason & " (NixOS without nix-ld, and other hosts " &
+      "without an FHS loader, cannot run it). Provide `" & name &
+      "` on PATH (e.g. from the project's dev shell), or use Nix " &
+      "provisioning: --tool-provisioning=nix or " &
       "REPRO_TOOL_PROVISIONING=nix.")
-    err.loader = loader
+    err.loader = refusal.loader
     err.executable = executable
+    err.prefix = prefix
+    err.probeOutput = refusal.probeOutput
     raise err
+  else:
+    discard useDef
+    discard executable
+    discard prefix
 
 proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
                        prefix, selectedUrl, resolved: string):
@@ -4244,7 +4378,8 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
         "tool-resolution failed: tarball realization " & receiptProbe.reason &
         " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
-  refuseUnrunnableTarballExecutable(useDef, receipt.executable)
+  refuseUnrunnableTarballExecutable(useDef, receipt.executable,
+    receipt.prefix)
   result = tarballProfileFor(useDef, plan, receipt.prefix,
     receipt.selectedUrl, receipt.executable)
   # Not part of the profile fingerprint (see the field), so set after the
@@ -4279,6 +4414,14 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
 # ---------------------------------------------------------------------------
 
 const
+  BootstrapNimVersion* = "2.2.10"
+    ## The Nim release every bootstrap archive below is. The URLs and
+    ## digests are measured for this release, so changing it means
+    ## re-measuring them. Package ids, lock identities and the version the
+    ## records carry (which the ``uses`` range check reads) are spelled from
+    ## it, so they cannot disagree with one another.
+  BootstrapNimPackageId = "nim@" & BootstrapNimVersion
+  BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
     "https://nim-lang.org/download/nim-2.2.10_x64.zip"
   BootstrapNimTarballSha256 =
@@ -4323,7 +4466,7 @@ const
 proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "nim >=2.2 <3.0",
-    packageSelector: "nim@2.2.10",
+    packageSelector: BootstrapNimPackageId,
     executableName: "nim")
   when defined(windows):
     result.tarballProvisioning = @[
@@ -4334,8 +4477,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "zip",
         executablePath: "bin/nim.exe",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:sha256:" & BootstrapNimTarballSha256,
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId & ":sha256:" &
+          BootstrapNimTarballSha256,
         cpu: "x86_64",
         os: "windows")]
   elif defined(macosx):
@@ -4349,8 +4493,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-aarch64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-aarch64:sha256:" &
           BootstrapNimTarballMacosArm64Sha256,
         cpu: "aarch64",
         os: "macos"),
@@ -4363,8 +4508,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-x86_64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-x86_64:sha256:" &
           BootstrapNimTarballMacosX64Sha256,
         cpu: "x86_64",
         os: "macos")]
@@ -4399,9 +4545,19 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "build.sh",
         stripComponents: 1,
-        packageId: "nim-source@2.2.10",
-        lockIdentity: "tarball:nim-source@2.2.10:sha256:" &
+        packageId: BootstrapNimSourcePackageId,
+        lockIdentity: "tarball:" & BootstrapNimSourcePackageId & ":sha256:" &
           BootstrapNimSourceTarballSha256)]
+  # Every record above is the ``BootstrapNimVersion`` release, and says so --
+  # from the constant its package ids are spelled from, so the two cannot
+  # drift apart. Acquisition holds a request to its ``uses`` range
+  # (``selectTarballRecord``'s ``versionRange``) and admits an unversioned
+  # record only for an unversioned request, so these records -- built here
+  # rather than by the ``tarball`` DSL statement, which records ``version``
+  # -- must carry it, or this host's only route refuses the bootstrap's own
+  # ``nim >=2.2 <3.0``.
+  for record in result.tarballProvisioning.mitems:
+    record.detail.version = BootstrapNimVersion
 
 proc bootstrapGccToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -4732,17 +4888,21 @@ when defined(macosx):
         raise newException(OSError, "`/usr/bin/xcrun -f clang` answered " &
           cc & ", a SIP-protected path the build monitor cannot follow")
     result.cc = cc
-    if getEnv("SDKROOT").len == 0:
-      let sdk = uncontrolledExecCmdEx("/usr/bin/xcrun --show-sdk-path",
-        options = {poStdErrToStdOut})
-      let path = lastOutputLine(sdk.output)
-      if sdk.exitCode != 0 or path.len == 0 or
-          not dirExists(extendedPath(path)):
-        raise newException(OSError, "`/usr/bin/xcrun --show-sdk-path` " &
-          "exited " & $sdk.exitCode & (if path.len > 0: ": " & path else: "") &
-          ". Install the Xcode Command Line Tools with " &
-          "`xcode-select --install`, or set SDKROOT.")
-      result.sdk = path
+    if not cc.startsWith("/nix/store/"):
+      let envSdk = getEnv("SDKROOT")
+      if envSdk.len > 0 and dirExists(extendedPath(envSdk)):
+        result.sdk = envSdk
+      else:
+        let sdk = uncontrolledExecCmdEx("/usr/bin/xcrun --show-sdk-path",
+          options = {poStdErrToStdOut})
+        let path = lastOutputLine(sdk.output)
+        if sdk.exitCode != 0 or path.len == 0 or
+            not dirExists(extendedPath(path)):
+          raise newException(OSError, "`/usr/bin/xcrun --show-sdk-path` " &
+            "exited " & $sdk.exitCode & (if path.len > 0: ": " & path else: "") &
+            ". Install the Xcode Command Line Tools with " &
+            "`xcode-select --install`, or set SDKROOT.")
+        result.sdk = path
 else:
   proc resolveXcodeClang(): tuple[cc, sdk: string] =
     raise newException(OSError, "the Xcode route exists only on macOS")
@@ -4929,7 +5089,7 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
   ## The tarball package of Nim ``version``'s pinned source archive. Its
   ## declared executable is ``build.sh``: what the tarball edge must find in
   ## the extracted tree for the build edge to run.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim-source@" & version,
     executableName: "nim",
@@ -4942,6 +5102,9 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
       stripComponents: 1,
       packageId: "nim-source@" & version,
       lockIdentity: "tarball:nim-source@" & version & ":sha256:" & sha256)])
+  # The record is ``version``'s archive; without the version the range check
+  # refuses the ``nim ==<version>`` this use asks for.
+  result.tarballProvisioning[0].detail.version = version
 
 proc nimSourceBuildEdges*(version, url, sha256, storeRoot, cc,
                           sdkRoot: string): ProvisioningEdges =
@@ -5065,7 +5228,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
       if cc.len == 0:
         raise newException(OSError, "there is no bootstrap C compiler to " &
           "build it with")
-      result = buildNimFromSourceThroughEdges("2.2.10",
+      result = buildNimFromSourceThroughEdges(BootstrapNimVersion,
         BootstrapNimSourceTarballUrl, BootstrapNimSourceTarballSha256,
         storeRoot, cc, "")
     if result.len == 0:
@@ -5073,7 +5236,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
   except CatchableError as err:
     raise newException(BootstrapNimError,
       "could not provision the Nim compiler that compiles the recipe" &
-      "\n  package: nim 2.2.10" &
+      "\n  package: nim " & BootstrapNimVersion &
       "\n  route: " & describeBootstrapNimRoute(route) &
       "\n  tool store: " & storeRoot &
       "\n  failure: " & indentDetail(err.msg) &
@@ -5188,7 +5351,7 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
   ## bootstrap's own Windows Nim this is the same selector, URL, digest and
   ## lock identity as ``bootstrapNimToolUse``, so the two share one
   ## tool-store prefix.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim@" & version,
     executableName: "nim",
@@ -5201,6 +5364,10 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
       stripComponents: 1,
       packageId: "nim@" & version,
       lockIdentity: "tarball:nim@" & version & ":sha256:" & sha256)])
+  # The record is ``version``'s archive; without the version the range check
+  # refuses the ``nim ==<version>`` this use asks for (as in
+  # ``nimSourceToolUse``).
+  result.tarballProvisioning[0].detail.version = version
 
 type
   PinnedNimRealization* = object

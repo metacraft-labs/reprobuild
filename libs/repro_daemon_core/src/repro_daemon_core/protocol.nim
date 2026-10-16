@@ -66,6 +66,9 @@ proc userDaemonFeatureDescription*(name: string): string =
     "binary-cache substitution served by the daemon (multi-user mode)"
   of "lease-registry":
     "the ephemeral-state lease registry (lease renewals)"
+  of "service-instance-registry":
+    "sharing development service instances between sessions " &
+      "(`repro up` / `repro down` converge on and release them)"
   else: unknownUserDaemonFeatureDescription(name)
 
 proc sanitizeUserDaemonRequestEnvironment*(

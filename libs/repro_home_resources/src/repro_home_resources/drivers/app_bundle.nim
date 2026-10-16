@@ -24,6 +24,14 @@
 ##   nothing. A bundle at the target path that Reprobuild did not place is
 ##   never overwritten.
 ##
+## The PLACED ITEM is usually the bundle itself. An installer application's
+## product can instead be a bundle inside a FOLDER of the installed prefix
+## (``OpenWebStart/OpenWebStart javaws.app``); the folder is then the placed
+## item, copied and removed as a whole, and its identity is the folder
+## identity (``readPlacedItemIdentityBytes``): the identities of the bundles
+## directly in it. Store-And-Installation-Layout.md § Installer applications,
+## "Activation".
+##
 ## Every tool runs from its absolute ``/usr/bin`` / ``/usr/sbin`` path:
 ## a Nix dev shell can put ``sigtool``'s minimal ``codesign`` first on
 ## ``PATH``, and it does not implement ``--verify --deep`` or ``-R``.
@@ -38,7 +46,7 @@
 ## * spctl(8); "Notarizing macOS software before distribution" —
 ##   https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution
 
-import std/[os, osproc, strutils, streams]
+import std/[algorithm, os, osproc, strutils, streams]
 from repro_core/ambient_execution import uncontrolledStartProcess
 
 const
@@ -52,6 +60,12 @@ const
     ## First line of the canonical identity bytes; bump when the set of
     ## identity fields changes so an old recorded binding never compares
     ## equal to a new observation by accident.
+  AppFolderIdentityFormat* = "macos.appFolder.v1"
+    ## First line of a FOLDER's identity bytes (a placed item that holds
+    ## bundles rather than being one; Store-And-Installation-Layout.md
+    ## § Installer applications, "Activation"). Distinct from
+    ## ``AppBundleIdentityFormat``, so a folder never compares equal to a
+    ## bundle.
 
 type
   AppTrustRelaxation* = enum
@@ -170,6 +184,11 @@ proc plistString(plist, key: string): string =
     return ""
   res.output.strip(leading = false, chars = {'\n', '\r'})
 
+proc appBundleExecutableName*(bundlePath: string): string =
+  ## The bundle's ``CFBundleExecutable`` ("" when absent or empty; macOS
+  ## then uses the bundle's directory name).
+  plistString(bundlePath / "Contents" / "Info.plist", "CFBundleExecutable")
+
 proc isValidTeamId*(teamId: string): bool =
   ## Apple team identifiers are ten upper-case letters and digits. Checked
   ## before the value is spliced into a code requirement.
@@ -207,20 +226,101 @@ proc readAppBundleIdentity*(bundlePath: string): AppBundleIdentity =
     elif line.startsWith("Authority="):
       result.authority.add(line["Authority=".len .. ^1])
 
+proc appBundleIdentityFields(identity: AppBundleIdentity): string =
+  ## The identity field lines shared by a bundle's and a folder's identity
+  ## bytes: identifier, both versions, team, code-directory hash.
+  "bundleId=" & identity.bundleId & "\n" &
+    "shortVersion=" & identity.shortVersion & "\n" &
+    "bundleVersion=" & identity.bundleVersion & "\n" &
+    "teamId=" & identity.teamId & "\n" &
+    "cdhash=" & identity.cdhash & "\n"
+
+proc bytesOfText(text: string): seq[byte] =
+  result = newSeq[byte](text.len)
+  for i, ch in text:
+    result[i] = byte(ord(ch))
+
 proc appBundleCanonicalBytes*(identity: AppBundleIdentity): seq[byte] =
   ## The bytes the resource lifecycle digests and records for a placed
   ## bundle. Two bundles with the same canonical bytes carry the same signed
   ## code directory, so the comparison is a content comparison of what the
   ## signature seals, without hashing hundreds of megabytes on every apply.
-  let text = AppBundleIdentityFormat & "\n" &
-    "bundleId=" & identity.bundleId & "\n" &
-    "shortVersion=" & identity.shortVersion & "\n" &
-    "bundleVersion=" & identity.bundleVersion & "\n" &
-    "teamId=" & identity.teamId & "\n" &
-    "cdhash=" & identity.cdhash & "\n"
-  result = newSeq[byte](text.len)
-  for i, ch in text:
-    result[i] = byte(ord(ch))
+  bytesOfText(AppBundleIdentityFormat & "\n" &
+    appBundleIdentityFields(identity))
+
+proc isAppBundleName*(name: string): bool =
+  ## A placed item named ``<Name>.app`` is a bundle; any other name is a
+  ## folder holding bundles.
+  name.endsWith(".app")
+
+proc placedItemOf*(appBundle: string): tuple[item, mainBundle: string] =
+  ## The placed item of an installer application whose product bundle is
+  ## ``appBundle`` (a path in the installed prefix), and the product
+  ## bundle's path inside it: the bundle itself for a one-component path
+  ## (``mainBundle`` ""), otherwise the first component -- the folder holding
+  ## the product -- and the rest (Store-And-Installation-Layout.md
+  ## § Installer applications, "Declaring it").
+  let parts = appBundle.replace('\\', '/').split('/')
+  if parts.len == 1:
+    (parts[0], "")
+  else:
+    (parts[0], parts[1 .. ^1].join("/"))
+
+proc installerProductPathError*(appBundle: string): string =
+  ## "" when ``appBundle`` is a valid product-bundle path of an installer
+  ## application, otherwise why it is not (Store-And-Installation-Layout.md
+  ## § Installer applications, "Declaring it"): a relative ``/``-separated
+  ## path of ONE or TWO components, none empty, ``.``, ``..`` or hidden,
+  ## naming a ``.app``; with two, the first (the placed folder) is not itself
+  ## a ``.app``. Two at most because the folder identity covers only the
+  ## bundles DIRECTLY in the placed folder: a product nested deeper would be
+  ## launched from bytes the recorded identity does not pin.
+  if appBundle.len == 0 or appBundle.startsWith("/") or '\\' in appBundle:
+    return "it must be a relative '/'-separated path"
+  let parts = appBundle.split('/')
+  if parts.len > 2:
+    return "it has " & $parts.len & " components; it names the product " &
+      "bundle (one component) or the folder holding it and the bundle (two)"
+  for part in parts:
+    if part.len == 0 or part == "." or part == ".." or part.startsWith("."):
+      return "it has an empty, '.', '..' or hidden component"
+  if not parts[^1].endsWith(".app"):
+    return "it must name a .app bundle"
+  if parts.len == 2 and parts[0].endsWith(".app"):
+    return "its first component is the placed item, which holds the " &
+      "product bundle and must not itself be a .app bundle"
+  ""
+
+proc topLevelBundles*(folder: string): seq[string] =
+  ## The names of the ``.app`` bundles directly in ``folder``, in byte order
+  ## (the order of the folder identity). A symlink named ``*.app`` is not a
+  ## bundle of the folder: it is not followed, so it cannot pull a bundle
+  ## from elsewhere into the identity.
+  for kind, name in walkDir(folder, relative = true):
+    if kind == pcDir and isAppBundleName(name):
+      result.add(name)
+  result.sort(system.cmp[string])
+
+proc readPlacedItemIdentityBytes*(itemPath: string): seq[byte] =
+  ## The identity bytes of a placed item, which the resource lifecycle
+  ## records and compares: for a bundle (``<Name>.app``) exactly
+  ## ``appBundleCanonicalBytes`` -- so every bundle placed before folders
+  ## existed keeps its recorded identity -- and for a folder the folder
+  ## identity: ``macos.appFolder.v1``, then for each bundle directly in the
+  ## folder in byte order of its name a ``bundle=<name>`` line followed by
+  ## that bundle's identity fields. Files outside a bundle's signature are
+  ## not part of it (Store-And-Installation-Layout.md § Installer
+  ## applications, "Activation"). Raises ``EAppBundleRefused`` (check
+  ## ``info-plist``) when the item is not a readable bundle or folder.
+  if isAppBundleName(extractFilename(itemPath)):
+    return appBundleCanonicalBytes(readAppBundleIdentity(itemPath))
+  if symlinkExists(itemPath) or not dirExists(itemPath):
+    refuse(itemPath, "info-plist", "not a folder of application bundles")
+  var text = AppFolderIdentityFormat & "\n"
+  for name in topLevelBundles(itemPath):
+    text.add("bundle=" & name & "\n" &
+      appBundleIdentityFields(readAppBundleIdentity(itemPath / name)))
+  bytesOfText(text)
 
 # ---------------------------------------------------------------------------
 # Verification
@@ -236,45 +336,41 @@ proc developerIdRequirement*(teamId: string): string =
     "exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists " &
     "and certificate leaf[subject.OU] = \"" & teamId & "\""
 
-proc verifyAppBundle*(bundlePath: string; expected: AppBundleExpectation;
-                      policy: AppTrustPolicy = {}): AppBundleIdentity =
-  ## Every trust check, in order; the first failure raises
-  ## ``EAppBundleRefused`` naming the check. Returns the bundle's identity.
-  if not isValidTeamId(expected.teamId):
+proc refuseInvalidTeamId(bundlePath, teamId: string) =
+  if not isValidTeamId(teamId):
     refuse(bundlePath, "team-id", "the contribution declares team id " &
-      expected.teamId.escape & ", which is not a 10-character Apple team " &
+      teamId.escape & ", which is not a 10-character Apple team " &
       "identifier; a contribution must declare the team that signs the app")
-  result = readAppBundleIdentity(bundlePath)
-  if expected.bundleId.len == 0 or result.bundleId != expected.bundleId:
-    refuse(bundlePath, "bundle-id", "CFBundleIdentifier is " &
-      result.bundleId.escape & ", the contribution declares " &
-      expected.bundleId.escape)
-  if expected.version.len > 0 and result.shortVersion != expected.version:
-    refuse(bundlePath, "version", "CFBundleShortVersionString is " &
-      result.shortVersion.escape & ", the contribution declares " &
-      expected.version.escape)
-  # Integrity of the whole bundle: every nested code object and every sealed
-  # resource. --strict also rejects symlinks that leave the bundle and
-  # unsealed additions.
+
+proc verifySignatureIntegrity*(bundlePath: string) =
+  ## Trust check 2: integrity of the whole bundle -- every nested code
+  ## object and every sealed resource. ``--strict`` also rejects symlinks
+  ## that leave the bundle and unsealed additions.
   let verify = runTool(CodesignExe,
     ["--verify", "--deep", "--strict", "--verbose=2", bundlePath])
   if verify.exitCode != 0:
     refuse(bundlePath, "signature", "codesign --verify --deep --strict " &
       "failed:\n" & verify.output.strip())
-  if result.teamId != expected.teamId:
+
+proc verifyTeamSignature(bundlePath: string; identity: AppBundleIdentity;
+                         teamId: string; policy: AppTrustPolicy) =
+  ## Trust checks 2 to 5 against ``teamId``: signature integrity, the
+  ## signing team, the Developer ID chain proving it, and notarization.
+  verifySignatureIntegrity(bundlePath)
+  if identity.teamId != teamId:
     refuse(bundlePath, "team-id", "signed by team " &
-      (if result.teamId.len > 0: result.teamId else: "<none>") &
-      ", the contribution declares " & expected.teamId)
+      (if identity.teamId.len > 0: identity.teamId else: "<none>") &
+      ", the contribution declares " & teamId)
   if atrUnanchoredTeamIdentifier notin policy:
     # The TeamIdentifier above is a claim inside the signature; an ad-hoc
     # signature can carry any value. The requirement test proves it through
     # Apple's certificate chain.
     let req = runTool(CodesignExe, ["--verify", "--strict",
-      "-R=" & developerIdRequirement(expected.teamId), bundlePath])
+      "-R=" & developerIdRequirement(teamId), bundlePath])
     if req.exitCode != 0:
       refuse(bundlePath, "developer-id", "the signature does not chain to " &
         "an Apple Developer ID Application certificate of team " &
-        expected.teamId & ":\n" & req.output.strip())
+        teamId & ":\n" & req.output.strip())
   if atrSkipNotarization notin policy:
     let assess = runTool(SpctlExe,
       ["--assess", "--type", "execute", "-vv", bundlePath])
@@ -287,6 +383,34 @@ proc verifyAppBundle*(bundlePath: string; expected: AppBundleExpectation;
              "notarization cannot be established; re-enable them with " &
              "`spctl --global-enable`)"
          else: "") & ":\n" & assess.output.strip())
+
+proc verifyAppBundle*(bundlePath: string; expected: AppBundleExpectation;
+                      policy: AppTrustPolicy = {}): AppBundleIdentity =
+  ## Every trust check, in order; the first failure raises
+  ## ``EAppBundleRefused`` naming the check. Returns the bundle's identity.
+  refuseInvalidTeamId(bundlePath, expected.teamId)
+  result = readAppBundleIdentity(bundlePath)
+  if expected.bundleId.len == 0 or result.bundleId != expected.bundleId:
+    refuse(bundlePath, "bundle-id", "CFBundleIdentifier is " &
+      result.bundleId.escape & ", the contribution declares " &
+      expected.bundleId.escape)
+  if expected.version.len > 0 and result.shortVersion != expected.version:
+    refuse(bundlePath, "version", "CFBundleShortVersionString is " &
+      result.shortVersion.escape & ", the contribution declares " &
+      expected.version.escape)
+  verifyTeamSignature(bundlePath, result, expected.teamId, policy)
+
+proc verifyAppBundleTeam*(bundlePath, teamId: string;
+                          policy: AppTrustPolicy = {}): AppBundleIdentity =
+  ## Trust checks 2 to 5 against ``teamId`` for a bundle that declares no
+  ## identifier or version of its own: an installer application (pinned by
+  ## its archive's sha256) and the other bundles an installer produced
+  ## (Store-And-Installation-Layout.md § Installer applications). Check 1
+  ## only requires ``Contents/Info.plist``. ``policy`` relaxes checks 4 and
+  ## 5 exactly as for ``verifyAppBundle``.
+  refuseInvalidTeamId(bundlePath, teamId)
+  result = readAppBundleIdentity(bundlePath)
+  verifyTeamSignature(bundlePath, result, teamId, policy)
 
 # ---------------------------------------------------------------------------
 # Placement
@@ -347,6 +471,17 @@ proc copyBundle*(source, dest: string) =
     e.targetPath = dest
     raise e
 
+proc refuseIdentityMismatch(path: string; observed: seq[byte];
+                            pinned: openArray[byte]) =
+  if observed.len != pinned.len or observed != @pinned:
+    var observedText = newString(observed.len)
+    for i, b in observed: observedText[i] = char(b)
+    var pinnedText = newString(pinned.len)
+    for i, b in pinned: pinnedText[i] = char(b)
+    refuse(path, "identity", "the bundle is not the one the " &
+      "generation recorded.\nrecorded:\n" & pinnedText & "observed:\n" &
+      observedText)
+
 proc verifyPinnedAppBundle*(bundlePath: string;
                             pinned: openArray[byte]): AppBundleIdentity =
   ## Verify ``bundlePath`` against identity bytes a generation recorded when
@@ -358,20 +493,24 @@ proc verifyPinnedAppBundle*(bundlePath: string;
   ## so rollback re-places a bundle without re-running the anchor and
   ## notarization checks.
   result = readAppBundleIdentity(bundlePath)
-  let verify = runTool(CodesignExe,
-    ["--verify", "--deep", "--strict", "--verbose=2", bundlePath])
-  if verify.exitCode != 0:
-    refuse(bundlePath, "signature", "codesign --verify --deep --strict " &
-      "failed:\n" & verify.output.strip())
-  let observed = appBundleCanonicalBytes(result)
-  if observed.len != pinned.len or observed != @pinned:
-    var observedText = newString(observed.len)
-    for i, b in observed: observedText[i] = char(b)
-    var pinnedText = newString(pinned.len)
-    for i, b in pinned: pinnedText[i] = char(b)
-    refuse(bundlePath, "identity", "the bundle is not the one the " &
-      "generation recorded.\nrecorded:\n" & pinnedText & "observed:\n" &
-      observedText)
+  verifySignatureIntegrity(bundlePath)
+  refuseIdentityMismatch(bundlePath, appBundleCanonicalBytes(result), pinned)
+
+proc verifyPinnedPlacedItem*(itemPath: string; pinned: openArray[byte]) =
+  ## ``verifyPinnedAppBundle`` for any placed item. A folder is verified
+  ## against the folder identity a generation recorded: check 2 on every
+  ## bundle directly in it, and byte-equal folder identity bytes, which carry
+  ## each bundle's code-directory hash -- what rollback needs to re-place a
+  ## folder without re-running the anchor and notarization checks
+  ## (Store-And-Installation-Layout.md § Installer applications,
+  ## "Activation").
+  if isAppBundleName(extractFilename(itemPath)):
+    discard verifyPinnedAppBundle(itemPath, pinned)
+    return
+  let observed = readPlacedItemIdentityBytes(itemPath)
+  for name in topLevelBundles(itemPath):
+    verifySignatureIntegrity(itemPath / name)
+  refuseIdentityMismatch(itemPath, observed, pinned)
 
 type
   StagedAppBundle* = object
@@ -381,7 +520,12 @@ type
     ## until then the target is exactly as it was.
     target*: string            ## ``applicationsDir / bundleName``
     identity*: AppBundleIdentity
-      ## What the staged copy carries (verified).
+      ## What the staged copy carries (verified): the bundle's identity, or
+      ## for a folder its product bundle's (empty when a folder was staged
+      ## against pinned bytes alone, as rollback does).
+    itemIdentity*: seq[byte]
+      ## ``readPlacedItemIdentityBytes`` of the staged copy: what the
+      ## resource lifecycle records for the placed item.
     applicationsDir: string
     stagingDir: string         ## private directory holding the staged copy
     retiredDir: string         ## where a replaced bundle is moved aside
@@ -407,11 +551,44 @@ proc discardStagedAppBundle*(staged: StagedAppBundle) =
   try: removeTree(staged.stagingDir) except CatchableError: discard
   dropDirIfCreatedAndEmpty(staged)
 
+proc invalidPlacement(target, msg: string) {.noreturn.} =
+  var e = newException(EAppBundlePlacement, msg)
+  e.targetPath = target
+  raise e
+
+proc validMainBundlePath(mainBundle: string): bool =
+  ## A product bundle's path inside a placed folder: ONE component naming a
+  ## ``.app`` directly in the folder, because the folder identity covers
+  ## only the bundles directly in it (``installerProductPathError``).
+  mainBundle.len > 0 and '/' notin mainBundle and '\\' notin mainBundle and
+    mainBundle != "." and mainBundle != ".." and
+    not mainBundle.startsWith(".") and mainBundle.endsWith(".app")
+
+proc verifyStagedFolder(staging, mainBundle: string;
+                        expected: AppBundleExpectation;
+                        policy: AppTrustPolicy): AppBundleIdentity =
+  ## A staged FOLDER (Store-And-Installation-Layout.md § Installer
+  ## applications, "Activation"): its product bundle passes trust checks 1
+  ## to 5 and every other bundle directly in it check 2. The product bundle
+  ## is reached without crossing a symlink, so the checks run on the bytes
+  ## that will be launched.
+  var walked = staging
+  for part in mainBundle.split('/'):
+    walked = walked / part
+    if symlinkExists(walked):
+      refuse(walked, "info-plist", "the product bundle path " &
+        mainBundle.escape & " crosses a symlink")
+  result = verifyAppBundle(staging / mainBundle, expected, policy)
+  for name in topLevelBundles(staging):
+    if name != mainBundle:
+      verifySignatureIntegrity(staging / name)
+
 proc stageAppBundle*(source, applicationsDir, bundleName: string;
                      expected: AppBundleExpectation;
                      policy: AppTrustPolicy = {};
                      managedPrior = false;
-                     pinned: seq[byte] = @[]): StagedAppBundle =
+                     pinned: seq[byte] = @[];
+                     mainBundle = ""): StagedAppBundle =
   ## The first half of ``placeAppBundle``: copy ``source`` beside
   ## ``applicationsDir / bundleName`` and verify the copy, without touching
   ## the target. Raises (``EAppBundleCollision``, ``EAppBundleRefused``,
@@ -419,16 +596,31 @@ proc stageAppBundle*(source, applicationsDir, bundleName: string;
   ## no Applications directory this call created. Verification is as
   ## documented on ``placeAppBundle``.
   ##
+  ## ``bundleName`` is the placed item: ``<Name>.app``, or a folder name
+  ## (an installer application's product folder), in which case
+  ## ``mainBundle`` is the product bundle's path inside it that
+  ## ``expected`` describes. Rollback stages a folder with an empty
+  ## ``expected`` and the recorded ``pinned`` bytes alone, and needs no
+  ## ``mainBundle``.
+  ##
   ## A caller placing several bundles stages them all first and commits
   ## only when every one verified, so a refusal of any bundle changes none
   ## (rollback does this). Each bundle has its own staging directory, so
   ## several can be staged into one Applications directory at once.
   if bundleName.len == 0 or '/' in bundleName or bundleName == "." or
-      bundleName == ".." or not bundleName.endsWith(".app"):
-    var e = newException(EAppBundlePlacement, "invalid bundle name " &
-      bundleName.escape)
-    e.targetPath = applicationsDir / bundleName
-    raise e
+      bundleName == ".." or bundleName.startsWith("."):
+    invalidPlacement(applicationsDir / bundleName,
+      "invalid placed-item name " & bundleName.escape)
+  let isFolder = not isAppBundleName(bundleName)
+  let pinnedOnly = expected.teamId.len == 0 and pinned.len > 0
+  if not isFolder and mainBundle.len > 0:
+    invalidPlacement(applicationsDir / bundleName, "bundle " &
+      bundleName.escape & " is placed as itself; it has no product bundle " &
+      "path (got " & mainBundle.escape & ")")
+  if isFolder and not pinnedOnly and not validMainBundlePath(mainBundle):
+    invalidPlacement(applicationsDir / bundleName, "folder " &
+      bundleName.escape & " needs its product bundle, the name of a " &
+      ".app directly in it (got " & mainBundle.escape & ")")
   let target = applicationsDir / bundleName
   if pathPresent(target) and not managedPrior:
     var e = newException(EAppBundleCollision, target.escape & " already " &
@@ -444,7 +636,7 @@ proc stageAppBundle*(source, applicationsDir, bundleName: string;
   # directories are per bundle so that several bundles can be staged at
   # once.
   let workRoot = applicationsDir / (".repro-" & $getCurrentProcessId() &
-    "-" & bundleName.changeFileExt(""))
+    "-" & (if isFolder: bundleName else: bundleName.changeFileExt("")))
   result = StagedAppBundle(target: target, applicationsDir: applicationsDir,
     stagingDir: workRoot & ".staging", retiredDir: workRoot & ".old",
     createdDir: not dirExists(applicationsDir))
@@ -456,12 +648,23 @@ proc stageAppBundle*(source, applicationsDir, bundleName: string;
     createDir(result.stagingDir)
     copyBundle(source, staging)
     makeOwnerWritable(staging)
-    if expected.teamId.len == 0 and pinned.len > 0:
-      result.identity = verifyPinnedAppBundle(staging, pinned)
+    if not isFolder:
+      if pinnedOnly:
+        result.identity = verifyPinnedAppBundle(staging, pinned)
+      else:
+        result.identity = verifyAppBundle(staging, expected, policy)
+        if pinned.len > 0:
+          discard verifyPinnedAppBundle(staging, pinned)
+      result.itemIdentity = appBundleCanonicalBytes(result.identity)
+    elif pinnedOnly:
+      verifyPinnedPlacedItem(staging, pinned)
+      result.itemIdentity = pinned
     else:
-      result.identity = verifyAppBundle(staging, expected, policy)
+      result.identity = verifyStagedFolder(staging, mainBundle, expected,
+        policy)
+      result.itemIdentity = readPlacedItemIdentityBytes(staging)
       if pinned.len > 0:
-        discard verifyPinnedAppBundle(staging, pinned)
+        refuseIdentityMismatch(staging, result.itemIdentity, pinned)
   except CatchableError:
     discardStagedAppBundle(result)
     raise
@@ -500,7 +703,8 @@ proc placeAppBundle*(source, applicationsDir, bundleName: string;
                      expected: AppBundleExpectation;
                      policy: AppTrustPolicy = {};
                      managedPrior = false;
-                     pinned: seq[byte] = @[]): AppBundleIdentity =
+                     pinned: seq[byte] = @[];
+                     mainBundle = ""): AppBundleIdentity =
   ## Place ``source`` (a verified bundle in the store) at
   ## ``applicationsDir / bundleName``.
   ##
@@ -519,8 +723,14 @@ proc placeAppBundle*(source, applicationsDir, bundleName: string;
   ## to verify against the recorded identity alone
   ## (``verifyPinnedAppBundle``). ``stageAppBundle`` followed by
   ## ``commitStagedAppBundle``.
+  ##
+  ## A FOLDER placed item (``bundleName`` not ending in ``.app``; an
+  ## installer application's product folder) is placed as a whole: its
+  ## product bundle ``mainBundle`` passes ``verifyAppBundle``, every other
+  ## bundle directly in it passes check 2, and ``pinned`` is compared with
+  ## the folder identity (``readPlacedItemIdentityBytes``).
   commitStagedAppBundle(stageAppBundle(source, applicationsDir, bundleName,
-    expected, policy, managedPrior, pinned))
+    expected, policy, managedPrior, pinned, mainBundle))
 
 proc removeAppBundle*(targetPath: string) =
   ## Remove a bundle Reprobuild placed. The caller has established

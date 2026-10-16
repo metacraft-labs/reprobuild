@@ -402,6 +402,93 @@ proc checkCertificateDeclarations(buildBody: NimNode) =
           exported.call.lineInfo & ": a certificate name is a target " &
           "name, so it must name the same node or a new name", cert.call)
 
+proc hasComputedCertificateName(node: NimNode): bool =
+  ## Whether a ``build:`` body declares a ``certificate`` whose name is not
+  ## a string literal: its name is known only when the body runs.
+  if node.kind in {nnkCall, nnkCommand} and node.len >= 2 and
+      node[0].kind in {nnkIdent, nnkSym} and node[0].eqIdent("certificate") and
+      node[1].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return true
+  for child in node:
+    if hasComputedCertificateName(child):
+      return true
+
+proc emitEnactedCertificatePolicy(packageName: string; body: NimNode):
+    NimNode =
+  ## Test-Certificates TC-9b: lower ``enactCertificatePolicy <policy>``.
+  ##
+  ## * At most once per package; a second one is a compile error naming the
+  ##   first.
+  ## * The policy must be a compile-time value (``const``): it is data, and
+  ##   ``repro.lock`` records it as data.
+  ## * Every certificate a rule requires must be declared by this package
+  ##   (``certificate "<name>", <node>`` in ``build:``). The literal
+  ##   declarations are checked HERE, so a missing one fails the provider
+  ##   compile naming the rule, its branch pattern and the name. ``test``
+  ##   (which may be the implicit marking, D15) and packages that compute a
+  ##   certificate name are checked when the body runs instead
+  ##   (``buildPackageFragment``).
+  ## * At module initialisation the policy is registered for the package and,
+  ##   in the provider's main module, emitted for the lock writer.
+  result = newStmtList()
+  var enact: NimNode = nil
+  for stmt in body:
+    if stmt.kind in {nnkCall, nnkCommand} and stmt.len >= 1 and
+        stmt[0].kind in {nnkIdent, nnkSym} and
+        stmt[0].eqIdent("enactCertificatePolicy"):
+      if stmt.len != 2:
+        error("enactCertificatePolicy takes one policy: " &
+          "`enactCertificatePolicy <policy>`", stmt)
+      if not enact.isNil:
+        error("enactCertificatePolicy may appear at most once per package; " &
+          "it is already enacted at " & enact.lineInfo, stmt)
+      enact = stmt
+  if enact.isNil:
+    return
+  var policyExpr = enact[1]
+  if policyExpr.kind == nnkStmtList and policyExpr.len == 1:
+    policyExpr = policyExpr[0]
+  let buildBody = collectBuildStatements(body, packageName)
+  var certificates: seq[CertificateSourceDecl] = @[]
+  var exports: seq[ExportSourceDecl] = @[]
+  collectCertificateSourceDecls(buildBody, "", certificates, exports)
+  var declared = newTree(nnkBracket)
+  for cert in certificates:
+    declared.add(newLit(cert.name))
+  let deferred = newTree(nnkBracket, newLit(implicitCertificateName))
+  let policyConst = genSym(nskConst, "reproEnactedCertificatePolicy")
+  let checkConst = genSym(nskConst, "reproCertificatePolicyCheck")
+  let policyType = bindSym"BranchCertificatePolicy"
+  let undeclared = bindSym"undeclaredRequirement"
+  let register = bindSym"registerEnactedCertificatePolicy"
+  let relativeTo = bindSym"withDeclaredInRelativeTo"
+  let pkgLit = newLit(packageName)
+  # The recipe's own directory, so the policy's declaring file is recorded
+  # relative to it: a compiled provider is reused for every copy of an
+  # identical recipe tree, so an absolute path would name another checkout.
+  let recipeDir = newLit(enact.lineInfoObj.filename.parentDir)
+  # The const is what makes "a policy is data" enforced: a `let` policy, or
+  # one built from a runtime call, does not compile here.
+  # Two steps: the type annotation on the first is what resolves a name that
+  # is also a module (`teamPolicy` and `import .../team_policy` are one
+  # identifier to Nim) to the policy value.
+  let declaredConst = genSym(nskConst, "reproDeclaredCertificatePolicy")
+  result.add(quote do:
+    const `declaredConst`: `policyType` = `policyExpr`
+    const `policyConst`: `policyType` = `relativeTo`(`declaredConst`,
+      `recipeDir`))
+  if not hasComputedCertificateName(buildBody):
+    let errorPragma = newTree(nnkPragma,
+      newColonExpr(ident("error"), checkConst))
+    errorPragma.copyLineInfo(enact)
+    result.add(quote do:
+      const `checkConst` = `undeclared`(`policyConst`, `declared`,
+        `deferred`)
+      when `checkConst`.len > 0:
+        `errorPragma`)
+  result.add(quote do:
+    `register`(`pkgLit`, `policyConst`, isMainModule))
+
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let buildBody = collectBuildStatements(body, pkg.packageName)
   checkCertificateDeclarations(buildBody)
@@ -3740,7 +3827,10 @@ proc dss10RefuseRegistrationWithoutReadiness(packageName, serviceName: string;
     "REGISTRATION RESOURCE ordered on this service. " &
     dss10DegradationRule & " " & dss10ReadinessRemedy, anchor)
 
-proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
+proc m5ServiceEmission(packageName: string; stmt: NimNode;
+                       contributionPoints:
+                         seq[tuple[bareName, key: string]] = @[]):
+    NimNode =
   ## Lower ONE ``service <name>:`` statement to its wrap-and-register
   ## block, or return ``nil`` when ``stmt`` is not a recognised service
   ## entry.
@@ -3806,8 +3896,40 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
     tryBody.add(quote do:
       addActiveServiceConvergePoint(`pointLit`))
   for argExpr in parsedBody.argExprs:
-    tryBody.add(quote do:
-      addActiveServiceArg(`argExpr`))
+    # Shared-Development-Services, reprobuild issue #498: `args <point>`
+    # where `<point>` is a bare identifier naming an ordered-collection
+    # `config:` key of the ENCLOSING activity (or of the package, at
+    # package level) emits a DEFERRED slot instead of the folded
+    # tokens.
+    #
+    # WHY THE MACRO AND NOT THE RUNTIME. `addActiveServiceArg` receives
+    # a `seq[string]`; the key it came from is gone by then, and a
+    # runtime that guessed the key by matching the value against every
+    # point's current fold would be the "assertion satisfied by the
+    # wrong text" shape in executable form -- two points folding to the
+    # same members would be indistinguishable. The macro is the only
+    # place that still has the author's own identifier.
+    #
+    # The EAGER value is passed too, and `addActiveServiceArgPoint`
+    # documents what it is for: an `enable <activity>(<point> = ...)`
+    # site supplies the argument explicitly and the parameter default
+    # -- the read of the fold -- is never evaluated, so deferring such
+    # a value would let a later contribution overwrite an explicit
+    # argument.
+    var pointKey = ""
+    if argExpr.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      let bare = identText(argExpr).normalize
+      for point in contributionPoints:
+        if point.bareName.normalize == bare:
+          pointKey = point.key
+          break
+    if pointKey.len > 0:
+      let keyLit = newLit(pointKey)
+      tryBody.add(quote do:
+        addActiveServiceArgPoint(`keyLit`, `argExpr`))
+    else:
+      tryBody.add(quote do:
+        addActiveServiceArg(`argExpr`))
   for fileExpr in parsedBody.runtimeFileExprs:
     tryBody.add(quote do:
       addActiveServiceRuntimeFile(`fileExpr`))
@@ -4004,10 +4126,27 @@ proc emitM5Services*(packageName: string;
   ## The per-entry lowering itself lives in ``m5ServiceEmission``, which
   ## L2's dev-env ``activity`` walker shares.
   result = newStmtList()
+  # Shared-Development-Services #498: the PACKAGE-LEVEL contribution
+  # points, so `args <point>` in a package-level `service` body defers
+  # exactly as it does in an activity's. Collected here rather than
+  # inside `m5ServiceEmission` because the emitter is shared with L2's
+  # dev-env walker, which has a DIFFERENT key shape
+  # (`<pkg>.<activity>.<name>` against `<pkg>.<name>`) -- one emitter,
+  # two callers, each supplying its own key.
+  var packagePoints: seq[tuple[bareName, key: string]] = @[]
+  for entry in classified:
+    if entry.ownership != soM2Config:
+      continue
+    if entry.stmt.len < 2:
+      continue
+    for cfg in collectM2ConfigEntries(entry.stmt[entry.stmt.len - 1]):
+      if m2TypeReprIsOrderedCollection(cfg.typeNode.repr):
+        packagePoints.add((bareName: cfg.name,
+          key: packageName & "." & cfg.name))
   for entry in classified:
     if entry.ownership != soM5Service:
       continue
-    let emission = m5ServiceEmission(packageName, entry.stmt)
+    let emission = m5ServiceEmission(packageName, entry.stmt, packagePoints)
     if emission == nil:
       continue
     result.add(emission)
@@ -4722,13 +4861,24 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
     formal.add(nnkIdentDefs.newTree(ident(c.name), c.typeNode.copyNimTree(),
       default))
 
+  # Shared-Development-Services #498: this activity's ordered-collection
+  # `config:` keys, fully qualified. `args <point>` inside one of this
+  # activity's `service` bodies lowers to a DEFERRED slot filled at
+  # finalization, so a contribution made by ANOTHER activity's body
+  # reaches the command line whichever order the two are declared in.
+  var activityPoints: seq[tuple[bareName, key: string]] = @[]
+  for c in config:
+    if m2TypeReprIsOrderedCollection(c.typeNode.repr):
+      activityPoints.add((bareName: c.name,
+        key: packageName & "." & parsed.activityName & "." & c.name))
+
   let procBody = newStmtList()
   procBody.add(l2MemberCheckStmts(parsed.activityName, params, parsed.body))
   for entry in parsed.body:
     if l2IsHeadNamed(entry, "config"):
       continue
     if l2IsHeadNamed(entry, "service"):
-      let emission = m5ServiceEmission(packageName, entry)
+      let emission = m5ServiceEmission(packageName, entry, activityPoints)
       if emission != nil:
         procBody.add(emission)
         continue
@@ -9557,6 +9707,9 @@ macro packageImpl*(name: untyped;
   let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
   # ── Named-Lock-Files NLF-M7: §4.9's compile error, §4.3's registration ──
   let lockFileEmission = emitLockFileDesignations(pkg, name)
+  # ── Test-Certificates TC-9b: `enactCertificatePolicy` ─────────────
+  let certificatePolicyEmission =
+    emitEnactedCertificatePolicy(packageName, body)
   # ── M5: cross-project uses + cycle detection ─────────────────────
   var declaredUses: seq[string] = @[]
   for u in pkg.toolUses:
@@ -9625,6 +9778,9 @@ macro packageImpl*(name: untyped;
   # module scope (after the package wrapper code so the variant
   # accessor symbols are visible to ``build:`` code emitted below).
   result.add(lockFileEmission)
+  # Before `buildCode`, whose provider-mode `quit` ends module init: the
+  # policy must be registered (and emitted) first.
+  result.add(certificatePolicyEmission)
   result.add(variantsEmission)
   # ── M5: cross-project storage / const / accessors ────────────────
   # `wrapperCode` and `toolActionWrapperCode` BOTH unconditionally

@@ -543,6 +543,24 @@ proc isProviderModePath(path: string): bool =
     # exist only under this define.
     "libs/repro_project_dsl/tests/" &
       "t_dss11_resolutions_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services, reprobuild issue #498: drives
+    # ``buildPackageDevEnv`` over a fixture whose two activities
+    # contribute across each other, and reads the argv the provider
+    # lowered -- ``buildPackageDevEnv``, ``ProviderGraphRequest`` and
+    # the generated ``devEnv<Pkg>Package`` exist only under this
+    # define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss498_cross_activity_contribution_is_order_independent.nim",
+    # Shared-Development-Services F1: drives ``buildPackageDevEnv`` and
+    # reads ``DevEnvResult.actions``, the channel that only exists on
+    # the provider's own return.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssf1_dev_env_actions_reach_the_caller.nim",
+    # Shared-Development-Services J-2: drives ``buildPackageDevEnv``
+    # over a two-owner / two-resolver fixture and reads the resolutions
+    # the provider lowered.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssj2_two_resolvers_do_not_collide.nim",
   ]:
     if p == exact:
       return true

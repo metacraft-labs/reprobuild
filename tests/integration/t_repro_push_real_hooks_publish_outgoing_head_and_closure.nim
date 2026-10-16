@@ -11,7 +11,11 @@
 ## locks; and a later lib receive failure retains/reports the already-published
 ## core prefix before a retry completes. A shared backend's preflight accepts
 ## untracked output under its ``.repro/build/`` and nothing else uncommitted.
-## The manifest's preserved hooks observe
+## A dependency parked on a local-only ``reprobuild/pinned/<short-sha>`` branch
+## at a commit its upstream already carries is classified already-published,
+## never transmitted to (or creating a branch on) that upstream, while an
+## existing remote branch of the checkout's own name that is behind HEAD is
+## still advanced. The manifest's preserved hooks observe
 ## no capability/context, while successful nested pushes and empty capability
 ## storage prove one-use authorization was exercised. Nothing is mocked: only
 ## local Git processes, filesystem hooks, worktrees, and bare remotes are used.
@@ -694,6 +698,64 @@ suite "protocol v2 real-hook repro push closure":
         " merge-base --is-ancestor " & q(retained) & " " &
         q(completedBackend)).code == 0
 
+  test "ordinary backend ahead commit names offender rather than upstream record":
+    let gitBin = findExe("git")
+    doAssert gitBin.len > 0, "Git is required for backend refusal regression"
+    for shape in ["upstream-record", "no-records", "valid-prefix", "followed-by-lock",
+        "modified-metadata", "deleted-metadata"]:
+      let fx = setup(gitBin, "ordinary-ahead-" & shape)
+      defer: removeDir(fx.scratch)
+      let appSha = remoteHead(gitBin, fx.appBare)
+      let innocent = "locks/app/app/" & appSha & ".toml"
+      if shape == "upstream-record":
+        # The reported record in the field was already upstream and untouched.
+        writeLockRecord(fx.manifests, "app", "app", appSha)
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add locks")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m upstream-record")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+      if shape in ["modified-metadata", "deleted-metadata"]:
+        writeFile(fx.manifests / ".gitignore", "scratch\n")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add .gitignore")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m upstream-metadata")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+      let coreSha = commit(fx, gitBin, fx.core, "core-ordinary-ahead")
+      if shape == "valid-prefix":
+        writeLockRecord(fx.manifests, "core", "core", coreSha)
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add locks")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m valid-prefix")
+      let backendBefore = remoteHead(gitBin, fx.manifestBare)
+      let sourceBefore = remoteHead(gitBin, fx.coreBare)
+      if shape == "deleted-metadata": removeFile(fx.manifests / ".gitignore")
+      else: writeFile(fx.manifests / ".gitignore", ".repro/\n")
+      discard require(q(gitBin) & " -C " & q(fx.manifests) & " add .gitignore")
+      discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m ordinary-ignore")
+      let offender = require(q(gitBin) & " -C " & q(fx.manifests) & " rev-parse HEAD").strip()
+      if shape == "followed-by-lock":
+        writeLockRecord(fx.manifests, "core", "core", coreSha)
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add locks")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m later-lock-addition")
+      let localBefore = require(q(gitBin) & " -C " & q(fx.manifests) & " rev-parse HEAD").strip()
+      if shape == "upstream-record":
+        check require(q(gitBin) & " -C " & q(fx.manifests) & " log --oneline origin/main..HEAD -- " & q(innocent)).strip().len == 0
+        check run(q(gitBin) & " -C " & q(fx.manifests) & " cat-file -e " & q("origin/main:" & innocent)).code == 0
+      installHooks(fx)
+      let beforeStatus = require(q(gitBin) & " -C " & q(fx.manifests) & " status --porcelain")
+      let stopped = invokePush(fx)
+      check stopped.code != 0
+      let stoppedReport = report(fx)
+      check stoppedReport["stoppedStage"].getStr() == "lock-backend-preflight"
+      let diagnostic = stoppedReport["lockDiagnostic"].getStr()
+      checkpoint(shape & ": " & diagnostic)
+      check offender in diagnostic
+      check ".gitignore" in diagnostic
+      check "solely of additions of canonical lock records under locks/" in diagnostic
+      check innocent notin diagnostic
+      check offender in stopped.output
+      check remoteHead(gitBin, fx.manifestBare) == backendBefore
+      check remoteHead(gitBin, fx.coreBare) == sourceBefore
+      check require(q(gitBin) & " -C " & q(fx.manifests) & " rev-parse HEAD").strip() == localBefore
+      check require(q(gitBin) & " -C " & q(fx.manifests) & " status --porcelain") == beforeStatus
+
   test "three-repo backend-ahead recovery rejects every invalid prefix shape":
     let gitBin = findExe("git")
     if gitBin.len == 0: skip()
@@ -1267,3 +1329,190 @@ suite "protocol v2 real-hook repro push closure":
         check remoteHead(gitBin, fx.personalLocksBare) == backendRemote
         check require(q(gitBin) & " -C " & q(fx.personalLocks) &
           " status --porcelain") == backendStatus
+
+  test "pinned dependency already on an upstream branch is not pushed":
+    # A pinned dependency is parked on a local `reprobuild/pinned/<short-sha>`
+    # branch at a revision its upstream already carries on `main`. No branch of
+    # that name exists remotely, but the commit is published, so `repro push`
+    # must treat the member as already published: no transport to the
+    # upstream, no junk `reprobuild/pinned/*` branch created there, and no
+    # stop at `source-push` when the upstream is a read-only third party.
+    # Both shapes are exercised: a read-only upstream (every receive refused)
+    # and a writable one (where a wrongly attempted push would succeed and
+    # leave the parking branch behind on the upstream).
+    let gitBin = findExe("git")
+    if gitBin.len == 0: skip("git is not on PATH")
+    else:
+      for upstream in ["read-only", "writable"]:
+        let fx = setup(gitBin, "pinned-published-" & upstream)
+        defer: removeDir(fx.scratch)
+        let coreSha = remoteHead(gitBin, fx.coreBare)
+        check require(q(gitBin) & " -C " & q(fx.core) &
+          " rev-parse HEAD").strip() == coreSha
+        let pinnedBranch = "reprobuild/pinned/" & coreSha[0 ..< 12]
+        discard require(q(gitBin) & " -C " & q(fx.core) &
+          " switch -c " & q(pinnedBranch))
+        if upstream == "read-only":
+          executable(fx.coreBare / "hooks" / "pre-receive",
+            "#!/usr/bin/env sh\ncat >/dev/null\nexit 73\n")
+        let libSha = commit(fx, gitBin, fx.lib, "lib-over-pinned-" & upstream)
+        let appSha = commit(fx, gitBin, fx.app, "app-over-pinned-" & upstream)
+        installHooks(fx)
+        let coreRefsBefore = require(q(gitBin) & " -C " & q(fx.coreBare) &
+          " for-each-ref --format='%(refname) %(objectname)'")
+
+        let pushed = invokePush(fx)
+        if pushed.code != 0: checkpoint(pushed.output)
+        let r = report(fx)
+        check r["stoppedStage"].getStr() != "source-push"
+        check r["repos"][0]["name"].getStr() == "core"
+        check r["repos"][0]["branch"].getStr() == pinnedBranch
+        check r["repos"][0]["headSha"].getStr() == coreSha
+        check r["repos"][0]["outcome"].getStr() == "already-published"
+        check require(q(gitBin) & " -C " & q(fx.coreBare) &
+          " for-each-ref --format='%(refname) %(objectname)'") ==
+          coreRefsBefore
+        check run(q(gitBin) & " -C " & q(fx.coreBare) &
+          " rev-parse --verify " & q("refs/heads/" & pinnedBranch)).code != 0
+
+        # The dependents carry new commits and are published normally on top
+        # of the pinned dependency, each through its own real gate.
+        check r["repos"].len == 3
+        if r["repos"].len == 3:
+          check r["repos"][1]["name"].getStr() == "lib"
+          check r["repos"][1]["outcome"].getStr() == "pushed"
+          check r["repos"][2]["name"].getStr() == "app"
+          check r["repos"][2]["outcome"].getStr() == "pushed"
+        check remoteHead(gitBin, fx.libBare) == libSha
+        check remoteHead(gitBin, fx.appBare) == appSha
+        check remoteHasLock(gitBin, fx, "lib", libSha)
+        check remoteHasLock(gitBin, fx, "app", appSha)
+
+        # Final completion still expects an exact record for EVERY closure
+        # member at its HEAD, and only a member's own gate creates one. The
+        # pinned member is never transmitted, so its record was never created
+        # and completion stops honestly instead of manufacturing it -- the
+        # same contract as "already-published closure without records fails
+        # honestly on retry". It names the member and a runnable remedy.
+        check pushed.code == 2
+        check r["stoppedStage"].getStr() == "final-lock-verification"
+        check r["retryCommand"].getStr() ==
+          "repro workspace lock app --trigger-repo=core && " &
+          "repro push --sync --rebase"
+        check not remoteHasLock(gitBin, fx, "core", coreSha)
+
+        # Following that remedy completes the closure without ever touching
+        # the pinned dependency's upstream.
+        let locked = runShell(shellCommand(@[fx.reproBin, "workspace", "lock",
+          "app", "--trigger-repo=core", "--workspace-root=" & fx.workspace],
+          @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+        if locked.code != 0: checkpoint(locked.output)
+        check locked.code == 0
+        let retried = invokePush(fx)
+        if retried.code != 0: checkpoint(retried.output)
+        check retried.code == 0
+        let completed = report(fx)
+        check completed["stoppedStage"].getStr() == ""
+        check completed["lockPublished"].getBool()
+        check completed["repos"].len == 3
+        for member in completed["repos"]:
+          check member["outcome"].getStr() == "already-published"
+        check remoteHasLock(gitBin, fx, "core", coreSha)
+        check require(q(gitBin) & " -C " & q(fx.coreBare) &
+          " for-each-ref --format='%(refname) %(objectname)'") ==
+          coreRefsBefore
+
+  test "pinned member published by another branch is revalidated after deletion":
+    # The no-op decision for a member parked on a local-only pinned branch
+    # rests on a DIFFERENT advertised branch (`main`) containing its HEAD. That
+    # branch must be part of what revalidation re-proves: if it disappears
+    # between global preflight and this member's turn, the stale "already
+    # published" plan must be refused, not acted on and not reinterpreted as a
+    # push of the parking branch.
+    let gitBin = findExe("git")
+    if gitBin.len == 0: skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "pinned-containing-deletion")
+      defer: removeDir(fx.scratch)
+      let libSha = remoteHead(gitBin, fx.libBare)
+      let pinnedBranch = "reprobuild/pinned/" & libSha[0 ..< 12]
+      discard require(q(gitBin) & " -C " & q(fx.lib) &
+        " switch -c " & q(pinnedBranch))
+      # An attached notes ref makes the already-published core run a real
+      # pre-push hook, which deletes lib's only containing branch after
+      # preflight has classified lib as published.
+      discard require(q(gitBin) & " -C " & q(fx.core) &
+        " notes --ref=refs/notes/test-certificates/certificates add -m " &
+        q("delete pinned member's containing branch") & " HEAD")
+      executable(fx.core / ".git" / "hooks" / "pre-push",
+        "#!/usr/bin/env sh\nset -eu\n" &
+        q(gitBin) & " --git-dir=" & q(fx.libBare) &
+          " update-ref -d refs/heads/main\n" &
+        "cat >/dev/null\nexit 73\n")
+      installHooks(fx)
+      let coreRemote = remoteHead(gitBin, fx.coreBare)
+      let appRemote = remoteHead(gitBin, fx.appBare)
+      let backendRemote = remoteHead(gitBin, fx.manifestBare)
+
+      let stopped = invokePush(fx)
+      if stopped.code == 0: checkpoint(stopped.output)
+      check stopped.code != 0
+      let r = report(fx)
+      check r["repos"].len == 2
+      if r["repos"].len == 2:
+        check r["repos"][0]["name"].getStr() == "core"
+        check r["repos"][0]["outcome"].getStr() == "already-published"
+        check r["repos"][1]["name"].getStr() == "lib"
+        check r["repos"][1]["branch"].getStr() == pinnedBranch
+        check r["repos"][1]["outcome"].getStr() == "failed"
+        check "exact destination advertisement changed after preflight" in
+          r["repos"][1]["diagnostic"].getStr()
+      check r["stoppedRepo"].getStr() == "lib"
+      check r["stoppedStage"].getStr() == "source-revalidation"
+
+      # Nothing was transmitted: the deleted branch is not recreated and no
+      # parking branch appears on lib's remote.
+      check require(q(gitBin) & " -C " & q(fx.libBare) &
+        " for-each-ref --format='%(refname)' refs/heads/").strip() == ""
+      check remoteHead(gitBin, fx.coreBare) == coreRemote
+      check remoteHead(gitBin, fx.appBare) == appRemote
+      check remoteHead(gitBin, fx.manifestBare) == backendRemote
+
+  test "existing destination behind HEAD is advanced though another branch has it":
+    # Containment by ANOTHER branch only stands in for a destination branch
+    # that does not exist. When the checkout's own branch exists remotely and
+    # is behind HEAD, it is still fast-forwarded: reporting the member
+    # "already published" because some other branch happens to carry HEAD
+    # would leave the branch the user is publishing stale.
+    let gitBin = findExe("git")
+    if gitBin.len == 0: skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "exact-behind-contained-elsewhere")
+      defer: removeDir(fx.scratch)
+      let coreBefore = remoteHead(gitBin, fx.coreBare)
+      let coreSha = commit(fx, gitBin, fx.core, "core-also-elsewhere")
+      # Raw push before the managed hooks exist: `elsewhere` carries HEAD and
+      # the source gains a matching `origin/elsewhere` remote-tracking ref.
+      discard require(q(gitBin) & " -C " & q(fx.core) &
+        " push origin HEAD:refs/heads/elsewhere")
+      check require(q(gitBin) & " -C " & q(fx.core) &
+        " rev-parse refs/remotes/origin/elsewhere").strip() == coreSha
+      check remoteHead(gitBin, fx.coreBare) == coreBefore
+      let libSha = commit(fx, gitBin, fx.lib, "lib-over-elsewhere")
+      let appSha = commit(fx, gitBin, fx.app, "app-over-elsewhere")
+      installHooks(fx)
+
+      let pushed = invokePush(fx)
+      if pushed.code != 0: checkpoint(pushed.output)
+      check pushed.code == 0
+      let r = report(fx)
+      check r["stoppedStage"].getStr() == ""
+      check r["repos"].len == 3
+      if r["repos"].len == 3:
+        check r["repos"][0]["name"].getStr() == "core"
+        check r["repos"][0]["outcome"].getStr() == "pushed"
+      check remoteHead(gitBin, fx.coreBare) == coreSha
+      check remoteHead(gitBin, fx.libBare) == libSha
+      check remoteHead(gitBin, fx.appBare) == appSha
+      check remoteHasLock(gitBin, fx, "core", coreSha)
+      check r["lockPublished"].getBool()

@@ -78,11 +78,12 @@
 ##     is that the fix did not break the platform it does not apply to, and
 ##     that the ``--force-local``-then-retry shape extracts the same bytes.
 
-import std/[exitprocs, os, osproc, sequtils, strtabs, strutils, unittest]
+import std/[os, osproc, sequtils, strtabs, strutils, unittest]
 
 import repro_dsl_stdlib/packages/apt_jammy {.all.}
 from repro_core/paths import extendedPath
 from repro_core/host_tar import resolveHostTar, HostTarOverrideEnv
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 let N48Root = "build/test-tmp/t-n48-apt-jammy/" & $getCurrentProcessId()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
@@ -98,9 +99,11 @@ let N48Root = "build/test-tmp/t-n48-apt-jammy/" & $getCurrentProcessId()
   ## was still reading ("File removed before we read it"). A decimal pid adds
   ## no backslash, so the vacuity guarantee above is unchanged.
 
-addExitProc(proc () =
-  try: removeDir(extendedPath(N48Root))
-  except CatchableError: discard)
+# Removed when THIS process exits. Absolute, because a case may change the
+# working directory before then. Not an ``addExitProc`` closure: under ORC the
+# ``N48Root`` global it read is destroyed before exit procs run. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(absolutePath(N48Root))
 
 const N48RaisingFirstChars = {'a', 'b', 'f', 'n', 'r', 't', 'v'}
   ## The seven letters GNU tar turns into a control character. ``\0`` is NOT

@@ -13,6 +13,7 @@ module, `reprobuild.homeManagerModules.intent`, so a Nix configuration can
 | turn a canonical package name into a nixpkgs attribute | [`nixRealizationOf`](#nixrealizationof--canonical-name-to-nixpkgs-attribute) |
 | turn a canonical package name into a Homebrew token, or a Brewfile token back into a package | [`brewRealizationOf`](#brewrealizationof--canonical-name-to-homebrew-token-and-back) |
 | let Home Manager install packages, files and environment from the profile | [`homeManagerModules.intent`](#the-home-manager-module) |
+| check that a Home Manager configuration and the profile give a host the same thing | [`homeManagerFacts`, `homeEquivalenceCheck`](host-facts.md) |
 
 Nix never compiles your profile and never re-implements Reprobuild's rules
 beyond the one it has to: the [predicate grammar](home-export.md#predicates)

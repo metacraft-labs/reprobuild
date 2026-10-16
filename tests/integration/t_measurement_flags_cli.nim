@@ -170,18 +170,28 @@ suite "measurement flags: the new surface parses":
 # boilerplate: Language-Conventions/Nim.md lists "A **C-family compiler**
 # (`gcc`, `clang`, or `msvc/vcc`) for the C/C++/Objective-C backends — pulled
 # from the user's `uses:`", and `nim.c(...)` lowers to an edge that shells out
-# to a BARE `gcc`. Since an action's PATH is composed only from what the edge
-# declares, a recipe that names only `nim` gets `gcc: command not found` —
+# to a BARE C compiler. Since an action's PATH is composed only from what the
+# edge declares, a recipe that names only `nim` gets `gcc: command not found` —
 # and an unmatched tool ref is inert, so the omission is silent until the
 # compile runs.
+#
+# WHICH compiler is per platform, and it has to be the one `nim c` really
+# runs: `nim.c(...)` names `clang` on macOS and `gcc` elsewhere as the edge's
+# backend tool ref (`repro_dsl_stdlib/packages/nim.nim`, the
+# `backendCompiler` choice), matching Nim's own default. A recipe that
+# declared `gcc` on macOS left the `clang` ref unmatched, so the edge got no
+# compiler at all and every successful-build case here died with
+# `clang: command not found` before measuring anything.
 const
+  BackendCompilerUse = when defined(macosx): "clang >=1" else: "gcc >=1"
+
   OkProject = """
 import repro_project_dsl
 
 package measok:
   uses:
     "nim >=2.2 <3.0"
-    "gcc >=1"
+    """" & BackendCompilerUse & """"
 
   executable measTool:
     build:
@@ -194,7 +204,7 @@ import repro_project_dsl
 package measbad:
   uses:
     "nim >=2.2 <3.0"
-    "gcc >=1"
+    """" & BackendCompilerUse & """"
 
   executable measBroken:
     build:

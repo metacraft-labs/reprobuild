@@ -44,6 +44,7 @@ import repro_home_apply/pipeline
 import repro_home_apply/resource_move
 import repro_home_apply/junction_aware_remove
 import repro_home_apply/gc
+import repro_home_apply/host_facts
 
 export dep_graph
 export errors
@@ -66,3 +67,4 @@ export resource_move
 export pipeline
 export junction_aware_remove
 export gc
+export host_facts
