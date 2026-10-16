@@ -9050,6 +9050,11 @@ proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
   for output in action.outputs:
     result.incl(materialPath(action.cwd, output).replace('\\', '/'))
 
+proc outputAncestorDirectoryKeys(action: BuildAction;
+                                 evidence: PathSetEvidence): HashSet[string]
+proc isOutputAncestorObservation(ancestors: HashSet[string];
+                                 key: string): bool {.inline.}
+
 proc evidenceInputPaths(action: BuildAction;
                         evidence: PathSetEvidence): seq[string] =
   # Deferred-D4: side-car ``HashSet`` keeps the per-action wrap-up linear
@@ -9059,21 +9064,28 @@ proc evidenceInputPaths(action: BuildAction;
   #
   # S5: the observed channels are filtered against the action's own
   # declared outputs; see ``selfWrittenOutputKeys``. Declared inputs are
-  # never filtered.
+  # never filtered. The directories those outputs sit in are filtered the
+  # same way (``outputAncestorDirectoryKeys``), so this denominator and the
+  # keyed set ``gradeKeyedInputSet`` compares it with subtract the same
+  # self-written paths.
   let selfWritten = action.selfWrittenOutputKeys()
+  let ancestors = action.outputAncestorDirectoryKeys(evidence)
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     result.addUnique(seen, input)
   for input in evidence.depfileInputs:
-    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+    let key = materialPath(action.cwd, input).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for input in evidence.monitorReads:
-    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+    let key = materialPath(action.cwd, input).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
-    if selfWritten.contains(materialPath(action.cwd, probe).replace('\\', '/')):
+    let key = materialPath(action.cwd, probe).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, probe)
 
@@ -9411,6 +9423,104 @@ proc selfWrittenDirectoryKeys(action: BuildAction): HashSet[string] =
       result.incl(dir)
   for root in action.declaredWriteRootPrefixes():
     result.incl(root)
+
+proc outputAncestorDirectoryKeys(action: BuildAction;
+                                 evidence: PathSetEvidence): HashSet[string] =
+  ## The directories every declared output of this action sits beneath: the
+  ## parent of each declared output file and each of ITS ancestors, and each
+  ## declared write root with its ancestors. Keyed in the normalized,
+  ## materialized form (`normalizeWriteRoot`), in both the declared and the
+  ## symlink-resolved spelling, because the monitor reports resolved paths
+  ## (`/private/tmp/...` on macOS) and a declaration need not be spelled so.
+  ##
+  ## What this set is for: an observation of one of these directories'
+  ## EXISTENCE — a probe, or a directory open — is not an input of the action,
+  ## and `cacheInputPaths` drops it from the observed channels. Spec:
+  ## `Filesystem-Policy-And-Observed-Inputs.md` §"A directory an output lives
+  ## in is not an existence input".
+  ##
+  ## Why that is sound, which is the whole argument. After every successful
+  ## run each of these directories exists, because the declared output is in
+  ## it; after every cache HIT it exists too, because restoring the output
+  ## creates its parents. So the state a hit leaves behind is the state a run
+  ## leaves behind, whatever the directory's pre-run state was. And the
+  ## recorder could never have recorded that pre-run state anyway: it
+  ## identifies an input by what is on disk AFTER the run, so a shell that
+  ## probed `build/` before `mkdir -p build` created it was recorded as
+  ## "directory" while what it observed was "absent". No fresh checkout — no
+  ## peer, no portable consumer, no `rm -rf build` of the producing tree —
+  ## could then match the record, and the producer itself only converged
+  ## because its own first run had left the directory behind
+  ## (`issues/2026-10-16-action-created-directories-recorded-as-post-run-
+  ## inputs.md`). Keying on the action's own side effect is the S5 defect
+  ## (`selfWrittenOutputKeys`) one path component up.
+  ##
+  ## The residual is the one S5 accepts and for the same reason: a tool that
+  ## BRANCHES on whether its output directory already existed is not
+  ## hermetic. An incremental tool that genuinely reads prior state declares
+  ## that state as an input, and a declared input is never filtered — the
+  ## callers add `declaredInputs` first and unfiltered.
+  ##
+  ## Deliberately NOT covered, because the soundness argument above does not
+  ## reach them: the MEMBERSHIP of these directories (enumerations, governed
+  ## by `selfWrittenDirectoryKeys` and the graph view — a listing of an
+  ## ancestor names other actions' outputs too), any path BELOW an output's
+  ## parent that is not itself an ancestor of an output (a sibling file is a
+  ## real input; S5's tests pin that), and an undeclared directory the action
+  ## creates and does not declare anything inside (a hit would not recreate
+  ## it, so its existence after a hit differs from after a run).
+  ##
+  ## THE MEMBERSHIP CARVE-OUT IS ENFORCED HERE, NOT MERELY STATED. An
+  ## enumeration is folded into `monitorProbes` as well as into
+  ## `monitorDirectoryEnumerations`, and the record attaches a membership
+  ## digest only to a path that is ALSO in the keyed input list
+  ## (`recordActionResult`'s `enumeratedDirectories`). Dropping an enumerated
+  ## ancestor from the probe channel would therefore silently drop its
+  ## membership: `cat *.txt > build/all.txt` enumerates the project root, an
+  ## ancestor of its output, and a new `*.txt` beside the others would no
+  ## longer invalidate it — a false hit. So an ancestor this action
+  ## ENUMERATED is removed from the set, and keyed exactly as before, unless
+  ## it is one whose membership `cacheEnumeratedDirectories` already treats
+  ## as derived (`selfWrittenDirectoryKeys`: an output's own parent or a
+  ## declared write root), where only existence could have been recorded.
+  result = initHashSet[string]()
+  var parents = initHashSet[string]()
+  for output in action.outputs:
+    parents.incl(normalizeWriteRoot(parentDir(materialPath(action.cwd,
+      output))))
+  for root in action.declaredWriteRootPrefixes():
+    # Already carries both spellings, and is itself a directory the action
+    # writes into.
+    parents.incl(root)
+  var spellings = initHashSet[string]()
+  for parent in parents:
+    if parent.len == 0:
+      continue
+    spellings.incl(parent)
+    if parent.isAbsolute:
+      spellings.incl(canonicalPolicyPath(parent))
+  for spelling in spellings:
+    var dir = spelling
+    while dir.len > 0 and dir notin result:
+      result.incl(dir)
+      let up = normalizeWriteRoot(parentDir(dir))
+      if up.len == 0 or up == dir:
+        break
+      dir = up
+  if result.len == 0 or evidence.monitorDirectoryEnumerations.len == 0:
+    return
+  let derivedMembership = action.selfWrittenDirectoryKeys()
+  for dir in evidence.monitorDirectoryEnumerations:
+    let key = normalizeWriteRoot(materialPath(action.cwd, dir))
+    if key notin derivedMembership:
+      result.excl(key)
+
+proc isOutputAncestorObservation(ancestors: HashSet[string];
+                                 key: string): bool {.inline.} =
+  ## `key` is an observed path in `cacheInputPaths`' normalized form; the
+  ## monitor may report a directory with a trailing `/`, which
+  ## `outputAncestorDirectoryKeys` never carries.
+  ancestors.len > 0 and normalizeWriteRoot(key) in ancestors
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
@@ -9883,6 +9993,10 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   for why those are provably not inputs, and for the
   ##   declared-input carve-out that keeps the two filters from
   ##   colliding. Declared inputs are never dropped by either filter.
+  ## * the same filter extends one path component up: an observation of the
+  ##   EXISTENCE of a directory a declared output sits in (a probe of
+  ##   ``build/`` before ``mkdir -p build`` created it) is the action's own
+  ##   side effect, not an input — see ``outputAncestorDirectoryKeys``.
   let toolRoots = action.toolInputRoots()
   # The EXPLICIT prefix set, deliberately not the derived one. The derived
   # self-written set applies to the ENUMERATION channel only — see
@@ -9890,6 +10004,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # recipe that makes the difference load-bearing.
   let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
   let selfWritten = action.selfWrittenOutputKeys()
+  let ancestors = action.outputAncestorDirectoryKeys(evidence)
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
   # output ``seq`` retains insertion order because the action-cache key
@@ -9902,7 +10017,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -9914,7 +10029,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -9926,7 +10041,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or

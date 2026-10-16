@@ -825,6 +825,85 @@ proc matchPolicy*(policy: BranchCertificatePolicy; target: BranchRef):
       "no requirement"
 
 # ---------------------------------------------------------------------------
+# What a gate takes from a matched rule (Test-Certificates TC-9c)
+# ---------------------------------------------------------------------------
+
+type
+  CertificateGateKind* = enum
+    ## Which gate is asking. The commit gate reads ``commit_gate``; the
+    ## client pre-push gate and the gateway read ``gate_mode``
+    ## (Test-Certificates.md §"Modes").
+    cgkCommit = "commit"
+    cgkPush = "push"
+
+proc modeFor*(rule: PolicyRule; gate: CertificateGateKind): PolicyMode =
+  ## The rule's mode for ``gate``. ``commitGate`` already carries the
+  ## ``gate_mode`` default (operator decision D7): the reader and the DSL
+  ## both resolve it, so a gate never re-applies the default.
+  case gate
+  of cgkCommit: rule.commitGate
+  of cgkPush: rule.gateMode
+
+proc stricterMode*(a, b: PolicyMode): PolicyMode =
+  ## The stricter of two modes (``off`` < ``advisory`` < ``required``). The
+  ## gateway's ratchet takes the stricter of the pushed snapshot's and the
+  ## anchor's ``gate_mode`` (Push-Gateway-Wiring-And-Policy §4.2).
+  if ord(a) >= ord(b): a else: b
+
+proc platformsLabel*(platforms: openArray[string]): string =
+  ## ``any platform`` for ``["*"]``, the platforms joined otherwise.
+  if platforms.len == 1 and platforms[0] == AnyPlatformMarker:
+    "any platform"
+  else:
+    @platforms.join(", ")
+
+proc requirementLabel*(req: PolicyRequirement): string =
+  ## ``pre-commit (any platform)``, ``unit-suite (linux/amd64)``.
+  req.certificate & " (" & platformsLabel(req.platforms) & ")"
+
+proc requirementsLabel*(requires: openArray[PolicyRequirement]): string =
+  ## Every requirement, comma-separated; ``nothing required`` when none.
+  var parts: seq[string] = @[]
+  for req in requires:
+    parts.add(requirementLabel(req))
+  if parts.len == 0: "nothing required" else: parts.join(", ")
+
+proc branchPatternsLabel*(rule: PolicyRule): string =
+  ## A rule's patterns as ``ensure`` prints them; ``detached HEAD`` for the
+  ## ``detachedHead`` rule.
+  var parts: seq[string] = @[]
+  for p in rule.branches:
+    parts.add(if p == DetachedHeadPattern: "detached HEAD" else: p)
+  parts.join(", ")
+
+proc ruleGateLine*(rule: PolicyRule): string =
+  ## One line per rule, as ``repro hooks ensure --vcs`` reports the gates it
+  ## generated (Test-Certificates.md §"Generated gates"), for example
+  ## ``certificate gate: agents, agents-to-dev-* -> pre-commit (any
+  ## platform); commit advisory, push required``.
+  "certificate gate: " & branchPatternsLabel(rule) & " -> " &
+    requirementsLabel(rule.requires) &
+    "; commit " & $rule.commitGate & ", push " & $rule.gateMode
+
+proc groupRequirementsByPlatforms*(requires: openArray[PolicyRequirement]):
+    seq[tuple[platforms: seq[string]; names: seq[string]]] =
+  ## The requirements grouped by their platform set, in first-appearance
+  ## order. A coverage evaluator judges one platform set at a time: each
+  ## listed platform's union must hold every name of its group, and the
+  ## ``["*"]`` group must be held by one platform's union on its own
+  ## (Test-Certificates.md §"How a gate computes coverage", step 4).
+  for req in requires:
+    var placed = false
+    for group in result.mitems:
+      if group.platforms == req.platforms:
+        if req.certificate notin group.names:
+          group.names.add(req.certificate)
+        placed = true
+        break
+    if not placed:
+      result.add((platforms: req.platforms, names: @[req.certificate]))
+
+# ---------------------------------------------------------------------------
 # The provider's emission: how an evaluated policy leaves the recipe process
 # ---------------------------------------------------------------------------
 

@@ -19168,7 +19168,7 @@ protect_finish() {
   ## snapshot that cannot be taken is announced and the commit proceeds
   ## exactly as before: protection must not become a new way to block one.
 
-proc vcsDispatcherContent(hookName: string): string =
+proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ## RA-4: the dispatcher coexists with the pre-commit framework's
   ## ``hook-impl`` shim. Two safeguards (modelled on repo-workspaces
   ## ``9ee9141``):
@@ -19310,7 +19310,15 @@ proc vcsDispatcherContent(hookName: string): string =
       "export " & InternalHookContextEnv &
       "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\"; " &
       "exec \"$MANAGED_HOOK\" \"$@\") || exit $?; fi\n")
-    if hookName == "pre-commit":
+    if hookName == "pre-commit" and certificatePhase:
+      # TC-9c — GENERATED only for a repository where a certificate policy is
+      # in effect (its `repro.lock` carries `[certificate_policy]`, or — until
+      # TC-9d — its project's `[certificates]` table gates it). Elsewhere the
+      # dispatcher has no third phase at all, so a commit there pays nothing
+      # for a gate that has nothing to require, and its bytes are the
+      # dispatcher's from before the gate existed. The phase embeds no rule:
+      # `repro` reads the snapshot and the branch every time it fires.
+      #
       # TC-8g — the THIRD phase: the certificate gate. It runs after every
       # step of the commit that can change the index — the chained user hook
       # and the managed lock refresh above — because the content it judges is
@@ -19442,6 +19450,15 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("# reprobuild managed " & hookName & " hook\n")
   result.add("# managed-by: reprobuild hooks ensure\n")
   result.add("# dispatches to: repro hooks dispatch " & hookName & "\n")
+  if hookName in ["pre-commit", "pre-push"]:
+    # TC-9c — the certificate gate this hook reaches reads its requirement
+    # from the `[certificate_policy]` snapshot of the content it judges. A
+    # `repro` that predates that reads only the `[certificates]` table and
+    # would apply a different policy to the same commit, so the body says so
+    # and its contract token (a digest of these bytes) moves with it: such a
+    # build refuses to service it, and `ensure` reports older bodies stale.
+    result.add("# certificate policy: the judged content's repro.lock " &
+      "[certificate_policy]\n")
   result.add("set -eu\n")
   result.add("set +x\n")
   # PG-15 — where this hook may file a contract-refusal record, and under what
@@ -20788,11 +20805,36 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
     "    REPROBUILD_REPRO=" & interpreterPath & " " & interpreterPath &
       " hooks ensure --vcs " & repoRoot)
 
+type
+  CertificateGatePlan* = object
+    ## Whether ``repro hooks ensure --vcs`` generates the pre-commit
+    ## certificate phase for a repository (TC-9c), and what it reports.
+    wanted*: bool
+      ## A policy is in effect: the repository's ``repro.lock`` carries
+      ## ``[certificate_policy]`` (even a malformed one, which the phase then
+      ## refuses on), or — interim, until TC-9d — its project's
+      ## ``[certificates]`` table gates it.
+    undecided*: bool
+      ## The legacy table could not be resolved (a manifest that does not
+      ## load). The installer then keeps whatever is installed rather than
+      ## flipping the phase on a transient fault.
+    lines*: seq[string]
+      ## One line per rule, as ``ensure`` prints them.
+
+proc certificateGatePlan*(repoRoot: string): CertificateGatePlan
+  ## Defined after the workspace resolution it needs.
+
 proc ensureVcsHookDetailed(hooksDir, hookName: string;
-                           guard: HookWriteGuard = nil): VcsHookEnsureOutcome =
+                           guard: HookWriteGuard = nil;
+                           repoRoot = ""): VcsHookEnsureOutcome =
   ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
   ## structured outcome so callers can surface per-repo per-hook status
   ## in the JSON report and the human-readable summary line.
+  ##
+  ## ``repoRoot`` is the repository the hooks serve (default: the parent of
+  ## ``.git/hooks``). The ``pre-commit`` dispatcher depends on it: its
+  ## certificate phase is generated only where a policy is in effect
+  ## (``certificateGatePlan``).
   ##
   ## Outcome priority (the higher-impact change wins when several apply):
   ##   reclaimed-shadowed  >  chained-user-hook  >  rewrote-contractless-body
@@ -20970,7 +21012,16 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   if existingManaged.len > 0 and oldContract.len == 0:
     rewroteContractless = true
 
-  let canonicalDispatcher = vcsDispatcherContent(hookName)
+  var certificatePhase = false
+  if hookName == "pre-commit":
+    let plan = certificateGatePlan(
+      if repoRoot.len > 0: repoRoot else: parentDir(parentDir(hooksDir)))
+    certificatePhase = plan.wanted
+    if plan.undecided:
+      certificatePhase = fileExists(extendedPath(standard)) and
+        isReprobuildVcsHook(standard, hookName) and
+        readFile(extendedPath(standard)).contains(PreCommitGatePhaseArg)
+  let canonicalDispatcher = vcsDispatcherContent(hookName, certificatePhase)
   if fileExists(extendedPath(standard)) and
       isReprobuildVcsHook(standard, hookName) and
       readFile(extendedPath(standard)) != canonicalDispatcher:
@@ -21096,7 +21147,7 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   let guard = newHookWriteGuard()
   for hookName in VcsHookNames:
     try:
-      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
+      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, top)
       case outcome
       of vheoAlreadyUpToDate, vheoChainedUserHook:
         discard
@@ -21414,7 +21465,12 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
     result.ok = false
   let hooksDir = gitHooksDir(repoPath)
   for hookName in VcsHookNames:
-    let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
+    if hookName == "pre-commit":
+      # TC-9c: say which certificate gates this repository now has, one
+      # line per rule (stderr, so `--json` keeps stdout one document).
+      for line in certificateGatePlan(repoPath).lines:
+        stderr.writeLine("repro hooks: " & repoName & ": " & line)
+    let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, repoPath)
     let tag = vcsHookOutcomeTag(outcome)
     if outcome == vheoRewroteContractlessBody:
       # Deliverable 2's distinct state, said out loud and not only counted.
@@ -21539,7 +21595,13 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   of hakEnsure, hakReinstall:
     let guard = newHookWriteGuard()
     for hookName in VcsHookNames:
-      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
+      if hookName == "pre-commit":
+        # TC-9c: one line per rule of the certificate gate generated here.
+        # stderr: the stdout line below is `.envrc`'s activation signal.
+        for line in certificateGatePlan(resolveHooksTarget(targetPath)).lines:
+          stderr.writeLine("repro hooks: " & line)
+      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard,
+        resolveHooksTarget(targetPath))
       if outcome != vheoAlreadyUpToDate:
         changed = true
       if outcome == vheoRewroteContractlessBody:
@@ -48805,7 +48867,7 @@ proc effectivePrePushHook(identity: GitToolIdentity; repoRoot: string):
   # Comments/markers are discovery hints only. Authorization and orchestration
   # require the complete canonical dispatcher/body pair and executable files;
   # a marker-only or partially refreshed bundle is incompatible, never v2.
-  if dispatcher == vcsDispatcherContent("pre-push") and
+  if dispatcher == vcsDispatcherContent("pre-push", false) and
       managedHookBodyIsCurrent("pre-push", managedContent) and
       executableFile(path) and executableFile(managed):
     return (ephReproV2, path, "")
@@ -57200,6 +57262,11 @@ type
     coveredByPlatform*: seq[MissingCoverage]
       ## The required targets covered on each required platform by records
       ## evaluated end to end (monotonic: covered whatever the outcome).
+    unmet*: seq[tuple[name, platform: string]]
+      ## Every unmet ``(name, platform)`` pair, so a diagnostic can name the
+      ## command that produces each one (Test-Certificates.md §"How a gate
+      ## computes coverage", step 5). ``platform`` is ``"*"`` for a name that
+      ## no single platform covers under an any-platform requirement.
 
 proc evaluateReprobuildCoverage*(found: openArray[FoundCertificate];
     state: CertificateState; requiredPlatforms, requiredTargets: seq[string];
@@ -57278,6 +57345,8 @@ proc evaluateReprobuildCoverage*(found: openArray[FoundCertificate];
     result.missing = @["any platform (missing: " &
       (if haveBest and best.len > 0: best.join(", ") else: "<no certificate>") &
       ")"]
+    for t in (if haveBest: best else: requiredTargets):
+      result.unmet.add((name: t, platform: anyCertificatePlatform))
     result.outcome =
       if anyUnverifiable or couldNotLook.len > 0: voUnverifiable
       else: voNotCovered
@@ -57290,6 +57359,13 @@ proc evaluateReprobuildCoverage*(found: openArray[FoundCertificate];
   if result.outcome == voCovered:
     return
   result.missing = shortfall(r)
+  for platform in requiredPlatforms:
+    var have: seq[string]
+    for c in r.covered:
+      if c.platform == platform: have = c.targets
+    for t in requiredTargets:
+      if t notin have:
+        result.unmet.add((name: t, platform: platform))
   if couldNotLook.len > 0:
     result.outcome = voUnverifiable
 
@@ -57306,6 +57382,192 @@ proc describeCoverageVerdict*(v: ReprobuildCoverageVerdict): string =
   if v.unevaluated.len > 0:
     parts.add("could not be evaluated: " & v.unevaluated.join("; "))
   parts.join(" — ")
+
+# ---- TC-9c: what a gate requires, read from the content it judges ----------
+#
+# Every consumer — the pre-commit phase, the client pre-push gate, the
+# gateway, `repro ci plan`, `repro certify` with no names — takes its
+# requirement from the `[certificate_policy]` snapshot in the `repro.lock` of
+# the content it judges (Test-Certificates.md §"How a gate computes
+# coverage"). The first rule matching the branch decides: its mode for this
+# gate (`commit_gate` at commit, `gate_mode` at push) and its `requires`, each
+# with its own platform set.
+#
+# INTERIM (until TC-9d retires it): content that carries NO snapshot is judged
+# by the legacy input exactly as before — the project's `[certificates]`
+# table on the client, the config the gateway was wired with on the receiving
+# side. Where a snapshot is present it alone decides and the legacy input is
+# not consulted: no workspace floor (operator decision D14 (3)). Dropping the
+# legacy input outright would turn a project's `required` into `off` without
+# a word, which TC-9d forbids; TC-9d makes the table a loud error instead.
+
+type
+  GatePolicySource* = enum
+    ## Where a gate's requirement came from.
+    gpsNone = "none"          ## no snapshot and no legacy input: no requirement
+    gpsSnapshot = "snapshot"  ## the judged content's ``[certificate_policy]``
+    gpsLegacy = "legacy"      ## interim: ``[certificates]`` / the gateway config
+
+  GateRequirement* = object
+    ## The requirement one gate applies to one judged state.
+    source*: GatePolicySource
+    mode*: CertificateGateMode
+    requires*: seq[PolicyRequirement]
+    ciTrust*: CertificateCiTrust
+    untrackedInputs*: PolicyUntrackedInputs
+    label*: string
+      ## What decided, for diagnostics: the rule and the policy, or the table.
+    noRule*: string
+      ## Why no rule applies, when a snapshot is present and none matched.
+    error*: string
+      ## A structural error in the snapshot, or a read that failed. Never
+      ## means "no requirement": gates refuse on it (the format is checked
+      ## loudly).
+
+proc toGateMode*(mode: PolicyMode): CertificateGateMode =
+  case mode
+  of pmOff: cgmOff
+  of pmAdvisory: cgmAdvisory
+  of pmRequired: cgmRequired
+
+proc toPolicyMode*(mode: CertificateGateMode): PolicyMode =
+  case mode
+  of cgmOff: pmOff
+  of cgmAdvisory: pmAdvisory
+  of cgmRequired: pmRequired
+
+proc legacyRequirements*(policy: CertificatePolicy): seq[PolicyRequirement] =
+  ## The ``[certificates]`` table as policy requirements: every required
+  ## target on the table's platforms (``["*"]`` stays any-platform). An empty
+  ## ``required_platforms`` meant "advisory only", so it requires nothing.
+  if policy.requiredPlatforms.len == 0:
+    return
+  for t in policy.requiredTargets:
+    result.add(PolicyRequirement(certificate: t,
+      platforms: policy.requiredPlatforms))
+
+proc legacyGateRequirement*(policy: CertificatePolicy;
+                            label: string): GateRequirement =
+  ## The interim legacy input. The table has no ``commit_gate``, so both
+  ## gates take ``gate_mode`` (D7's default).
+  result.source = if policy.gateMode == cgmOff: gpsNone else: gpsLegacy
+  result.mode = policy.gateMode
+  result.requires = legacyRequirements(policy)
+  result.ciTrust = policy.ciTrust
+  result.label = label
+
+proc snapshotGateRequirement*(policy: BranchCertificatePolicy;
+                              target: BranchRef;
+                              gate: CertificateGateKind): GateRequirement =
+  ## The requirement the first rule matching ``target`` sets for ``gate``.
+  ## A branch no rule matches has no requirement, and ``noRule`` says why.
+  result.source = gpsSnapshot
+  result.ciTrust =
+    case policy.ciTrust
+    of pctAdvisory: cctAdvisory
+    of pctSkip: cctSkip
+  result.untrackedInputs = policy.untrackedInputs
+  let match = matchPolicy(policy, target)
+  if not match.matched:
+    result.mode = cgmOff
+    result.noRule = match.reason
+    result.label = "certificate policy '" & policy.name & "'"
+    return
+  result.mode = toGateMode(modeFor(match.rule, gate))
+  result.requires = match.rule.requires
+  result.label = "certificate policy '" & policy.name & "' " &
+    ruleLabel(policy, match.ruleIndex) & " (matched by \"" & match.pattern &
+    "\")"
+
+proc gateRequirementFromLock*(lockStatus: ContentFileStatus;
+                              lockText, lockReason: string;
+                              target: BranchRef;
+                              gate: CertificateGateKind;
+                              legacy: GateRequirement): GateRequirement =
+  ## Step 1–2 of §"How a gate computes coverage" for a ``repro.lock`` read out
+  ## of the judged content: the snapshot's rule when the lock carries one,
+  ## the legacy input (interim) when it does not, and an ERROR — never
+  ## ``off`` — when the lock could not be read or its snapshot is malformed.
+  case lockStatus
+  of cfsFailed:
+    result = legacy
+    result.error = "the judged content's " & CommittedLockFileName &
+      " could not be read: " & lockReason
+    return
+  of cfsAbsent:
+    return legacy
+  of cfsPresent:
+    discard
+  var read: tuple[present: bool; policy: BranchCertificatePolicy]
+  try:
+    read = readCertificatePolicySnapshot(lockText)
+  except CertificatePolicySnapshotError as err:
+    result.source = gpsSnapshot
+    result.error = CommittedLockFileName & " [certificate_policy]: " &
+      err.msg & " (a structural error, never 'off'; run `repro lock refresh`)"
+    return
+  if not read.present:
+    return legacy
+  snapshotGateRequirement(read.policy, target, gate)
+
+proc describeGateRequirement*(g: GateRequirement): string =
+  ## One phrase naming what a gate applies and why.
+  case g.source
+  of gpsNone:
+    if g.label.len > 0: "no requirement (" & g.label & ")"
+    else: "no certificate policy: no requirement"
+  of gpsSnapshot:
+    if g.noRule.len > 0: g.label & ": " & g.noRule
+    else: g.label & ": " & $g.mode & ", requires " &
+      requirementsLabel(g.requires)
+  of gpsLegacy:
+    g.label & ": " & $g.mode & ", requires " & requirementsLabel(g.requires)
+
+proc evaluateRequirementCoverage*(found: openArray[FoundCertificate];
+    state: CertificateState; requires: seq[PolicyRequirement];
+    keys: RegisteredKeyStoreLoad; lockSource: ReprobuildLockSource;
+    couldNotLook: openArray[string] = []): ReprobuildCoverageVerdict =
+  ## Coverage of every ``requires (n, P)``: the requirements are grouped by
+  ## platform set and each group is judged by ``evaluateReprobuildCoverage``
+  ## over the same candidates. Covered only when every group is; otherwise
+  ## unverifiable when any group could not be judged, not-covered when all
+  ## could (Verification §7.1). Nothing required is covered.
+  result.outcome = voCovered
+  var anyUnverifiable = false
+  var anyShort = false
+  for group in groupRequirementsByPlatforms(requires):
+    let v = evaluateReprobuildCoverage(found, state, group.platforms,
+      group.names, keys, lockSource, couldNotLook)
+    for line in v.untrusted:
+      if line notin result.untrusted: result.untrusted.add(line)
+    for line in v.unevaluated:
+      if line notin result.unevaluated: result.unevaluated.add(line)
+    result.contributing = max(result.contributing, v.contributing)
+    for c in v.coveredByPlatform: result.coveredByPlatform.add(c)
+    if v.outcome == voCovered:
+      continue
+    anyShort = true
+    if v.outcome == voUnverifiable: anyUnverifiable = true
+    for m in v.missing: result.missing.add(m)
+    for u in v.unmet:
+      if u notin result.unmet: result.unmet.add(u)
+  if anyShort:
+    result.outcome = if anyUnverifiable: voUnverifiable else: voNotCovered
+
+proc unmetRemedies*(v: ReprobuildCoverageVerdict): seq[string] =
+  ## For each unmet ``(name, platform)``, the command that produces it:
+  ## ``repro certify <name>`` here, or the same on a ``<platform>`` host.
+  let here = currentPlatformTag()
+  for u in v.unmet:
+    let line =
+      if u.platform == anyCertificatePlatform or u.platform == here:
+        "'" & u.name & "' on " &
+          (if u.platform == anyCertificatePlatform: "any platform"
+           else: u.platform) & ": run 'repro certify " & u.name & "'"
+      else:
+        "'" & u.name & "' on " & u.platform & ": run 'repro certify " &
+          u.name & "' on a " & u.platform & " host"
+    if line notin result: result.add(line)
 
 # ============================================================================
 # TC-2: certificate TRANSPORT — git notes, the push-time carrier.
@@ -57851,25 +58113,61 @@ proc pushCertificateNotes*(gitBin, repoPath, remote: string):
         res.output.strip())
   (ok: true, pushed: true, diagnostic: "")
 
-proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
-                     pushedCommit, certRepoPath, gitBin,
-                     currentRepoName, registeredKeysPath: string) =
-  ## TC-3 / RA-32 — the certificate-coverage stage of the RA-21 pre-push gate.
-  ## Called ONLY after every other gate stage has passed (clean + published +
-  ## at the locked revisions, lock current), from each exit point of stage 5.
-  ##
-  ## DEFAULT-OFF (RA-32): ``cgmOff`` — the value a project with NO
-  ## ``[certificates]`` table resolves to — is a strict NO-OP. It touches
-  ## neither ``failures`` nor ``exitCode`` nor ``notices``, so every existing
-  ## pre-push gate test (which sets no policy) is byte-for-byte unaffected.
-  ##
-  ## ``cgmAdvisory`` RECORDS the coverage verdict in ``report.notices`` but
-  ## never changes ``exitCode`` (the load-bearing onboarding property: advisory
-  ## never blocks). ``cgmRequired`` REFUSES the push (exit 2 + a structured
-  ## ``certificate-coverage`` failure) unless the submitted certificates COVER
-  ## the pushed commit for the required targets on EACH required platform.
-  if policy.gateMode == cgmOff:
+type
+  PushedRefJudgement* = object
+    ## One unit the client pre-push gate judges: the commit a ref update
+    ## pushes and the DESTINATION branch it is pushed to.
+    commit*: string
+    target*: BranchRef
+    refName*: string    ## the destination ref, for diagnostics
+
+proc pushedRefJudgements*(refsPath: string): seq[PushedRefJudgement] =
+  ## The branch updates of a git ``pre-push`` refs stream
+  ## (``<local-ref> <local-sha> <remote-ref> <remote-sha>``), each judged by
+  ## its DESTINATION name (Test-Certificates.md §"Branch matching": a push
+  ## of ``HEAD:agents`` from a detached ``HEAD`` is judged as ``agents``).
+  ## Deletions push nothing and are skipped; a destination that is not a
+  ## branch is never gated by a rule.
+  if refsPath.len == 0 or not fileExists(refsPath):
     return
+  for rawLine in readFile(refsPath).splitLines():
+    let parts = rawLine.strip().splitWhitespace()
+    if parts.len < 4:
+      continue
+    let localSha = parts[1]
+    if localSha.len == 0 or localSha.allCharsInSet({'0'}):
+      continue
+    let target = branchRefFromRef(parts[2])
+    if target.kind != brkBranch:
+      continue
+    result.add(PushedRefJudgement(commit: localSha, target: target,
+      refName: parts[2]))
+
+proc certificateGate(report: var CheckReport; legacy: GateRequirement;
+                     judged: seq[PushedRefJudgement]; certRepoPath, gitBin,
+                     currentRepoName, registeredKeysPath: string) =
+  ## TC-3 / RA-32 / TC-9c — the certificate-coverage stage of the RA-21
+  ## pre-push gate. Called ONLY after every other gate stage has passed
+  ## (clean + published + at the locked revisions, lock current), from each
+  ## exit point of stage 5.
+  ##
+  ## For each pushed commit, the requirement is the ``[certificate_policy]``
+  ## snapshot in THAT commit's ``repro.lock``: the first rule matching the
+  ## DESTINATION branch, under its ``gate_mode``, with its ``requires`` and
+  ## their platforms (Test-Certificates.md §"How a gate computes coverage").
+  ## A commit with no snapshot is judged by ``legacy`` — the project's
+  ## ``[certificates]`` table — exactly as before (interim, until TC-9d).
+  ##
+  ## DEFAULT-OFF (RA-32): no snapshot and no legacy table, an unmatched
+  ## branch, or a rule whose ``gate_mode`` is ``off`` is a strict NO-OP on
+  ## ``failures`` and ``exitCode``; an unmatched branch is said in a notice.
+  ##
+  ## ``advisory`` RECORDS the coverage verdict in ``report.notices`` but
+  ## never changes ``exitCode``. ``required`` REFUSES the push (exit 2 + a
+  ## structured ``certificate-coverage`` failure) unless trusted
+  ## certificates cover the pushed content for every required name on its
+  ## platforms. A malformed snapshot refuses (``certificate-policy-
+  ## malformed``): it never reads as ``off``.
   # TC-7 / TC-8b: the certificate carries no lock digest. The gate establishes
   # the lock itself — the standard's framework-specific validity step — from
   # the state it evaluates. By default (Unified-Locking-And-Hooks §14) that is
@@ -57882,18 +58180,18 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
     if report.lockUpdate.lockFilePath.len > 0:
       recordStoreLockSource(parentDir(report.lockUpdate.lockFilePath))
     else: committedLockSource()
-  # A policy that opts in but lists no required platforms means certificates
-  # are advisory-only (the spec: required_platforms may be none). There is
-  # nothing to enforce, so ``required`` degrades to a no-op rather than
-  # blocking on an empty requirement set.
-  if policy.requiredPlatforms.len == 0:
-    if policy.gateMode == cgmAdvisory:
-      report.notices.add("certificate advisory: policy sets no " &
-        "required_platforms — nothing to attest (pushes not gated)")
-    return
-  if pushedCommit.len == 0:
+  if judged.len == 0:
+    if legacy.mode == cgmOff:
+      return
+    if legacy.requires.len == 0:
+      # As before TC-9c: a table with no required platforms is advisory-only
+      # and has nothing to attest, whether or not there is a commit.
+      if legacy.mode == cgmAdvisory:
+        report.notices.add("certificate advisory: policy sets no " &
+          "required_platforms — nothing to attest (pushes not gated)")
+      return
     let why = "no HEAD commit to attest"
-    if policy.gateMode == cgmAdvisory:
+    if legacy.mode == cgmAdvisory:
       report.notices.add("certificate advisory: coverage NOT verified (" &
         why & ")")
     else:
@@ -57905,77 +58203,122 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
         evidence: why))
       report.exitCode = 2
     return
-  # TC-8c (operator decision D2): a client-side gate finds its candidates in
-  # the LOCAL CERTIFICATE STORE — both roots — under the content id of the
-  # state it judges (the pushed commit's tree), never in notes. That is where
-  # every conforming producer delivers, so a certificate issued before the
-  # commit existed, or in another clone of the same content, is found.
-  #
-  # Each required platform is checked independently, and its covered set is
-  # the UNION of every contributing certificate's targets (a linux cert + a
-  # macos cert together satisfy a {linux, macos} requirement). A certificate
-  # counts only with a VALID REGISTERED SIGNATURE (TC-5), content matching
-  # the pushed commit's tree (TC-8b; its ``base`` is never compared) and
-  # reprobuild's lock step passing for that tree.
-  let evaluated = commitUnderEvaluation(certRepoPath, pushedCommit)
-  let lookup = findCertificatesInLocalStore(evaluated)
-  for problem in lookup.problems:
-    report.notices.add("certificate store: " & problem)
-  let keys = readRegisteredKeyStoreChecked(registeredKeysPath)
-  let verdict = evaluateReprobuildCoverage(lookup.found, evaluated,
-    policy.requiredPlatforms, policy.requiredTargets, keys, lockSource,
-    (if lookup.searchFailed: lookup.problems else: @[]))
-  let short = pushedCommit[0 ..< min(12, pushedCommit.len)]
-  let searched =
-    if lookup.found.len == 0 and lookup.contentIds.len > 0:
-      " (no certificate found in the local store under " &
-        lookup.contentIds.join(", ") & "; searched " &
-        lookup.searched.join(", ") & ")"
-    else: ""
-  case verdict.outcome
-  of voCovered:
-    if policy.gateMode == cgmAdvisory:
-      report.notices.add("certificate advisory: coverage OK for " &
-        policy.requiredPlatforms.join(", ") & " × [" &
-        policy.requiredTargets.join(", ") & "] at " & short)
-    # In required mode a clean pass adds no failure — the gate keeps whatever
-    # exit code stage 5 set (0 on success).
-  of voNotCovered:
-    let detail = describeCoverageVerdict(verdict) & searched
-    if policy.gateMode == cgmAdvisory:
-      report.notices.add("certificate advisory: coverage INCOMPLETE — " &
-        detail & " (run 'repro certify' on the missing platform(s); " &
-        "advisory mode does not block this push)")
-    else:
-      report.failures.add(CheckFailure(
-        repo: currentRepoName,
-        property: "certificate-coverage",
-        remediation: "run 'repro certify' (on each required platform) to " &
-          "issue the missing certificate(s), then 'repro push' to carry them " &
-          "with this push",
-        evidence: "uncovered: " & detail,
-        source: ""))
-      report.exitCode = 2
-  of voUnverifiable:
-    # Verification §7: unverifiable MUST NOT be reported as not-covered. Under
-    # ``required`` the push is still refused, but the diagnostic names WHY
-    # the certificates could not be judged — re-running tests changes nothing.
-    let detail = describeCoverageVerdict(verdict)
-    if policy.gateMode == cgmAdvisory:
-      report.notices.add("certificate advisory: coverage UNVERIFIABLE — " &
-        detail & " (advisory mode does not block this push)")
-    else:
-      report.failures.add(CheckFailure(
-        repo: currentRepoName,
-        property: "certificate-unverifiable",
-        remediation: "the certificates for " & short & " could not be " &
-          "evaluated; fix what is named (an unreadable key store or " &
-          "certificate store, an algorithm this reprobuild cannot compute, " &
-          "a record in a schema it does not implement) — re-running the " &
-          "tests changes nothing",
-        evidence: "unverifiable: " & detail,
-        source: ""))
-      report.exitCode = 2
+  var keysLoaded = false
+  var keys: RegisteredKeyStoreLoad
+  for unit in judged:
+    let pushedCommit = unit.commit
+    let short = pushedCommit[0 ..< min(12, pushedCommit.len)]
+    let where = unit.refName & " @ " & short
+    let evaluated = commitUnderEvaluation(certRepoPath, pushedCommit)
+    let lock = readContentFile(certRepoPath, CommittedLockFileName,
+      evaluated.content)
+    let requirement = gateRequirementFromLock(lock.status, lock.bytes,
+      lock.reason, unit.target, cgkPush, legacy)
+    if requirement.error.len > 0:
+      if requirement.source == gpsSnapshot:
+        report.failures.add(CheckFailure(
+          repo: currentRepoName,
+          property: "certificate-policy-malformed",
+          remediation: "run 'repro lock refresh' to re-record the policy " &
+            "snapshot, commit it, and push again",
+          evidence: where & ": " & requirement.error))
+        report.exitCode = 2
+        return
+      # The pushed commit's lock could not be read. The client gate is fast
+      # feedback; the receiving side meets the same commit and fails closed.
+      report.notices.add("certificate gate: " & where & ": NOT evaluated: " &
+        requirement.error)
+      continue
+    if requirement.source == gpsSnapshot and requirement.noRule.len > 0:
+      report.notices.add("certificate gate: " & where & ": " &
+        requirement.noRule & " (" & requirement.label & ")")
+      continue
+    if requirement.mode == cgmOff:
+      continue
+    # A policy that opts in but requires nothing has nothing to attest. For
+    # the legacy table that is "required_platforms may be none", an
+    # advisory-only setting.
+    if requirement.requires.len == 0:
+      if requirement.mode == cgmAdvisory and requirement.source == gpsLegacy:
+        report.notices.add("certificate advisory: policy sets no " &
+          "required_platforms — nothing to attest (pushes not gated)")
+      continue
+    let applied = where & ": " & describeGateRequirement(requirement)
+    # TC-8c (operator decision D2): a client-side gate finds its candidates
+    # in the LOCAL CERTIFICATE STORE — both roots — under the content id of
+    # the state it judges (the pushed commit's tree), never in notes. That is
+    # where every conforming producer delivers, so a certificate issued
+    # before the commit existed, or in another clone of the same content, is
+    # found.
+    #
+    # Each required name is checked on each of ITS platforms, and a
+    # platform's covered set is the UNION of every contributing certificate's
+    # targets. A certificate counts only with a VALID REGISTERED SIGNATURE
+    # (TC-5), content matching the pushed commit's tree (TC-8b; its ``base``
+    # is never compared) and reprobuild's lock step passing for that tree.
+    let lookup = findCertificatesInLocalStore(evaluated)
+    for problem in lookup.problems:
+      report.notices.add("certificate store: " & problem)
+    if not keysLoaded:
+      keys = readRegisteredKeyStoreChecked(registeredKeysPath)
+      keysLoaded = true
+    let verdict = evaluateRequirementCoverage(lookup.found, evaluated,
+      requirement.requires, keys, lockSource,
+      (if lookup.searchFailed: lookup.problems else: @[]))
+    let searched =
+      if lookup.found.len == 0 and lookup.contentIds.len > 0:
+        " (no certificate found in the local store under " &
+          lookup.contentIds.join(", ") & "; searched " &
+          lookup.searched.join(", ") & ")"
+      else: ""
+    case verdict.outcome
+    of voCovered:
+      if requirement.mode == cgmAdvisory:
+        report.notices.add("certificate advisory: coverage OK for " &
+          requirementsLabel(requirement.requires) & " at " & short & " (" &
+          applied & ")")
+      # In required mode a clean pass adds no failure — the gate keeps
+      # whatever exit code stage 5 set (0 on success).
+    of voNotCovered:
+      let detail = describeCoverageVerdict(verdict) & searched
+      let remedies = unmetRemedies(verdict)
+      if requirement.mode == cgmAdvisory:
+        report.notices.add("certificate advisory: coverage INCOMPLETE — " &
+          detail & " (" & applied & "; " & remedies.join("; ") &
+          "; advisory mode does not block this push)")
+      else:
+        report.failures.add(CheckFailure(
+          repo: currentRepoName,
+          property: "certificate-coverage",
+          remediation: remedies.join("; ") & "; then 'repro push' to carry " &
+            "the certificates with this push",
+          evidence: "uncovered: " & detail & " (" & applied & ")",
+          source: ""))
+        report.exitCode = 2
+        return
+    of voUnverifiable:
+      # Verification §7: unverifiable MUST NOT be reported as not-covered.
+      # Under ``required`` the push is still refused, but the diagnostic
+      # names WHY the certificates could not be judged — re-running tests
+      # changes nothing.
+      let detail = describeCoverageVerdict(verdict)
+      if requirement.mode == cgmAdvisory:
+        report.notices.add("certificate advisory: coverage UNVERIFIABLE — " &
+          detail & " (" & applied & "; advisory mode does not block this " &
+          "push)")
+      else:
+        report.failures.add(CheckFailure(
+          repo: currentRepoName,
+          property: "certificate-unverifiable",
+          remediation: "the certificates for " & short & " could not be " &
+            "evaluated; fix what is named (an unreadable key store or " &
+            "certificate store, an algorithm this reprobuild cannot compute, " &
+            "a record in a schema it does not implement) — re-running the " &
+            "tests changes nothing",
+          evidence: "unverifiable: " & detail & " (" & applied & ")",
+          source: ""))
+        report.exitCode = 2
+        return
 
 # ============================================================================
 # TC-8g — the pre-commit certificate gate: the dispatcher's third phase.
@@ -58006,22 +58349,20 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
 #   * each candidate is VERIFIED through the same evaluator as every other
 #     client gate (TC-8b: registered signature, content match, reprobuild's
 #     lock step), for each required platform;
-#   * the MODE is ``commit_gate``, which defaults to ``gate_mode`` (D7). Until
-#     the shared branch policy exists (TC-9b/TC-9c) the requirement is the
-#     project's ``[certificates]`` table, which has no ``commit_gate`` key, so
-#     the default always applies. TC-9c changes the input, not this logic.
+#   * the REQUIREMENT (TC-9c) is the ``[certificate_policy]`` snapshot in the
+#     ``repro.lock`` of that same index: the first rule matching the branch
+#     the commit will be pushed to, its ``commit_gate`` (defaulting to its
+#     ``gate_mode``, D7) and its ``requires``. An index with no snapshot is
+#     judged by the project's ``[certificates]`` table (interim, TC-9d).
 #
 # A record-store project's lock is not part of the content (D8): the gate
 # passes on the certificate alone and never looks the lock record up. The
 # record is written after the commit, at pre-push.
 # ============================================================================
 
-proc commitGateMode*(policy: CertificatePolicy): CertificateGateMode =
-  ## The pre-commit gate's mode for ``policy`` (operator decision D7):
-  ## ``commit_gate``, defaulting to ``gate_mode``. The ``[certificates]``
-  ## table this reads today has no ``commit_gate`` key, so this is
-  ## ``gate_mode``; the shared branch policy (TC-9c) will supply both.
-  policy.gateMode
+proc currentCommitBranch(repoRoot: string): BranchRef
+  ## Defined beside ``repro certificates policy``, which reports the same
+  ## branch.
 
 proc consumePreCommitRepinNotes(workspaceRoot, repoRoot: string):
     seq[tuple[path, digest: string]] =
@@ -58056,14 +58397,24 @@ proc hookIndexFile(repoRoot: string): string =
 proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
   ## ``repro hooks dispatch pre-commit --phase=certificate-gate`` routes here.
   ##
-  ## Returns 1 — git refuses the commit — only under ``commit_gate =
-  ## required``, from a canonical (not displaced) dispatcher, when the
-  ## index being committed is not covered or its coverage cannot be
-  ## established. Every other outcome returns 0: ``advisory`` reports,
-  ## ``off`` does nothing, a replay stands down, and a fault in the gate's
-  ## own inputs (no workspace, a manifest that does not resolve) is logged
-  ## and is not a reason to reject a developer's work — the push gate meets
-  ## the same fault and is the enforcement point.
+  ## TC-9c: the requirement is read from the INDEX BEING COMMITTED — the
+  ## ``[certificate_policy]`` snapshot in its ``repro.lock`` — for the branch
+  ## the commit will be pushed to (``commitTimeBranch``: the upstream's name
+  ## when configured, else the current branch, else a detached ``HEAD``). The
+  ## first matching rule's ``commit_gate`` (defaulting to its ``gate_mode``,
+  ## D7) applies to its ``requires``. A branch no rule matches passes, and the
+  ## gate says so. Content with no snapshot is judged by the project's
+  ## ``[certificates]`` table, as before (interim, until TC-9d).
+  ##
+  ## Returns 1 — git refuses the commit — only from a canonical (not
+  ## displaced) dispatcher, under ``required`` when the index is not covered
+  ## or its coverage cannot be established, or when the snapshot it carries is
+  ## malformed (a structural error never becomes ``off``). Every other outcome
+  ## returns 0: ``advisory`` reports, ``off`` does nothing, a replay stands
+  ## down, and a fault in the gate's own inputs (no workspace, a manifest that
+  ## does not resolve, an index it cannot read) is logged and is not a reason
+  ## to reject a developer's work — the push gate meets the same fault and is
+  ## the enforcement point.
   let timestamp = isoTimestampNow()
   let workspaceRoot = resolvePostCommitWorkspaceRoot(repoRoot, "")
   if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
@@ -58071,41 +58422,107 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
   let repinNotes = consumePreCommitRepinNotes(workspaceRoot, repoRoot)
   template log(line: string) =
     appendPreCommitLog(workspaceRoot, timestamp & " certificate-gate " & line)
+  let prefix = "repro pre-commit: certificate gate: "
 
+  # The project is needed for the interim legacy table, for a record-store
+  # route (D8) and for the repository's name. A snapshot in the index needs
+  # none of them, so a project that does not resolve only removes the legacy
+  # input.
   var resolved: ResolvedProject
   var workspaceLocal: Option[WorkspaceLocal]
+  var resolveFailure = ""
   try:
     (resolved, workspaceLocal) = resolveWorkspaceProjectShared(workspaceRoot,
       "", "the pre-commit certificate gate")
   except CatchableError as err:
-    log("not-evaluated: the workspace project did not resolve: " & err.msg)
-    return 0
-  let policy = resolved.certificatePolicy
-  let configured = commitGateMode(policy)
-  if configured == cgmOff:
-    return 0
-  if policy.requiredPlatforms.len == 0:
-    # Same reading as the push gate: no required platform, nothing to attest.
-    log("not-gated: the policy sets no required_platforms")
-    return 0
-
-  # Only a repository the project declares carries the project's
-  # certificates; a commit anywhere else (the manifest repository itself, an
-  # unrelated checkout under the workspace root) is not this policy's to judge.
+    resolveFailure = err.msg
   var identity: GitToolIdentity
   try:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   except CatchableError as err:
     log("not-evaluated: git is not resolvable: " & err.msg)
     return 0
-  let match = resolveRepoWorktreeMatch(identity, workspaceRoot,
-    resolved.repos, repoRoot)
-  if not match.found:
-    log("not-gated: " & repoRoot & " is not a repository of project '" &
-      resolved.projectName & "'" &
-      (if match.diagnostic.len > 0: " (" & match.diagnostic & ")" else: ""))
+  var repoName = extractFilename(repoRoot)
+  var legacy = GateRequirement(source: gpsNone)
+  if resolveFailure.len == 0:
+    # Only a repository the project declares carries the project's table; a
+    # commit anywhere else is not that table's to judge.
+    let match = resolveRepoWorktreeMatch(identity, workspaceRoot,
+      resolved.repos, repoRoot)
+    if match.found:
+      repoName = resolved.repos[match.repoIndex].name
+      legacy = legacyGateRequirement(resolved.certificatePolicy,
+        "the [certificates] table of project '" & resolved.projectName & "'")
+
+  var target: BranchRef
+  try:
+    target = currentCommitBranch(repoRoot)
+  except CatchableError as err:
+    log("not-evaluated: the commit-time branch could not be read: " & err.msg)
     return 0
-  let repoName = resolved.repos[match.repoIndex].name
+  let branchText =
+    case target.kind
+    of brkBranch: "branch '" & target.name & "'"
+    of brkDetached: "detached HEAD"
+    of brkOther: target.name
+
+  # The content id, and the snapshot, are read by `git` children of this
+  # process, so the index being committed is named to them through the
+  # environment. This process is the gate alone and exits right after, and
+  # the variable is removed again before anything else runs.
+  let indexFile = hookIndexFile(repoRoot)
+  let hadIndexEnv = existsEnv("GIT_INDEX_FILE")
+  let savedIndexEnv = getEnv("GIT_INDEX_FILE")
+  if indexFile.len > 0:
+    putEnv("GIT_INDEX_FILE", indexFile)
+  var state: CertificateState
+  var requirement: GateRequirement
+  try:
+    state = indexUnderEvaluation(repoRoot, repoName)
+    let lock = readContentFile(repoRoot, CommittedLockFileName, state.content)
+    requirement = gateRequirementFromLock(lock.status, lock.bytes,
+      lock.reason, target, cgkCommit, legacy)
+  finally:
+    if hadIndexEnv: putEnv("GIT_INDEX_FILE", savedIndexEnv)
+    else: delEnv("GIT_INDEX_FILE")
+
+  if requirement.error.len > 0:
+    if requirement.source != gpsSnapshot:
+      # The index could not be read: a fault in the gate's own input.
+      log("not-evaluated: " & requirement.error)
+      return 0
+    # A malformed snapshot is a structural error: it refuses, and it is never
+    # read as "no requirement".
+    log((if displaced: "reported " else: "refused ") & "malformed-policy: " &
+      requirement.error)
+    stderr.writeLine(prefix & requirement.error)
+    if displaced:
+      stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running " &
+        "as pre-commit.legacy under another hook manager, so this gate " &
+        "cannot refuse. Restore it with 'repro hooks ensure --vcs " &
+        repoRoot & "'")
+      return 0
+    stderr.writeLine(prefix & "the commit is REFUSED: the certificate " &
+      "policy this commit carries cannot be read. This is early feedback, " &
+      "which `git commit --no-verify` skips; it is not the enforcement point")
+    return 1
+  if requirement.source == gpsSnapshot and requirement.noRule.len > 0:
+    # Spec: a branch matching no rule passes, and the gate says so.
+    log("no-rule: " & branchText & ": " & requirement.noRule)
+    stderr.writeLine(prefix & branchText & ": " & requirement.noRule &
+      " (" & requirement.label & ")")
+    return 0
+  let configured = requirement.mode
+  if configured == cgmOff:
+    return 0
+  if requirement.requires.len == 0:
+    if requirement.source == gpsLegacy:
+      # Same reading as the push gate: no required platform, nothing to attest.
+      log("not-gated: the policy sets no required_platforms")
+    else:
+      log("covered: " & branchText & ": " & requirement.label &
+        " requires nothing")
+    return 0
 
   # A replay (rebase, cherry-pick, `am`) re-creates commits that already
   # exist; judging each one again would stop the operation half way through
@@ -58126,36 +58543,30 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
   # and does not refuse.
   let mode =
     if displaced and configured == cgmRequired: cgmAdvisory else: configured
-  let prefix = "repro pre-commit: certificate gate: "
 
-  # The content id is computed by `git` children of this process, so the
-  # index being committed is named to them through the environment. This
-  # process is the gate alone and exits right after, and the variable is
-  # removed again before anything else runs.
-  let indexFile = hookIndexFile(repoRoot)
-  let hadIndexEnv = existsEnv("GIT_INDEX_FILE")
-  let savedIndexEnv = getEnv("GIT_INDEX_FILE")
   if indexFile.len > 0:
     putEnv("GIT_INDEX_FILE", indexFile)
   var lookup: LocalStoreLookup
   var verdict: ReprobuildCoverageVerdict
   var repinned: seq[string]
   try:
-    let state = indexUnderEvaluation(repoRoot, repoName)
     lookup = findCertificatesInLocalStore(state)
     # D8: a project whose lock lives in an out-of-tree record store has no
     # lock in this content, and `reprobuildLockVerdict` does not consult the
     # store for a state that is not a commit. The records directory is
     # therefore not even resolved here.
-    let recordStore = pickRecordStoreRoot(
-      WorkspaceLockArgs(workspaceRoot: workspaceRoot), workspaceLocal)
+    let recordStore =
+      if resolveFailure.len == 0:
+        pickRecordStoreRoot(WorkspaceLockArgs(workspaceRoot: workspaceRoot),
+          workspaceLocal)
+      else: ""
     let lockSource =
       if recordStore.len > 0: recordStoreLockSource("")
       else: committedLockSource()
     let keys = readRegisteredKeyStoreChecked(
       registeredKeyStorePath(workspaceRoot))
-    verdict = evaluateReprobuildCoverage(lookup.found, state,
-      policy.requiredPlatforms, policy.requiredTargets, keys, lockSource,
+    verdict = evaluateRequirementCoverage(lookup.found, state,
+      requirement.requires, keys, lockSource,
       (if lookup.searchFailed: lookup.problems else: @[]))
     if verdict.outcome != voCovered:
       for note in repinNotes:
@@ -58170,21 +58581,23 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
   let content =
     if lookup.contentIds.len > 0: lookup.contentIds.join(", ")
     else: "the index being committed"
+  let applied = branchText & ": " & describeGateRequirement(requirement)
   if verdict.outcome == voCovered:
-    log("covered: " & content & " for " & policy.requiredPlatforms.join(", ") &
-      " x [" & policy.requiredTargets.join(", ") & "]")
+    log("covered: " & content & " for " &
+      requirementsLabel(requirement.requires) & " (" & applied & ")")
     return 0
 
   let refuses = mode == cgmRequired
   let verdictTag =
     if verdict.outcome == voUnverifiable: "unverifiable" else: "not-covered"
   log((if refuses: "refused " else: "reported ") & verdictTag & ": " &
-    content & ": " & describeCoverageVerdict(verdict) &
+    content & ": " & describeCoverageVerdict(verdict) & " (" & applied & ")" &
     (if displaced: " (dispatcher displaced)" else: "") &
     (if repinned.len > 0: " (re-pinned: " & repinned.join(", ") & ")"
      else: ""))
   for problem in lookup.problems:
     stderr.writeLine(prefix & "certificate store: " & problem)
+  stderr.writeLine(prefix & applied)
   if verdict.outcome == voUnverifiable:
     stderr.writeLine(prefix & "coverage of the content being committed (" &
       content & ") could not be established: " &
@@ -58207,9 +58620,11 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
       stderr.writeLine(prefix & "cause: this commit's lock refresh re-pinned " &
         "and staged " & repinned.join(", ") & ", so the content being " &
         "committed is not the content the tests ran on")
+    for remedy in unmetRemedies(verdict):
+      stderr.writeLine(prefix & "unmet: " & remedy)
     stderr.writeLine(prefix & "remedy: run 'repro certify' on exactly what " &
-      "you are committing (on each required platform: " &
-      policy.requiredPlatforms.join(", ") & "), then commit again")
+      "you are committing (each name on each platform named above), then " &
+      "commit again")
   if displaced:
     stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
       "pre-commit.legacy under another hook manager, whose hooks run after " &
@@ -58546,6 +58961,11 @@ type
       ## What the gate actually read and decided on. Empty when it read
       ## nothing — which for a branch update carrying a lock is itself the
       ## defect, not a neutral outcome.
+    policyNotes*: seq[string]
+      ## TC-9c: for each gated branch, the policy that applied — the pushed
+      ## snapshot's rule, the ratchet anchor and where it came from, the
+      ## mode that resulted — and a note when the gateway config still bakes
+      ## a policy that the snapshot overrides.
 
 # ---- HL-5 (§6 Decision 3) — server-side PUBLIC-TIER lock gate --------------
 #
@@ -58819,32 +59239,143 @@ proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
       lockBlobId: read.blobId, depCount: ld.deps.len,
       integrityChecked: integrityChecked))
 
+proc gatewayLockAsContentFile(read: GatewayLockRead): ContentFile =
+  ## A gateway lock read in the shape ``gateRequirementFromLock`` takes.
+  case read.status
+  of glrUnreadable: ContentFile(status: cfsFailed, reason: read.diagnostic)
+  of glrAbsent, glrEmpty: ContentFile(status: cfsAbsent)
+  of glrPresent: ContentFile(status: cfsPresent, bytes: read.blob)
+
+type
+  GatewayRatchetAnchor* = object
+    ## Where the ratchet's ``gate_mode`` came from for one branch.
+    found*: bool
+      ## An anchor commit was resolved and its lock was read.
+    commit*: string
+    source*: string
+      ## Named every time (PG-7): which source supplied the anchor, or why
+      ## there was none.
+    mode*: PolicyMode
+      ## The anchor snapshot's ``gate_mode`` for the branch (``off`` when the
+      ## anchor carries no snapshot or no rule matches).
+    detail*: string
+
+proc localRepositoryPath(url: string): string =
+  ## The directory a ``file://`` URL or a plain path names, or "" for a
+  ## network URL.
+  var path = url
+  if path.startsWith("file://"):
+    path = path["file://".len .. ^1]
+  if path.len > 0 and (path.isAbsolute or dirExists(path)) and
+      dirExists(path):
+    return path
+  ""
+
+proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
+                           target: BranchRef;
+                           received = ReceivedObjectStore()):
+    GatewayRatchetAnchor =
+  ## The ratchet's anchor for ``target`` (Push-Gateway-Wiring-And-Policy
+  ## §4.2): the upstream's published ``refs/heads/<branch>`` — NOT the
+  ## ``<old>`` value the hook is handed and NOT the gateway's own refs, both
+  ## of which are per-workspace state a fork or a re-created gateway resets.
+  ## Its ``[certificate_policy]`` snapshot's ``gate_mode`` for the same branch
+  ## is the floor a pushed commit cannot relax.
+  ##
+  ## The anchor commit's objects are read from the gateway (which holds every
+  ## commit it forwarded) and, failing that, from the upstream itself when it
+  ## is a local repository. A snapshot at the anchor that does not parse
+  ## counts as ``required``: a structural error never reads as ``off``.
+  ##
+  ## This is the subset of PG-7's resolution the gateway can do on its own:
+  ## the shared-pool source and the targeted fetch are PG-7's, and until it
+  ## lands an anchor that is neither in the gateway nor in a local upstream is
+  ## reported as unreadable ("no anchor"), never silently treated as off.
+  if target.kind != brkBranch:
+    result.source = "no anchor: " & target.name & " is not a branch"
+    return
+  if upstreamUrl.len == 0:
+    result.source = "no anchor: the gateway config names no upstream"
+    return
+  let refName = "refs/heads/" & target.name
+  let listed = gitNoteRun(gitBin, ["ls-remote", upstreamUrl, refName])
+  if listed.code != 0:
+    result.source = "no anchor: 'git ls-remote " & upstreamUrl & " " &
+      refName & "' failed (exit " & $listed.code & "): " &
+      listed.output.strip()
+    return
+  var sha = ""
+  for line in listed.output.splitLines():
+    let parts = line.strip().splitWhitespace()
+    if parts.len >= 2 and parts[1] == refName:
+      sha = parts[0]
+  if sha.len == 0:
+    result.source = "no anchor: the upstream has no " & refName &
+      " (a new branch)"
+    return
+  result.commit = sha
+  var read = gatewayReadPushedLock(gitBin, gatewayBareDir, sha, received)
+  var where = "the upstream's " & refName & " at " & sha[0 ..< min(12,
+    sha.len)] & ", read from the gateway"
+  if read.status == glrUnreadable:
+    let local = localRepositoryPath(upstreamUrl)
+    if local.len > 0:
+      read = gatewayReadPushedLock(gitBin, local, sha)
+      where = "the upstream's " & refName & " at " &
+        sha[0 ..< min(12, sha.len)] & ", read from the upstream"
+  if read.status == glrUnreadable:
+    result.source = "no anchor: the upstream's " & refName & " (" & sha &
+      ") could not be read: " & read.diagnostic
+    return
+  result.found = true
+  result.source = where
+  if read.status != glrPresent:
+    result.detail = "the anchor carries no " & CommittedLockFileName
+    return
+  try:
+    let snap = readCertificatePolicySnapshot(read.blob)
+    if not snap.present:
+      result.detail = "the anchor's lock records no certificate policy"
+      return
+    let match = matchPolicy(snap.policy, target)
+    if match.matched:
+      result.mode = match.rule.gateMode
+      result.detail = "the anchor's " & ruleLabel(snap.policy,
+        match.ruleIndex) & " sets gate_mode " & $match.rule.gateMode
+    else:
+      result.detail = "the anchor's policy: " & match.reason
+  except CertificatePolicySnapshotError as err:
+    result.mode = pmRequired
+    result.detail = "the anchor's [certificate_policy] is malformed (" &
+      err.msg & "); counted as required"
+
 proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
                         updates: seq[GatewayRefUpdate];
                         cfg: GatewayConfig;
                         received = ReceivedObjectStore()):
     GatewayVerifyResult =
-  ## The AUTHORITATIVE receiving-side check. For each pushed BRANCH update,
-  ## read the certificates noted on the pushed commit's TREE (TC-8c) — from the
-  ## INCOMING ``certificateNotesRef`` value, already an object in this bare
-  ## repo's quarantine because the push delivered it, and from the settled
-  ## ref — and, under a ``required`` policy, require that a registered-SIGNED
-  ## (TC-5) certificate COVERS (TC-1) the pushed content for the required
-  ## targets on EACH required platform. The verdict is three-valued:
-  ## unverifiable is reported apart from not covered (Verification §7).
+  ## The AUTHORITATIVE receiving-side check. For each pushed BRANCH update:
   ##
-  ## REUSE, not re-implementation: the per-cert signature check is the TC-5
-  ## ``verifyCertificateSignature`` and the per-platform coverage is the TC-1
-  ## ``verifyCoverage`` — exactly what the client gate (TC-3) runs, but here on
-  ## the receiving side where ``--no-verify`` cannot reach.
+  ##   * the requirement (TC-9c) is the ``[certificate_policy]`` snapshot in
+  ##     the PUSHED commit's ``repro.lock``, read inside the receive
+  ##     quarantine: the first rule matching the DESTINATION branch, its
+  ##     ``gate_mode`` and its ``requires``. ``gate_mode`` alone is ratcheted:
+  ##     the anchor's value for the branch is read too, and the stricter one
+  ##     applies, so a commit cannot relax the rule that judges it. The sets
+  ##     are not ratcheted (Push-Gateway-Wiring §4.2). A pushed commit with no
+  ##     snapshot is judged by the policy the config was wired with (interim,
+  ##     until TC-9d); where a snapshot is present the config's baked policy is
+  ##     ignored, and the gateway says so;
+  ##   * the certificates are the notes on the pushed commit's TREE (TC-8c),
+  ##     from the INCOMING ``certificateNotesRef`` value — already an object
+  ##     in this bare repo's quarantine because the push delivered it — and
+  ##     from the settled ref;
+  ##   * under ``required`` a registered-SIGNED (TC-5) certificate set must
+  ##     COVER the pushed content for every required name on its platforms.
+  ##     The verdict is three-valued: unverifiable is reported apart from not
+  ##     covered (Verification §7). A malformed snapshot, or a pushed lock the
+  ##     gateway cannot read while a policy is in play, refuses.
   result.accepted = true
-  # ``off`` → transparent forward (no cert check at all). ``advisory`` →
-  # records the verdict but never rejects. ``required`` → rejects on a miss.
-  if cfg.gateMode == cgmOff:
-    return
-  if cfg.requiredPlatforms.len == 0:
-    # Opted in but nothing to enforce (required_platforms may be none).
-    return
   # Locate the incoming notes-ref value: the new id the push set for
   # ``certificateNotesRef``. In pre-receive the ref is not yet in place, but
   # the notes commit is already an object (in the quarantine), so the note is
@@ -58853,16 +59384,74 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
   for u in updates:
     if u.refName == certificateNotesRef:
       notesSha = u.newSha
-  let keys = readRegisteredKeyStoreChecked(cfg.registeredKeysPath)
   let lockSource =
     if cfg.lockRecordsDir.len > 0: recordStoreLockSource(cfg.lockRecordsDir)
     else: committedLockSource()
+  let baked = CertificatePolicy(gateMode: cfg.gateMode,
+    requiredTargets: cfg.requiredTargets,
+    requiredPlatforms: cfg.requiredPlatforms)
+  let bakedPresent = cfg.gateMode != cgmOff or cfg.requiredTargets.len > 0 or
+    cfg.requiredPlatforms.len > 0
+  let legacy = legacyGateRequirement(baked,
+    "the policy " & gatewayConfigRelPath & " was wired with")
+  var keysLoaded = false
+  var keys: RegisteredKeyStoreLoad
+  var bakedReported = false
   for u in updates:
     # Only gate branch pushes; the notes ref + tags are not the gated unit.
     if not u.refName.startsWith("refs/heads/"): continue
     if u.newSha.len > 0 and u.newSha.allCharsInSet({'0'}):
       continue  # branch deletion — nothing to attest.
     let pushedCommit = u.newSha
+    let target = branchRefFromRef(u.refName)
+    let pushedLock = gatewayLockAsContentFile(
+      gatewayReadPushedLock(gitBin, gatewayBareDir, pushedCommit, received))
+    let requirement = gateRequirementFromLock(pushedLock.status,
+      pushedLock.bytes, pushedLock.reason, target, cgkPush, legacy)
+    if requirement.source == gpsSnapshot and bakedPresent and
+        not bakedReported:
+      result.policyNotes.add(gatewayConfigRelPath & " still carries " &
+        "gate_mode / required_targets / required_platforms; they are " &
+        "IGNORED: the policy is read from the pushed tree's " &
+        CommittedLockFileName)
+      bakedReported = true
+    if requirement.error.len > 0:
+      result.accepted = false
+      result.outcome = voUnverifiable
+      result.diagnostic = u.refName & ": certificate policy: " &
+        requirement.error & "; REFUSING (a policy the gateway cannot read " &
+        "is not a policy it may wave through)"
+      return
+    # The anchor can only raise the mode, and a mode gates nothing when no
+    # name is required (the sets are not ratcheted, §4.2). With no snapshot
+    # and nothing required by the legacy input there is no policy in play,
+    # so the gateway does not query the upstream at all: `off` stays a
+    # transparent forward, as it was before the ratchet existed.
+    let anchor =
+      if requirement.source != gpsSnapshot and requirement.requires.len == 0:
+        GatewayRatchetAnchor(source: "not resolved: no policy in play")
+      else:
+        gatewayRatchetAnchor(gitBin, gatewayBareDir, cfg.upstreamUrl, target,
+          received)
+    let pushedMode = toPolicyMode(requirement.mode)
+    let effective = toGateMode(stricterMode(pushedMode, anchor.mode))
+    # A gateway with no policy anywhere stays silent: `off` is a documented
+    # strict no-op, and the absence of output is its specification.
+    if requirement.source == gpsSnapshot or effective != cgmOff:
+      result.policyNotes.add(u.refName & ": policy: " &
+        describeGateRequirement(requirement) & "; ratchet anchor: " &
+        anchor.source &
+        (if anchor.detail.len > 0: " (" & anchor.detail & ")" else: "") &
+        "; applied gate_mode " & $effective &
+        (if toPolicyMode(effective) != pushedMode:
+           " (the pushed commit's " & $pushedMode & " cannot relax it)"
+         else: ""))
+    if effective == cgmOff:
+      continue
+    if requirement.requires.len == 0:
+      # Nothing to attest: an advisory-only legacy table, or a pushed rule
+      # that names nothing (the sets are not ratcheted, §4.2).
+      continue
     # TC-8c (Transport §3): the certificates for the pushed commit are the
     # notes on its TREE, ``<new>^{tree}``, resolved inside the receive
     # quarantine — read from the INCOMING notes commit and from the settled
@@ -58901,14 +59490,16 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         if key in seen: continue   # the same record, incoming and settled
         seen.add(key)
         found.add(f)
+    if not keysLoaded:
+      keys = readRegisteredKeyStoreChecked(cfg.registeredKeysPath)
+      keysLoaded = true
     # The standard's evaluator (TC-7), the gateway's three-valued verdict
     # (TC-8c): framework first, a registered signature, content matching the
     # pushed tree, reprobuild's lock step — by default the ``repro.lock`` in
     # the pushed tree, or, for a project that opted into a lock record store
     # (a configured ``lock_records_dir``), the record for the pushed commit.
-    let verdict = evaluateReprobuildCoverage(found, evaluated,
-      cfg.requiredPlatforms, cfg.requiredTargets, keys, lockSource,
-      couldNotLook)
+    let verdict = evaluateRequirementCoverage(found, evaluated,
+      requirement.requires, keys, lockSource, couldNotLook)
     case verdict.outcome
     of voCovered:
       # COVERED — and by WHAT. An acceptance that says nothing is
@@ -58924,10 +59515,13 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
           " (no certificate note on the pushed tree under " &
             certificateNotesRef & "; push that ref with the branch)"
         else: ""
+      let remedies = unmetRemedies(verdict)
       let detail = u.refName & ": " & label & ": " &
-        describeCoverageVerdict(verdict) & noneArrived
+        describeCoverageVerdict(verdict) & noneArrived &
+        (if verdict.outcome == voNotCovered and remedies.len > 0:
+           " — " & remedies.join("; ") else: "")
       result.outcome = verdict.outcome
-      if cfg.gateMode == cgmRequired:
+      if effective == cgmRequired:
         result.accepted = false
         result.diagnostic = detail
         return
@@ -59590,6 +60184,8 @@ proc runGatewayCommand*(args: openArray[string]): int =
   of "pre-receive":
     # Cert gate (TC-5/TC-1) — kept verbatim (HL-5 is ADDITIVE).
     let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg, received)
+    for note in verdict.policyNotes:
+      stderr.writeLine("reprobuild gateway: " & note)
     for fault in verdict.carrierFaults:
       stderr.writeLine("reprobuild gateway: " & fault)
     if verdict.diagnostic.len > 0:
@@ -60837,25 +61433,40 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   let certRepoPath =
     if parsed.currentRepo.len > 0: parsed.currentRepo
     else: parsed.workspaceRoot
-  var certPushedCommit = ""
+  var certJudged: seq[PushedRefJudgement]
   var deferredParticipation: seq[DeferredParticipationWrite]
-  if not parsed.skipCertificateGate and
-      resolved.certificatePolicy.gateMode != cgmOff:
-    # The pushed commit is the current repo's HEAD. Prefer the already-
-    # observed SHA; fall back to a fresh probe if the current repo was not
-    # one of the in-scope observations (e.g. an empty-closure fallback).
-    for obs in observations:
-      if obs.name == currentRepoName and obs.headSha.len > 0:
-        certPushedCommit = obs.headSha
-        break
-    if certPushedCommit.len == 0:
-      let headRes = queryGitState(headShaQuery(certRepoPath), identity)
-      if headRes.status == gqsOk:
-        certPushedCommit = headRes.headSha
+  if not parsed.skipCertificateGate:
+    # TC-9c: each updated branch is judged by its DESTINATION name, at the
+    # commit it pushes, under the policy that commit carries.
+    certJudged = pushedRefJudgements(parsed.pushedRefsPath)
+    if certJudged.len == 0:
+      # No refs stream (a manual `repro check`), or one naming no branch:
+      # the pushed commit is the current repo's HEAD, judged as the branch a
+      # commit there is pushed to. Prefer the already-observed SHA; fall back
+      # to a fresh probe if the current repo was not one of the in-scope
+      # observations (e.g. an empty-closure fallback).
+      var head = ""
+      for obs in observations:
+        if obs.name == currentRepoName and obs.headSha.len > 0:
+          head = obs.headSha
+          break
+      if head.len == 0:
+        let headRes = queryGitState(headShaQuery(certRepoPath), identity)
+        if headRes.status == gqsOk:
+          head = headRes.headSha
+      if head.len > 0:
+        var target = BranchRef(kind: brkDetached)
+        try: target = currentCommitBranch(certRepoPath)
+        except CatchableError: discard
+        certJudged.add(PushedRefJudgement(commit: head, target: target,
+          refName: "HEAD"))
   template applyCertificateGate() =
     if not parsed.skipCertificateGate:
-      certificateGate(result, resolved.certificatePolicy, certPushedCommit,
-        certRepoPath, identity.binaryPath, currentRepoName,
+      certificateGate(result,
+        legacyGateRequirement(resolved.certificatePolicy,
+          "the [certificates] table of project '" & resolved.projectName &
+          "'"),
+        certJudged, certRepoPath, identity.binaryPath, currentRepoName,
         registeredKeyStorePath(parsed.workspaceRoot))
   template finalizePoliciesAndParticipation() =
     ## Durable stores are the final gate side effect. Certificates and every
@@ -73444,6 +74055,17 @@ type
     problems*: seq[string]
       ## What the certificate search reported (a misattached note, an
       ## unreadable store root, a record filed under other content).
+    policySource*: string
+      ## TC-9c: where the required names and ``ci_trust`` came from —
+      ## ``base`` (the base's snapshot), ``candidate`` (names only; the base
+      ## carries no snapshot, so ``ci_trust`` stays ``advisory``), ``legacy``
+      ## (the ``[certificates]`` table, interim) or ``none``.
+    policyBranch*: string
+      ## The branch whose rule applied.
+    policyBase*: string
+      ## The base commit whose snapshot was read ("" when none resolved).
+    policyDetail*: string
+      ## The rule, or why none applied, in words.
 
 proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
                             state: CertificateState;
@@ -73519,6 +74141,10 @@ proc renderCiPlanJson*(plan: CiPlan): JsonNode =
       o["advisory_note"] = %pp.advisoryNote
     platforms.add(o)
   result["platforms"] = platforms
+  if plan.policySource.len > 0:
+    result["policy"] = %*{"source": plan.policySource,
+      "branch": plan.policyBranch, "base": plan.policyBase,
+      "detail": plan.policyDetail}
   if plan.problems.len > 0:
     result["problems"] = %plan.problems
 
@@ -75121,14 +75747,52 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       "--no-runquota" in opts.buildFlags)
     defer: releaseAutoRunQuotaProcess(autoRunQuota)
     if selectors.len == 0 and opts.certifyExplicit:
-      # ``repro certify`` with no names materializes every declared
-      # certificate-producing node. (Once the shared branch policy exists it
-      # will be the names the current branch's rule requires instead.)
-      let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
-        selectDefaultAction = false, workRoot = workRoot, lowerGraph = false)
-      for entry in aggregateCertificateExportTable(declared.snapshot).entries:
-        if selectors.find(entry.name) < 0:
-          selectors.add(entry.name)
+      # TC-9c: ``repro certify`` with no names materializes the names the
+      # current branch's rule requires, read from the ``[certificate_policy]``
+      # snapshot of the working tree being certified, for the branch a commit
+      # here is pushed to. With no snapshot, or no rule for the branch, it
+      # materializes every declared certificate-producing node, as before.
+      let root = absolutePath(".")
+      var ruleNames: seq[string]
+      try:
+        let lock = readContentFile(root, CommittedLockFileName,
+          workingTreeState())
+        let target = currentCommitBranch(root)
+        let requirement = gateRequirementFromLock(lock.status, lock.bytes,
+          lock.reason, target, cgkPush, GateRequirement(source: gpsNone))
+        let branchText =
+          case target.kind
+          of brkBranch: "branch '" & target.name & "'"
+          of brkDetached: "detached HEAD"
+          of brkOther: target.name
+        if requirement.error.len > 0 and requirement.source == gpsSnapshot:
+          stderr.writeLine("repro certify: " & requirement.error)
+          return 2
+        if requirement.source == gpsSnapshot:
+          for req in requirement.requires:
+            if req.certificate notin ruleNames:
+              ruleNames.add(req.certificate)
+          if ruleNames.len > 0:
+            stderr.writeLine("repro certify: " & branchText & ": " &
+              requirement.label & " requires " &
+              requirementsLabel(requirement.requires) & "; certifying " &
+              ruleNames.join(", "))
+          else:
+            stderr.writeLine("repro certify: " & branchText & ": " &
+              describeGateRequirement(requirement) &
+              "; certifying every declared name")
+      except CatchableError as err:
+        stderr.writeLine("repro certify: the branch rule could not be read (" &
+          err.msg & "); certifying every declared name")
+      for name in ruleNames:
+        selectors.add(name)
+      if selectors.len == 0:
+        let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
+          selectDefaultAction = false, workRoot = workRoot,
+          lowerGraph = false)
+        for entry in aggregateCertificateExportTable(declared.snapshot).entries:
+          if selectors.find(entry.name) < 0:
+            selectors.add(entry.name)
       if selectors.len == 0:
         stderr.writeLine("repro certify: this project declares no " &
           "certificate-producing node (see 'repro certificates list'); " &
@@ -75839,6 +76503,15 @@ type
     platforms: seq[string]   ## explicit ``--platform`` values; empty ⇒ all required.
     json: bool
     toolProvisioning: ToolProvisioningMode
+    base: string
+      ## ``--base=<rev>``: the commit whose snapshot decides ``ci_trust`` and
+      ## the required names (TC-9c): the target branch's published tip for a
+      ## pull request, the anchor for a push. Default:
+      ## ``refs/remotes/origin/<branch>``.
+    branch: string
+      ## ``--branch=<name>``: the branch whose rule applies (the PR's target
+      ## branch, or the pushed branch). Default: ``$GITHUB_BASE_REF``, else
+      ## ``$GITHUB_REF_NAME``, else the checkout's commit-time branch.
 
 proc parseCiPlanArgs(args: openArray[string]): CiPlanArgs =
   result.toolProvisioning = tpmUnspecified
@@ -75847,6 +76520,10 @@ proc parseCiPlanArgs(args: openArray[string]): CiPlanArgs =
     elif a.startsWith("--platform="):
       let v = a["--platform=".len .. ^1].strip()
       if v.len > 0: result.platforms.add(v)
+    elif a.startsWith("--base="):
+      result.base = a["--base=".len .. ^1].strip()
+    elif a.startsWith("--branch="):
+      result.branch = a["--branch=".len .. ^1].strip()
     elif a.startsWith("--workspace-root="):
       result.workspaceRoot = a["--workspace-root=".len .. ^1]
     elif a.startsWith("--current-repo="):
@@ -75861,26 +76538,148 @@ proc parseCiPlanArgs(args: openArray[string]): CiPlanArgs =
 proc runCiPlanCommand(args: openArray[string]): int =
   ## ``repro ci plan`` — the per-platform CI fast-track decision (TC-4).
   let parsed = parseCiPlanArgs(args)
-  # Resolve the project's certificate policy (required targets/platforms +
-  # ci_trust). REUSE the same manifest resolution the develop/check paths use.
-  var policy: CertificatePolicy
+  let certRepoPath =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: parsed.workspaceRoot
+  # TC-9c: the required names, their platforms and ``ci_trust`` come from the
+  # ``[certificate_policy]`` snapshot of the BASE the job evaluates against,
+  # under the rule for the target branch. The candidate's own snapshot is
+  # never read for ``ci_trust``: a commit cannot instruct CI to trust it
+  # (Test-Certificates.md §"Modes"). When the base carries no snapshot, the
+  # candidate's rule supplies the names only and ``ci_trust`` stays
+  # ``advisory``; when neither does, the project's ``[certificates]`` table
+  # decides (interim, until TC-9d).
+  var legacyPolicy: CertificatePolicy
+  var legacyFailure = ""
   try:
     let resolved = resolveDevelopWorkspaceProject(parsed.workspaceRoot)
-    policy = resolved.certificatePolicy
+    legacyPolicy = resolved.certificatePolicy
   except CatchableError as err:
-    stderr.writeLine("repro ci plan: could not resolve a project policy: " &
-      err.msg)
-    return 1
+    legacyFailure = err.msg
+  var branch = parsed.branch
+  if branch.len == 0: branch = getEnv("GITHUB_BASE_REF")
+  if branch.len == 0: branch = getEnv("GITHUB_REF_NAME")
+  var target: BranchRef
+  if branch.len > 0:
+    target = branchRefFromRef(branch)
+  else:
+    try: target = currentCommitBranch(certRepoPath)
+    except CatchableError: target = BranchRef(kind: brkDetached)
+  let snapshotIdentity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  var baseCommit = ""
+  let baseSpec =
+    if parsed.base.len > 0: parsed.base
+    elif target.kind == brkBranch: "refs/remotes/origin/" & target.name
+    else: ""
+  if baseSpec.len > 0:
+    let resolvedBase = gitRunPlain(snapshotIdentity, ["-C", certRepoPath,
+      "rev-parse", "--verify", "--quiet", baseSpec & "^{commit}"])
+    if resolvedBase.code == 0:
+      baseCommit = resolvedBase.output.strip()
+    elif parsed.base.len > 0:
+      stderr.writeLine("repro ci plan: --base=" & parsed.base &
+        " does not name a commit in " & certRepoPath)
+      return 1
+  # A base that IS the candidate is no base. On a push event the default
+  # `origin/<branch>` names the pushed commit itself (the checkout fetched
+  # it there), so reading its snapshot would let a commit raise its own
+  # `ci_trust`. The job must name the anchor (the branch's previous tip) with
+  # `--base` instead.
+  var baseIsCandidate = false
+  if baseCommit.len > 0:
+    let candidateHead = gitRunPlain(snapshotIdentity, ["-C", certRepoPath,
+      "rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+    if candidateHead.code == 0 and candidateHead.output.strip() == baseCommit:
+      baseIsCandidate = true
+      baseCommit = ""
+  var requirement = GateRequirement(source: gpsNone)
+  var policySource = "none"
+  var policyDetail = ""
+  var baseHasSnapshot = false
+  if baseCommit.len > 0:
+    let lock = readContentFile(certRepoPath, CommittedLockFileName,
+      commitUnderEvaluation(certRepoPath, baseCommit).content)
+    let fromBase = gateRequirementFromLock(lock.status, lock.bytes,
+      lock.reason, target, cgkPush, GateRequirement(source: gpsNone))
+    if fromBase.error.len > 0 and fromBase.source == gpsSnapshot:
+      stderr.writeLine("repro ci plan: the base " & baseCommit & ": " &
+        fromBase.error)
+      return 1
+    if fromBase.source == gpsSnapshot:
+      baseHasSnapshot = true
+      requirement = fromBase
+      policySource = "base"
+      policyDetail = describeGateRequirement(fromBase)
+  if not baseHasSnapshot:
+    let candidateLock = readContentFile(certRepoPath, CommittedLockFileName,
+      workingTreeState())
+    let fromCandidate = gateRequirementFromLock(candidateLock.status,
+      candidateLock.bytes, candidateLock.reason, target, cgkPush,
+      GateRequirement(source: gpsNone))
+    if fromCandidate.error.len > 0 and fromCandidate.source == gpsSnapshot:
+      stderr.writeLine("repro ci plan: the checked-out " & fromCandidate.error)
+      return 1
+    if fromCandidate.source == gpsSnapshot:
+      requirement = fromCandidate
+      requirement.ciTrust = cctAdvisory
+      policySource = "candidate"
+      policyDetail = describeGateRequirement(fromCandidate) &
+        "; ci_trust is advisory because " &
+        (if baseCommit.len > 0: "the base " & baseCommit & " carries no " &
+           "certificate policy"
+         elif baseIsCandidate: "the base (" & baseSpec & ") is the " &
+           "candidate itself (pass --base=<the branch's previous tip>)"
+         else: "no base was resolved (" &
+           (if baseSpec.len > 0: baseSpec & " does not exist" else:
+            "pass --base") & ")") &
+        ", and the candidate's own ci_trust is never read"
+    elif legacyFailure.len > 0:
+      stderr.writeLine("repro ci plan: could not resolve a project policy: " &
+        legacyFailure)
+      return 1
+    else:
+      requirement = legacyGateRequirement(legacyPolicy,
+        "the [certificates] table")
+      policySource = if requirement.source == gpsLegacy: "legacy" else: "none"
+      policyDetail = describeGateRequirement(requirement)
+  # The names to plan, and which of them each platform owes. The legacy table
+  # keeps its shape exactly: every target on every listed platform.
+  var requiredNames: seq[string]
+  for req in requirement.requires:
+    if req.certificate notin requiredNames:
+      requiredNames.add(req.certificate)
+  if requirement.source == gpsLegacy:
+    requiredNames = legacyPolicy.requiredTargets
+  proc namesFor(platform: string): seq[string] =
+    if requirement.source == gpsLegacy:
+      return legacyPolicy.requiredTargets
+    for req in requirement.requires:
+      if (platform in req.platforms or
+          AnyPlatformMarker in req.platforms) and
+          req.certificate notin result:
+        result.add(req.certificate)
   # The platforms to plan for: explicit ``--platform`` values, else every
   # required platform. (A platform CI asks about that is NOT in the required set
   # is still planned — it simply has no required coverage obligation, so it runs
-  # the full required target set.)
-  let planPlatforms =
-    if parsed.platforms.len > 0: parsed.platforms
-    else: policy.requiredPlatforms
-  if policy.requiredTargets.len == 0:
-    stderr.writeLine("repro ci plan: project declares no required_targets — " &
+  # the full required target set.) An any-platform requirement is planned on
+  # this host's platform.
+  var planPlatforms = parsed.platforms
+  if planPlatforms.len == 0:
+    if requirement.source == gpsLegacy:
+      planPlatforms = legacyPolicy.requiredPlatforms
+    else:
+      for req in requirement.requires:
+        for p in req.platforms:
+          let concrete = if p == AnyPlatformMarker: currentPlatformTag()
+                         else: p
+          if concrete notin planPlatforms: planPlatforms.add(concrete)
+  if requiredNames.len == 0:
+    stderr.writeLine("repro ci plan: " &
+      (if requirement.source == gpsSnapshot: policyDetail & " — "
+       else: "project declares no required_targets — ") &
       "nothing to plan (CI runs its own targets normally)")
+  let policy = (ciTrust: requirement.ciTrust,
+    requiredTargets: requiredNames)
   # TC-8c: the binding is the CONTENT CI checked out, not a commit. A
   # certificate issued before the commit — or in another clone — covers it
   # when it names that content; a modified checkout binds its own content, so
@@ -75889,9 +76688,6 @@ proc runCiPlanCommand(args: openArray[string]): int =
   # opted into a lock record store has its lock resolved at the checked-out
   # commit (record-store lock subtree); otherwise the committed repro.lock is
   # read from the content itself.
-  let certRepoPath =
-    if parsed.currentRepo.len > 0: parsed.currentRepo
-    else: parsed.workspaceRoot
   let pre = evaluateIssuancePreconditions(
     parsed.workspaceRoot, parsed.currentRepo, parsed.toolProvisioning)
   let lockSource =
@@ -75901,7 +76697,13 @@ proc runCiPlanCommand(args: openArray[string]): int =
     if parsed.toolProvisioning == tpmUnspecified: tpmPathOnly
     else: parsed.toolProvisioning, getEnv("PATH"))
   var plan = CiPlan(requiredTargets: policy.requiredTargets,
-    ciTrust: policy.ciTrust)
+    ciTrust: policy.ciTrust, policySource: policySource,
+    policyBranch:
+      (case target.kind
+       of brkBranch: target.name
+       of brkDetached: "(detached)"
+       of brkOther: target.name),
+    policyBase: baseCommit, policyDetail: policyDetail)
   let headRes = queryGitState(headShaQuery(certRepoPath), identity)
   if headRes.status == gqsOk:
     plan.commit = headRes.headSha
@@ -75967,14 +76769,18 @@ proc runCiPlanCommand(args: openArray[string]): int =
   let keys = readRegisteredKeyStoreChecked(
     registeredKeyStorePath(parsed.workspaceRoot))
   for platform in planPlatforms:
+    # A platform no requirement names owes nothing in particular, so it runs
+    # every required name, as before.
+    var owed = namesFor(platform)
+    if owed.len == 0: owed = policy.requiredTargets
     var pp =
       if evaluated == nil:
         # No binding ⇒ run the full required set on this platform.
         CiPlatformPlan(platform: platform, verdict: voNotCovered,
-          run: policy.requiredTargets)
+          run: owed)
       else:
         computeCiPlatformPlan(found, evaluated, lockSource, platform,
-          policy.requiredTargets, policy.ciTrust, keys, couldNotLook)
+          owed, policy.ciTrust, keys, couldNotLook)
     if bindingNote.len > 0 and pp.advisoryNote.len == 0:
       pp.advisoryNote = bindingNote
     plan.platforms.add(pp)
@@ -75986,6 +76792,7 @@ proc runCiPlanCommand(args: openArray[string]): int =
       (if plan.commit.len >= 12: " (HEAD " & plan.commit[0 ..< 12] & ")"
        else: "") &
       "  ci_trust=" & $policy.ciTrust
+    echo "  policy (" & policySource & "): " & policyDetail
     for pp in plan.platforms:
       echo "  " & pp.platform & ":  " & $pp.verdict & "  skip=[" &
         pp.skip.join(", ") & "]  run=[" & pp.run.join(", ") & "]" &
@@ -77699,6 +78506,61 @@ proc currentCommitBranch(repoRoot: string): BranchRef =
     if merge.code == 0:
       upstream = merge.output.strip()
   commitTimeBranch(headRef, upstream)
+
+proc certificateGatePlan*(repoRoot: string): CertificateGatePlan =
+  ## Whether a certificate policy is in effect for ``repoRoot``, so
+  ## ``repro hooks ensure --vcs`` generates the pre-commit certificate phase
+  ## (Test-Certificates.md §"Generated gates"), and one line per rule to
+  ## report. The policy is the ``[certificate_policy]`` snapshot in the
+  ## repository's ``repro.lock``; with none, (interim, until TC-9d) the
+  ## project's ``[certificates]`` table when it gates this repository.
+  ##
+  ## The answer depends on the checked-out lock, not on the branch: the phase
+  ## itself resolves the branch and its rule each time it fires, so a branch
+  ## switch needs no re-install. Never raises.
+  let lockPath = repoRoot / CommittedLockFileName
+  if fileExists(extendedPath(lockPath)):
+    var text = ""
+    try: text = readFile(extendedPath(lockPath))
+    except CatchableError: discard
+    try:
+      let read = readCertificatePolicySnapshot(text)
+      if read.present:
+        result.wanted = true
+        for rule in read.policy.rules:
+          result.lines.add(ruleGateLine(rule))
+        if read.policy.rules.len == 0:
+          result.lines.add("certificate gate: certificate policy '" &
+            read.policy.name & "' has no rules; no branch is gated")
+        return
+    except CertificatePolicySnapshotError as err:
+      result.wanted = true
+      result.lines.add("certificate gate: " & lockPath &
+        " carries a malformed [certificate_policy] (" & err.msg &
+        "); every commit is refused until `repro lock refresh` re-records it")
+      return
+  let workspaceRoot = enclosingWorkspaceRoot(repoRoot)
+  if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
+    return
+  try:
+    let (resolved, _) = resolveWorkspaceProjectShared(workspaceRoot, "",
+      "repro hooks ensure")
+    let policy = resolved.certificatePolicy
+    if policy.gateMode == cgmOff:
+      return
+    let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    let match = resolveRepoWorktreeMatch(identity, workspaceRoot,
+      resolved.repos, repoRoot)
+    if not match.found:
+      return
+    result.wanted = true
+    result.lines.add("certificate gate: every branch -> " &
+      requirementsLabel(legacyRequirements(policy)) & "; commit " &
+      $policy.gateMode & ", push " & $policy.gateMode &
+      " (the [certificates] table of project '" & resolved.projectName &
+      "', until it is migrated to a certificate policy)")
+  except CatchableError:
+    result.undecided = true
 
 proc requirementText(req: PolicyRequirement): string =
   req.certificate & " (" &

@@ -249,7 +249,11 @@
         # Bumped to 527368e (2026-10-16), io-mon's `agents` tip; 414a3de is an
         # ancestor. Test-only: the macOS nesting fixtures give their second
         # shim its own install name, so they run two distinct shim images.
-      url = "github:metacraft-labs/io-mon/527368ee896b58263085a116f8fffb9b3ee2d82e";
+        # Bumped to 2801e94 (2026-10-16), io-mon's `agents` tip; 527368e is an
+        # ancestor. Linux records path mutations, the directories glob(3)
+        # scans, and the files and directories mkstemp and mkdtemp create;
+        # the writer closes a byte-capped fragment once on a key change.
+      url = "github:metacraft-labs/io-mon/2801e948810673bbb0fcbc7adb222943d4e7de50";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -498,7 +502,11 @@
       # change -- it declares the Zstandard headers through the new ``zstd-dev``
       # selector -- and that revision's ``repro.lock`` names trace-format d8cd2ed5,
       # so ``ct-trace-format-src`` moves to it in the same step.
-      url = "github:metacraft-labs/codetracer/23d5af70f74765e0717e57aefaa453e3a1c18717";
+      #
+      # At 6b6d05a08 (2026-10-15, the published `agents` tip; 23d5af70f is its
+      # parent) only ``flake.lock`` and ``repro.lock`` change, and the latter
+      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays.
+      url = "github:metacraft-labs/codetracer/6b6d05a081287ae66cd875ece212e5e713a9f9e3";
       flake = false;
     };
 
