@@ -51147,6 +51147,77 @@ proc toJsonNode*(report: PostCommitReport): JsonNode =
   result["pendingRecords"] = %report.pendingRecords
   result["strandedRecords"] = %report.strandedRecords
 
+proc mainWorktreeRootFor(startPath: string; gitBin = ""): string =
+  ## HL-1 (§4.3) — the MAIN worktree's root for a path inside a LINKED git
+  ## worktree, or "" when ``startPath`` is not inside one.
+  ##
+  ## A linked worktree's ``.git`` is a FILE and its VCS-private dir is the
+  ## COMMON dir, so ``git rev-parse --git-common-dir`` is what walks a linked
+  ## worktree back to the repository it belongs to. Its parent is the main
+  ## worktree's root — the canonical worktree identity the push-hook
+  ## publication protocol binds.
+  ##
+  ## This exists because a path ascent alone cannot find a workspace from a
+  ## linked worktree: the worktree is checked out ANYWHERE (commonly a scratch
+  ## dir outside the workspace entirely), so no ancestor of it carries the
+  ## workspace marker and every marker probe is a stat of a path that is not
+  ## there. The gate then concluded "not a workspace" and no-oped, which is
+  ## fail-OPEN — the one direction a publication gate must never fail.
+  ##
+  ## Returns "" — meaning "nothing new to try" — for every non-linked case, so
+  ## a caller's behaviour outside a linked worktree is unchanged:
+  ##   * not a git repo, or no git on PATH;
+  ##   * a MAIN worktree (``--git-dir`` == ``--git-common-dir``), whose root is
+  ##     already on the ancestor walk;
+  ##   * a BARE repository's worktree, whose common dir has no working tree
+  ##     above it — taking its parent would escalate to an unrelated directory,
+  ##     so only the standard layout (common dir named ``.git``) is accepted.
+  if startPath.len == 0:
+    return ""
+  let start = absolutePath(startPath)
+  if not dirExists(start):
+    return ""
+  let git = if gitBin.len > 0: gitBin else: findExe("git")
+  if git.len == 0:
+    return ""
+  proc revParse(flag: string): string =
+    ## ``git -C start rev-parse <flag>``, resolved to an absolute, normalized
+    ## path. Relative output is joined against ``start`` (git answers relative
+    ## to its own ``-C`` directory) rather than requiring ``--path-format``,
+    ## which predates the git versions this still has to run on.
+    let res = execCmdEx(quoteShell(git) & " -C " & quoteShell(start) &
+      " rev-parse " & flag,
+      options = {poStdErrToStdOut, poUsePath},
+      env = scrubbedGitRepositoryEnv())
+    if res.exitCode != 0:
+      return ""
+    var value = res.output.strip()
+    if value.len == 0:
+      return ""
+    if not isAbsolute(value):
+      value = start / value
+    try:
+      os.normalizedPath(expandFilename(value))
+    except OSError, CatchableError:
+      os.normalizedPath(absolutePath(value))
+  let commonDir = revParse("--git-common-dir")
+  let gitDir = revParse("--git-dir")
+  if commonDir.len == 0 or gitDir.len == 0:
+    return ""
+  # A MAIN worktree has --git-dir == --git-common-dir. A LINKED worktree's
+  # --git-dir is <common>/worktrees/<name>, so the inequality IS the test for
+  # "linked", and it needs no parsing of that path.
+  if gitDir == commonDir:
+    return ""
+  if lastPathPart(commonDir) != ".git":
+    return ""
+  let mainRoot = parentDir(commonDir)
+  if mainRoot.len == 0 or not dirExists(mainRoot):
+    return ""
+  if mainRoot == start:
+    return ""
+  mainRoot
+
 proc selfAndAncestors(startPath: string): seq[string] =
   ## ``startPath`` and every directory above it, nearest first.
   result = @[]
@@ -51159,9 +51230,21 @@ proc selfAndAncestors(startPath: string): seq[string] =
     if parent == probe: break
     probe = parent
 
-proc enclosingWorkspaceRoot*(startPath: string): string =
+proc enclosingWorkspaceRoot*(startPath: string;
+                             followWorktree = true): string =
   ## The nearest ancestor of ``startPath`` (inclusive) that is a WORKSPACE, or
   ## "" when there is none.
+  ##
+  ## When the ascent finds nothing and ``startPath`` is inside a LINKED git
+  ## worktree, the walk is retried from the MAIN worktree's root
+  ## (``mainWorktreeRootFor``, HL-1 §4.3). A linked worktree is checked out
+  ## anywhere — typically outside the workspace — so the ascent from it passes
+  ## through no workspace at all, and the gate that consults this resolver
+  ## concluded "not a workspace" and no-oped. Resolving the common dir walks
+  ## back to the repo the worktree belongs to, from which the ascent reaches
+  ## the workspace above it and the gate ENFORCES. ``followWorktree`` is the
+  ## recursion guard: the retry resolves a main worktree, which by definition
+  ## has no further worktree to follow.
   ##
   ## A managed hook fires inside a participating repo and has to walk up to the
   ## workspace. The marker for that walk is the WORKSPACE, never a ``.repro/``
@@ -51198,10 +51281,18 @@ proc enclosingWorkspaceRoot*(startPath: string): string =
   ## workspace that owns the ``.repro/`` it sits in.
   ##
   ## All of this is the shared ``discoverWorkspaceRoot``
-  ## (``repro_core/workspace_root``) — the one walk every workspace-root
+  ## (``repro_core/workspace_root``) -- the one walk every workspace-root
   ## lookup uses, whose marker set also includes the settings file
   ## (Workspace-Settings-Files.md §6) and honours ``REPRO_WORKSPACE_CONFIG``.
-  findWorkspaceRoot(startPath)
+  result = findWorkspaceRoot(startPath)
+  if result.len == 0 and followWorktree:
+    # The linked-worktree retry documented above. `agents` replaced the inline
+    # ascent with the shared walk, which does not follow worktrees; `dev`
+    # carries the retry. Keeping both is the union -- dropping either would
+    # lose the shared marker set or lose HL-1 §4.3.
+    let mainRoot = mainWorktreeRootFor(startPath)
+    if mainRoot.len > 0:
+      return enclosingWorkspaceRoot(mainRoot, followWorktree = false)
 
 proc enclosingReproShell*(startPath: string): string =
   ## The nearest ancestor of ``startPath`` (inclusive) holding a ``.repro/``
@@ -69543,18 +69634,31 @@ type
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec      ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc ascendToWorkspaceRoot(startDir: string): string =
+proc ascendToWorkspaceRoot(startDir: string;
+                           followWorktree = true): string =
   ## Walk up from ``startDir`` to the workspace root that owns it, so the
   ## prompt and the workspace-wide verbs work from any subdirectory of a
   ## workspace (like ``__git_ps1``). Returns "" when there is none. Pure
-  ## filesystem stat walk — no git, bounded by the path depth.
+  ## filesystem stat walk -- no git, bounded by the path depth -- except for
+  ## the linked-worktree retry below, which is the one place git is consulted.
   ##
   ## The shared ``discoverWorkspaceRoot`` (``repro_core/workspace_root``), so
   ## a member repo's own committed ``repro.lock`` no longer makes the member
   ## its own workspace when a workspace root sits above it. FINDING a root is
   ## not the root being initialized: a caller that needs state asks
   ## ``isInitializedWorkspace`` of the answer (the prompt does).
-  findWorkspaceRoot(startDir)
+  ##
+  ## ``followWorktree`` retries the walk from the MAIN worktree's root when
+  ## ``startDir`` is inside a LINKED git worktree -- the same HL-1 §4.3
+  ## resolution ``enclosingWorkspaceRoot`` performs, so a cwd-based verb run
+  ## from a worktree resolves the same workspace the hook-based gate does.
+  ## Without it, `repro ws status` / `branch` / `switch` silently acted on the
+  ## worktree dir instead of the workspace.
+  result = findWorkspaceRoot(startDir)
+  if result.len == 0 and followWorktree:
+    let mainRoot = mainWorktreeRootFor(startDir)
+    if mainRoot.len > 0:
+      return findWorkspaceRoot(mainRoot)
 
 proc resolveInvokedWorkspaceRoot(explicit: string): string =
   ## The workspace root a workspace-wide verb should act on.
