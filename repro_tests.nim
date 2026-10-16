@@ -14103,6 +14103,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim",
+    binary: "build/test-bin/t_nix_tool_resolution_is_a_provisioning_edge",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_no_project_set_errors_name_the_remedy.nim",
     binary: "build/test-bin/t_no_project_set_errors_name_the_remedy",
     defines: @[],
