@@ -7,16 +7,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "222a4a0099115066ba331817e94a3ac9f2293290"
+    "2097ae648aa03198727c402b5bfbede548d068a9"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-222a4a00.nim"
+    "tests/fixtures/codetracer-subset/repro-2097ae64.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-222a4a00.nims"
+    "tests/fixtures/codetracer-subset/config-2097ae64.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ccf12e902fdd57ae789434591256683a46b3d35e19ba81df0d7b28cc0c0f6582"
+    "3e6a250b12ffcda211ab54bf5665b55c273bf9eb181c33d580f97afcc6119c92"
   PinnedCodeTracerConfigPayloadSha256 =
-    "5a619728256fbebfaa8fffde8280293e93a2600daac684375193a4413b69c3dd"
+    "469f008a005d9d0d6b274fca8f8422b9f96bc78156567e269b35b0f3ce625a80"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by
@@ -59,6 +59,23 @@ const
       path: "libs/nimcrypto",
       revision: "69eec0375dd146aede41f920c702c531bfe89c6b",
       module: "nimcrypto.nim"
+    ),
+    # CodeTracer 2097ae648 imports ``regex`` from
+    # ``src/frontend/viewmodel/host/text_match.nim``, which the desktop main
+    # process reaches through ``src/frontend/index/ipc_utils.nim`` ->
+    # ``find_in_files``, so every ``index.js`` / ``server_index.js`` compile
+    # needs the nim-regex gitlink (vendored by CodeTracer 905e31111), and
+    # nim-regex imports ``pkg/unicodedb``, whose gitlink the same commit moved
+    # to 0.13.2.
+    (
+      path: "libs/nim-regex",
+      revision: "a0f1df6a6512340df9ababe59f55140c94a2200f",
+      module: "src/regex.nim"
+    ),
+    (
+      path: "libs/nim-unicodedb",
+      revision: "66f2458710dc641dd4640368f9483c8a0ec70561",
+      module: "src/unicodedb.nim"
     )
   ]
 
@@ -107,7 +124,12 @@ const CodeTracerCommonDevToolExecutables: seq[string] = @[
   "webpack-cli",
   "wget",
   "yarn",
-  "zstd"
+  "zstd",
+  # CodeTracer 01d8b6e54 (pinned since 2097ae64) declares Zstandard's
+  # development channel unconditionally beside the ``zstd`` CLI, and names it
+  # as a tool ref on every native edge. Path-mode resolution probes the
+  # selector itself on PATH, so it is listed and provided like the others.
+  "zstd-dev"
 ]
 
 when not defined(macosx):
@@ -136,6 +158,10 @@ else:
 
 const CodeTracerSourcePackages = [
   "isonim",
+  # Declared under ``uses:`` since CodeTracer 01d8b6e54 (pinned since
+  # 2097ae64), consumed through the SC-11 Nim library-source channel exactly
+  # as the packages beside it are.
+  "codetracer-trace-format-nim",
   "nim-everywhere",
   "nim-agent-harbor",
   "nim-agents",

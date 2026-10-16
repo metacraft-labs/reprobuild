@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned command-semantics extract from CodeTracer commit
-# 222a4a0099115066ba331817e94a3ac9f2293290, src/Tuprules.tup.
-# Source: https://github.com/metacraft-labs/codetracer/blob/222a4a0099115066ba331817e94a3ac9f2293290/src/Tuprules.tup
+# 2097ae648aa03198727c402b5bfbede548d068a9, src/Tuprules.tup.
+# Source: https://github.com/metacraft-labs/codetracer/blob/2097ae648aa03198727c402b5bfbede548d068a9/src/Tuprules.tup
 #
 # This fixture contains every variable and macro definition that contributes
 # to the !nim_js and !trace_object_file command fingerprints exercised by the
@@ -39,6 +39,7 @@ NIM_REPO_PATH_FLAGS=\
 --path:$(ROOT)/libs/nim-prompt\
 --path:$(ROOT)/libs/nim-stew\
 --path:$(ROOT)/libs/nim-unicodedb/src\
+--path:$(ROOT)/libs/nim-regex/src\
 --path:$(ROOT)/libs/poly\
 --path:$(ROOT)/libs/quicktest\
 --path:$(ROOT)/libs/chronos\

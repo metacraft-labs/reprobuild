@@ -24,13 +24,20 @@ const
   # exclusion ``| $(NIM_SIDE_OUTPUTS_IGNORE)``, which tells tup to accept the
   # writes into that cache. Every other fingerprinted definition is
   # byte-identical, so ``!trace_object_file`` keeps its hash.
-  NimJsSemanticsHash = "c78271220ebdc225"
-  NimJsWithoutOldCaseObjectsHash = "600a5090da25c07b"
+  #
+  # Refreshed at 2097ae64 (the next ``codetracer-src`` pin): CodeTracer
+  # 905e31111 vendored nim-regex and appended
+  # ``--path:$(ROOT)/libs/nim-regex/src`` to ``NIM_REPO_PATH_FLAGS``, which
+  # ``!nim_js`` expands through ``NIM_SELECTED``. That one search path is the
+  # only change to a fingerprinted definition since 34b96d03, so both
+  # ``!nim_js`` hashes move and ``!trace_object_file`` keeps its hash.
+  NimJsSemanticsHash = "cf5abd87a80ad4de"
+  NimJsWithoutOldCaseObjectsHash = "75caac0be4d67d5c"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "222a4a0099115066ba331817e94a3ac9f2293290"
+    "2097ae648aa03198727c402b5bfbede548d068a9"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-222a4a00.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-2097ae64.tup"
 
 type
   TupRules = object

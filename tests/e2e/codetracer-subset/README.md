@@ -7,7 +7,7 @@ Reprobuild project and builds it through the public `repro build` command with
 The macOS gate does not invoke `tup`. Homebrew marks `tup` Linux-only and
 nixpkgs marks it broken on this host. Instead, the test parses and fingerprints
 the command-semantics fixture pinned from CodeTracer commit
-`222a4a0099115066ba331817e94a3ac9f2293290`, the revision this repository's
+`2097ae648aa03198727c402b5bfbede548d068a9`, the revision this repository's
 `flake.lock` pins for `codetracer-src`; using a Reprobuild-owned fixture keeps
 the oracle independent of an adjacent CodeTracer checkout's branch or
 uncommitted state. The fixture covers the exact
@@ -34,14 +34,14 @@ that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
 payloads pinned from reviewed CodeTracer commit
-`222a4a0099115066ba331817e94a3ac9f2293290`. The files retain CodeTracer's
+`2097ae648aa03198727c402b5bfbede548d068a9`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/222a4a0099115066ba331817e94a3ac9f2293290/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/222a4a0099115066ba331817e94a3ac9f2293290/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/2097ae648aa03198727c402b5bfbede548d068a9/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/2097ae648aa03198727c402b5bfbede548d068a9/config.nims`
 
-`222a4a00` is not an arbitrary newer commit. It is the revision this
+`2097ae64` is not an arbitrary newer commit. It is the revision this
 repository's `flake.lock` pins for its `codetracer-src` input, so the vendored
 project contract, the Tup command-semantics extract and the flake-pinned
 CodeTracer source all name one reviewed commit instead of three. The previous
@@ -52,6 +52,37 @@ adding the build-graph gate edges and the development-environment
 activation), `config.nims` (sibling-then-override search-path order) and the
 `NIM_REPO_PATH_FLAGS` feeding `!nim_js` (the runquota library paths). The
 remedy is to refresh the fixtures, not to relax the comparison.
+
+The `2097ae64` refresh followed the next `codetracer-src` pin, which moved
+through 272a09ad5, 23d5af70f and 6b6d05a08 without a refresh. Between
+222a4a009 and 272a09ad5 the three files are unchanged; every later change comes
+from two CodeTracer commits. 01d8b6e54 (first pinned at 23d5af70f) changes
+`repro.nim`: `uses:` gains `zstd-dev >=0`, unconditional on every platform, and
+`codetracer-trace-format-nim >=0`, consumed through the SC-11 Nim library-source
+channel like the other sibling packages, and every native `ctNative` edge now
+names the backend C compiler (`clang` on macOS, `gcc` elsewhere) and `zstd-dev`
+as tool refs, which makes that edge's `PATH` hermetic. 905e31111 (first pinned
+at 2097ae648) vendors nim-regex as the `libs/nim-regex` gitlink and adds
+`libs/nim-regex/src` to the search paths in all three files: `CodeTracerNimPaths`
+in `repro.nim`, `addPathIfDir` in `config.nims`, and `NIM_REPO_PATH_FLAGS` in
+`src/Tuprules.tup`. Both payload digests therefore change, the Tup extract
+gains that one `--path:` line, and both `!nim_js` fingerprints move. The
+`!trace_object_file` fingerprint does not. 2097ae648 itself adds the first
+importer: `src/frontend/viewmodel/host/text_match.nim` imports `regex`, and the
+desktop main process reaches it through `src/frontend/index/ipc_utils.nim`, so
+every `index.js` and `server_index.js` compile needs the `libs/nim-regex`
+gitlink and, through `pkg/unicodedb`, the `libs/nim-unicodedb` gitlink at its
+new revision. Both are now in the in-place test's required-gitlink table, so
+CI's sibling provisioning has to initialise them too. The `!nim_js` extract
+compiles `ipc_registry_test.nim`, which does not reach `regex`, so the Tup
+subset needs neither. The in-place test now expects `zstd-dev` among the
+declared tools, with a `zstd-dev` PATH fixture beside `zstd`, and
+`codetracer-trace-format-nim` among the source packages. CodeTracer `dev`
+(2c8489930 when this pin moved) contains neither commit: its `repro.nim` and
+`src/Tuprules.tup` are still those of 222a4a009, and its `config.nims` also
+lacks the `NIM_TERMCTL_SRC` line. The fail-closed comparisons against CI's
+`codetracer=dev` sibling therefore hold only once CodeTracer promotes `agents`
+to `dev`.
 
 The `222a4a00` refresh followed the next `codetracer-src` pin. Between
 17c111fb2 and 222a4a009 `repro.nim`, `config.nims` and `src/Tuprules.tup` are
