@@ -2072,9 +2072,11 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
       (getMonoTime() - started).inNanoseconds)
 
 const UnresolvedSymlinkIdentityDomain = "reprobuild.unresolved-symlink.v1"
-  ## Leads the bytes `unresolvedSymlinkIdentity` hashes, so that identity
-  ## lives in a namespace of its own instead of colliding with a regular
-  ## file whose content happens to be the same text.
+  ## Leads the bytes `unresolvedSymlinkIdentity` hashes and versions their
+  ## layout. It does NOT keep that identity apart from a regular file: a
+  ## file can contain these exact bytes. What keeps the two apart is the
+  ## kind, which every content-keyed comparison checks beside the hash
+  ## (`sameContentIdentity`).
 
 proc unresolvedSymlinkIdentity(path: string): seq[byte] =
   ## The bytes a content-keyed policy hashes for an `ffkUnresolvedSymlink`
@@ -5433,6 +5435,30 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
   result.observedExecution = true
   cache.writePerEdgeRecord(result)
 
+proc sameContentIdentity(recorded, current: FileFingerprint): bool =
+  ## Whether a content-keyed input still has the identity it was recorded
+  ## with: both sides carry a local hash, the hashes are equal, AND the two
+  ## are the same kind of entity.
+  ##
+  ## The kind is part of the comparison because the hashed bytes are not
+  ## unique to one kind (`fileBytesForHash`): an absent path, a directory and
+  ## a FIFO all hash the empty payload, and a dangling link hashes a marker
+  ## text that a regular file can contain verbatim. Compared by hash alone,
+  ## an absent probe that became an empty file, or a dangling link whose
+  ## target appeared holding exactly that marker, was a cache hit -- a wrong
+  ## one, since the action would now observe something else. Requiring equal
+  ## kinds makes such a collision impossible by construction, whatever the
+  ## bytes are.
+  ##
+  ## Done in the comparison rather than by folding the kind into the hash:
+  ## the hash is what the strong fingerprint and the record frame carry, and
+  ## changing it would re-key every content-keyed record in every existing
+  ## cache. The kind is already recorded beside it (`writeMetadata`), so
+  ## comparing it costs nothing and leaves the record format untouched.
+  recorded.hasLocalHash and current.hasLocalHash and
+    recorded.metadata.kind == current.metadata.kind and
+    recorded.localHash == current.localHash
+
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
                      changedInputPath: var string;
@@ -5469,8 +5495,7 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
       of ffpChecksum:
         let current = observeFileWithMetadata(location, recorded.policy,
           currentMetadata)
-        if (not recorded.hasLocalHash) or (not current.hasLocalHash) or
-            current.localHash != recorded.localHash:
+        if not sameContentIdentity(recorded, current):
           changed = true
           changedInputPath = recorded.path
           return
@@ -5492,7 +5517,10 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
           changed = true
           changedInputPath = recorded.path
           return
-        if current.localHash == recorded.localHash:
+        # The cutoff serves a record whose METADATA moved, so it is exactly
+        # where a kind change arrives: it must not be cut off on a hash that
+        # merely coincides (`sameContentIdentity`).
+        if sameContentIdentity(recorded, current):
           if result.reusedRecordedInputs:
             result.inputs = newSeq[FileFingerprint](record.inputs.len)
             for prior in 0 ..< i:

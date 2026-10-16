@@ -28,6 +28,9 @@
 ##                  text and why it does not resolve. The edge is cached;
 ##                  the link gaining a target re-runs it, under the default
 ##                  timestamp policy as well as under `checksum`.
+##                  A target that appears holding exactly the bytes the
+##                  link's identity hashed re-runs it too: the record
+##                  compares the input's kind, not only its content hash.
 ##   link loop      the same kind (`ELOOP`); breaking the loop re-runs it.
 ##   EACCES file    exists, cannot be read: a content-keyed record cannot
 ##                  describe it, so the result is not published and the edge
@@ -177,6 +180,33 @@ suite "t_dangling_symlink_in_observed_directory_does_not_abort":
     # after; only the recorded unresolved-link identity can see this.
     writeFile(target, "now it resolves\n")
     fx.requireBuilt("third build, the link's target exists")
+    check fx.runs == 2
+    check "dangling present" in fx.listing
+
+  test "a dangling link whose target appears holding exactly the link's hashed identity re-runs the edge":
+    # Under a content-keyed policy a dangling link is hashed over a marker
+    # text that names its target. A regular file can contain those exact
+    # bytes, and when the link's target appears as such a file the content
+    # hash recorded for the link and the one taken through it now are EQUAL.
+    # The input is still a different kind of thing (a resolving link, not a
+    # dangling one), and the edge must re-run: the record compares the kind
+    # as well as the hash.
+    let fx = newFixture("repro-dangling-marker-", policy = "acfpChecksum")
+    defer: removeDir(fx.root)
+    let target = fx.root / "target-holding-the-marker.txt"
+    createSymlink(target, fx.listed / "dangling")
+
+    fx.requireBuilt("first build, dangling link present")
+    check fx.runs == 1
+    check "dangling absent" in fx.listing
+    fx.requireBuilt("second build, nothing changed")
+    check fx.runs == 1
+
+    # Byte for byte what the dangling link's identity hashed: the domain,
+    # its `readlink` text, and why it did not resolve.
+    writeFile(target,
+      "reprobuild.unresolved-symlink.v1\0" & target & "\0absent")
+    fx.requireBuilt("third build, the target holds the link's identity")
     check fx.runs == 2
     check "dangling present" in fx.listing
 
