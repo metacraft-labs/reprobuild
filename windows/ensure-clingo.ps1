@@ -129,13 +129,11 @@ function Ensure-Clingo {
     Assert-FileSha256 -Path $archivePath -Expected $expectedSha
   }
 
-  # Expand-Archive only accepts a `.zip` extension, so stage a renamed copy.
+  # A .conda file is a zip; Expand-ZipArchive reads it under its own name.
   $staging = Join-Path $cacheDir "staging-$version"
   Ensure-CleanDirectory -Path $staging
   try {
-    $zipPath = Join-Path $staging "clingo.zip"
-    Copy-Item -LiteralPath $archivePath -Destination $zipPath -Force
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $staging -Force
+    Expand-ZipArchive -ArchivePath $archivePath -Destination $staging
 
     $pkgZst = Get-ChildItem -LiteralPath $staging -Filter "pkg-*.tar.zst" |
       Select-Object -First 1

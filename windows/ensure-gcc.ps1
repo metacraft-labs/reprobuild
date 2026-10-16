@@ -101,10 +101,10 @@ function Get-GccReportedVersion {
 function Expand-WinLibsArchive {
   ## Extract the WinLibs zip into $Destination.
   ##
-  ## `tar.exe` (bsdtar, shipped with Windows 10 1803+) reads zip and is several
-  ## times faster than `Expand-Archive` on a tree this size (~30k files).
-  ## `Expand-Archive` is kept as the fallback for hosts whose bundled
-  ## libarchive was built without zip support.
+  ## `tar.exe` (bsdtar, shipped with Windows 10 1803+) reads zip and is fast on
+  ## a tree this size (~30k files). `Expand-ZipArchive` (.NET's zip reader) is
+  ## the fallback for hosts whose bundled libarchive was built without zip
+  ## support.
   param(
     [Parameter(Mandatory = $true)][string]$ArchivePath,
     [Parameter(Mandatory = $true)][string]$Destination
@@ -120,12 +120,12 @@ function Expand-WinLibsArchive {
   }
 
   if (-not $extracted) {
-    Write-Host "tar.exe could not read the archive; falling back to Expand-Archive..."
-    # Start from empty. A tar that failed PART WAY leaves a partial tree, and
-    # `Expand-Archive -Force` overwrites what it writes but removes nothing —
-    # so a stale file from the first attempt would survive into the install.
+    Write-Host "tar.exe could not read the archive; falling back to .NET's zip reader..."
+    # Start from empty. A tar that failed PART WAY leaves a partial tree that
+    # would otherwise survive into the install, and ExtractToDirectory refuses
+    # to overwrite a file that is already there.
     Ensure-CleanDirectory -Path $Destination
-    Expand-Archive -Path $ArchivePath -DestinationPath $Destination -Force
+    Expand-ZipArchive -ArchivePath $ArchivePath -Destination $Destination
   }
 }
 

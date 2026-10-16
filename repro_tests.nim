@@ -2061,6 +2061,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_expand_archive_zip_extraction_cost.nim",
+    binary: "build/test-bin/t_expand_archive_zip_extraction_cost",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
     binary: "build/test-bin/t_isonim_ssg_render_edge",
     defines: @[],
@@ -2720,6 +2729,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter_pre_install_runner.nim",
     binary: "build/test-bin/t_builtin_adapter_pre_install_runner",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_home_apply/tests/t_builtin_adapter_zip_extraction_cost.nim",
+    binary: "build/test-bin/t_builtin_adapter_zip_extraction_cost",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -14094,6 +14112,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim",
+    binary: "build/test-bin/t_nix_tool_resolution_is_a_provisioning_edge",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_no_project_set_errors_name_the_remedy.nim",
     binary: "build/test-bin/t_no_project_set_errors_name_the_remedy",
     defines: @[],
@@ -14456,6 +14483,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
     binary: "build/test-bin/t_pre_push_gate_checks_only_pushed_repo_dependency_closure",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
+    binary: "build/test-bin/t_pre_push_gate_enforces_inside_a_linked_worktree",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

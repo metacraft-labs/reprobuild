@@ -270,7 +270,7 @@ function Ensure-NimPrebuilt {
     Assert-FileSha256 -Path $tempZip -Expected $archiveSha256
 
     Ensure-CleanDirectory -Path $prebuiltRoot
-    Expand-Archive -Path $tempZip -DestinationPath $prebuiltRoot -Force
+    Expand-ZipArchive -ArchivePath $tempZip -Destination $prebuiltRoot
 
     if (-not (Test-Path $nimExe)) {
       throw "Nim extraction did not produce '$nimExe'."
