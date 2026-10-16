@@ -93,6 +93,36 @@ suite "Home-generations smoke":
     check decoded.realizedPackages[0].packageId == "fd"
     check decoded.realizedPackages[0].adapter == "scoop"
 
+  test "a manifest with owned concerns is schema 3; without, schema 2 and " &
+       "byte-identical":
+    # GM7: a generation whose host declares the concerns Reprobuild applies
+    # records them (trailing section, schema 3). Without a declaration the
+    # writer stays at schema 2, so every earlier manifest's bytes -- and
+    # their CAS dedup -- are unchanged.
+    var plain = ActivationManifest(schemaVersion: 2'u16)
+    plain.resourceBindings = @[ResourceBinding(resourceAddress: "a",
+      resourceKind: "fs.userFile")]
+    let plainBytes = encodeManifest(plain)
+    check plainBytes[4] == 2'u8 and plainBytes[5] == 0'u8
+    var owned = plain
+    owned.concernsDeclared = true
+    owned.ownedConcerns = @["applications", "environment"]
+    let ownedBytes = encodeManifest(owned)
+    check ownedBytes[4] == 3'u8 and ownedBytes[5] == 0'u8
+    let decoded = decodeManifestBytes(ownedBytes)
+    check decoded.concernsDeclared
+    check decoded.ownedConcerns == @["applications", "environment"]
+    check decoded.resourceBindings.len == 1
+    check decoded.resourceBindings[0].resourceKind == "fs.userFile"
+    let decodedPlain = decodeManifestBytes(plainBytes)
+    check not decodedPlain.concernsDeclared
+    check decodedPlain.ownedConcerns.len == 0
+    # Declared but empty: a host where Reprobuild applies nothing.
+    var none = plain
+    none.concernsDeclared = true
+    let noneDecoded = decodeManifestBytes(encodeManifest(none))
+    check noneDecoded.concernsDeclared and noneDecoded.ownedConcerns.len == 0
+
   test "intent snapshot is bit-exact":
     var snap = IntentSnapshot(schemaVersion: 1'u16)
     let fileA = IntentFileEntry(path: "home.nim",

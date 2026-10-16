@@ -42,7 +42,22 @@
 #     extractor edges with ties broken by name, which only the resolver can
 #     compute -- consumers should not depend on order);
 #   * resources and config overrides: those whose `guard` holds, in intent
-#     order.
+#     order;
+#   * applies: the concerns the host's `hosts:` entry declares Reprobuild
+#     applies (`intent.hostApplies`, Gradual-Nix-To-Reprobuild-Migration.md
+#     §Concern-scoped apply), absent when it declares none. A declaration
+#     naming a concern the document's `concerns.names` does not list -- or a
+#     declaration in a document without `concerns` -- is refused: the
+#     library cannot tell what such a name covers;
+#   * package concerns: for a host that declares, every package carries
+#     `concern` (`applications` / `packages`) and `resolved`, read from the
+#     classification Reprobuild computed for `system`
+#     (`concerns.packages.<system>`: the references whose selection places an
+#     application there, and those that resolve to nothing there; keyed
+#     `name`, or `name@version` for a pinned reference). Nothing is
+#     classified here: which package is an application is Reprobuild's
+#     realization selection (P1, P6). A document without a row for `system`
+#     is refused.
 #
 # Resource scope: the home planner refuses a home profile that declares a
 # resource it does not apply (a system-scope kind such as `fs.systemFile`),
@@ -181,39 +196,73 @@ let
           binaries = p.binaries or [ ];
         }) unique
       );
+      hostApplies = intent.hostApplies or { };
+      knownConcerns = doc.concerns.names or null;
+      applies = hostApplies.${selectedHost} or null;
+      unknownConcerns = if applies == null || knownConcerns == null then [ ] else filter (c: !(elem c knownConcerns)) applies;
+      # Reprobuild's per-package classification for this system, read only for
+      # a host that declares (`withConcern`).
+      classification =
+        doc.concerns.packages.${system}
+          or (throw "reprobuild.lib.readIntent: host ${selectedHost} declares the concerns Reprobuild applies, but the document carries no package classification for ${system} (concerns.packages.${system}); it was produced by a repro that does not publish one -- re-export");
+      packageKey = p: if p.version == "" then p.name else "${p.name}@${p.version}";
+      withConcern =
+        p:
+        p
+        // {
+          concern = if elem (packageKey p) classification.applications then "applications" else "packages";
+          resolved = !(elem (packageKey p) classification.unresolved);
+        };
     in
     if reason != null then
       throw "reprobuild.lib.readIntent: cannot evaluate this export for ${system}: ${reason}"
+    else if hostApplies != { } && knownConcerns == null then
+      throw "reprobuild.lib.readIntent: the document's intent declares the concerns Reprobuild applies per host (hostApplies) but carries no `concerns` classification; it was not produced by `repro home export` -- re-export"
+    else if unknownConcerns != [ ] then
+      throw "reprobuild.lib.readIntent: host ${selectedHost} declares unknown concern(s) ${toJSON unknownConcerns} (known: ${toJSON knownConcerns})"
     else
       {
         target = system;
         host = selectedHost;
-        inherit activities packages;
+        inherit activities;
+        packages = if applies == null then packages else map withConcern packages;
         resources = filter (r: holdsFor facts (r.guard or null)) (intent.resources or [ ]);
         configOverrides = filter (o: holdsFor facts (o.guard or null)) (intent.configOverrides or [ ]);
-      };
+      }
+      // (if applies == null then { } else { inherit applies; });
 
   # The derivation IFD mode imports: `repro home export` of `profileDir` for
   # `host`, run by the packaged `repro` in the build sandbox with a private
   # HOME and state directory. The profile is copied to a writable directory
   # (the compile stages its configuration beside it). `--target` is not
   # passed: the evaluation is `evaluate`'s, in both modes.
+  #
+  # `packagesCatalog` (a `reprobuild-packages` checkout, or null) is where the
+  # export's package classification (`concerns.packages`) finds the package
+  # definitions that live in that catalog: the sandbox has no workspace to
+  # find it beside, so without it every such package is `unresolved` there.
+  # It is passed as `$REPROBUILD_PACKAGES_ROOT`, the only place `repro` then
+  # looks.
   exportDerivation =
     {
       pkgs,
       repro,
       profileDir,
       host,
+      packagesCatalog ? null,
     }:
     let
       safeHost = builtins.replaceStrings [ " " "/" ] [ "-" "-" ] host;
     in
     pkgs.runCommand "repro-home-export-${safeHost}.json"
-      {
-        profile = profileDir;
-        inherit host;
-        nativeBuildInputs = [ repro ];
-      }
+      (
+        {
+          profile = profileDir;
+          inherit host;
+          nativeBuildInputs = [ repro ];
+        }
+        // (if packagesCatalog == null then { } else { REPROBUILD_PACKAGES_ROOT = packagesCatalog; })
+      )
       ''
         export HOME="$TMPDIR/home"
         export REPRO_HOME_STATE_DIR="$TMPDIR/state"
@@ -235,10 +284,13 @@ in
     ;
 
   # reprobuild.lib.readIntent { host, system, snapshot ? null, profileDir ? null,
-  #                             buildSystem ? <evaluator>, repro ? <pinned> }
+  #                             buildSystem ? <evaluator>, repro ? <pinned>,
+  #                             packagesCatalog ? null }
   #
   # Snapshot mode when `snapshot` (a path to a committed export) is given,
-  # IFD mode otherwise (`profileDir` required). Returns
+  # IFD mode otherwise (`profileDir` required; `packagesCatalog`, a
+  # `reprobuild-packages` checkout, lets the sandboxed export classify the
+  # packages that catalog defines -- see `exportDerivation`). Returns
   # `{ mode, document, evaluation }`, `evaluation` being what
   # `repro home export --target ${system}` reports for `host`. Throws when
   # the document cannot describe `system` (see `refusalReason`).
@@ -254,6 +306,7 @@ in
       profileDir ? null,
       buildSystem ? builtins.currentSystem or null,
       repro ? null,
+      packagesCatalog ? null,
     }:
     let
       mode = if snapshot != null then "snapshot" else "ifd";
@@ -269,7 +322,7 @@ in
             readFile (exportDerivation {
               pkgs = pkgsFor buildSystem;
               repro = if repro != null then repro else reproFor buildSystem;
-              inherit profileDir host;
+              inherit profileDir host packagesCatalog;
             })
           );
       reason =

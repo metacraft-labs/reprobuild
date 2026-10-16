@@ -77,6 +77,14 @@ type
     activities*: seq[ActivityIntent]
     configOverrides*: seq[ConfigOverride]
     hosts*: Table[string, seq[string]]
+    hostApplies*: Table[string, seq[string]]
+      ## The concerns Reprobuild applies on a host, for every host whose
+      ## `hosts:` entry declares `applies: [...]` (block form). A host
+      ## absent from this table declares nothing: Reprobuild applies every
+      ## concern there. Values are concern names (`repro_profile/concerns`),
+      ## validated by the macro; an empty seq is a host where Reprobuild
+      ## applies nothing (Gradual-Nix-To-Reprobuild-Migration.md
+      ## §Concern-scoped apply).
     resources*: seq[ResourceIntent]
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G. Action-edge items emitted

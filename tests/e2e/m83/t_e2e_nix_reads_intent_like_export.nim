@@ -79,7 +79,8 @@ when defined(linux) or defined(macosx):
     test "e2e_nix_reads_intent_like_export":
       let update = getEnv(UpdateEnvVar) == "1"
       let cases = caseDirs()
-      check cases.mapIt(it.extractFilename) == @["compile-time", "neutral"]
+      check cases.mapIt(it.extractFilename) ==
+        @["compile-time", "concerns", "neutral"]
       for dir in cases:
         let name = dir.extractFilename
         let sb = newProfileSandbox("gm5-intent-" & name,
@@ -87,6 +88,13 @@ when defined(linux) or defined(macosx):
         defer: sb.dispose()
         sb.copyProfile(dir / "profile")
         let snapshot = dir / "export.json"
+        # GM7: the concerns case classifies its packages against the fixture
+        # catalog beside its profile (the sandbox copy has no sibling).
+        let caseEnv =
+          if name == "concerns":
+            @[("REPROBUILD_PACKAGES_ROOT", dir / "reprobuild-packages")]
+          else:
+            newSeq[(string, string)]()
         let evaluationsFile = dir / "evaluations.json"
         let hostSystem = compilingPlatformSystem()
         let committedDoc = parseFile(snapshot)
@@ -108,11 +116,11 @@ when defined(linux) or defined(macosx):
           # 1. The snapshot is current.
           if update:
             let fresh = sb.runRepro(["home", "export", "--format", "json"],
-              host = "m1")
+              host = "m1", extraEnv = caseEnv)
             require fresh.exitCode == 0
             writeFile(snapshot, fresh.stdout)
           let checked = sb.runRepro(["home", "export", "--check", snapshot],
-            host = "m1")
+            host = "m1", extraEnv = caseEnv)
           checkpoint(name & ": --check -> " & $checked.exitCode & "\n" &
             checked.stderr)
           check checked.exitCode == 0
@@ -123,7 +131,7 @@ when defined(linux) or defined(macosx):
             evaluations[host] = newJObject()
             for system in Systems:
               let r = sb.runRepro(["home", "export", "--format", "json",
-                "--target", system], host = host)
+                "--target", system], host = host, extraEnv = caseEnv)
               checkpoint(name & ": " & host & " @ " & system & " -> " &
                 $r.exitCode & "\n" & r.stderr)
               if r.exitCode == 3:
@@ -147,7 +155,7 @@ when defined(linux) or defined(macosx):
           # this host's own export must say the converse: the snapshot's
           # compiling platform is not `same` for it, and --target refuses it.
           let fresh = sb.runRepro(["home", "export", "--format", "json"],
-            host = "m1")
+            host = "m1", extraEnv = caseEnv)
           require fresh.exitCode == 0
           let freshDoc = parseJson(fresh.stdout)
           checkpoint(name & ": exported on " & hostSystem & ", platforms " &
@@ -156,7 +164,7 @@ when defined(linux) or defined(macosx):
             hostSystem
           check freshDoc["platforms"][snapshotTarget].getStr != "same"
           let refused = sb.runRepro(["home", "export", "--format", "json",
-            "--target", snapshotTarget], host = "m1")
+            "--target", snapshotTarget], host = "m1", extraEnv = caseEnv)
           check refused.exitCode == 3
           evaluations = parseFile(evaluationsFile)
 
@@ -195,12 +203,14 @@ when defined(linux) or defined(macosx):
               inc evaluated
 
         # Vacuity. Where the case's profile declares a hosts: registry
-        # (`neutral`), `server` is undeclared: refused on every system, on
-        # both sides. The `compile-time` profile has no registry, so there
-        # `server` is evaluated with `default` alone -- the host-agnostic
-        # control.
+        # without `server` (`neutral`), `server` is undeclared: refused on
+        # every system, on both sides. The `compile-time` profile has no
+        # registry, so there `server` is evaluated with `default` alone --
+        # the host-agnostic control. The `concerns` profile declares
+        # `server` (it gives Reprobuild the packages there).
         check evaluated > 0
-        if committedDoc["intent"]["hosts"].len > 0:
+        if committedDoc["intent"]["hosts"].len > 0 and
+            not committedDoc["intent"]["hosts"].hasKey("server"):
           check undeclared == Systems.len
           for system in Systems:
             check evaluations["server"][system].hasKey("undeclaredHost")
@@ -215,3 +225,40 @@ when defined(linux) or defined(macosx):
             check e["packages"].len > 0
             check e["resources"].len > 0
             check e["configOverrides"].len > 0
+        if name == "concerns":
+          # GM7: the hosts that declare `applies:` carry it in every
+          # evaluation, with each package's concern; the one that declares
+          # no `applies:` carries neither. The export carries the classification the Nix
+          # side reads it with.
+          for system in Systems:
+            check evaluations["m1"][system]["applies"] ==
+              %*["applications", "environment"]
+            check evaluations["server"][system]["applies"] == %*["packages"]
+            check not evaluations["home-pc"][system].hasKey("applies")
+            for host in ["m1", "server"]:
+              for p in evaluations[host][system]["packages"]:
+                check p.hasKey("concern") and p.hasKey("resolved")
+            for p in evaluations["home-pc"][system]["packages"]:
+              check not p.hasKey("concern")
+          let doc = parseFile(snapshot)
+          check doc["intent"]["hostApplies"] ==
+            %*{"m1": ["applications", "environment"], "server": ["packages"]}
+          check doc["concerns"]["resourceKinds"]["fs.managedBlock"] ==
+            %"environment"
+          check doc["concerns"]["configOverrides"] == %"files"
+          # The per-package classification (Open question 9): the fixture
+          # catalog's disk image is an application on the darwin targets
+          # only, and every system is classified.
+          for system in Systems:
+            let apps = doc["concerns"]["packages"][system]["applications"]
+            if system.endsWith("-darwin"):
+              check apps == %*["gm7app"]
+            else:
+              check apps.len == 0
+          var app: JsonNode
+          for p in evaluations["m1"]["aarch64-darwin"]["packages"]:
+            if p["name"].getStr == "gm7app":
+              app = p
+          require not app.isNil
+          check app["concern"] == %"applications"
+          check app["resolved"] == %true

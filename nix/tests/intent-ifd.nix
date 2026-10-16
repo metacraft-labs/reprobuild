@@ -19,7 +19,15 @@
 #     mode, where the same rule throws;
 #   * the compile-time-dependent profile is refused exactly where the build
 #     system's compile does not describe the target: the darwin targets when
-#     a non-darwin system exported it, the others when darwin did.
+#     a non-darwin system exported it, the others when darwin did;
+#   * the concern-declaring profile, exported with `packagesCatalog` (its
+#     fixture `reprobuild-packages` catalog), carries the same `concerns` --
+#     the per-system package classification included -- as the snapshot, and
+#     the same evaluations (Gradual-Nix-To-Reprobuild-Migration.md
+#     §Concern-scoped apply). Without `packagesCatalog` the sandboxed export
+#     refuses to classify -- a failed IFD build, which `tryEval` cannot
+#     observe, so that refusal is covered by the CLI gate
+#     (tests/e2e/gm7/t_e2e_hosts_applies_declaration_cli.nim) instead.
 #
 # The IFD derivation is built for `buildSystem` (the evaluator, when the
 # evaluation is impure; this check's own system otherwise), never for the
@@ -55,6 +63,15 @@ let
       profileDir = fixtures + "/${name}/profile";
       inherit host system buildSystem;
     };
+  concernsCatalog = fixtures + "/concerns/reprobuild-packages";
+  ifdConcerns =
+    host:
+    reprobuildLib.readIntent {
+      profileDir = fixtures + "/concerns/profile";
+      packagesCatalog = concernsCatalog;
+      inherit host system buildSystem;
+    };
+  concernsSnapshot = fromJSON (readFile (fixtures + "/concerns/export.json"));
   snapshotOf = name: host: {
     snapshot = fixtures + "/${name}/export.json";
     inherit host system;
@@ -74,6 +91,19 @@ let
       (ifd "neutral" host).evaluation == (reprobuildLib.readIntent (snapshotOf "neutral" host)).evaluation
     ) hosts;
     undeclared-host-refused = fails (reprobuildLib.readIntent (snapshotOf "neutral" "server"));
+    concerns-match-snapshot =
+      let
+        doc = (ifdConcerns "m1").document;
+      in
+      comparedFields doc == comparedFields concernsSnapshot && doc.concerns == concernsSnapshot.concerns;
+    concerns-evaluations = builtins.all (
+      host:
+      (ifdConcerns host).evaluation
+      == (reprobuildLib.readIntent {
+        snapshot = fixtures + "/concerns/export.json";
+        inherit host system;
+      }).evaluation
+    ) hosts;
     compile-time-refusal =
       let
         refused = fails (ifd "compile-time" "m1");

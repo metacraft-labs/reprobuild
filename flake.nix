@@ -2268,6 +2268,12 @@
               pkgs.openssl
               pkgs.pcre
             ];
+            # The source bootstrap (`config.nims`) and the helpers Reprobuild
+            # compiles for itself (`externalHashFlags`) both bake an OpenSSL
+            # directory into `-L` and RPATH. Name this shell's own target
+            # OpenSSL so neither falls back to a store glob, whose first match
+            # on a mixed-architecture store was a 32-bit build.
+            OPENSSL_LIBDIR = "${pkgs.openssl.out}/lib";
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;

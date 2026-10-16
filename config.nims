@@ -818,15 +818,110 @@ const LibSubdirs = [
   "lib/aarch64-linux-gnu",
 ]
 
+proc libMatchesTargetArch(libFile: string): bool =
+  ## NimScript mirror of `soMatchesHostArch` in
+  ## `libs/repro_interface_artifacts/src/repro_interface_artifacts.nim`:
+  ## whether `libFile`'s object header names something the TARGET's loader
+  ## can map. Keep the two in step; the library proc carries the full
+  ## rationale and the header-layout references, and
+  ## `libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim`
+  ## pins the behaviour.
+  ##
+  ## The `/nix/store` glob below is not an architecture selector: the CI
+  ## runners' store holds i686, x86-64 and aarch64 builds under names that
+  ## differ only in their hash, and its first sorted `*-openssl-*` was a
+  ## 32-bit OpenSSL, baked as `-L` + `-Wl,-rpath` into 64-bit binaries
+  ## (`libcrypto.so.3: wrong ELF class: ELFCLASS32`).
+  ##
+  ## In NimScript `hostCPU` and `defined(cpu64)` describe the compilation's
+  ## target (`buildCPU` is the machine running the compiler), which is the
+  ## architecture the `-L`/RPATH must match. There is no `File` API in the
+  ## VM, so the header is taken from `readFile`; it runs only on fallback
+  ## candidates, and stops at the first that matches.
+  ##
+  ## An ELF must match the target's class (`EI_CLASS`, byte 4), data encoding
+  ## (`EI_DATA`, byte 5) and `e_machine` (bytes 18-19); a thin Mach-O its
+  ## word size and `cputype`; a universal Mach-O must carry a slice for the
+  ## target `cputype`. An ELF never matches a Darwin target, a Mach-O never
+  ## a non-Darwin one. Anything unclassified -- a static archive, a linker
+  ## script, a short file, an unknown target machine -- is accepted and left
+  ## to the linker, as before this filter existed.
+  if not fileExists(libFile):
+    return true
+  let hdr = readFile(libFile)
+  if hdr.len < 8:
+    return true
+  proc b(at: int): uint32 = uint32(ord(hdr[at]))
+  proc le32(at: int): uint32 =
+    b(at) or (b(at + 1) shl 8) or (b(at + 2) shl 16) or (b(at + 3) shl 24)
+  proc be32(at: int): uint32 =
+    (b(at) shl 24) or (b(at + 1) shl 16) or (b(at + 2) shl 8) or b(at + 3)
+  let targetIs64 = defined(cpu64)
+  let targetMachine =
+    if hostCPU == "amd64": 0x3E'u32         # EM_X86_64
+    elif hostCPU == "arm64": 0xB7'u32       # EM_AARCH64
+    elif hostCPU == "i386": 0x03'u32        # EM_386
+    else: 0'u32
+  let targetCpuType =
+    if hostCPU == "amd64": 0x01000007'u32   # CPU_TYPE_X86_64
+    elif hostCPU == "arm64": 0x0100000C'u32 # CPU_TYPE_ARM64
+    else: 0'u32
+  let magic = hdr[0 .. 3]
+  if magic == "\x7FELF":
+    when defined(macosx):
+      return false
+    else:
+      if hdr.len < 20:
+        return true
+      if b(4) != (if targetIs64: 2'u32 else: 1'u32):
+        return false
+      let targetLittleEndian = cpuEndian == littleEndian
+      if b(5) != (if targetLittleEndian: 1'u32 else: 2'u32):
+        return false
+      if targetMachine == 0'u32:
+        return true
+      let eMachine =
+        if targetLittleEndian: b(18) or (b(19) shl 8)
+        else: (b(18) shl 8) or b(19)
+      return eMachine == targetMachine
+  let thin64 = magic == "\xCF\xFA\xED\xFE"
+  let thin32 = magic == "\xCE\xFA\xED\xFE"
+  let fat = magic == "\xCA\xFE\xBA\xBE"
+  if not (thin64 or thin32 or fat):
+    return true
+  when not defined(macosx):
+    return false
+  else:
+    if thin32:
+      return not targetIs64
+    if thin64:
+      return targetCpuType == 0'u32 or le32(4) == targetCpuType
+    # FAT_MAGIC doubles as the Java class-file magic; see the library proc.
+    let slices = int(be32(4))
+    if slices <= 0 or slices > 32 or 8 + slices * 20 > hdr.len or
+       targetCpuType == 0'u32:
+      return true
+    for i in 0 ..< slices:
+      if be32(8 + i * 20) == targetCpuType:
+        return true
+    false
+
+proc holdsLibrary(libDir, dylibName: string; targetArchOnly: bool): bool =
+  ## Whether `libDir/dylibName` exists and -- when `targetArchOnly` -- is a
+  ## file the target's loader can map (see `libMatchesTargetArch`).
+  let path = libDir / dylibName
+  fileExists(path) and (not targetArchOnly or libMatchesTargetArch(path))
+
 proc firstExistingPrefixLibDir(prefix: string;
-                               dylibNames: openArray[string]): string =
+                               dylibNames: openArray[string];
+                               targetArchOnly = false): string =
   ## Return the absolute libdir under `prefix` that holds one of
   ## `dylibNames`, or "" if none match. Probes `prefix/lib`,
   ## `prefix/lib64`, and the two common Debian-multiarch triples.
   for libSub in LibSubdirs:
     let candidate = prefix / libSub
     for dylibName in dylibNames:
-      if fileExists(candidate / dylibName):
+      if holdsLibrary(candidate, dylibName, targetArchOnly):
         return candidate
   ""
 
@@ -851,13 +946,21 @@ proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): stri
     let prefix = line.strip()
     if prefix.len == 0:
       continue
+    # Same architecture filter as `nixLibDir` (and as the library's
+    # `nixPrefix`): the store holds every architecture under one name.
     if fileExists(prefix / header) and
-       firstExistingPrefixLibDir(prefix, dylibNames).len > 0:
+       firstExistingPrefixLibDir(prefix, dylibNames,
+                                 targetArchOnly = true).len > 0:
       return prefix
   ""
 
 proc firstExistingLibDir(candidates: openArray[string];
-                         dylibNames: openArray[string]): string =
+                         dylibNames: openArray[string];
+                         targetArchOnly = false): string =
+  ## `targetArchOnly` is for candidates nobody chose for this build -- a
+  ## conventional prefix, a store glob -- where a directory's existence says
+  ## nothing about its architecture. An explicitly named prefix is taken as
+  ## given.
   for candidate in candidates:
     let path = candidate.strip()
     if path.len == 0:
@@ -868,14 +971,18 @@ proc firstExistingLibDir(candidates: openArray[string];
     # whether the host is `/usr/lib`, `/usr/lib64`, or a Debian-multiarch
     # triple.
     for dylibName in dylibNames:
-      if fileExists(path / dylibName):
+      if holdsLibrary(path, dylibName, targetArchOnly):
         return path
-    let resolved = firstExistingPrefixLibDir(path, dylibNames)
+    let resolved = firstExistingPrefixLibDir(path, dylibNames, targetArchOnly)
     if resolved.len > 0:
       return resolved
   ""
 
 proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
+  ## The first sorted `/nix/store` prefix matching `namePattern` whose libdir
+  ## holds one of `dylibNames` built for the compilation's target. Mirrored
+  ## by `nixLibDirIn` in `repro_interface_artifacts`; the architecture filter
+  ## is what keeps "first sorted" from meaning "arbitrary architecture".
   let cmd = "find /nix/store -maxdepth 1 -type d -name '" & namePattern &
     "' 2>/dev/null | sort"
   let result = gorgeEx(cmd)
@@ -885,7 +992,7 @@ proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
     let prefix = line.strip()
     if prefix.len == 0:
       continue
-    let libDir = firstExistingLibDir([prefix], dylibNames)
+    let libDir = firstExistingLibDir([prefix], dylibNames, targetArchOnly = true)
     if libDir.len > 0:
       return libDir
   ""
@@ -991,8 +1098,9 @@ proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
 when not defined(windows) and not defined(macosx):
   # SQLite link search path. Order: an explicit SQLITE_LIBDIR/SQLITE_PREFIX;
   # then, when a Nix toolchain is in play, the dev shell's own sqlite
-  # (NIX_LDFLAGS) or any Nix store sqlite; only on a host with no Nix at all
-  # the distribution's directories. A host directory is used for `-L` but is
+  # (NIX_LDFLAGS) or a Nix store sqlite built for the target architecture
+  # (`nixLibDir` filters the glob); only on a host with no Nix at all the
+  # distribution's directories. A host directory is used for `-L` but is
   # never baked into RPATH (see `isHostSystemLibDir`).
   let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
   let nixInPlay = getEnv("NIX_CC").len > 0 or
@@ -1040,23 +1148,35 @@ when not defined(windows) and not defined(macosx):
 # carried the blake3/xxhash `-L` flags from those blocks, proving the channel).
 # We add only the search path — the graph still owns `-lssl -lcrypto` per edge —
 # so this is a no-op for non-ssl edges. Windows keeps its own graph-level path.
+#
+# Resolution order: an explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev
+# shell sets the former to its own `pkgs.openssl`); then the dev shell's own
+# `-L` link inputs (`nixLdflagsLibDir`); then the Homebrew prefixes; and only
+# then the `/nix/store` glob. The last two are filtered by target
+# architecture (`libMatchesTargetArch`): `/usr/local` on Apple Silicon is
+# commonly an x86-64 Homebrew, and on a mixed-architecture store the glob's
+# first match was a 32-bit OpenSSL. `externalHashFlags` in
+# `repro_interface_artifacts` replays this exact order for the helpers
+# Reprobuild compiles for itself; keep the two in step.
 when not defined(windows):
+  let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
   let opensslLibDir = block:
-    let direct = firstExistingLibDir(
-      [
-        getEnv("OPENSSL_LIBDIR"),
-        getEnv("OPENSSL_PREFIX"),
-        "/opt/homebrew/opt/openssl@3",
-        "/opt/homebrew/opt/openssl",
-        "/usr/local/opt/openssl@3",
-        "/usr/local/opt/openssl",
-      ],
-      ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"])
-    if direct.len > 0:
-      direct
-    else:
-      nixLibDir("*-openssl-*",
-        ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"])
+    var dir = firstExistingLibDir(
+      [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
+    if dir.len == 0:
+      dir = nixLdflagsLibDir(opensslNames)
+    if dir.len == 0:
+      dir = firstExistingLibDir(
+        [
+          "/opt/homebrew/opt/openssl@3",
+          "/opt/homebrew/opt/openssl",
+          "/usr/local/opt/openssl@3",
+          "/usr/local/opt/openssl",
+        ],
+        opensslNames, targetArchOnly = true)
+    if dir.len == 0:
+      dir = nixLibDir("*-openssl-*", opensslNames)
+    dir
 
   if opensslLibDir.len > 0:
     switch("passL", "-L" & opensslLibDir)
