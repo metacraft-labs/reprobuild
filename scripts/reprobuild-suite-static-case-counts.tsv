@@ -889,6 +889,7 @@ tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.n
 tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim	nim	2
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim	nim	3
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim	nim	2
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim	nim	17
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim	nim	2
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim	nim	2
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim	nim	2

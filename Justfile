@@ -2886,6 +2886,15 @@ e2e_hcr_linux_concurrent_patch_no_torn_instruction:
         tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_concurrent_patch_no_torn_instruction.log
 
+integration_hcr_linux_concurrent_patch_gate_conditions:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_concurrent_patch_gate_conditions \
+        --out:build/test-bin/integration_hcr_linux_concurrent_patch_gate_conditions \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_concurrent_patch_gate_conditions.log
+
 e2e_hcr_linux_quiescence_handshake_and_release:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
