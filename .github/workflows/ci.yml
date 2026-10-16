@@ -588,14 +588,85 @@ jobs:
             echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
           fi
 
-      # Reconcile the public lock-pinned source siblings after preparing the
-      # freshly bootstrapped binaries, without inheriting the setup action's
-      # persistent Git credentials.
+      # Reconcile CodeTracer's lock-pinned source siblings, after preparing
+      # the freshly bootstrapped binaries.
+      #
+      # WHICH REPOSITORIES, AND WHY SOME ARE PRIVATE. `develop --all` clones
+      # every `coord_kind = "vcs"` dep of CodeTracer's committed repro.lock.
+      # That set is NOT anonymously cloneable, and nothing promises it is:
+      # reprobuild-pm/spec/Unified-Locking-And-Hooks.md §14.1 makes the
+      # committed lock the default home of every develop-set sibling, and a
+      # lock entry's `visibility = "public"` names the configuration TIER that
+      # declared it, never who can read it on its forge. CodeTracer's lock
+      # names forge-private repos (codetracer-launcher, -native-backend,
+      # -native-recorder, -test-mirror, -visual-replay) marked "public", and
+      # the anonymous clone failed with `could not read Username`. So the step
+      # carries a credential, minted for exactly the set the lock names: the
+      # next two steps derive the list from the lock itself (ignoring
+      # `visibility`) and mint a read-only installation token for it.
+      - name: List the repositories CodeTracer's lock clones
+        id: ct_lock_repos
+        run: |
+          set -euo pipefail
+          ct_root="$(cd "${{ github.workspace }}/../codetracer" && pwd)"
+          # Fails loudly on a missing or unparseable lock, or on an empty set
+          # (an empty `repositories:` would mint an all-repositories token).
+          # Deps under other owners are reported on stderr: they are cloned
+          # without a credential.
+          repos="$(dev-exec python3 scripts/ci_lock_source_credentials.py repositories \
+            --lock "$ct_root/repro.lock" --owner metacraft-labs)"
+          printf '%s\n' "$repos"
+          delim="ct_lock_repos_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "repositories<<$delim"
+            printf '%s\n' "$repos"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      # Installation tokens expire after one hour and the job-wide `ci_token`
+      # was minted at job start, so mint this one immediately before the
+      # clones that use it.
+      - name: Refresh installation token for CodeTracer source dependencies
+        id: ci_token_reconcile
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          repositories: ${{ steps.ct_lock_repos.outputs.repositories }}
+          permission-contents: read
+
+      # WHAT THE MASKING GUARDS AGAINST. These runners are self-hosted and
+      # reused: their HOME, global git config and workspace outlive the job.
+      # The setup action's persistent credential (a global helper or a broad
+      # `url.<token>@github.com/.insteadOf`) would hand this phase an
+      # org-wide token for every github.com URL. A token carried in a URL is
+      # also exposed beyond the request: a rewrite puts it into the argv of
+      # every `git-remote-https`, readable by any process on the host, and a
+      # token in a clone URL is written into that clone's `.git/config`, in a
+      # workspace that outlives the job. So global and system configuration
+      # stay masked (/dev/null, NOSYSTEM, no prompts), and the only credential
+      # this phase sees is the scoped, freshly minted token above, as an
+      # `http.<repo-url>/.extraHeader` per lock repository in a 0600 file
+      # under $RUNNER_TEMP that is deleted when the step exits. The header is
+      # sent on the wire and never persisted into a clone, and git matches it
+      # by slash-delimited path prefix, so it reaches only those repositories.
+      #
+      # WHY GIT_CONFIG_GLOBAL AND NOT GIT_CONFIG_COUNT. The engine runs its git
+      # actions with `scrubbedGitRepositoryEnv()`
+      # (libs/repro_workspace_vcs/src/git_tool.nim, GitRepositoryLocalEnv and
+      # GitRepositoryLocalEnvPrefixes), which drops GIT_CONFIG_COUNT /
+      # GIT_CONFIG_KEY_* / GIT_CONFIG_VALUE_*. The mechanism the ct build step
+      # below uses would therefore never reach `develop`'s clones;
+      # GIT_CONFIG_GLOBAL is not scrubbed. It is exported only inside the
+      # subshell that runs `develop`, so the local-config cleanup keeps the
+      # masked /dev/null.
       - name: Reconcile CodeTracer source dependencies
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
+          GH_TOKEN: ${{ steps.ci_token_reconcile.outputs.token }}
         run: |
           set -euo pipefail
           repro_root="${{ github.workspace }}"
@@ -604,8 +675,9 @@ jobs:
           test -x "$repro_bin" || { echo "repro not bootstrapped at $repro_bin" >&2; exit 1; }
           # setup-dev-env's inherited checkout token may leave a broad rewrite
           # in CodeTracer's local config. Remove that exact entry silently and
-          # restore the canonical origin before syncing submodule URLs. Global
-          # and system configuration remain masked for this public-only phase.
+          # restore the canonical origin before syncing submodule URLs, so the
+          # job-wide token is not what `develop` (or anything after it)
+          # authenticates with.
           git -C "$ct_root" config --local --unset-all \
             "url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/.insteadOf" \
             >/dev/null 2>&1 || true
@@ -614,17 +686,33 @@ jobs:
               https://github.com/metacraft-labs/codetracer.git
           fi
           git -C "$ct_root" submodule sync --recursive
+          # The scoped credential (see the comment above this step). mktemp -d
+          # gives a fresh 0700 directory; the script creates the file inside
+          # it exclusively with mode 0600, and the trap removes both on every
+          # exit path. --emit-actions-mask masks the header's base64 form,
+          # which GitHub does not mask on its own.
+          git_auth_dir="$(mktemp -d "$RUNNER_TEMP/ct-lock-git-auth.XXXXXX")"
+          trap 'rm -rf "$git_auth_dir"' EXIT
+          git_auth_config="$git_auth_dir/gitconfig"
+          dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
+            --lock "$ct_root/repro.lock" --owner metacraft-labs \
+            --out "$git_auth_config" --emit-actions-mask
+          # The file now holds the credential; nothing below needs it in the
+          # environment, so do not hand it to every descendant of `develop`.
+          unset GH_TOKEN
           # L2 (CI-PROVISION-FROM-LOCK): provision codetracer's dependency
           # siblings FROM THE LOCK, not from a hard-coded name list. codetracer
-          # ships a committed `repro.lock` enumerating its from-source deps
-          # (isonim + the nim-* libs it `uses:`) at pinned revisions; a single
-          # `repro develop --all` resolves that set over the solved graph and
-          # records the develop-mode override map so reprobuild splices each
-          # sibling's Nim source into the ct consumer graph. The sibling
-          # checkouts already sit adjacent to $ct_root (cloned by setup-dev-env
-          # from reprobuild's .github/sibling-repos), so `develop --all` ADOPTS
-          # them in place when they match the locked revision; --into=<siblings>
-          # names that adjacency explicitly. Fails loud if the lock is missing.
+          # ships a committed `repro.lock` enumerating its from-source deps at
+          # pinned revisions -- isonim, the nim-* libs it `uses:`, and the
+          # codetracer-* repos, several of them forge-private (see the comment
+          # above this step) -- and a single `repro develop --all` resolves
+          # that set over the solved graph and records the develop-mode
+          # override map so reprobuild splices each sibling's Nim source into
+          # the ct consumer graph. The sibling checkouts already sit adjacent
+          # to $ct_root (cloned by setup-dev-env from reprobuild's
+          # .github/sibling-repos), so `develop --all` ADOPTS them in place
+          # when they match the locked revision; --into=<siblings> names that
+          # adjacency explicitly. Fails loud if the lock is missing.
           #
           # --reset: the siblings were pre-cloned by clone-siblings at their
           # `=dev` BRANCH TIPS, which in general differ from the revisions
@@ -636,7 +724,8 @@ jobs:
           # lock-pinned sources, not the moving `=dev` tips. This is the crux
           # that keeps this step green as the sibling `dev` tips advance.
           siblings_root="$(cd "$ct_root/.." && pwd)"
-          ( cd "$ct_root" && "$repro_bin" develop --all --reset --into="$siblings_root" )
+          ( cd "$ct_root" && export GIT_CONFIG_GLOBAL="$git_auth_config" && \
+            "$repro_bin" develop --all --reset --into="$siblings_root" )
 
       # CodeTracer's Nix graph reads native-recorder, while its submodule graph
       # also reads tree-sitter-nim. Mint exactly that repository set immediately

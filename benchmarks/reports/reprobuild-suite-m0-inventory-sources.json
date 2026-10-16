@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 654,
     "staticallyDetectedRuntimeCompilerFlowTests": 122,
-    "testEntries": 2149
+    "testEntries": 2150
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1297,7 +1297,7 @@
       "integration": 1156,
       "platform/destructive": 130,
       "pure unit": 654,
-      "unclassified": 190
+      "unclassified": 191
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1500,8 +1500,8 @@
       }
     ],
     "nimTestBinaryCount": 2128,
-    "pythonTestFileCount": 21,
-    "testEntryCount": 2149
+    "pythonTestFileCount": 22,
+    "testEntryCount": 2150
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -45529,6 +45529,21 @@
       "source": "tests/unit/test_build_report_attribution.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 20,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_ci_reconcile_lock_credentials.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
