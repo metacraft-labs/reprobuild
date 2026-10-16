@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2110,
+    "nimTestBinaries": 2112,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 650,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2131
+    "testEntries": 2133
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,7 +1279,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1144,
+      "integration": 1146,
       "platform/destructive": 129,
       "pure unit": 650,
       "unclassified": 189
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2110,
+    "nimTestBinaryCount": 2112,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2131
+    "testEntryCount": 2133
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -27837,6 +27837,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_hand_run_gate_judges_the_repo_the_hook_judges",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_hand_run_gate_judges_the_repo_the_hook_judges.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_linked_worktree_sibling_is_reported_and_gated",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -27846,6 +27863,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_mixed_direction_refusal_clears_in_one_pass",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_mixed_direction_refusal_clears_in_one_pass.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
