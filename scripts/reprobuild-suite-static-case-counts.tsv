@@ -1630,7 +1630,7 @@ tests/integration/t_projects_add_writes_and_pushes_manifest.nim	nim	2
 tests/integration/t_prompt_cache_is_its_own_file_and_marks_staleness.nim	nim	1
 tests/integration/t_prompt_prints_no_workspace_notices.nim	nim	1
 tests/integration/t_protocol_document_survives_suite_body_echo.nim	nim	4
-tests/integration/t_provider_compile_follows_the_recipe.nim	nim	1
+tests/integration/t_provider_compile_follows_the_recipe.nim	nim	2
 tests/integration/t_provider_compile_key_ignores_the_callers_shell.nim	nim	1
 tests/integration/t_provider_compile_reporting_distinguishes_compile_from_reuse.nim	nim	1
 tests/integration/t_provider_file_driven_fanout_cleanup.nim	nim	1
