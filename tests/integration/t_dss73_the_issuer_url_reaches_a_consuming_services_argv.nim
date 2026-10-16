@@ -562,20 +562,52 @@ proc askTheInstance(issuerUrl: string): string =
     client.close()
 
 suite "§7.3 — the instance's issuer URL reaches a consuming service's argv":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
-  defer:
-    discard c.runRepro(c.issuerProject, @["down", "--activity=" & Activity])
-    discard c.runRepro(c.offlineProject, @["down", "--activity=" & Activity])
-    c.closeDaemon(daemon)
-    # REAP AFTER `closeDaemon` -- the daemon's own argv names this case's
-    # tempRoot, so the sweep would otherwise kill it out from under the
-    # graceful `repro down` calls above -- and BEFORE the tree is removed,
-    # because the path is the identity witness.
-    c.reapCaseProcesses()
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+  # Prepared on the first case's `setup`, NOT in the suite body. The suite
+  # body runs at registration, in every process this binary starts --
+  # including `--list` / `--list-json`, which only enumerates and is run
+  # from a scratch working directory. Preparing here made enumeration
+  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
+  # no case was listed) and start a daemon just to print case names. The
+  # runner executes each case in its own process, so a case still prepares
+  # the fixture and starts the daemon exactly once, and the deferred
+  # cleanup below still runs in that process -- only if a case prepared.
+  var prepared = false
+  var c: Dss73Case
+  var daemon: owned(Process)
 
-  test "A: the URL on argv is the one the RUNNING instance is serving":
+  setup:
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
+
+  defer:
+    if prepared:
+      discard c.runRepro(c.issuerProject,
+        @["down", "--activity=" & Activity])
+      discard c.runRepro(c.offlineProject,
+        @["down", "--activity=" & Activity])
+      c.closeDaemon(daemon)
+      # REAP AFTER `closeDaemon` -- the daemon's own argv names this case's
+      # tempRoot, so the sweep would otherwise kill it out from under the
+      # graceful `repro down` calls above -- and BEFORE the tree is removed,
+      # because the path is the identity witness.
+      c.reapCaseProcesses()
+      try: removeDir(c.tempRoot) except OSError, IOError: discard
+
+  # ONE PROCESS PER CASE. The suite runner executes every case in a process
+  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
+  # FRESH fixture and daemon in `setup` above. The cases below are one
+  # scenario told in steps, and a later step asserts on state an earlier
+  # step created -- so each step is a template, and a case first REPLAYS the
+  # earlier steps its state depends on, assertions and all, then runs its
+  # own. Run alone, a case therefore measures exactly what it measured as
+  # part of the sequence; a prerequisite step that fails fails the dependent
+  # case too, at that step's own assertion, rather than letting it pass or
+  # fail on a fixture it never built.
+
+  template runningInstanceUrlOnArgv() =
+    # The steps of case "A: the URL on argv is the one the RUNNING instance is serving".
     let program = c.issuerProject / "scripts" / "registrar.sh"
     let up = c.runRepro(c.issuerProject, @["up", "--activity=" & Activity],
       registrarProgram = program)
@@ -631,7 +663,8 @@ suite "§7.3 — the instance's issuer URL reaches a consuming service's argv":
     check up.output.contains("1 instance attribute recorded: " &
       IssuerAttributeName)
 
-  test "B: offline, the attribute REFUSES BY NAME and the service never starts":
+  template offlineAttributeRefusesByName() =
+    # The steps of case "B: offline, the attribute REFUSES BY NAME and the service never starts".
     # §7.2 keeps the development registrar as the default, and it reports
     # no attributes -- it speaks to no issuer, so it knows no issuer URL.
     # There is deliberately no permissive spelling of
@@ -669,7 +702,8 @@ suite "§7.3 — the instance's issuer URL reaches a consuming service's argv":
     check attributeRowFor(c.offlineProject, IssuerAttributeName) == nil
     check up.output.contains("0 instance attributes recorded")
 
-  test "C: a RESTARTED instance's new URL replaces the old one on argv":
+  template restartedInstanceUrlReplacesOld() =
+    # The steps of case "C: a RESTARTED instance's new URL replaces the old one on argv".
     # THE ANTI-STALENESS PROPERTY, END TO END. The instance is taken down
     # and brought up again; it binds a DIFFERENT ephemeral port, so the
     # issuer URL legitimately moves. A lane that reused the stored
@@ -709,7 +743,8 @@ suite "§7.3 — the instance's issuer URL reaches a consuming service's argv":
     # asymmetry: mint-once for the credential, replace for the address.
     check argvOf(c.issuerProject).flagValue("--client-id") == IssuerClientId
 
-  test "D: a REFUSED registration does not leave the OLD url on the record":
+  template refusedRegistrationKeepsNoOldUrl() =
+    # The steps of case "D: a REFUSED registration does not leave the OLD url on the record".
     # ───────────────────────────────────────────────────────────────────
     # THE ORDERING, ASSERTED. §7.3's attribute reconcile runs BEFORE the
     # registration reconcile, and until this case that was program order
@@ -798,3 +833,18 @@ suite "§7.3 — the instance's issuer URL reaches a consuming service's argv":
     #    and `repro up` named both facts above.
     check after.registrations.len == 1
     check after.registrations[0].mintedId == IssuerClientId
+
+  test "A: the URL on argv is the one the RUNNING instance is serving":
+    runningInstanceUrlOnArgv()
+
+  test "B: offline, the attribute REFUSES BY NAME and the service never starts":
+    offlineAttributeRefusesByName()
+
+  test "C: a RESTARTED instance's new URL replaces the old one on argv":
+    runningInstanceUrlOnArgv()
+    restartedInstanceUrlReplacesOld()
+
+  test "D: a REFUSED registration does not leave the OLD url on the record":
+    runningInstanceUrlOnArgv()
+    restartedInstanceUrlReplacesOld()
+    refusedRegistrationKeepsNoOldUrl()
