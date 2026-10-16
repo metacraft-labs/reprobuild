@@ -30,6 +30,7 @@ import repro_launch_plan
 # so this adds no new link-time surface, only a use of what is already there.
 import repro_project_dsl
 
+import ./app_activation
 import ./errors
 import ./plan
 import ./realize
@@ -112,7 +113,7 @@ proc runtimeDepSelectors*(packageName: string): seq[string] =
     if parts.len > 0 and parts[0].len > 0:
       result.add(parts[0])
 
-proc buildLaunchPlan(rec: RealizedRecord; commandName: string;
+proc buildLaunchPlan(rec: RealizedRecord; commandName, executablePath: string;
                      runtimeLibraryDirs: seq[string]): LaunchPlan =
   ## Synthesize a LaunchPlan. Environment shaping and executable bindings are
   ## still empty (phase A); `runtimeLibraryDirs` is now supplied by the caller,
@@ -122,7 +123,7 @@ proc buildLaunchPlan(rec: RealizedRecord; commandName: string;
   result.schemaVersion = LaunchPlanCurrentSchemaVersion
   result.realizedPrefix = rec.prefixAbsolutePath
   result.exportedCommand = commandName
-  result.executablePath = rec.resolvedExecutablePath
+  result.executablePath = executablePath
   result.arguments = @[]
   result.hasWorkingDirectory = false
   result.environmentBindings = @[]
@@ -193,8 +194,13 @@ when defined(windows):
 
 proc materializeLaunchers*(store: var Store; binDir: string;
                            realized: seq[RealizedRecord];
-                           launchers: seq[PlannedLauncher]):
+                           launchers: seq[PlannedLauncher];
+                           applicationsDir = ""):
     seq[MaterializedLauncherRecord] =
+  ## ``applicationsDir`` is where this apply places application bundles:
+  ## a launcher of an application runs the placed copy there
+  ## (``app_activation.launcherExecutablePath``). "" keeps every launcher
+  ## on the realized prefix.
   createDir(extendedPath(binDir))
   # Build a quick lookup from package id → realized record.
   var byPkg: seq[(string, RealizedRecord)]
@@ -242,7 +248,9 @@ proc materializeLaunchers*(store: var Store; binDir: string;
         "runtime library dependencies declared but not realized: " &
         resolution.unresolved.join(", ") &
         " (planner/realize-step bug — the dependency was not planned)")
-    let plan = buildLaunchPlan(rec, l.commandName, resolution.dirs)
+    let exePath = launcherExecutablePath(rec, l.executableRelPath,
+      applicationsDir)
+    let plan = buildLaunchPlan(rec, l.commandName, exePath, resolution.dirs)
     let key = storeLaunchPlan(store, plan)
     let digest = digestFromKey(key)
     let idHex = prefixIdHex(key)
@@ -251,7 +259,7 @@ proc materializeLaunchers*(store: var Store; binDir: string;
     matRec.launchPlanDigest = digest
     when defined(windows):
       let winRec = materializeWindowsLauncher(binDir, l.commandName,
-        launcherBinary, store.root, idHex, rec.resolvedExecutablePath,
+        launcherBinary, store.root, idHex, exePath,
         rec.prefixAbsolutePath)
       matRec.binDirArtifactKind = winRec.binDirArtifactKind
       matRec.binDirRelativePath =
