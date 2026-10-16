@@ -307,6 +307,20 @@ proc scanPath(s: var StoreRefScanner; path: string) =
   elif isRegularFile(path):
     s.scanFile(path)
 
+proc resolveScannedStorePath(path, storeDir: string): string =
+  ## `path` as scanned (`<storeDir>/<hash>-<maximal name run>`), or, when that
+  ## spelling does not exist, the longest existing `<storeDir>/<hash>-<prefix
+  ## of the name>`. See `scanStoreReferences` for why the name's end is a
+  ## guess. One `lstat` for a path that exists, which is the common case.
+  if storePathExists(path):
+    return path
+  let nameStart = storeDir.len + 1 + NixStoreHashLen + 1
+  for nameEnd in countdown(path.len - 1, nameStart + 1):
+    let candidate = path[0 ..< nameEnd]
+    if storePathExists(candidate):
+      return candidate
+  path
+
 proc scanStoreReferences*(paths: openArray[string];
                           storeDir = nixStoreDir()): seq[string] =
   ## The distinct top-level store paths (`<storeDir>/<hash>-<name>`, cut at
@@ -316,11 +330,29 @@ proc scanStoreReferences*(paths: openArray[string];
   ## Existence of the FOUND paths is not checked here: an output may name a
   ## store path that never existed on this host (a log quoting another
   ## machine's path), and only the caller knows what that means for it.
+  ##
+  ## WITH ONE EXCEPTION, the name's END. The text gives no reliable end for a
+  ## name: a store path serialized without a terminator (a length-prefixed
+  ## string in a binary artifact, such as a provider's `.rbsz`) is followed
+  ## by whatever byte comes next, and when that byte is a name character the
+  ## maximal run overshoots: `…-source` followed by a length byte `'9'`
+  ## scans as `…-source9`, which exists nowhere. Nix itself identifies a
+  ## reference by its HASH alone (`RefScanSink`), so the hash is the fact
+  ## and the name is the guess. When the maximal spelling is absent, the
+  ## longest PREFIX of its name that is an existing store entry under the
+  ## same hash is the reference. Only when no prefix exists is the maximal
+  ## spelling kept, as before. Without this the false spelling was recorded
+  ## as absent, and an output scanned with no ledger manifest (a shared
+  ## recipe-compile output reached from another copy of the recipe) was
+  ## judged to have LOST a store path and re-executed on every copy.
   var s = StoreRefScanner(prefix: storeDir & "/", storeDir: storeDir,
     found: initHashSet[string]())
   for path in paths:
     s.scanPath(path)
+  var resolved = initHashSet[string]()
   for p in s.found:
+    resolved.incl(resolveScannedStorePath(p, storeDir))
+  for p in resolved:
     result.add(p)
   result.sort()
 
