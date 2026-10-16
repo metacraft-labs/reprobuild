@@ -1746,6 +1746,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim",
+    binary: "build/test-bin/t_daemon_declines_a_foreign_engines_request",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim",
     binary: "build/test-bin/t_daemon_deferral_log_is_bounded",
     defines: @[],
@@ -14114,6 +14123,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_nix_tool_realizations_are_gc_rooted.nim",
     binary: "build/test-bin/t_nix_tool_realizations_are_gc_rooted",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim",
+    binary: "build/test-bin/t_nix_tool_resolution_is_a_provisioning_edge",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

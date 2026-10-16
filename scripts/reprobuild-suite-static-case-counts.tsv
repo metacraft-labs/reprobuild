@@ -200,6 +200,7 @@ libs/repro_core/tests/t_source_root_installed_layout.nim	nim	9
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
 libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	28
+libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim	nim	4
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
@@ -1575,6 +1576,7 @@ tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
 tests/integration/t_nix_daemon_ipc.nim	nim	7
 tests/integration/t_nix_daemon_provisioner.nim	nim	8
 tests/integration/t_nix_tool_realizations_are_gc_rooted.nim	nim	1
+tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim	nim	4
 tests/integration/t_no_project_set_errors_name_the_remedy.nim	nim	1
 tests/integration/t_no_runtime_compilation_in_tests.nim	nim	2
 tests/integration/t_old_names_read_until_retired.nim	nim	6

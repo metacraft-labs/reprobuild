@@ -32150,6 +32150,23 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       selectedRoots: selectedRoots)
     let daemonResult = requestUserDaemonWatchStart(request, config.endpoint,
       renderDaemonWatchEvent)
+    # An unsupported terminal answer means "run it yourself", exactly as for
+    # `runDaemonBuild`: the caller below falls back to a direct watch. It
+    # used to be returned as exit 64 instead, so a daemon that declined a
+    # watch sent for another engine (`foreignEngineVerdict`) ended the watch.
+    #
+    # Except under `--detach`: a direct watch runs in the foreground and
+    # cannot detach, so falling back would turn a command that returns at
+    # once into one that blocks its caller for as long as the watch runs
+    # (forever, with no `--max-cycles`). A detached watch keeps the exit 64
+    # and says why; retrying it reaches a daemon on the caller's own engine.
+    if not daemonResult.supported:
+      if detach:
+        stderr.writeLine("repro watch: daemon watch unsupported; a " &
+          "detached watch cannot fall back to direct mode: " &
+          daemonResult.message)
+        return daemonResult.exitCode
+      raise newException(DaemonBuildUnsupported, daemonResult.message)
     if detach:
       echo "repro watch: detached session=" & daemonResult.sessionId
     daemonResult.exitCode
