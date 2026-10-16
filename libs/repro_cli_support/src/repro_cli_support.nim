@@ -47460,6 +47460,14 @@ type
       ## Host-local elaboration (the absolute path probed, a git
       ## diagnostic). Report- and terminal-only; never serialized.
 
+  SweptLockDraft* = object
+    ## One untracked lock draft ``sweepOrphanedLockDrafts`` deleted, with the
+    ## evidence that justified it.
+    relPath*: string ## store-relative path, forward slashes
+    repo*: string ## the record's decoded ``<repo>`` component
+    sha*: string ## its trigger commit, reachable from no ref
+    repoRoot*: string ## the checkout in which reachability was decided
+
   WorkspaceLockReport* = object
     ## Structured outcome of one ``repro workspace lock`` invocation.
     ## ``lockFilePath`` is the absolute path the writer landed on;
@@ -47503,6 +47511,12 @@ type
       ## `participation` is filled only on the non-deferred path, so "empty
       ## participation" cannot by itself distinguish "public-only" from "the
       ## participation writes were deferred to the gate".
+    sweptDrafts*: seq[SweptLockDraft]
+      ## Untracked drafts this write DELETED because their trigger commit is
+      ## reachable from no ref (``sweepOrphanedLockDrafts``). Every surface
+      ## that runs the writer reports them; nothing reads them back.
+    sweepDiagnostics*: seq[string]
+      ## Sweep probes that failed and therefore left their drafts in place.
     exitCode*: int
 
   WorkspaceLockOutcome* = object
@@ -47549,6 +47563,16 @@ proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
     obj["detail"] = %entry.detail
     unmaterialized.add(obj)
   result["unmaterialized"] = unmaterialized
+  var swept = newJArray()
+  for entry in report.sweptDrafts:
+    var obj = newJObject()
+    obj["relPath"] = %entry.relPath
+    obj["repo"] = %entry.repo
+    obj["sha"] = %entry.sha
+    obj["repoRoot"] = %entry.repoRoot
+    swept.add(obj)
+  result["sweptDrafts"] = swept
+  result["sweepDiagnostics"] = %report.sweepDiagnostics
   result["exitCode"] = %report.exitCode
 
 proc unmaterializedLockNotice*(
@@ -48017,6 +48041,222 @@ proc pickTriggerRepo(resolved: ResolvedProject;
         "' declares no repos; cannot pick a trigger anchor")
   resolved.repos[0]
 
+proc nulSeparatedPaths(output: string): seq[string] =
+  ## Split the output of a ``-z`` git query into paths.
+  ##
+  ## ``-z`` NUL-TERMINATES each path, and the captured output still carries the
+  ## trailing newline the child wrote after the last record. Splitting on NUL
+  ## therefore yields a final element that is ``"\n"`` rather than ``""``, and a
+  ## plain ``if raw.len == 0: continue`` does not drop it. That element then
+  ## flows on as if it were a path: it is not under ``locks/``, so the repair
+  ## planner read it as "this branch touches something outside locks/" and
+  ## refused every store it was pointed at, naming a path that renders as
+  ## nothing at all.
+  ##
+  ## Strip the trailing newlines ONCE, from the whole output, before splitting;
+  ## every element is then either a real path or empty. Not a per-element
+  ## ``strip``: a path may legitimately begin or end with a byte ``strip``
+  ## would eat.
+  for raw in output.strip(leading = false, chars = {'\n', '\r'}).split('\0'):
+    if raw.len == 0: continue
+    result.add(raw.replace('\\', '/'))
+
+# ---- Orphaned lock drafts: swept, never published -------------------------
+#
+# push-hook-publication-protocol.md §"A draft whose commit no ref reaches is
+# swept, never published".
+#
+# A lock record's key is the trigger commit's SHA, and at ``post-commit`` that
+# SHA is PROVISIONAL. The workflow this project prescribes — sync the mainline
+# before measuring, which on a branch that has moved means rebasing, or simply
+# ``git commit --amend`` — rewrites the commit minutes later, and the draft
+# ``locks/<project>/<repo>/<sha>.toml`` written for it then names a commit that
+# exists on no branch. Nothing removed it, and an UNSCOPED publication (an
+# explicit ``repro workspace lock`` names no records, so the publisher stages
+# every untracked canonical record it finds) committed and pushed it. A
+# published record is immutable, so the store then carried, for good, a record
+# of a workspace state at a commit that never existed on any branch. Observed
+# three times in one session (reprobuild-pm issue 2026-09-29).
+#
+# Deleting the draft is allowed because a draft is NOT history: the
+# "Corollary — immutability binds published records, not local drafts" of the
+# same spec. Only an UNTRACKED file is a draft. A tracked record is published
+# history, or a routed backend's record that ``putLock`` committed, and neither
+# is ever touched here.
+#
+# Every lock WRITE sweeps (post-commit, the pre-push gate, an explicit
+# ``repro workspace lock``), and every publication is preceded by a write or by
+# the gate's own sweep, so an orphan is gone before any staging step can see
+# it. The sweep does not depend on a publication happening at all: in a
+# workspace that never publishes, the draft readers ("the latest draft" for an
+# unpushed HEAD) would otherwise keep reading the debris.
+
+type
+  LockDraftSweep* = object
+    swept*: seq[SweptLockDraft]
+    diagnostics*: seq[string]
+      ## Probes that FAILED, each of which left its drafts in place. An
+      ## unresolvable repo or a missing commit object is not a failure — it is
+      ## the ordinary "cannot prove it, so keep it" answer — and is not listed.
+
+proc isFullObjectIdText(value: string): bool =
+  ## A full SHA-1 or SHA-256 object id in hex. Anything else in the filename
+  ## stem is not handed to git as a revision at all: a stem such as ``main`` or
+  ## ``HEAD@{1}`` would be RESOLVED by ``rev-list``, and the sweep would then
+  ## be deciding about whatever commit that name happens to denote today.
+  (value.len == 40 or value.len == 64) and value.allIt(it in HexDigits)
+
+proc sweptLockDraftLine*(item: SweptLockDraft): string =
+  ## The one-line, factual account of a sweep, shared by every surface that
+  ## reports one (the post-commit log, ``repro workspace lock``'s stderr, the
+  ## pre-push gate's notices) so they cannot drift apart.
+  "swept orphaned lock draft '" & item.relPath & "': commit " & item.sha &
+    " is reachable from no ref in " & item.repoRoot
+
+proc sweepOrphanedLockDrafts*(identity: GitToolIdentity;
+    recordStoreRoot: string; repoRoots: Table[string, string];
+    keepRelPaths: openArray[string] = []): LockDraftSweep =
+  ## Delete every UNTRACKED canonical record under ``<recordStoreRoot>/locks``
+  ## whose trigger commit is PROVABLY ORPHANED, and return what was deleted.
+  ##
+  ## ``repoRoots`` maps a record's decoded ``<repo>`` component (the declared
+  ## repo NAME) to that repo's checkout in this workspace. ``keepRelPaths``
+  ## names records the caller has just written and must not lose — never
+  ## needed for correctness (a record keyed at a checkout's HEAD is reachable),
+  ## but it makes "the sweep never deletes the record its own writer filed" a
+  ## property of the call rather than of the repository's state.
+  ##
+  ## Provably orphaned means all three hold, and anything less leaves the file:
+  ##
+  ## * the record's repo resolves through ``repoRoots`` (records of repos this
+  ##   workspace does not have checked out are somebody else's question);
+  ## * the commit object exists in that checkout — a draft for a commit the
+  ##   checkout never had (fetched elsewhere, or a different clone's work)
+  ##   cannot be judged here; and
+  ## * no ref and no HEAD reaches it. ``--all`` is every ref under ``refs/``
+  ##   (branches, remote-tracking refs, tags, ``refs/stash``) plus ``HEAD``,
+  ##   and by default every linked worktree's ``HEAD`` too. A commit that only
+  ##   a REFLOG still names counts as orphaned: the reflog records where a ref
+  ##   WAS, it is local and expires, and no publication ever ships from it —
+  ##   that is exactly the state an amend or a rebase leaves the old commit in.
+  ##
+  ## A commit that is mid-rewrite is not orphaned yet: while a rebase is in
+  ## progress the original branch ref still reaches the pre-rewrite commits.
+  ## (``post-commit`` additionally stands down for the whole operation.)
+  ##
+  ## One ``rev-list`` per repo, not per record:
+  ## ``git rev-list --ignore-missing <sha>^{commit}… --not --all`` prints the
+  ## commits reachable from the drafts' SHAs and from no ref, so a SHA is
+  ## orphaned exactly when it is printed. ``--ignore-missing`` drops a SHA whose
+  ## object is absent instead of failing the whole batch, and ``^{commit}``
+  ## makes a SHA that names a non-commit object drop out the same way — both
+  ## then simply are not printed, so they are kept.
+  ##
+  ## Best-effort by construction: it never raises. Any failed probe leaves that
+  ## repo's drafts where they are and is recorded in ``diagnostics``.
+  if recordStoreRoot.len == 0 or repoRoots.len == 0:
+    return
+  try:
+    if not dirExists(extendedPath(recordStoreRoot / "locks")):
+      return
+    # The store must be its OWN checkout root (``discoverGitWorktree`` refuses
+    # a plain directory nested in another checkout), for the reason
+    # ``publishWorkspaceLock`` gives: Git's upward discovery would otherwise
+    # answer "untracked" from whatever repository encloses the directory, and
+    # the sweep would be classifying files that repository does not own.
+    if not discoverGitWorktree(identity, recordStoreRoot).ok:
+      return
+    # ``--others`` WITHOUT ``--exclude-standard``: the publisher enumerates the
+    # same way (an operator may ignore the whole manifest layer), and a draft
+    # the publisher would stage is exactly a draft the sweep must see.
+    let listing = gitRunPlainQuery(identity,
+      ["-C", recordStoreRoot, "ls-files", "-z", "--others", "--", "locks"])
+    if listing.code != 0:
+      result.diagnostics.add("could not list untracked lock records in '" &
+        recordStoreRoot & "': " & listing.diagnostic)
+      return
+    var keep = initHashSet[string]()
+    for rel in keepRelPaths:
+      keep.incl(rel.replace('\\', '/'))
+    var byRepo = initOrderedTable[string, seq[LockRecordPath]]()
+    for rel in nulSeparatedPaths(listing.output):
+      if rel in keep: continue
+      let parsed = parseLockRecordRelPath(rel)
+      # A non-canonical file under ``locks/`` is not a draft this tool wrote;
+      # the publisher reports those and ``migrate-locks`` repairs them.
+      if not parsed.ok: continue
+      if not isFullObjectIdText(parsed.sha): continue
+      if parsed.repo notin repoRoots: continue
+      byRepo.mgetOrPut(parsed.repo, @[]).add(parsed)
+    # Drafts of commits that stay REACHABLE are never swept, and every commit
+    # that was not itself the pushed HEAD leaves one behind, so a long-lived
+    # workspace accumulates thousands per repo. Passing them all on one command
+    # line would eventually exceed the platform's limit (32 767 characters on
+    # Windows; 128 KiB for the single ``sh -c`` argument POSIX ``execCmdEx``
+    # builds), and from then on every sweep of that repo would fail and keep
+    # its orphans for good. Each SHA's orphan status is independent of the
+    # others, so asking in fixed-size batches answers exactly the same question.
+    const ShasPerRevList = 200
+    for repo, drafts in byRepo:
+      let repoRoot = repoRoots[repo]
+      var unreachable = initHashSet[string]()
+      var probeFailed = false
+      var first = 0
+      while first < drafts.len:
+        let last = min(first + ShasPerRevList, drafts.len) - 1
+        var args = @["-C", repoRoot, "rev-list", "--ignore-missing"]
+        for draft in drafts[first .. last]:
+          args.add(draft.sha & "^{commit}")
+        args.add("--not")
+        args.add("--all")
+        let reach = gitRunPlainQuery(identity, args)
+        if reach.code != 0:
+          result.diagnostics.add("could not decide reachability of " &
+            $drafts.len & " lock draft(s) for '" & repo & "' in '" &
+            repoRoot & "'; left in place: " & reach.diagnostic)
+          probeFailed = true
+          break
+        for line in reach.output.splitLines():
+          let sha = line.strip().toLowerAscii()
+          if sha.len > 0: unreachable.incl(sha)
+        first = last + 1
+      # One failed batch keeps the whole repo's drafts: a partial answer is
+      # still positive evidence for the SHAs it printed, but a sweep that
+      # reports "probe failed" and deletes anyway would be harder to reason
+      # about than one that simply did nothing for that repo this time.
+      if probeFailed: continue
+      var doomed: seq[LockRecordPath]
+      for draft in drafts:
+        if draft.sha.toLowerAscii() in unreachable:
+          doomed.add(draft)
+      if doomed.len == 0: continue
+      # Re-ask "untracked?" for exactly the files about to be deleted. The
+      # listing above is a moment old, and a publisher in another process may
+      # have staged one since; a staged record is on its way into history and
+      # is no longer this sweep's to delete. One call for the batch.
+      var relPaths: seq[string]
+      for draft in doomed: relPaths.add(draft.relPath)
+      let staged = gitRunPlainQuery(identity,
+        @["-C", recordStoreRoot, "ls-files", "-z", "--cached", "--"] &
+          relPaths)
+      if staged.code != 0:
+        result.diagnostics.add("could not confirm lock drafts for '" & repo &
+          "' are untracked; left in place: " & staged.diagnostic)
+        continue
+      let nowTracked = nulSeparatedPaths(staged.output).toHashSet()
+      for draft in doomed:
+        if draft.relPath in nowTracked: continue
+        let abs = recordStoreRoot / draft.relPath.replace('/', DirSep)
+        try:
+          removeFile(extendedPath(abs))
+          result.swept.add(SweptLockDraft(relPath: draft.relPath,
+            repo: repo, sha: draft.sha, repoRoot: repoRoot))
+        except OSError as err:
+          result.diagnostics.add("could not delete orphaned lock draft '" &
+            draft.relPath & "': " & err.msg)
+  except CatchableError as err:
+    result.diagnostics.add("lock draft sweep aborted: " & err.msg)
+
 proc executeWorkspaceLock(args: WorkspaceLockArgs;
     deferParticipation = false): WorkspaceLockOutcome =
   ## End-to-end driver. (1) Resolve the project / compose layers.
@@ -48050,6 +48290,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # resolution check below.
   var headShas = initTable[string, string]()
   var currentBranches = initTable[string, string]()
+  # Declared repo NAME → the checkout this run actually observed it at (the
+  # trigger's linked worktree when one fired the hook). It is the map the
+  # orphaned-draft sweep below resolves a record's ``<repo>`` component
+  # through, so the sweep decides reachability in exactly the checkouts the
+  # lock itself was read from, and never in one it could not observe.
+  var observedRoots = initTable[string, string]()
   var dirtyEntries: seq[WorkspaceLockDirtyEntry]
   # RA-21 — the dirty refusal is scoped to ``dirtyScopeNames`` when the
   # caller supplied one (the pre-push gate passes the pushed repo's
@@ -48115,6 +48361,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
         detail: headRes.diagnostic))
       continue
     headShas[repo.path] = headRes.headSha
+    observedRoots[repo.name] = repoPath
     let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
     let isClean =
       if cleanRes.status == gqsOk: cleanRes.isClean
@@ -48472,6 +48719,32 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     else: triggerSha
   report.createdAt = createdAt
   report.workspaceBranch = workspaceBranch
+
+  # Sweep the drafts whose commit no ref reaches any more (see
+  # ``sweepOrphanedLockDrafts`` and push-hook-publication-protocol.md §"A draft
+  # whose commit no ref reaches is swept, never published"). HERE, in the one
+  # writer every surface shares, so post-commit, the pre-push gate and an
+  # explicit ``repro workspace lock`` all sweep, and the two that publish do so
+  # only after the orphans are gone — an explicit lock's publication names no
+  # records and would otherwise stage them.
+  #
+  # The record this run just wrote is excluded by name. It is keyed at the
+  # trigger checkout's HEAD and so is reachable anyway, but an operator may
+  # also lock an explicit ``--sha=`` that no ref reaches yet, and the sweep must
+  # never undo the write it follows.
+  #
+  # Best-effort: the sweep never raises, and a failed probe leaves the draft
+  # where it is. Post-commit therefore stays unable to fail on its account.
+  # Post-commit's stand-down during a rebase/sequencer run happens before this
+  # writer is invoked at all, so a commit that is mid-rewrite is never judged.
+  if recordStoreRoot.len > 0:
+    var justWritten: seq[string]
+    if lockRelForTracking.len > 0:
+      justWritten.add(lockRelForTracking)
+    let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
+      observedRoots, keepRelPaths = justWritten)
+    report.sweptDrafts = sweep.swept
+    report.sweepDiagnostics = sweep.diagnostics
 
   # MO-4 — record each repo's participation through its ASSIGNED locking
   # backend (config → per-repo backend, keyed by visibility). A no-op when the
@@ -49655,26 +49928,6 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
       return
     result.verifiedLocalHead = refreshedHead.output.strip().toLowerAscii()
 
-proc nulSeparatedPaths(output: string): seq[string] =
-  ## Split the output of a ``-z`` git query into paths.
-  ##
-  ## ``-z`` NUL-TERMINATES each path, and the captured output still carries the
-  ## trailing newline the child wrote after the last record. Splitting on NUL
-  ## therefore yields a final element that is ``"\n"`` rather than ``""``, and a
-  ## plain ``if raw.len == 0: continue`` does not drop it. That element then
-  ## flows on as if it were a path: it is not under ``locks/``, so the repair
-  ## planner read it as "this branch touches something outside locks/" and
-  ## refused every store it was pointed at, naming a path that renders as
-  ## nothing at all.
-  ##
-  ## Strip the trailing newlines ONCE, from the whole output, before splitting;
-  ## every element is then either a real path or empty. Not a per-element
-  ## ``strip``: a path may legitimately begin or end with a byte ``strip``
-  ## would eat.
-  for raw in output.strip(leading = false, chars = {'\n', '\r'}).split('\0'):
-    if raw.len == 0: continue
-    result.add(raw.replace('\\', '/'))
-
 proc publishWorkspaceLock*(identity: GitToolIdentity;
                            manifestRepoRoot: string;
                            exactExpected: seq[ExpectedLockRecord] = @[]):
@@ -50678,6 +50931,15 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
     outcome.report.toJsonNode())
   for line in renderLockTextLines(outcome.report):
     stdout.writeLine(line)
+  # A deleted file is reported, never silent: one stderr line per swept draft,
+  # naming the record and the evidence (spec §"A draft whose commit no ref
+  # reaches is swept, never published", "Each sweep is reported"). A probe
+  # that failed kept its drafts; say so too, since those drafts are still
+  # candidates for the unscoped publication below.
+  for item in outcome.report.sweptDrafts:
+    stderr.writeLine("repro: " & sweptLockDraftLine(item))
+  for diag in outcome.report.sweepDiagnostics:
+    stderr.writeLine("repro: lock draft sweep: " & diag)
   # RA-7: an explicit ``repro workspace lock`` PUBLISHES (commit + push)
   # the lock to the manifest repo. Only attempt when the write succeeded
   # (exit 0). Publication is best-effort: a refusal/failure is surfaced to
@@ -52558,6 +52820,19 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   report.indexFilePath = outcome.report.indexFilePath
   report.triggerRepo = outcome.report.triggerRepo
   report.triggerSha = outcome.report.triggerSha
+
+  # The writer swept drafts whose commit no ref reaches (an earlier
+  # post-commit's record for a commit since amended or rebased away). That is
+  # the designed steady state, not a warning, so it goes to the log only: one
+  # line per deleted file, because a deletion nobody can trace afterwards is
+  # the thing this log exists to prevent. A failed probe kept its draft and is
+  # logged the same way.
+  for item in outcome.report.sweptDrafts:
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " " & sweptLockDraftLine(item))
+  for diag in outcome.report.sweepDiagnostics:
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " lock draft sweep: " & diag)
 
   var loud = true
   case outcome.report.exitCode
@@ -62566,6 +62841,32 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           break
   if not lockMissing and not lockStale:
     result.lockUpdate.kind = cluAlreadyCurrent
+    # This arm writes nothing, so the writer's orphaned-draft sweep does not
+    # run — yet the publication after the gate still follows. It is scoped to
+    # this push's anchored record whenever the gate resolved one
+    # (INVARIANT 13), but it is UNSCOPED when it did not (no ``--current-repo``,
+    # or a pushed repo with no observable HEAD), and an unscoped publication
+    # stages every untracked canonical record. Sweep here too, so "every
+    # publication is preceded by a sweep" holds on both arms rather than only
+    # on the one that writes. Resolved through the same checkouts this gate
+    # observed.
+    if recordStoreRoot.len > 0:
+      var observedRoots = initTable[string, string]()
+      for obs in observations:
+        if obs.hasGit and obs.headSha.len > 0:
+          observedRoots[obs.name] = obs.absPath
+      # The record this push is anchored on is keyed at the pushed repo's
+      # HEAD and so is reachable anyway; naming it makes "the gate never
+      # sweeps the record it is about to publish" a property of the call.
+      var anchored: seq[string]
+      for expectedRecord in result.expectedManifestRecords:
+        anchored.add(expectedRecord.relPath)
+      let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
+        observedRoots, keepRelPaths = anchored)
+      for item in sweep.swept:
+        result.notices.add(sweptLockDraftLine(item))
+      for diag in sweep.diagnostics:
+        result.notices.add("lock draft sweep: " & diag)
     # Surface the most-recent lock file path so the operator can audit
     # which lock backed the check. MO-3: the store's ``lockKey`` carries the
     # RA-1 identity tuple, from which the ``locks/<p>/<repo>/<sha>.toml`` path
@@ -62654,6 +62955,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       unmaterializedLockNotice(lockOutcome.report.unmaterialized)
     if unmaterializedNotice.len > 0:
       result.notices.add(unmaterializedNotice)
+    # The writer swept orphaned drafts before this gate's publication can
+    # stage anything; the gate output names each deleted file.
+    for item in lockOutcome.report.sweptDrafts:
+      result.notices.add(sweptLockDraftLine(item))
+    for diag in lockOutcome.report.sweepDiagnostics:
+      result.notices.add("lock draft sweep: " & diag)
     result.lockUpdate.kind =
       if lockMissing: cluCreated else: cluRefreshed
     # HL-3 (§6 Decision 2) — surface the per-repo, tier-tagged participation
@@ -77593,6 +77900,10 @@ type
     write: bool
     allowRegression: seq[string]
       ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` (refresh only)
+    repin: seq[string]
+      ## ``--repin=<package>[,<package>…]`` (refresh only): the targeted
+      ## re-pin of `Locking-And-Solver.md` §"Targeted re-pin". Empty is the
+      ## ordinary whole-lock refresh.
 
 proc parseLockVerbArgs(rest: openArray[string]; verb: string;
                        projectDir, inputsOverride, lockOverride,
@@ -77603,8 +77914,9 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
   ## [--strategy <default|lowest|highest|lowest-direct>] [--lowest]
   ## [--highest] [--registry <url>] [--write] [--json]``, plus, for
   ## ``refresh`` only, ``[--allow-pin-regression=<sibling>[,<sibling>…]]``
-  ## (see `gateRefreshedSiblingPins`). Returns 0 on success, 2 on a usage
-  ## error (diagnostic already emitted).
+  ## (see `gateRefreshedSiblingPins`) and ``[--repin=<package>[,<package>…]]``
+  ## (see `runLockGenerationVerb`). Returns 0 on success, 2 on a usage error
+  ## (diagnostic already emitted).
   ##
   ## ``--lowest`` / ``--highest`` are the spellings `Locking-And-Solver.md`
   ## §"CLI Surface" names for `repro lock solve`, and NLF-M6 ships them as
@@ -77654,6 +77966,21 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
         return 2
       for n in parsedAllow.names:
         if n notin gen.allowRegression: gen.allowRegression.add(n)
+    elif verb == "refresh" and (arg == "--repin" or
+        arg.startsWith("--repin=")):
+      # Package names, comma-separated, each once. An empty element is a
+      # usage error rather than something to skip: `--repin=` or `--repin=a,,b`
+      # is a typo, and a re-pin that quietly named fewer packages than the
+      # caller meant would fail later on a held pin with a misleading cause.
+      let raw = valueFromFlag(rest, i, "--repin")
+      for part in raw.split(','):
+        let name = part.strip()
+        if name.len == 0:
+          stderr.writeLine("repro lock " & verb & ": --repin names " &
+            "packages (--repin=<package>[,<package>…]); '" & raw &
+            "' contains an empty name")
+          return 2
+        if name notin gen.repin: gen.repin.add(name)
     elif arg.startsWith("--"):
       stderr.writeLine("repro lock " & verb & ": unknown flag " & arg)
       return 2
@@ -77691,6 +78018,21 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
 # workspace is sourced from its real provider.
 # ---------------------------------------------------------------------------
 
+const SolverDeclarationSitesSuffix = ".sites"
+  ## MUST match ``repro_dsl_stdlib/configurables/variants.SolverDeclarationSitesSuffix``
+  ## — appended to the emit path to name the declaration-site sidecar.
+
+proc parseSolverDeclarationSites(text: string): Table[string, string] =
+  ## ``<package>\t<site>`` lines (``variants.renderSolverDeclarationSites``).
+  ## A malformed line is skipped: the sites only decide whether a diagnostic
+  ## says "cross-repo producer", so a line this reader cannot use costs that
+  ## sentence and nothing else.
+  result = initTable[string, string]()
+  for line in text.splitLines():
+    let tab = line.find('\t')
+    if tab <= 0: continue
+    result[line[0 ..< tab]] = line[tab + 1 .. ^1].strip()
+
 const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## MUST match ``repro_dsl_stdlib/configurables/variants.SolverInputsEmitEnvVar``
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
@@ -77727,6 +78069,12 @@ type CompiledProviderSolverInputs = object
     ## Every ``uses:`` selector the transitive walk could not reach, with the
     ## recipe that named it. Filled by ``foldProviderSolverInputs``; the lock
     ## writer refuses when one names a develop-set sibling.
+  declarationSites: Table[string, string]
+    ## Where THIS provider's recipe registered each parent package
+    ## (``variants.SolverDeclarationSite`` spelled as text), read from the
+    ## sidecar the provider writes beside its emitted inputs. Diagnostics only
+    ## — never merged across providers, because a site is relative to the
+    ## recipe being evaluated: see ``rootDeclaresAsOwn``.
 
 type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
@@ -78103,10 +78451,16 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     let parsed = parseExplainFixture(text)
     if parsed.packages.len == 0 and parsed.variants.len == 0:
       return result
+    let sitesPath = emitPath & SolverDeclarationSitesSuffix
+    let sites =
+      if fileExists(extendedPath(sitesPath)):
+        parseSolverDeclarationSites(readFile(extendedPath(sitesPath)))
+      else: initTable[string, string]()
     return some(CompiledProviderSolverInputs(
       variants: parsed.variants,
       packages: parsed.packages,
       text: text,
+      declarationSites: sites,
       toolUses: artifact.projectInterface.toolUses,
       usesSelectors: usesSelectors,
       defaultToolProvisioning:
@@ -78315,7 +78669,8 @@ type RefreshSolverInputs = tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-    catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector]]
+    catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector];
+    rootDeclarationSites: Table[string, string]]
   ## What ``resolveRefreshSolverInputs`` answers. Named once because
   ## ``repro lock validate`` declares a variable of it.
 
@@ -78354,17 +78709,17 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
           p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-          p.unreachedSelectors)
+          p.unreachedSelectors, p.declarationSites)
       return (true, p.variants, p.packages, p.text, "provider",
         p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-        p.unreachedSelectors)
+        p.unreachedSelectors, p.declarationSites)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[], @[])
+      @[], @[], @[], @[], initTable[string, string]())
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -78384,11 +78739,13 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         # to PATH. A recipe this refresh cannot read is a failed refresh.
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
-      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[])
+      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[],
+        initTable[string, string]())
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
-  return (false, @[], @[], "", "", @[], @[], @[], @[])
+  return (false, @[], @[], "", "", @[], @[], @[], @[],
+    initTable[string, string]())
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -78396,7 +78753,8 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 entryPoint: LockGenerationEntryPoint;
                                 verb: string;
                                 request: var LockGenerationRequest;
-                                unreached: var seq[UnreachedUsesSelector]):
+                                unreached: var seq[UnreachedUsesSelector];
+                                rootSites: var Table[string, string]):
                                 int =
   ## Assemble the generation request the four CLI doors share.
   ##
@@ -78439,6 +78797,7 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
       resolved.sourceRecipeRoots, resolved.catalogRoots),
     entryPoint: entryPoint)
   unreached = resolved.unreachedSelectors
+  rootSites = resolved.rootDeclarationSites
   return 0
 
 const IncompleteSolveExitCode = 5
@@ -79054,6 +79413,21 @@ proc runCertificatesPolicyCommand*(args: openArray[string]): int =
     echo "branch " & branchText & ": " & applied.reason
   0
 
+proc rootDeclaresAsOwn(rootSites: Table[string, string];
+                       pkg: string): bool =
+  ## Whether the recipe a lock is written for declares ``pkg`` as one of its
+  ## own packages, from the declaration sites its provider reported
+  ## (``variants.SolverDeclarationSite``). A package the root provider
+  ## registered from an imported sibling RECIPE, or one the root provider does
+  ## not have at all (it came from a sibling's provider through the fold), is
+  ## a cross-repo producer's. With no sites to go on (a provider compiled
+  ## before they were reported, or the ``repro.solver`` sidecar path) every
+  ## package counts as the project's own: the diagnostic then makes no claim
+  ## rather than a wrong one.
+  if rootSites.len == 0: return true
+  if pkg notin rootSites: return false
+  rootSites[pkg] != "sdsSiblingRecipe"
+
 proc runLockGenerationVerb(rest: openArray[string]; verb: string;
                            entryPoint: LockGenerationEntryPoint;
                            writeByDefault: bool): int =
@@ -79072,11 +79446,49 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
+  # `--repin` (Locking-And-Solver.md §"Targeted re-pin"): "It requires a
+  # committed lock (there is nothing to hold otherwise) ... either missing is a
+  # usage error (exit 2) that writes nothing." Checked BEFORE the provider
+  # probe, which is the expensive part, so a usage error costs nothing.
+  var committedForRepin: LockedDependencies
+  if gen.repin.len > 0:
+    if not fileExists(extendedPath(lockP)):
+      stderr.writeLine("repro lock " & verb & ": --repin holds every pin " &
+        "the committed lock records and re-solves only the named packages, " &
+        "but there is no committed lock at " & lockP & " to hold; run `repro " &
+        "lock " & verb & "` without --repin to write one (nothing was " &
+        "written)")
+      return 2
+    try:
+      committedForRepin = parseLockedDependencies(
+        readFile(extendedPath(lockP)))
+    except CatchableError as e:
+      stderr.writeLine("repro lock " & verb & ": --repin cannot read the " &
+        "committed lock " & lockP & " whose pins it would hold: " & e.msg &
+        " (nothing was written)")
+      return 2
   var request: LockGenerationRequest
   var unreached: seq[UnreachedUsesSelector]
+  var rootSites: Table[string, string]
   let prc = buildLockGenerationRequest(projectDir, inputsOverride,
-    platformOverride, gen, entryPoint, verb, request, unreached)
+    platformOverride, gen, entryPoint, verb, request, unreached, rootSites)
   if prc != 0: return prc
+  if gen.repin.len > 0:
+    # "...and a package name the solve actually has". Judged against the
+    # solve's own declarations, not the lock's: a package the lock records
+    # but the recipe no longer declares has nothing to be re-solved against.
+    var known: seq[string]
+    for decl in request.packages: known.add(decl.name)
+    var unknown: seq[string]
+    for name in gen.repin:
+      if name notin known: unknown.add(name)
+    if unknown.len > 0:
+      var listing = known
+      listing.sort()
+      stderr.writeLine("repro lock " & verb & ": --repin names " &
+        "package(s) the solve does not have: '" & unknown.join("', '") &
+        "' (it has: " & listing.join(", ") & "); nothing was written")
+      return 2
   let writeTo = if writeByDefault or gen.write: lockP else: ""
   # A solve that could not read a develop-set sibling's recipe is a PARTIAL
   # solve: a lock written from it is one the next build in a complete
@@ -79132,12 +79544,28 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     for r in gate.allowed:
       stderr.writeLine("repro lock " & verb & ": " &
         pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
+  if gen.repin.len > 0:
+    # Every committed version and variant value except the named packages'
+    # becomes a hard pin. A held pin that contradicts a declared range is
+    # that pin's `ELockConflict`, reported and not widened. Done after the
+    # incomplete-solve refusal and the pin-regression gate, which apply to a
+    # re-pin exactly as to a full refresh and must not be masked by it.
+    let crossRepo = proc (pkg: string): bool =
+      not rootDeclaresAsOwn(rootSites, pkg)
+    try:
+      holdCommittedPins(request, committedForRepin, gen.repin, lockP,
+        crossRepo)
+    except ELockConflict as e:
+      stderr.writeLine("repro lock " & verb & ": " & e.msg &
+        " [ELockConflict] (nothing was written)")
+      return 1
   # Test-Certificates TC-9b: a writing door records the certificate policy the
   # recipe enacts as the lock's `[certificate_policy]` snapshot, naming the
   # package from the dependencies this lock pins. A policy that cannot be
   # read refuses the write: a lock written without it would silently drop a
-  # requirement that is still meant.
-  if writeTo.len > 0:
+  # requirement that is still meant. A targeted re-pin CARRIES the committed
+  # snapshot forward instead (`runLockRepin`), so it does not evaluate one.
+  if writeTo.len > 0 and gen.repin.len == 0:
     try:
       request.certificatePolicySection =
         evaluatedCertificatePolicySection(projectDir, request.extraDeps)
@@ -79152,9 +79580,12 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
       try: removeDir(extendedPath(request.workDir))
       except CatchableError: discard
     let generated =
-      case entryPoint
-      of lgeLockRefresh: runLockRefresh(request, writeTo)
-      else: runLockSolve(request, writeTo)
+      if gen.repin.len > 0:
+        runLockRepin(request, committedForRepin, gen.repin, writeTo)
+      else:
+        case entryPoint
+        of lgeLockRefresh: runLockRefresh(request, writeTo)
+        else: runLockSolve(request, writeTo)
     return reportGeneratedLock(verb, writeTo, generated)
   except EUnsatisfiable as e:
     stderr.writeLine("repro lock " & verb & ": solver UNSAT — cannot pin a " &
@@ -79195,8 +79626,9 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
   var gen = LockVerbOptions(strategy: strategy, registries: @[], write: false)
   var request: LockGenerationRequest
   var unreached: seq[UnreachedUsesSelector]
+  var rootSites: Table[string, string]
   let prc = buildLockGenerationRequest(projectDir, "", "", gen,
-    lgeStrategyHiddenLock, "build --strategy", request, unreached)
+    lgeStrategyHiddenLock, "build --strategy", request, unreached, rootSites)
   if prc != 0: return prc
   # The hidden lock is never committed, so an incomplete solve is a warning
   # here rather than a refusal — but it is said: a build pinned from a solve

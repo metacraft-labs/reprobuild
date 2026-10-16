@@ -457,7 +457,15 @@
       # moved together with it: the incremental-test seam this input supplies
       # is compiled against that trace-format source, so the two must name a
       # CodeTracer revision built against the same trace-format revision. A
-      # branch ref would let either side move alone.
+      # branch ref would let either side move alone. "The same" is exact:
+      # ``ct-trace-format-src`` is the revision THIS input's ``repro.lock``
+      # names for codetracer-trace-format-nim, and the
+      # ``ct-trace-format-pin-coherence`` check below refuses any other pair
+      # when it is evaluated (``nix flake check``, or ``nix build
+      # .#checks.<system>.ct-trace-format-pin-coherence``). Nothing else
+      # evaluates it, so run it whenever either input moves. Before that check
+      # the pairing was kept by hand only, and drifted (reprobuild-pm issue
+      # 2026-10-04).
       #
       # ``flake = false`` — we want the source tree only. CodeTracer's own
       # flake drags in the Electron/frontend/db-backend toolchain, none of
@@ -610,6 +618,12 @@
       flake = false;
     };
     ct-trace-format-src = {
+      # Moves only with ``codetracer-src``, to exactly the revision that
+      # CodeTracer revision's ``repro.lock`` names; the
+      # ``ct-trace-format-pin-coherence`` check fails on any other revision
+      # when it is evaluated (see ``codetracer-src`` above). The history below
+      # records each such move.
+      #
       # CodeTracer 632fdceed imports codetracer_trace_writer/span_stream. Keep
       # this past the span-stream writer, cumulative-index, and encoder fixes;
       # the older c2f3dfc3 pin does not contain that module at all.
@@ -2041,6 +2055,69 @@
                 )
               else
                 throw "reprobuild nixpkgs-package-src-sync: package.nix defaults are not the snapshot of their `src` commit ${defaultSrc.rev}:\n${builtins.concatStringsSep "\n" found}";
+            # The two CodeTracer-family inputs are one dependency, pinned
+            # twice. `codetracer-src` is a CodeTracer revision; that
+            # revision's own `repro.lock` names the codetracer-trace-format-nim
+            # revision it was solved -- and therefore compiled -- against.
+            # `ct-trace-format-src` is what this flake actually hands the
+            # CodeTracer sources it builds (the incremental adapter, `ct-test`,
+            # the CodeTracer e2e fixture) and vendors into the Nim fork. So
+            # the project policy recorded on both inputs above is: the
+            # trace-format pin moves with `codetracer-src`, to exactly the
+            # revision that CodeTracer revision's `repro.lock` names.
+            #
+            # That is reprobuild-pm `spec/Cross-Repo-Source-Consumption.md`
+            # §6 "Corrected lock semantics": "the executable's solve -- its
+            # `repro.lock` -- governs the complete transitive pinned
+            # solution." The consumer is CodeTracer, so ITS lock decides the
+            # trace-format revision; a second, independently moved pin here
+            # is a different solution, and one in which the pinned consumer
+            # need not compile. It did not, once: codetracer 704bf164 called
+            # a reader routine the then-pinned trace-format bc7c5d2 lacked
+            # (reprobuild-pm issue 2026-10-04 "reprobuild pins a trace-format
+            # older than its own CodeTracer pin calls"). Before this check
+            # the policy was kept by hand, and had drifted.
+            #
+            # It compares the inputs AS PASSED to this evaluation, not
+            # ./flake.lock's text, so an `--override-input` of either one is
+            # checked too. A source with no `rev` (a `path:` override of a
+            # working tree) cannot be shown to be the named revision and
+            # fails rather than passes. A `repro.lock` with no
+            # codetracer-trace-format-nim entry fails as well: a check that
+            # passes because there is nothing to compare is vacuous. Decided
+            # at evaluation time, like `nixpkgs-package-src-sync`, so it
+            # builds nothing and runs for every system.
+            ct-trace-format-pin-coherence =
+              let
+                fail = msg: throw "reprobuild ct-trace-format-pin-coherence: ${msg}";
+                ctLockPath = "${codetracer-src}/repro.lock";
+                ctRev = codetracer-src.rev or "<no rev: not a locked revision>";
+                # repro.lock is TOML (schema reprobuild.solved-graph-lock.v2);
+                # the source deps sit in the `[lock]` table's `deps` array.
+                ctLock = builtins.fromTOML (builtins.readFile ctLockPath);
+                named = builtins.filter (dep: (dep.name or null) == "codetracer-trace-format-nim") (
+                  ctLock.lock.deps or [ ]
+                );
+                wanted = (builtins.head named).revision or null;
+                pinned = ct-trace-format-src.rev or null;
+              in
+              if !(builtins.pathExists ctLockPath) then
+                fail "codetracer-src (${ctRev}) has no repro.lock, so the trace-format revision it was built against is unknown"
+              else if builtins.length named != 1 then
+                fail "codetracer-src (${ctRev}) repro.lock has ${toString (builtins.length named)} `deps` entries named codetracer-trace-format-nim, expected exactly 1"
+              else if wanted == null then
+                fail "codetracer-src (${ctRev}) repro.lock's codetracer-trace-format-nim entry has no `revision`"
+              else if pinned == null then
+                fail "ct-trace-format-src has no `rev` (overridden by a path?), so it cannot be shown to be ${wanted}, the revision codetracer-src (${ctRev}) repro.lock names"
+              else if pinned != wanted then
+                fail "ct-trace-format-src is pinned at ${pinned}, but codetracer-src (${ctRev}) was built against codetracer-trace-format-nim ${wanted} (its repro.lock). Move ct-trace-format-src in flake.nix to ${wanted} -- the revision the pinned CodeTracer's repro.lock names -- and refresh flake.lock; or move codetracer-src to a CodeTracer revision whose repro.lock names ${pinned}."
+              else
+                pkgs.writeText "reprobuild-ct-trace-format-pin-coherence" (
+                  builtins.toJSON {
+                    codetracer = ctRev;
+                    trace-format = pinned;
+                  }
+                );
             packaged-runtime-compile = packagedRuntimeCompileCheck;
 
             # ── The Nix helper library (GM5) ──────────────────────────────
