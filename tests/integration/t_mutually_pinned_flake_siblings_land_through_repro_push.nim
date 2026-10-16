@@ -19,10 +19,18 @@
 ## `other` is a sibling `core`'s flake ALSO pins but that does not depend on
 ## `core` — the negative control for the deferral rule.
 ##
+## `core`'s flake input is substituted by the `app` checkout only because an
+## EXPLICIT develop override says so (`substituteAppInCore`). A recipe input
+## pinned by exact revision is compared with its sibling checkout only when an
+## explicit override substitutes it (Unified-Locking-And-Hooks.md §16.5): a
+## bulk override, or membership in the develop set alone, leaves the pin to the
+## lock checks and the gate does not compare it. Every case that needs the
+## pre-push flake stage to compare `app-src` therefore records that override.
+##
 ## `app` carries its own committed `repro.lock`, as `codetracer` does. That lock
-## is what admits `app` to the develop set (so `core`'s flake input really is
-## substituted by the `app` checkout), and it is ALSO what made the issue's
-## `repro push` resolve a different workspace than its hook: a committed
+## puts `app` in the develop set, which by itself does not substitute the
+## rev-pinned input. It is what made the issue's `repro push` resolve a
+## different workspace than its hook: a committed
 ## `repro.lock` is a workspace marker (MO-2), and a bare `repro push` used the
 ## current directory as the workspace root, so it computed the closure from
 ## `app`'s lock (`app -> lib`, no `core`) while the managed hook walked up to
@@ -71,7 +79,11 @@
 ## `repro hooks ensure --vcs`, fired by git itself during real `git push`es.
 ## `nix` is not run: the gate reads `flake.lock` and never evaluates it, and
 ## the `narHash` values are inert placeholders for the same reason the NF-2
-## fixture's are.
+## fixture's are. The explicit override document is written by hand in the
+## exact shape `repro develop <input> --into=…` writes, because that verb needs
+## a `repro.nim` in both checkouts and these repos carry none
+## (`substituteAppInCore` says why it is that document and not the workspace
+## override file).
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
@@ -331,6 +343,29 @@ proc registerOverrides(fx: Fixture; names: openArray[string]) =
       created_at: "2026-10-16T00:00:00Z"))
   writeDevelopOverridesFile(fx.workspace, overrides)
 
+proc substituteAppInCore(fx: Fixture) =
+  ## Substitute `core`'s rev-pinned `app-src` input with the `app` checkout by
+  ## an EXPLICIT develop override: `core`'s per-project override document, the
+  ## record `repro develop app-src --into=<app>` keeps in `core`'s git
+  ## directory. Written in that document's exact on-disk shape, because the
+  ## verb itself needs a `repro.nim` in both checkouts and this fixture's repos
+  ## carry none (the gate matches an override by name or by checkout path, so
+  ## the path is what names `app` here).
+  ##
+  ## Not the workspace `.repro/develop-overrides.toml` with `--only`
+  ## provenance, although that is equally explicit: stage 3 reads THAT file,
+  ## and over an unpublished `app` it would defer the override (adding a
+  ## second `DEFERRED` notice) or, once `core`'s HEAD is published, refuse
+  ## before the flake stage runs at all. These cases assert on the flake
+  ## stage, so the substitution is recorded where only the flake stage reads
+  ## it, and stage 3 sees no override, exactly as before §16.5.
+  let path = fx.dir("core") / ".git" / "reprobuild" / "develop-overrides.json"
+  createDir(parentDir(path))
+  writeFile(path, pretty(%*{
+    "schemaId": "reprobuild.develop-overrides.v1",
+    "projectRoot": fx.dir("core"),
+    "overrides": [{"node": "app-src", "path": fx.dir("app")}]}) & "\n")
+
 proc pushReport(fx: Fixture): JsonNode =
   let path = fx.workspace / ".repro" / "build" / "reports" / "push-report.json"
   if fileExists(path): parseFile(path) else: newJObject()
@@ -360,6 +395,7 @@ suite "mutually pinned flake siblings land through repro push":
     defer: fx.release()
     let heads = fx.arrangeTheDeadlock()
     let coreLock = readFile(fx.dir("core") / "flake.lock")
+    fx.substituteAppInCore()
     fx.installHooks()
     let pushed = fx.reproPush("app", explicit = false)
     checkpoint("repro push output:\n" & pushed.output)
@@ -377,6 +413,7 @@ suite "mutually pinned flake siblings land through repro push":
     let fx = setup("explicit")
     defer: fx.release()
     let heads = fx.arrangeTheDeadlock()
+    fx.substituteAppInCore()
     fx.installHooks()
     let pushed = fx.reproPush("app", explicit = true)
     checkpoint("repro push output:\n" & pushed.output)
@@ -389,6 +426,7 @@ suite "mutually pinned flake siblings land through repro push":
     let fx = setup("raw")
     defer: fx.release()
     let heads = fx.arrangeTheDeadlock()
+    fx.substituteAppInCore()
     fx.installHooks()
     # The dependent first: refused over core, as it must be (invariant 2).
     let appFirst = fx.rawPush("app")
@@ -437,6 +475,7 @@ suite "mutually pinned flake siblings land through repro push":
     discard fx.commitFile(fx.dir("app"), "work.txt", "app\n", "app work")
     discard fx.gitIn(fx.dir("app"), "push -q origin HEAD:main")
     discard fx.commitFile(fx.dir("core"), "work.txt", "core\n", "core work")
+    fx.substituteAppInCore()
     fx.installHooks()
     let core = fx.rawPush("core")
     checkpoint("raw core push:\n" & core.output)
@@ -456,6 +495,7 @@ suite "mutually pinned flake siblings land through repro push":
     discard fx.gitIn(fx.dir("app"), "reset -q --hard " & fx.seedOf("app"))
     fx.writeCoreFlake(newer, fx.seedOf("other"))
     discard fx.commitFile(fx.dir("core"), "work.txt", "core\n", "core work")
+    fx.substituteAppInCore()
     fx.installHooks()
     let behind = fx.rawPush("core")
     checkpoint("behind:\n" & behind.output)
@@ -483,6 +523,7 @@ suite "mutually pinned flake siblings land through repro push":
     discard fx.commitFile(fx.dir("app"), "work.txt", "app 3\n", "app: ahead")
     fx.writeCoreFlake(localPin, fx.seedOf("other"))
     discard fx.commitFile(fx.dir("core"), "work.txt", "core\n", "core work")
+    fx.substituteAppInCore()
     fx.installHooks()
     let core = fx.rawPush("core")
     checkpoint("raw core push:\n" & core.output)
@@ -500,6 +541,7 @@ suite "mutually pinned flake siblings land through repro push":
     # cycle is not there, and the ordinary refusal and remedy apply.
     let heads = fx.arrangeTheDeadlock()
     discard fx.gitIn(fx.dir("core"), "push -q origin HEAD:refs/heads/side")
+    fx.substituteAppInCore()
     fx.installHooks()
     let core = fx.rawPush("core")
     checkpoint("raw core push:\n" & core.output)

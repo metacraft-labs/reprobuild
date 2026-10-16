@@ -299,7 +299,7 @@
       #
       # Pinned to the nim-shm-queue rev that adds the Layer-1 EmbeddedRing
       # (repro_shm_index's action-cache ring embeds it in the control region).
-      url = "github:metacraft-labs/nim-shm-queue/5a8e43b52fa202859658692c9f8432967f3971ea";
+      url = "github:metacraft-labs/nim-shm-queue/a3564c13e0b7d0c6a092c19c998cd3faee5ce20a";
       flake = false;
     };
     nimcrypto-src = {

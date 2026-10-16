@@ -49,6 +49,21 @@ waiver actually gets made); and "fixes" that improve a monitor evidence
 grade without improving the evidence. Each trap is cited to the guard
 that stops it.
 
+## When A Commit Or Push Is Refused Over A Pinned Revision
+
+Do not add an exact revision to a recipe (`rev=` or a `/<sha>` URL in
+`flake.nix`, an exact `uses:` version in `repro.nim`) to get past a refusal.
+A recipe pin is a reviewed statement about which revision is acceptable, not
+a way to silence a hook. If the newer revision is the intended upgrade, run
+`repro lock update <dependency> [--to <rev>]`: it moves both locks and
+rewrites an exact pin wherever one already exists. If the newer revision was
+a temporary experiment, drop the develop override with
+`repro develop --drop=<dependency>` (or check the sibling out at the pinned
+revision). Each refusal prints the exact commands, with the right roots. A
+sibling that you develop side by side should be tracked through the lock,
+and `repro check` and `repro health` list any exact pin of one, with the
+reason written beside it or `no reason stated`.
+
 ## Working In A Reprobuild Repo
 
 - **[Idiomatic Reprobuild](../user-guide/idiomatic-reprobuild.md)**: how to use it *well*, and the mistakes that look exactly like correct use. §10 covers the most expensive one — building a prerequisite in a shell script instead of declaring an edge, which costs invalidation and evidence ownership, not just caching.
