@@ -354,7 +354,7 @@ libs/repro_interface_artifacts/tests/t_l4_identity_and_scope_cross_the_lift.nim	
 libs/repro_interface_artifacts/tests/t_l6_compatibility_major_crosses_the_lift.nim	nim	14
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim	nim	1
-libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
+libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	3
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
 libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim	nim	13
 libs/repro_interface_artifacts/tests/t_repro_lib_fingerprint_memo.nim	nim	4
