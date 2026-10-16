@@ -134,6 +134,8 @@ require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${
 # records the same immutable revision in both `locked` and `original`.
 # t_flake_lock_has_no_competing_reprobuild_pin also checks the parsed graph
 # so a differently pinned extra trace-format node cannot evade this count.
+# Whether this is the RIGHT revision -- the one the pinned CodeTracer's
+# repro.lock names -- is the flake check `ct-trace-format-pin-coherence`.
 require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 2
 require_contains "${package_nix}" 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
 # ONE definition of the guarded source root, in the derivation, read back by
