@@ -74,6 +74,31 @@ proc compileOpts(stateDir: string): ProfileCompileOptions =
     publicCliPath: reproBinary(),
     repoRoot: ProjectRoot)
 
+proc observedUnder(observed: openArray[string]; dir: string): seq[string] =
+  ## The observed reads that lie under `dir`, relative to it with `/`
+  ## separators. io-mon records the path the kernel resolved, which on macOS
+  ## is the canonical one. `createTempDir` hands out a path under `$TMPDIR`,
+  ## which on macOS lies behind a symlink: `/var/folders/...` normally, or
+  ## `/tmp/nix-shell.*` inside `nix develop`, while the monitor records
+  ## `/private/var/folders/...` or `/private/tmp/...`. Matching only the
+  ## spelling the test created finds none of the module files, so both the
+  ## lexical and the resolved spelling of `dir` are accepted. This is the
+  ## same rule `profileInputs` (`repro home export`) applies to this record.
+  ## The separator in the prefix keeps out a sibling such as `<dir>-other`
+  ## and the bare `dir`.
+  var roots = @[absolutePath(dir)]
+  try:
+    let real = expandFilename(dir)
+    if real notin roots:
+      roots.add real
+  except OSError:
+    discard
+  for s in observed:
+    for root in roots:
+      if s.startsWith(root & DirSep):
+        result.add(s.relativePath(root).replace('\\', '/'))
+        break
+
 proc collectPackageNames(intent: ProfileIntent;
                          activityName: string): seq[string] =
   for a in intent.activities:
@@ -168,10 +193,7 @@ suite "M83 Phase F1: canonical profile-modules example":
     # the dependency record io-mon observed `nim` read — not in a list a
     # text walk produced. This is what the action cache keys on.
     check artifact.edgeLaunched
-    var rels: seq[string]
-    for s in artifact.observedInputs:
-      if s.startsWith(profileSrcDir):
-        rels.add(s.relativePath(profileSrcDir).replace('\\', '/'))
+    let rels = observedUnder(artifact.observedInputs, profileSrcDir)
     checkpoint("observed under profile dir: " & rels.join(", "))
     check "home.nim" in rels
     check "modules/git_dev_environment.nim" in rels
@@ -390,10 +412,7 @@ proc outerBundle*(): seq[ActivityElement] =
 
     let first = compileProfileToRbpi(dir / "home.nim", compileOpts(stateDir))
     check first.edgeLaunched
-    var rels: seq[string]
-    for s in first.observedInputs:
-      if s.startsWith(dir):
-        rels.add(s.relativePath(dir).replace('\\', '/'))
+    let rels = observedUnder(first.observedInputs, dir)
     checkpoint("observed under profile dir: " & rels.join(", "))
     check "home.nim" in rels
     check "modules/outer.nim" in rels

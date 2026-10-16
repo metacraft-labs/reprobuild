@@ -3530,7 +3530,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 163,
+          "line": 188,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3546,7 +3546,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 190,
+          "line": 212,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3562,7 +3562,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 236,
+          "line": 258,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3578,7 +3578,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 290,
+          "line": 312,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3594,7 +3594,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 313,
+          "line": 335,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3610,7 +3610,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 322,
+          "line": 344,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3626,7 +3626,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 341,
+          "line": 363,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3642,7 +3642,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 343,
+          "line": 365,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3658,7 +3658,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 391,
+          "line": 413,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3674,7 +3674,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 404,
+          "line": 423,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3690,7 +3690,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 410,
+          "line": 429,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
