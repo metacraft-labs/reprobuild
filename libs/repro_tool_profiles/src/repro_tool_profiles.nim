@@ -2267,7 +2267,39 @@ proc validateTarEntries(archivePath, archiveType: string) =
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
   let tarExe = requireHostTar()
   requireTarDecompressor(tarExe, archivePath, archiveType)
-  let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
+  # The listing below is read through ``execCmdExCloseOnce``, which merges
+  # stderr into stdout, so every line tar prints is checked as an entry name.
+  # GNU tar warns on stderr about pax keywords it does not know — notably the
+  # ``LIBARCHIVE.xattr.*`` keywords macOS ``/usr/bin/tar`` writes for every
+  # file's xattrs (``com.apple.provenance``) — and that line begins with tar's
+  # own absolute path, so the check below refused every macOS-built archive
+  # as "unsafe" (reprobuild-pm issue 2026-10-16-tar-listing-preflight-reads-
+  # tar-warnings-as-archive-entries). Two GNU-only flags keep tar's own
+  # messages out of the listing on the GNU attempt:
+  #
+  #   * ``--warning=none`` silences GNU tar's warning class
+  #     (https://www.gnu.org/software/tar/manual/html_node/warnings.html).
+  #     Warnings never change tar's exit status, and errors are not warnings,
+  #     so a truncated, unreadable or undecompressable archive still exits
+  #     non-zero and is still refused below (GNU tar 1.35: exit 2).
+  #   * ``--absolute-names`` (``-P``): ``Removing leading `/' from member
+  #     names`` is NOT in that warning class and survives ``--warning=none``.
+  #     In list mode ``-P`` only stops that message: tar prints member names
+  #     as stored either way (measured on GNU tar 1.35, an ``/etc/hosts`` and
+  #     a ``../x`` entry list identically with and without it), so an unsafe
+  #     entry still reaches the check below — and the refusal now names the
+  #     entry instead of tar's diagnostic about it.
+  #
+  # Neither flag can hide an entry: they only REMOVE diagnostic lines, and
+  # entry names are on stdout regardless, so the unsafe-entry check is not
+  # weakened. Filtering lines by a ``tar:`` prefix instead would be, because
+  # an entry may be named like that. Reading stdout apart from stderr is the
+  # more general fix, but it needs both pipes drained concurrently (a quiet
+  # stdout with a full stderr pipe deadlocks), which no exec helper here
+  # provides. bsdtar refuses both flags, falls through to the plain attempt
+  # and needs neither: libarchive reads ``LIBARCHIVE.xattr`` natively.
+  let res = runTarTwice(tarExe,
+    ["--force-local", "--warning=none", "--absolute-names"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
       execCmdExCloseOnce(command))
   if res.exitCode != 0:

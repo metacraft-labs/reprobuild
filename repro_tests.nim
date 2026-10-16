@@ -6021,6 +6021,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim",
+    binary: "build/test-bin/t_tar_listing_ignores_tar_warnings",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
     binary: "build/test-bin/t_tool_archive_missing_decompressor_is_named",
     defines: @[],

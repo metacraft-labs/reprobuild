@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2100,
+    "nimTestBinaries": 2101,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 648,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2121
+    "testEntries": 2122
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,7 +1279,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1139,
+      "integration": 1140,
       "platform/destructive": 129,
       "pure unit": 648,
       "unclassified": 186
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2100,
+    "nimTestBinaryCount": 2101,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2121
+    "testEntryCount": 2122
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19615,6 +19615,25 @@
       "source": "libs/repro_tool_profiles/tests/t_realization_selection.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 27,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tar_listing_ignores_tar_warnings",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
