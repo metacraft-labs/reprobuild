@@ -14886,7 +14886,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
