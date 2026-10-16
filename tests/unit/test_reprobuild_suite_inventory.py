@@ -1,5 +1,7 @@
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 import re
@@ -86,6 +88,55 @@ def built_tree_verdict(present, declared, require):
     if require:
         return "fail", f"{REQUIRE_BUILT_TREE_ENV}=1 but {message}"
     return "skip", message
+
+
+SYNTHETIC_TEST_SPEC = (
+    "  TestSpec(\n"
+    '    source: "{source}",\n'
+    '    binary: "build/test-bin/{stem}",\n'
+    "    defines: @[],\n"
+    "    requiresReproBinary: false,\n"
+    "    extraPassC: @[],\n"
+    "    extraPassL: @[],\n"
+    "    targetOs: soAny,\n"
+    "    selfInterposes: false),\n"
+)
+
+
+def write_synthetic_test_tree(root, declared, present):
+    """A minimal real tree: `repro_tests.nim` declaring `declared`, `present`
+    on disk.
+
+    A REAL tree rather than a mock, because every surface built on it --
+    `declared_source_drift`, `static_case_counts`, `source_inventory` -- reads
+    the filesystem and the generated table, and a mock of either would be a
+    mock of the thing under test. Module-level rather than a method of
+    `DeclaredSourceGateTests` because the suite-artifact action tests need the
+    same tree and a second copy of this shape is a second thing to keep in
+    step with the generator's output.
+
+    Returns the root.
+    """
+    specs = "".join(
+        SYNTHETIC_TEST_SPEC.format(source=src, stem=Path(src).stem)
+        for src in declared
+    )
+    (root / "repro_tests.nim").write_text(
+        "const reprobuildTestSpecs*: seq[TestSpec] = @[\n"
+        + specs
+        + "]\n"
+        + "const pythonTestPaths*: seq[string] = @[\n]\n",
+        encoding="utf-8",
+    )
+    for src in present:
+        target = root / src
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            'import std/unittest\n\nsuite "s":\n  test "t":\n'
+            "    check true\n",
+            encoding="utf-8",
+        )
+    return root
 
 
 class BuiltTreeCapabilityTests(unittest.TestCase):
@@ -1244,6 +1295,228 @@ class SourceInventoryArtifactTests(unittest.TestCase):
         parsed = inventory.parse_args(["--write-inventory-sources"])
         self.assertTrue(parsed.write_inventory_sources)
         self.assertTrue(inventory.parse_args(["--check-inventory"]).check_inventory)
+
+
+class SuiteArtifactActionCompositionTests(unittest.TestCase):
+    """Two action flags, two actions -- not the first one and a green exit.
+
+    `main` used to be a chain of `if` arms each ending in `return 0`. That is
+    the right shape for mutually exclusive SUBCOMMANDS and the wrong one for
+    independent ACTIONS, and these are independent actions: every campaign
+    brief in this repository tells an agent to run
+
+        reprobuild_suite_inventory.py --write-static-case-counts \\
+                                      --write-inventory-sources
+
+    and under the chain of arms that regenerated the TSV, returned 0, and
+    never reached the inventory writer. The second artifact stayed stale, the
+    run reported success, and the next `--check-inventory` went red
+    immediately after somebody had truthfully reported "regenerated, exit 0".
+    Recorded as `reprobuild-pm/issues/2026-10-09-generate-test-edges-accepts-
+    any-flag-and-reports-success.md`.
+
+    What is settled here, and what each case below pins:
+
+      * every requested action runs (case 1);
+      * the order they RUN in is fixed by `SUITE_ARTIFACT_ACTIONS` and does
+        not depend on the order they were TYPED (case 2) -- writes before
+        checks, so that a write-then-check invocation is coherent rather than
+        a race against argv;
+      * a failing check does not stop the actions behind it, and the process
+        status is the worst any action returned (case 3);
+      * and the table cannot fall behind the parser, because a seventh action
+        flag that nobody composed would fail case 4 rather than silently
+        becoming unreachable.
+
+    Real trees throughout, built by `write_synthetic_test_tree`: both writers
+    are pure functions of the source tree plus `repro_tests.nim`, so a
+    two-file tree exercises the real scan in under a second.
+    """
+
+    def scratch(self):
+        root = Path(tempfile.mkdtemp(prefix="suite-artifact-actions-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def tree(self):
+        """A tree both writers can run against, with BOTH artifacts stale.
+
+        Stale rather than absent on purpose: the failure this guards against
+        is a writer that never ran, and a pre-existing wrong file makes that
+        read as "stale" instead of as a missing-file exception somewhere
+        downstream.
+        """
+        root = self.scratch()
+        write_synthetic_test_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        for path, stale in (
+            (inventory.STATIC_CASE_COUNTS_PATH, "# stale\n"),
+            (inventory.SOURCE_INVENTORY_PATH, "{}\n"),
+        ):
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(stale, encoding="utf-8")
+        return root
+
+    def run_main(self, *argv):
+        """`main` in-process, with its reporting captured rather than lost.
+
+        Captured because the output IS part of what is being checked: an
+        action that runs says so, and "both ran" is read off the two
+        messages as well as off the two files.
+        """
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = inventory.main(list(argv))
+        return status, out.getvalue(), err.getvalue()
+
+    def assert_both_artifacts_are_current(self, root, status, out):
+        expected_counts = inventory.render_static_case_counts(
+            inventory.static_case_counts(root)
+        )
+        expected_sources = inventory.render_source_inventory(
+            inventory.source_inventory(root)
+        )
+        counts_path = root / inventory.STATIC_CASE_COUNTS_PATH
+        sources_path = root / inventory.SOURCE_INVENTORY_PATH
+        self.assertEqual(status, 0, out)
+        self.assertEqual(
+            counts_path.read_text(encoding="utf-8"),
+            expected_counts,
+            f"{inventory.STATIC_CASE_COUNTS_PATH} was not regenerated.",
+        )
+        self.assertEqual(
+            sources_path.read_text(encoding="utf-8"),
+            expected_sources,
+            f"{inventory.SOURCE_INVENTORY_PATH} was left STALE by a run that "
+            "was asked to regenerate it and exited 0. Both --write-* flags "
+            "were given; only the first one was honoured, which is the "
+            "defect this case exists for.",
+        )
+        self.assertIn(str(inventory.STATIC_CASE_COUNTS_PATH), out)
+        self.assertIn(str(inventory.SOURCE_INVENTORY_PATH), out)
+
+    def test_both_write_flags_regenerate_both_artifacts(self):
+        """The invocation every brief uses, and the one that was broken."""
+        root = self.tree()
+        status, out, _ = self.run_main(
+            "--repo-root", str(root),
+            "--write-static-case-counts",
+            "--write-inventory-sources",
+        )
+        self.assert_both_artifacts_are_current(root, status, out)
+
+    def test_the_typing_order_does_not_decide_which_actions_run(self):
+        """Same two artifacts with the flags typed the other way round.
+
+        Paired with the case above deliberately. A `main` that honoured only
+        the LAST arm instead of the first would satisfy that one and fail
+        this one, and a reader of either case alone could not tell the
+        difference between "both ran" and "argv happened to be in the lucky
+        order".
+        """
+        root = self.tree()
+        status, out, _ = self.run_main(
+            "--repo-root", str(root),
+            "--write-inventory-sources",
+            "--write-static-case-counts",
+        )
+        self.assert_both_artifacts_are_current(root, status, out)
+
+    def test_a_failing_check_does_not_suppress_the_actions_beside_it(self):
+        """Three checks, the middle one red: all three report, status 1.
+
+        A composition that stopped at the first non-zero would hide every
+        later gate behind whichever one went red first -- so a contributor
+        fixing a drift would discover the next one only on the next run. The
+        passing checks still have to print, or "it ran" is unverifiable.
+
+        The failing check is deliberately in the MIDDLE of the table order
+        (`--check-static-case-counts`, then `--check-inventory`, then
+        `--check-declared-sources`). With only a trailing failure, a `break`
+        on the first non-zero is indistinguishable from running everything:
+        the one action it would skip is one nobody asked about. The check
+        behind the red one is what makes "does not stop the rest" an
+        observation rather than a restatement of the table order.
+
+        `--check-inventory` is the failing one, and it fails for a reason
+        that cannot be mistaken for a flaky tree: the artifact it guards does
+        not exist in this root at all.
+        """
+        root = self.scratch()
+        write_synthetic_test_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        inventory.write_static_case_counts(root)
+        self.assertFalse((root / inventory.SOURCE_INVENTORY_PATH).exists())
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--repo-root",
+                str(root),
+                "--check-declared-sources",
+                "--check-inventory",
+                "--check-static-case-counts",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "as recorded",
+            result.stdout,
+            "--check-static-case-counts produced no verdict; a failing "
+            "sibling check must not stop it running.",
+        )
+        self.assertIn(
+            str(inventory.SOURCE_INVENTORY_PATH),
+            result.stderr,
+            "--check-inventory produced no verdict.",
+        )
+        self.assertIn(
+            "declared test sources:",
+            result.stdout,
+            "--check-declared-sources produced no verdict. It runs AFTER "
+            "the failing --check-inventory in SUITE_ARTIFACT_ACTIONS, so a "
+            "composition that stops at the first red swallows it -- and the "
+            "exit status looks identical, which is why this case watches "
+            "the verdicts and not only the status.",
+        )
+
+    def test_the_action_table_covers_the_action_flags_the_parser_declares(self):
+        """The table and the parser, derived from the module, must agree.
+
+        This is the part that keeps the fix from being a one-off. Both sides
+        are read out of the module rather than listed here: the parser side
+        is every boolean `--write-*` / `--check-*` destination `parse_args`
+        declares, the table side is `SUITE_ARTIFACT_ACTIONS`. Adding a
+        seventh action flag without composing it turns this red, instead of
+        producing a flag that parses, prints nothing and is never reached.
+        """
+        declared = {
+            name
+            for name, value in vars(inventory.parse_args([])).items()
+            if name.startswith(("write_", "check_")) and isinstance(value, bool)
+        }
+        self.assertEqual(
+            declared,
+            set(inventory.SUITE_ARTIFACT_ACTIONS),
+            "every boolean --write-*/--check-* flag the parser declares must "
+            "appear in SUITE_ARTIFACT_ACTIONS, and nothing else may.",
+        )
+        # The order is a documented property, not an accident of dict
+        # construction: writes first, so --write-X --check-X is coherent.
+        order = list(inventory.SUITE_ARTIFACT_ACTIONS)
+        writes = [name for name in order if name.startswith("write_")]
+        checks = [name for name in order if name.startswith("check_")]
+        self.assertEqual(order, writes + checks)
+        self.assertTrue(writes and checks)
 
 
 class SuiteInventoryTests(unittest.TestCase):
@@ -8337,40 +8610,11 @@ class DeclaredSourceGateTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         return root
 
-    SPEC = (
-        "  TestSpec(\n"
-        '    source: "{source}",\n'
-        '    binary: "build/test-bin/{stem}",\n'
-        "    defines: @[],\n"
-        "    requiresReproBinary: false,\n"
-        "    extraPassC: @[],\n"
-        "    extraPassL: @[],\n"
-        "    targetOs: soAny,\n"
-        "    selfInterposes: false),\n"
-    )
+    SPEC = SYNTHETIC_TEST_SPEC
 
     def write_tree(self, root, declared, present):
         """Declare `declared`, put `present` on disk. Returns the root."""
-        specs = "".join(
-            self.SPEC.format(source=src, stem=Path(src).stem)
-            for src in declared
-        )
-        (root / "repro_tests.nim").write_text(
-            "const reprobuildTestSpecs*: seq[TestSpec] = @[\n"
-            + specs
-            + "]\n"
-            + "const pythonTestPaths*: seq[string] = @[\n]\n",
-            encoding="utf-8",
-        )
-        for src in present:
-            target = root / src
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                'import std/unittest\n\nsuite "s":\n  test "t":\n'
-                "    check true\n",
-                encoding="utf-8",
-            )
-        return root
+        return write_synthetic_test_tree(root, declared, present)
 
     def test_an_unenrolled_test_file_is_reported(self):
         """The defect itself: a file on disk that nothing builds."""
