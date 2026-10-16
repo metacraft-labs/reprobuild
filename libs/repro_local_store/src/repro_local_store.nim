@@ -440,6 +440,12 @@ type
     ownedOutputs*: seq[string]
       ## The action's declared outputs, as the action spells them (resolved
       ## against `outputRoot`).
+    containerOutputs*: seq[string]
+      ## The action's CONTAINER directory outputs, as the action spells them:
+      ## directories it declares only to say they exist (`fs.ensureDir`, the
+      ## output root of `fs.preserveTree`). Revalidated for existence and kind,
+      ## never by tree digest -- see `outputStateMismatchImpl`. Empty for
+      ## every process action.
     refuseRecordWithNoInputs*: bool
       ## Treat a matched record that has NO input fingerprints and NO
       ## environment inputs as if there were no record at all.
@@ -3098,7 +3104,8 @@ proc recordOutputsNotOwnedBy*(record: ActionResultRecord; outputRoot: string;
   ""
 
 proc outputStateMismatchImpl(record: ActionResultRecord;
-                             outputRoot: string): string =
+                             outputRoot: string;
+                             containerOutputs: openArray[string]): string =
   ## Incremental-Invalidation.md §"Minimum check set per target
   ## consultation", Step 3.3: "For an in-place local build, declared outputs
   ## must already exist **and match the recorded output metadata**."
@@ -3118,6 +3125,15 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
   ## consultation would be correct and would also make the warm no-op path
   ## scale with total artifact bytes instead of artifact count. The change
   ## time is what buys tamper evidence without that: see `OutputBlob`.
+  ##
+  ## `containerOutputs` names the action's CONTAINER directory outputs
+  ## (Incremental-Invalidation.md §"Non-regular outputs", "Container
+  ## directory outputs"): directories a built-in declares only to say they
+  ## exist, whose other entries belong to other writers. They are checked for
+  ## existence and kind, never by tree digest. See the directory arm below.
+  var containers = initHashSet[string]()
+  for path in containerOutputs:
+    containers.incl(ownedOutputKey(outputRoot, path))
   for output in record.outputs:
     if output.metadata.kind == ffkMissing:
       # Nothing was recorded for this output; there is nothing to compare
@@ -3148,6 +3164,22 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
 
     # -- directory ---------------------------------------------------------
     if output.metadata.kind == ffkDirectory:
+      if containers.len > 0 and
+          ownedOutputKey(outputRoot, output.path) in containers:
+        # A CONTAINER: the action's claim is "this directory exists", and the
+        # `live != output.metadata` comparison above has already established
+        # that (a directory's recorded size and mtime are zeroed, so what it
+        # compares is existence and kind). Its other entries are other
+        # actions' declared outputs or files nobody declared: CodeTracer's C
+        # compiles write `build/c/*.o` into `fs.ensureDir("build/c")`, and a
+        # copy writes `public/ui.js` into a `fs.preserveTree` root. A tree
+        # digest would measure those writers, reject the record on every
+        # warm build after they ran, and re-run a built-in that neither
+        # writes nor removes those entries, so the re-run could not restore
+        # anything. Every entry a container's action DOES produce is a
+        # declared output of its own (each `preserveTree` entry and its
+        # manifest) and is revalidated by its own arm.
+        continue
       if not output.hasTreeDigest:
         # `fingerprintMetadata` zeroes size and mtime for a directory, so
         # everything compared above was vacuous and the only thing actually
@@ -3189,14 +3221,16 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
   ""
 
 proc outputStateMismatch*(record: ActionResultRecord;
-                          outputRoot: string): string =
+                          outputRoot: string;
+                          containerOutputs: openArray[string] = []): string =
   let started = getMonoTime()
-  result = outputStateMismatchImpl(record, outputRoot)
+  result = outputStateMismatchImpl(record, outputRoot, containerOutputs)
   inc outputStateCheckCalls
   outputStateCheckNanos += (getMonoTime() - started).inNanoseconds
 
 proc payloadlessOutputsInPlace(record: ActionResultRecord;
-                               outputRoot: string): bool =
+                               outputRoot: string;
+                               containerOutputs: openArray[string]): bool =
   ## Whether a record WITHOUT output payloads still describes the outputs on
   ## disk: it names at least one output, recorded every one of them as
   ## present, and each still matches (`outputStateMismatch`, Step 3.3).
@@ -3211,7 +3245,7 @@ proc payloadlessOutputsInPlace(record: ActionResultRecord;
   for output in record.outputs:
     if output.metadata.kind == ffkMissing:
       return false
-  outputStateMismatch(record, outputRoot).len == 0
+  outputStateMismatch(record, outputRoot, containerOutputs).len == 0
 
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
@@ -5152,7 +5186,8 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     # §"Minimum check set" Step 3.3). Without this the whole-build fast
     # path would keep accepting an artifact that was overwritten after
     # the build produced it.
-    let outputMismatch = outputStateMismatch(record, probe.outputRoot)
+    let outputMismatch = outputStateMismatch(record, probe.outputRoot,
+      probe.containerOutputs)
     if outputMismatch.len > 0:
       return HotMetadataScan(status: hmssOutputChanged,
         recordCount: totalRecords, checkedInputCount: checkedInputs,
@@ -5639,7 +5674,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   allowMetadataOnlyHit = false;
                                   metadataCache: ptr FileMetadataCache = nil;
                                   envResolver: EnvResolver = nil;
-                                  outputRoot = ""):
+                                  outputRoot = "";
+                                  containerOutputs: seq[string] = @[]):
                                   ActionCacheLookup =
   if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
@@ -5667,7 +5703,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         # are the ones the record describes -- Incremental-Invalidation.md
         # §"Minimum check set" Step 3.3. Existence alone (which is all the
         # engine's `allOutputsExist` pre-check establishes) is not enough.
-        let outputMismatch = outputStateMismatch(hot.record, outputRoot)
+        let outputMismatch = outputStateMismatch(hot.record, outputRoot,
+          containerOutputs)
         if outputMismatch.len > 0:
           return ActionCacheLookup(status: aclRejectedCorruptOutput,
             record: hot.record, message: outputMismatch)
@@ -5734,7 +5771,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         # from before an edge stored any) on EVERY build, outputs untouched —
         # against Incremental-Invalidation.md §"Validation Criteria": "a warm
         # re-run of an unchanged graph still executes zero actions".
-        if not payloadlessOutputsInPlace(candidate, outputRoot):
+        if not payloadlessOutputsInPlace(candidate, outputRoot,
+            containerOutputs):
           return ActionCacheLookup(status: aclMissNoOutputPayload,
             record: candidate,
             message: "cache record does not contain output payloads")
@@ -5750,7 +5788,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       # workspace copies against the recorded output state instead.
       # `verifyOutputBlobs` mode is the restore mode and materializes over
       # whatever is there, so it needs no such check.
-      let outputMismatch = outputStateMismatch(candidate, outputRoot)
+      let outputMismatch = outputStateMismatch(candidate, outputRoot,
+        containerOutputs)
       if outputMismatch.len > 0:
         return ActionCacheLookup(status: aclRejectedCorruptOutput,
           record: candidate, message: outputMismatch)
@@ -5900,13 +5939,18 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          outputRoot = "";
                          retention = forever();
                          nowUnix: int64 = 0;
-                         buildEpoch = ""): ActionCacheLookup =
+                         buildEpoch = "";
+                         containerOutputs: openArray[string] = []):
+                         ActionCacheLookup =
+  ## `containerOutputs`: the requesting action's container directory outputs
+  ## (see `outputStateMismatchImpl`), revalidated for existence only.
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
-    outputRoot = outputRoot)
+    outputRoot = outputRoot,
+    containerOutputs = @containerOutputs)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
@@ -5918,13 +5962,18 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          outputRoot = "";
                          retention = forever();
                          nowUnix: int64 = 0;
-                         buildEpoch = ""): ActionCacheLookup =
+                         buildEpoch = "";
+                         containerOutputs: openArray[string] = []):
+                         ActionCacheLookup =
+  ## `containerOutputs`: the requesting action's container directory outputs
+  ## (see `outputStateMismatchImpl`), revalidated for existence only.
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
-    outputRoot = outputRoot)
+    outputRoot = outputRoot,
+    containerOutputs = @containerOutputs)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 # ===========================================================================

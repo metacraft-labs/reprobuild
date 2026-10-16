@@ -7982,8 +7982,8 @@
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_action_cache_output_integrity.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -23684,6 +23684,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_project_dsl",
         "repro_test_support",
         "repro_tool_profiles"
       ],
