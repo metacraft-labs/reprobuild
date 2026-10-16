@@ -85,6 +85,7 @@ libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim	nim	
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_output_directory_an_action_creates_is_not_an_input.nim	nim	8
 libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim	nim	6
+libs/repro_build_engine/tests/t_path_mutation_evidence.nim	nim	4
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	4
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	7
@@ -675,8 +676,9 @@ libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.n
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
 libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	27
+libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim	nim	3
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
-libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	14
+libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	15
 libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	3
 libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	nim	3
 libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	nim	4

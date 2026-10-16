@@ -253,6 +253,8 @@
         # ancestor. Linux records path mutations, the directories glob(3)
         # scans, and the files and directories mkstemp and mkdtemp create;
         # the writer closes a byte-capped fragment once on a key change.
+        # Trapped inline syscalls are classified from what they named when
+        # they trapped; the engine folds the new records (`monitorRemovals`).
       url = "github:metacraft-labs/io-mon/2801e948810673bbb0fcbc7adb222943d4e7de50";
       flake = false;
     };

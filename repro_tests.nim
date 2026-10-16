@@ -711,6 +711,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_path_mutation_evidence.nim",
+    binary: "build/test-bin/t_path_mutation_evidence",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim",
     binary: "build/test-bin/t_portable_fingerprint_engine",
     defines: @[],
@@ -6014,6 +6023,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_tool_profiles/tests/t_realization_selection.nim",
     binary: "build/test-bin/t_realization_selection",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim",
+    binary: "build/test-bin/t_tar_listing_ignores_tar_warnings",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
