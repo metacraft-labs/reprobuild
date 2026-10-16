@@ -169,3 +169,88 @@ proc lockSourceDescription*(pins: LockPins): string =
   ## How a diagnostic should refer to the governing lock.
   if pins.lockPath.len > 0: "committed lock '" & pins.lockPath & "'"
   else: "the committed lock"
+
+proc lockRecordsPackage*(pins: LockPins; packageName: string): bool =
+  ## Whether the lock's solved graph carries ``packageName`` itself — under
+  ## either identifier spelling, since a recipe's package reaches a lock as
+  ## ``isonim_gpui`` from one path and ``isonim-gpui`` from another (reprobuild-pm
+  ## issue 2026-10-12 lists both side by side). A solve that SAW a recipe
+  ## records that recipe's package (every parent package gets a synthetic
+  ## ``0.1.0`` candidate, and the solved graph carries it), so absence is
+  ## evidence the writing solve never had the recipe at all.
+  ##
+  ## Lives here, beside the pin grammar, because both conflict checkers ask
+  ## it: the provider's (``repro_dsl_stdlib/configurables/variants``) and the
+  ## targeted re-pin's (``repro lock refresh --repin``, in the CLI). Two copies
+  ## of the spelling rule would be two answers to "did the writer see it".
+  if packageName in pins.packages: return true
+  let hyphen = packageName.replace('_', '-')
+  let underscore = packageName.replace('-', '_')
+  hyphen in pins.packages or underscore in pins.packages
+
+proc repinCommandFor*(depPackage: string): string =
+  ## The targeted re-pin that clears a conflict on ``depPackage``
+  ## (`Locking-And-Solver.md` §"Targeted re-pin"), as the reader would type it.
+  "repro lock refresh --repin=" & depPackage
+
+proc lockConflictDiagnostic*(lockDescription, depPackage, locked,
+                             parentPackage, rangePart: string;
+                             declarerRecorded, crossRepoProducer: bool):
+                             string =
+  ## The text of an ``ELockConflict``: a committed lock pins ``depPackage`` to
+  ## ``locked`` and ``parentPackage`` declares ``uses: <depPackage>
+  ## <rangePart>``, which ``locked`` does not satisfy.
+  ##
+  ## ONE renderer for both places the conflict is detected — the build's
+  ## provider and ``repro lock refresh --repin`` — so the two cannot drift into
+  ## naming different remedies for the same contradiction. The spec fixes three
+  ## things about it (`Locking-And-Solver.md` §"Targeted re-pin"; settled by
+  ## reprobuild-pm issue 2026-10-14 "declaring a sibling producer imports its
+  ## toolchain floor into the consumer's committed-lock solve"):
+  ##
+  ##   * the FIRST remedy is the targeted re-pin with the package filled in. A
+  ##     whole-lock ``repro lock refresh`` re-solves every version pin and
+  ##     every sibling revision pin to admit one new floor, and "relax the
+  ##     declared constraint" means editing a recipe — often another repo's —
+  ##     that states its floor correctly. Both remain named, after it;
+  ##   * when ``crossRepoProducer``, it says the declaring package is a
+  ##     cross-repo producer, because the reader otherwise searches their own
+  ##     recipe for a constraint it does not contain;
+  ##   * when the lock does not record the declaring package
+  ##     (``declarerRecorded`` false) the writing solve never saw that recipe,
+  ##     and there are two ways that happens — the recipe (or the ``uses:``
+  ##     reaching it) was declared AFTER the lock was written, or the lock was
+  ##     regenerated where the recipe was unreachable. The message used to
+  ##     claim only the second, which is the wrong story for the ordinary case
+  ##     of adding a dependency.
+  result = "the " & lockDescription & " pins '" & depPackage & "' to " &
+    locked & ", but package '" & parentPackage & "' declares `uses: " &
+    depPackage & " " & rangePart & "`, which " & locked &
+    " does not satisfy. "
+  if crossRepoProducer:
+    result.add("'" & parentPackage & "' is a cross-repo producer this " &
+      "project consumes through `uses:`, not one of its own packages, so " &
+      "the constraint is stated in that producer's recipe rather than in " &
+      "this project's. Its ranges still bind this lock, as the ranges of " &
+      "every package this project consumes do. ")
+  result.add("Re-pin only '" & depPackage & "' with `" &
+    repinCommandFor(depPackage) & "`, which re-solves that entry and holds " &
+    "every other pin the lock records. ")
+  if not declarerRecorded:
+    result.add("The lock records no pin for '" & parentPackage &
+      "' itself, so the solve that wrote it never saw the recipe that " &
+      "declares this constraint: either that recipe (or the `uses:` that " &
+      "reaches it) was declared after the lock was written, or the lock " &
+      "was regenerated where the recipe was not reachable (typically a " &
+      "develop-set sibling that was not checked out), so its pins are the " &
+      "floors of fewer recipes than this build sees. In the second case run " &
+      "the re-pin, or a full `repro lock refresh`, from a workspace where " &
+      "the sibling declaring '" & parentPackage & "' is checked out; a " &
+      "refresh that cannot reach such a sibling refuses rather than " &
+      "dropping its constraints.")
+  else:
+    result.add("A committed lock is a pin, not a preference: the build " &
+      "refuses to re-solve '" & depPackage & "' to a version the lock " &
+      "does not name. Regenerate the lock with `repro lock refresh` or " &
+      "relax the declared constraint only when a whole-lock re-solve or a " &
+      "recipe change is what is wanted.")
