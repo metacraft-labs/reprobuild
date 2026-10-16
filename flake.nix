@@ -255,7 +255,13 @@
         # the writer closes a byte-capped fragment once on a key change.
         # Trapped inline syscalls are classified from what they named when
         # they trapped; the engine folds the new records (`monitorRemovals`).
-      url = "github:metacraft-labs/io-mon/2801e948810673bbb0fcbc7adb222943d4e7de50";
+        # Bumped to a4378d9 (2026-10-16), io-mon's `agents` tip; 2801e94 is an
+        # ancestor. Trapped inline syscalls that cannot be classified before
+        # the image ends (an exit or exec from inside a hook, a fork child
+        # before exec, a thread trapping after the exit drain) are reported as
+        # event-loss instead of vanishing; execveat and fexecve run the exec
+        # hook, so their child is monitored and the exec is recorded.
+      url = "github:metacraft-labs/io-mon/a4378d9400f209924cf6591d7c794654eb5f7906";
       flake = false;
     };
     nim-shm-gset-src = {
