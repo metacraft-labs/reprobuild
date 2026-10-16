@@ -28,9 +28,10 @@
 ##                  text and why it does not resolve. The edge is cached;
 ##                  the link gaining a target re-runs it, under the default
 ##                  timestamp policy as well as under `checksum`.
-##                  A target that appears holding exactly the bytes the
-##                  link's identity hashed re-runs it too: the record
-##                  compares the input's kind, not only its content hash.
+##                  A regular file that replaces the link holding exactly
+##                  the bytes the link's identity hashed re-runs it too: the
+##                  record compares the input's kind, not only its content
+##                  hash.
 ##   link loop      the same kind (`ELOOP`); breaking the loop re-runs it.
 ##   EACCES file    exists, cannot be read: a content-keyed record cannot
 ##                  describe it, so the result is not published and the edge
@@ -183,18 +184,19 @@ suite "t_dangling_symlink_in_observed_directory_does_not_abort":
     check fx.runs == 2
     check "dangling present" in fx.listing
 
-  test "a dangling link whose target appears holding exactly the link's hashed identity re-runs the edge":
+  test "a dangling link replaced by a file holding exactly the link's hashed identity re-runs the edge":
     # Under a content-keyed policy a dangling link is hashed over a marker
     # text that names its target. A regular file can contain those exact
-    # bytes, and when the link's target appears as such a file the content
-    # hash recorded for the link and the one taken through it now are EQUAL.
-    # The input is still a different kind of thing (a resolving link, not a
-    # dangling one), and the edge must re-run: the record compares the kind
+    # bytes, and when such a file replaces the link at the same path the
+    # content hash recorded for the link and the one taken now are EQUAL.
+    # The input is still a different kind of thing (a regular file, not a
+    # dangling link), and the edge must re-run: the record compares the kind
     # as well as the hash.
     let fx = newFixture("repro-dangling-marker-", policy = "acfpChecksum")
     defer: removeDir(fx.root)
-    let target = fx.root / "target-holding-the-marker.txt"
-    createSymlink(target, fx.listed / "dangling")
+    let target = fx.root / "never-created.txt"
+    let link = fx.listed / "dangling"
+    createSymlink(target, link)
 
     fx.requireBuilt("first build, dangling link present")
     check fx.runs == 1
@@ -204,9 +206,9 @@ suite "t_dangling_symlink_in_observed_directory_does_not_abort":
 
     # Byte for byte what the dangling link's identity hashed: the domain,
     # its `readlink` text, and why it did not resolve.
-    writeFile(target,
-      "reprobuild.unresolved-symlink.v1\0" & target & "\0absent")
-    fx.requireBuilt("third build, the target holds the link's identity")
+    removeFile(link)
+    writeFile(link, "reprobuild.unresolved-symlink.v1\0" & target & "\0absent")
+    fx.requireBuilt("third build, a file holding the link's identity")
     check fx.runs == 2
     check "dangling present" in fx.listing
 

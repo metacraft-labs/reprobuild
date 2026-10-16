@@ -11,9 +11,9 @@
 ##     an absent path that became an empty regular file (or a directory) was
 ##     a cache hit;
 ##   * a dangling symlink hashes a marker text that names its target
-##     (`reprobuild.unresolved-symlink.v1\0<target>\0<reason>`), so a link
-##     whose target was created as a regular file containing exactly that
-##     text was a cache hit.
+##     (`reprobuild.unresolved-symlink.v1\0<target>\0<reason>`), so a
+##     dangling link replaced by a regular file containing exactly that text
+##     was a cache hit.
 ##
 ## Each is a WRONG hit: the action could observe something different (a file
 ## where there was none, a resolving link where there was a dangling one).
@@ -77,12 +77,12 @@ suite "t_content_keyed_comparison_includes_file_kind":
   # POSIX only: the case is defined by a dangling symlink, which needs
   # privileges to create on Windows. Declared conditionally, not skipped.
   when defined(posix):
-    test "a dangling link whose target appears holding exactly the marker bytes is a miss":
+    test "a dangling link replaced by a regular file holding exactly the marker bytes is a miss":
       for policy in contentKeyed:
         checkpoint("policy " & $policy)
         var fx = newFixture("repro-kind-marker-")
         defer: removeDir(fx.root)
-        let target = fx.work / "target-appears-later.txt"
+        let target = fx.work / "never-created.txt"
         let link = fx.work / "dangling"
         createSymlink(target, link)
         let weak = weakFor("kind.marker." & $policy)
@@ -93,10 +93,16 @@ suite "t_content_keyed_comparison_includes_file_kind":
         # Positive control: nothing changed, the record is served.
         check fx.lookup(weak, policy).status == aclHit
 
-        # The target appears as a regular file whose bytes are exactly what
-        # the dangling link hashed. The content hashes are therefore EQUAL;
-        # only the kind tells the two states apart.
-        writeFile(target, unresolvedSymlinkMarker(target, "absent"))
+        # The link is replaced, at the same path, by a regular file whose
+        # bytes are exactly what the dangling link hashed. The content hashes
+        # are therefore EQUAL; only the kind tells the two states apart.
+        #
+        # A regular file at the path rather than the link's target appearing:
+        # a link that resolves to a file also hashes its own `readlink` text,
+        # so its hash differs from the dangling link's for that reason alone
+        # and would not isolate the kind comparison.
+        removeFile(link)
+        writeFile(link, unresolvedSymlinkMarker(target, "absent"))
         let now = observeFile(link, policy)
         require now.metadata.kind == ffkRegular
         require now.hasLocalHash and recorded.inputs[0].hasLocalHash
