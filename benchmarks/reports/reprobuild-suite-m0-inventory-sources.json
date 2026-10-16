@@ -9521,7 +9521,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_dss72_external_registrar_protocol.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 18,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
