@@ -16,8 +16,9 @@
 #                nixRealizationOf (reprobuild-nix-packages) into `pkgs`
 #   homebrew     pkg.homebrewCask / pkg.homebrewFormula resources, and
 #                packages a Homebrew realization hook claims, -> token lists
-#                for the host's Homebrew module (the hook is GM5b's
-#                `brewRealizationOf`; until then it claims nothing)
+#                for the host's Homebrew module (the module's default hook is
+#                `reprobuild.lib.brewRealizationOf`, over the pinned
+#                reprobuild-brew-packages catalog)
 #   files        fs.userFile under ~ -> home.file
 #   environment  env.userVariable -> home.sessionVariables,
 #                env.userPath -> home.sessionPath

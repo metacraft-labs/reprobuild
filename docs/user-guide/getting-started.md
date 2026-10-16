@@ -36,6 +36,15 @@ Inside a workspace, local flakes obtain their sibling input overrides from
 fails activation instead of silently selecting different sources. Standalone
 and remote flakes do not acquire workspace overrides.
 
+Automatic bindings use the input's `flake.lock` `original` repository coordinates
+when present, including its owner and host. Input aliases can differ from
+repository names: an input named `wazero` can bind a checkout of
+`metacraft-labs/codetracer-wasm-recorder`. A checkout from another owner or host
+keeps its pin. Input-name matching and configured suffix stripping apply only
+when the lock node has no repository coordinates. Matching still requires the
+checkout to be in the selected develop set and to meet the existing flake and
+revision requirements; `override-status` explains why a candidate was declined.
+
 Use `flakeRef = "./nix"` for a nested flake or `flakeRef = ".#ci"` for another
 shell. The default profile lives in `.repro/foreign-env/flake-profile`.
 

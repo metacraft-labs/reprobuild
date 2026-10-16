@@ -16,6 +16,7 @@
   system,
   homeManager,
   intentModule,
+  brewIntentModule,
   root,
 }:
 let
@@ -23,12 +24,12 @@ let
   isLinux = lib.hasSuffix "-linux" system;
   snapshot = root + "/tests/fixtures/intent-exports/neutral/export.json";
 
-  configFor =
-    extra:
+  configWith =
+    module: extra:
     (homeManager.lib.homeManagerConfiguration {
       inherit pkgs;
       modules = [
-        intentModule
+        module
         {
           home = {
             username = "gm5";
@@ -50,6 +51,7 @@ let
         extra
       ];
     }).config;
+  configFor = configWith intentModule;
 
   all = configFor { };
   outPaths = ps: map (p: p.outPath) ps;
@@ -328,7 +330,39 @@ let
       }).home.packages
     );
 
+  # GM5b: the module's DEFAULT `homebrew.realizationOf` hook is
+  # `reprobuild.lib.brewRealizationOf` over the flake's catalogs. Here the
+  # module is built over the Nix catalog plus tests/fixtures/brew-catalog,
+  # which claims `ripgrep` as cask `gm5b-ripgrep` and `gm5-home-pc-only` as
+  # formula `gm5b-only`: on darwin both leave `unmapped` for the token lists;
+  # on Linux the cask does not apply (casks are macOS-only), so `ripgrep`
+  # stays unmapped while the formula is claimed.
+  brew = configWith brewIntentModule { };
+  sortStrings = lib.sort (a: b: a < b);
+  brewExpected = {
+    casks = sortStrings (expected.casks ++ lib.optional isDarwin "gm5b-ripgrep");
+    formulae = lib.optional (isDarwin || isLinux) "gm5b-only";
+    unmapped = lib.filter (
+      id: id != "package:gm5-home-pc-only" && !(isDarwin && id == "package:ripgrep")
+    ) expected.unmapped;
+  };
+  brewOk =
+    sortStrings brew.reprobuild.intent.homebrew.casks == brewExpected.casks
+    && brew.reprobuild.intent.homebrew.formulae == brewExpected.formulae
+    && ids brew.reprobuild.intent.unmapped == brewExpected.unmapped
+    # Homebrew disabled: the hook claims nothing and the packages are the
+    # `packages` category's again (unmapped, as without the catalog).
+    && ids (configWith brewIntentModule { reprobuild.intent.homebrew.enable = lib.mkForce false; })
+      .reprobuild.intent.unmapped == expected.unmapped
+    # An explicit `_: null` hook claims nothing even with the catalog.
+    && ids (configWith brewIntentModule { reprobuild.intent.homebrew.realizationOf = lib.mkForce (_: null); })
+      .reprobuild.intent.unmapped == expected.unmapped
+    # The flake's own module reads the pinned catalogs; nothing in the
+    # neutral fixture is a catalog application, so it claims nothing there.
+    && all.reprobuild.intent.homebrew.formulae == [ ];
+
   results = {
+    homebrew-realization-hook = brewOk;
     unrecognised-input-is-unmapped = unrecognisedOk;
     evaluation-is-home-pc = all.reprobuild.intent.evaluation.host == "home-pc";
     packages = packagesOk;

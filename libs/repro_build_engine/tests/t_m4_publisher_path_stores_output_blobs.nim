@@ -56,7 +56,7 @@
 ## in that order, so the file states the limitation rather than only the
 ## win.
 
-import std/[options, os, strutils, unittest]
+import std/[options, os, unittest]
 
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
@@ -69,6 +69,7 @@ from repro_cas_store import openCasStore, casGet, close, CasStore,
 
 from repro_core/paths import extendedPath
 from repro_test_support import testCaseScratchSlug
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 # Every case gets its OWN root, under this run's pid-scoped directory in
 # the build tree, and every removal goes through ``extendedPath``.
@@ -111,8 +112,9 @@ let RunRoot = absolutePath("build/test-tmp/m4pub" / testCaseScratchSlug())
 proc dropTree(path: string) =
   ## Best-effort removal, always through ``extendedPath``. Never fatal:
   ## failing a case on its cleanup would report a caching defect that is
-  ## not one. What survives is NAMED by the teardown suite rather than
-  ## silently left.
+  ## not one. What survives goes with ``RunRoot`` when the process exits,
+  ## and a removal that fails there is NAMED on stderr rather than
+  ## silently left (``repro_test_support/process_fixtures``).
   for _ in 0 .. 4:
     if not dirExists(extendedPath(path)):
       return
@@ -121,15 +123,16 @@ proc dropTree(path: string) =
     except CatchableError:
       sleep(100)
 
+# Removed when THIS process exits, whichever case it ran. A final "teardown"
+# case used to remove the roots, and under the runner's one-process-per-case
+# model it ran in its own process and so removed only its own.
+releaseDirAtProcessExit(RunRoot)
 createDir(extendedPath(RunRoot))
-
-var caseRoots: seq[string] = @[]
 
 proc newCaseRoot(tag: string): string =
   result = RunRoot / tag
   dropTree(result)
   createDir(extendedPath(result))
-  caseRoots.add(result)
 
 # ---------------------------------------------------------------------------
 # Fixtures. The action is ``bakWriteText`` — hermetic, no toolchain, no
@@ -389,20 +392,3 @@ suite "M4 the publisher-configured path stores output blobs":
     # A status flag is not a restore. The bytes are.
     check fileExists(fx.outputPath)
     check readFile(fx.outputPath) == fx.payload
-
-
-suite "M4 the publisher-configured path — teardown":
-
-  test "every root this run created is removed, and any survivor is NAMED":
-    ## Counting is not enough — M3 made that point about its own teardown
-    ## and it applies here: a survivor has to be identifiable, because the
-    ## only interesting question about one is WHICH case left it.
-    var surviving: seq[string] = @[]
-    for root in caseRoots:
-      dropTree(root)
-      if dirExists(extendedPath(root)):
-        surviving.add(root)
-    if surviving.len > 0:
-      echo "    surviving: ", surviving.join(", ")
-    check surviving.len == 0
-    dropTree(RunRoot)

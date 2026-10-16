@@ -1175,9 +1175,10 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
 #
 # WHAT IT DOES NOT COVER. Python tests (`pythonTestPaths`) are out of scope
 # here; `run_tests.sh` finds those with its own `find tests -name 'test_*.py'`
-# and so does not have this defect. Shell gates under `tests/integration/` are
-# standalone by design (N55) and are covered by
-# `scripts/list_standalone_shell_gates.sh`.
+# and so does not have this defect. Shell test scripts under `tests/` ARE
+# covered: any shell test script not referenced across `repro_tests.nim`,
+# `Justfile`, `.github/`, `scripts/`, or `tests/` must be recorded in
+# `scripts/uninvoked-shell-tests-baseline.txt` as accepted debt.
 
 DECLARED_SOURCE_ROOTS = ("tests", "libs", "tools", "recipes", "apps")
 
@@ -1192,6 +1193,10 @@ DECLARED_SOURCE_SKIP_PREFIXES = (
 )
 
 DECLARED_SOURCES_REGENERATE_COMMAND = "nim r scripts/generate_test_edges.nim"
+UNINVOKED_SHELL_TESTS_BASELINE_PATH = Path(
+    "scripts/uninvoked-shell-tests-baseline.txt"
+)
+
 
 
 def _is_test_shaped_source(rel: str) -> bool:
@@ -1261,6 +1266,105 @@ def bundled_test_sources(root: Path, nim_specs: list[TestSpec]) -> list[str]:
         ):
             members.add(member)
     return sorted(members)
+ 
+ 
+def load_uninvoked_shell_tests_baseline(path: Path) -> set[str]:
+    """Read uninvoked shell tests baseline, ignoring comments and blank lines."""
+    if not path.is_file():
+        return set()
+    entries: set[str] = set()
+    for line in read_text(path).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        entries.add(stripped)
+    return entries
+
+
+def walk_shell_test_scripts(root: Path) -> list[str]:
+    """Every shell test script under tests/ (*.sh), repo-relative, sorted."""
+    base = root / "tests"
+    if not base.is_dir():
+        return []
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [
+            d for d in dirnames if d not in (".git", "nimcache", "build")
+        ]
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        for name in filenames:
+            if name.endswith(".sh"):
+                found.append(name if rel_dir == "." else rel_dir + "/" + name)
+    return sorted(found)
+
+
+def find_unreferenced_shell_scripts(
+    root: Path, shell_scripts: list[str], baseline_path: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """Detect unreferenced shell test scripts across repro_tests.nim, Justfile, .github/, scripts/, tests/.
+
+    A script is unreferenced if its basename is not present in any other file
+    across those locations, excluding directories like .git, nimcache, build,
+    and excluding the baseline file and the script itself.
+    """
+    if not shell_scripts:
+        return [], []
+
+    target_files: list[Path] = []
+    for single in ("repro_tests.nim", "Justfile"):
+        f = root / single
+        if f.is_file():
+            target_files.append(f)
+
+    for dname in (".github", "scripts", "tests"):
+        dp = root / dname
+        if dp.is_dir():
+            for dirpath, dirnames, filenames in os.walk(dp):
+                dirnames[:] = [
+                    d for d in dirnames if d not in (".git", "nimcache", "build")
+                ]
+                for name in filenames:
+                    target_files.append(Path(dirpath) / name)
+
+    resolved_baseline = (
+        baseline_path.resolve()
+        if baseline_path and baseline_path.is_file()
+        else None
+    )
+
+    target_contents: list[tuple[Path, str]] = []
+    for tf in target_files:
+        try:
+            resolved_tf = tf.resolve()
+        except OSError:
+            continue
+        if resolved_baseline and resolved_tf == resolved_baseline:
+            continue
+        try:
+            content = tf.read_text(encoding="utf-8", errors="replace")
+            target_contents.append((resolved_tf, content))
+        except OSError:
+            pass
+
+    unreferenced: list[str] = []
+    referenced: list[str] = []
+
+    for rel_path in shell_scripts:
+        candidate_path = (root / rel_path).resolve()
+        candidate_name = Path(rel_path).name
+        is_ref = False
+        for tf_path, content in target_contents:
+            if tf_path == candidate_path:
+                continue
+            if candidate_name in content:
+                is_ref = True
+                break
+        if is_ref:
+            referenced.append(rel_path)
+        else:
+            unreferenced.append(rel_path)
+
+    return sorted(unreferenced), sorted(referenced)
 
 
 # ---------------------------------------------------------------------------
@@ -1514,14 +1618,45 @@ def declared_source_drift(root: Path) -> dict[str, Any]:
     expected = {rel for rel in covered if _is_test_shaped_source(rel)}
     unreachable = sorted(expected - found_set)
 
-    undeclared = [rel for rel in found if rel not in covered]
+    undeclared_nim = [rel for rel in found if rel not in covered]
+
+    shell_candidates = walk_shell_test_scripts(root)
+    baseline_path = root / UNINVOKED_SHELL_TESTS_BASELINE_PATH
+    shell_baseline_missing = bool(shell_candidates and not baseline_path.is_file())
+
+    baseline_entries = (
+        load_uninvoked_shell_tests_baseline(baseline_path)
+        if baseline_path.is_file()
+        else set()
+    )
+    shell_unreferenced, shell_referenced = find_unreferenced_shell_scripts(
+        root, shell_candidates, baseline_path=baseline_path
+    )
+    shell_baseline = [s for s in shell_unreferenced if s in baseline_entries]
+    shell_undeclared = [
+        s for s in shell_unreferenced if s not in baseline_entries
+    ]
+
+    undeclared = sorted(undeclared_nim + shell_undeclared)
+
     return {
-        "clean": not undeclared and not unreachable,
+        "clean": (
+            not undeclared
+            and not unreachable
+            and not shell_baseline_missing
+        ),
         "candidateCount": len(found),
+        "nimCandidateCount": len(found),
         "declaredCount": len(declared),
         "bundledCount": len(bundled),
         "undeclared": undeclared,
+        "undeclared_nim": undeclared_nim,
+        "undeclared_shell": shell_undeclared,
         "unreachable": unreachable,
+        "shellCandidateCount": len(shell_candidates),
+        "shellReferencedCount": len(shell_referenced),
+        "shellBaselineCount": len(shell_baseline),
+        "shellBaselineMissing": shell_baseline_missing,
     }
 
 
@@ -1536,14 +1671,27 @@ def format_declared_source_drift(drift: dict[str, Any]) -> str:
         )
         for rel in drift["unreachable"]:
             lines.append(f"  - {rel}")
-    if drift["undeclared"]:
+
+    if drift.get("shellBaselineMissing"):
         lines.append(
-            f"FAIL: {len(drift['undeclared'])} test source(s) exist in the "
+            f"FAIL: {UNINVOKED_SHELL_TESTS_BASELINE_PATH} not found. "
+            "It records accepted debt for uninvoked shell test scripts. "
+            "Its absence is a failure rather than a skip."
+        )
+
+    nim_undeclared = drift.get("undeclared_nim")
+    if nim_undeclared is None:
+        nim_undeclared = [
+            r for r in drift.get("undeclared", []) if not r.endswith(".sh")
+        ]
+    if nim_undeclared:
+        lines.append(
+            f"FAIL: {len(nim_undeclared)} test source(s) exist in the "
             "tree but are in no build edge. Nothing compiles them and nothing "
             "runs them, and no other gate can see that, because every other "
             "gate derives its universe from repro_tests.nim:"
         )
-        for rel in drift["undeclared"]:
+        for rel in nim_undeclared:
             lines.append(f"  - {rel}")
         lines.append(
             "Enrol them by regenerating the edge table, or -- if one is "
@@ -1557,7 +1705,29 @@ def format_declared_source_drift(drift: dict[str, Any]) -> str:
             "need widening -- that IS the defect, not a reason to add an "
             "exception here."
         )
+
+    shell_undeclared = drift.get("undeclared_shell")
+    if shell_undeclared is None:
+        shell_undeclared = [
+            r for r in drift.get("undeclared", []) if r.endswith(".sh")
+        ]
+    if shell_undeclared:
+        lines.append(
+            f"FAIL: {len(shell_undeclared)} shell test script(s) under tests/ "
+            "are not referenced by any test runner, workflow, Justfile or "
+            "script, and are not recorded in "
+            f"{UNINVOKED_SHELL_TESTS_BASELINE_PATH}:"
+        )
+        for rel in shell_undeclared:
+            lines.append(f"  - {rel}")
+        lines.append(
+            "Enrol them in a test runner, invoke them from Justfile or CI, "
+            "delete them if obsolete, or record them in "
+            f"{UNINVOKED_SHELL_TESTS_BASELINE_PATH} if accepted debt."
+        )
+
     return "\n".join(lines)
+
 
 
 def read_text(path: Path) -> str:
@@ -7041,13 +7211,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--check-declared-sources",
         action="store_true",
         help=(
-            "compare the test sources present in the tree against the "
-            "entry set repro_tests.nim declares, and exit non-zero when "
-            "a test file exists that nothing builds or runs. Needs no "
-            "built test binaries, no compiler and no nix. This is the "
-            "only gate whose universe is the FILESYSTEM rather than "
-            "repro_tests.nim, which is why it is the only one that can "
-            "see a test that was never enrolled"
+            "compare the Nim and shell test sources present in the tree against "
+            "the entry set repro_tests.nim declares and the uninvoked shell "
+            "test baseline, and exit non-zero when a test file exists that "
+            "nothing builds, references or runs. Needs no built test binaries, "
+            "no compiler and no nix. This is the only gate whose universe is "
+            "the FILESYSTEM rather than repro_tests.nim, which is why it is "
+            "the only one that can see a test that was never enrolled"
         ),
     )
     parser.add_argument(
@@ -7156,9 +7326,12 @@ def main(argv: list[str]) -> int:
         if drift["clean"]:
             print(
                 "declared test sources: "
-                f"{drift['candidateCount']} test sources in the tree, all "
+                f"{drift['candidateCount']} Nim test sources in the tree, all "
                 f"enrolled ({drift['declaredCount']} own build edges, "
-                f"{drift['bundledCount']} folded into pure-unit bundles)"
+                f"{drift['bundledCount']} folded into pure-unit bundles); "
+                f"{drift['shellCandidateCount']} shell test scripts "
+                f"({drift['shellReferencedCount']} referenced, "
+                f"{drift['shellBaselineCount']} accepted baseline debt)"
             )
             return 0
         print(format_declared_source_drift(drift), file=sys.stderr)

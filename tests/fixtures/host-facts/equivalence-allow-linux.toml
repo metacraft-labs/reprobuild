@@ -1,0 +1,33 @@
+# Known differences of the GM6 equivalence fixture on Linux: what every Home
+# Manager configuration adds on its own. The profile declares none of it, and
+# the comparison must say so rather than hide it.
+
+[[allow]]
+category = "files"
+status = "only-in-nix"
+id = "~/.cache/.keep"
+reason = "Home Manager creates the XDG cache directory with a .keep file in every configuration"
+
+[[allow]]
+category = "files"
+status = "only-in-nix"
+id = "~/.local/state/.keep"
+reason = "Home Manager creates the XDG state directory with a .keep file in every configuration"
+
+[[allow]]
+category = "files"
+status = "only-in-nix"
+id = "~/.config/environment.d/10-home-manager.conf"
+reason = "Home Manager exports its session variables to systemd user sessions on Linux"
+
+[[allow]]
+category = "environment"
+status = "only-in-nix"
+id = "var:LOCALE_ARCHIVE_2_27"
+reason = "Home Manager sets the glibc locale archive on non-NixOS-module Linux configurations"
+
+[[allow]]
+category = "services"
+status = "only-in-nix"
+id = "systemd:tray.target"
+reason = "Home Manager declares tray.target for its own tray-applet services"

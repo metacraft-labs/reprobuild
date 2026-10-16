@@ -80,6 +80,7 @@ libs/repro_standard_provider/src/repro_standard_provider/conventions/zig_direct.
 libs/repro_store_daemon/src/repro_store_daemon/runtime.nim
 libs/repro_system_rollback/src/repro_system_rollback.nim
 libs/repro_test_support/src/repro_test_support.nim
+libs/repro_test_support/src/repro_test_support/per_case_runs.nim
 libs/repro_tool_profiles/src/repro_tool_profiles.nim
 libs/repro_workspace_manifests/src/repro_workspace_manifests/manifest_refresh.nim
 libs/repro_workspace_manifests/src/repro_workspace_manifests/provenance.nim

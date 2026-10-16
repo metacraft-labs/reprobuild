@@ -170,9 +170,12 @@ jobs:
       # into "this action took N minutes" or "this action never finished".
       REPROBUILD_PROGRESS: simple-lines
       # The commit the release images are built from (the checkout below is
-      # `github.sha`). The `.#release` engine edge embeds it as
-      # `ReprobuildSourceRevision`, so a shipped `repro` can name its source
-      # revision (e.g. in `repro home export` provenance).
+      # `github.sha`), embedded as `ReprobuildSourceRevision` so a shipped
+      # `repro` can name its source revision (e.g. in `repro home export`
+      # provenance). The `.#release` engine edge takes it from the
+      # `reprobuild.apps.source-revision` probe, which runs
+      # scripts/source_revision.sh when the ACTION runs and so inherits this
+      # job-level variable, which wins over the checkout's own git answer.
       REPROBUILD_SOURCE_REVISION: ${{ github.sha }}
     strategy:
       # fail-fast stays false so ONE broken leg still lets the others report.

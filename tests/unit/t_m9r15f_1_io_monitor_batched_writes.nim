@@ -33,6 +33,15 @@
 ##    M9.R.15f.1 delivers (the syscall-per-record cost is amortised
 ##    away) on any host. On a fast Linux host the batched path clears
 ##    10 M emit/s; the relative gate stays meaningful on slower stores.
+##    The floor is one cross-platform figure, not a per-platform one:
+##    the same case also asserts the cause deterministically — the
+##    batched run's ``writeBuffer`` / ``flushFile`` count AND its
+##    descriptor-identity probe count (one ``fstat`` each) scale with
+##    the number of flushes, not with the number of records. A probe per
+##    record once held the batched path to ~2.2x on m1
+##    (aarch64-darwin, APFS) while writes and flushes were still
+##    amortised; with no per-record syscall the same host measures
+##    12-18x. The throughput figures are printed on every run.
 ## 2. **Write-count amortization** — emitting N short records must
 ##    drive far fewer ``writeBuffer`` syscalls than N: with the 64 KiB
 ##    stack buffer the underlying-write count must stay below
@@ -103,9 +112,6 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
 
   test "batched writer is many times faster than per-record syscalls":
     closeFragmentSlot()
-    resetFragmentLogOpenCount()
-    resetFragmentLogWriteCount()
-    resetFragmentLogFlushCount()
 
     let fragmentDir = getTempDir() / ("m9r15f-1-thru-" & $getCurrentProcessId())
     createDir(fragmentDir)
@@ -159,6 +165,10 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
     # reflects steady-state hot-path cost only.
     appendFragmentRecord(fragmentDir, sampleRecord(0'u64, osPid, threadId, "/warm"))
     flushFragmentBatch()
+    resetFragmentLogOpenCount()
+    resetFragmentLogWriteCount()
+    resetFragmentLogFlushCount()
+    resetFragmentLogHandleProbeCount()
     let t0 = getMonoTime()
     for i in 0 ..< N:
       appendFragmentRecord(fragmentDir, records[i])
@@ -168,14 +178,32 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
     let batchedRate = float64(N) / batchedS
     let speedup = batchedRate / baselineRate
 
-    checkpoint("baseline=" & $baselineRate & " emit/s  batched=" &
+    let writes = fragmentLogWriteCount()
+    let flushes = fragmentLogFlushCount()
+    let probes = fragmentLogHandleProbeCount()
+    let measurement = "baseline=" & $baselineRate & " emit/s  batched=" &
       $batchedRate & " emit/s  speedup=" & $speedup & "x  writes=" &
-      $fragmentLogWriteCount() & " flushes=" & $fragmentLogFlushCount())
+      $writes & " flushes=" & $flushes & " identity-probes=" & $probes
+    # Reported on every run, not only on failure: the absolute figures
+    # are the per-host record the relative gate deliberately omits.
+    echo "    ", measurement
+    checkpoint(measurement)
 
-    # Batching must amortise the write+flush syscall pair across many
-    # frames: far fewer underlying writes than records, and a large
-    # net throughput win over the per-record path.
-    check fragmentLogWriteCount() < uint64(N)
+    # Batching must amortise every per-record syscall across many
+    # frames. Writes: the ~90-byte frames fill a 64 KiB batch roughly
+    # seven hundred at a time, so 100k records need ~145 writes; N div 64
+    # still leaves room for the 100 ms staleness flushes a loaded host
+    # adds. Descriptor-identity probes: one per flush plus one for each
+    # of the read-tail pending / committed markers that open and close a
+    # dirty cycle — at most three per flush, however many records the
+    # batch holds. No reopen happens on the steady-state path.
+    check fragmentLogOpenCount() == 0
+    check writes >= 1
+    check writes == flushes
+    check writes <= uint64(N div 64)
+    check probes <= 3 * flushes
+    # And the amortisation must show up as a large net throughput win
+    # over the per-record path.
     check speedup >= MinBatchSpeedup
 
   test "write-count amortization — 100 short emits drive < 5 writeBuffer calls":

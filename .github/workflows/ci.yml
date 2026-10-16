@@ -386,6 +386,8 @@ jobs:
             reprobuild-cmake
             reprobuild-examples
             gosti
+            codetracer-native-backend
+            codetracer-visual-replay
           permission-contents: read
 
       # Sibling clones: setup-dev-env clones the CodeTracer sibling declared in
@@ -430,6 +432,31 @@ jobs:
           repo: metacraft-labs/reprobuild-examples
           ref: dev
           path: ${{ github.workspace }}/../reprobuild-examples
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      # The `ct-mcr` recorder bundle (`.#test-cross-repo-fixtures` edge
+      # `reprobuild.test_fixtures.hcr_ct_mcr_bundle`, which
+      # e2e_hcr_linux_replay_of_patched_recording records and replays with)
+      # is built by the recorder's own `just build-ct-mcr`. Its licensing
+      # prerequisite builds `ct_license_ffi` in ../codetracer-native-backend,
+      # and ct_cli imports ../codetracer-visual-replay; the recorder,
+      # codetracer, codetracer-trace-format and codetracer-trace-format-nim
+      # already come from .github/sibling-repos. Cloned here rather than added
+      # to sibling-repos because only this job builds that collection.
+      - name: Clone codetracer-native-backend sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-native-backend
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-native-backend
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      - name: Clone codetracer-visual-replay sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-visual-replay
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-visual-replay
           gh-token: ${{ steps.ci_token.outputs.token }}
 
       # vm-harness ships the ``vm_harness`` library that the ReproOS
@@ -695,7 +722,15 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
-          repositories: codetracer-native-recorder
+          # codetracer-rr (a private flake input of the recorder's dev shell)
+          # and lldb-sys.rs (a private cargo git dependency of the backend's
+          # `ct_license_ffi`) are fetched while `.#test-cross-repo-fixtures`
+          # builds the `ct-mcr` bundle for
+          # e2e_hcr_linux_replay_of_patched_recording.
+          repositories: |
+            codetracer-native-recorder
+            codetracer-rr
+            lldb-sys.rs
           permission-contents: read
 
       # BUDGET NOTE (measured on run 31716928161, dev @ 910cb956, and on
@@ -804,12 +839,20 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
-          GIT_CONFIG_COUNT: '1'
+          # The second rewrite, and cargo fetching through the git CLI so that
+          # it honours these GIT_CONFIG_* rewrites at all, serve the `ct-mcr`
+          # bundle edge (scripts/build_hcr_ct_mcr_fixture.sh forwards exactly
+          # these variables into the recorder's otherwise cleared shell).
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          GIT_CONFIG_COUNT: '2'
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/lldb-sys.rs.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/metacraft-labs/lldb-sys.rs
           NIX_CONFIG: >-
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_test.outputs.token }}
+            github.com/metacraft-labs/codetracer-rr=${{ steps.ci_token_test.outputs.token }}
         run: dev-exec just test
       # RunQuota daemon diagnostics, collected whether or not anything
       # failed.

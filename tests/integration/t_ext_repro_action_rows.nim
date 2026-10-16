@@ -129,20 +129,48 @@ proc writeCopyProject(projectRoot, packageName: string; actionCount: int;
       "        cacheable = true)\n")
   writeFile(projectRoot / "reprobuild.nim", body)
 
+const RunQuotaActiveLine = "runQuota: active (lease authority)"
+
+var buildSerial = 0
+
 proc runBuild(projectRoot, tempRoot, workName, socketPath: string): string =
   ## A build that goes THROUGH RUNQUOTA. ``--no-runquota`` is deliberately
   ## absent: without a lease there is no execution row, and without an
   ## execution row there is nothing for an extension row to be joined to.
-  requireSuccess(shellCommand(@[
+  ##
+  ## AND THAT IS CHECKED, NOT ASSUMED, because two silent fallbacks end in
+  ## the same "no rows" as a lost row. When the daemon named by
+  ## ``RUNQUOTA_SOCKET`` does not answer the handshake, the engine either
+  ## auto-spawns a private ``runquotad`` at ``$TMPDIR/reprobuild-runquota-
+  ## <pid>/`` and leases from THAT one (its rows land in a store this test
+  ## never queries), or, under ``--tool-provisioning=path``, bypasses
+  ## RunQuota altogether. Both are silent under ``--log=quiet``. Run 33
+  ## failed with ``no ext_repro_action row for m17-copy-0`` after a
+  ## successful build and left nothing to tell these apart from a dropped
+  ## row. ``--write-diagnostics`` records the socket the build leased from
+  ## and the RunQuota authority header even when logging is quiet, so the
+  ## build now states which daemon, if any, admitted its work.
+  inc buildSerial
+  let diagnostics = tempRoot / ("diagnostics-" & $buildSerial & ".txt")
+  let output = requireSuccess(shellCommand(@[
     publicReproBin(), "build", projectRoot,
     "--daemon=off",
     "--tool-provisioning=path",
     "--work-root=" & tempRoot / workName,
     "--action-cache-root=" & tempRoot / "action-cache",
+    "--write-diagnostics=" & diagnostics,
     "--progress=quiet",
     "--log=quiet",
     "--measure=none"
   ], @[("RUNQUOTA_SOCKET", socketPath)]), repoRoot())
+  let recorded =
+    if fileExists(diagnostics): readFile(diagnostics) else: ""
+  doAssert RunQuotaActiveLine in recorded and
+      ("runQuotaSocket: " & socketPath) in recorded,
+    "the build did not lease from this test's runquotad at " & socketPath &
+    ", so none of its ext_repro_action rows can be in the store this test " &
+    "queries; its diagnostics:\n" & recorded & "\nits output:\n" & output
+  output
 
 type ActionRow = object
   values: Table[string, string]

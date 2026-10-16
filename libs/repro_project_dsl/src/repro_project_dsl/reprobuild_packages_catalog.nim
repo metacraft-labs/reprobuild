@@ -77,6 +77,81 @@ proc isBareCatalogSelector(selector: string): bool =
       return false
   true
 
+const
+  ReprobuildPackagesRepositoryName* = "reprobuild-packages"
+    ## The catalog repository's name: the checkout directory the workspace
+    ## convention looks for, and the name a lock records it under.
+  CatalogRevisionMarkerFile* = "catalog-revision"
+    ## In a catalog COPY that is not a git checkout -- the one an installed
+    ## reprobuild ships at ``share/repro/reprobuild-packages`` -- the
+    ## repository and commit it was copied from, one ``key=value`` per line:
+    ## ``url=<fetch url>`` and ``revision=<commit id>``. It is what lets a lock
+    ## record the revision of a catalog that has no ``.git`` to ask.
+  CommittedLockFileName* = "repro.lock"
+    ## Standard committed lock filename.
+
+proc findLockedCatalogRevision*(lockContent: string): string =
+  ## Extract the pinned `revision` of `reprobuild-packages` from `repro.lock` content.
+  if lockContent.len == 0:
+    return ""
+  var searchFrom = 0
+  while true:
+    let idx = lockContent.find(ReprobuildPackagesRepositoryName, searchFrom)
+    if idx < 0:
+      return ""
+    let entryStart = lockContent.rfind('{', 0, idx)
+    let entryEnd = lockContent.find('}', idx)
+    let slice =
+      if entryStart >= 0 and entryEnd > entryStart:
+        lockContent[entryStart .. entryEnd]
+      else:
+        let lineStart = lockContent.rfind('\n', 0, idx)
+        let lineEnd = lockContent.find('\n', idx)
+        lockContent[(if lineStart >= 0: lineStart else: 0) .. (if lineEnd >= 0: lineEnd else: lockContent.len - 1)]
+
+    if ("\"" & ReprobuildPackagesRepositoryName & "\"") in slice:
+      var searchRegion = slice
+      if entryStart < 0 or entryEnd <= entryStart:
+        let nextTable = lockContent.find('[', idx)
+        searchRegion = lockContent[idx ..< (if nextTable >= 0: nextTable else: lockContent.len)]
+
+      const revKey = "revision"
+      var rIdx = searchRegion.find(revKey)
+      if rIdx >= 0:
+        let eqIdx = searchRegion.find('=', rIdx + revKey.len)
+        if eqIdx >= 0:
+          let firstQuote = searchRegion.find('"', eqIdx + 1)
+          if firstQuote >= 0:
+            let secondQuote = searchRegion.find('"', firstQuote + 1)
+            if secondQuote >= 0:
+              let rev = searchRegion[firstQuote + 1 ..< secondQuote].strip()
+              if rev.len > 0:
+                return rev
+    searchFrom = idx + ReprobuildPackagesRepositoryName.len
+
+proc findEnclosingLockPinnedCatalog*(consumerSourceFile: string):
+    tuple[consumerRoot, revision: string] =
+  ## Find the nearest enclosing `repro.lock` walking up from `consumerSourceFile`
+  ## and extract the locked `reprobuild-packages` revision, if any.
+  if consumerSourceFile.len == 0:
+    return ("", "")
+  var dir = if dirExists(consumerSourceFile): consumerSourceFile else: consumerSourceFile.parentDir
+  for _ in 0 ..< 16:
+    let lockPath = dir / CommittedLockFileName
+    if fileExists(lockPath):
+      try:
+        let content = readFile(lockPath)
+        let rev = findLockedCatalogRevision(content)
+        if rev.len > 0:
+          return (dir, rev)
+      except CatchableError:
+        discard
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  return ("", "")
+
 proc reprobuildCheckoutRoot(): string =
   # <reprobuild>/libs/repro_project_dsl/src/repro_project_dsl/<this file>
   currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir
@@ -91,7 +166,9 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
   ## 2. a ``reprobuild-packages`` directory beside the consumer's project or
   ##    any ancestor of it -- the workspace-sibling convention, and where
   ##    `setup-dev-env` clones a `.github/sibling-repos` entry in CI;
-  ## 3. a ``reprobuild-packages`` directory beside the reprobuild checkout
+  ## 3. the lock-pinned catalog, under
+  ##    ``<consumerRoot>/.repro/cross-repo-producers/reprobuild-packages/<rev>``;
+  ## 4. a ``reprobuild-packages`` directory beside the reprobuild checkout
   ##    this module was compiled from.
   ##
   ## A checkout that lacks the interface does not end the walk; the next place
@@ -127,6 +204,18 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
       if result.module.len > 0:
         return
       dir = parent
+
+  # Step 3: Locked catalog revision from nearest enclosing repro.lock
+  if consumerSourceFile.len > 0:
+    let (lockDir, lockedRev) = findEnclosingLockPinnedCatalog(consumerSourceFile)
+    if lockDir.len > 0 and lockedRev.len > 0:
+      let lockedRoot = lockDir / ".repro" / "cross-repo-producers" /
+        ReprobuildPackagesRepositoryName / lockedRev
+      seen.add(lockedRoot)
+      probe(result, "locked at " & lockedRev, lockedRoot)
+      if result.module.len > 0:
+        return
+
   let besideReprobuild = reprobuildCheckoutRoot().parentDir / "reprobuild-packages"
   if besideReprobuild notin seen:
     probe(result, "beside the reprobuild checkout " & reprobuildCheckoutRoot(),
@@ -140,21 +229,11 @@ proc reprobuildPackagesInterfaceModule*(selector, consumerSourceFile: string):
   ## `reprobuildPackagesSearch` for where it looks.
   reprobuildPackagesSearch(selector, consumerSourceFile).module
 
-const
-  ReprobuildPackagesRepositoryName* = "reprobuild-packages"
-    ## The catalog repository's name: the checkout directory the workspace
-    ## convention looks for, and the name a lock records it under.
-  CatalogRevisionMarkerFile* = "catalog-revision"
-    ## In a catalog COPY that is not a git checkout -- the one an installed
-    ## reprobuild ships at ``share/repro/reprobuild-packages`` -- the
-    ## repository and commit it was copied from, one ``key=value`` per line:
-    ## ``url=<fetch url>`` and ``revision=<commit id>``. It is what lets a lock
-    ## record the revision of a catalog that has no ``.git`` to ask.
-
-proc catalogSelectionIdentity*(): string =
+proc catalogSelectionIdentity*(consumerSourceFile: string = ""): string =
   ## What an interface extraction's cache identity must carry about the
   ## catalog: the explicitly selected catalog, `$REPROBUILD_PACKAGES_ROOT`,
-  ## when it is set; "" otherwise.
+  ## when it is set; or when unset and the consumer has a locked catalog
+  ## revision (with no develop sibling override), the locked revision; "" otherwise.
   ##
   ## The variable decides which module a ``uses:`` of a catalog package
   ## imports, and the recipe's text does not change when it does, so an
@@ -162,13 +241,28 @@ proc catalogSelectionIdentity*(): string =
   ## interface of the previously selected catalog. Keyed by VALUE because it
   ## is a choice of input, not host noise. An edit to the selected module in
   ## place is a content change of a file the compile read, which the
-  ## extraction's recorded inputs already cover. "" when unset, so the
-  ## identity of every extraction that does not select a catalog is
-  ## unchanged.
+  ## extraction's recorded inputs already cover. "" when unset and no locked
+  ## revision governs, so the identity of every extraction that does not
+  ## select or lock a catalog is unchanged.
   let root = getEnv(ReprobuildPackagesRootEnv)
-  if root.len == 0:
-    return ""
-  "catalog-root:" & root.replace('\\', '/')
+  if root.len > 0:
+    return "catalog-root:" & root.replace('\\', '/')
+  if consumerSourceFile.len > 0:
+    var dir = if dirExists(consumerSourceFile): consumerSourceFile else: consumerSourceFile.parentDir
+    var hasDevelopSibling = false
+    for _ in 0 ..< 16:
+      let parent = dir.parentDir
+      if parent.len == 0 or parent == dir:
+        break
+      if dirExists(parent / ReprobuildPackagesRepositoryName):
+        hasDevelopSibling = true
+        break
+      dir = parent
+    if not hasDevelopSibling:
+      let (_, lockedRev) = findEnclosingLockPinnedCatalog(consumerSourceFile)
+      if lockedRev.len > 0:
+        return "catalog-locked:" & lockedRev
+  return ""
 
 proc catalogRootOfInterfaceModule*(file: string): string =
   ## The catalog checkout that ``file`` belongs to when ``file`` is a catalog

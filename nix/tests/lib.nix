@@ -341,6 +341,216 @@ let
       )
     );
 
+  # --- brewRealizationOf (GM5b) ---------------------------------------------
+  # The real pinned catalog (reprobuild-brew-packages) for the mappings a
+  # host relies on, and synthetic catalogs for the refusals the real one must
+  # never exhibit (an ambiguous name or token, a develop interface, an
+  # unknown record kind).
+  brewTests =
+    let
+      mkRecord =
+        {
+          target,
+          kind ? "cask",
+          token,
+          file ? "repro.nim",
+          line ? 1,
+          develop ? false,
+        }:
+        {
+          targetPackage = target;
+          contributor = "github:example/brew-${file}";
+          developInterface = develop;
+          location = {
+            inherit file line;
+          };
+          homebrewProvisioning = [
+            {
+              inherit kind token;
+              tap = "";
+              location = {
+                inherit file;
+                line = line + 1;
+              };
+            }
+          ];
+        };
+      catalog = name: records: {
+        inherit name;
+        records = builtins.toFile "${name}.json" (toJSON {
+          format = "repro.provisioning-contributions";
+          schemaVersion = 1;
+          contributions = records;
+        });
+      };
+      synthetic = libFor [
+        (catalog "a" [
+          (mkRecord {
+            target = "twice";
+            token = "twice-a";
+            file = "a.nim";
+          })
+          (mkRecord {
+            target = "shared-a";
+            token = "shared";
+            file = "a.nim";
+            line = 5;
+          })
+          (mkRecord {
+            target = "devpkg";
+            token = "devpkg";
+            develop = true;
+          })
+          (mkRecord {
+            target = "cli";
+            kind = "formula";
+            token = "cli-tool";
+          })
+        ])
+        (catalog "b" [
+          (mkRecord {
+            target = "twice";
+            token = "twice-b";
+            file = "b.nim";
+            line = 2;
+          })
+          (mkRecord {
+            target = "shared-b";
+            token = "shared";
+            file = "b.nim";
+            line = 7;
+          })
+        ])
+      ];
+      badKind = libFor [
+        (catalog "bad" [
+          (mkRecord {
+            target = "x";
+            kind = "tap";
+            token = "x";
+          })
+        ])
+      ];
+      darwin = "aarch64-darwin";
+      linux = "x86_64-linux";
+    in
+    # The real catalog: the application set and the casks a Brewfile names.
+    expect "brewRealizationOf vscode on aarch64-darwin" {
+      kind = "cask";
+      token = "visual-studio-code";
+      tap = "";
+    } (reprobuildLib.brewRealizationOf {
+      name = "vscode";
+      system = darwin;
+    })
+    ++ expect "brewRealizationOf jdk on x86_64-darwin is temurin@21" "temurin@21"
+      (reprobuildLib.brewRealizationOf {
+        name = "jdk";
+        system = "x86_64-darwin";
+      }).token
+    ++ expect "a cask claims nothing on Linux" null (
+      reprobuildLib.brewRealizationOf {
+        name = "vscode";
+        system = linux;
+      }
+    )
+    ++ expect "an unclaimed package is not claimed" null (
+      reprobuildLib.brewRealizationOf {
+        name = "bash";
+        system = darwin;
+      }
+    )
+    ++ expectTrue "an unclaimed package is reported, not guessed" (
+      let
+        r = reprobuildLib.lookupBrewRealization "bash";
+      in
+      !r.found && contains "no Homebrew record claims `bash`" r.reason
+    )
+    ++ expect "lookupBrewToken visual-studio-code" "vscode"
+      (reprobuildLib.lookupBrewToken { token = "visual-studio-code"; }).name
+    ++ expect "lookupBrewToken codex-app is the desktop app" "codex-desktop"
+      (reprobuildLib.lookupBrewToken { token = "codex-app"; }).name
+    ++ expectTrue "an unknown token maps to nothing and is reported" (
+      let
+        r = reprobuildLib.lookupBrewToken { token = "gm5b-no-such-cask"; };
+      in
+      !r.found
+      && !(r ? name)
+      && contains "no canonical package in reprobuild-nix-packages, reprobuild-brew-packages is installed by Homebrew cask `gm5b-no-such-cask`" r.reason
+    )
+    ++ expectTrue "a cask token is not found as a formula" (
+      !(reprobuildLib.lookupBrewToken {
+        kind = "formula";
+        token = "visual-studio-code";
+      }).found
+    )
+    ++ expectTrue "the real catalog maps each name and each token once" (
+      let
+        recs = reprobuildLib.brewRecords;
+        uniq = xs: builtins.length (builtins.attrNames (lib.genAttrs xs (_: true))) == builtins.length xs;
+      in
+      builtins.length recs >= 30
+      && uniq (map (r: r.name) recs)
+      && uniq (map (r: "${r.kind}:${r.token}") recs)
+    )
+    ++ expectTrue "the Nix catalog contributes no Homebrew record" (
+      builtins.all (r: r.catalog == "reprobuild-brew-packages") reprobuildLib.brewRecords
+    )
+    # Synthetic catalogs: the refusals.
+    ++ expectTrue "a formula claims on Linux and darwin" (
+      (synthetic.brewRealizationOf {
+        name = "cli";
+        system = linux;
+      }) == {
+        kind = "formula";
+        token = "cli-tool";
+        tap = "";
+      }
+      && (synthetic.brewRealizationOf {
+        name = "cli";
+        system = darwin;
+      }) != null
+    )
+    ++ expectTrue "two Homebrew records for one package are ambiguous" (
+      let
+        r = synthetic.lookupBrewRealization "twice";
+      in
+      !r.found && contains "2 Homebrew records" r.reason && contains "a a.nim:2" r.reason
+    )
+    ++ expectTrue "brewRealizationOf throws on an ambiguous package" (
+      fails (
+        synthetic.brewRealizationOf {
+          name = "twice";
+          system = darwin;
+        }
+      )
+    )
+    ++ expectTrue "a token two packages claim is ambiguous, not guessed" (
+      let
+        r = synthetic.lookupBrewToken { token = "shared"; };
+      in
+      !r.found && contains "claimed by 2 canonical packages (shared-a, shared-b" r.reason
+    )
+    ++ expectTrue "a develop-interface contribution is refused" (
+      !(synthetic.lookupBrewRealization "devpkg").found
+      && !(synthetic.lookupBrewToken { token = "devpkg"; }).found
+      && fails (
+        synthetic.brewRealizationOf {
+          name = "devpkg";
+          system = darwin;
+        }
+      )
+    )
+    ++ expectTrue "an unknown record kind is refused, not skipped" (fails badKind.brewRecords)
+    ++ expectTrue "an unknown lookup kind is reported" (
+      contains "not a Homebrew record kind" (
+        synthetic.lookupBrewToken {
+          kind = "tap";
+          token = "x";
+        }
+      ).reason
+    );
+
   failures =
     predicateTests
     ++ dataSelectionTests
@@ -348,7 +558,8 @@ let
     ++ dataThrowTests
     ++ intentTests
     ++ refusalTests
-    ++ realizationTests;
+    ++ realizationTests
+    ++ brewTests;
 
   # Vacuity: the fixture trees were found and compared.
   counts = {
