@@ -821,7 +821,11 @@ suite "e2e_repro_dev_sessions":
       # service declared: 60000 ms declared + 10000 ms margin.
       check res.output.contains("waiting up to 70000 ms (derived: 60000 ms " &
         "of declared service readiness timeouts + 10000 ms margin")
-      check not res.output.contains("did not become queryable")
+      # Neither of the two messages the parent's wait can end in today. The
+      # pre-fix "did not become queryable" text no longer exists anywhere in
+      # the tree, so asserting its absence could not fail; these can.
+      check not res.output.contains("is still starting")
+      check not res.output.contains("dev session cannot start")
 
       let metadata = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
       check metadata["services"][0]["ready"].getBool()
@@ -882,7 +886,6 @@ suite "e2e_repro_dev_sessions":
         "the declared service readiness timeouts would derive 70000 ms)")
       check res.output.contains("events.jsonl")
       check res.output.contains("the session was left running")
-      check not res.output.contains("did not become queryable")
       # It gave up when the USER said, not when the service said: the
       # wait it reports is the 800 ms it was given, not the 70000 ms the
       # service's declaration would have allowed.
@@ -920,7 +923,6 @@ suite "e2e_repro_dev_sessions":
       check res.output.contains("dev session cannot start")
       check res.output.contains("service slow")
       check res.output.contains("events.jsonl")
-      check not res.output.contains("did not become queryable")
       check not res.output.contains("is still starting")
       # Bounded by the DECLARED timeout plus startup overhead, and well
       # inside the 12000 ms budget the parent was willing to wait: the
