@@ -142,6 +142,9 @@ const PartialCatalogCoverage* = {
   "clang": "Windows archive only; POSIX hosts use the nixPackage.",
   "capnp": "Windows archive only; POSIX hosts use the nixPackage.",
   "zstd": "Windows archive only; POSIX hosts use the nixPackage.",
+  "zstd-dev": "Windows archive only; POSIX hosts use the nixPackage. " &
+    "Same upstream release as 'zstd', selected on its header rather than " &
+    "its executable.",
   "tmux": "Windows archive only; POSIX hosts use the nixPackage.",
   "sh": "Windows archive only; POSIX hosts have a system shell.",
   "openssl": "Windows archive only; POSIX hosts use the nixPackage."

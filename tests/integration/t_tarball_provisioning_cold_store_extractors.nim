@@ -41,6 +41,7 @@ import repro_tool_profiles
 import repro_dsl_stdlib/packages/git
 import repro_dsl_stdlib/packages/msys2_ncurses
 import repro_test_support/reasoned_skip
+import repro_test_support/process_fixtures
 
 const HostHasArchivedTools = defined(windows) and defined(amd64)
 
@@ -60,6 +61,11 @@ proc stdlibToolUse(packageName, executableName: string): InterfaceToolUse =
 suite "cold-store realization of archived tools without host extractors":
   putEnv("REPRO_CACHE_DISABLE", "1")
   let tempRoot = createTempDir("repro-cold-extractors-", "")
+  # Removed when THIS process exits. Suite-level code runs in every
+  # process the runner starts -- one per case, plus its ``--list-json``
+  # probe -- and nothing removed this directory in any of them. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(tempRoot)
   let storeRoot = tempRoot / "store"
 
   when HostHasArchivedTools:

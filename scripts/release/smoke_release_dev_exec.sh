@@ -37,13 +37,41 @@ work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-smoke-XXXXXX")
 trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 project="$work/project"
 mkdir -p "$project"
-cat > "$project/repro.nim" <<'EOF'
+# On Linux the recipe also declares a `dslDeps:` dependency and USES the symbol
+# it exports. Its macro expansion resolves the dependency by running
+# `<reproBin> internal resolve-package …` through `staticExec`, which ignores a
+# failed command: under the archive's loader launcher a `reproBin` naming the
+# glibc loader (getAppFilename()) resolved nothing and dropped the import
+# without a word. Using the symbol turns that into a compile error here
+# (`undeclared identifier`). The use is gated on `reproInterfaceMode` because
+# only the interface compile receives the dslDeps imports. Linux only because
+# the loader launcher is Linux-only, and that is where this has been verified.
+if [[ "$(uname -s)" == Linux* ]]; then
+  mkdir -p "$work/release_smoke_exporter"
+  cat > "$work/release_smoke_exporter/repro.nim" <<'EOF'
+const releaseSmokeExported* = "exported"
+EOF
+  cat > "$project/repro.nim" <<'EOF'
+import repro_project_dsl
+
+package releaseSmoke:
+  dslDeps:
+    "release_smoke_exporter"
+  when defined(reproInterfaceMode):
+    const releaseSmokeImported = releaseSmokeExported
+    static: doAssert releaseSmokeImported.len > 0
+  devEnv:
+    discard
+EOF
+else
+  cat > "$project/repro.nim" <<'EOF'
 import repro_project_dsl
 
 package releaseSmoke:
   devEnv:
     discard
 EOF
+fi
 
 scrub=(
   REPROBUILD_SOURCE_ROOT REPROBUILD_LIBS_DIR REPROBUILD_REPO_ROOT
@@ -68,7 +96,10 @@ if command -v timeout >/dev/null 2>&1; then
   bound=(timeout --kill-after=60 "${REPRO_SMOKE_TIMEOUT_SECONDS:-2700}")
 fi
 set +e
-(cd "$project" && "${bound[@]}" "$repro_bin" exec -- bash -c \
+# Guarded array expansion: under `set -u`, bash < 4.4 treats `"${bound[@]}"` on an
+# empty array as an unbound variable. `${bound[@]+"${bound[@]}"}` expands to nothing
+# when empty without triggering nounset errors on macOS stock /bin/bash (3.2).
+(cd "$project" && ${bound[@]+"${bound[@]}"} "$repro_bin" exec -- bash -c \
   'echo "$1"; echo "seeded-source-root=${REPROBUILD_SOURCE_ROOT:-}"' _ "$marker") \
   > "$out" 2>&1 < /dev/null
 rc=$?
@@ -83,6 +114,13 @@ if [[ $rc -ne 0 ]] || ! grep -q "^${marker}" "$out"; then
   if grep -q "cannot open file" "$out"; then
     echo "  A module the installed compile needs is missing from the archive's share/repro;" >&2
     echo "  see scripts/release/stage_release_sources.sh." >&2
+  fi
+  if grep -q "error while loading shared libraries" "$out"; then
+    echo "  The engine re-executed the glibc loader instead of its launcher;" >&2
+    echo "  see publicCliImagePath in libs/repro_core/src/repro_core/source_root.nim." >&2
+  elif grep -q "undeclared identifier" "$out"; then
+    echo "  The recipe's dslDeps: import was dropped: its resolve-package callback" >&2
+    echo "  (-d:reproBin) did not name a runnable engine." >&2
   fi
   exit 1
 fi

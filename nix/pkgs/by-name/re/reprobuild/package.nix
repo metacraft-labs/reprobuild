@@ -49,6 +49,16 @@
   # source. See ./nim-fork.nix for why the stock nixpkgs `nim` cannot be used.
   nimFork ? callPackage ./nim-fork.nix { },
 
+  # The flake supplies its pinned bundle. A nixpkgs-style build uses the same
+  # shared derivation from the pinned source, without depending on flake APIs.
+  macosTools ? if stdenv.isDarwin then callPackage "${macosToolsSrc}/package.nix" { } else null,
+  # This fixed evaluation-time fetch permits importing the shared recipe
+  # without import-from-derivation; the payload is the same pinned source.
+  macosToolsSrc ? builtins.fetchTarball {
+    url = "https://github.com/metacraft-labs/stackable-hooks-macos-tools/archive/1ad378d58776ec9b6cc73e1c27b8e53c15676f03.tar.gz";
+    sha256 = "sha256-l4rPNg0DzGmaNpBpCFGTM6qFAg2Og0HCA5X/yny0/R0=";
+  },
+
   # ── Sources ────────────────────────────────────────────────────────────────
   # Every entry mirrors a pin of the `flake.lock` of the commit `src` (below)
   # names -- NOT of the tree this file sits in, whose lock moves on every
@@ -259,6 +269,7 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   env = {
+    STACKABLE_HOOKS_BUILT_TOOLS_DIR = if stdenv.isDarwin then "${macosTools}" else "";
     BLAKE3_PREFIX = "${blake3Prefix}";
     NIMCRYPTO_SRC = "${nimcryptoSrc}";
     BEARSSL_SRC = "${bearsslSrc}";
@@ -514,10 +525,10 @@ stdenv.mkDerivation (finalAttrs: {
     license = lib.licenses.mit;
     mainProgram = "repro";
     maintainers = [ ];
+    # nixpkgs 26.11 dropped x86_64-darwin (see flake.nix `systems`).
     platforms = [
       "x86_64-linux"
       "aarch64-linux"
-      "x86_64-darwin"
       "aarch64-darwin"
     ];
   };

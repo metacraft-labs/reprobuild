@@ -597,6 +597,24 @@ lint:
     # is a live walk of `tests/`, not a list, so a new file cannot be invisible
     # to it (Verification-Harness-Traps.md Sec. 35).
     python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
+    # The version-literal gate, beside the vacuous-case and bare-skip gates
+    # because it guards the same property from a third side: a case that
+    # PRETENDS to have run, a case that declines to run, and -- this one -- a
+    # case that runs and measures the wrong thing. It refuses an integer
+    # literal standing in for a format version: a number poked into the
+    # version word at byte 4/5, a hand-listed set of version numbers driving
+    # such a poke, or a literal pinned against one, unless the line carries
+    # `# version-literal-ok: <reason>`. Measured at ee229299f: SEVENTEEN
+    # unannotated instances across seven files, ten of them live defects
+    # and three of those a verbatim `[2, 3, 4, 5]` that had silently stopped
+    # covering version 6 when the action-record epoch moved 6 -> 7. Source
+    # scan, no compiler, seconds -- same cost class as its neighbours.
+    python3 ./scripts/check_version_literals.py 2>&1 | tee -a test-logs/lint.log
+    # ...and the proof it still has the power it claims, on the model of the
+    # shell-command-strings self-test above. Every exemption is a licence to
+    # ignore a real defect, so each shape is probed with an instance that
+    # must be caught and each allowance with one that must not be.
+    python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,
     # under a second -- and here because of what it catches, which nothing
@@ -1014,9 +1032,11 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
 # the events either side of the boundary reproduce the body that produced them.
 # Campaigns: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org HLX-M7;
 #            reprobuild-specs/HCR-Per-Platform-Handoff.milestones.org HX-S-2.
-# Needs the sibling codetracer-native-recorder checkout built
-# (`just build-ct-mcr` there); the gate fails loudly naming that if it is not.
-e2e_hcr_linux_replay_of_patched_recording:
+# Records and replays with the `ct-mcr` bundle that `hcr_ct_mcr_fixture`
+# (below) builds -- the same script the graph edge
+# `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs -- so the HCR lane, which
+# runs this recipe, has the recorder without anyone building it by hand.
+e2e_hcr_linux_replay_of_patched_recording: hcr_ct_mcr_fixture
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
         --threads:on \
@@ -1025,6 +1045,15 @@ e2e_hcr_linux_replay_of_patched_recording:
         --out:build/test-bin/e2e_hcr_linux_replay_of_patched_recording \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_replay_of_patched_recording.log
+
+# The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
+# needs, staged into build/test-fixtures/hcr-ct-mcr: the recorder's own
+# `just build-ct-mcr`, run in the recorder's own flake dev shell (sibling from
+# $CT_CODETRACER_NATIVE_RECORDER_SIBLING, else ../codetracer-native-recorder).
+# The graph edge `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs this same
+# script; see its header. A no-op that says so off Linux x86_64.
+hcr_ct_mcr_fixture:
+    bash ./scripts/build_hcr_ct_mcr_fixture.sh
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.
@@ -2885,6 +2914,15 @@ e2e_hcr_linux_concurrent_patch_no_torn_instruction:
         --out:build/test-bin/e2e_hcr_linux_concurrent_patch_no_torn_instruction \
         tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_concurrent_patch_no_torn_instruction.log
+
+integration_hcr_linux_concurrent_patch_gate_conditions:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_concurrent_patch_gate_conditions \
+        --out:build/test-bin/integration_hcr_linux_concurrent_patch_gate_conditions \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_concurrent_patch_gate_conditions.log
 
 e2e_hcr_linux_quiescence_handshake_and_release:
     mkdir -p test-logs build/test-bin build/nimcache

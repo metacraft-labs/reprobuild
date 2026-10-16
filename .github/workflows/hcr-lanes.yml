@@ -87,7 +87,10 @@ jobs:
   hcr-lane-linux:
     name: HCR lane (linux-x86_64)
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) -> eph-linux-x64
-    timeout-minutes: 60
+    # 90, up from 60: the lane now also builds the `ct-mcr` recorder bundle
+    # (its dev shell, nimble and cargo) before the replay gate, on a runner
+    # that starts cold.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access
@@ -117,7 +120,65 @@ jobs:
       # refuses to start without it; this is the step that supplies it.
       - name: Build repro
         run: dev-exec just build
+      # `e2e_hcr_linux_replay_of_patched_recording` records and replays with
+      # the `ct-mcr` bundle its recipe builds through `hcr_ct_mcr_fixture`
+      # (scripts/build_hcr_ct_mcr_fixture.sh): the recorder's own `just
+      # build-ct-mcr` in the recorder's own flake dev shell. The recorder
+      # itself (and codetracer, codetracer-trace-format, nim-stackable-hooks,
+      # codetracer-trace-format-nim) come from .github/sibling-repos; these
+      # two are read only by that recipe -- its licensing prerequisite builds
+      # `ct_license_ffi` in ../codetracer-native-backend, and ct_cli imports
+      # ../codetracer-visual-replay -- so they are cloned for this job alone
+      # rather than for every dev-shell job.
+      - name: Clone codetracer-native-backend sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-native-backend
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-native-backend
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      - name: Clone codetracer-visual-replay sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-visual-replay
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-visual-replay
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      # Installation tokens expire after an hour; the lane (and the recorder
+      # build at its start) can outlast the one minted above.
+      - name: Refresh installation token for the lane
+        id: ci_token_lane
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          # Scoped to the private repositories the recorder bundle fetches:
+          # the recorder itself, codetracer-rr (a private flake input of its
+          # dev shell) and lldb-sys.rs (a private cargo git dependency of the
+          # backend's `ct_license_ffi`). The token reaches every gate in the
+          # lane through the environment, so it names nothing else.
+          repositories: |
+            codetracer-native-recorder
+            codetracer-rr
+            lldb-sys.rs
+          permission-contents: read
+      # The recorder's flake has a private input (nix needs the scoped access
+      # token), and its recipe fetches a private cargo git dependency (cargo
+      # goes through the git CLI, which reads the GIT_CONFIG_* rewrite). The
+      # fixture script forwards exactly these GIT_CONFIG_* variables into the
+      # recorder's otherwise cleared shell. Mirrors the Test job in ci.yml.
       - name: Run the HCR lane
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_lane.outputs.token }}@github.com/metacraft-labs/lldb-sys.rs.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/lldb-sys.rs
+          NIX_CONFIG: >-
+            access-tokens = github.com=${{ github.token }}
+            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_lane.outputs.token }}
+            github.com/metacraft-labs/codetracer-rr=${{ steps.ci_token_lane.outputs.token }}
         run: dev-exec just hcr_lane_linux
       - name: Upload the per-platform census and gate logs
         if: always()

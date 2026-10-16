@@ -163,7 +163,10 @@ suite "stdlib catalog tarball arms realize on this host":
         let verdict = conformTarballArm(useDef, arm, storeRoot)
         case verdict.verdict
         of acvOk:
-          discard
+          # A note here means the arm conforms but this host cannot start
+          # it (NixOS); the realizer refuses it at resolution instead.
+          if verdict.detail.len > 0:
+            checkpoint(label & ": " & verdict.detail)
         of acvOwnedByHomeRealizer:
           inc homeRealizerArms
         else:

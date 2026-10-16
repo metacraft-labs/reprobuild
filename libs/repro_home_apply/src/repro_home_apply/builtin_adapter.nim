@@ -72,6 +72,8 @@ import ./errors
 import ./junction_aware_remove
 import ./macos_archives
 import ./package_catalog
+when defined(macosx):
+  import ./macos_installer
 
 type
   EBuiltinDigestMismatch* = object of EHomeApply
@@ -244,10 +246,17 @@ type
       ## assert the silent flag + target dir were composed correctly.
     appBundlePath*: string
       ## GM4c: for an `imAppBundle` realization, the verified bundle at the
-      ## prefix root (`<prefix>/<Name>.app`); "" otherwise.
+      ## prefix root (`<prefix>/<Name>.app`); for a macOS installer
+      ## application, the placed item the installer produced (the product
+      ## bundle, or the folder holding it: `<prefix>/OpenWebStart`); ""
+      ## otherwise.
+    appBundleMainPath*: string
+      ## For a placed FOLDER, the product bundle's path inside it
+      ## (`OpenWebStart javaws.app`); "" when the placed item is the bundle.
     appBundleIdentity*: seq[byte]
-      ## GM4c: `appBundleCanonicalBytes` of that bundle — what activation
-      ## pins the placed copy to.
+      ## GM4c: `readPlacedItemIdentityBytes` of the placed item (a bundle's
+      ## `appBundleCanonicalBytes`, or the folder identity) — what
+      ## activation pins the placed copy to.
 
 const
   SevenZipPackageNames* = ["7zip", "sevenzip"]
@@ -2583,6 +2592,57 @@ proc appBundleLeaf*(resolution: ArchiveRealization): string =
   ## nested in a package payload alike: the prefix holds it at its root.
   resolution.appBundle.replace('\\', '/').split('/')[^1]
 
+proc isMacosInstallerApp*(resolution: ArchiveRealization): bool =
+  ## A macOS installer application (Store-And-Installation-Layout.md
+  ## § Installer applications): an ``installer-silent`` record that names
+  ## the installer's ``installerApp``. A Windows installer names none.
+  resolution.installMethod == imInstallerSilent and
+    resolution.installerApp.len > 0
+
+proc appPlacedItem*(resolution: ArchiveRealization):
+    tuple[item, mainBundle: string] =
+  ## What activation places in the Applications directory for an
+  ## application record, and the product bundle's path inside it: an
+  ## ``app-bundle`` record places its bundle (``appBundleLeaf``); an
+  ## installer application places the first component of its ``appBundle``
+  ## -- the bundle, or the folder holding it (``placedItemOf``).
+  if isMacosInstallerApp(resolution):
+    placedItemOf(resolution.appBundle)
+  else:
+    (appBundleLeaf(resolution), "")
+
+proc installerArchiveKindOf(packageId: string; format: ArchiveFormat):
+    AppArchiveKind =
+  ## Which unpacking an installer application's archive gets. Not ``pkg``:
+  ## a flat installer package that must run is ``pkg-install``.
+  case format
+  of afDmg: aakDmg
+  of afZip: aakZip
+  of afTarGz, afTarXz, afTarBz2: aakTar
+  else:
+    var e = newException(EBuiltinInstallMethodUnsupported,
+      "builtin adapter: package '" & packageId & "' is a macOS installer " &
+      "application in archive type " & $format & "; an installer " &
+      "application is delivered as dmg, zip, tar.gz, tar.xz or tar.bz2")
+    e.step = 7
+    e.stepName = "realize"
+    e.packageId = packageId
+    e.installMethod = $imInstallerSilent
+    raise e
+
+proc publishAppItem(res: var RealizeBuiltinResult;
+                    resolution: ArchiveRealization; prefixAbs: string) =
+  ## Record the realized application's placed item and its identity, which
+  ## activation pins the placed copy to (the prefix was verified before it
+  ## was published; activation verifies the placed copy again).
+  if resolution.installMethod != imAppBundle and
+      not isMacosInstallerApp(resolution):
+    return
+  let placed = appPlacedItem(resolution)
+  res.appBundlePath = prefixAbs / placed.item
+  res.appBundleMainPath = placed.mainBundle
+  res.appBundleIdentity = readPlacedItemIdentityBytes(res.appBundlePath)
+
 proc realizeBuiltinPackage*(store: var Store;
                             resolution: ArchiveRealization;
                             appTrust: AppTrustPolicy = {}):
@@ -2640,8 +2700,18 @@ proc realizeBuiltinPackage*(store: var Store;
     extra.add("app:" & resolution.appBundle)
     extra.add("bundleId:" & resolution.bundleId)
     extra.add("teamId:" & resolution.teamId)
-  if resolution.installMethod == imAppBundle and
-      resolution.digestAlgorithm != "sha256":
+  # An installer application: the installer that ran is part of what the
+  # prefix is (Store-And-Installation-Layout.md § Installer applications).
+  # Its unattended arguments too: they decide what it installs and where,
+  # so a record that changes them must not be served the old prefix. (Only
+  # for installer applications, so no existing prefix id changes.)
+  if resolution.installerApp.len > 0:
+    extra.add("installerApp:" & resolution.installerApp)
+    for arg in resolution.installerArgs:
+      extra.add("installerArg:" & arg)
+  let macosApp = resolution.installMethod == imAppBundle or
+    isMacosInstallerApp(resolution)
+  if macosApp and resolution.digestAlgorithm != "sha256":
     # The archive is attached (a disk image) or expanded before its bundle's
     # signature can be checked, so its bytes are pinned by SHA-256 first.
     var e = newException(EBuiltinInstallMethodUnsupported,
@@ -2652,17 +2722,19 @@ proc realizeBuiltinPackage*(store: var Store;
     e.step = 7
     e.stepName = "realize"
     e.packageId = packageId
-    e.installMethod = $imAppBundle
+    e.installMethod = $resolution.installMethod
     raise e
   when not defined(macosx):
-    if resolution.installMethod == imAppBundle:
+    if macosApp:
       var e = newException(EBuiltinInstallMethodUnsupported,
         "builtin adapter: package '" & packageId & "' is a macOS " &
-        "application bundle; it is realized on a macOS host only")
+        (if resolution.installMethod == imAppBundle: "application bundle"
+         else: "installer application") &
+        "; it is realized on a macOS host only")
       e.step = 7
       e.stepName = "realize"
       e.packageId = packageId
-      e.installMethod = $imAppBundle
+      e.installMethod = $resolution.installMethod
       raise e
   let prefixId = computeRealizationHash(packageId, version,
     BuiltinAdapterName, lockIdentity, declaredExe,
@@ -2687,12 +2759,9 @@ proc realizeBuiltinPackage*(store: var Store;
       result.digestValue = resolution.digestValue
       result.archiveFormat = resolution.archiveFormat
       result.envBindings = substituteEnv(resolution.envSubstitutions, prefixAbs)
-      if resolution.installMethod == imAppBundle:
-        # The prefix was verified before it was published; activation
-        # verifies the placed copy again and pins it to this identity.
-        result.appBundlePath = prefixAbs / appBundleLeaf(resolution)
-        result.appBundleIdentity = appBundleCanonicalBytes(
-          readAppBundleIdentity(result.appBundlePath))
+      # The prefix was verified before it was published; activation
+      # verifies the placed copy again and pins it to this identity.
+      publishAppItem(result, resolution, prefixAbs)
       return
 
   # Steps 2-7: genuine realization. Use the store's realizePrefix
@@ -2937,8 +3006,37 @@ proc realizeBuiltinPackage*(store: var Store;
             darkExe = darkExe, innounpExe = innounpExe,
             msiAdminInstallOverride = resolution.msiAdminInstall)
       of imInstallerSilent:
-        capturedInstallerArgv = runInstallerSilent(packageId, downloadPath,
-          stagingDir, resolution.installerArgs, resolution.archiveFormat)
+        if isMacosInstallerApp(resolution):
+          # Store-And-Installation-Layout.md § Installer applications: the
+          # installer is copied out of the archive into private scratch
+          # OUTSIDE the staging prefix, verified, and run confined into the
+          # prefix, which must hold only the placed item afterwards -- so
+          # the downloaded archive is moved to that scratch and the download
+          # directory removed first, leaving the prefix empty. A refusal
+          # raises out of this closure: `realizePrefix` discards the staging
+          # directory and nothing is published.
+          when defined(macosx):
+            let scratch = stagingDir & ".installer"
+            try:
+              createDir(scratch)
+              let archive = scratch / extractFilename(downloadPath)
+              moveFile(downloadPath, archive)
+              removeDir(extendedPath(downloadDir))
+              capturedInstallerArgv = realizeInstallerApp(archive,
+                installerArchiveKindOf(packageId, resolution.archiveFormat),
+                resolution.installerApp, resolution.installerArgs,
+                resolution.appBundle, appBundleExpectationOf(resolution),
+                stagingDir, scratch, appTrust)
+            finally:
+              # The installer's scratch HOME and its copy of the installer
+              # may be read-only; make it removable before removing it.
+              discard runSystemTool("/bin/chmod", ["-R", "u+w", scratch])
+              try: removeDir(scratch) except OSError: discard
+          else:
+            discard # refused above: realized on a macOS host only
+        else:
+          capturedInstallerArgv = runInstallerSilent(packageId, downloadPath,
+            stagingDir, resolution.installerArgs, resolution.archiveFormat)
       of imInstallerMsi:
         # M4: MSI extraction via lessmsi (default) or msiexec /a
         # (CAKBUILTIN_PREFER_MSIEXEC=1 or platform.msi_admin_install).
@@ -3152,10 +3250,7 @@ proc realizeBuiltinPackage*(store: var Store;
   result.resolvedExecutablePath = exePath
   result.envBindings = substituteEnv(resolution.envSubstitutions,
     outcome.absolutePath)
-  if resolution.installMethod == imAppBundle:
-    result.appBundlePath = outcome.absolutePath / appBundleLeaf(resolution)
-    result.appBundleIdentity = appBundleCanonicalBytes(
-      readAppBundleIdentity(result.appBundlePath))
+  publishAppItem(result, resolution, outcome.absolutePath)
   # M3: append pre_install Add-Path bindings (the action's `value` was
   # already substituted against the staging dir; rewrite to the final
   # realized prefix abs path so downstream consumers get a stable

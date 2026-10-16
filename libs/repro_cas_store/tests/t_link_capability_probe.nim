@@ -18,9 +18,10 @@
 ## announce via ``checkpoint`` when the host cannot supply one rather
 ## than silently passing.
 
-import std/[exitprocs, os, sequtils, strutils, unittest]
+import std/[os, sequtils, strutils, unittest]
 
 from repro_core/paths import extendedPath
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 import repro_cas_store
 
@@ -35,14 +36,15 @@ type
     pairKey*: string  ## ``filesystemPairKey(dir, dir)``; the identity we
                       ## use to tell one volume from another.
 
-var scratchDirs: seq[string] = @[]
-
 proc claimScratchDir(parent: string; tag: string): string =
-  ## Create ``<parent>/repro-m0-<pid>-<tag>`` and remember it for
-  ## teardown. Returns ``""`` when the parent is not writable.
+  ## Create ``<parent>/repro-m0-<pid>-<tag>``, removed when this process
+  ## exits. Returns ``""`` when the parent is not writable.
   if parent.len == 0 or not dirExists(extendedPath(parent)):
     return ""
   let candidate = parent / ("repro-m0-" & $getCurrentProcessId() & "-" & tag)
+  # Owned by THIS process: removed when it exits, whichever cases it ran.
+  # Registered before the directory exists, so it is never on disk unowned.
+  releaseDirAtProcessExit(candidate)
   try:
     createDir(extendedPath(candidate))
     # Prove it is writable, not merely creatable.
@@ -51,7 +53,6 @@ proc claimScratchDir(parent: string; tag: string): string =
     removeFile(extendedPath(witness))
   except CatchableError, Defect:
     return ""
-  scratchDirs.add(candidate)
   candidate
 
 proc candidateParents(): seq[string] =
@@ -88,7 +89,23 @@ proc discoverVolumes(): seq[ProbeVolume] =
     result.add(ProbeVolume(dir: dir, fsName: filesystemName(dir),
                            pairKey: filesystemPairKey(dir, dir)))
 
-let volumes = discoverVolumes()
+## Discovery is LAZY: it runs on first use, from inside a case, never at
+## module scope. The runner runs every case in its own process and probes
+## the binary with ``--list-json`` besides; discovery at module scope made
+## each of those processes claim a scratch directory on every volume, and
+## only the final "teardown" case removed any — its own process's.
+var discoveredVolumes: seq[ProbeVolume] = @[]
+var volumesDiscovered = false
+
+proc hostVolumes(): seq[ProbeVolume] =
+  if not volumesDiscovered:
+    volumesDiscovered = true
+    discoveredVolumes = discoverVolumes()
+  discoveredVolumes
+
+template volumes(): untyped =
+  ## Every discovered volume; discovers on first use.
+  hostVolumes()
 
 proc primaryVolume(): ProbeVolume =
   doAssert volumes.len > 0,
@@ -408,14 +425,11 @@ suite "M0 link-capability probe — pair identity":
     let vol = primaryVolume()
     check hardlinkCount(vol.dir / "definitely-not-here.bin") == -1
 
-suite "M0 link-capability probe — teardown":
-  # Deliberately a test rather than an ``addExitProc``: under ORC the
-  # exit-proc closure runs after this module's globals have been
-  # destroyed, so ``scratchDirs`` is already gone by then.
-  test "every scratch directory this suite created is removed":
-    for d in scratchDirs:
-      try:
-        removeDir(extendedPath(d))
-      except CatchableError, Defect:
-        discard
-      check not dirExists(extendedPath(d))
+# There is deliberately no "teardown" suite. This file used to end with a
+# case that removed every scratch directory, and the runner runs each case
+# in its own process: that case removed only what ITS OWN process had
+# claimed, while every other case process and the ``--list-json`` probe left
+# a directory per volume behind. Release now belongs to the process that
+# claimed the directory (``claimScratchDir``), and the guarantee is checked
+# the way the runner runs this file by
+# ``tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process``.

@@ -976,6 +976,82 @@ proc registeredResourceTypeInterfaces*(): seq[ResourceTypeInterfaceDef]
   ## declaration order. Consumed by ``toProjectInterface``.
   resourceTypeInterfaceRegistry
 
+var activityInterfaceRegistry: seq[ActivityInterfaceDef] = @[]
+  ## Shared-Development-Services L3: module-global set of exported dev-env
+  ## activity SIGNATURES, collected for interface lifting. Shape taken
+  ## from ``resourceTypeInterfaceRegistry`` above, with one deliberate
+  ## difference: each record carries its own ``packageName``, because
+  ## activities ARE declared lexically inside a ``package`` block and the
+  ## extractor can therefore attribute them exactly rather than folding
+  ## the whole registry into whichever project is being lifted.
+  ##
+  ## Populated at MODULE INIT, outside the ``when defined(reproProviderMode)``
+  ## guard that wraps ``devEnv<Pkg>Package()``. That placement is
+  ## load-bearing and was measured: in interface mode the dev-env proc is
+  ## not even compiled, so a registration emitted inside its body would
+  ## never run and the lift would carry nothing.
+
+var serviceInterfaceRegistry: seq[ServiceInterfaceDef] = @[]
+  ## Shared-Development-Services L3: the service half of the same lift.
+  ## See ``activityInterfaceRegistry``.
+
+proc resetActivityInterfaceRegistry*() {.dynOrStatic.} =
+  activityInterfaceRegistry.setLen(0)
+
+proc registerActivityInterface*(packageName: string;
+                                def: ActivityInterfaceDef) {.dynOrStatic.} =
+  ## Append one activity signature. Emitted by the ``package`` macro's
+  ## dev-env walker at module scope, once per constructor-shaped
+  ## ``activity``. Re-registration of the same (package, name) pair
+  ## REPLACES the earlier record rather than appending a second one: a
+  ## module whose ``package`` block is expanded twice (``include``d by a
+  ## sibling shim, which is how ``usesImportCode`` consumes a workspace
+  ## producer) would otherwise lift every activity twice and move the
+  ## interface fingerprint for a reason that has nothing to do with the
+  ## producer's contract.
+  for existing in activityInterfaceRegistry.mitems:
+    if existing.packageName == packageName and existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  activityInterfaceRegistry.add(entry)
+
+proc registeredActivityInterfaces*(): seq[ActivityInterfaceDef]
+    {.dynOrStatic.} =
+  ## The activity signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  activityInterfaceRegistry
+
+proc resetServiceInterfaceRegistry*() {.dynOrStatic.} =
+  serviceInterfaceRegistry.setLen(0)
+
+proc registerServiceInterface*(packageName: string;
+                               def: ServiceInterfaceDef) {.dynOrStatic.} =
+  ## Append one service signature. Same replace-on-duplicate rule, and
+  ## the same reason, as ``registerActivityInterface``; the identity is
+  ## (package, activity, service) because two activities may each declare
+  ## a service of the same bare name.
+  for existing in serviceInterfaceRegistry.mitems:
+    if existing.packageName == packageName and
+        existing.activityName == def.activityName and
+        existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  serviceInterfaceRegistry.add(entry)
+
+proc registeredServiceInterfaces*(): seq[ServiceInterfaceDef]
+    {.dynOrStatic.} =
+  ## The service signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  serviceInterfaceRegistry
+
 proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
   ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
   ## between scenarios so registry entries don't leak across cases.
@@ -2632,6 +2708,73 @@ proc resolveCertificateExports*(owningPackage: string;
     let implicitEntry = implicitTestCertificate(owningPackage, targets)
     if implicitEntry.name.len > 0:
       result.entries.add(implicitEntry)
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9b — ``enactCertificatePolicy <policy>``.
+#
+# Test-Certificates.md §"The policy declaration": a repository adopts a shared
+# branch policy by enacting it in its ``repro.nim``. The ``package`` macro
+# lowers the statement to ``registerEnactedCertificatePolicy`` at module
+# initialisation (and checks the policy's literal requirements at compile
+# time, ``emitEnactedCertificatePolicy``). What is registered here reaches the
+# CLI two ways, both carrying ``renderCertificatePolicyEmission``'s text:
+#
+# * written to ``$REPRO_EMIT_CERTIFICATE_POLICY`` when the recipe runs as the
+#   main module of a provider, which is how ``repro lock refresh`` and the
+#   staleness checks read it without building anything;
+# * as a ``reprobuild.certificate-policy.v1`` metadata node of the package's
+#   graph fragment (``buildPackageFragment``), which is how a certifying run's
+#   lock-update node reads it from the graph it already evaluated.
+# ---------------------------------------------------------------------------
+
+var enactedCertificatePolicies: seq[tuple[packageName: string;
+                                          policy: BranchCertificatePolicy]]
+  ## Every policy enacted by a package compiled into this provider, keyed by
+  ## the enacting package.
+var emittedCertificatePolicyPackage = ""
+  ## The main-module package whose policy was written to the emission file.
+
+proc registerEnactedCertificatePolicy*(packageName: string;
+                                       policy: BranchCertificatePolicy;
+                                       mainModule: bool) {.dynOrStatic.} =
+  ## Record ``packageName``'s enacted policy and, for the provider's main
+  ## module only, write it to ``$REPRO_EMIT_CERTIFICATE_POLICY``. A recipe
+  ## imported from a sibling (``uses:``) is not the main module, so a
+  ## sibling's own policy never reaches this repository's lock.
+  ##
+  ## The write is EAGER, at registration, for the reason
+  ## ``LockFilesEmitEnvVar`` documents: an exit proc that reads module
+  ## globals runs after they are destroyed.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      raise newException(ValueError, "package '" & packageName &
+        "' enacts a certificate policy twice")
+  enactedCertificatePolicies.add((packageName: packageName, policy: policy))
+  if not mainModule:
+    return
+  let path = getEnv(CertificatePolicyEmitEnvVar)
+  if path.len == 0:
+    return
+  if emittedCertificatePolicyPackage.len > 0 and
+      emittedCertificatePolicyPackage != packageName:
+    # repro.lock carries one policy per repository; two enacting packages
+    # in one recipe would make which one it records an accident of order.
+    raise newException(ValueError, "packages '" &
+      emittedCertificatePolicyPackage & "' and '" & packageName &
+      "' both enact a certificate policy in one recipe; repro.lock " &
+      "records one policy per repository, so enact it in one package")
+  emittedCertificatePolicyPackage = packageName
+  writeFile(path, renderCertificatePolicyEmission(policy, packageName))
+
+proc enactedCertificatePolicy*(packageName: string;
+                               policy: var BranchCertificatePolicy): bool
+    {.dynOrStatic.} =
+  ## The policy ``packageName`` enacts, if any.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      policy = entry.policy
+      return true
+  false
 
 proc resetStateGroupRegistry*() {.dynOrStatic.} =
   ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the

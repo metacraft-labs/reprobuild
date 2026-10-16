@@ -1,0 +1,83 @@
+# Baseline of uninvoked shell test scripts under tests/
+# Issue: reprobuild-pm/issues/2026-09-30-most-shell-test-scripts-are-invoked-by-nothing.md
+#
+# A test script that exists, is committed, and is never executed should be
+# either enrolled or deleted; the tree should not reach a state where it is
+# neither.
+#
+# This baseline records pre-existing unreferenced shell test scripts as accepted
+# debt so that no new uninvoked shell scripts can be added without enrollment
+# or explicit debt recording.
+#
+# Format: repo-relative paths, sorted alphabetically. Lines starting with '#'
+# and blank lines are ignored.
+
+tests/e2e/hcr-coordinate/test_hx_d1_macos_coordinate_completes_against_a_real_agent.sh
+tests/e2e/hcr-debug-unwind/test_hx_d3_backtrace_through_a_patched_macos_function_is_correct.sh
+tests/e2e/test_hx_d2_a_shipped_macos_binary_function_is_replaced_in_a_live_process.sh
+tests/fixtures/t_auto_config_minimal_validation.sh
+tests/integration-real/t_windows_client_substitute_smoke.sh
+tests/integration/binary_cache/perf/t_a2_5_single_pass_hash.sh
+tests/integration/binary_cache/t_a3_compat_isolation.sh
+tests/integration/binary_cache/t_a3_p8_transcode_chain_amd64.sh
+tests/integration/binary_cache/t_a3_r5_r9_static_smoke.sh
+tests/integration/binary_cache/t_a3_substitute_hit_r4_chain.sh
+tests/integration/binary_cache/t_a4_p1_sentinel_endpoint.sh
+tests/integration/binary_cache/t_a4_p3_parallel_orchestrator.sh
+tests/integration/binary_cache/t_a4_p5_parallel_closure.sh
+tests/integration/binary_cache/t_phaseA_debt_hard_cap.sh
+tests/integration/binary_cache/t_phaseA_debt_refresh_pins.sh
+tests/integration/binary_cache/t_r1_client_trust.sh
+tests/integration/de0/t_de0_dbus.sh
+tests/integration/de0/t_de0_graphics_stack.sh
+tests/integration/de0/t_de0_systemd_session.sh
+tests/integration/de_g/t_de_g1_gnome_catalog.sh
+tests/integration/de_h/t_de_h1_hyprland_catalog.sh
+tests/integration/de_k/t_de_k1_plasma_catalog.sh
+tests/integration/dem/t_dem1_multi_de_overlay.sh
+tests/integration/dem/t_dem2_login_selection.sh
+tests/integration/foreign_packages/t_c2_harvest_git.sh
+tests/integration/foreign_packages/t_c2_harvest_idempotent.sh
+tests/integration/foreign_packages/t_c2_harvest_signature.sh
+tests/integration/foreign_packages/t_c3_launcher_dep_resolution.sh
+tests/integration/foreign_packages/t_c3_launcher_linux_exec.sh
+tests/integration/foreign_packages/t_c3_launcher_no_host_modification.sh
+tests/integration/foreign_packages/t_c3_launcher_perf.sh
+tests/integration/foreign_packages/t_d2_harvest_dnf.sh
+tests/integration/multi_os_runtime/t_d2_launcher_runtime_darling.sh
+tests/integration/multi_os_runtime/t_d3_macos_catalog.sh
+tests/integration/multi_os_runtime/t_w2_launcher_runtime_wine.sh
+tests/integration/system_generations/t_b2_apply_diff.sh
+tests/integration/system_generations/t_b2_apply_idempotent.sh
+tests/integration/system_generations/t_b2_boot_after_apply.sh
+tests/integration/system_generations/t_b3_boot_failure_auto_rollback.sh
+tests/integration/system_generations/t_b3_concurrent_apply_lock.sh
+tests/integration/system_generations/t_b3_gc.sh
+tests/integration/system_generations/t_b3_repair.sh
+tests/integration/system_generations/t_b3_rollback.sh
+tests/integration/system_generations/t_b3_switch_live.sh
+tests/integration/system_generations/t_b3_switch_reboot.sh
+tests/integration/t_reproos_source_glibc_relocation.sh
+tests/integration/t_reproos_source_runtime_normalizer.sh
+tests/integration/test_hx_l1_the_unpatchable_set_is_inventoried_and_the_count_is_derived.sh
+tests/integration/test_hx_l2_clang_cet_target_is_refused_at_negotiation.sh
+tests/integration/test_hx_l3_a_failed_downcast_refuses_instead_of_reporting_applied.sh
+tests/integration/test_hx_s0_the_hcr_library_is_one_named_artifact_on_three_platforms.sh
+tests/integration/test_hx_s1_unwind_metadata_is_refused_rather_than_substituted.sh
+tests/integration/test_hx_s6_publication_refuses_without_a_serializing_primitive.sh
+tests/integration/test_hx_s7_the_normalisation_decision_is_recorded_and_the_rule_matches_it.sh
+tests/integration/test_hx_s8_every_platform_lane_executes_the_hcr_targets.sh
+tests/integration/test_hx_s8_the_undeclared_ffi_set_is_equal_on_every_platform_artifact.sh
+tests/integration/test_hx_s9_the_section_sign_survives_the_wire_and_the_container.sh
+tests/integration/test_hx_w0_the_windows_publication_decision_is_recorded_and_measured.sh
+tests/integration/test_hx_w1_windows_publication_refuses_or_quiesces_but_never_neither.sh
+tests/integration/test_hx_w2_windows_quiescence_holds_and_the_ip_adjustment_is_load_bearing.sh
+tests/integration/test_hx_w3_a_function_in_a_real_pe_image_resolves_and_a_mismatched_identity_is_refused.sh
+tests/integration/test_hx_w4_an_exception_unwinds_through_a_patched_windows_frame.sh
+tests/integration/test_hx_w5_a_windows_target_hosts_the_agent_and_completes_a_handshake.sh
+tests/integration/test_hx_w6_windows_debugger_integration_decision_is_recorded.sh
+tests/unit/t_build_apps_reports_failure.sh
+tests/unit/t_m9r15i_2_strip_wsl_mnt_paths.sh
+tests/unit/test_hx_l0_the_two_linux_campaigns_agree_on_what_is_shared.sh
+tests/unit/test_hx_s3_reason_vocabulary_is_closed_in_both_directions.sh
+tests/unit/test_hx_s4_no_reported_field_is_a_format_string_literal.sh
