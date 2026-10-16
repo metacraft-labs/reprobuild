@@ -2461,6 +2461,39 @@ type
       ## ``group "..."`` — run-as group. Empty when the body lacked
       ## the setter.
 
+  ServiceArgTemplateItemKind* = enum
+    ## Shared-Development-Services, reprobuild issue #498 — what ONE
+    ## `args` token on a service's command line is derived FROM.
+    satkLiteral
+      ## A token whose text was known when the body ran: a string
+      ## literal, a build output's path, an interpolated expression.
+    satkContributionPoint
+      ## `args <contributionPoint>`. NOT a token but a HOLE: the
+      ## point's folded members go here, one token each, and the fold
+      ## is performed at FINALIZATION rather than when the body ran.
+
+  ServiceArgTemplateItem* = object
+    ## One slot in a service's argv template.
+    ##
+    ## WHY A TEMPLATE AND NOT A LIST OF STRINGS. #498: `args <point>`
+    ## resolved EAGERLY — Nim evaluates the argument before `args` is
+    ## called, so the point was folded while the activity's body ran and
+    ## the strings were copied into the frame, where nothing re-read
+    ## them. A contribution made by a LATER activity's body therefore
+    ## reached `registrationMembers` (folded late, by
+    ## `mergeTypedServiceFacts`) and never reached argv, and the same
+    ## artifact stated two different member sets for one point. The
+    ## template keeps the HOLE open so the fold can happen once, after
+    ## every body has run — which is the staging
+    ## `Shared-Development-Services.md` §7 already specifies
+    ## (instantiation -> resolution -> finalization -> materialization)
+    ## and which the eager fold was violating.
+    case kind*: ServiceArgTemplateItemKind
+    of satkLiteral:
+      arg*: ServiceArgDef
+    of satkContributionPoint:
+      pointKey*: string
+
   DslServiceContextFrame = object
     ## One frame on the active-service stack. Pushed by
     ## ``beginServiceContext``, popped by ``finishServiceContext``.
@@ -2497,6 +2530,13 @@ type
     convergePoints: seq[string]
       ## Shared-Development-Services L8: the bare `converge <point>`
       ## names collected by `addActiveServiceConvergePoint`.
+    argTemplate: seq[ServiceArgTemplateItem]
+      ## Shared-Development-Services #498: the argv template, parallel
+      ## to `args` / `typedArgs` except that a contribution point
+      ## occupies ONE slot here and as many tokens as it has members
+      ## there. Kept on the frame rather than derived afterwards
+      ## because only the body knows which token came from which
+      ## point.
     identityDeclared: bool
       ## Whether this body already ran an ``identity`` setter. The macro
       ## refuses a second one at expansion time, so this is the runtime
@@ -2521,6 +2561,24 @@ var dslPortServiceRegistry: Table[string, seq[DslServiceDef]]
   ## ``registerService`` appends to the per-package seq;
   ## ``registeredServices`` returns a copy so callers cannot mutate
   ## the registry from outside the public API.
+
+var dslPortServiceArgTemplates:
+    Table[string, seq[seq[ServiceArgTemplateItem]]]
+  ## Shared-Development-Services #498 — the argv TEMPLATE of each row in
+  ## `dslPortServiceRegistry`, index for index.
+  ##
+  ## A PARALLEL TABLE AND NOT A FIELD ON `DslServiceDef`, which would be
+  ## the obvious shape. `DslServiceDef` crosses a positional codec
+  ## (`dslServiceDefPayload` / its reader) and reaches the interface
+  ## lift; a template is PROCESS-LOCAL scaffolding that exists between a
+  ## body running and the package's dev-env being finalised, and nothing
+  ## outside this process has any use for it. Putting it on the record
+  ## would have versioned the wire for a value no reader wants.
+  ##
+  ## Index alignment is maintained by appending here in
+  ## `registerServiceRecord` — the registry's ONE append site — so a row
+  ## registered through the positional `registerService` path gets an
+  ## empty template rather than shifting its neighbours' by one.
 
 var dslPortActiveServiceContext {.threadvar.}:
     seq[DslServiceContextFrame]
@@ -2571,6 +2629,11 @@ proc clearRegisteredServices*(packageName: string) =
   ## re-run replaces rather than duplicates.
   if packageName in dslPortServiceRegistry:
     dslPortServiceRegistry[packageName] = @[]
+  # #498: the argv templates go with the rows they describe. Leaving
+  # them would misalign the next re-run's indices by exactly the number
+  # of rows this call dropped.
+  if packageName in dslPortServiceArgTemplates:
+    dslPortServiceArgTemplates[packageName] = @[]
 
 proc rerunServiceDeclarators*(packageName: string) =
   ## Re-evaluate ``packageName``'s service bodies against the CURRENT
@@ -2600,10 +2663,12 @@ proc resetDslPortServiceState*() =
   ## artifacts, build, services) separable lets tests target one
   ## surface without disturbing the others.
   dslPortServiceRegistry.clear()
+  dslPortServiceArgTemplates.clear()
   dslPortActiveServiceContext.setLen(0)
   dslPortServiceDeclarators.setLen(0)
 
-proc registerServiceRecord*(def: DslServiceDef) =
+proc registerServiceRecord*(def: DslServiceDef;
+                            argTemplate: seq[ServiceArgTemplateItem] = @[]) =
   ## Append one fully-built ``DslServiceDef`` against ``def.packageName``.
   ##
   ## Shared-Development-Services L1 split this out of ``registerService``
@@ -2614,6 +2679,14 @@ proc registerServiceRecord*(def: DslServiceDef) =
   if def.packageName notin dslPortServiceRegistry:
     dslPortServiceRegistry[def.packageName] = @[]
   dslPortServiceRegistry[def.packageName].add(def)
+  # #498: one template per row, ALWAYS, so the two seqs are index for
+  # index. A caller that built its record without a template (the
+  # positional `registerService` path, an out-of-tree caller) gets an
+  # empty one, which `foldDeferredServiceArgv` reads as "this row's argv
+  # is already final".
+  if def.packageName notin dslPortServiceArgTemplates:
+    dslPortServiceArgTemplates[def.packageName] = @[]
+  dslPortServiceArgTemplates[def.packageName].add(argTemplate)
 
 proc registerService*(packageName, serviceName, executableRef: string;
                      args: seq[string]; bodyRepr: string;
@@ -3137,9 +3210,11 @@ proc addActiveServiceArg*(value: string) =
   ## argument so the variadic shape survives the macro round-trip.
   if dslPortActiveServiceContext.len == 0:
     return
+  let arg = ServiceArgDef(kind: svakLiteral, value: value)
   dslPortActiveServiceContext[^1].args.add(value)
-  dslPortActiveServiceContext[^1].typedArgs.add(ServiceArgDef(
-    kind: svakLiteral, value: value))
+  dslPortActiveServiceContext[^1].typedArgs.add(arg)
+  dslPortActiveServiceContext[^1].argTemplate.add(
+    ServiceArgTemplateItem(kind: satkLiteral, arg: arg))
 
 proc addActiveServiceArg*(value: BuildOutputPath) =
   ## Body-setter for a build output's path on argv. ``Package-Model.md``:
@@ -3150,13 +3225,16 @@ proc addActiveServiceArg*(value: BuildOutputPath) =
   ## argument's producing edge is recorded alongside its text.
   if dslPortActiveServiceContext.len == 0:
     return
-  dslPortActiveServiceContext[^1].args.add(value.value)
-  dslPortActiveServiceContext[^1].typedArgs.add(ServiceArgDef(
+  let arg = ServiceArgDef(
     kind: svakBuildOutput,
     value: value.value,
     producerPackage: value.producerPackage,
     producerActionId: value.producerActionId,
-    producerPath: value.producerPath))
+    producerPath: value.producerPath)
+  dslPortActiveServiceContext[^1].args.add(value.value)
+  dslPortActiveServiceContext[^1].typedArgs.add(arg)
+  dslPortActiveServiceContext[^1].argTemplate.add(
+    ServiceArgTemplateItem(kind: satkLiteral, arg: arg))
 
 proc addActiveServiceArg*(value: BuildOutput) =
   ## ``args <buildOutput>`` — the handle itself on argv, equivalent to
@@ -3231,6 +3309,76 @@ proc addActiveServiceArg*(values: seq[string]) =
   ## command line it ran before any consumer existed.
   for value in values:
     addActiveServiceArg(value)
+
+proc addActiveServiceArgPoint*(pointKey: string; eager: seq[string]) =
+  ## Shared-Development-Services, reprobuild issue #498 —
+  ## `args <contributionPoint>` as a DEFERRED slot.
+  ##
+  ## THE DECISION THIS IMPLEMENTS, AND WHY IT IS THIS ONE. §9.1.1
+  ## measured a cross-activity contribution reaching the owning
+  ## service's argv only when the contributing activity was declared
+  ## FIRST — and, with a `converge` on the owning service, one dev-env
+  ## artifact stating two different member sets for one point: the
+  ## launcher's command line without the member, the converge lane's
+  ## `registrationMembers` with it. Both arrangements exited 0.
+  ##
+  ## Two fixes were on the table. REFUSING a contribution that arrives
+  ## after the fold is NOT the one taken, for three reasons:
+  ##
+  ##   1. `t_l8_contribution_operation_is_a_second_axis.nim`'s "a second
+  ##      consumer arriving does not renumber or re-make the first's"
+  ##      reads a point, contributes to it and asserts the late member
+  ##      LANDS. A late contribution reaching the fold is an ASSERTED
+  ##      property of the configurable system, so a refusal would
+  ##      contradict an existing semantic rather than add a guard.
+  ##   2. Declaration order must not be semantically significant in a
+  ##      declarative DSL. A refusal makes the current behaviour honest;
+  ##      it does not make the recipe `Shared-Development-Services.md`
+  ##      §9.1 writes implementable.
+  ##   3. A collection IS a configurable (§5), so its final value is
+  ##      only knowable once every contributor has run. The documented
+  ##      staging — instantiation, resolution, finalization,
+  ##      materialization — already requires that; the eager fold was
+  ##      the implementation disagreeing with the staging, and this
+  ##      aligns them.
+  ##
+  ## So the point's members are NOT read here. The slot is recorded and
+  ## `foldDeferredServiceArgv` fills it after every activity body in the
+  ## package has run, which is the same moment
+  ## `mergeTypedServiceFacts` folds `registrationMembers` — one fold, at
+  ## one time, so the two views of one point cannot disagree.
+  ##
+  ## `eager` IS STILL READ, FOR ONE THING: to tell a point READ FROM ITS
+  ## SLOT from a value the author passed EXPLICITLY at the `enable`
+  ## site. The activity's `config:` key lowers to a parameter whose
+  ## DEFAULT reads the fold, so `enable sso()` yields the fold and
+  ## `enable sso(members = @["x"])` yields `@["x"]` and never evaluates
+  ## the default. Deferring the latter would let a later contribution
+  ## overwrite an explicit argument — an owner overriding its own
+  ## environment at its own enable site (§6.6) silently undone. So when
+  ## `eager` differs from the point's fold AT THIS MOMENT the tokens are
+  ## FROZEN as literals, and only the matching case defers.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  var deferred = isContributionPoint(pointKey)
+  if deferred:
+    # The fold is read HERE only to compare, never to emit: what is
+    # emitted in the deferring case is the hole.
+    deferred = foldContributionPoint(pointKey).members == eager
+  if not deferred:
+    for value in eager:
+      addActiveServiceArg(value)
+    return
+  dslPortActiveServiceContext[^1].argTemplate.add(ServiceArgTemplateItem(
+    kind: satkContributionPoint, pointKey: pointKey))
+  # The EAGER tokens are still written into `args` / `typedArgs`, so a
+  # reader that never reaches finalization (a test driving a service
+  # body directly, the package-level `service` lane) sees exactly what
+  # it saw before this change. `foldDeferredServiceArgv` REPLACES them.
+  for value in eager:
+    dslPortActiveServiceContext[^1].args.add(value)
+    dslPortActiveServiceContext[^1].typedArgs.add(ServiceArgDef(
+      kind: svakLiteral, value: value))
 
 proc addActiveServiceRuntimeFile*(value: BuildOutput) =
   ## Body-setter for ``runtimeFile <buildOutput>`` — "declares a build
@@ -3714,7 +3862,77 @@ proc finishServiceContext*() =
     readiness: frame.readiness,
     workingDirectory: frame.workingDirectory,
     stateDirectories: frame.stateDirectories,
-    instance: frame.instance))
+    instance: frame.instance),
+    frame.argTemplate)
+
+
+proc foldDeferredServiceArgv*(packageName: string): int {.discardable.} =
+  ## Shared-Development-Services, reprobuild issue #498 — FINALIZATION:
+  ## fill every deferred `args <contributionPoint>` slot of
+  ## `packageName`'s services from the point's fold AS IT NOW STANDS.
+  ##
+  ## Called once, after every activity body in the package has run, by
+  ## `buildPackageDevEnv` (and by `buildPackageFragment` after its
+  ## service-declarator re-run, so the build lane cannot drift from the
+  ## dev-env lane on this). The same moment `mergeTypedServiceFacts`
+  ## folds `registrationMembers`, which is the point: ONE fold of one
+  ## contribution point at ONE time, so the launcher's command line and
+  ## the converge lane's member set are two READINGS of one value rather
+  ## than two values.
+  ##
+  ## Returns the number of services whose argv CHANGED. A caller that
+  ## wants to know whether anything was deferred at all can read it;
+  ## more importantly a test can, which is how "the deferral is wired"
+  ## is measurable rather than inferred from the result being correct
+  ## for some other reason.
+  ##
+  ## IDEMPOTENT. The template is the source and the row is the
+  ## derivation, so running this twice against one contribution set
+  ## rewrites the same bytes and the second call returns 0.
+  if packageName notin dslPortServiceRegistry:
+    return 0
+  if packageName notin dslPortServiceArgTemplates:
+    return 0
+  var rows = dslPortServiceRegistry[packageName]
+  let templates = dslPortServiceArgTemplates[packageName]
+  if templates.len != rows.len:
+    # NOT a silent `min(len)` walk. A misalignment here would rewrite
+    # one service's argv from another's template, which is a wrong
+    # command line that looks right.
+    raise newException(ValueError,
+      "foldDeferredServiceArgv(`" & packageName & "`): " &
+      $rows.len & " service row(s) against " & $templates.len &
+      " argv template(s). The two are maintained index for index by " &
+      "`registerServiceRecord`, so a disagreement means a row reached " &
+      "the registry by a route that did not record one.")
+  for i in 0 ..< rows.len:
+    var deferred = false
+    for item in templates[i]:
+      if item.kind == satkContributionPoint:
+        deferred = true
+        break
+    if not deferred:
+      continue
+    var args: seq[string] = @[]
+    var typedArgs: seq[ServiceArgDef] = @[]
+    for item in templates[i]:
+      case item.kind
+      of satkLiteral:
+        args.add(item.arg.value)
+        typedArgs.add(item.arg)
+      of satkContributionPoint:
+        # ONE TOKEN PER MEMBER, in fold order, and NO token for an empty
+        # collection -- the same rule `addActiveServiceArg(seq[string])`
+        # states, read from one place so the deferred and the eager
+        # paths cannot render a point differently.
+        for member in foldContributionPoint(item.pointKey).members:
+          args.add(member)
+          typedArgs.add(ServiceArgDef(kind: svakLiteral, value: member))
+    if args != rows[i].args:
+      inc result
+    rows[i].args = args
+    rows[i].typedArgs = typedArgs
+  dslPortServiceRegistry[packageName] = rows
 
 # ---------------------------------------------------------------------------
 # DSL-port M7 — user-facing service-context accessors. Symmetric with the

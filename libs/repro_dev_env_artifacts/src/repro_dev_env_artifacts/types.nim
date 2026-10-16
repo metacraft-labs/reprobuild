@@ -67,6 +67,26 @@ type
     instanceLeaseTtlSeconds*: int64
     instanceEnvironment*: string
 
+  DevEnvActionSummary* = object
+    ## Shared-Development-Services F1: one build ACTION a `devEnv:` body
+    ## registered, as the ARTIFACT carries it.
+    ##
+    ## THE PAYLOAD IS CARRIED VERBATIM AND NOT RE-MODELLED. `payload` is
+    ## the bytes `repro_project_dsl`'s `actionPayload` produced -- the
+    ## same versioned action record the BUILD lane's `gnkAction` node
+    ## carries -- held here as an opaque string. Re-modelling the action
+    ## in this library would be a second representation of one edge,
+    ## with its own version to keep in step; carrying the bytes keeps
+    ## exactly one definition of what an action is, and this record adds
+    ## only the identity a reader needs to address it.
+    nodeId*: string
+      ## The graph node id (`actionNode(namespace, actionId)`), so a
+      ## caller can name the same node the build lane names.
+    actionId*: string
+      ## The action's own id, which is the `stableName` of its node.
+    payload*: string
+      ## `actionPayload`'s bytes, verbatim.
+
   DevEnvSharedResolutionSummary* = object
     ## Shared-Development-Services D-SS11 (§4.6): one resolver call, as
     ## the ARTIFACT carries it.
@@ -141,6 +161,21 @@ type
       ## above keeps its SSZ offset and the navigator's relational
       ## assertions about the `shellOps` / `tasks` / `services` sections
       ## stay about what they claim.
+    actions*: seq[DevEnvActionSummary]
+      ## Shared-Development-Services F1: every build ACTION the
+      ## `devEnv:` body registered.
+      ##
+      ## THE ARTIFACT HOP IS NOT OPTIONAL, for the reason D-SS11 records
+      ## for `sharedResolutions`: a cached dev-env edge is answered FROM
+      ## THE ARTIFACT without re-running the provider, so an actions
+      ## channel that lived only on the provider wire would report the
+      ## actions on a cold evaluation and silently never again -- and
+      ## the second `repro up` would launch a service whose rendered
+      ## configuration nobody produced. That is the same silent drop F1
+      ## measured, moved from the first run to the second.
+      ##
+      ## Appended at the END, after `sharedResolutions`, for that
+      ## field's own stated reason.
 
   DevEnvNavigatorStats* = object
     envelopeBytesChecked*: int
@@ -156,11 +191,17 @@ type
     servicesSectionStart*: int
 
 const
-  DevEnvArtifactSchemaVersion* = 4'u32
+  DevEnvArtifactSchemaVersion* = 5'u32  # version-literal-ok: this IS
+                                        # the schema version definition,
+                                        # not a literal standing in for
+                                        # one.
     ## Shared-Development-Services L8 bumped this from 1 to 2 because
     ## `DevEnvServiceSummary` grew eight fields and the SSZ container is
     ## positional, so a v1 payload decoded as v2 would not be refused by
     ## the format -- it would be refused by the schema check, which is
     ## what this constant is for. A cached v1 artifact is re-evaluated
     ## rather than mis-read.
+    ##
+    ## Shared-Development-Services F1 bumped it 4 -> 5 for the same
+    ## reason one more time: the container grew an `actions` list.
   DevEnvArtifactRequiredFeatures* = 0'u32

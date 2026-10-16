@@ -259,6 +259,11 @@ proc decodeServiceRegistrarAnswerDocument*(program, text: string;
       "consumer's `" & ClientIdAttributeName & "` would stay uncomputed " &
       "and the failure would surface at the issuer instead of here.")
   var seen = initTable[string, string]()
+  var identifierOwner = initTable[string, string]()
+    ## The REVERSE index of `seen`: which member a minted identifier has
+    ## already been claimed for. Shared-Development-Services §7.2's
+    ## laundering hazard, in the direction the forward map cannot see --
+    ## see the refusal below.
   for row in rows:
     if row.kind != JObject:
       raise newException(ServiceRegistrarError,
@@ -288,6 +293,25 @@ proc decodeServiceRegistrarAnswerDocument*(program, text: string;
         "`. Refused rather than last-writer-wins: the two rows are two " &
         "claims about one consumer's credential and nothing here can " &
         "choose between them.")
+    if identifierOwner.hasKey(clientId):
+      raise newException(ServiceRegistrarError,
+        "the service registrar `" & program & "` answered members `" &
+        identifierOwner[clientId] & "` and `" & member &
+        "` with the SAME `" & ClientIdAttributeName & "` `" & clientId &
+        "`. TWO MEMBERS, ONE IDENTIFIER is refused by name rather than " &
+        "collapsed: a minted identifier is the credential one relying " &
+        "party authenticates with, so two members sharing one means " &
+        "either the registrar registered one of them and reported it " &
+        "twice -- a SILENT DROP of the other, which would reach its " &
+        "consumer's argv as a credential belonging to somebody else -- " &
+        "or it reused an existing registration for a member that asked " &
+        "for its own. Nothing here can tell those apart, and both are " &
+        "worse than failing: the first LAUNDERS one consumer's identity " &
+        "into another's, and the campaign already found this shape in a " &
+        "reuse key. A registrar that cannot mint a distinct identifier " &
+        "per member must fail and name the members it could not " &
+        "separate.")
+    identifierOwner[clientId] = member
     seen[member] = clientId
   var requestedSet = initTable[string, bool]()
   for m in requested:

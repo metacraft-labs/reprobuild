@@ -6379,7 +6379,8 @@ const
 
 proc positionKeyedNimcacheKey*(declaredCache, producingProject,
                                workDir: string;
-                               hostFlags, libFlags: openArray[string]): string =
+                               hostFlags, libFlags: openArray[string];
+                               compileFlags: openArray[string] = []): string =
   ## POSITION-KEYED nimcache identity: producing project x declared cache x
   ## variant (Tool-Owned-Caches.md, "Identity").
   ##
@@ -6433,10 +6434,19 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
   ##   lives elsewhere: ``interfaceExtractionContext`` still folds
   ##   ``reproLibSourceFingerprint`` into ``interfaceExtractionFingerprint``.
   ##
-  ## WHAT REMAINS: the toolchain and library set. A nimcache holds objects
-  ## produced by one Nim + one host C compiler against one ``--path`` set;
-  ## mixing them in one directory is unsound independently of position.
-  ## These are flag strings, not content, so they are stable across edits.
+  ## WHAT REMAINS: the toolchain, the library set and the COMPILE
+  ## CONFIGURATION. A nimcache holds objects produced by one Nim + one host
+  ## C compiler against one ``--path`` set under one set of ``--define``s and
+  ## code-generation options; mixing them in one directory is unsound
+  ## independently of position. ``compileFlags`` carries every compile option
+  ## of the command (see ``nimcacheKeyedCompileFlags``: the whole flag list
+  ## minus the location-only ``--out:`` / ``--nimcache:`` and the module
+  ## argument). Without it one recipe compiled as a plain provider and as a
+  ## ``-d:useNimRtl -d:reproNimRtlShared`` library shared one directory, and
+  ## Nim reused C generated under the other configuration (clang: "incomplete
+  ## definition of type 'Exception'" in ``@pjson.nim.c``). These are flag
+  ## strings, not content, so they are stable across edits and identical for
+  ## identical configurations.
   ##
   ## SCOPE (Compiles-Are-Normal-Edges.md): this selects a SCRATCH DIRECTORY
   ## for Nim's own incremental cache. It is NOT the cache key of any
@@ -6453,7 +6463,29 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
     parts.add(f)
   for f in libFlags:
     parts.add(f)
+  if compileFlags.len > 0:
+    # Domain-separated so a compile flag is never read as a library flag.
+    parts.add("compile-flags")
+    for f in compileFlags:
+      parts.add(f)
   fnvHex64(parts)
+
+proc nimcacheKeyedCompileFlags*(command: openArray[string];
+                                moduleArg: string): seq[string] =
+  ## The options of a ``nim c`` command that select the C it generates:
+  ## everything after the compiler and its subcommand, minus the
+  ## location-only ``--out:`` / ``--nimcache:`` and the module argument
+  ## (which ``positionKeyedNimcacheKey`` already keys as the producing
+  ## project). ``--parallelBuild:`` and ``--listCmd`` only schedule or echo
+  ## the C compiles, so they stay out: an environment tuning knob must not
+  ## cost a cold cache.
+  for i in 2 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg.startsWith("--parallelBuild:") or arg == "--listCmd" or
+        arg == moduleArg:
+      continue
+    result.add(arg)
 
 proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
@@ -7031,23 +7063,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "--define:reproConsumerRoot=" & effectiveConsumerRoot,
   ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
          @["--define:reproDslDepsDebug"] else: @[])
-  let nimcache =
-    if providerNimcacheMode() == "per-binary":
-      tempRoot / "nimcache"
-    else:
-      when defined(windows):
-        tempParent / "nimcache-interface" /
-          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
-            hostFlags, libFlags)
-      else:
-        buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
-          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
-            hostFlags, libFlags)
+  # The `--nimcache:` argument is filled in once the command is complete: its
+  # position key folds in every compile option (defines, producer paths), so
+  # two configurations of one recipe never share generated C.
   var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
     "--path:" & moduleDir,
-    "--nimcache:" & nimcache,
+    "--nimcache:",
     "--out:" & runnerBin,
     runnerPath
   ])
@@ -7082,6 +7105,22 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # (index 2), never after `runnerPath`, or nim treats it as a second input file.
   if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
     command.insert(@["--listCmd"], 2)
+  block:
+    let nimcache =
+      if providerNimcacheMode() == "per-binary":
+        tempRoot / "nimcache"
+      else:
+        let key = positionKeyedNimcacheKey(InterfaceCacheName, modulePath,
+          workDir, hostFlags, libFlags,
+          nimcacheKeyedCompileFlags(command, runnerPath))
+        when defined(windows):
+          tempParent / "nimcache-interface" / key
+        else:
+          buildScratchRoot(workDir, scratchDir) / "nimcache-interface" / key
+    for i in 0 ..< command.len:
+      if command[i] == "--nimcache:":
+        command[i] = "--nimcache:" & nimcache
+        break
   # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
   # packages deliberately point it at their immutable source closure, so it is
   # not a valid compiler working directory: Nim writes relative linker response
@@ -7920,7 +7959,15 @@ proc rtlModeDefines*(mode: ReproRtlMode): seq[string] =
 
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
                              workDir = getCurrentDir();
-                             scratchDir = ""): seq[string] =
+                             scratchDir = "";
+                             extraFlags: openArray[string] = []): seq[string] =
+  # `extraFlags` are further compile options (a library build's `--app:lib`
+  # and RTL defines, a caller's `--passL`/`--define`s). They are placed
+  # before the module argument and, like every other compile option of the
+  # command, key the nimcache: a caller must pass them HERE rather than
+  # inserting them into the returned command, or two configurations would
+  # share one directory of generated C.
+  #
   # The Nim provider nimcache holds generated C/object files with long
   # `@m..@s..nim.c` names. When `outputBinaryPath` lands deep inside a
   # CMake TryCompile scratch tree, a nimcache placed next to it overflows
@@ -7965,12 +8012,8 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # TryCompile scratch trees hit (Nim's mkdir does not use the \\?\
   # extended-length prefix).
   let nimcacheRoot = getTempDir() / "repro-nimcache-provider"
-  let nimcache =
-    if providerNimcacheMode() == "per-binary":
-      nimcacheRoot / providerNimcacheKey(outputBinaryPath)
-    else:
-      nimcacheRoot / positionKeyedNimcacheKey(ProviderCacheName, modulePath,
-        workDir, hostFlags, libFlags)
+  # The position key folds in the finished command's compile options, so the
+  # `--nimcache:` argument is filled in last (see the end of this proc).
   result = boundedNimCompileCommand()
   result.add(@[
     # Provider compiles are often nested inside latency-sensitive graph
@@ -7982,7 +8025,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # in its directory; its search path is then that directory, `.`.
     "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)
                  else: "."),
-    "--nimcache:" & nimcache,
+    "--nimcache:",
     "--out:" & outputBinaryPath,
     modulePath
   ])
@@ -8021,6 +8064,20 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       dynamicFlags.add("--passL:-Wl,-rpath," & libDir)
     for flag in dynamicFlags:
       result.insert(flag, 2)
+  # Flags after the module argument are run arguments, so these go before it.
+  for flag in extraFlags:
+    result.insert(flag, result.len - 1)
+  let nimcache =
+    if providerNimcacheMode() == "per-binary":
+      nimcacheRoot / providerNimcacheKey(outputBinaryPath)
+    else:
+      nimcacheRoot / positionKeyedNimcacheKey(ProviderCacheName, modulePath,
+        workDir, hostFlags, libFlags,
+        nimcacheKeyedCompileFlags(result, modulePath))
+  for i in 0 ..< result.len:
+    if result[i] == "--nimcache:":
+      result[i] = "--nimcache:" & nimcache
+      break
 
 proc providerCompileConfigurationIdentity*(command: openArray[string]):
     ContentDigest =
@@ -8040,7 +8097,9 @@ proc providerCompileConfigurationIdentity*(command: openArray[string]):
 proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
                                     mode: ReproRtlMode;
                                     workDir = getCurrentDir();
-                                    scratchDir = ""): seq[string] =
+                                    scratchDir = "";
+                                    extraFlags: openArray[string] = []):
+    seq[string] =
   ## The provider-LIBRARY compile command (M4c). Same base as
   ## ``providerCompileCommand`` (full repro ``--path`` set + host flags +
   ## ``-d:reproProviderMode``), rendered as a shared library in the requested
@@ -8049,10 +8108,10 @@ proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
   ## so they land in ``providerCompileOptions`` and re-key the compile action
   ## per mode — a nimRtl-shared artifact and a standalone C-ABI artifact are
   ## DISTINCT cache entries (§4.4).
+  ## They and ``extraFlags`` also key the nimcache, so the two modes never
+  ## share a directory of generated C.
   result = providerCompileCommand(modulePath, outputBinaryPath, workDir,
-    scratchDir)
-  for flag in rtlModeDefines(mode):
-    result.insert(flag, result.len - 1)
+    scratchDir, rtlModeDefines(mode) & @extraFlags)
 
 proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
                                       interfaceFingerprint: ContentDigest;
@@ -8595,6 +8654,79 @@ proc decodeInterfaceFingerprintArg*(text: string): ContentDigest =
   result.domain = HashDomain(parseInt(parts[1]))
   for i in 0 ..< 32:
     result.bytes[i] = byte(parseHexInt(parts[2][2 * i .. 2 * i + 1]))
+
+const RelocatableProviderVerdict* = "relocatable"
+  ## The whole content (plus a newline) of a recipe-relative provider
+  ## compile's verdict file when its binary does not embed the recipe's
+  ## location. Anything else names the location-bound string it found.
+
+proc recipeRelativeProviderVerdictPath*(edgeArtifactPath: string): string =
+  ## Where the recipe-relative provider-compile edge records whether its
+  ## binary may be served to another location of the recipe. A declared
+  ## output of the edge, beside its artifact, so a cache hit restores the
+  ## verdict together with the binary it describes.
+  parentDir(edgeArtifactPath) / "relocation-verdict"
+
+proc isComponentByte(c: char): bool =
+  ## A byte that continues a path component. Deliberately not `@`: Nim
+  ## stores a string literal behind a capacity word whose last byte is `@`
+  ## (the literal flag), so every literal in a binary is preceded by one.
+  c in {'a'..'z', 'A'..'Z', '0'..'9', '.', '_', '-', '+', '~'}
+
+proc isEmbeddedPathByte(c: char): bool =
+  c == '/' or isComponentByte(c)
+
+proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
+  ## The first string in a compiled provider that names the directory it was
+  ## compiled in, or "" when it names none.
+  ##
+  ## WHY THIS IS CHECKED. A recipe-relative provider compile is shared by
+  ## every copy of a byte-identical recipe (`recipeCompileOutputDir`), which
+  ## is only sound if the binary does not depend on where it was compiled.
+  ## The DSL names its own source sites relative to the recipe, but Nim
+  ## makes `currentSourcePath()` and `instantiationInfo(fullPaths = true)`
+  ## absolute, and a recipe may bake them into the graph it evaluates:
+  ## CodeTracer's recipe computes `projectRootPath = parentDir(
+  ## currentSourcePath())` in a `const` and puts `projectRootPath / "libs/..."`
+  ## on every `nim js` command line. Served at another location, that
+  ## binary evaluated to the OTHER copy's absolute paths, so the copy's
+  ## actions compiled against the other copy's tree, and the shared binary
+  ## changed under it whenever another copy recompiled it — an action key
+  ## that moved between two builds of an unchanged tree.
+  ##
+  ## WHAT IS EXEMPT. A string `<recipeDir>/<file>.nim` (or `.nims`) naming a
+  ## source file that exists in the recipe directory: every provider carries
+  ## its main module's absolute path as compiler line information. Any other
+  ## spelling — the directory itself, a path under it that is not a source
+  ## file — is a location the provider can act on, and binds it.
+  if recipeDir.len == 0:
+    return ""
+  let dir = recipeDir.strip(leading = false, chars = {'/'})
+  if dir.len == 0:
+    return ""
+  var start = 0
+  while true:
+    let at = binaryBytes.find(dir, start)
+    if at < 0:
+      return ""
+    start = at + 1
+    # Only a whole path component: `/a/proj` must not match `/a/projX`, nor
+    # `/x/a/proj` (a longer path that merely ends in the same components).
+    if at > 0 and isComponentByte(binaryBytes[at - 1]):
+      continue
+    var stop = at + dir.len
+    if stop < binaryBytes.len and binaryBytes[stop] != '/' and
+        isEmbeddedPathByte(binaryBytes[stop]):
+      continue
+    while stop < binaryBytes.len and isEmbeddedPathByte(binaryBytes[stop]):
+      inc stop
+    let embedded = binaryBytes[at ..< stop]
+    if embedded.len > dir.len + 1:
+      let rel = embedded[dir.len + 1 .. ^1]
+      if (rel.endsWith(".nim") or rel.endsWith(".nims")) and
+          fileExists(extendedPath(dir / rel)):
+        continue
+    return embedded
 
 proc publishRecipeRelativeProviderCompile*(plan: ProviderCompilePlan;
     edgeArtifactPath, artifactPath, modulePath: string;
