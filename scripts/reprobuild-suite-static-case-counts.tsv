@@ -470,7 +470,7 @@ libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_module_imports.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	nim	11
 libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	95
-libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	29
+libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	30
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	32
@@ -675,7 +675,7 @@ libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
 libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	27
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
-libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	10
+libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	14
 libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	3
 libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	nim	3
 libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	nim	4
@@ -1370,6 +1370,7 @@ tests/integration/t_health_push_gateway_check_reports_observed_state.nim	nim	5
 tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.nim	nim	1
 tests/integration/t_health_reports_a_malformed_repo_fragment.nim	nim	1
 tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim	nim	3
+tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim	nim	5
 tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	6
 tests/integration/t_health_vcs_hooks_digest_output.nim	nim	1
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
@@ -1574,7 +1575,7 @@ tests/integration/t_post_commit_lock_survives_a_repo_local_repro_dir.nim	nim	2
 tests/integration/t_post_commit_publishes_evidence_and_excludes_from_cache_push.nim	nim	1
 tests/integration/t_post_commit_refreshes_lock_and_pushes_cache.nim	nim	1
 tests/integration/t_post_commit_report_lands_in_the_disposable_build_tree.nim	nim	1
-tests/integration/t_post_commit_reports_the_hook_path_it_will_not_rewrite.nim	nim	2
+tests/integration/t_post_commit_reports_the_hook_path_it_will_not_rewrite.nim	nim	3
 tests/integration/t_post_merge_hook_reconciles_local_state.nim	nim	2
 tests/integration/t_pre_commit_gate_ignores_the_record_store_lock.nim	nim	1
 tests/integration/t_pre_commit_gate_is_advisory_when_the_dispatcher_is_displaced.nim	nim	1

@@ -12276,6 +12276,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim",
+    binary: "build/test-bin/t_health_reports_a_worktree_unsafe_hooks_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
     binary: "build/test-bin/t_health_reports_each_layer_status_with_remedy",
     defines: @[],

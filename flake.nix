@@ -246,7 +246,10 @@
         # through, the first absent component, and the link the readlink
         # family reads with its target, so a directory replaced by a link and
         # a retargeted link change a recorded input.
-      url = "github:metacraft-labs/io-mon/414a3de4f5912f498f6adea0994458b776884a26";
+        # Bumped to 527368e (2026-10-16), io-mon's `agents` tip; 414a3de is an
+        # ancestor. Test-only: the macOS nesting fixtures give their second
+        # shim its own install name, so they run two distinct shim images.
+      url = "github:metacraft-labs/io-mon/527368ee896b58263085a116f8fffb9b3ee2d82e";
       flake = false;
     };
     nim-shm-gset-src = {
