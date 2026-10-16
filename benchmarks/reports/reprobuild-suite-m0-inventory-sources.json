@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2109,
+    "nimTestBinaries": 2110,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 650,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2130
+    "testEntries": 2131
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,7 +1279,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1143,
+      "integration": 1144,
       "platform/destructive": 129,
       "pure unit": 650,
       "unclassified": 189
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2109,
+    "nimTestBinaryCount": 2110,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2130
+    "testEntryCount": 2131
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9645,6 +9645,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_home_apply",
         "repro_home_intent",
         "repro_profile",
         "repro_profile_compile"
@@ -10645,7 +10646,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_nix_store_references_scan.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 12,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26739,6 +26740,25 @@
       "source": "tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_host_flag_resolved_once",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations",
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_home_host_flag_resolved_once.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

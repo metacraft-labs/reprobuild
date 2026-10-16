@@ -7,11 +7,16 @@ Each case is a profile (`<case>/profile/`) and what Reprobuild says about it:
   …; }`.
 - `evaluations.json` — for every host in `hosts` below and every target
   system, what `repro home export --host <host> --target <system>` reports:
-  `{ "<host>": { "<system>": <evaluation> | { "refused": true } } }`. This is
+  `{ "<host>": { "<system>": <evaluation> | { "refused": true } |
+  { "undeclaredHost": true } } }`. This is
   Reprobuild's own evaluation (`evaluateHomeExport`), the answer the Nix
   evaluator (`nix/lib/intent.nix`) must reproduce from `export.json` alone.
 
 Hosts evaluated: `m1`, `home-pc`, `server` (declared, declared, undeclared).
+The undeclared host is refused on every system, by `repro home export` and by
+the Nix evaluator alike (`{ "undeclaredHost": true }`): a profile with a
+`hosts:` registry declares every host it may be applied to (reprobuild-pm
+spec Gradual-Nix-To-Reprobuild-Migration.md, Open question 6).
 
 Who reads them:
 

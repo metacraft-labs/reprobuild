@@ -13,7 +13,9 @@
 ## `evaluateHomeExport` (what `repro home export --target` runs: the
 ## planner's `enabledActivitiesFor` + `buildPlan` under the target's
 ## predicate facts). Each `row-rejection` case must make `expandProfileData`
-## raise `EDataFile` naming every listed substring.
+## raise `EDataFile` naming every listed substring. An evaluation marked
+## `undeclaredHost` must make the evaluation raise `EUndeclaredHost` (the host
+## is not in the case's non-empty `hosts:` map; spec Open question 6).
 ##
 ## Vacuity: the fixture tree is non-empty in both groups, and every
 ## selection case has at least one evaluation with a non-empty and one with
@@ -33,6 +35,7 @@ import std/[algorithm, json, os, sequtils, strutils, unittest]
 import repro_profile
 import repro_home_intent
 import repro_profile_compile
+import repro_home_apply
 import repro_cli_support/home_export
 
 const FixtureRoot = currentSourcePath().parentDir().parentDir().parentDir().
@@ -81,6 +84,13 @@ suite "GM4: shared data-file row-selection fixtures":
       for evaluation in caseJson["evaluations"]:
         let host = evaluation["host"].getStr
         let system = evaluation["system"].getStr
+        if evaluation{"undeclaredHost"}.getBool:
+          checkpoint(name & ": " & host & " @ " & system &
+            " (undeclared host)")
+          expect EUndeclaredHost:
+            discard evaluateHomeExport(
+              exportDocument(expanded.intent, host), system, host)
+          continue
         let evaluated = evaluateHomeExport(
           exportDocument(expanded.intent, host), system, host)
         var got = evaluated["packages"].getElems.mapIt(it["name"].getStr)
