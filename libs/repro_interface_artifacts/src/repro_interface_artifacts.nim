@@ -7016,7 +7016,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     if consumerRoot.len > 0: absolutePath(consumerRoot) else: getCurrentDir()
   let interfaceDefines = @[
     "--define:reproInterfaceMode",
-    "--define:reproBin=" & getAppFilename(),
+    # The path that re-enters this engine, NOT `getAppFilename()`: under the
+    # portable Linux launcher that names the glibc loader, so the macro's
+    # `staticExec("<loader> internal resolve-package …")` failed, its empty
+    # output read as "unresolved", and every `dslDeps:` import was dropped
+    # without a diagnostic (`publicCliImagePath` in repro_core/source_root).
+    "--define:reproBin=" & publicCliImagePath(),
     # NOT workDir. On the cross-repo producer path workDir comes from
     # `reprobuildLibraryWorkDir()`, which resolves through
     # `currentSourcePath()` and therefore names REPROBUILD's own root -- so

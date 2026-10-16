@@ -24,11 +24,18 @@
 ##     standard library, so the prefix is a working interpreter and not
 ##     merely a file with the right name.
 ##
-## On a NixOS host the last step needs one accommodation: NixOS cannot start
-## a generic-Linux dynamically linked executable directly (its FHS loader path
-## holds a stub that refuses, exit 127), so there -- and only on that exact
-## refusal -- the interpreter is run through the glibc loader this test binary
-## was linked against. The prefix is still what is being tested.
+## A profile is a claim that the tool RUNS on this host, so the interpreter is
+## run directly, as a consumer would, with no loader substituted. On a host
+## whose dynamic loader cannot start a generic-Linux executable -- NixOS,
+## whose FHS loader path holds a stub that refuses with exit 127 -- realization
+## must instead refuse with ``TarballHostLoaderMissing``
+## (reprobuild-pm/issues/
+## 2026-09-28-tarball-realized-linux-executables-cannot-start-on-nixos.md:
+## it used to return a profile whose ``python3`` could only exit 127). That
+## refusal is checked for truth both ways: the realized interpreter really
+## cannot be started directly, and the archive bytes it points at are still a
+## working 3.12 when run through the glibc loader this test binary was linked
+## against -- so the bytes are verified on that host too.
 ##
 ## No mocks. This is a network test: it downloads the upstream archive the
 ## recipe pins (once — both packages share it, and the store's download cache
@@ -71,9 +78,6 @@ proc pythonToolUse(packageName: string): InterfaceToolUse =
   doAssert iface.toolUses.len == 1,
     "expected one tool use for " & packageName
   iface.toolUses[0]
-
-const NixosStubLdSignature =
-  "NixOS cannot run dynamically linked executables intended for generic"
 
 proc selfElfInterpreter(): string =
   ## The PT_INTERP of this test binary (little-endian ELF64 only, which is
@@ -126,45 +130,67 @@ suite "stdlib python tarball arms realize":
         let useDef = pythonToolUse(packageName)
         require useDef.tarballProvisioning.len > 0
 
-        let profile = resolveTarballTool(useDef, storeRoot)
-        let prefix = profile.selectedStorePath
-        let exe = profile.resolvedExecutablePath
-
-        check profile.installMethod == "tarball"
-        check exe.startsWith(prefix)
-        check fileExists(exe)
-        check isRegularFile(exe)
-        require profile.pathSearchList.len > 0
-
-        let invoked =
-          when defined(windows): exe
-          else: profile.pathSearchList[0] / "python3"
-        check fileExists(invoked)
-
         let probe = "import sys, json; " &
           "print('%d.%d' % sys.version_info[:2]); " &
           "print(json.dumps({'ok': True}))"
-        var run = runShell(shellCommand([invoked, "-c", probe]))
-        when defined(linux):
-          if run.code == 127 and NixosStubLdSignature in run.output:
-            # This host cannot start ANY generic-Linux dynamically linked
-            # executable directly: NixOS installs a stub at the FHS loader
-            # path that prints the signature above and exits 127. That is a
-            # property of the host, not of the prefix under test, so the
-            # prefix is run through the glibc loader this test binary was
-            # itself linked against -- which still exercises everything this
-            # case is about (the interpreter starts, reports 3.12, imports
-            # from its own stdlib). Nothing else is excused: any other 127,
-            # or a loader that cannot be found, fails below.
+
+        var profile: PathOnlyToolProfile
+        var refused = false
+        try:
+          profile = resolveTarballTool(useDef, storeRoot)
+        except TarballHostLoaderMissing as e:
+          when defined(linux):
+            # This host's loader cannot start the generic-Linux interpreter
+            # (NixOS's stub-ld). The refusal is the contract there; check
+            # that it is TRUE, then still verify the realized bytes.
+            refused = true
+            checkpoint("realization refused on this host: " & e.msg)
+            check e.loader.len > 0
+            check e.prefix.len > 0
+            check e.executable.startsWith(e.prefix)
+            check isRegularFile(e.executable)
+            # Truthful: started directly, the realized interpreter cannot
+            # start -- 127, stub-ld's answer and the shell's when the kernel
+            # finds no loader -- rather than failing in some other way.
+            let direct = runShell(shellCommand([e.executable, "-c", probe]))
+            checkpoint("started directly: " & direct.output)
+            check direct.code == 127
+            # The bytes are a working interpreter all the same, through the
+            # glibc loader this test binary itself was linked against.
             let loader = selfElfInterpreter()
-            checkpoint("NixOS stub loader refused " & invoked &
-              "; re-running through " & loader)
             require loader.len > 0 and fileExists(loader)
-            run = runShell(shellCommand([loader, invoked, "-c", probe]))
-        check run.code == 0
-        check run.output.contains("3.12")
-        check run.output.contains("{\"ok\": true}")
-        if run.code != 0:
-          echo run.output
+            let viaLoader = runShell(shellCommand(
+              [loader, e.executable, "-c", probe]))
+            check viaLoader.code == 0
+            check viaLoader.output.contains("3.12")
+            check viaLoader.output.contains("{\"ok\": true}")
+            if viaLoader.code != 0:
+              echo viaLoader.output
+          else:
+            raise
+
+        if not refused:
+          let prefix = profile.selectedStorePath
+          let exe = profile.resolvedExecutablePath
+
+          check profile.installMethod == "tarball"
+          check exe.startsWith(prefix)
+          check fileExists(exe)
+          check isRegularFile(exe)
+          require profile.pathSearchList.len > 0
+
+          let invoked =
+            when defined(windows): exe
+            else: profile.pathSearchList[0] / "python3"
+          check fileExists(invoked)
+
+          # A returned profile claims the tool runs HERE: run it directly,
+          # with no loader substituted.
+          let run = runShell(shellCommand([invoked, "-c", probe]))
+          check run.code == 0
+          check run.output.contains("3.12")
+          check run.output.contains("{\"ok\": true}")
+          if run.code != 0:
+            echo run.output
 
   try: removeDir(tempRoot) except CatchableError: discard

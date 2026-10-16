@@ -12285,6 +12285,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim",
+    binary: "build/test-bin/t_health_reports_a_worktree_unsafe_hooks_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
     binary: "build/test-bin/t_health_reports_each_layer_status_with_remedy",
     defines: @[],
@@ -16004,6 +16013,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_the_bootstrap_hands_over_to_the_pinned_reprobuild.nim",
     binary: "build/test-bin/t_the_bootstrap_hands_over_to_the_pinned_reprobuild",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_the_release_launcher_does_not_make_the_engine_self_spawn_the_loader.nim",
+    binary: "build/test-bin/t_the_release_launcher_does_not_make_the_engine_self_spawn_the_loader",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

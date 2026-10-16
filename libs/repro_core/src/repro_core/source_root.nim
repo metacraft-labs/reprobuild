@@ -206,6 +206,68 @@ proc runningImagePrefixCandidates*(): seq[string] =
     getEnv(PublicCliPathEnvVar))
 
 # ---------------------------------------------------------------------------
+# The path that re-enters this engine.
+# ---------------------------------------------------------------------------
+
+proc absoluteNormalizedCliPath(path: string): string =
+  ## `path` made absolute against the current directory and normalized.
+  if path.isAbsolute:
+    os.normalizedPath(path)
+  else:
+    os.normalizedPath(getCurrentDir() / path)
+
+proc configuredPublicCliPath*(): string =
+  ## ``$REPRO_PUBLIC_CLI_PATH`` made absolute, or "" when it is unset or does
+  ## not name an existing file.
+  ##
+  ## A value naming nothing is ignored rather than trusted: a stale variable
+  ## inherited from a launcher that has since moved or been deleted would
+  ## otherwise turn every self-spawn into "no such file", far from the cause.
+  ## Ignoring it falls back to ``getAppFilename()``, which is right for every
+  ## image not run through a loader.
+  let configured = getEnv(PublicCliPathEnvVar)
+  if configured.len == 0:
+    return ""
+  let path = absoluteNormalizedCliPath(configured)
+  if not fileExists(extendedPath(path)):
+    return ""
+  path
+
+proc publicCliImagePath*(): string =
+  ## The path to exec to run THIS engine again: what every self-spawn of the
+  ## running engine (an internal verb, a nested ``build``, a detached cache
+  ## push) and every hand-off of "the repro that is running" to something
+  ## that will exec it must use, instead of a raw ``getAppFilename()``.
+  ##
+  ## WHY NOT ``getAppFilename()``. The portable Linux archive runs the engine
+  ## through its bundled glibc loader
+  ## (``exec <prefix>/lib/ld-linux-*.so.2 --library-path <prefix>/lib
+  ## <prefix>/bin/.reprobuild.real "$@"``, written by
+  ## ``scripts/relocate_release_posix.sh``). Under it ``/proc/self/exe`` -- and
+  ## so ``getAppFilename()`` -- is the LOADER, and ``<loader> <verb> …`` makes
+  ## rtld try to map ``<verb>`` as a program:
+  ## ``<verb>: error while loading shared libraries: <verb>: cannot open
+  ## shared object file``. The launcher exports ``$REPRO_PUBLIC_CLI_PATH``
+  ## naming itself (``<prefix>/bin/reprobuild``), which is the only path that
+  ## re-enters the engine with its library path intact; spawning
+  ## ``.reprobuild.real`` directly would lose ``--library-path``.
+  ##
+  ## Precedence: ``configuredPublicCliPath()``, else ``getAppFilename()``
+  ## made absolute. No ``PATH`` search: ``getAppFilename()`` asks the OS for
+  ## the image (``/proc/self/exe``, ``_NSGetExecutablePath``,
+  ## ``GetModuleFileName``) and its own fallback already searches ``PATH``, so
+  ## a second, ambient lookup here could only name a DIFFERENT binary.
+  ##
+  ## This answers "which path", not "may it be spawned with an internal
+  ## verb": the embedded-test-binary refusal is ``repro_cli_support``'s
+  ## ``spawnableWithInternalVerb``, and a caller passing an internal selector
+  ## must still go through it.
+  let configured = configuredPublicCliPath()
+  if configured.len > 0:
+    return configured
+  absoluteNormalizedCliPath(getAppFilename())
+
+# ---------------------------------------------------------------------------
 # The resolver.
 # ---------------------------------------------------------------------------
 

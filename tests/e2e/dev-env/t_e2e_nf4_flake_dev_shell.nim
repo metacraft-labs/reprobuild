@@ -36,6 +36,7 @@ import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_provider_runtime
 import repro_test_support
+import repro_test_support/process_fixtures
 
 const NixSystem =
   when defined(macosx):
@@ -193,6 +194,11 @@ proc prepareFixture(): Fixture =
   result.repoRoot = getCurrentDir()
   result.reproBin = reproBinary(result.repoRoot)
   result.root = createTempDir("repro-nf4-flake", "")
+  # The fixture is prepared at suite level, which runs in every process the
+  # runner starts -- one per case, plus its ``--list-json`` probe -- and none
+  # of them removed it. It is removed when THIS process exits. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(result.root)
   result.sibA = result.root / "sibA"
   result.sibB = result.root / "sibB"
   writeSibling(result.sibA, "sibA")
@@ -201,9 +207,12 @@ proc prepareFixture(): Fixture =
   # The counting wrapper. `/dev/shm` because the engine's evidence fold drops
   # every path under `/dev`, so the counter cannot become a cache input and
   # cannot invalidate the very edge whose invalidation it is measuring.
-  result.spawnCounter = "/dev/shm/repro-nf4-nix-spawns-" &
-    $getCurrentProcessId()
-  removeFile(result.spawnCounter)
+  # In a directory of its own, so that it is released with this process too.
+  let counterDir = "/dev/shm/repro-nf4-" & $getCurrentProcessId()
+  releaseDirAtProcessExit(counterDir)
+  removeDir(counterDir)
+  createDir(counterDir)
+  result.spawnCounter = counterDir / "nix-spawns"
   createDir(result.root / "bin")
   result.nixWrapper = result.root / "bin" / "nix"
   writeFile(result.nixWrapper,

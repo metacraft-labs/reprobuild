@@ -42,13 +42,24 @@
 ## leaked named; the second must not. Without that pair, an empty report
 ## would not distinguish "nothing leaked" from "nothing was looked at".
 ##
-## SUBJECTS are the files that had the teardown-as-a-case shape. Each is an
-## input of this file's execute edge (``PerCaseFixtureGateSubjects`` in
-## ``repro.nim``), so a change to any of them re-runs this gate; the last case
-## below checks that the two lists agree. Two files of that shape are fixed
-## the same way but are NOT subjects, because this file cannot judge them
-## soundly:
+## SUBJECTS are the files that had the teardown-as-a-case shape, or that
+## acquired a fixture at module or suite scope and never released it, which
+## leaks the same way: once per process. Each is an input of this file's
+## execute edge (``PerCaseFixtureGateSubjects`` in ``repro.nim``), so a change
+## to any of them re-runs this gate; the last case below checks that the two
+## lists agree. A subject must sort before this file in the test specs, which
+## is why the never-released files under ``tests/integration/t_workspace_*``
+## and ``tests/unit/`` are fixed but are not subjects. Other files of these
+## shapes are fixed the same way but are NOT subjects, because this file
+## cannot judge them soundly:
 ##
+##   * ``t_dry_run_plans_without_a_reachable_runquotad`` (and every subject
+##     that drives a project build) leaves the engine's provider nimcache,
+##     ``<TMPDIR>/repro-nimcache-provider``, in the redirected TMPDIR. That
+##     cache is shared and content-keyed by design, so this file would report
+##     it as a leak; a dry-run case also costs a provider compile per process;
+##   * ``t_e2e_nf4_flake_dev_shell`` evaluates a real flake in every process
+##     (about 20 s each) and needs a trusted nix daemon;
 ##   * ``t_every_launch_path_is_monitored`` puts its scratch tree in a literal
 ##     ``/tmp`` (its socket must fit ``sun_path`` under any TMPDIR) with a
 ##     random name, so nothing here could tell its leftovers from those of a
@@ -91,6 +102,12 @@ const Subjects = [
   "tests/integration/t_snp_expectation_reaches_the_manifest.nim",
   "tests/integration/t_teardown_runs_on_failure_path.nim",
   "tests/integration/t_verify_e2e_mock.nim",
+  "libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim",
+  "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
+  "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
+  "tests/integration/t_snp_evidence_reaches_the_verdict.nim",
+  "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
+  "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
 ]
   ## Repo-relative sources; each one's binary is the graph-built
   ## ``build/test-bin/<stem>``.
@@ -321,6 +338,22 @@ suite "no subject's fixture outlives the process that acquired it":
     checkSubject("tests/integration/t_teardown_runs_on_failure_path.nim")
   test "t_verify_e2e_mock":
     checkSubject("tests/integration/t_verify_e2e_mock.nim")
+  test "t_l5_environment_is_in_the_graph_cache_key":
+    checkSubject(
+      "libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim")
+  test "t_l4_service_instance_identity_and_state":
+    checkSubject(
+      "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim")
+  test "t_l5_environment_is_in_the_instance_key":
+    checkSubject(
+      "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim")
+  test "t_snp_evidence_reaches_the_verdict":
+    checkSubject("tests/integration/t_snp_evidence_reaches_the_verdict.nim")
+  test "t_tarball_provisioning_cold_store_extractors":
+    checkSubject(
+      "tests/integration/t_tarball_provisioning_cold_store_extractors.nim")
+  test "t_tdx_expectation_reaches_the_verifier":
+    checkSubject("tests/integration/t_tdx_expectation_reaches_the_verifier.nim")
 
 suite "the subject list":
   test "every subject has a case, and every case a subject":

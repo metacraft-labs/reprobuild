@@ -3131,7 +3131,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       node.payload
     ].join("\n")
     var argv = @[
-      getAppFilename(), "hcr", "prepare-object",
+      publicCliImagePath(), "hcr", "prepare-object",
       "--input", argValue("input"),
       "--output", argValue("output"),
       "--segment", argValue("segment")
@@ -7801,22 +7801,11 @@ proc buildMaxParallelism(): uint32 =
   buildMaxParallelismResolved().value
 
 proc stablePublicCliPath(): string =
-  let configured = getEnv("REPRO_PUBLIC_CLI_PATH")
-  if configured.len > 0:
-    if configured.isAbsolute:
-      return os.normalizedPath(configured)
-    return os.normalizedPath(getCurrentDir() / configured)
-  let app = getAppFilename()
-  if app.isAbsolute:
-    return os.normalizedPath(app)
-  if app.contains(DirSep) or app.contains(AltSep):
-    return os.normalizedPath(getCurrentDir() / app)
-  let resolved = findExe(app)
-  if resolved.len > 0:
-    if resolved.isAbsolute:
-      return os.normalizedPath(resolved)
-    return os.normalizedPath(getCurrentDir() / resolved)
-  os.normalizedPath(getCurrentDir() / app)
+  ## The path that re-enters this engine. The one definition is
+  ## ``publicCliImagePath`` in `repro_core/source_root`, because the recipe
+  ## interface compile in `repro_interface_artifacts`, below this library,
+  ## needs the same answer for its ``-d:reproBin``.
+  publicCliImagePath()
 
 var runningImageIsReproCliFlag = false
   ## Set by ``markRunningImageAsReproCli`` — see ``runningImageIsReproCli``.
@@ -7994,13 +7983,7 @@ proc selfSpawnIoMonitorPath*(publicCliPath = ""): string =
     if publicCliPath.len > 0:
       os.normalizedPath(publicCliPath)
     else:
-      let configured = getEnv("REPRO_PUBLIC_CLI_PATH")
-      if configured.len == 0:
-        stablePublicCliPath()
-      elif configured.isAbsolute:
-        os.normalizedPath(configured)
-      else:
-        os.normalizedPath(getCurrentDir() / configured)
+      stablePublicCliPath()
   if spawnableWithInternalVerb(candidate):
     return candidate
   ""
@@ -18824,8 +18807,8 @@ proc hooksPathDiagnosisLines*(repoRoot: string;
   ##
   ## It has to carry everything the operator needs to act, because nothing
   ## else in this code path will: the value, what it costs, that this hook
-  ## deliberately left it alone, two commands that fix it, and the fact that
-  ## the next push refuses until one of them is run. A diagnostic an operator
+  ## deliberately left it alone, two commands that fix it, and what a push does
+  ## until one of them is run. A diagnostic an operator
   ## cannot act on is how a warning becomes noise, and the reflex that noise
   ## trains is ``--no-verify``.
   if finding.previous.len == 0:
@@ -18848,8 +18831,26 @@ proc hooksPathDiagnosisLines*(repoRoot: string;
       "computed here: " & finding.diagnostic)
     result.add("repro hooks:   fix it with:  repro hooks ensure --vcs " &
       repoRoot)
-  result.add("repro hooks:   until then the publication gate refuses to " &
-    "publish from this repository.")
+  # What the next push does, stated as what `pre-push` really does: it makes
+  # the value absolute itself (`ensureWorktreeSafeHooksPath`) and refuses only
+  # when that repair cannot be made. A push from a LINKED worktree runs no hook
+  # at all, which is why this has to be said now rather than left to the gate.
+  result.add("repro hooks:   until then a push from any linked worktree of " &
+    "this repository runs no publication gate; the next push from the main " &
+    "worktree rewrites the value, or refuses if it cannot.")
+
+proc hooksPathFindingLabel(label: string; finding: HooksPathRepair): string =
+  ## One entry for ``repro health``'s ``path-unsafe`` list: the repo and the
+  ## value, plus why no repair target could be computed when that is the case.
+  ## Empty when ``finding`` reports nothing to repair, so a caller can test the
+  ## result instead of re-deriving the condition.
+  if finding.previous.len == 0 and finding.ok:
+    return ""
+  result = label & " (core.hooksPath '" & finding.previous & "'"
+  if not finding.ok and finding.diagnostic.len > 0:
+    result.add("; its absolute target could not be computed: " &
+      finding.diagnostic)
+  result.add(")")
 
 proc hooksPathRefusalLines*(repoRoot: string;
     repair: HooksPathRepair): seq[string] =
@@ -18911,13 +18912,41 @@ proc gitHooksDir(targetPath: string): string =
   # value that survived it.
   #
   # `selfHealManagedHooks` deliberately does NOT repair the path first (it
-  # reports instead), and that does not reintroduce the case: a relative
+  # reports instead), so it CAN receive the unusable answer. A relative
   # `core.hooksPath` means Git finds no hooks directory in a linked worktree,
-  # so no hook runs there, so nothing calls the self-heal there. Where the
-  # self-heal does run — the main worktree — the relative value and its
+  # so commits, merges and checkouts there run no hook — but `git worktree add`
+  # resolves the hooks in the parent process (the main worktree) and runs
+  # `post-checkout` with the NEW worktree as its directory, so the self-heal
+  # does run there once, and this proc then returns a path under that
+  # worktree's `.git` FILE. The self-heal checks for exactly that
+  # (`hooksDirCanExist`) and installs nothing rather than attempting a `mkdir`
+  # that cannot succeed. In the main worktree the relative value and its
   # absolute reading name the same directory.
   result = if raw.isAbsolute: os.normalizedPath(raw)
     else: os.normalizedPath(repoRoot / raw)
+
+proc hooksDirCanExist(hooksDir: string): bool =
+  ## False when ``hooksDir`` can never be created because one of its ancestors
+  ## exists and is NOT a directory — the shape a relative ``core.hooksPath``
+  ## takes in a linked worktree, where it resolves under ``<top>/.git``, a
+  ## file. True when the directory exists or the nearest existing ancestor is
+  ## a directory (an ordinary not-yet-created hooks dir).
+  ##
+  ## Asks the filesystem rather than "is this a linked worktree", so a caller
+  ## using it to skip a write skips only a write that would fail.
+  var probe = os.normalizedPath(hooksDir)
+  while probe.len > 0:
+    if dirExists(extendedPath(probe)):
+      return true
+    if fileExists(extendedPath(probe)) or symlinkExists(extendedPath(probe)):
+      # Exists, and is not a directory (`dirExists` follows symlinks, so a
+      # symlink reaching here is dangling or points at a non-directory).
+      return false
+    let parent = parentDir(probe)
+    if parent.len == 0 or parent == probe:
+      break
+    probe = parent
+  true
 
 proc hookPath(hooksDir, hookName: string): string =
   hooksDir / hookName
@@ -20348,7 +20377,7 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
   ## is re-anchored, exactly as the author path is.
   vcsManagedHookBody(hookName, managedHookContract(hookName),
     ManagedHookSite(
-      authorBin: getAppFilename(),
+      authorBin: publicCliImagePath(),
       refusalRecordDir: guard.refusalRecordDir(repoRoot)))
 
 type
@@ -20529,8 +20558,11 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
   ## hook body's own text warns against, the command running ambiently from the
   ## generated ``.envrc`` on every directory entry, and the command whose
   ## effect is to delete the diagnostic rather than the defect.
+  # `publicCliImagePath`, not `getAppFilename()`: the identity runs
+  # `<path> --version`, and under the portable Linux launcher the raw image is
+  # the glibc loader, which would answer with ITS version.
   let writer = reproBuildIdentity(
-    try: getAppFilename() except CatchableError: "")
+    try: publicCliImagePath() except CatchableError: "")
   let runner = reproBuildIdentity(interpreterPath)
   let author = managedHookAuthorBin(existingBody)
   let repoRoot = parentDir(parentDir(hooksDir))
@@ -20839,9 +20871,30 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   # and installing a perfect bundle into the main worktree's does not change
   # that — so it has to be SAID here. What it is not is this hook's to fix:
   # see "Which namespace a hook may write" above.
-  for line in hooksPathDiagnosisLines(top, inspectWorktreeSafeHooksPath(top)):
+  let pathFinding = inspectWorktreeSafeHooksPath(top)
+  for line in hooksPathDiagnosisLines(top, pathFinding):
     result.add(line)
   let hooksDir = gitHooksDir(top)
+  # A RELATIVE value read in a LINKED worktree names a directory that cannot
+  # exist: `gitHooksDir` joins it onto this worktree's top level, and here
+  # `<top>/.git` is a FILE. One hook does run in such a worktree regardless —
+  # `git worktree add` resolves the hooks directory in the parent process (the
+  # main worktree, where the value resolves) and then runs `post-checkout`
+  # with the NEW worktree as its directory. Attempting the per-hook repair
+  # there tried to `mkdir` under that file and printed "could NOT repair
+  # <hook> … Failed to create '<wt>/.git/'" once per managed hook: five
+  # warnings about a write that could never succeed, burying the one diagnosis
+  # above that does tell the operator what is wrong and how to fix it.
+  #
+  # So install nothing here. A bundle written ANYWHERE else would not be the
+  # one Git reads from this worktree either (it reads none), and the main
+  # worktree's bundle is self-healed by the hooks that fire there. The
+  # diagnosis already printed covers the condition, and `repro health` reports
+  # it as `path-unsafe`. The test is on the computed directory rather than on
+  # "is this a linked worktree", so it skips exactly the writes that would
+  # fail and nothing else.
+  if pathFinding.previous.len > 0 and not hooksDirCanExist(hooksDir):
+    return
   # One guard for the five hooks of this repo: the contract probe is a
   # subprocess and this proc runs from post-commit / post-merge /
   # post-checkout, i.e. on every commit in every repo.
@@ -21626,7 +21679,7 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
         stderr.writeLine(line)
       return 1
     if protocol != PrePushProtocolVersion:
-      let resolvedRepro = getAppFilename()
+      let resolvedRepro = publicCliImagePath()
       let candidate = if repoRoot.len > 0: repoRoot else: getCurrentDir()
       let discoveredRepo = gitTopLevel(candidate)
       let remedyRepo =
@@ -35266,7 +35319,7 @@ proc requireHcrDir(path, name: string) =
 proc runHcrBuildCycle(project, target, logPath: string): string =
   let targetArg = project & "#" & target
   let command = shellCommand([
-    getAppFilename(), "build", targetArg,
+    publicCliImagePath(), "build", targetArg,
     "--tool-provisioning=path",
     "--progress=none",
     "--log=actions"])
@@ -48595,7 +48648,7 @@ proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     tuple[code: int; output: string] =
   let hook = effectivePrePushHook(identity, repoRoot)
   if hook.kind == ephReproIncompatible:
-    return (1, hook.diagnostic & "; run '" & getAppFilename() &
+    return (1, hook.diagnostic & "; run '" & publicCliImagePath() &
       " hooks ensure --vcs " & repoRoot & "'")
   var capability = ""
   if hook.kind == ephReproV2:
@@ -51236,7 +51289,7 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ##     parser. See ``spawnDetachedNoShell``.
   if workspaceName.len == 0:
     return
-  let myExe = getAppFilename()
+  let myExe = publicCliImagePath()
   if myExe.len == 0:
     return
   when defined(windows):
@@ -58775,8 +58828,10 @@ proc assessHookWriterRunnerSkew*(repoRoot: string;
   ## build — so this is a probe, not a survey. ``post-commit`` is the default
   ## because it is the token §1.6b's measurements were taken against.
   result.contract = managedHookContract(hookName)
+  # The path that re-enters this engine, not the raw image: see the writer in
+  # `hookContractWriteRefusal`.
   result.writer = reproBuildIdentity(
-    try: getAppFilename() except CatchableError: "")
+    try: publicCliImagePath() except CatchableError: "")
   let resolved = resolveManagedHookInterpreter(repoRoot)
   result.runnerSource =
     if resolved.source.len > 0: resolved.source
@@ -62247,17 +62302,17 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       of ephReproIncompatible: hook.diagnostic
       of ephThirdParty: "effective pre-push hook is not Reprobuild protocol v2"
       of ephReproV2: ""
-    return (false, reason & "; run '" & getAppFilename() &
+    return (false, reason & "; run '" & publicCliImagePath() &
       " hooks ensure --vcs " & repoRoot & "'")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
     return (false, "the hook-resolved repro executable is unavailable; run '" &
-      getAppFilename() & " hooks ensure --vcs " & repoRoot & "'")
+      publicCliImagePath() & " hooks ensure --vcs " & repoRoot & "'")
   let probe = execCmdEx(shellCommand(@[hookCli, "hooks", "protocol",
     "--require=2"]), options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitChildEnv())
   if probe.exitCode != 0 or probe.output.strip() != "2":
-    return (false, "hook protocol mismatch; run '" & getAppFilename() &
+    return (false, "hook protocol mismatch; run '" & publicCliImagePath() &
       " hooks ensure --vcs " & repoRoot & "' and retry")
   (true, "")
 
@@ -62854,7 +62909,7 @@ proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
   let hook = protocolV2HookReady(identity, repoAbs)
   if not hook.ok:
     return (false, PushPreflightRepo(), "hook-preflight", hook.diagnostic,
-      getAppFilename() & " hooks ensure --vcs " & repoAbs)
+      publicCliImagePath() & " hooks ensure --vcs " & repoAbs)
   let head = gitRunPlainQuery(identity,
     ["-C", repoAbs, "rev-parse", "--verify", "HEAD^{commit}"])
   if head.code != 0 or head.output.strip().len == 0:
@@ -63346,7 +63401,7 @@ proc executePush(args: PushArgs): PushReport =
       result.lockDiagnostic = diagnostic
       result.retryCommand =
         if "hook" in backend.diagnostic.toLowerAscii():
-          getAppFilename() & " hooks ensure --vcs " & plan.root
+          publicCliImagePath() & " hooks ensure --vcs " & plan.root
         else:
           "repair the lock backend and retry 'repro push --sync --rebase'"
       result.exitCode = 2
@@ -63452,7 +63507,7 @@ proc executePush(args: PushArgs): PushReport =
         result.lockDiagnostic = diagnostic
         result.retryCommand =
           if "hook" in backend.diagnostic.toLowerAscii():
-            getAppFilename() & " hooks ensure --vcs " & plan.root
+            publicCliImagePath() & " hooks ensure --vcs " & plan.root
           else:
             "repair the lock backend and retry " &
               "'repro push --sync --rebase'"
@@ -64664,7 +64719,7 @@ proc reproSelfPath(): string =
   ## Best-effort absolute path to the running ``repro`` binary, used to
   ## render copy-pasteable remedy commands that don't depend on PATH.
   try:
-    result = getAppFilename()
+    result = publicCliImagePath()
   except CatchableError:
     result = ""
   if result.len == 0:
@@ -65457,8 +65512,17 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     pushes keep succeeding, and the absence surfaces only much later as a
   #     CI job that cannot resolve its siblings.
   #
-  #     THREE distinct ways it stops, all seen in the fleet:
+  #     FOUR distinct ways it stops, all seen in the fleet:
   #
+  #       * PATH-UNSAFE — the repo's ``core.hooksPath`` is RELATIVE (the
+  #         ``.git/hooks`` that ``git-hooks.nix``'s installer writes). Git
+  #         resolves it against each worktree's own top level, and a linked
+  #         worktree's ``.git`` is a FILE, so in every linked worktree Git
+  #         finds no hooks directory and runs NO hook — silently. Every body
+  #         can be perfect and still gate only the main worktree, which is why
+  #         this is a per-REPO finding read from git config rather than a
+  #         per-hook one read from ``.git/hooks``, and why those bodies are
+  #         still counted as wired;
   #       * missing — the repo never got hooks (``ensure`` never reached it);
   #       * shadowed — a foreign installer (pre-commit) overwrote the
   #         dispatcher at the canonical path while the managed body sits
@@ -65492,10 +65556,26 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     of the same question). An ambient ``hooks ensure`` runs on dev-shell
   #     entry in this very repo, so a doctor that offered to re-author would be
   #     racing it to delete its own evidence.
+  #
+  #     ARM ORDER: stale, path-unsafe, shadowed, missing. Stale first is the
+  #     safety property above. Path-unsafe next because its consequence reaches
+  #     every worktree of the repo and because its repair — the same
+  #     ``hooks ensure --vcs``, which rewrites the value to the absolute path it
+  #     was written to mean (``ensureWorktreeSafeHooksPath``) — is what makes
+  #     the other two arms' repairs reach linked worktrees at all. Each arm
+  #     NAMES the findings of the arms below it in the same detail, so taking
+  #     one arm never drops another's finding.
+  #
+  #     The issue that added path-unsafe (reprobuild-pm 2026-09-27) put it this
+  #     way: this row must report a hooks path that cannot resolve from a
+  #     worktree, "since the failure mode is silence" — no hook runs there, so
+  #     no hook can say so, and before this arm the row read the five bodies
+  #     through the main worktree and answered ``ok``.
   block hooksCheck:
     var missing: seq[string]
     var shadowed: seq[string]
     var stale: seq[string]
+    var pathUnsafe: seq[string]
     var okCount = 0
     var reposInspected = 0
     let enumerated = enumerateParticipatingRepos(parsed.workspaceRoot)
@@ -65507,6 +65587,12 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if gitTopLevel(repo.repoPath).len == 0:
         continue        # not materialized; the siblings check owns that.
       inc reposInspected
+      # Read-only: health REPORTS the path; the repair is the remedy's
+      # (``hooks ensure --vcs``, also reached through ``--fix``).
+      let pathEntry = hooksPathFindingLabel(repo.name,
+        inspectWorktreeSafeHooksPath(repo.repoPath))
+      if pathEntry.len > 0:
+        pathUnsafe.add(pathEntry)
       let hooksDir = gitHooksDir(repo.repoPath)
       for hookName in VcsHookNames:
         let standard = hookPath(hooksDir, hookName)
@@ -65565,55 +65651,80 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     # population: "4 wired" means nothing without "of 5 present in 1 repo".
     let census = $okCount & " managed hook(s) wired across " &
       $reposInspected & " participating repo(s)"
+    # The "Also N …" tail an arm appends for each finding class BELOW it, so
+    # taking one arm drops no other arm's finding. ``full`` selects the
+    # unabridged list (``fullDetail``: ``--json`` / ``--verbose``) over the
+    # digest, matching how each arm renders its own list.
+    proc alsoClause(label: string; items: seq[string];
+        full, verbose: bool): string =
+      if items.len == 0:
+        return ""
+      ". Also " & $items.len & " " & label & ": " &
+        (if full: items.join(", ") else: formatFindingList(items, verbose))
+    const pathUnsafeAlsoLabel = "repo(s) PATH-UNSAFE (a relative " &
+      "core.hooksPath, so NO managed hook runs in any of their linked " &
+      "worktrees)"
+    # What a path-unsafe repo costs, said once for both the workspace arm and
+    # the single-repo arm.
+    const pathUnsafeConsequence = " — core.hooksPath is a RELATIVE path, " &
+      "which Git resolves against each worktree's own top level; a linked " &
+      "worktree's '.git' is a FILE, so there it names nothing and NO managed " &
+      "hook runs (pushes from a linked worktree bypass the publication gate, " &
+      "silently): "
     if enumerated.mode != "workspace":
-      checks.add(HealthCheck(
-        name: "vcs-hooks",
-        status: hsOk,
-        detail: "single-repo target; workspace hook enumeration not applicable",
-        remedy: "", fixKind: hfNone))
+      # A single-repo target has no participating-repo population, so the
+      # per-hook states have nothing to sweep. Its hook PATH is still a fact
+      # about the one repo in front of us, and answering ``ok`` "not
+      # applicable" for it hid a gate that is off in every linked worktree.
+      let target = gitTopLevel(parsed.workspaceRoot)
+      let entry =
+        if target.len == 0: ""
+        else: hooksPathFindingLabel(target,
+          inspectWorktreeSafeHooksPath(target))
+      if entry.len > 0:
+        checks.add(HealthCheck(
+          name: "vcs-hooks",
+          status: hsFail,
+          detail: "single-repo target is PATH-UNSAFE" &
+            pathUnsafeConsequence & entry,
+          # The same command the workspace arm names; on a single repo it
+          # rewrites the value through the same ``ensureWorktreeSafeHooksPath``
+          # (``runVcsHooksCommand``), and ``--fix`` repairs the value directly.
+          remedy: self & " hooks ensure --vcs " & target,
+          fixKind: hfEnsureVcsHooks))
+      else:
+        checks.add(HealthCheck(
+          name: "vcs-hooks",
+          status: hsOk,
+          detail: "single-repo target; workspace hook enumeration not " &
+            "applicable (core.hooksPath is worktree-safe)",
+          remedy: "", fixKind: hfNone))
     elif stale.len > 0:
-      # FIRST, ahead of ``shadowed`` and ``missing``, and that ordering is the
-      # safety property rather than a preference: the other two arms hand out
-      # an ``--fix``-able ``hooks ensure``, and running that while a contract
-      # mismatch is live is how the diagnostic gets deleted instead of the
-      # defect. Whatever else is wrong is NAMED here, in the same detail, so
-      # nothing is dropped by taking this arm.
-      let fullStaleDetail = $stale.len & " managed hook(s) STALE — present, carrying " &
-        "every marker a generated body carries, and demanding a contract " &
-        "THIS build does not generate, so each fire refuses (pre-push) or " &
-        "fails open in silence (the four observational hooks): " &
-        stale.join(", ") & ". " & census &
-        (if writers.len > 0:
-          ". The installed bodies name their writer(s): " &
-            writers.join(" | ") &
-            " — compare STORE PATHS, not versions"
-        else: "") &
-        (if shadowed.len > 0:
-          ". Also " & $shadowed.len & " SHADOWED: " & shadowed.join(", ")
-        else: "") &
-        (if missing.len > 0:
-          ". Also " & $missing.len & " missing: " & missing.join(", ")
-        else: "") &
-        ". See the hook-interpreter row for whether this host's shells " &
-        "even agree about which 'repro' runs them."
-      let staleDetail = $stale.len & " managed hook(s) STALE — present, carrying " &
-        "every marker a generated body carries, and demanding a contract " &
-        "THIS build does not generate, so each fire refuses (pre-push) or " &
-        "fails open in silence (the four observational hooks): " &
-        formatFindingList(stale, parsed.verbose) & ". " & census &
-        (if writers.len > 0:
-          ". The installed bodies name their writer(s): " &
-            writers.join(" | ") &
-            " — compare STORE PATHS, not versions"
-        else: "") &
-        (if shadowed.len > 0:
-          ". Also " & $shadowed.len & " SHADOWED: " & formatFindingList(shadowed, parsed.verbose)
-        else: "") &
-        (if missing.len > 0:
-          ". Also " & $missing.len & " missing: " & formatFindingList(missing, parsed.verbose)
-        else: "") &
-        ". See the hook-interpreter row for whether this host's shells " &
-        "even agree about which 'repro' runs them."
+      # FIRST, ahead of ``path-unsafe``, ``shadowed`` and ``missing``, and that
+      # ordering is the safety property rather than a preference: the other
+      # three arms hand out an ``--fix``-able ``hooks ensure``, and running
+      # that while a contract mismatch is live is how the diagnostic gets
+      # deleted instead of the defect. Whatever else is wrong is NAMED here, in
+      # the same detail, so nothing is dropped by taking this arm.
+      proc staleDetailFor(full: bool): string =
+        $stale.len & " managed hook(s) STALE — present, carrying " &
+          "every marker a generated body carries, and demanding a contract " &
+          "THIS build does not generate, so each fire refuses (pre-push) or " &
+          "fails open in silence (the four observational hooks): " &
+          (if full: stale.join(", ")
+           else: formatFindingList(stale, parsed.verbose)) & ". " & census &
+          (if writers.len > 0:
+            ". The installed bodies name their writer(s): " &
+              writers.join(" | ") &
+              " — compare STORE PATHS, not versions"
+          else: "") &
+          alsoClause(pathUnsafeAlsoLabel, pathUnsafe, full, parsed.verbose) &
+          alsoClause("SHADOWED", shadowed, full, parsed.verbose) &
+          alsoClause("missing", missing, full, parsed.verbose) &
+          ". See the hook-interpreter row for whether this host's shells " &
+          "even agree about which 'repro' runs them."
+      let fullStaleDetail = staleDetailFor(full = true)
+      let staleDetail = staleDetailFor(full = false)
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
@@ -65623,11 +65734,37 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: "direnv reload   # then, only once hook-interpreter agrees: " &
           remedy,
         fixKind: hfNone))
+    elif pathUnsafe.len > 0:
+      # SECOND. Its remedy is the same ``--fix``-able ``hooks ensure --vcs`` as
+      # the two arms below, and it is the one whose consequence reaches every
+      # worktree of the repo; it names their findings so none is dropped.
+      proc pathUnsafeDetailFor(full: bool): string =
+        $pathUnsafe.len & " repo(s) PATH-UNSAFE" & pathUnsafeConsequence &
+          (if full: pathUnsafe.join(", ")
+           else: formatFindingList(pathUnsafe, parsed.verbose)) & ". " &
+          census &
+          alsoClause("SHADOWED", shadowed, full, parsed.verbose) &
+          alsoClause("missing", missing, full, parsed.verbose)
+      let fullPathUnsafeDetail = pathUnsafeDetailFor(full = true)
+      let pathUnsafeDetail = pathUnsafeDetailFor(full = false)
+      checks.add(HealthCheck(
+        name: "vcs-hooks",
+        status: hsFail,
+        detail: pathUnsafeDetail,
+        fullDetail: if pathUnsafeDetail != fullPathUnsafeDetail:
+            fullPathUnsafeDetail
+          else: "",
+        # ``ensureWorkspaceHooks`` rewrites each relative value to the
+        # absolute path it was written to mean before installing anything.
+        remedy: remedy,
+        fixKind: hfEnsureVcsHooks))
     elif shadowed.len > 0:
       let fullShadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
-        "installer and not running: " & shadowed.join(", ") & ". " & census
+        "installer and not running: " & shadowed.join(", ") & ". " & census &
+        alsoClause("missing", missing, true, parsed.verbose)
       let shadowedDetail = $shadowed.len & " managed hook(s) SHADOWED by a foreign " &
-        "installer and not running: " & formatFindingList(shadowed, parsed.verbose) & ". " & census
+        "installer and not running: " & formatFindingList(shadowed, parsed.verbose) & ". " & census &
+        alsoClause("missing", missing, false, parsed.verbose)
       checks.add(HealthCheck(
         name: "vcs-hooks",
         status: hsFail,
@@ -66315,8 +66452,30 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         keys.sort()
         var parts: seq[string]
         for k in keys: parts.add(k & "=" & $report.summary[k])
-        result.add("fix: " & $report.entries.len & " hook(s) across " &
-          $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
+        # A single-repo target installs nothing here (see below), and a
+        # "0 hook(s) across 0 repo(s)" line would read as a failed fix.
+        if report.mode == "workspace" or report.entries.len > 0:
+          result.add("fix: " & $report.entries.len & " hook(s) across " &
+            $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
+        # ``ensureWorkspaceHooks`` makes every participating repo's
+        # ``core.hooksPath`` worktree-safe before installing into it. A
+        # SINGLE-REPO target enumerates no participating repos, so it reaches
+        # none — yet the ``vcs-hooks`` row's single-repo arm offers this fix
+        # for exactly one finding, a path-unsafe hook path. Repair that value
+        # here, through the same ``ensureWorktreeSafeHooksPath`` every other
+        # route uses, and only that: the row reported nothing about the hook
+        # bodies of a single-repo target, so the fix does not touch them.
+        if report.mode != "workspace":
+          let target = gitTopLevel(parsed.workspaceRoot)
+          if target.len > 0:
+            let repair = ensureWorktreeSafeHooksPath(target)
+            let line = hooksPathRepairReport(target, repair)
+            if line.len > 0:
+              result.add("fix: " & line)
+            if not repair.ok:
+              result.add("fix: could NOT make core.hooksPath in " & target &
+                " worktree-safe (it is '" & repair.previous & "'): " &
+                repair.diagnostic)
       except CatchableError as err:
         result.add("fix: hooks ensure failed: " & err.msg)
     of hfSharedCloneLeaves:

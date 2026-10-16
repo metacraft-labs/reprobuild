@@ -35,6 +35,7 @@
 
 import std/[json, options, os, osproc, sets, streams, strutils, tables, tempfiles, times]
 from repro_core/paths import extendedPath
+from repro_core/source_root import publicCliImagePath
 from repro_core/process_streams import drainStream
 from repro_profile/data_refs import dataFilePathProblem
 
@@ -237,7 +238,7 @@ proc defaultProfileCompileOptionsFor(profileRoot: string;
     ProfileCompileOptions =
   result = ProfileCompileOptions(
     stateDir: stateDir,
-    publicCliPath: getAppFilename(),
+    publicCliPath: publicCliImagePath(),
     # Empty: `compileProfileToRbpi` resolves the sources through
     # `reprobuildRepoRoot()`, which honours `$REPROBUILD_REPO_ROOT` and the
     # installed package's `$REPROBUILD_SOURCE_ROOT` alike.

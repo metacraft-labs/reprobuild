@@ -298,6 +298,28 @@ named by the diagnostic. The command preserves existing user hooks; preserved
 hooks run without Reprobuild's internal capability or legacy recursion marker
 in their environment.
 
+### The managed hooks do not run in a linked worktree
+
+A **relative** `core.hooksPath` — typically `.git/hooks`, which the
+`git-hooks.nix` installer writes — is resolved by Git against the top level
+of whichever worktree is running the hook. In a linked worktree (`git worktree
+add`, `repro branch`) `.git` is a *file*, so that path names nothing and Git
+runs **no hooks at all** there: commits and pushes from the worktree bypass the
+publication gate without a word.
+
+Reprobuild reports it in three places. A commit or checkout in the repository
+prints a `repro hooks: core.hooksPath in <repo> is the relative path …`
+diagnosis and leaves the value alone (it is your git config, and you did not
+run a hooks command). A `pre-push` from the main worktree rewrites the value,
+or refuses the push when it cannot. And `repro health` reports the repository
+as `PATH-UNSAFE` in its `vcs-hooks` row, after any `STALE` hooks and before any
+shadowed or missing ones. The repair rewrites the value to the absolute path it
+was meant to name, which every worktree then shares:
+
+```console
+$ repro hooks ensure --vcs <repo-or-workspace>    # or: repro health --fix
+```
+
 ### The hook does not recognize the `repro` it found
 
 A managed hook runs `$REPROBUILD_REPRO`, or whatever `repro` is on `PATH`. If
