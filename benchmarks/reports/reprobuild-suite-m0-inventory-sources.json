@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2116,
-    "pureUnitConsolidationGroups": 61,
-    "pureUnitTests": 652,
-    "staticallyDetectedRuntimeCompilerFlowTests": 121,
-    "testEntries": 2137
+    "nimTestBinaries": 2120,
+    "pureUnitConsolidationGroups": 62,
+    "pureUnitTests": 654,
+    "staticallyDetectedRuntimeCompilerFlowTests": 122,
+    "testEntries": 2141
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -278,6 +278,20 @@
       "sources": [
         "libs/repro_home_apply/tests/test_m69_env_export.nim",
         "libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_home_generations",
+        "repro_home_rollback"
+      ],
+      "owner": "libs/repro_home_rollback",
+      "sources": [
+        "libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim",
+        "libs/repro_home_rollback/tests/t_smoke_home_rollback.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1280,9 +1294,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1147,
-      "platform/destructive": 129,
-      "pure unit": 652,
+      "integration": 1148,
+      "platform/destructive": 130,
+      "pure unit": 654,
       "unclassified": 190
     },
     "graphOwnedTestArtifacts": [
@@ -1485,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2116,
+    "nimTestBinaryCount": 2120,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2137
+    "testEntryCount": 2141
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2204,6 +2218,28 @@
         }
       ],
       "source": "tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "applyOptions",
+          "executedVariables": [],
+          "line": 156,
+          "path": "tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let artifact = compileProfileToRbpi(result.profilePath,"
+        }
+      ],
+      "source": "tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim"
     },
     {
       "class": "integration",
@@ -13288,7 +13324,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_generations/tests/t_smoke_home_generations.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13308,6 +13344,24 @@
       "source": "libs/repro_home_intent/tests/t_smoke_home_intent.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 34,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_concern_classification",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_generations",
+        "repro_home_resources"
+      ],
+      "owner": "libs/repro_home_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_resources/tests/t_concern_classification.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13396,6 +13450,24 @@
       "source": "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
       "sourceSuiteCount": 12,
       "staticCaseCount": 163,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rollback_releases_unowned_concerns",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_generations",
+        "repro_home_rollback"
+      ],
+      "owner": "libs/repro_home_rollback",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15946,7 +16018,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 32,
+      "staticCaseCount": 33,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24370,6 +24442,50 @@
       "source": "tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_apply_applies_declared_concerns",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply",
+        "repro_home_generations",
+        "repro_home_intent",
+        "repro_home_resources",
+        "repro_home_rollback",
+        "repro_local_store",
+        "repro_profile_compile",
+        "repro_profile_intent",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hosts_applies_declaration_cli",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm7/t_e2e_hosts_applies_declaration_cli.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

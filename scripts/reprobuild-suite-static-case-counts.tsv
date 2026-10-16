@@ -331,13 +331,15 @@ libs/repro_home_apply/tests/test_m69_apply_end_to_end.nim	nim	4
 libs/repro_home_apply/tests/test_m69_catalog_lookup.nim	nim	9
 libs/repro_home_apply/tests/test_m69_env_export.nim	nim	11
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	nim	4
-libs/repro_home_generations/tests/t_smoke_home_generations.nim	nim	7
+libs/repro_home_generations/tests/t_smoke_home_generations.nim	nim	8
 libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	34
+libs/repro_home_resources/tests/t_concern_classification.nim	nim	5
 libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
 libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	5
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	163
+libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
@@ -478,7 +480,7 @@ libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	95
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	30
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
-libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	32
+libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	33
 libs/repro_project_dsl/tests/dsl_port/t_dsl_activity_surface_is_typed.nim	nim	16
 libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_build_input_wiring.nim	nim	8
@@ -946,6 +948,8 @@ tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
 tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	5
 tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
 tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim	nim	2
+tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim	nim	4
+tests/e2e/gm7/t_e2e_hosts_applies_declaration_cli.nim	nim	1
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim	nim	2

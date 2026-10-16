@@ -63,6 +63,10 @@ type
                                        ## when --accept-overwrite was
                                        ## passed and the executor
                                        ## clobbered a drifted record
+    released*: seq[string]             ## GM7: records of concerns the
+                                       ## target generation does not
+                                       ## apply, left in place rather
+                                       ## than removed (`<kind> <name>`)
 
 # ---------------------------------------------------------------------------
 # Option resolution.
@@ -739,6 +743,7 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
 
       # ---- Step 5: build plan ----
       let plan = buildRollbackPlan(cur.manifest, tgt.manifest, tgt.envelope)
+      result.released = plan.released
 
       # ---- Step 6: digest-check ----
       if not opts.acceptOverwrite:

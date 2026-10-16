@@ -21,6 +21,7 @@
 import std/[algorithm, options, os, sets, strutils, tables]
 
 import repro_home_intent
+import repro_profile/concerns
 
 import ./errors
 import ./package_catalog
@@ -180,6 +181,46 @@ proc enabledActivitiesFor*(profile: Profile; host: string): HashSet[string] =
   e.host = host
   e.declaredHosts = declared
   raise e
+
+type
+  AppliedConcerns* = object
+    ## The concerns `repro home apply` applies on one host
+    ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+    concerns*: ConcernSet
+    declared*: bool
+      ## The host's `hosts:` entry declares `applies:`. False: every concern
+      ## (the behaviour of a profile without a declaration).
+
+proc appliedConcernsFor*(profile: Profile; host: string): AppliedConcerns =
+  ## THE concern-selection rule: the concerns the host's `hosts:` entry lists
+  ## under `applies:`, or every concern when it lists none (or the host has
+  ## no entry). `repro home apply`, `--plan`, `repro home plan`, the host
+  ## facts and the export all call this, so they cannot disagree. A name the
+  ## vocabulary does not know raises `ValueError` (the macro and the adapter
+  ## already refuse one; this is the last line for a profile that reached
+  ## the planner another way).
+  result = AppliedConcerns(concerns: AllHomeConcerns, declared: false)
+  let hostsOpt = findHostsBlock(profile)
+  if hostsOpt.isNone:
+    return
+  for entry in hostsOpt.get.hostsEntries:
+    if entry.hostName == host and entry.hostAppliesDeclared:
+      let problem = concernListProblem(entry.hostApplies)
+      if problem.len > 0:
+        raise newException(ValueError, "hosts entry \"" & host &
+          "\": applies: " & problem)
+      return AppliedConcerns(concerns: toConcernSet(entry.hostApplies),
+        declared: true)
+
+proc describeAppliedConcerns*(applied: AppliedConcerns; host: string): string =
+  ## One line for plan / apply output: which concerns are applied and why.
+  if not applied.declared:
+    "all (hosts entry for " & host & " declares no `applies:`)"
+  elif applied.concerns.card == 0:
+    "none (hosts." & host & ".applies is empty)"
+  else:
+    concernNames(applied.concerns).join(", ") & " (hosts." & host &
+      ".applies)"
 
 proc evaluateHostPredicate*(predicateAst: PredNode; ctx: HostContext): bool =
   ## Evaluate a profile predicate against the host facts selected for

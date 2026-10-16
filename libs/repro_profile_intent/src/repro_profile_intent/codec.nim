@@ -59,6 +59,11 @@ const
     ## imports (`ProfileIntent.catalogImports`). Optional; omitted when
     ## empty, so a profile without the section encodes exactly as before.
     ## Envelope schema 6.
+  KeyHostApplies  = "hostApplies"
+    ## The concerns Reprobuild applies per host (`ProfileIntent.hostApplies`,
+    ## a block-form `hosts:` entry's `applies:`). Optional; omitted when no
+    ## host declares, so a profile without a declaration encodes exactly as
+    ## before. Envelope schema 7.
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -296,6 +301,8 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
     entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
   if p.catalogImports.len > 0:
     entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
+  if p.hostApplies.len > 0:
+    entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
   cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
@@ -570,6 +577,12 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   if ciFound:
     for it in expectArray(ciNode, KeyCatalogImports):
       result.catalogImports.add expectText(it, KeyCatalogImports)
+  # The per-host concern declaration is OPTIONAL on the wire (absent when
+  # no host declares one).
+  var haFound = false
+  let haNode = lookupOpt(entries, KeyHostApplies, haFound)
+  if haFound:
+    result.hostApplies = decodeHosts(haNode)
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

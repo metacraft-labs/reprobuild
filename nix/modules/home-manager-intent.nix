@@ -28,6 +28,21 @@
 # of a category the host did not enable are excluded: that is the host's
 # explicit opt-out, not input the module failed to recognise.
 #
+# Concern-scoped apply (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+# apply): when the host's `hosts:` entry declares the concerns Reprobuild
+# applies (`evaluation.applies`), each category switch DEFAULTS to the
+# complement -- on unless Reprobuild applies the category's concern
+# (`categoryConcerns`: packages -> packages, homebrew -> applications,
+# files -> files, environment -> environment) -- and stays overridable; an
+# enabled category whose concern Reprobuild also applies is warned about
+# (both sides would apply it). Uncategorized entries of a concern Reprobuild
+# applies are excluded. Packages are routed by the concern Reprobuild's
+# realization selection gives them (`evaluation.packages[].concern`, from the
+# export's per-system classification): a host that gives Reprobuild
+# `applications` and Nix `packages` (or the reverse) needs no application list
+# on the Nix side (home-manager-mapping.nix). A host without a declaration:
+# every switch defaults off, as before.
+#
 # User documentation: docs/user-guide/nix-helper-library.md.
 { reprobuildLib }:
 {
@@ -47,12 +62,20 @@ let
     // lib.optionalAttrs (cfg.snapshot != null) { inherit (cfg) snapshot; }
     // lib.optionalAttrs (cfg.profileDir != null) { inherit (cfg) profileDir; }
     // lib.optionalAttrs (cfg.buildSystem != null) { inherit (cfg) buildSystem; }
+    // lib.optionalAttrs (cfg.packagesCatalog != null) { inherit (cfg) packagesCatalog; }
   );
+
+  # The concerns Reprobuild applies on this host, or null when its entry
+  # declares none (then nothing is derived from it).
+  applies = result.evaluation.applies or null;
+  reprobuildApplies = concern: applies != null && lib.elem concern applies;
+  complementDefault = name: applies != null && !(reprobuildApplies mapping.categoryConcerns.${name});
 
   mapped = mapping.mapIntent {
     inherit (result) evaluation;
     inherit pkgs;
     inherit (cfg) system;
+    concerns = result.document.concerns or null;
     categories = {
       packages = cfg.packages.enable;
       homebrew = cfg.homebrew.enable;
@@ -85,10 +108,21 @@ let
     name: description:
     lib.mkOption {
       type = lib.types.submodule {
-        options.enable = lib.mkEnableOption description;
+        options.enable = lib.mkOption {
+          type = lib.types.bool;
+          default = complementDefault name;
+          defaultText = lib.literalMD "on exactly when the host's `hosts:` entry declares `applies:` and does not list `${mapping.categoryConcerns.${name}}`";
+          description = "Whether to enable ${description}.";
+        };
       };
       default = { };
     };
+
+  # Both sides would apply the concern: the switch was turned on although the
+  # declaration gives the concern to Reprobuild.
+  bothApply = lib.filter (name: cfg.${name}.enable && reprobuildApplies mapping.categoryConcerns.${name}) (
+    lib.attrNames mapping.categoryConcerns
+  );
 in
 {
   options.reprobuild.intent = {
@@ -114,6 +148,11 @@ in
       default = null;
       description = "The profile directory, for IFD mode (used when `snapshot` is null).";
     };
+    packagesCatalog = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "IFD mode: a `reprobuild-packages` checkout the sandboxed `repro home export` reads package definitions from (`$REPROBUILD_PACKAGES_ROOT`). Needed for the export's per-package classification (which packages are applications) on a host whose `hosts:` entry declares `applies:`; without it, every package that catalog defines is `unresolved`. Ignored in snapshot mode.";
+    };
     buildSystem = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -126,7 +165,12 @@ in
     homebrew = lib.mkOption {
       type = lib.types.submodule {
         options = {
-          enable = lib.mkEnableOption "Homebrew token lists from pkg.homebrewCask / pkg.homebrewFormula resources and Homebrew-realized packages";
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = complementDefault "homebrew";
+            defaultText = lib.literalMD "on exactly when the host's `hosts:` entry declares `applies:` and does not list `applications`";
+            description = "Whether to enable Homebrew token lists from pkg.homebrewCask / pkg.homebrewFormula resources and Homebrew-realized packages.";
+          };
           realizationOf = lib.mkOption {
             type = lib.types.functionTo (lib.types.nullOr (lib.types.attrsOf lib.types.str));
             # The pinned Homebrew contribution catalog (reprobuild-brew-packages),
@@ -202,6 +246,11 @@ in
       assertion = false;
       inherit (r) message;
     }) (lib.filter (r: r.policy == "error") reports);
-    warnings = map (r: r.message) (lib.filter (r: r.policy == "warn") reports);
+    warnings =
+      map (r: r.message) (lib.filter (r: r.policy == "warn") reports)
+      ++ map (
+        name:
+        "reprobuild.intent: category `${name}` is enabled for host ${cfg.host}, but its `hosts:` entry declares that Reprobuild applies `${mapping.categoryConcerns.${name}}` there (applies: ${builtins.toJSON applies}): both sides apply it"
+      ) bothApply;
   };
 }
