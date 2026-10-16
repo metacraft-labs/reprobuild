@@ -10786,8 +10786,8 @@
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
