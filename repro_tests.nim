@@ -8550,6 +8550,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim",
+    binary: "build/test-bin/t_integration_hcr_linux_concurrent_patch_gate_conditions",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim",
     binary: "build/test-bin/t_integration_hcr_linux_on_stack_function_reported_skipped",
     defines: @[],
@@ -14499,6 +14508,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_provider_compile_key_ignores_the_callers_shell.nim",
+    binary: "build/test-bin/t_provider_compile_key_ignores_the_callers_shell",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_provider_compile_reporting_distinguishes_compile_from_reuse.nim",
     binary: "build/test-bin/t_provider_compile_reporting_distinguishes_compile_from_reuse",
     defines: @[],
@@ -15977,6 +15995,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_the_bootstrap_hands_over_to_the_pinned_reprobuild.nim",
     binary: "build/test-bin/t_the_bootstrap_hands_over_to_the_pinned_reprobuild",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_the_release_launcher_does_not_make_the_engine_self_spawn_the_loader.nim",
+    binary: "build/test-bin/t_the_release_launcher_does_not_make_the_engine_self_spawn_the_loader",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
