@@ -53425,6 +53425,83 @@ proc siblingAwaitsThisPush(view: PushCycleView; sibling: string;
     sibling.len > 0 and sibling != view.selfName and
     view.selfName in developSetClosure(view.repos, sibling)
 
+proc flakeLockPinnedRevisions*(lockText: string):
+    tuple[ok: bool; diagnostic: string;
+          pins: Table[string, tuple[node, rev: string]];
+          unpinned: Table[string, tuple[node, reason: string]]]
+  ## Forward declaration; defined with the NF-3 flake.lock reader.
+
+proc committedLockRevisions(repoRoot: string):
+    tuple[ok: bool; revs: HashSet[string]] =
+  ## Every revision the in-tree locks committed in ``repoRoot`` name: the
+  ## ``rev`` of each root input of ``flake.lock`` and the ``revision`` of each
+  ## VCS dependency of ``repro.lock``, lower-cased. ``ok`` is false when a lock
+  ## that exists cannot be read; the caller must then assume it names any
+  ## revision, because "no pin found" in an unread file proves nothing.
+  result.ok = true
+  result.revs = initHashSet[string]()
+  let root = absolutePath(repoRoot)
+  let flakeLock = root / "flake.lock"
+  if fileExists(extendedPath(flakeLock)):
+    try:
+      let pinned = flakeLockPinnedRevisions(readFile(extendedPath(flakeLock)))
+      if not pinned.ok:
+        result.ok = false
+      for _, pin in pinned.pins:
+        result.revs.incl(pin.rev.toLowerAscii())
+    except CatchableError:
+      result.ok = false
+  let lockPath = root / CommittedLockFileName
+  if fileExists(extendedPath(lockPath)):
+    try:
+      for d in parseLockedDependencies(readFile(extendedPath(lockPath))).deps:
+        if d.coordinates.kind == ckVcs and d.coordinates.revision.len > 0:
+          result.revs.incl(d.coordinates.revision.toLowerAscii())
+    except CatchableError:
+      result.ok = false
+
+proc overrideAwaitsThisPush(view: PushCycleView; override: string;
+    overrideHeadUnpublished, overrideHeadPinnedHere, selfIsOverride: bool):
+    bool =
+  ## Stage 3's form of the same rule (Workspace-And-Develop-Mode.md
+  ## §"Develop overrides that wait on the push"): may an unpublished develop
+  ## override that names the declared repo ``override`` be DEFERRED by this
+  ## push instead of refusing it?
+  ##
+  ## Stage 3 reads the WHOLE override file, so every gate refuses over every
+  ## unpublished override — including the gate of the override itself, which
+  ## refuses over this repo whenever this repo can be shown to block it. Then
+  ## no order of pushes passes. Two shapes prove the override cannot go first
+  ## under that refusal:
+  ##
+  ##   * its develop closure contains this repo (its stage 2 refuses over this
+  ##     repo's unpublished HEAD) — the `siblingAwaitsThisPush` shape;
+  ##   * this repo is itself an unpublished develop override (its stage 3
+  ##     refuses over this repo).
+  ##
+  ## Deferring it is sound only when what this push publishes names none of
+  ## the override's unpublished content:
+  ##
+  ##   * the override is OUTSIDE this repo's develop closure, so this push does
+  ##     not vouch for it. The gate's workspace lock record still observes its
+  ##     HEAD, as it observes every repo outside the closure (RA-21). Inside the
+  ##     closure stage 2 has already refused, and that refusal stands;
+  ##   * this repo's committed ``flake.lock`` / ``repro.lock`` do not name the
+  ##     override's HEAD (``overrideHeadPinnedHere`` is false). Stages 3b and
+  ##     3c read a pin EQUAL to the sibling's HEAD as agreeing, so this is the
+  ##     one pin of an unpublished revision they would let through; a pin that
+  ##     differs from HEAD is theirs to refuse or defer.
+  ##
+  ## And this repo's own HEAD must be unpublished — once it is published the
+  ## override CAN go first, and pushing it is the remedy.
+  if not (view.known and view.selfHeadUnpublished and
+      overrideHeadUnpublished and not overrideHeadPinnedHere and
+      override.len > 0 and override != view.selfName):
+    return false
+  if override in developSetClosure(view.repos, view.selfName):
+    return false
+  selfIsOverride or view.selfName in developSetClosure(view.repos, override)
+
 proc pinDefersToMutualPin(view: PushCycleView; identity: GitToolIdentity;
     sibling, siblingDir, pinnedRev: string;
     ahead, siblingHeadUnpublished: bool): bool =
@@ -62225,6 +62302,25 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         source: developOverridesPath(parsed.workspaceRoot)))
       result.exitCode = 2
       return
+  # The declared repo an override's source path names, and whether THIS repo is
+  # itself one of the overrides: the inputs to ``overrideAwaitsThisPush``.
+  # Asked of the declared checkout paths, which is what ``repro develop``
+  # records.
+  proc declaredRepoAt(path: string): string =
+    for repo in resolved.repos:
+      if sameFilesystemPath(parsed.workspaceRoot / repo.path, path):
+        return repo.name
+    ""
+  var selfIsOverride = false
+  if overridesOpt.isSome and parsed.currentRepo.len > 0:
+    for entry in listOverrides(overridesOpt.get()):
+      let p =
+        if isAbsolute(entry.local_path): entry.local_path
+        else: absolutePath(parsed.workspaceRoot / entry.local_path)
+      if sameFilesystemPath(p, parsed.currentRepo): selfIsOverride = true
+  var overrideCycle: PushCycleView
+  var overrideCycleResolved = false
+  var pinnedHere: tuple[ok: bool; revs: HashSet[string]]
   if overridesOpt.isSome:
     for entry in listOverrides(overridesOpt.get()):
       let sourcePath =
@@ -62315,6 +62411,43 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
             headSha == outgoing.headOid and
             sameFilesystemPath(sourcePath, parsed.currentRepo):
           continue
+        # An override that provably cannot be published before THIS push, and
+        # whose unpublished content this push does not pin, is deferred rather
+        # than refused — the only way two such pushes can both land
+        # (``overrideAwaitsThisPush``).
+        let overrideRepo = declaredRepoAt(sourcePath)
+        if overrideRepo.len > 0 and currentRepoName.len > 0:
+          if not overrideCycleResolved:
+            overrideCycle = pushCycleViewOf(parsed.currentRepo,
+              parsed.workspaceRoot, identity)
+            pinnedHere = committedLockRevisions(parsed.currentRepo)
+            overrideCycleResolved = true
+          # An unreadable HEAD or lock cannot prove the pin absent.
+          let headPinnedHere = headSha.len == 0 or not pinnedHere.ok or
+            headSha.toLowerAscii() in pinnedHere.revs
+          if overrideAwaitsThisPush(overrideCycle, overrideRepo, true,
+              headPinnedHere, selfIsOverride):
+            let why =
+              if overrideCycle.selfName in developSetClosure(
+                  overrideCycle.repos, overrideRepo):
+                "'" & overrideRepo & "' depends on '" & overrideCycle.selfName &
+                  "' (its develop closure contains it)"
+              else:
+                "'" & overrideCycle.selfName & "' is itself an unpublished " &
+                  "develop override, which '" & overrideRepo &
+                  "''s own gate refuses over"
+            result.notices.add("develop override DEFERRED, not refused: '" &
+              overrideRepo & "' (" & sourcePath & ") is unpublished, but " &
+              why & ", so it cannot be published before this push. It is " &
+              "outside this repo's develop closure, and this repo's " &
+              "committed flake.lock / repro.lock do not name its HEAD, so " &
+              "this push does not vouch for its unpublished content. The " &
+              "order that terminates: " &
+              "publish this repo now; then publish '" & overrideRepo &
+              "' (`repro push --current-repo=" & sourcePath & "`). [override=" &
+              overrideRepo & " head=" & headSha &
+              " unpublished=true deferred=override-awaits-push]")
+            continue
         # A develop-override deliberately asks the ANY-remote question (it is
         # an arbitrary local path with no manifest-declared remote), so the
         # requested name is empty and the wording is the plain one.
@@ -64744,12 +64877,55 @@ proc executePush(args: PushArgs): PushReport =
       if repo.name == args.projectName:
         pushedRepoName = repo.name
         break
-  else:
+  # A LINKED WORKTREE of a declared repo, parked outside the declared path, is
+  # that repo — and it is the checkout being pushed. The managed hook's gate
+  # identifies it by its git common directory (``resolveRepoWorktreeMatch``);
+  # matching only by declared path here missed it, fell back to the WHOLE
+  # workspace, pushed every declared checkout with unpublished work and never
+  # the worktree's own commits (CLI/push.md §"Scope"). Same resolver, so push
+  # and gate name the same repo.
+  var pushedCheckout = ""
+  if args.projectName.len == 0:
     let abs = absolutePath(args.currentRepo)
     for repo in resolved.repos:
       if sameFilesystemPath(args.workspaceRoot / repo.path, abs):
         pushedRepoName = repo.name
         break
+    if pushedRepoName.len == 0 and discoverGitWorktree(identity, abs).ok:
+      let match = resolveRepoWorktreeMatch(identity, args.workspaceRoot,
+        resolved.repos, abs)
+      if match.found and not sameFilesystemPath(
+          enclosingWorkspaceRoot(match.worktree.worktreeRoot),
+          args.workspaceRoot):
+        # The managed hook finds its workspace by walking up from the pushed
+        # checkout. From a worktree OUTSIDE this workspace that walk finds none
+        # and the hook does not gate the push at all ("not a workspace;
+        # nothing to enforce") — so it writes no lock record, and this command
+        # would be publishing workspace state its own gate never saw. Stop
+        # before any push instead of producing a half-published state.
+        result.stoppedRepo = resolved.repos[match.repoIndex].name
+        result.stoppedStage = "current-repo-identity"
+        result.retryCommand = "push from a worktree inside " &
+          args.workspaceRoot & " (for example one made by 'repro branch'), " &
+          "where the managed pre-push gate sees this workspace"
+        result.lockDiagnostic = match.worktree.worktreeRoot & " is a linked " &
+          "worktree of '" & result.stoppedRepo & "' outside the workspace " &
+          args.workspaceRoot & "; its pre-push hook resolves no workspace"
+        result.exitCode = 2
+        return
+      if match.found:
+        pushedRepoName = resolved.repos[match.repoIndex].name
+        pushedCheckout = match.worktree.worktreeRoot
+      elif match.ambiguous:
+        # The gate refuses this identity (`current-repo-identity`); widening
+        # to the whole workspace instead would publish repos nobody named.
+        result.stoppedRepo = args.currentRepo
+        result.stoppedStage = "current-repo-identity"
+        result.retryCommand = "repair the workspace declaration of " &
+          args.currentRepo & " and retry 'repro push'"
+        result.lockDiagnostic = match.diagnostic
+        result.exitCode = 2
+        return
 
   # The closure is everything this push's own gate will require to be
   # published ALREADY (CLI/push.md §"The closure is what the gate requires
@@ -64795,6 +64971,13 @@ proc executePush(args: PushArgs): PushReport =
   var byName = initTable[string, ResolvedRepo]()
   for repo in resolved.repos:
     byName[repo.name] = repo
+  if pushedCheckout.len > 0:
+    # Every per-member step reads ``workspaceRoot / path``; for the pushed repo
+    # that has to be the worktree. Only this view is redirected: lock records
+    # (``pushLockBackendPlans``) keep the DECLARED path, exactly as the gate
+    # writes them.
+    byName[pushedRepoName].path = relativePath(pushedCheckout,
+      args.workspaceRoot)
 
   let recordStoreRoot = pickRecordStoreRoot(WorkspaceLockArgs(
     workspaceRoot: args.workspaceRoot,

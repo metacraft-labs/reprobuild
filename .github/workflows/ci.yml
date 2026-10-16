@@ -973,6 +973,16 @@ jobs:
         run: |
           git diff --exit-code -- flake.lock
           dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
+      - name: Check the trace-format pin against CodeTracer's lock
+        # Decided at evaluation time, so it builds nothing: it fails when
+        # ``ct-trace-format-src`` is not the revision the pinned
+        # ``codetracer-src``'s ``repro.lock`` names (see the check in
+        # flake.nix). Nothing else would run it -- CI builds only
+        # ``.#default``, not ``checks.*``.
+        run: |
+          system="$(dev-exec nix eval --impure --raw --expr builtins.currentSystem)"
+          dev-exec nix build --no-update-lock-file --no-link \
+            ".#checks.${system}.ct-trace-format-pin-coherence"
       - name: nix build
         # ``--log-lines 200`` widens nix's failure tail from its default 25.
         # Twenty-five lines is not enough to see WHICH entrypoint's ``nim c``
