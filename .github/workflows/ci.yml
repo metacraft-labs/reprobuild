@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+    branches-ignore: [agents]
 
 # This workflow supersedes its own older runs, on branches as well as pull
 # requests, and that is deliberate rather than merely inherited.
@@ -85,6 +86,7 @@ jobs:
             devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
+            reprobuild-packages
             reprobuild-test-adapters
             runquota
             tree-sitter-aiken
@@ -367,6 +369,7 @@ jobs:
             devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
+            reprobuild-packages
             reprobuild-test-adapters
             runquota
             tree-sitter-aiken
@@ -898,6 +901,7 @@ jobs:
             devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
+            reprobuild-packages
             reprobuild-test-adapters
             runquota
             tree-sitter-aiken

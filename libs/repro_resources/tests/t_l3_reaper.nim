@@ -350,3 +350,117 @@ suite "L3: crash-safe reaper":
     check rc == 0
     check not hasStateRecord(store, "cluster")
     check destroyLog == @["cluster"]
+
+  test "(11) one unreapable record does not abort the sweep; its dependencies are held":
+    ## The defect this case pins: a sweep that RAISES on one record reaps
+    ## NOTHING. The daemon's wall-clock tick hit it on its very first record —
+    ## a `vm_harness.nic` whose attrs marshaller the daemon does not link — on
+    ## every one of 141,895 consecutive attempts over 60 days, and reaped
+    ## nothing, ever (reprobuild-specs/issues/
+    ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md).
+    ##
+    ## The store here is REAL and so is the failure: `orphan` is a genuine
+    ## record written to disk whose `attrsTypeId` has no `registerExtension`
+    ## marshaller in this process, so `reconstructInstance` raises the same
+    ## `KeyError` the live daemon logs. Nothing is stubbed to fail.
+    ##
+    ## Three reapable records, and the reverse-topo order puts the broken one
+    ## FIRST (see below), reproducing the abort exactly:
+    ##
+    ##   cluster  -- reapable, independent      -> MUST be reaped
+    ##   orphan   -- no marshaller, dependsOn base -> unreapable, record kept
+    ##   base     -- reapable, but `orphan` depends on it -> HELD, not destroyed
+    ##
+    ## `base` is held rather than reaped on purpose. `orphan` still exists, in
+    ## the store and possibly in the world, so destroying what it depends on
+    ## would tear a dependency out from under a live dependent — the exact
+    ## thing the reverse-topo order exists to prevent — and would leave
+    ## `orphan.dependsOn` dangling at a removed address.
+    let store = scratchStore("unreapable")
+    let t0 = fromUnix(1_700_000_000)
+    let ttl = initDuration(minutes = 10)
+    let later = t0 + ttl + initDuration(minutes = 1)
+
+    # Two real, reconstructable stub states, each leased by its own consumer.
+    materialize(store, "cluster", "smoke", delayed(ttl), t0)
+    materialize(store, "base", "basic", delayed(ttl), t0)
+
+    # ...and one record whose attrs typeId has NO registered marshaller. Hand
+    # written because `buildStateRecord` marshals through the registry, which
+    # is precisely the step that cannot happen for such a type. The payload is
+    # opaque bytes: `unmarshalAttrs` refuses on the typeId before reading it.
+    writeStateRecord(store, ResourceStateRecord(
+      address: "orphan",
+      typeId: "l3.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @["base"],
+      identity: "stub:orphan",
+      present: true,
+      holders: initTable[string, Time](),
+      effectiveDeadline: some(t0),
+      lastRenewed: t0))
+
+    # Order check, so this case cannot pass vacuously by reaping `cluster`
+    # before ever reaching the broken record: `reverseTopoOrder` emits
+    # [orphan, cluster, base], so the sweep meets `orphan` FIRST.
+    let selected = selectReapable(listStateRecords(store), later)
+    var order: seq[string] = @[]
+    for rec in reverseTopoOrder(selected): order.add(rec.address)
+    check order == @["orphan", "cluster", "base"]
+
+    let report = reapOnce(store, now = later)
+
+    # The reapable, unrelated record IS reaped — the sweep ran to the end.
+    check "cluster" in destroyLog
+    check not hasStateRecord(store, "cluster")
+    # The broken record is left on disk for a later sweep (in a process that
+    # DOES link the marshaller) to resume. Nothing was destroyed for it.
+    check hasStateRecord(store, "orphan")
+    check "orphan" notin destroyLog
+    # ...and so is its dependency, untouched.
+    check hasStateRecord(store, "base")
+    check "base" notin destroyLog
+    # Exactly one record was reaped, and the other two are NOT reported as
+    # healthy `kept` records: `skipped` means "inspected and correctly kept"
+    # (here, the two never-reap consumer records only). A record the reaper
+    # was asked to destroy and could not must not read as a healthy one.
+    #
+    # Deliberately asserted through the baseline API and the CLI text below
+    # rather than by naming the new report field, so reverting only the
+    # production change reddens this case at RUN time on the behaviour, not at
+    # compile time on a missing symbol.
+    check report.reaped.len == 1
+    check report.reaped[0].address == "cluster"
+    check report.skipped.len == 2
+    for a in @["orphan", "base"]:
+      check a notin report.skipped
+
+    # The `repro reap` CLI seam reports the unreapable records rather than
+    # printing "kept" and exiting 0 — the invisibility that let the daemon
+    # fail for 60 days must not be reproduced at the CLI.
+    let store2 = scratchStore("unreapable-cli")
+    materialize(store2, "cluster", "smoke", delayed(ttl), t0)
+    writeStateRecord(store2, ResourceStateRecord(
+      address: "orphan", typeId: "l3.unregistered",
+      determinism: rdVolatile, attrsTypeId: "l3.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00", dependsOn: @[],
+      identity: "stub:orphan", present: true,
+      holders: initTable[string, Time](),
+      effectiveDeadline: some(t0), lastRenewed: t0))
+    var lines: seq[string] = @[]
+    let capture = proc (line: string) = lines.add(line)
+    let rc = runReapCli(@["--once", "--state-root=" & store2.root],
+                        now = later, echoLine = capture)
+    # Non-zero: the verb was asked to destroy this state and did not.
+    check rc == 1
+    var named = false
+    var reportedReaped = false
+    for l in lines:
+      if l.contains("orphan") and l.contains("marshaller"): named = true
+      if l == "reaped: 1": reportedReaped = true
+    check named            # the operator is told WHICH record and WHY
+    check reportedReaped   # ...and that the rest of the sweep still ran
+    check not hasStateRecord(store2, "cluster")
+    check hasStateRecord(store2, "orphan")

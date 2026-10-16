@@ -306,6 +306,47 @@ proc runLeaseReapTick*(scope: DaemonLeaseScope = dlsUser;
   let t = if transport.isSome: transport.get else: buildLeaseReapTransport()
   reapExpiredAtReconcileStart(store, now, t)
 
+proc leaseReapFindings*(report: ReapReport):
+    seq[tuple[signature, line: string]] =
+  ## Render one tick's ``failed`` records as ready-to-log sentences, each
+  ## paired with the key a caller de-duplicates it on.
+  ##
+  ## This rendering lives HERE rather than in ``runtime.nim`` for the reason
+  ## stated at the top of this module: ``lease_registry`` is the ONE module in
+  ## ``repro_daemon_core`` that links ``repro_resources``, so the event loop
+  ## cannot name ``ReapFailureKind`` to decide a verb. Same translation duty as
+  ## the ``ttlSeconds`` <-> ``LeasePolicy`` encoding above — the resource lane's
+  ## vocabulary stops at this module.
+  ##
+  ## THE SIGNATURE IS NOT THE LINE, and returning both is the whole point.
+  ## ``runScopedLeaseReapTick`` reports each finding once per daemon run and
+  ## keeps its keys for the daemon's entire life, so the key set has to be
+  ## bounded by the STORE rather than by whatever text a failure happens to
+  ## carry. ``reason`` is ``err.msg`` for an ``rfkUnreapable`` record, and only
+  ## ONE of the causes ``reapOnce`` enumerates has a fixed message — a missing
+  ## attrs marshaller names just the typeId. The others are a provider session
+  ## that will not launch and a real provider's own ``observe``/``apply``
+  ## failure: arbitrary text from out-of-tree code, free to carry a pid, a
+  ## socket path, an errno or an attempt counter that differs on every tick.
+  ## Keyed on the rendered line, such a record would log again every 30 s —
+  ## the 142,713-line flood the de-duplication exists to stop — AND grow the
+  ## key set without bound for as long as the daemon runs.
+  ##
+  ## address + typeId + kind IS the finding: one record, and one reason it is
+  ## stuck. A changed message about the same stuck record is the same finding,
+  ## and its text is already on the line that was logged.
+  result = @[]
+  for f in report.failed:
+    let verb =
+      case f.kind
+      of rfkUnreapable: "cannot reap"
+      of rfkBlocked: "holding"
+    result.add((
+      signature: "finding\x00" & f.address & "\x00" & f.typeId & "\x00" &
+        $f.kind,
+      line: verb & " address=" & f.address & " typeId=" & f.typeId &
+        ": " & f.reason))
+
 # ---------------------------------------------------------------------------
 # L5 deferral (ii): the concrete consume-site renew hook.
 #

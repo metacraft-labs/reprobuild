@@ -465,7 +465,7 @@ suite "manifest to agent to verdict, over a socket, with no hardware":
       "--json", "--out", jsonPath]) == AttestExitAcceptedNoRootOfTrust
     let jsonText = readFile(jsonPath)
     check "\"schema\": \"reproos.attestation-verdict.v1\"" in jsonText
-    check jsonText.count("\"check\":") == 11
+    check jsonText.count("\"check\":") == 13
 
   test "the command line refuses the shapes that have no right answer":
     # Asserting the exit CODE is not enough and that is not a theory:

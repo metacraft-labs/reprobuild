@@ -391,8 +391,8 @@ suite "RA-25 — repro push: closure published in topological order":
         " status --porcelain")
       check manifestStatus.code == 0
       check manifestStatus.output.strip().len == 0
-      check not fileExists(fx.workspaceRoot / ".repro" / "workspace" /
-        "post-commit-report.json")
+      check not fileExists(fx.workspaceRoot / ".repro" / "build" /
+        "reports" / "post-commit-report.json")
 
   test "t_repro_push_named_project_publishes_same_closure":
     # ``repro push <project>`` resolves the same closure as the no-arg form.

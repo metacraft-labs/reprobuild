@@ -20,7 +20,7 @@
 ## A gate that only ever builds the healthy provider cannot tell a passing
 ## assertion from a vacuous one.
 
-import std/[json, os, osproc, streams, strutils]
+import std/[exitprocs, json, os, osproc, streams, strutils, tempfiles]
 
 # Nim parses `../hcr-linux-direct/x` as arithmetic, so the ELF reader HLX-M0
 # already ships is imported by quoted path rather than copied. One reader, one
@@ -80,9 +80,29 @@ proc runOrFail*(command, cwd: string): string =
       "command failed (exit " & $res.exitCode & "): " & command & "\n" & res.output)
   res.output
 
+var m3WorkDirOfThisProcess {.threadvar.}: string
+
 proc m3WorkDir*(repoRoot: string): string =
-  result = repoRoot / "build" / "hcr-linux-m3"
-  createDir(result)
+  ## ONE DIRECTORY PER PROCESS, not one per checkout. Every object and fixture
+  ## binary these gates build is written here, and the gates do not run alone:
+  ## the three HLX-M3 binaries share this helper, and the production runner
+  ## runs each case as its own process, in parallel with other cases. With a
+  ## single shared `build/hcr-linux-m3/`, one process's `gcc -o
+  ## hcr_lx_m3_patch.o` truncated the object another process was parsing
+  ## (run 14: "not an ELF64 object (too short): …/hcr_lx_m3_patch.o"), and a
+  ## fixture binary could be relinked under a process that was running it.
+  ## Every build here is from source on each call, so nothing is lost by not
+  ## sharing; the directory is removed when the process exits.
+  if m3WorkDirOfThisProcess.len == 0:
+    let parent = repoRoot / "build" / "hcr-linux-m3"
+    createDir(parent)
+    m3WorkDirOfThisProcess = createTempDir("run-" & $getCurrentProcessId() &
+      "-", "", parent)
+    let owned = m3WorkDirOfThisProcess
+    addExitProc(proc () =
+      try: removeDir(owned)
+      except CatchableError: discard)
+  m3WorkDirOfThisProcess
 
 proc m3CaseDir*(repoRoot: string): string =
   repoRoot / "tests" / "e2e" / "hcr-linux-txn"

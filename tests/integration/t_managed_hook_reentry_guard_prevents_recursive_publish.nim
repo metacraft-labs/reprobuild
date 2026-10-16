@@ -112,7 +112,7 @@ suite "managed post-commit recursion context":
       check readFile(dispatcher).contains("REPROBUILD_HOOK_ACTIVE")
       check readFile(managed).contains(InternalLockCommitContext)
 
-      let report = workspaceRoot / ".repro" / "workspace" /
+      let report = workspaceRoot / ".repro" / "build" / "reports" /
         "post-commit-report.json"
       if fileExists(report): removeFile(report)
 

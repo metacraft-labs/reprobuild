@@ -75,9 +75,11 @@
 ##   5. a repo contributes AT MOST ONE record however many root consumers its
 ##      document offers: neither `liba-shadow` nor `libc-shadow` is in the rows,
 ##      and neither revision is anywhere in the report.
-##   6. `libc` resolves at the ROOT lock's revision, at `<ws>/vendor/libc`,
-##      state `absent` — the precondition for (5)'s `libc` half, since it is the
-##      root having claimed the NAME that leaves the PATH unclaimed.
+##   6. `libc` resolves at its OWN lock's revision, at `<ws>/libc`, state
+##      `at-lock`, overruling the root lock's `vendor/libc` claim — the
+##      precondition for (5)'s `libc` half, since the winning record occupies
+##      the slot the ROOT entry opened and the path that slot was indexed under
+##      is still `vendor/libc`.
 ##
 ## Falsifiability / mutation checks. Each was RUN against a rebuilt `repro`, and
 ## the failing checks are named by IDENTITY rather than by line number, which
@@ -462,17 +464,27 @@ suite "DS-1: a per-repo committed lock contributes only its own self-record":
           check liba.path == os.normalizedPath(ws / "liba")
           check liba.state == "at-lock"
 
-        # ---- (6) `libc` resolves from the ROOT lock, and ONLY from it. ----
-        # The root claimed the NAME, so `libc`'s own self-record is skipped —
-        # and, because that skip never claims the PATH, this is precisely the
-        # shape in which a second `.` dep would sail through both dedup arms.
+        # ---- (6) `libc` resolves from its OWN lock, overruling the root. ---
+        # The root lock names `libc` too, at `vendor/libc` — a location nothing
+        # in this workspace occupies. A repo publishes its own coordinates and
+        # the workspace root does not publish them on its behalf, so the repo's
+        # own record wins (see
+        # `t_develop_repo_own_lock_outranks_the_root_lock`), and the
+        # disagreement is announced rather than swallowed.
+        #
+        # This remains the shape in which a second `.` dep could sail through
+        # both dedup arms: the winning record occupies the slot the ROOT entry
+        # opened, whose indexed path is still `vendor/libc`, so nothing claims
+        # path `libc` unless the fold re-indexes it. `break` in
+        # `participatingRepoCommittedLocks` is the first line of defence and
+        # (5) below is what proves it is still there.
         let libc = rowFor(report, "libc")
         check libc.found
         if libc.found:
-          check libc.revision == libcRootSha
-          check libc.revision != libcSha
-          check libc.path == os.normalizedPath(ws / "vendor" / "libc")
-          check libc.state == "absent"
+          check libc.revision == libcSha
+          check libc.revision != libcRootSha
+          check libc.path == os.normalizedPath(ws / "libc")
+          check libc.state == "at-lock"
 
         # ---- (4) the develop set is EXACTLY the participating repos. ------
         var names: seq[string]

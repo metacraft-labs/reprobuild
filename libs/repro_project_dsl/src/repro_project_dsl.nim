@@ -61,6 +61,8 @@ import repro_project_dsl/install_mirror_resolver
 import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/shell_fetch
 import repro_project_dsl/source_cache_identity
+import repro_project_dsl/reprobuild_packages_catalog
+export reprobuild_packages_catalog
 # How a macro shells out at compile time. A `std`-only leaf, deliberately
 # separate from this module so a gate can compile against the RULE without
 # paying for the whole DSL — see the module's own header for why the rule is

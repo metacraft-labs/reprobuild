@@ -26,6 +26,17 @@
 ## remove the only thing under test, which is whether the in-memory tally
 ## tracks what is actually on disk.
 ##
+## A WRITER THAT DIES WITHOUT WRITING ANYTHING IS THE OTHER CROSS-PROCESS
+## CASE, and it is not the same as a worker that writes a terminal state. A
+## SIGKILLed, OOM-killed or power-cut worker leaves its record `running` on
+## disk forever, so re-reading the record keeps agreeing that the session is
+## active and the tally keeps blocking the dev self-restart -- for the whole
+## life of the daemon process, because the startup sweep
+## (`reclaimAbandonedSessions`) runs once. Measured: 16,788 consecutive
+## deferrals from one daemon. `activeSessionTallyFor` therefore reconciles
+## against writer liveness too, and the case below drives it with a real
+## forked process that really dies.
+##
 ## THE RESTART CASE IS THE ONE THAT MATTERS MOST. A tally that counted only
 ## the sessions its own process observed would read LOW after a dev
 ## self-restart, and a status consumer that believes there are no active
@@ -378,3 +389,58 @@ suite "which identity governs is encoded in the state":
       check posix.WIFEXITED(status) and posix.WEXITSTATUS(status) == 0
       check countActiveSessionRecordsFromDisk(config) == 0
       check activeSessionTallyFor(config) == 0
+
+    test "a session whose worker dies without a terminal write stops blocking":
+      ## The other half of the cross-process case, and the one that jams the
+      ## dev self-restart indefinitely. The parent accepts the session (and
+      ## counts it); the worker stamps its OWN identity and transitions to
+      ## `running` -- and is then killed without ever writing a terminal
+      ## state, which is what a SIGKILL, an OOM kill or a lost terminal does.
+      ##
+      ## Nothing will ever write that record again, so re-reading it can only
+      ## keep reporting `running`. The tally must nevertheless come down: the
+      ## record's writer is PROVABLY gone, and `restartCandidateReady` gates
+      ## on this number. Before the reconciliation existed the count stayed up
+      ## for the daemon's whole life, because the startup sweep had already
+      ## run and does not run again.
+      ##
+      ## A real `fork()` whose child really exits is the only faithful
+      ## reproduction: the identity in the record has to be one this process
+      ## can probe and find absent, and a synthetic pid would be a mock of the
+      ## exact boundary under test.
+      let root = createTempDir("repro-tally-", "")
+      defer: removeDir(root)
+      let config = tempConfig(root)
+      var accepted = session("killed-worker", "accepted")
+      accepted.writer = encodeWriterIdentity(currentWriterIdentity())
+      writeSessionRecord(config, accepted)
+      check activeSessionTallyFor(config) == 1
+      let pid = posix.fork()
+      if pid == 0:
+        var running = session("killed-worker", "running")
+        # The worker's own identity, stamped in the same write as the
+        # transition -- the production one-write rule.
+        running.writer = encodeWriterIdentity(currentWriterIdentity())
+        try:
+          writeSessionRecord(config, running)
+        except CatchableError:
+          quit(1)
+        quit(0)
+      require pid > 0
+      var status: cint
+      discard posix.waitpid(pid, status, 0)
+      check posix.WIFEXITED(status) and posix.WEXITSTATUS(status) == 0
+      # The record on disk is still non-terminal, in the name of a process
+      # that no longer exists. That is the whole population this defends.
+      let body = readFile(root / "sessions" / "killed-worker.session")
+      check "state=running" in body
+      let thisProcess = "writer=" & encodeWriterIdentity(currentWriterIdentity())
+      check thisProcess notin body
+      let tally = activeSessionTallyFor(config)
+      checkpoint("record still says running; reconciled tally=" & $tally)
+      check tally == 0
+      # ...and the finding is durable rather than private to this process, so
+      # a concurrent daemon and `repro daemon sessions` stop being lied to.
+      check countActiveSessionRecordsFromDisk(config) == 0
+      check AbandonedSessionState in
+        readFile(root / "sessions" / "killed-worker.session")

@@ -155,6 +155,55 @@ All three are source scans — no compiler, no built binaries, a couple of
 minutes on the full tree against the hours a build costs — which is what
 makes them affordable at every push.
 
+## Integrating: these artifacts are never merged, only regenerated
+
+The four files the refreshes above write —
+
+- `repro_tests.nim`
+- `scripts/reprobuild-test-shape-parity.tsv`
+- `scripts/reprobuild-suite-static-case-counts.tsv`
+- `benchmarks/reports/reprobuild-suite-m0-inventory-sources.json`
+
+— are marked `-merge` in `.gitattributes`. When a merge, rebase or cherry-pick
+finds that **both** sides moved one of them, git stops with the path unmerged
+(`UU`) instead of text-merging it. There is nothing to resolve by hand:
+
+```bash
+just regen-suite-artifacts
+git add repro_tests.nim scripts/reprobuild-test-shape-parity.tsv \
+        scripts/reprobuild-suite-static-case-counts.tsv \
+        benchmarks/reports/reprobuild-suite-m0-inventory-sources.json
+```
+
+Do not pick a side, and do not hand-edit. Every byte of these files is derived
+from the tree, so the correct post-merge value is a function of the **merged
+tree** — not of the two edits. Taking `--ours`, taking `--theirs` or splicing
+the two all produce a document no generator ever emitted, which is why the
+gates then fail on whoever branches next rather than on whoever merged.
+
+Nothing has to be installed for this to work. `.gitattributes` is a tracked
+file, so every clone and every linked worktree has it; unlike a custom merge
+driver, whose `merge.<name>.driver` half lives in the unversioned `.git/config`
+and which git silently ignores — no warning, exit 0, ordinary "Auto-merging"
+line — in any clone that never registered it.
+
+The mark costs nothing when only one side moved the file, or when both sides
+generated identical bytes: git resolves those trivially, as before. It fires
+only on the case that was previously silent. Over the 182 two-parent merges in
+the last 795 commits before it was added, 51 (28%) were that case. In 43 of the
+51 every two-sided artifact came out matching neither parent. In the other 8 at
+least one artifact came out byte-identical to one parent while its siblings
+were blended — the worse shape, because that is how the artifacts come to
+contradict each other, and those 8 can be shown wrong from the commit alone:
+`repro_tests.nim`, the JSON and the TSV disagree about which test sources
+exist, by one to four sources. The rest cannot be settled without regenerating
+a historical tree, which is exactly why nothing caught them.
+
+`tests/unit/test_generated_artifact_merge_policy.py` reproduces the silent
+failure, asserts the refusal against this repository's own `.gitattributes`,
+and derives the protected set from the generators' path constants — so a fifth
+generated artifact cannot arrive without a mark.
+
 ## Nix Dev Shell
 
 `nix develop` activates the compiler and library toolchain. Every input this

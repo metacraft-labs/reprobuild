@@ -13,7 +13,11 @@
 ##     that, the extraction fix is unreachable because the listing dies first.
 ##   * the ``conda`` arm's zstd fallback built a LIVE ``|`` shell string for
 ##     ``uncontrolledExecCmdEx``. There is no shell behind that call on
-##     Windows, so the arm could never work there at all.
+##     Windows, so the arm could never work there at all. (Since the extractor
+##     became a dependency edge -- Dependency-Provisioning-In-Build-Graph.md
+##     section 4 -- the conda arm has no discovery and no fallback: it is
+##     handed its zstd, decompresses to a file and runs the tar-family arm.
+##     The case below drives that shape against GNU tar.)
 ##
 ## The two defects, restated so a future reader need not fetch them:
 ##
@@ -76,11 +80,9 @@
 ##     DELETED until the mutation run exposed it. Ruled out by
 ##     ``n48AssertChildIsAWitness``, which refuses the run unless the child
 ##     reports a GNU tar banner from the tar it actually spawned.
-##   * The conda case silently takes the DIRECT zstd-capable-tar arm instead
-##     of the fallback it claims to exercise, so the ``|`` it exists for is
-##     never run. Ruled out by ``n48ZstdFallbackVerdict``, which restates the
-##     product's own discovery order and turns the case into a NAMED skip
-##     rather than a green whenever discovery would take the other arm.
+##   * The conda case runs a tar immune to the defect. Ruled out by pinning
+##     ``REPRO_HOST_TAR`` to GNU tar for the call and asserting, through
+##     ``resolveHostTar``, that GNU tar is what the product resolves.
 ##   * The host has no ``tar``/``zstd``/zip writer so the case never runs. Not
 ##     silent: every skip names what was missing, and each case checkpoints
 ##     WHICH tar it exercised so a green can be attributed.
@@ -236,52 +238,6 @@ proc n48MakeZip(sourceDir, zipPath: string): tuple[ok: bool, why: string] =
   if not fileExists(extendedPath(zipPath)):
     return (false, "zip writer reported success but produced no file")
   (true, "")
-
-proc n48SpeaksZstd(exe: string): bool =
-  ## ``tarSpeaksZstd``'s predicate, restated. The product's copy is a nested
-  ## proc inside ``extractTarballArchive`` and cannot be called from here, so
-  ## it is mirrored — and the mirror is validated by the fact that the case
-  ## FAILS TO REACH THE FALLBACK whenever this returns true for anything
-  ## discovery would pick.
-  if exe.len == 0: return false
-  let probe = execCmdEx(shellArgv([exe, "--version"]))
-  probe.exitCode == 0 and probe.output.toLowerAscii().contains("libarchive")
-
-proc n48InertBinary(): string =
-  ## A real, harmless executable whose ``--version`` output cannot contain
-  ## ``libarchive``. Used below to stand in for ``bsdtar`` so discovery is
-  ## forced past the direct arm. It must be a REAL image: an empty file named
-  ## ``bsdtar.exe`` would make ``CreateProcessW`` fail and the product would
-  ## raise out of the probe rather than reject the candidate.
-  when defined(windows):
-    result = getEnv("WINDIR", r"C:\Windows") / "System32" / "whoami.exe"
-    if not fileExists(extendedPath(result)): result = ""
-  else:
-    result = findExe("false")
-
-proc n48ZstdFallbackVerdict(): tuple[reachable: bool, why: string] =
-  ## Whether the conda arm's zstd fallback is the arm discovery would take,
-  ## RIGHT NOW, with the environment as this case has arranged it. This
-  ## restates the product's own discovery order so the case cannot quietly
-  ## exercise the OTHER arm and report a green for the ``|`` it exists to
-  ## have removed.
-  when defined(windows):
-    let systemTar = getEnv("WINDIR", r"C:\Windows") / "System32" / "tar.exe"
-    if fileExists(extendedPath(systemTar)) and n48SpeaksZstd(systemTar):
-      return (false, "%WINDIR%\\System32\\tar.exe (" & systemTar &
-        ") still speaks zstd, so discovery takes the DIRECT arm")
-  let bsd = findExe("bsdtar")
-  if n48SpeaksZstd(bsd):
-    return (false, "`bsdtar` on PATH (" & bsd & ") speaks zstd, so " &
-      "discovery takes the DIRECT arm")
-  let plain = findExe("tar")
-  if n48SpeaksZstd(plain):
-    return (false, "`tar` on PATH (" & plain & ") reports libarchive, so " &
-      "discovery takes the DIRECT arm")
-  if findExe("zstd").len == 0:
-    return (false, "no bare `zstd` on PATH, so the fallback cannot run")
-  (true, "")
-
 
 # ---------------------------------------------------------------------------
 # N48 — the child role that pins WHICH ``tar`` the product actually spawns
@@ -565,27 +521,38 @@ suite "N48 repro_tool_profiles tar operands":
         check tree.ok
 
   test "test_n48_conda_zstd_fallback_runs_without_a_shell":
-    ## Site 2 — the conda arm's zstd fallback, which used to be one command
-    ## string carrying a ``|`` handed to ``uncontrolledExecCmdEx``. There is
-    ## no shell behind that call on Windows, so the arm could not work there
-    ## at all; and its ``-C`` operand was raw, so it carried the unquoting
-    ## defect on top.
+    ## (The name predates the extractor dependency edge, when this arm was a
+    ## FALLBACK behind a zstd-capable-tar probe. It is kept so the case's
+    ## history and suite records stay continuous; the arm it names is now the
+    ## only one.)
     ##
-    ## Reaching the arm takes a host whose ``tar`` is not libarchive, because
-    ## ``tarSpeaksZstd`` demands that banner before the direct arm is taken.
-    ## On Windows that means hiding ``%WINDIR%\System32\tar.exe``, which IS
-    ## bsdtar, so the case points ``WINDIR`` at a directory with no
-    ## ``System32\tar.exe`` and restores it afterwards. Whether the override
-    ## worked is ASSERTED, not assumed.
+    ## Site 2 — the conda arm. It used to build one command string carrying a
+    ## ``|`` handed to ``uncontrolledExecCmdEx``; there is no shell behind
+    ## that call on Windows, so the arm could not work there at all, and its
+    ## ``-C`` operand was raw, so it carried the unquoting defect on top.
+    ##
+    ## The arm now takes its zstd from the provisioning edge's zstd
+    ## dependency (``ExtractorTools``) -- never from PATH -- decompresses to a
+    ## file and hands the tar to the tar-family arm. This drives it against
+    ## GNU tar, pinned through ``REPRO_HOST_TAR``, into destinations GNU tar
+    ## would unquote. The zstd here is the fixture's own (it also builds the
+    ## archive), passed explicitly as the edge would pass its realization.
     let zstdExe = findExe("zstd")
     let tarExe = findExe("tar")
+    let banner =
+      if tarExe.len == 0: ""
+      else: execCmdEx(shellArgv([tarExe, "--version"])).output
     if zstdExe.len == 0 or tarExe.len == 0:
-      echo "  [skip] this arm needs BOTH a bare `zstd` and a `tar` on PATH" &
-        " (zstd=" & zstdExe & " tar=" & tarExe & ")"
+      echo "  [skip] this case needs a `zstd` and a `tar` on PATH to build " &
+        "its fixture (zstd=" & zstdExe & " tar=" & tarExe & ")"
+      skip()
+    elif not banner.toLowerAscii().contains("gnu tar"):
+      echo "  [skip] `tar` on PATH is not GNU tar, so this host cannot " &
+        "witness a defect that is GNU tar's (" & tarExe & ")"
       skip()
     else:
       checkpoint("tar under test: " & tarExe)
-      checkpoint("zstd under test: " & zstdExe)
+      checkpoint("zstd handed to the arm: " & zstdExe)
       n48Reset(N48Root)
       let payload = n48BuildPayloadDir()
       let stageDir = N48Root & "/conda-stage"
@@ -609,69 +576,53 @@ suite "N48 repro_tool_profiles tar operands":
           "envelope: " & zipMade.why
         skip()
       else:
-        # Force discovery past the direct arm, then PROVE it went past it.
-        #
-        # Two things have to move. ``%WINDIR%\System32\tar.exe`` IS bsdtar on
-        # Windows and is step (i), so ``WINDIR`` is pointed at a directory
-        # with no ``System32\tar.exe``. Step (ii) tries ``bsdtar`` then
-        # ``tar`` on PATH, and this host has a real libarchive ``bsdtar``
-        # beside its GNU ``tar`` in the same directory — so a shim directory
-        # goes FIRST on PATH carrying a ``bsdtar`` that is a real but inert
-        # image (``whoami.exe`` / ``false``), which the product's probe
-        # rejects exactly as it would reject any non-libarchive candidate.
-        # ``tar`` is deliberately NOT shimmed, so it still resolves to the
-        # host's real GNU tar and real bytes still move.
-        let originalWindir = getEnv("WINDIR")
-        let originalPath = getEnv("PATH")
-        let inert = n48InertBinary()
-        let shimDir = absolutePath(N48Root & "/discovery-shim")
-        n48Reset(N48Root & "/discovery-shim")
-        n48Reset(N48Root & "/no-system-tar")
-        if inert.len > 0:
-          let shimName = when defined(windows): "bsdtar.exe" else: "bsdtar"
-          copyFile(extendedPath(inert), extendedPath(shimDir / shimName))
-          when not defined(windows):
-            inclFilePermissions(shimDir / shimName, {fpUserExec})
-          putEnv("PATH", shimDir & (when defined(windows): ";" else: ":") &
-            originalPath)
-        when defined(windows):
-          putEnv("WINDIR", absolutePath(N48Root & "/no-system-tar"))
+        let originalOverride = getEnv(HostTarOverrideEnv)
+        putEnv(HostTarOverrideEnv, tarExe)
         defer:
-          putEnv("PATH", originalPath)
-          when defined(windows):
-            if originalWindir.len > 0: putEnv("WINDIR", originalWindir)
-        let verdict = n48ZstdFallbackVerdict()
-        if not verdict.reachable:
-          echo "  [skip] this host cannot be steered onto the conda zstd " &
-            "fallback: " & verdict.why
-          skip()
-        else:
-          checkpoint("discovery steered onto the zstd fallback; bsdtar shim: " &
-            (if inert.len > 0: inert else: "<none needed>"))
-          let leaves = ["tango-n48", "0zero-n48"]
-          n48AssertLeavesStillTest(leaves)
-          for leaf in leaves:
-            let leafRoot = N48Root & "/conda-" & leaf
-            n48Reset(leafRoot)
-            let destDir = n48DestFor(leafRoot, leaf)
-            var raisedWith = ""
-            try:
-              extractTarballArchive(condaArchive, destDir, "conda", 0)
-            except CatchableError as err:
-              raisedWith = err.msg
-            checkpoint("leaf=" & leaf & " dest=" & destDir &
-              (if raisedWith.len > 0: " raised: " & raisedWith
-               else: " (no raise)"))
-            check raisedWith.len == 0
-            let tree = n48CheckExtractedTree(destDir)
-            checkpoint("leaf=" & leaf & " tree verdict: " &
-              (if tree.ok: "complete" else: tree.why))
-            check tree.ok
-            # The conda arm's own staging directory is a SIBLING of the
-            # destination (``<dest>.conda-staging``) and is removed in the
-            # product's ``finally``, so the parent must hold the destination
-            # and nothing else once the call returns.
-            let siblings = n48EntriesDirectlyUnder(leafRoot)
-            checkpoint("leaf=" & leaf & " entries directly under the parent: " &
-              siblings.join(", "))
-            check siblings == @[leaf]
+          if originalOverride.len > 0:
+            putEnv(HostTarOverrideEnv, originalOverride)
+          else:
+            delEnv(HostTarOverrideEnv)
+        # The witness: the tar the product resolves is the GNU tar pinned.
+        let resolved = resolveHostTar()
+        require resolved.exe == tarExe
+        # Without its zstd dependency the arm refuses by name; it does not go
+        # looking on PATH (where this host HAS a zstd).
+        block:
+          let leafRoot = N48Root & "/conda-no-zstd"
+          n48Reset(leafRoot)
+          var refused = ""
+          try:
+            extractTarballArchive(condaArchive, leafRoot & "/dest", "conda", 0)
+          except CatchableError as err:
+            refused = err.msg
+          checkpoint("without a zstd tool: " & refused)
+          check "needs zstd" in refused
+        let leaves = ["tango-n48", "0zero-n48"]
+        n48AssertLeavesStillTest(leaves)
+        for leaf in leaves:
+          let leafRoot = N48Root & "/conda-" & leaf
+          n48Reset(leafRoot)
+          let destDir = n48DestFor(leafRoot, leaf)
+          var raisedWith = ""
+          try:
+            extractTarballArchive(condaArchive, destDir, "conda", 0,
+              tools = ExtractorTools(zstd: zstdExe))
+          except CatchableError as err:
+            raisedWith = err.msg
+          checkpoint("leaf=" & leaf & " dest=" & destDir &
+            (if raisedWith.len > 0: " raised: " & raisedWith
+             else: " (no raise)"))
+          check raisedWith.len == 0
+          let tree = n48CheckExtractedTree(destDir)
+          checkpoint("leaf=" & leaf & " tree verdict: " &
+            (if tree.ok: "complete" else: tree.why))
+          check tree.ok
+          # The conda arm's staging directories are SIBLINGS of the
+          # destination (``<dest>.conda-staging``, ``<dest>.zst-staging``) and
+          # are removed in the product's ``finally``, so the parent must hold
+          # the destination and nothing else once the call returns.
+          let siblings = n48EntriesDirectlyUnder(leafRoot)
+          checkpoint("leaf=" & leaf & " entries directly under the parent: " &
+            siblings.join(", "))
+          check siblings == @[leaf]

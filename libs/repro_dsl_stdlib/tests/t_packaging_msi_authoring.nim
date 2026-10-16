@@ -327,3 +327,79 @@ suite "packaging: the MSI producer translates the same Distribution":
       if id in old: collided = true
       old.add(id)
     check collided
+
+const
+  HostDirSddl = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
+  HostDirGuid = "{3C5D1A7E-6B2F-4C8D-9E1A-2F4B6D8C0A13}"
+
+proc withHostDirectory(dist: Distribution): Distribution =
+  result = dist
+  result.hostDirectories = @[HostDirectory(
+    path: r"C:\ProgramData\sampletool",
+    windowsSddl: HostDirSddl,
+    windowsComponentGuid: HostDirGuid,
+    seedFiles: @[HostSeedFile(name: "sampletool.toml",
+      buildPath: "etc/sampletool.toml")])]
+
+proc refusal(dist: Distribution): string =
+  try:
+    dist.validate()
+  except ValueError as err:
+    return err.msg
+  ""
+
+suite "packaging: the MSI provisions a host directory":
+
+  test "the directory is created under CommonAppDataFolder with its DACL":
+    # The RunQuota case: a service's host state directory the SERVICE must
+    # not create, because a directory made under C:\ProgramData inherits
+    # BUILTIN\Users write access. The core PermissionEx with an SDDL DACL
+    # marked P (protected) is what replaces that inheritance.
+    let wxs = wxsFor(withHostDirectory(sampleDistribution(toWindows)))
+    check wxs.contains("<Directory Id=\"CommonAppDataFolder\">")
+    check wxs.contains("<Directory Id=\"HOSTDIR0\" Name=\"sampletool\">")
+    check wxs.contains("<Component Id=\"cmp_hostdir_0\" Guid=\"" &
+      HostDirGuid & "\" KeyPath=\"yes\" Permanent=\"yes\">")
+    check wxs.contains("<CreateFolder>")
+    check wxs.contains("<PermissionEx Sddl=\"" & HostDirSddl & "\" />")
+    check not wxs.contains("util:PermissionEx")
+    check wxs.contains("<ComponentRef Id=\"cmp_hostdir_0\" />")
+    # MsiLockPermissionsEx is a Windows Installer 5.0 table.
+    check wxs.contains("InstallerVersion=\"500\"")
+
+  test "a seed file installs once and is never overwritten or removed":
+    let wxs = wxsFor(withHostDirectory(sampleDistribution(toWindows)))
+    check wxs.contains("<Component Id=\"cmp_hostseed_0_0\" Guid=\"*\" " &
+      "Permanent=\"yes\" NeverOverwrite=\"yes\">")
+    check wxs.contains("Name=\"sampletool.toml\" KeyPath=\"yes\" " &
+      "Source=\"etc\\sampletool.toml\"")
+    check wxs.contains("<ComponentRef Id=\"cmp_hostseed_0_0\" />")
+    # The seed is an input of both WiX edges, so a changed template is a
+    # changed package.
+    check hostSeedPaths(withHostDirectory(sampleDistribution(toWindows))) ==
+      @["etc/sampletool.toml"]
+
+  test "without a host directory nothing changes":
+    let wxs = wxsFor(sampleDistribution(toWindows))
+    check not wxs.contains("CommonAppDataFolder")
+    check not wxs.contains("PermissionEx")
+    check wxs.contains("InstallerVersion=\"200\"")
+
+  test "a host directory the MSI cannot express is refused, not dropped":
+    var posix = sampleDistribution(toLinux)
+    posix.hostDirectories = withHostDirectory(
+      sampleDistribution(toWindows)).hostDirectories
+    check "only produced for Windows" in refusal(posix)
+    var outside = withHostDirectory(sampleDistribution(toWindows))
+    outside.hostDirectories[0].path = r"C:\Tools\sampletool"
+    check "under C:\\ProgramData" in refusal(outside)
+    var inheriting = withHostDirectory(sampleDistribution(toWindows))
+    inheriting.hostDirectories[0].windowsSddl = ""
+    check "windowsSddl" in refusal(inheriting)
+    var noGuid = withHostDirectory(sampleDistribution(toWindows))
+    noGuid.hostDirectories[0].windowsComponentGuid = "3C5D1A7E"
+    check "windowsComponentGuid" in refusal(noGuid)
+    var nested = withHostDirectory(sampleDistribution(toWindows))
+    nested.hostDirectories[0].seedFiles[0].name = r"sub\sampletool.toml"
+    check "plain file name" in refusal(nested)
+    check refusal(withHostDirectory(sampleDistribution(toWindows))) == ""

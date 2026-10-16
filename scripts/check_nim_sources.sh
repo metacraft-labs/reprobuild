@@ -10,6 +10,7 @@ mkdir -p build/nimcache
 # shellcheck source=scripts/source_paths.sh
 source scripts/source_paths.sh
 export SHM_QUEUE_SRC="$(resolve_shm_queue_src)"
+export BEARSSL_SRC="$(resolve_bearssl_src)"
 
 # Mirror the compile defines used by the real app build in
 # scripts/build_apps.sh:

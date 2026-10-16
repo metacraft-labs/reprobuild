@@ -39,6 +39,10 @@ when defined(posix):
   import std/[json, net, os, osproc, posix, sequtils, streams, strutils,
               tempfiles, times, unittest]
   import repro_core/cli_images
+  # For `systemdUnitName`: the teardown below stops the transient unit the
+  # daemon this case launches runs under, and the name has to come from the
+  # runtime that chose it.
+  import repro_daemon_core
 
   type
     ProcessRecord = object
@@ -1483,8 +1487,15 @@ else:
           discard execCmdEx("launchctl bootout " &
             quoteShell("gui/" & $getuid() & "/" & label))
         elif defined(linux):
-          let unit = "repro-daemon-" & endpoint.extractFilename & ".service"
-          discard execCmdEx("systemctl --user stop " & quoteShell(unit))
+          # Asks the runtime for the name rather than restating the
+          # derivation: this teardown stopped the wrong unit the moment the
+          # derivation stopped being the endpoint's basename, and a teardown
+          # that silently stops nothing is how the leak this suite is about
+          # gets re-created.
+          var unitConfig = defaultUserDaemonConfig(devMode = false)
+          unitConfig.endpoint = endpoint
+          discard execCmdEx("systemctl --user stop " &
+            quoteShell(systemdUnitName(unitConfig)))
         try:
           removeFile(endpoint)
         except OSError:

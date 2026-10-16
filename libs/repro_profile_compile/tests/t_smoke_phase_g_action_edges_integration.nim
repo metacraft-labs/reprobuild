@@ -334,7 +334,7 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
     # Pin the Phase F integration: the typed-tool's `BuildActionDef`
     # return value flows through `addProfileBuildAction` and lands as
     # a `ProfileBuildAction` whose argv targets the resolved native
-    # tool (`Expand-Archive` on Windows / `unzip` or `tar` on POSIX).
+    # tool (PowerShell on Windows / `unzip` or `tar` on POSIX).
     resetBuildActionRegistry()
     when defined(windows):
       let archive = "C:\\actions-runner-cache\\actions-runner.zip"

@@ -451,3 +451,37 @@ suite "repro sync --mainline":
       check headSha(gitBin, repoPath) == before
       # The WIP is still there — refusing must not consume it.
       check fileExists(repoPath / "uncommitted.txt")
+
+  test "test_sync_mainline_clones_missing_repo_and_filters_routine_output":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = setupFixture(gitBin, "missing-clone", @[
+        RepoSpec(name: "prod", mainline: "dev"),
+        RepoSpec(name: "specs", mainline: "latest")])
+      defer: removeDirEventually(fx.scratch)
+      # Only clone prod, leaving specs missing
+      cloneInto(gitBin, fx.originOf("prod"), fx.workspaceRoot / "prod")
+
+      let res = invokeSync(fx, @[])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      # Phase announcement
+      check res.output.contains("workspace sync: checking 2 repositories...")
+      # Missing repo specs is cloned to its mainline branch
+      check dirExists(fx.workspaceRoot / "specs" / ".git")
+      check requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "specs") & " branch --show-current").strip() == "latest"
+      # Exception-based reporting: specs is reported as cloned, but up-to-date prod is omitted by default
+      check res.output.contains("specs")
+      check res.output.contains("cloned")
+      check not res.output.contains("workspace sync: prod")
+      # Summary line shows total counts
+      check res.output.contains("1 up_to_date")
+      check res.output.contains("1 cloned")
+
+      # With --verbose, routine repos are included
+      let resVerbose = invokeSync(fx, @["--verbose"])
+      check resVerbose.code == 0
+      check resVerbose.output.contains("workspace sync: prod up_to_date")

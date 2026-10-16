@@ -33,16 +33,36 @@ suite "python3 answers to the name it is declared under":
 
   test "every platform slice provides a `python3` command":
     # Either the declared executable IS `python3`, or an alias supplies
-    # that name beside it. A slice offering neither realizes a prefix whose
+    # that name beside it, or -- POSIX only -- the declared file is the
+    # versioned interpreter `python3.<minor>` of a python-build-standalone
+    # archive, which ships `python3` as a symlink beside it in the same
+    # `bin/`. A slice offering none of these realizes a prefix whose
     # declared command nobody invokes.
+    #
+    # The third arm exists because f7b524b6b had to declare the regular
+    # file: realization refuses a declared executable reached through a
+    # symlink, and in those archives `python/bin/python3` IS the symlink.
+    # The name consumers invoke is still in the directory PATH gets, but
+    # that is a fact about the archive's bytes, which this text-level test
+    # cannot see. `t_stdlib_python_tarball_arms_realize` extracts the
+    # host's arm and asserts `python3` is present there; this arm of the
+    # rule is only as good as that test. The arm is deliberately narrow --
+    # `python3.<digits>` in a `bin/` directory, never on Windows -- so a
+    # slice declaring some other name still fails here.
     for slice in slices("python3"):
       checkpoint(slice.os & "/" & slice.cpu & " -> " &
         slice.executablePath & " alias=" & slice.executableAlias)
-      let declared = slice.executablePath.rsplit('/', 1)[^1]
+      let parts = slice.executablePath.rsplit('/', 2)
+      let declared = parts[^1]
+      let versionedBeside =
+        slice.os != "windows" and parts.len >= 2 and parts[^2] == "bin" and
+        declared.startsWith("python3.") and declared.len > "python3.".len and
+        declared["python3.".len .. ^1].allCharsInSet({'0'..'9'})
       let provides =
         declared == "python3" or declared == "python3.exe" or
         slice.executableAlias == "python3" or
-        slice.executableAlias == "python3.exe"
+        slice.executableAlias == "python3.exe" or
+        versionedBeside
       check provides
 
   test "the Windows slice carries the alias specifically":

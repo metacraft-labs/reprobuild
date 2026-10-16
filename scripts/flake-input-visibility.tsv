@@ -22,7 +22,6 @@
 # ends when the row does -- this file is regenerated from the lock, so
 # an identity that leaves the lock leaves this file on the next
 # refresh.
-# residual: metacraft-labs/codetracer-native-recorder -- inherited through an upstream flake's own pin; clears when that pin moves past the commit that dropped the input
 # unverifiable: https://spectrum-os.org/git/spectrum -- a git-other repository; this gate has no client for that host, so its visibility is NOT established here
 # unverifiable: rycee/nmt -- a gitlab repository; this gate has no client for that host, so its visibility is NOT established here
 # unverifiable: ~rycee/nmd -- a sourcehut repository; this gate has no client for that host, so its visibility is NOT established here
@@ -50,7 +49,6 @@ https://spectrum-os.org/git/spectrum	unverified-host
 ipetkov/crane	public
 juliosueiras-nix/nix-utils	public
 metacraft-labs/codetracer	public
-metacraft-labs/codetracer-native-recorder	private
 metacraft-labs/codetracer-trace-format-nim	public
 metacraft-labs/devops-modules	public
 metacraft-labs/ethereum.nix	public
@@ -61,8 +59,6 @@ metacraft-labs/nim-shm-gset	public
 metacraft-labs/nim-shm-lease	public
 metacraft-labs/nim-shm-queue	public
 metacraft-labs/nim-stackable-hooks	public
-metacraft-labs/nixos-modules	public
-metacraft-labs/reprobuild	public
 metacraft-labs/reprobuild-ct-test-runner	public
 metacraft-labs/reprobuild-test-adapters	public
 metacraft-labs/runquota	public

@@ -1,0 +1,27 @@
+[Unit]
+Description=Sweep cloud leases every 300 seconds
+
+[Timer]
+# 300 seconds, which is this build's default sweep interval. The number
+# is half of how long a leaked instance can keep billing — the other
+# half is the hold it was taken under — so it is a bound rather than a
+# preference, and the gate beside the lease library requires it to stay
+# at or under the longest gap this build will schedule.
+# The machine may have been off past a fire time, and a lease that
+# expired while it was off is exactly the one that is still billing —
+# so the first sweep after a boot is a minute in, not an interval in.
+#
+# This is OnBootSec's job and NOT Persistent='s. Persistent= reads like
+# the setting for it and is documented to have an effect only on a timer
+# configured with OnCalendar=; on the monotonic timers below it is
+# inert. It was set here, and a check beside the lease library asserted
+# it, which is a check on a line that does nothing. Both were removed in
+# favour of the directive that does the work.
+OnBootSec=60s
+OnUnitActiveSec=300s
+# The cadence above is nominal: a timer may fire this much late, so the
+# gap a sweep is really bounded by is 300 + 10 seconds.
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

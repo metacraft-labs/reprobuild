@@ -60,6 +60,9 @@
 ##  16. ``t_branch_fork_rejects_invalid_declared_baseline`` — the same
 ##      target-only path fails when the manifest-declared branch is absent;
 ##      it does not fall back to the remote's default branch or repair source.
+##      The root and another member remain materialized; the text summary
+##      reports an incomplete fork, never a preflight refusal claiming that
+##      nothing was created. No mocks are needed for this failure boundary.
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
 ## real filesystem, and the real engine-built ``build/bin/repro`` spawned as a
@@ -777,6 +780,14 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       let res = invokeFork(fx, "feature-no-fallback", forkPath)
       checkpoint("output: " & res.output)
       check res.code == 1
+
+      check dirExists(forkPath / ".git")
+      check dirExists(forkPath / "lib-a" / ".git")
+      check res.output.contains("workspace branch: INCOMPLETE")
+      check res.output.contains(forkPath)
+      check res.output.contains("re-run the same command")
+      check not res.output.contains("workspace branch: ABORTED")
+      check not res.output.contains("nothing had been created")
 
       # A fallback to the remote's default `main` would leave a valid checkout
       # here and proceed to cut `feature-no-fallback`. The failed clone is

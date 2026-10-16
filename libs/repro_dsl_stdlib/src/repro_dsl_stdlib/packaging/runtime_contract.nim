@@ -2024,11 +2024,14 @@ const
     ## BOTH WORLDS AT ONCE. It is not a packaging invention: the
     ## resolver that consumes it (``repro_interface_artifacts.
     ## nimCompilerPath``) has always taken it as its highest-priority
-    ## arm, and its next arm is ``BuiltNimCompilerPath``, a constant
-    ## baked at COMPILE TIME out of ``staticExec("command -v nim")``.
-    ## Under Nix that constant is a store path that exists, so the flake
-    ## never needed to say anything; in a native package it is a store
-    ## path that does not, and the arm after it is ``nim`` on ``$PATH``.
+    ## arm. When this was written its next arm was ``BuiltNimCompilerPath``,
+    ## a constant baked at COMPILE TIME out of ``staticExec("command -v
+    ## nim")``: under Nix a store path that exists, in a native package a
+    ## store path that does not, after which came ``nim`` on ``$PATH``.
+    ## That constant is gone. Without this variable, ``repro`` now
+    ## provisions a pinned Nim itself before any recipe compile, or stops
+    ## (``repro_tool_profiles.ensureBootstrapToolchainEnv``); this variable
+    ## is what lets the package use the compiler it ships instead.
     ##
     ## That last arm is where the measurement bites. Neither
     ## ``debian:trixie-slim`` nor ``fedora:latest`` PACKAGES A NIM
@@ -2043,9 +2046,9 @@ const
     ## external supplier is exactly the case for vendoring, so the
     ## package ships a toolchain and this variable names it.
     ##
-    ## The flake sets it too, at the same store path its
-    ## ``BuiltNimCompilerPath`` would have found, which makes the
-    ## resolution explicit in both worlds rather than implicit in one.
+    ## The flake sets it too, to the Nim it builds reprobuild with, which
+    ## makes the resolution explicit in both worlds rather than implicit
+    ## in one.
 
   ReprobuildDlopenPackages* = ["zstd", "clingo"]
     ## §5: "clingo and zstd … the last two ``dlopen``'d by leaf name".

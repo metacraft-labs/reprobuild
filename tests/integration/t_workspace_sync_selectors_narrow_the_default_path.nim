@@ -259,3 +259,52 @@ suite "repro workspace sync — repo selectors on the default path":
         @["otherproject"])
       check inScope.code == 0
       check inScope.names == @["delta-tool"]
+
+  test "t_workspace_sync_positional_repo_name_names_the_only_flag":
+    # A positional names a PROJECT. ``repro ws sync <repo>`` was documented as
+    # the way to scope a force-push migration to one repo and never worked:
+    # it failed with "unknown project '<repo>'", which names neither the
+    # mistake nor the fix. It must still refuse -- reinterpreting the word as
+    # a repo selector would make its meaning depend on whether a project by
+    # that name happens to exist -- but the refusal must name ``--only``.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; the fixture seeds real git remotes")
+    else:
+      let fixture = setupFixture(gitBin)
+      defer: removeDir(fixture.scratch)
+
+      proc assertNamesOnly(res: tuple[code: int; names: seq[string];
+                                      output: string]) =
+        checkpoint(res.output)
+        check res.code != 0
+        check res.names.len == 0
+        check "is a repo, not a project" in res.output
+        check "--only=alpha-recorder" in res.output
+
+      # A workspace with no recorded metadata: the positional is the
+      # resolution target itself.
+      assertNamesOnly(plannedNames(fixture, @[], @["alpha-recorder"]))
+      # ``--mainline`` resolves from the first positional on its own path.
+      assertNamesOnly(plannedNames(fixture, @["--mainline"],
+        @["alpha-recorder"]))
+      # A workspace that records its project: the positional is a scope
+      # filter over the recorded set.
+      createDir(fixture.workspaceRoot / ".repro")
+      writeFile(fixture.workspaceRoot / ".repro" / "workspace.toml",
+        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+        "[workspace]\nproject = \"selproject\"\n")
+      assertNamesOnly(plannedNames(fixture, @[], @["alpha-recorder"]))
+      # The spelling the refusal recommends does what was meant.
+      let only = plannedNames(fixture, @["--only=alpha-recorder"], @[])
+      check only.code == 0
+      check only.names == @["alpha-recorder"]
+      # And a real project positional is unaffected by the new check.
+      let scoped = plannedNames(fixture, @[], @["selproject"])
+      check scoped.code == 0
+      check scoped.names.len == FixtureRepoNames.len
+      # A name that is neither still gets the unknown-project error, which
+      # now also points at the repo selectors.
+      let neither = plannedNames(fixture, @[], @["no-such-thing"])
+      check neither.code != 0
+      check "is a repo" notin neither.output

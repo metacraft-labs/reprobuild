@@ -5730,11 +5730,34 @@ def inventory_source_projection(data: Mapping[str, Any]) -> dict[str, Any]:
     "the build-free half" means and no second implementation to drift.
     """
     tests = []
+    seen_sources: set[str] = set()
     for item in _require(data, "tests", "inventory"):
         where = f"tests[{item.get('source', '?')}]"
-        tests.append(
-            {field: _require(item, field, where) for field in SOURCE_INVENTORY_ENTRY_FIELDS}
-        )
+        entry = {
+            field: _require(item, field, where)
+            for field in SOURCE_INVENTORY_ENTRY_FIELDS
+        }
+        # REFUSED, not collapsed. `source_inventory_drift` keys both sides by
+        # source into a dict, so a document listing the same source twice used
+        # to have its earlier copy DISCARDED -- and the gate then passed as
+        # long as the surviving copy matched the tree. That is not a
+        # hypothetical shape: these artifacts are `-merge` in `.gitattributes`
+        # precisely because integrations kept text-merging them, and a
+        # duplicated entry is what a union-style resolution of a sorted array
+        # produces. The TSV parser beside this one has raised on a repeated
+        # source since it was written (`parse_static_case_counts`); this is the
+        # same rule for the same reason, in the one function both sides of
+        # every comparison pass through.
+        if entry["source"] in seen_sources:
+            raise InventoryProjectionError(
+                f"{where}: source {entry['source']!r} is listed more than "
+                "once. A derived artifact has one entry per source; a "
+                "duplicate is a merged or hand-edited document, not a "
+                "regenerated one. Regenerate it: "
+                f"{SOURCE_INVENTORY_REGENERATE_COMMAND}"
+            )
+        seen_sources.add(entry["source"])
+        tests.append(entry)
     tests.sort(key=lambda item: item["source"])
 
     groups = []

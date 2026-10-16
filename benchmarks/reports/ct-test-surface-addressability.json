@@ -30,15 +30,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11046,
-      "suite": 2537
+      "case": 11407,
+      "suite": 2619
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 13345,
-      "python-unittest": 235
+      "nim-unittest": 13751,
+      "python-unittest": 272
     },
-    "itemsTotal": 13583,
+    "itemsTotal": 14026,
     "responseDiagnostics": {
       "info": 1,
       "warning": 35
@@ -47,6 +47,21 @@
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
   "generatedBy": "scripts/ct_test_surface_addressability.py",
   "identityCollisions": [
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim::compressed-tool-archive-with-no-decompressor-on-path::gnu-tar-+",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
+          "startLine": 113
+        },
+        {
+          "file": "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
+          "startLine": 133
+        }
+      ]
+    },
     {
       "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
       "id": "nim-unittest/nim/std/unittest/tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim::integration_scoop_manifest_bin_resolution::integration_scoop_manifest_bin_resolution",
@@ -229,29 +244,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.25,
-    "caseItemsInCatalog": 11046,
-    "casesAddressableThroughTheSurface": 10412,
-    "collidingIdentities": 12,
-    "distinctCaseIdentities": 11034,
+    "caseCoveragePercent": 96.36,
+    "caseItemsInCatalog": 11407,
+    "casesAddressableThroughTheSurface": 10744,
+    "collidingIdentities": 13,
+    "distinctCaseIdentities": 11394,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1733,
-      "compared": 1738,
+      "agree": 1775,
+      "compared": 1780,
       "disagree": 5
     },
-    "sourceCoveragePercent": 99.43,
-    "sourcesAddressableThroughTheSurface": 1738,
-    "sourcesNotAddressable": 10,
-    "trackedNimSuiteSources": 1748,
-    "trackedStaticCaseCount": 10818
+    "sourceCoveragePercent": 99.5,
+    "sourcesAddressableThroughTheSurface": 1780,
+    "sourcesNotAddressable": 9,
+    "trackedNimSuiteSources": 1789,
+    "trackedStaticCaseCount": 11150
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
-    "provenance": "metacraft-labs/codetracer a9ef983ed, the codetracer-src revision flake.lock pins, built by this repository's dev shell (ctTestTools)",
-    "resolvedBy": "environment",
-    "sha256": "d626d4212fbcefac2baaf81b36f85dfd33a8014219efe92ac5a2e6fa94f1abd3"
+    "provenance": "",
+    "resolvedBy": "PATH:ct-test",
+    "sha256": "f91ae5ef7614f9477d396109573e1afcf8c970629eb5285c6f5413a15059fb94"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
@@ -307,13 +322,7 @@
       "detail": "declares no literal suite/test of its own; any cases it contributes are declared in the modules it imports, which are discovered separately under their own identities",
       "inventoryStaticCaseCount": 0,
       "reason": "declares-no-cases-of-its-own",
-      "source": "tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim"
-    },
-    {
-      "detail": "declares no literal suite/test of its own; any cases it contributes are declared in the modules it imports, which are discovered separately under their own identities",
-      "inventoryStaticCaseCount": 0,
-      "reason": "declares-no-cases-of-its-own",
-      "source": "tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim"
+      "source": "tests/unit/t_nimcache_is_worktree_local.nim"
     }
   ]
 }

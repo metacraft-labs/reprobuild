@@ -442,24 +442,40 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check zipEdge{"callExecutable"}.getStr() == "exec"
     check zipEdge{"commandStatsId"}.getStr() == "expandArchive.eafZip"
     # M3f serializes the Windows intent explicitly on every host. Pin the
-    # complete argv so literal runtime `$PID`, fail-closed cleanup, and the
-    # absence of a compiler-selected scratch path survive the fixture boundary.
+    # complete argv so the progress-free, scratch-free, overwrite-in-place
+    # extraction survives the fixture boundary.
     let windowsZipArgv = doc{"windowsZipArgv"}
     check windowsZipArgv == %*[
       "powershell",
       "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
       "-Command",
-      "$ErrorActionPreference = 'Stop'; " &
-        "$scratch = Join-Path $env:TEMP " &
-          "('repro-expand-archive-' + $PID + '.zip'); " &
-        "try { Copy-Item -LiteralPath " &
-          "'C:\\actions-runner-cache\\runner.zip' " &
-          "-Destination $scratch -Force; " &
-          "Expand-Archive -LiteralPath $scratch " &
-          "-DestinationPath 'C:\\actions-runner' -Force " &
-        "} finally { if (Test-Path -LiteralPath $scratch) { " &
-          "Remove-Item -LiteralPath $scratch -Force -ErrorAction Stop " &
-        "} }"]
+      "$ProgressPreference = 'SilentlyContinue'; " &
+        "$ErrorActionPreference = 'Stop'; " &
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+        "$root = [System.IO.Directory]::CreateDirectory(" &
+          "'C:\\actions-runner').FullName; " &
+        "$root = $root.TrimEnd([char[]]'\\/') + " &
+          "[System.IO.Path]::DirectorySeparatorChar; " &
+        "$zip = [System.IO.Compression.ZipFile]::OpenRead(" &
+          "'C:\\actions-runner-cache\\runner.zip'); " &
+        "try { foreach ($entry in $zip.Entries) { " &
+          "$target = [System.IO.Path]::GetFullPath(" &
+            "[System.IO.Path]::Combine($root, $entry.FullName)); " &
+          "if (-not $target.StartsWith($root, " &
+            "[System.StringComparison]::OrdinalIgnoreCase)) { " &
+            "throw ('zip entry escapes the destination: ' + " &
+              "$entry.FullName) } " &
+          "if ($entry.Name.Length -eq 0) { " &
+            "[void][System.IO.Directory]::CreateDirectory($target) " &
+          "} else { " &
+            "[void][System.IO.Directory]::CreateDirectory(" &
+              "[System.IO.Path]::GetDirectoryName($target)); " &
+            "[System.IO.Compression.ZipFileExtensions]::ExtractToFile(" &
+              "$entry, $target, $true) } " &
+        "} } finally { $zip.Dispose() }"]
     let zipArgv = zipEdge{"argv"}
     if host == "windows":
       check zipArgv == windowsZipArgv

@@ -31,14 +31,17 @@
 ##
 ## **3. A rejection is the default decision.** ``vdRejected`` is the zero
 ## value of ``VerdictDecision``, so a verdict nobody finished computing is
-## a rejection. And the successful decision is *three* values, not one:
-## ``vdAccepted``, ``vdAcceptedNoRootOfTrust`` and
-## ``vdAcceptedUnpinnedManifest``. A report from the mock tier can only
-## ever reach the second, and a verdict whose established identity comes
-## from a manifest no policy pinned can only ever reach the third — so a
-## consumer that writes ``== vdAccepted`` gets the safe answer without
-## having read this paragraph. A consumer that wants one of the other two
-## has to type its name.
+## a rejection. And the successful decision is *four* values, not one:
+## ``vdAccepted``, ``vdAcceptedNoRootOfTrust``,
+## ``vdAcceptedUnpinnedManifest`` and
+## ``vdAcceptedEvidenceBackedManifest``. A report from the mock tier can
+## only ever reach the second; a verdict whose established identity comes
+## from a manifest no policy pinned and nothing vouched for can only ever
+## reach the third; one whose manifest a quorum of admitted rebuilders
+## signed reaches the fourth — so a consumer that writes
+## ``== vdAccepted`` gets the safe answer without having read this
+## paragraph. A consumer that wants one of the other three has to type
+## its name.
 ##
 ## The unqualified ``vdAccepted`` is therefore the *narrow* value: it
 ## means every clause was satisfied, the evidence came from a root of
@@ -99,6 +102,17 @@ type
     vcTcbFloor = "tcb-floor"
       ## The vendor's trusted computing base is at or above the policy's
       ## floor.
+    vcEvidenceQuorum = "evidence-quorum"
+      ## K distinct admitted rebuilders signed the claim that this
+      ## configuration produced this measurement manifest.
+      ##
+      ## Appended rather than placed beside ``manifest-pinned``, where it
+      ## belongs by subject, because the enum's order is the order a
+      ## verdict lists its checks in and an existing reader should not
+      ## find the rows it already knows moved.
+    vcTransparencyLog = "transparency-log"
+      ## That claim is in an append-only log whose root this verifier
+      ## had already witnessed.
 
   FindingKind* = enum
     ## What a check found. ``fkViolated`` is the zero value, so a finding
@@ -159,6 +173,22 @@ type
       ##
       ## Appended to the enum rather than inserted, so no existing
       ## ordinal moves.
+    vdAcceptedEvidenceBackedManifest =
+      "accepted-against-an-evidence-backed-manifest"
+      ## Every check the policy required was satisfied, the evidence came
+      ## from a root of trust — and the measurement manifest the identity
+      ## was read out of is one the policy pinned *nothing* about, which
+      ## a quorum of admitted rebuilders vouched for instead.
+      ##
+      ## This is a weaker statement than ``vdAccepted`` and a stronger
+      ## one than ``vdAcceptedUnpinnedManifest``, and it is its own value
+      ## because the difference is exactly the thing a reader needs. The
+      ## unpinned decision means *nothing* vouched for the document; this
+      ## one means a named set of parties did, and it is worth precisely
+      ## what that set is worth. Folding it into either neighbour would
+      ## lose one of those two facts.
+      ##
+      ## Appended, so no existing ordinal moves.
 
   EstablishedIdentity* = object
     ## What §5.3 lets a verifier conclude about *which configuration*
@@ -232,8 +262,30 @@ proc identityRestsOnUnauthenticatedManifest*(
   ##
   ## Written once, here, so the decision and the identity block cannot
   ## come to disagree about which verdicts are hollow.
+  ##
+  ## A *passed* ``evidence-quorum`` takes a verdict out of this set, and
+  ## the exclusion is written here rather than at the decision so the
+  ## two predicates below cannot both be true of one verdict. "Nothing
+  ## vouched for this document" stops being true the moment a quorum of
+  ## admitted rebuilders did.
   checks[vcManifestPinned].outcome == coSkipped and
-    checks[vcMeasurementMatch].outcome == coPassed
+    checks[vcMeasurementMatch].outcome == coPassed and
+    checks[vcEvidenceQuorum].outcome != coPassed
+
+proc identityRestsOnEvidenceBackedManifest*(
+    checks: array[VerifierCheck, CheckRecord]): bool =
+  ## The rows that together say "this verdict read an identity out of a
+  ## document the policy pinned nothing about, and a quorum of admitted
+  ## rebuilders vouched for it".
+  ##
+  ## The complement of the predicate above, over the same two rows plus
+  ## one. Neither is derived from the other, but the ``evidence-quorum``
+  ## clause appears in both with opposite polarity, so a verdict cannot
+  ## satisfy both and a verdict that satisfies neither is one whose
+  ## manifest the policy pinned.
+  checks[vcManifestPinned].outcome == coSkipped and
+    checks[vcMeasurementMatch].outcome == coPassed and
+    checks[vcEvidenceQuorum].outcome == coPassed
 
 proc decisionFor*(checks: array[VerifierCheck, CheckRecord];
                   tier: AttestationTier): VerdictDecision =
@@ -251,6 +303,8 @@ proc decisionFor*(checks: array[VerifierCheck, CheckRecord];
     if checks[chk].outcome notin {coPassed, coSkipped}:
       return vdRejected
   if tier == atMock: return vdAcceptedNoRootOfTrust
+  if identityRestsOnEvidenceBackedManifest(checks):
+    return vdAcceptedEvidenceBackedManifest
   if identityRestsOnUnauthenticatedManifest(checks):
     return vdAcceptedUnpinnedManifest
   vdAccepted

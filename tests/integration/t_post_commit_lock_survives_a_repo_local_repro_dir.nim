@@ -189,7 +189,7 @@ suite "post-commit lock refresh survives a repo-local .repro directory":
         " rev-parse HEAD").strip()
 
       # ---- (3) the report is filed at the WORKSPACE, about the WORKSPACE
-      let reportPath = workspaceRoot / ".repro" / "workspace" /
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "post-commit-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)
@@ -207,7 +207,7 @@ suite "post-commit lock refresh survives a repo-local .repro directory":
       check fileExists(lockPath)
 
       # ---- (5) the repo was never mistaken for the workspace ----------
-      check not fileExists(repoPath / ".repro" / "workspace" /
+      check not fileExists(repoPath / ".repro" / "build" / "reports" /
         "post-commit-report.json")
 
   test "t_post_commit_lock_covers_a_repo_of_a_non_primary_project":
@@ -294,7 +294,7 @@ suite "post-commit lock refresh survives a repo-local .repro directory":
       checkpoint("post-commit output: " & dispatched.output)
       check dispatched.code == 0
 
-      let reportPath = workspaceRoot / ".repro" / "workspace" /
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "post-commit-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)

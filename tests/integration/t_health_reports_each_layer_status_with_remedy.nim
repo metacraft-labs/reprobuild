@@ -25,6 +25,10 @@
 ##     when all are present.
 ##   * ``--json`` is valid JSON with the documented shape and a non-zero
 ##     exit code when any check fails; the table mode exits non-zero too.
+##   * With real direnv installed, its initially untrusted, allowed and
+##     denied states produce fail/ok/fail for this workspace's direnv row.
+##     The allow-list is isolated under a temporary XDG_DATA_HOME; no
+##     executable or status response is mocked.
 ##
 ## Skip rule: only when ``git`` is missing from PATH (same convention as
 ## the M9–M12 / status fixtures).
@@ -131,6 +135,22 @@ proc setupFixture(gitBin, slug: string; withManifest: bool): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
+  # The ``.repro/`` SHELL, in BOTH states, so the only thing that differs
+  # between them is the one thing the cases below vary: the manifests.
+  #
+  # It used to be absent from both, which made the "marker present" fixture a
+  # bare clone of the workspace repo rather than an initialized workspace —
+  # manifest-shaped directories and nothing else — and the case then asserted
+  # that shape IS the marker. It is not, and the cost of reading it that way
+  # was measured in the field: the lock RECORD STORE has exactly that shape
+  # (``projects/``, ``repos/``, ``locks/``, no ``.repro/``), so it too was
+  # classified as an initialized workspace, every "not a workspace" guard was
+  # skipped there, and the pre-push gate exited 1 in a repo with nothing to
+  # gate. ``hasResolvedManifestCheckout`` now requires the shell for the flat
+  # layout, which is what its own contract always said. Creating it here keeps
+  # this case testing what its name claims — manifest presence drives ok vs
+  # fail — over a fixture that is a workspace root rather than a clone of one.
+  createDir(workspaceRoot / ".repro")
   if withManifest:
     let manifestsRoot = workspaceRoot
     createDir(manifestsRoot / "projects")
@@ -184,6 +204,26 @@ suite "RA-30 — repro health reports each layer status with remedy":
       check report["failed"].getInt() >= 1
       check report["exitCode"].getInt() == 1
       check res.code == 1
+
+      let direnvBin = findExe("direnv")
+      if direnvBin.len > 0:
+        let hadDataHome = existsEnv("XDG_DATA_HOME")
+        let previousDataHome = getEnv("XDG_DATA_HOME")
+        putEnv("XDG_DATA_HOME", fx.scratch / "direnv-data")
+        defer:
+          if hadDataHome: putEnv("XDG_DATA_HOME", previousDataHome)
+          else: delEnv("XDG_DATA_HOME")
+        writeFile(fx.workspaceRoot / ".envrc", "# real direnv trust fixture\n")
+        let untrusted = parseJson(invokeHealth(fx, ["--json"]).output)
+        check findCheck(untrusted, "direnv")["status"].getStr() == "fail"
+        let allow = runCmd(q(direnvBin) & " allow " & q(fx.workspaceRoot))
+        check allow.code == 0
+        let trusted = parseJson(invokeHealth(fx, ["--json"]).output)
+        check findCheck(trusted, "direnv")["status"].getStr() == "ok"
+        let deny = runCmd(q(direnvBin) & " deny " & q(fx.workspaceRoot))
+        check deny.code == 0
+        let denied = parseJson(invokeHealth(fx, ["--json"]).output)
+        check findCheck(denied, "direnv")["status"].getStr() == "fail"
 
   test "test_ra30_reports_all_expected_layer_names":
     let gitBin = findExe("git")

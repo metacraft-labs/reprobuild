@@ -150,6 +150,80 @@ proc dirOfRel(path: string): string =
   let cut = path.rfind('/')
   if cut < 0: "" else: path[0 ..< cut]
 
+proc hostDirectoryTail(dir: HostDirectory): seq[string] =
+  ## The path under ``C:\ProgramData``, as directory names. ``validate``
+  ## has already refused a path anywhere else.
+  const root = r"C:\ProgramData\"
+  for part in dir.path[root.len .. ^1].split({'\\', '/'}):
+    if part.len > 0:
+      result.add(part)
+
+proc needsInstallerVersion500*(dist: Distribution): bool =
+  ## A host directory's ACL is ``MsiLockPermissionsEx``, a Windows
+  ## Installer 5.0 table; nothing else here needs more than 2.0.
+  dist.hostDirectories.len > 0
+
+proc hostSeedPaths*(dist: Distribution): seq[string] =
+  ## The build-tree files the host directories are seeded from: inputs of
+  ## both WiX edges, so a changed template is a changed package.
+  for dir in dist.hostDirectories:
+    for seed in dir.seedFiles:
+      result.add(seed.buildPath)
+
+proc hostDirectoriesWxs(dist: Distribution;
+                        componentRefs: var seq[string]): string =
+  ## ``CommonAppDataFolder`` and, under it, each ``HostDirectory``: one
+  ## component that CREATES the directory with its DACL, and one per seed
+  ## file that installs the file only when it is absent.
+  ##
+  ## ``Permanent="yes"`` on all of them: an uninstall leaves the directory
+  ## and whatever the service and the operator wrote into it, because host
+  ## state and configuration outlive a package -- a reinstall has to find
+  ## the same machine identity and the same budget. ``NeverOverwrite="yes"``
+  ## on a seed: once the file exists it is the operator's, and a repair or
+  ## an upgrade must not put the template back over an edited file.
+  if dist.hostDirectories.len == 0:
+    return
+  result.add("      <Directory Id=\"CommonAppDataFolder\">\n")
+  for i, dir in dist.hostDirectories:
+    let tail = hostDirectoryTail(dir)
+    for j, name in tail:
+      let id =
+        if j == tail.len - 1: "HOSTDIR" & $i
+        else: "HOSTDIR" & $i & "_" & $j
+      result.add(" ".repeat(8 + 2 * j) & "<Directory Id=\"" & id &
+        "\" Name=\"" & xmlEscape(name) & "\">\n")
+    let pad = " ".repeat(8 + 2 * tail.len)
+    let dirComponent = "cmp_hostdir_" & $i
+    result.add(pad & "<Component Id=\"" & dirComponent & "\" Guid=\"" &
+      xmlEscape(dir.windowsComponentGuid) &
+      "\" KeyPath=\"yes\" Permanent=\"yes\">\n")
+    result.add(pad & "  <CreateFolder>\n")
+    # The CORE ``PermissionEx`` with ``Sddl`` -- ``MsiLockPermissionsEx`` --
+    # and not ``util:PermissionEx``. The util element grants ACEs on top of
+    # what the directory inherits, so ``C:\ProgramData``'s
+    # ``BUILTIN\Users`` write ACE would survive it; an SDDL DACL marked
+    # ``P`` (protected) replaces the whole list.
+    result.add(pad & "    <PermissionEx Sddl=\"" &
+      xmlEscape(dir.windowsSddl) & "\" />\n")
+    result.add(pad & "  </CreateFolder>\n")
+    result.add(pad & "</Component>\n")
+    componentRefs.add(dirComponent)
+    for k, seed in dir.seedFiles:
+      let seedComponent = "cmp_hostseed_" & $i & "_" & $k
+      # ``Guid="*"``: a file key path in a standard directory is exactly
+      # what WiX derives a stable GUID from.
+      result.add(pad & "<Component Id=\"" & seedComponent &
+        "\" Guid=\"*\" Permanent=\"yes\" NeverOverwrite=\"yes\">\n")
+      result.add(pad & "  <File Id=\"fil_hostseed_" & $i & "_" & $k &
+        "\" Name=\"" & xmlEscape(seed.name) & "\" KeyPath=\"yes\" Source=\"" &
+        xmlEscape(windowsPath(seed.buildPath)) & "\" />\n")
+      result.add(pad & "</Component>\n")
+      componentRefs.add(seedComponent)
+    for j in countdown(tail.len - 1, 0):
+      result.add(" ".repeat(8 + 2 * j) & "</Directory>\n")
+  result.add("      </Directory>\n")
+
 proc needsUtilExtension*(dist: Distribution): bool =
   ## Whether the authoring requires ``WixUtilExtension``.
   ##
@@ -192,7 +266,13 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
   # action imposes no InstallerVersion floor, so raising it would have
   # refused to install on older Windows for a requirement that does not
   # exist.
-  let installerVersion = "200"
+  #
+  # A HOST DIRECTORY IS THE EXCEPTION: its DACL is the
+  # ``MsiLockPermissionsEx`` table, which Windows Installer 5.0 introduced
+  # (Windows 7 and later), and candle refuses ``PermissionEx Sddl`` below
+  # that floor.
+  let installerVersion =
+    if needsInstallerVersion500(dist): "500" else: "200"
   let needsUtil = needsUtilExtension(dist)
 
   # Group components by the directory they live in, then render the
@@ -385,6 +465,7 @@ proc wxsText*(dist: Distribution; tree: StagedTree): string =
   result.add(renderDirTree(root, 10, componentsByDir))
   result.add("        </Directory>\n")
   result.add("      </Directory>\n")
+  result.add(hostDirectoriesWxs(dist, componentRefs))
   result.add("    </Directory>\n")
   result.add("    <Feature Id=\"Complete\" Title=\"" &
     xmlEscape(dist.name) & "\" Level=\"1\">\n")
@@ -422,7 +503,7 @@ proc msiPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     # does not read them — light does — but declaring them here as well
     # keeps the compile step invalidated by a changed payload, so a
     # rebuild after a binary changes cannot reuse a stale .wixobj.
-    extraInputs = tree.stagedPaths())
+    extraInputs = tree.stagedPaths() & hostSeedPaths(dist))
   declareProducerTool(site, candleEdge.id, CandleSelector)
 
   let outPath = dist.outputDir & "/" & msiArtifactName(dist)
@@ -445,7 +526,7 @@ proc msiPackage*(dist: Distribution; site = noSite()): PackagedArtifact =
     objects = @[objPath],
     actionId = "pkg-msi-light-" & dist.name,
     after = @[candleEdge] & tree.terminal,
-    extraInputs = tree.stagedPaths())
+    extraInputs = tree.stagedPaths() & hostSeedPaths(dist))
   declareProducerTool(site, lightEdge.id, LightSelector)
 
   PackagedArtifact(

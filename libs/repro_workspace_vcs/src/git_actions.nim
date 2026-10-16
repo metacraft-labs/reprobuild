@@ -48,6 +48,8 @@ import repro_core/path_identity
 import repro_hash
 
 import git_tool
+from shared_clones import prepareSharedBare, sharedBareFetchArgs,
+  checkRegisteredLeaves, messages, registerLeafWithPool
 
 export GitToolIdentity, EGitToolUnresolved, ensureGitToolResolvable,
   resolveGitTool, digestHex, ToolProvisioningMode
@@ -1050,6 +1052,9 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     args.add("--branch")
     args.add(cloneBranchRef(payload.revision))
   var cloneRes = runGit(payload, args)
+  # Whether the clone that landed borrows from the shared bare (the fallback
+  # below does not).
+  let borrowsFromPool = useReference and cloneRes.exitCode == 0
   if cloneRes.exitCode != 0 and useReference:
     # Best-effort fallback: drop the reference and clone standalone so a
     # broken/locked shared bare never breaks init. The RA-14 accelerators
@@ -1104,6 +1109,20 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
         "  git output: " & cloneOut)
     return failed("clone-failed",
       "git clone exited " & $cloneRes.exitCode & ": " & cloneOut)
+  if borrowsFromPool:
+    # Shared-Clone-Pool-Integrity §3.2/§3.4/§3.5: a checkout that borrows
+    # from the pool is registered with it (so a gc there keeps what this
+    # checkout names) and gets the refetch chain and ``fetch.hideRefs``. A
+    # borrower the pool cannot know about is one its gc can break, so if
+    # registration fails the clone stops borrowing instead: it copies the
+    # objects it uses into its own store and drops the alternates entry.
+    let registered = registerLeafWithPool(payload.binaryPath, target,
+      payload.referencePath)
+    if registered.len > 0 and not registered.startsWith("could not write"):
+      let copied = runGit(payload, ["-C", target, "repack", "-a", "-d", "-q"])
+      if copied.exitCode == 0:
+        try: removeFile(target / ".git" / "objects" / "info" / "alternates")
+        except OSError: discard
   if pinnedCommit:
     # The clone landed on the remote's default branch; move to the pinned
     # commit. Fetch it explicitly first — it need not be a branch tip, and
@@ -1349,22 +1368,39 @@ proc executeForkBranch(payload: GitVcsPayload;
   succeeded()
 
 proc executeRefreshBare(payload: GitVcsPayload;
-                        cwd, receiptPath: string): ActionResult =
+                        cwd, receiptPath: string): ActionResult {.gcsafe.} =
   ## RA-27 — clone-if-missing / fetch-if-present the RA-5 shared bare for
   ## ``remoteUrl`` at ``repoPath``. Scheduling this as an engine action (rather
   ## than the serial in-line loop it replaces) is safe because each unique URL
   ## maps to its OWN bare directory: the race the serial loop guarded against is
   ## per-bare, and distinct bares share no state. The caller deduplicates by
   ## URL, so two actions never target the same directory.
+  ##
+  ## Both arms go through ``shared_clones.prepareSharedBare`` -- the same
+  ## preparation ``refreshSharedBare`` does. This action used to fetch with
+  ## neither: no fetch refspec (so the "refresh" advanced no refs) and no
+  ## borrower-safety config (so the fetch's automatic maintenance could
+  ## expire objects that checkouts in other workspaces still borrow, and
+  ## rewrite the commit-graph layers they chain onto). One preparation proc
+  ## for every refresh path is what keeps the two from drifting apart again.
   let bare = payload.repoPath
   var outcome = "fetched"
+  var leafMessages: seq[string]
   if dirExists(bare / "objects") or dirExists(bare / ".git"):
-    let res = runGit(payload,
-      ["-C", bare, "fetch", "--all", "--prune", "--quiet"])
+    let prepared = prepareSharedBare(payload.binaryPath, bare)
+    if prepared.len > 0:
+      return failed("refresh-bare-prepare-failed", prepared)
+    let res = runGit(payload, sharedBareFetchArgs(bare))
     if res.exitCode != 0:
       return failed("refresh-bare-fetch-failed",
         "git fetch in shared bare failed (" & $res.exitCode & "): " &
           res.output.trimmed)
+    # Shared-Clone-Pool-Integrity §4.2: a refresh is what strands a rewritten
+    # upstream's old commits, so every leaf registered with this pool is
+    # checked right after it. The fetches that depend on this action
+    # therefore run in leaves that have already been repaired. The messages
+    # travel on stdout; ``repro sync`` prints them.
+    leafMessages = messages(checkRegisteredLeaves(payload.binaryPath, bare))
   else:
     let parent = bare.splitPath.head
     if parent.len > 0:
@@ -1382,6 +1418,10 @@ proc executeRefreshBare(payload: GitVcsPayload;
       return failed("refresh-bare-clone-failed",
         "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
           res.output.trimmed)
+    let prepared = prepareSharedBare(payload.binaryPath, bare)
+    if prepared.len > 0:
+      return failed("refresh-bare-prepare-failed",
+        "cloned the shared bare but " & prepared)
     outcome = "cloned"
   var receipt = RefreshBareReceiptHeader & "\n"
   receipt.add("kind\t" & WorkspaceVcsKind & "\n")
@@ -1391,7 +1431,9 @@ proc executeRefreshBare(payload: GitVcsPayload;
   receipt.add("outcome\t" & outcome & "\n")
   receipt.add("git-version\t" & payload.identityVersion & "\n")
   writeReceipt(receiptPath, receipt)
-  succeeded()
+  result = succeeded()
+  if leafMessages.len > 0:
+    result.stdout = leafMessages.join("\n") & "\n"
 
 proc executeRemoteBranchProbe(payload: GitVcsPayload;
                               cwd, receiptPath: string): ActionResult =
@@ -2227,9 +2269,10 @@ proc isPublishedQuery*(repoPath, remoteName: string): GitQueryAction =
 proc extendedStatusQuery*(repoPath, trunkBranch: string;
                           queryStashes, queryFiles, queryAheadBehind,
                           queryUnmerged: bool;
-                          queryFileDetails = false): GitQueryAction =
+                          queryFileDetails = false;
+                          remoteName = "origin"): GitQueryAction =
   GitQueryAction(kind: gqkExtendedStatus, repoPath: repoPath,
-    remoteName: "origin", trunkBranch: trunkBranch,
+    remoteName: remoteName, trunkBranch: trunkBranch,
     queryStashes: queryStashes, queryFiles: queryFiles,
     queryAheadBehind: queryAheadBehind, queryUnmerged: queryUnmerged,
     queryFileDetails: queryFileDetails)
@@ -2358,8 +2401,16 @@ proc queryGitState*(query: GitQueryAction;
     # 6. Unmerged Branches
     if query.queryUnmerged:
       let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+      let remoteName = if query.remoteName.len > 0: query.remoteName else: "origin"
+      let remoteRef = remoteName & "/" & trunkBranch
+      var targetRef = trunkBranch
+      let checkRemote = runGitQuery(payload,
+        ["-C", query.repoPath, "rev-parse", "--verify", "--quiet", "refs/remotes/" & remoteRef])
+      if checkRemote.exitCode == 0:
+        targetRef = remoteRef
+
       let unmergedRes = runGitQuery(payload,
-        ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
+        ["-C", query.repoPath, "branch", "--no-merged", targetRef])
       if unmergedRes.exitCode == 0:
         for rawLine in unmergedRes.output.splitLines():
           var line = rawLine.strip()
@@ -2374,7 +2425,7 @@ proc queryGitState*(query: GitQueryAction;
           # named `heads/main` makes bare `main` ambiguous). A real branch name
           # contains no whitespace or ':' and never starts with '(' (the
           # detached-HEAD note), so reject anything else as non-branch noise.
-          if line.len == 0 or line == trunkBranch: continue
+          if line.len == 0 or line == trunkBranch or line == targetRef: continue
           if line.startsWith("(") or line.contains(' ') or
              line.contains('\t') or line.contains(':'):
             continue
