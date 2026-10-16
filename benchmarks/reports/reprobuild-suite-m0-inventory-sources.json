@@ -5979,7 +5979,7 @@
             "repoRoot",
             "tempRoot"
           ],
-          "line": 306,
+          "line": 303,
           "path": "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
           "patterns": [
             "nim-variable-argv"
@@ -13666,7 +13666,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
