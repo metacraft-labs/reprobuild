@@ -11,8 +11,14 @@
 ## and must NOT be reported as the shorter prefix that happened to fit in the
 ## first chunk (`…-openssl-3` for `…-openssl-3.5.8`). Every offset around the
 ## boundary is tried, so a carry that is one byte short fails here.
+##
+## The ledger-index cases set the `actions/` directory's mtime with
+## `setLastModificationTime` to model a coarse filesystem clock. That is not a
+## mock: the stamp is the real directory's real mtime, read back by the
+## production code through the same `stat` it always uses; only the moment the
+## filesystem assigned it is chosen by the test instead of by the scheduler.
 
-import std/[algorithm, os, strutils, tempfiles, unittest]
+import std/[algorithm, os, strutils, tempfiles, times, unittest]
 
 import repro_core/nix_store_roots
 
@@ -240,6 +246,109 @@ suite "nix-gc-roots manifests":
     check rebuilt.valid
     check rebuilt.missingStorePaths("k3").found
     check not rebuilt.missingStorePaths("k2").found
+
+  test "the index is never stamped with a tick the clock has not passed":
+    # reprobuild-pm issue 2026-10-16 ("the Nix ledger index trusts a stale
+    # `actions/` stamp when two manifests land in one clock tick"). On Linux a
+    # directory's mtime comes from the kernel's COARSE clock, so a manifest
+    # written in the same tick as the stamp the index was built against
+    # leaves that stamp byte-identical, and the index — still "valid" — says
+    # the new manifest does not exist.
+    #
+    # The tick is modelled deterministically by giving `actions/` a stamp in
+    # the FUTURE and restoring it after the second write. What makes a stamp
+    # ambiguous is not its exact value but that the filesystem's clock has
+    # not moved past it yet: until it does, a further write can be stamped
+    # with the same value. Within a real tick that window is one jiffy; with
+    # a stamp an hour ahead it is an hour, so the outcome no longer depends
+    # on how the scheduler happens to interleave this process with the
+    # clock. Restoring the stamp then produces exactly the state a coarse
+    # clock produces: two different manifest sets, one byte-identical stamp.
+    # Whole seconds are used because `utimes` (POSIX, microseconds) and
+    # `SetFileTime` (Windows, 100 ns) both store them exactly; the first
+    # `check` below confirms the round trip on this host.
+    let dir = createTempDir("repro-ledger-tick-", "")
+    defer: removeDir(dir)
+    let store = dir / "store"
+    let ledger = dir / "ledger"
+    let actions = ledger / LedgerActionsDirName
+    createDir(store)
+    let refA = store / (H1 & "-a")
+    writeFile(refA, "")
+    let output = dir / "out"
+    writeFile(output, "")
+    writeNixRootsManifest(ledgerManifestPath(ledger, "k1"),
+      NixRootsManifest(label: "one", outputs: @[output], refs: @[refA]))
+
+    let unpassed = fromUnix(getTime().toUnix + 3600)
+    setLastModificationTime(actions, unpassed)
+    check getLastModificationTime(actions) == unpassed
+    discard pruneStaleRoots(ledger, store)
+    # The prune itself still happened (nothing to remove here), but the stamp
+    # it would have recorded is one a later write can repeat, so no index.
+    check not loadNixLedgerIndex(ledger).valid
+    writeNixRootsManifest(ledgerManifestPath(ledger, "k2"),
+      NixRootsManifest(label: "two", outputs: @[output], refs: @[refA]))
+    setLastModificationTime(actions, unpassed)
+    var stale = loadNixLedgerIndex(ledger)
+    # The defect: a valid index that reports the new manifest as absent.
+    check not stale.valid
+    check not stale.valid or stale.missingStorePaths("k2").found
+    check ledgerMissingStorePaths(ledger, "k2").found
+    check nixLedgerNeedsMaintenance(ledger, stale)
+
+    # The other side: a stamp the clock HAS passed is recorded, and then any
+    # later write — necessarily stamped at or after "now" — moves it.
+    let passed = fromUnix(getTime().toUnix - 3600)
+    setLastModificationTime(actions, passed)
+    check getLastModificationTime(actions) == passed
+    discard pruneStaleRoots(ledger, store)
+    var settled = loadNixLedgerIndex(ledger)
+    check settled.valid
+    check settled.valid and settled.missingStorePaths("k1").found
+    check settled.valid and settled.missingStorePaths("k2").found
+    check not nixLedgerNeedsMaintenance(ledger, settled)
+    writeNixRootsManifest(ledgerManifestPath(ledger, "k3"),
+      NixRootsManifest(label: "three", outputs: @[output], refs: @[refA]))
+    check not loadNixLedgerIndex(ledger).valid
+    check nixLedgerNeedsMaintenance(ledger, settled)
+
+  test "a manifest written right after a prune always invalidates the index":
+    # The same defect on the real clock: prune, then write a manifest at once,
+    # with nothing in between. On Linux the old index was stamped within the
+    # tick the next write landed in about half the time (5 of 10 isolated
+    # runs of the test above it, issue 2026-10-16), so 32 rounds miss the
+    # race with probability ~2^-32. On a fine-grained clock (APFS on macOS)
+    # this passes either way; the deterministic case above is what pins the
+    # fix there.
+    let dir = createTempDir("repro-ledger-race-", "")
+    defer: removeDir(dir)
+    let store = dir / "store"
+    let ledger = dir / "ledger"
+    createDir(store)
+    let refA = store / (H1 & "-a")
+    writeFile(refA, "")
+    let output = dir / "out"
+    writeFile(output, "")
+    var validAfterPrune = 0
+    for round in 0 ..< 32:
+      checkpoint("round " & $round)
+      writeNixRootsManifest(ledgerManifestPath(ledger, "before-" & $round),
+        NixRootsManifest(label: "before", outputs: @[output], refs: @[refA]))
+      discard pruneStaleRoots(ledger, store)
+      if loadNixLedgerIndex(ledger).valid:
+        inc validAfterPrune
+      let key = "after-" & $round
+      writeNixRootsManifest(ledgerManifestPath(ledger, key),
+        NixRootsManifest(label: "after", outputs: @[output], refs: @[refA]))
+      var index = loadNixLedgerIndex(ledger)
+      check not index.valid
+      check not index.valid or index.missingStorePaths(key).found
+    # Soundness alone is satisfied by never writing an index; the rounds only
+    # test something if the prune does write one. It waits for the clock to
+    # pass the stamp, so on any host with sub-second directory timestamps it
+    # should have done so in every round.
+    check validAfterPrune > 0
 
   test "ledger keys are filesystem-safe and distinguish scope":
     let a = ledgerKey("pkg/compile:a.c", "/work")

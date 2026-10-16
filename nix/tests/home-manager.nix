@@ -361,7 +361,166 @@ let
     # neutral fixture is a catalog application, so it claims nothing there.
     && all.reprobuild.intent.homebrew.formulae == [ ];
 
+  # GM7 (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply): over
+  # tests/fixtures/intent-exports/concerns/export.json. `m1` declares
+  # `applies: [applications, environment]` (Reprobuild the applications, Nix
+  # the packages), `server` declares `applies: [packages]` (the reverse) and
+  # `home-pc` declares nothing. Every category switch DEFAULTS to the
+  # complement of the declaration; home-pc keeps today's opt-in defaults (all
+  # off). Uncategorized entries of a concern Reprobuild applies are excluded.
+  # Packages are routed by the concern Reprobuild's export classified them
+  # into for this system (`concerns.packages`, carried as
+  # `evaluation.packages[].concern`): the fixture catalog's `gm7app` is a
+  # disk-image application on the darwin targets, so on m1 it is
+  # Reprobuild's (excluded) and on server it is Nix's (the Homebrew category,
+  # which claims nothing for it, reports it). An explicit switch overrides
+  # the default, and one whose concern Reprobuild also applies is warned
+  # about.
+  concernsSnapshot = root + "/tests/fixtures/intent-exports/concerns/export.json";
+  concernsConfig =
+    host: extra:
+    (homeManager.lib.homeManagerConfiguration {
+      inherit pkgs;
+      modules = [
+        intentModule
+        {
+          home = {
+            username = "gm7";
+            homeDirectory = if isDarwin then "/Users/gm7" else "/home/gm7";
+            stateVersion = "25.05";
+          };
+          reprobuild.intent = {
+            enable = true;
+            inherit host;
+            snapshot = concernsSnapshot;
+            unmappedPolicy = "warn";
+            uncategorizedPolicy = "warn";
+          };
+        }
+        extra
+      ];
+    }).config;
+  concernsM1 = concernsConfig "m1" { };
+  concernsServer = concernsConfig "server" { };
+  concernsHomePc = concernsConfig "home-pc" { };
+  m1Applies = [
+    "applications"
+    "environment"
+  ];
+  categoryConcerns = {
+    packages = "packages";
+    homebrew = "applications";
+    files = "files";
+    environment = "environment";
+  };
+  switchesOf = cfg: lib.mapAttrs (name: _: cfg.reprobuild.intent.${name}.enable) categoryConcerns;
+  complementOf = applies: lib.mapAttrs (_: concern: !(lib.elem concern applies)) categoryConcerns;
+  evalPackage = cfg: name: lib.findFirst (p: p.name == name) null cfg.reprobuild.intent.evaluation.packages;
+  unmappedIn =
+    cfg: category: id:
+    lib.any (e: e.id == id && e.category == category) cfg.reprobuild.intent.unmapped;
+  concernsOk =
+    concernsM1.reprobuild.intent.evaluation.applies == m1Applies
+    && concernsServer.reprobuild.intent.evaluation.applies == [ "packages" ]
+    && !(concernsHomePc.reprobuild.intent.evaluation ? applies)
+    # The defaults ARE the complement of the declaration, category by
+    # category, and nothing on an undeclared host.
+    && switchesOf concernsM1 == complementOf m1Applies
+    && switchesOf concernsServer == complementOf [ "packages" ]
+    && switchesOf concernsHomePc == lib.mapAttrs (_: _: false) categoryConcerns
+    # What the defaults do: files placed, the variable left to Reprobuild.
+    && concernsM1.home.file ? ".config/gm7/app.conf"
+    && !(concernsM1.home.sessionVariables ? GM7_EDITOR)
+    && lib.elem pkgs.bash.outPath (outPaths concernsM1.home.packages)
+    && !(concernsHomePc.home.file ? ".config/gm7/app.conf")
+    && !(lib.elem pkgs.bash.outPath (outPaths concernsHomePc.home.packages))
+    # Uncategorized: Reprobuild's (environment) excluded, Nix's reported.
+    && ids concernsM1.reprobuild.intent.uncategorized == [ "config:git.credentialHelper" ]
+    && ids concernsHomePc.reprobuild.intent.uncategorized == [
+      "config:git.credentialHelper"
+      "fs.managedBlock:~/.bashrc:gm7"
+    ]
+    && !(lib.any (w: lib.hasInfix "both sides apply" w) concernsM1.warnings);
+  # The per-package split (Open question 9): routed by Reprobuild's
+  # classification for this system, never by a list on the Nix side.
+  concernsPackagesOk =
+    let
+      bashOnM1 = evalPackage concernsM1 "bash";
+      app = evalPackage concernsM1 "gm7app";
+      appOnServer = evalPackage concernsServer "gm7app";
+      notOnNix = cfg: !(lib.any (e: e.id == "package:gm7app") cfg.reprobuild.intent.unmapped);
+    in
+    # Only a declaring host's packages carry a concern.
+    !(lib.any (p: p ? concern) concernsHomePc.reprobuild.intent.evaluation.packages)
+    && bashOnM1.concern == "packages"
+    && bashOnM1.resolved == true
+    && (
+      if isDarwin then
+        # Vacuity: the application IS in the darwin evaluation, classified
+        # by the export.
+        app.concern == "applications"
+        && app.resolved
+        && appOnServer.concern == "applications"
+        # m1: Reprobuild's -- neither nixpkgs nor Homebrew sees it.
+        && notOnNix concernsM1
+        && !(lib.elem "gm7app" concernsM1.reprobuild.intent.homebrew.casks)
+        # server: Nix's application, and the Homebrew category reports that
+        # it claims nothing for it.
+        && unmappedIn concernsServer "homebrew" "package:gm7app"
+      else
+        app == null && appOnServer == null && notOnNix concernsM1 && notOnNix concernsServer
+    )
+    # server: the packages are Reprobuild's; nothing of them reaches Nix.
+    && !(lib.elem pkgs.bash.outPath (outPaths concernsServer.home.packages))
+    && concernsServer.reprobuild.intent.homebrew.formulae == [ ]
+    && !(lib.any (e: lib.hasPrefix "package:" e.id && e.id != "package:gm7app") concernsServer.reprobuild.intent.unmapped);
+  # Overridable, and an override against the declaration is warned about.
+  concernsOverrideOk =
+    let
+      both = concernsConfig "m1" { reprobuild.intent.environment.enable = true; };
+      off = concernsConfig "m1" { reprobuild.intent.files.enable = false; };
+    in
+    both.home.sessionVariables.GM7_EDITOR or null == "nvim"
+    && lib.any (w: lib.hasInfix "category `environment` is enabled" w && lib.hasInfix "both sides apply" w) both.warnings
+    && !(off.home.file ? ".config/gm7/app.conf");
+
+  # The profile's commands (§Concern-scoped apply): server gives Reprobuild
+  # the packages (whose launchers it writes) and Nix the environment, so the
+  # environment category puts Reprobuild's profile bin directory -- the
+  # location the export publishes for this system, resolved against the
+  # user's directories -- FIRST on home.sessionPath. m1 gives Reprobuild the
+  # environment too, home-pc declares nothing: no directory. Switching the
+  # environment category off leaves it off PATH with the rest of the
+  # category.
+  concernsProfileBinOk =
+    let
+      expected =
+        if isDarwin then
+          "/Users/gm7/Library/Application Support/repro/home/current/bin"
+        else
+          "/home/gm7/.local/state/repro/home/current/bin";
+      movedState = concernsConfig "server" { xdg.stateHome = "/srv/gm7-state"; };
+      envOff = concernsConfig "server" { reprobuild.intent.environment.enable = false; };
+    in
+    concernsServer.reprobuild.intent.evaluation.profileBin.base == (if isDarwin then "home" else "xdgStateHome")
+    && concernsServer.reprobuild.intent.profileBin == expected
+    && lib.head concernsServer.home.sessionPath == expected
+    && concernsM1.reprobuild.intent.profileBin == null
+    && !(concernsM1.reprobuild.intent.evaluation ? profileBin)
+    && !(lib.elem expected concernsM1.home.sessionPath)
+    && concernsHomePc.reprobuild.intent.profileBin == null
+    # The base is honoured: on Linux the directory follows xdg.stateHome, on
+    # macOS it does not.
+    && movedState.reprobuild.intent.profileBin == (
+      if isDarwin then expected else "/srv/gm7-state/repro/home/current/bin"
+    )
+    && !(lib.elem expected envOff.home.sessionPath);
+
   results = {
+    concerns-profile-bin = concernsProfileBinOk;
+    concerns-complement-defaults = concernsOk;
+    concerns-package-split = concernsPackagesOk;
+    concerns-overridable = concernsOverrideOk;
     homebrew-realization-hook = brewOk;
     unrecognised-input-is-unmapped = unrecognisedOk;
     evaluation-is-home-pc = all.reprobuild.intent.evaluation.host == "home-pc";

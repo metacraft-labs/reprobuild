@@ -290,12 +290,30 @@ proc downEveryProject(c: L7Case) =
     discard c.down(project)
 
 suite "L7 §4.5 — `repro up` in three projects converges on one instance":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
+  # Prepared on the first case's `setup`, NOT in the suite body. The suite
+  # body runs at registration, in every process this binary starts --
+  # including `--list` / `--list-json`, which only enumerates and is run
+  # from a scratch working directory. Preparing here made enumeration
+  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
+  # no case was listed) and start a daemon just to print case names. The
+  # runner executes each case in its own process, so a case still prepares
+  # the fixture and starts the daemon exactly once, and the deferred
+  # cleanup below still runs in that process -- only if a case prepared.
+  var prepared = false
+  var c: L7Case
+  var daemon: owned(Process)
+
+  setup:
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
+
   defer:
-    downEveryProject(c)
-    c.closeDaemon(daemon)
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+    if prepared:
+      downEveryProject(c)
+      c.closeDaemon(daemon)
+      try: removeDir(c.tempRoot) except OSError, IOError: discard
 
   test "two orders, each ending with one instance, one pid and three holders":
     ## The gate's headline clause through the CLI: "`repro up` run in

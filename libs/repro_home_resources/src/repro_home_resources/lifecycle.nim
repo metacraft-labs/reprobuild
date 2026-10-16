@@ -302,6 +302,9 @@ proc summarize*(action: ResourceActionKind; address: string;
 # Decision.
 # ---------------------------------------------------------------------------
 
+proc decideActionIgnoringBusy(state: ResourceState;
+                  options: DecisionOptions): ResourceAction
+
 proc decideAction*(state: ResourceState;
                   options: DecisionOptions = DecisionOptions(
                     reconcile: rpFailClosed,
@@ -309,6 +312,23 @@ proc decideAction*(state: ResourceState;
   ## Pure decision: given the composite state (desired + observed +
   ## recorded), return the typed action. Does NOT mutate anything;
   ## the executor consumes the action and performs the I/O.
+  ##
+  ## A live object that is in use (`state.busy`, e.g. a running
+  ## application) is never changed: an update, replace or destroy is
+  ## DEFERRED -- a no-op whose summary says so, and which the executor
+  ## records as `deferred` so the next apply decides again. Drift is still
+  ## drift.
+  result = decideActionIgnoringBusy(state, options)
+  if state.busy.len > 0 and
+      result.kind in {rakUpdate, rakReplace, rakDestroy}:
+    let wanted = result.kind
+    result.kind = rakNoOp
+    result.deferred = true
+    result.summary = summarize(rakNoOp, state.address, result.resourceKind) &
+      " [" & $wanted & " deferred: in use by " & state.busy & "]"
+
+proc decideActionIgnoringBusy(state: ResourceState;
+                  options: DecisionOptions): ResourceAction =
   result.address = state.address
   result.driftExpectedHex = ""
   result.driftObservedHex = ""
@@ -360,6 +380,20 @@ proc decideAction*(state: ResourceState;
       result.kind = rakUpdate
       result.summary = summarize(rakUpdate, state.address, result.resourceKind)
       return
+    # A vendor update of what we recorded (an application that updated
+    # itself): not drift. Kept unless the desired version is newer.
+    if state.vendorUpdate:
+      if state.desiredSupersedesObserved:
+        result.kind = rakUpdate
+        result.summary = summarize(rakUpdate, state.address,
+          result.resourceKind) & " [replaces a vendor update with the " &
+          "newer declared version]"
+      else:
+        result.kind = rakNoOp
+        result.keptVendorUpdate = true
+        result.summary = summarize(rakNoOp, state.address,
+          result.resourceKind) & " [vendor update kept]"
+      return
     # Drift.
     let expectedHex =
       if state.hasRecorded: digestHex(state.recorded.postWriteDigest)
@@ -396,6 +430,7 @@ proc decideAction*(state: ResourceState;
   # references this address; the world still has the bytes.
   # Safe destroy iff observed matches recorded postWrite.
   if state.recorded.postWriteDigest == state.observed.digest or
+     state.vendorUpdate or
      options.reconcile == rpAcceptOverwrite:
     if options.enforcePreventDestroy and
        state.recorded.lifecyclePolicy == lpPreventDestroy:

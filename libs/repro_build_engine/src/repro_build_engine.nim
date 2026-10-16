@@ -1495,6 +1495,21 @@ type
     monitorReads*: ObservedPathChannel
     monitorWrites*: ObservedPathChannel
     monitorProbes*: ObservedPathChannel
+    monitorRemovals*: ObservedPathChannel
+      ## Paths the action REMOVED: io-mon's `mrPathMutation` records whose
+      ## call was an unlink, an rmdir or a remove (`isRemovalMutation`). The
+      ## other namespace changes -- a directory or a symbolic link created --
+      ## are writes and go to `monitorWrites`.
+      ##
+      ## A removal changes the tree as a write does: it reaches the
+      ## read-only-root check (`detectSourceWrites`) and invalidates the
+      ## metadata cache for the path (`invalidateCachedWrites`). It is kept
+      ## apart from `monitorWrites` because a removal is not a creation:
+      ## `transientOwnWrites` treats a written path that is gone at the end as
+      ## the action's own temporary and leaves it out of the portable key.
+      ## Deleting a file is no evidence of having made it, so a removal there
+      ## would drop a file the action READ and then deleted -- a genuine
+      ## input -- from the key, which is a false hit.
     monitorEnvReads*: seq[string]
       ## M10 — the NAMES of the environment variables the monitor observed
       ## this action reading (`mrEnvRead`, io-mon's observed-declared-input
@@ -2264,8 +2279,8 @@ type
       ## ``toolIdentityRefs`` name this tool (section 3, step 5), so
       ## re-realizing the tool invalidates its consumers through the ordinary
       ## declared-input path. Empty for a tool no provisioning edge realized
-      ## (a host ``PATH`` tool, a Nix realization outside the dev-env graph,
-      ## a from-source build).
+      ## (a host ``PATH`` tool, a from-source build, a Nix realization
+      ## resolved with no tool store).
     # M9.R.14e.3 — auxiliary search-path channels. The engine threads
     # each list onto a dedicated env var at action-launch time (see
     # ``resolvedToolAuxPaths`` / ``applyEnvSearchLists``):
@@ -4118,6 +4133,45 @@ proc cachedResultReusableInPlace(action: BuildAction;
   ## edge with nothing to restore from being treated as one that failed to.
   action.declaresNoOutputs() or declaredOutputsPresent
 
+proc containerDirectoryOutputs*(action: BuildAction): seq[string] =
+  ## The declared outputs of `action` that are CONTAINER directories: a
+  ## directory the action declares only to say it exists, while other
+  ## writers fill it. Incremental-Invalidation.md §"Non-regular outputs",
+  ## "Container directory outputs".
+  ##
+  ## * `bakEnsureDir` — its one output. It creates the directory and writes
+  ##   nothing into it; CodeTracer's C compiles write `build/c/*.o` into its
+  ##   `fs.ensureDir("build/c")`.
+  ## * `bakPreserveTree` — the output ROOT (second line of `builtinText`).
+  ##   Every entry it copies, and its manifest, is declared as an output of
+  ##   its own and keeps its own revalidation; the root's other entries are
+  ##   not its to own (CodeTracer copies `public/ui.js` into the
+  ##   `frontend-public-resources` root).
+  ##
+  ## The classification is a property of the ACTION's kind, so it is decided
+  ## here and handed to every revalidation path (the per-edge lookup, its
+  ## metadata-only hot path, the whole-graph no-op scan, and the restore-mode
+  ## "already in place" check) rather than stored in the record. A process
+  ## action's directory output is never a container: it is opaque, and its
+  ## tree digest is the only check that says anything about it.
+  ##
+  ## The paths are returned as the action spells them; the store resolves
+  ## both sides against the action's cwd (`ownedOutputKey`) before comparing.
+  case action.kind
+  of bakEnsureDir:
+    if action.outputs.len == 1:
+      result.add(action.outputs[0])
+  of bakPreserveTree:
+    # Read directly rather than through `builtinRoots`, which raises on a
+    # malformed text: a lookup is not the place to fail an action the
+    # executor rejects with its own diagnostic. A malformed action simply
+    # has no container.
+    let lines = action.builtinText.splitLines()
+    if lines.len >= 2 and lines[1].len > 0:
+      result.add(lines[1])
+  else:
+    discard
+
 proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
                                           record: ActionResultRecord): bool =
   ## "Is every declared output already exactly what this record describes?"
@@ -4166,7 +4220,8 @@ proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
     return false
   if not action.allOutputsExist():
     return false
-  outputStateMismatch(record, action.cwd).len == 0
+  outputStateMismatch(record, action.cwd,
+    action.containerDirectoryOutputs()).len == 0
 
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
@@ -4738,6 +4793,7 @@ type
     monitorReads*: HashSet[string]
     monitorWrites*: HashSet[string]
     monitorProbes*: HashSet[string]
+    monitorRemovals*: HashSet[string]
     monitorEnvReads*: HashSet[string]
       ## M10 — case-INSENSITIVE membership on Windows, where `PATH` and `Path`
       ## are one variable. The shim already dedupes that way; this is the
@@ -6978,6 +7034,35 @@ proc dropNamedPipeOpens(evidence: var PathSetEvidence;
   evidence.monitorReads.dropObserved(pipes)
   evidence.monitorProbes.dropObserved(pipes)
   evidence.monitorWrites.dropObserved(pipes)
+  evidence.monitorRemovals.dropObserved(pipes)
+
+proc sourceWriteOffenders*(action: BuildAction; evidence: PathSetEvidence):
+    seq[tuple[write: string; root: string]] =
+  ## R6: every observed change under one of the action's read-only roots.
+  ## A removal rewrites the source as surely as a write does, so both
+  ## channels are checked (`detectSourceWrites` does the matching).
+  if action.readOnlyRoots.len == 0:
+    return
+  detectSourceWrites(action.readOnlyRoots,
+    evidence.monitorWrites.paths & evidence.monitorRemovals.paths)
+
+proc isRemovalMutation*(detail: string): bool =
+  ## Whether an `mrPathMutation` record is a REMOVAL. io-mon names the call
+  ## first in the record's detail, on Linux (`linux_preload.nim`,
+  ## `repro_linux_observe_mutation`) and on macOS (`macos_interpose.nim`, the
+  ## ROUND-4 RW2 recorders): `unlink`, `unlinkat ...` (with `AT_REMOVEDIR`,
+  ## `rmdir unlinkat ...` on Linux), `rmdir` and `remove` remove a path;
+  ## `mkdir`, `mkdirat ...`, `symlink ...` and `symlinkat ...` create one.
+  ##
+  ## Anything else is treated as a creation, i.e. a write. That is the side
+  ## every write consumer reads conservatively except one: a path written and
+  ## gone at the end counts as the action's own temporary
+  ## (`transientOwnWrites`). An unknown removal read as a creation is
+  ## therefore exactly as safe as the write records already are.
+  for prefix in ["unlink", "rmdir", "remove"]:
+    if detail.startsWith(prefix):
+      return true
+  false
 
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
@@ -7207,6 +7292,19 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   of mrFileWrite:
     evidence.monitorWrites.observe(evidence.evidenceProvenance,
       evcMonitorCapture, seen.monitorWrites, materialized)
+  of mrPathMutation:
+    # A namespace change with no open behind it. A directory or a symbolic
+    # link CREATED changes the tree exactly as a write does, so it is one:
+    # without it a symbolic link the action laid down was no product
+    # (`undeclaredSurvivingWrites` could not see it, so a restored hit lacked
+    # it), and a temporary directory it made and removed was not recognised
+    # as its own. A REMOVAL goes to its own channel; see `monitorRemovals`.
+    if record.detail.isRemovalMutation():
+      evidence.monitorRemovals.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorRemovals, materialized)
+    else:
+      evidence.monitorWrites.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorWrites, materialized)
   of mrProcessExec:
     # A binary the action EXECUTED. Its bytes decide what the action
     # computes at least as directly as any file it reads, so it is a
@@ -8177,6 +8275,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     if action.cacheable and
         col.monitorObservedNoReads() and
         col.evidence.monitorWrites.len == 0 and
+        col.evidence.monitorRemovals.len == 0 and
         col.evidence.monitorProbes.len == 0 and
         col.evidence.monitorDirectoryEnumerations.len == 0 and
         col.depfileObservedNothing():
@@ -8450,6 +8549,7 @@ proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
     channel.dropObserved(drop)
   keep(evidence.monitorReads)
   keep(evidence.monitorWrites)
+  keep(evidence.monitorRemovals)
   keep(evidence.monitorProbes)
   keep(evidence.monitorDirectoryEnumerations)
   keep(evidence.depfileInputs)
@@ -8985,9 +9085,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # owns the target location" carve-out, so the check no-ops for them.
   # Legacy actions predate the field and also see an empty seq (v21
   # payload compatibility), so they are unaffected.
-  if action.readOnlyRoots.len > 0 and result.evidence.monitorWrites.len > 0:
-    let offenders = detectSourceWrites(action.readOnlyRoots,
-      result.evidence.monitorWrites.paths)
+  if action.readOnlyRoots.len > 0 and
+      (result.evidence.monitorWrites.len > 0 or
+       result.evidence.monitorRemovals.len > 0):
+    let offenders = action.sourceWriteOffenders(result.evidence)
     for offender in offenders:
       result.evidence.diagnostics.add(
         "source-write attempt (R6): action wrote to '" & offender.write &
@@ -9050,6 +9151,11 @@ proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
   for output in action.outputs:
     result.incl(materialPath(action.cwd, output).replace('\\', '/'))
 
+proc outputAncestorDirectoryKeys(action: BuildAction;
+                                 evidence: PathSetEvidence): HashSet[string]
+proc isOutputAncestorObservation(ancestors: HashSet[string];
+                                 key: string): bool {.inline.}
+
 proc evidenceInputPaths(action: BuildAction;
                         evidence: PathSetEvidence): seq[string] =
   # Deferred-D4: side-car ``HashSet`` keeps the per-action wrap-up linear
@@ -9059,21 +9165,28 @@ proc evidenceInputPaths(action: BuildAction;
   #
   # S5: the observed channels are filtered against the action's own
   # declared outputs; see ``selfWrittenOutputKeys``. Declared inputs are
-  # never filtered.
+  # never filtered. The directories those outputs sit in are filtered the
+  # same way (``outputAncestorDirectoryKeys``), so this denominator and the
+  # keyed set ``gradeKeyedInputSet`` compares it with subtract the same
+  # self-written paths.
   let selfWritten = action.selfWrittenOutputKeys()
+  let ancestors = action.outputAncestorDirectoryKeys(evidence)
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     result.addUnique(seen, input)
   for input in evidence.depfileInputs:
-    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+    let key = materialPath(action.cwd, input).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for input in evidence.monitorReads:
-    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+    let key = materialPath(action.cwd, input).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
-    if selfWritten.contains(materialPath(action.cwd, probe).replace('\\', '/')):
+    let key = materialPath(action.cwd, probe).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, probe)
 
@@ -9411,6 +9524,104 @@ proc selfWrittenDirectoryKeys(action: BuildAction): HashSet[string] =
       result.incl(dir)
   for root in action.declaredWriteRootPrefixes():
     result.incl(root)
+
+proc outputAncestorDirectoryKeys(action: BuildAction;
+                                 evidence: PathSetEvidence): HashSet[string] =
+  ## The directories every declared output of this action sits beneath: the
+  ## parent of each declared output file and each of ITS ancestors, and each
+  ## declared write root with its ancestors. Keyed in the normalized,
+  ## materialized form (`normalizeWriteRoot`), in both the declared and the
+  ## symlink-resolved spelling, because the monitor reports resolved paths
+  ## (`/private/tmp/...` on macOS) and a declaration need not be spelled so.
+  ##
+  ## What this set is for: an observation of one of these directories'
+  ## EXISTENCE — a probe, or a directory open — is not an input of the action,
+  ## and `cacheInputPaths` drops it from the observed channels. Spec:
+  ## `Filesystem-Policy-And-Observed-Inputs.md` §"A directory an output lives
+  ## in is not an existence input".
+  ##
+  ## Why that is sound, which is the whole argument. After every successful
+  ## run each of these directories exists, because the declared output is in
+  ## it; after every cache HIT it exists too, because restoring the output
+  ## creates its parents. So the state a hit leaves behind is the state a run
+  ## leaves behind, whatever the directory's pre-run state was. And the
+  ## recorder could never have recorded that pre-run state anyway: it
+  ## identifies an input by what is on disk AFTER the run, so a shell that
+  ## probed `build/` before `mkdir -p build` created it was recorded as
+  ## "directory" while what it observed was "absent". No fresh checkout — no
+  ## peer, no portable consumer, no `rm -rf build` of the producing tree —
+  ## could then match the record, and the producer itself only converged
+  ## because its own first run had left the directory behind
+  ## (`issues/2026-10-16-action-created-directories-recorded-as-post-run-
+  ## inputs.md`). Keying on the action's own side effect is the S5 defect
+  ## (`selfWrittenOutputKeys`) one path component up.
+  ##
+  ## The residual is the one S5 accepts and for the same reason: a tool that
+  ## BRANCHES on whether its output directory already existed is not
+  ## hermetic. An incremental tool that genuinely reads prior state declares
+  ## that state as an input, and a declared input is never filtered — the
+  ## callers add `declaredInputs` first and unfiltered.
+  ##
+  ## Deliberately NOT covered, because the soundness argument above does not
+  ## reach them: the MEMBERSHIP of these directories (enumerations, governed
+  ## by `selfWrittenDirectoryKeys` and the graph view — a listing of an
+  ## ancestor names other actions' outputs too), any path BELOW an output's
+  ## parent that is not itself an ancestor of an output (a sibling file is a
+  ## real input; S5's tests pin that), and an undeclared directory the action
+  ## creates and does not declare anything inside (a hit would not recreate
+  ## it, so its existence after a hit differs from after a run).
+  ##
+  ## THE MEMBERSHIP CARVE-OUT IS ENFORCED HERE, NOT MERELY STATED. An
+  ## enumeration is folded into `monitorProbes` as well as into
+  ## `monitorDirectoryEnumerations`, and the record attaches a membership
+  ## digest only to a path that is ALSO in the keyed input list
+  ## (`recordActionResult`'s `enumeratedDirectories`). Dropping an enumerated
+  ## ancestor from the probe channel would therefore silently drop its
+  ## membership: `cat *.txt > build/all.txt` enumerates the project root, an
+  ## ancestor of its output, and a new `*.txt` beside the others would no
+  ## longer invalidate it — a false hit. So an ancestor this action
+  ## ENUMERATED is removed from the set, and keyed exactly as before, unless
+  ## it is one whose membership `cacheEnumeratedDirectories` already treats
+  ## as derived (`selfWrittenDirectoryKeys`: an output's own parent or a
+  ## declared write root), where only existence could have been recorded.
+  result = initHashSet[string]()
+  var parents = initHashSet[string]()
+  for output in action.outputs:
+    parents.incl(normalizeWriteRoot(parentDir(materialPath(action.cwd,
+      output))))
+  for root in action.declaredWriteRootPrefixes():
+    # Already carries both spellings, and is itself a directory the action
+    # writes into.
+    parents.incl(root)
+  var spellings = initHashSet[string]()
+  for parent in parents:
+    if parent.len == 0:
+      continue
+    spellings.incl(parent)
+    if parent.isAbsolute:
+      spellings.incl(canonicalPolicyPath(parent))
+  for spelling in spellings:
+    var dir = spelling
+    while dir.len > 0 and dir notin result:
+      result.incl(dir)
+      let up = normalizeWriteRoot(parentDir(dir))
+      if up.len == 0 or up == dir:
+        break
+      dir = up
+  if result.len == 0 or evidence.monitorDirectoryEnumerations.len == 0:
+    return
+  let derivedMembership = action.selfWrittenDirectoryKeys()
+  for dir in evidence.monitorDirectoryEnumerations:
+    let key = normalizeWriteRoot(materialPath(action.cwd, dir))
+    if key notin derivedMembership:
+      result.excl(key)
+
+proc isOutputAncestorObservation(ancestors: HashSet[string];
+                                 key: string): bool {.inline.} =
+  ## `key` is an observed path in `cacheInputPaths`' normalized form; the
+  ## monitor may report a directory with a trailing `/`, which
+  ## `outputAncestorDirectoryKeys` never carries.
+  ancestors.len > 0 and normalizeWriteRoot(key) in ancestors
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
@@ -9883,6 +10094,10 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   for why those are provably not inputs, and for the
   ##   declared-input carve-out that keeps the two filters from
   ##   colliding. Declared inputs are never dropped by either filter.
+  ## * the same filter extends one path component up: an observation of the
+  ##   EXISTENCE of a directory a declared output sits in (a probe of
+  ##   ``build/`` before ``mkdir -p build`` created it) is the action's own
+  ##   side effect, not an input — see ``outputAncestorDirectoryKeys``.
   let toolRoots = action.toolInputRoots()
   # The EXPLICIT prefix set, deliberately not the derived one. The derived
   # self-written set applies to the ENUMERATION channel only — see
@@ -9890,6 +10105,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # recipe that makes the difference load-bearing.
   let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
   let selfWritten = action.selfWrittenOutputKeys()
+  let ancestors = action.outputAncestorDirectoryKeys(evidence)
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
   # output ``seq`` retains insertion order because the action-cache key
@@ -9902,7 +10118,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -9914,7 +10130,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -9926,7 +10142,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -10166,6 +10382,24 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
       continue
     result.addUnique(seenPrefixes, materialized)
 
+proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
+  ## Paths the action itself WROTE that no longer exist once it finished:
+  ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
+  ## the case that showed up — written, probed, deleted, under a new random
+  ## name every run. What the action observed there was its own doing, so
+  ## it is not an input; a written file that still EXISTS is kept, because
+  ## an action that read a file and then rewrote it did consume it.
+  ##
+  ## WRITTEN means created or written (`monitorWrites`): a directory or a
+  ## symbolic link the action made counts. A path it only REMOVED does not
+  ## (`monitorRemovals`): deleting a file is no evidence of having made it,
+  ## and a file the action read and then deleted is an input it consumed.
+  for path in evidence.monitorWrites:
+    if not fileExists(extendedPath(path)) and
+        not dirExists(extendedPath(path)) and
+        not symlinkExists(extendedPath(path)):
+      result.incl(path.replace('\\', '/'))
+
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
   ## S7 — the paths this action was OBSERVED to write that its declared
@@ -10189,7 +10423,8 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
   ##   ``ignoredInputPrefixes``: a prefix that overlaps the action's own
   ##   declared product is dropped, because such a prefix is a statement
   ##   about the cache KEY and not about the PRODUCT.
-  ## * writes that no longer exist, or that are DIRECTORIES.
+  ## * writes that no longer exist, or that are DIRECTORIES (but not a
+  ##   symbolic link to one, or a dangling one: a link is itself a product).
   ##
   ## The last one is not an optimization, it is required for the gate to
   ## mean anything. The monitor records a directory creation as a write, so
@@ -10233,7 +10468,10 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
       continue
     if path.isUnderCanonicalPolicyRoot(derivedRoots):
       continue
-    if dirExists(path) or not fileExists(path):
+    # A symbolic link is a product whatever it points at -- a directory,
+    # nothing at all -- so it is tested before the two tests below, which
+    # follow it. Restoring the declared outputs does not create it.
+    if not symlinkExists(path) and (dirExists(path) or not fileExists(path)):
       continue
     result.addUnique(seen, path)
 
@@ -15884,7 +16122,43 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        let exchange = requestNixDaemon($req, action.cwd)
+        # An edge MAY carry a JSON object in ``builtinText``
+        # (``repro_tool_profiles``' ``nixToolProvisioningEdges``) naming
+        #   * ``workspaceRoot``: the directory the selector is resolved
+        #     against, when it is not the edge's ``cwd``. A tool edge's
+        #     ``cwd`` is its tool store, so that the run ledger (keyed by id
+        #     and ``cwd``) keeps ONE manifest per tool request and releases a
+        #     superseded realization's GC root, while a ``.#…`` selector
+        #     still names the project's flake;
+        #   * ``expressionFile``: the Nix expression file the selector is
+        #     realized from (a ``nixPackage`` declared with
+        #     ``expressionFile``); the helper builds that file instead.
+        # An edge with no text -- the dev-env and extractor edges -- sends
+        # the request it always sent.
+        #
+        # The helper itself is resolved against the same directory the
+        # selector is (``requestNixDaemon``'s ``cwd`` anchors the candidates
+        # for a build run from the reprobuild tree): a tool edge's ``cwd``,
+        # its tool store, is no place to look for one, and before the edge
+        # existed tool resolution resolved it from the project directory.
+        var helperRoot = action.cwd
+        if action.builtinText.len > 0:
+          let spec =
+            try: parseJson(action.builtinText)
+            except CatchableError as err:
+              raiseEngine("bakForeignProvision: the nix edge's text is not " &
+                "a JSON object (" & err.msg & "): " & action.id)
+          if spec.kind != JObject:
+            raiseEngine("bakForeignProvision: the nix edge's text is not " &
+              "a JSON object: " & action.id)
+          let workspaceRoot = spec{"workspaceRoot"}.getStr()
+          if workspaceRoot.len > 0:
+            req["workspaceRoot"] = %workspaceRoot
+            helperRoot = workspaceRoot
+          let expressionFile = spec{"expressionFile"}.getStr()
+          if expressionFile.len > 0:
+            req["expressionFile"] = %expressionFile
+        let exchange = requestNixDaemon($req, helperRoot)
         if not exchange.connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " &
             exchange.socketPath & ": " & exchange.diagnostic)
@@ -15903,10 +16177,25 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if paths.len == 0:
           raiseEngine("Daemon returned no materialized paths for selector: " & selector)
         
-        let outPath = paths[0].getStr()
+        # THE RECEIPT NAMES EVERY REALIZED OUTPUT, one store path per line,
+        # in the helper's order: its first line is the output carrying the
+        # package's executable (``put_executable_output_first``), which is
+        # all this receipt used to hold. A tool's other outputs (a split
+        # ``-dev`` or ``-lib``) feed its consumers' include and library
+        # paths, so a receipt that dropped them could not stand for the
+        # realization. A single-output realization writes the same bytes as
+        # before, so no existing edge's record changes.
+        var outPaths: seq[string] = @[]
+        for pathNode in paths:
+          let outPath = pathNode.getStr()
+          if outPath.len > 0:
+            outPaths.add(outPath)
+        if outPaths.len == 0:
+          raiseEngine("Daemon returned no materialized paths for selector: " &
+            selector)
         createDir(extendedPath(receiptPath.splitPath.head))
         prepareBuiltinFileOutput(receiptPath)
-        writeFile(extendedPath(receiptPath), outPath)
+        writeFile(extendedPath(receiptPath), outPaths.join("\n"))
         
         # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
         # assigned to `monitorReads`, the MONITOR's channel, which is the
@@ -17193,18 +17482,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return none(string)
       some(graphViewIdentity(view, kind))
 
-  proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
-    ## Paths the action itself WROTE that no longer exist once it finished:
-    ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
-    ## the case that showed up — written, probed, deleted, under a new random
-    ## name every run. What the action observed there was its own doing, so
-    ## it is not an input; a written file that still EXISTS is kept, because
-    ## an action that read a file and then rewrote it did consume it.
-    for path in evidence.monitorWrites:
-      if not fileExists(extendedPath(path)) and
-          not dirExists(extendedPath(path)):
-        result.incl(path.replace('\\', '/'))
-
   proc determinismProbeAdmits(action: BuildAction;
                               evidence: EvidenceCollection): bool =
     ## Windows-Build-Correctness M6 refuses to cache an action whose tool
@@ -17879,7 +18156,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # makes: a record of another location's outputs is not this
           # action's record. See `recordOutputsNotOwnedBy`.
           enforceOwnedOutputs: true,
-          ownedOutputs: action.outputs))
+          ownedOutputs: action.outputs,
+          # A built-in's container directory is checked for existence, not
+          # by tree digest, on this path exactly as on the per-edge lookup.
+          # See `containerDirectoryOutputs`.
+          containerOutputs: action.containerDirectoryOutputs()))
         hotEnvResolvers.add(action.actionEnvResolver(unsafeAddr config))
       let lookupStart = statStart()
       let navigatorStart = statStart()
@@ -17944,8 +18225,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # Step 3.3). Fall back to the full scheduler when it is not.
       # Timing is accumulated inside `outputStateMismatch` and reported once
       # as "repro output revalidate"; a timer here would have measured this
-      # call site only.
-      if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
+      # call site only. Container directories are checked for existence
+      # only, as on the probe arm above (`containerDirectoryOutputs`).
+      if outputStateMismatch(hotRecord.get(), action.cwd,
+          action.containerDirectoryOutputs()).len > 0:
         return none(BuildRunResult)
       # The other whole-graph arm, and the same reason as the probe field
       # above: reaching `hmssHit` here also means the scheduler never runs, so
@@ -18176,6 +18459,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc invalidateCachedWrites(action: BuildAction; evidence: PathSetEvidence) =
     for output in evidence.monitorWrites:
       invalidateCachedPath(materialPath(action.cwd, output))
+    # A path the action removed has changed too; a cached fact about it
+    # would describe a file that no longer exists.
+    for removed in evidence.monitorRemovals:
+      invalidateCachedPath(materialPath(action.cwd, removed))
 
   proc storeOutputBlobsFor(action: BuildAction;
                            evidence: PathSetEvidence): bool =
@@ -19327,7 +19614,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             outputRoot = action.cwd,
             retention = action.effectiveRetention,
             nowUnix = config.nowUnix,
-            buildEpoch = config.buildEpoch)
+            buildEpoch = config.buildEpoch,
+            containerOutputs = action.containerDirectoryOutputs())
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
@@ -19362,7 +19650,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   outputRoot = action.cwd,
                   retention = action.effectiveRetention,
                   nowUnix = config.nowUnix,
-                  buildEpoch = config.buildEpoch)
+                  buildEpoch = config.buildEpoch,
+                  containerOutputs = action.containerDirectoryOutputs())
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
               else:

@@ -103,7 +103,7 @@ from repro_home_resources/types import ObservedState, ResourceActionKind,
   rakDestroy
 import repro_project_dsl                  # registerExtension / TypedExtensionBox
 import repro_resources/instance
-import repro_resources/service_registry  # the ONE registrations-suffix definition
+import repro_resources/service_registry_vocabulary # the ONE definition of each shared spelling (no codec: see that module)
 # Shared-Development-Services §7.2's provenance vocabulary, RE-EXPORTED
 # rather than declared here.
 #

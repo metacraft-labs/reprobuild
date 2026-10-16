@@ -163,7 +163,7 @@ proc writeReadinessFixture(dir: string; sleepSeconds: int;
   ]))
 
 proc writeStubbornStopFixture(dir: string; services: int) =
-  ## ``services`` services that each IGNORE SIGTERM and therefore burn the
+  ## ``services`` services that each trap SIGTERM away and therefore burn the
   ## supervisor's whole per-service stop grace before it reaches ``kill()``.
   ##
   ## Nothing here is a stub: these are real `sh` processes with a real
@@ -821,7 +821,11 @@ suite "e2e_repro_dev_sessions":
       # service declared: 60000 ms declared + 10000 ms margin.
       check res.output.contains("waiting up to 70000 ms (derived: 60000 ms " &
         "of declared service readiness timeouts + 10000 ms margin")
-      check not res.output.contains("did not become queryable")
+      # Neither of the two messages the parent's wait can end in today. The
+      # pre-fix "did not become queryable" text no longer exists anywhere in
+      # the tree, so asserting its absence could not fail; these can.
+      check not res.output.contains("is still starting")
+      check not res.output.contains("dev session cannot start")
 
       let metadata = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
       check metadata["services"][0]["ready"].getBool()
@@ -882,7 +886,6 @@ suite "e2e_repro_dev_sessions":
         "the declared service readiness timeouts would derive 70000 ms)")
       check res.output.contains("events.jsonl")
       check res.output.contains("the session was left running")
-      check not res.output.contains("did not become queryable")
       # It gave up when the USER said, not when the service said: the
       # wait it reports is the 800 ms it was given, not the 70000 ms the
       # service's declaration would have allowed.
@@ -920,7 +923,6 @@ suite "e2e_repro_dev_sessions":
       check res.output.contains("dev session cannot start")
       check res.output.contains("service slow")
       check res.output.contains("events.jsonl")
-      check not res.output.contains("did not become queryable")
       check not res.output.contains("is still starting")
       # Bounded by the DECLARED timeout plus startup overhead, and well
       # inside the 12000 ms budget the parent was willing to wait: the
@@ -1272,7 +1274,7 @@ suite "e2e_repro_dev_sessions":
       # the start side's defect, one command over. `stopServices` stops
       # services ONE AT A TIME, in reverse, and allows each one
       # `DevSessionServiceStopGraceMs` (3000) between `terminate()` and
-      # `kill()`. Four services that ignore SIGTERM therefore cost the
+      # `kill()`. Four services that trap SIGTERM away therefore cost the
       # supervisor about twelve seconds of work it is entitled to, and
       # `repro down` used to abandon that at 10000 ms and report a timeout
       # for a session that stops correctly.

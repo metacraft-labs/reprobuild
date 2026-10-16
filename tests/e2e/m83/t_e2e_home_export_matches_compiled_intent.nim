@@ -20,7 +20,8 @@
 ##   across every export run, and no generation exists.
 ##
 ## Host selection is exercised, not assumed: `alpha` and `beta` select
-## different activities, an undeclared host gets `default` alone, a
+## different activities, an undeclared host is refused (GM8, spec Open
+## question 6: a profile with a `hosts:` registry declares every host), a
 ## `$REPRO_HOST` selects like `--host` does, and a `--host` that `$REPRO_HOST`
 ## would silently override is refused.
 ##
@@ -296,12 +297,14 @@ suite "repro home export: compiled intent":
     check sorted(strings(beta["selection"]["activities"])) ==
       plannerActivities(plannerIntent, sb, "beta")
 
-    # --- an undeclared host gets `default` only ------------------------
-    let (nobodyRun, nobody) = sb.exportFor(["--host", "nobody"])
-    require nobodyRun.exitCode == 0
-    check not nobody["selection"]["hostDeclared"].getBool
-    check strings(nobody["selection"]["activities"]) == @["default"]
-    check plannerActivities(plannerIntent, sb, "nobody") == @["default"]
+    # --- an undeclared host is refused, by the export and the planner ---
+    let (nobodyRun, _) = sb.exportFor(["--host", "nobody"])
+    check nobodyRun.exitCode == 1
+    check nobodyRun.stdout.len == 0
+    check nobodyRun.stderr.contains("host `nobody` is not declared in the " &
+      "profile's hosts: registry (declared: alpha, beta)")
+    expect EUndeclaredHost:
+      discard plannerActivities(plannerIntent, sb, "nobody")
 
     # --- $REPRO_HOST selects exactly like --host -----------------------
     let (envRun, viaEnv) = sb.exportFor(newSeq[string](), envHost = "beta")

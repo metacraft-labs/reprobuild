@@ -457,10 +457,220 @@ it) and refresh again. A sibling checked out without any recipe declares
 no constraints and is not a reason to refuse. `repro lock solve` without
 `--write` prints the same finding as a warning.
 
+#### `ELockConflict`: re-pin one package, not the whole lock
+
+A committed lock is a pin, so a build refuses with `ELockConflict` when
+the recipe now declares a range the lock's version does not satisfy. The
+usual cause is a **new** constraint: a `uses:` line added to the project,
+or a sibling it consumes, after the lock was written. A sibling consumed
+as a pure-Nim-source library counts: this project's compiler compiles
+its modules, so its toolchain floor (`nim >=2.2 <3.0`) binds this lock.
+When the declaring package belongs to such a sibling, the diagnostic
+says it is a **cross-repo producer**, so look for the constraint in that
+repo's recipe, not in yours.
+
+The first remedy the diagnostic names is the targeted re-pin:
+
+```
+repro lock refresh --repin=<package>[,<package>…]
+```
+
+It re-solves only the named packages and holds every other entry. The
+solve runs with every other committed package version and variant value
+supplied as a hard pin, the same pins a build applies. The written lock
+differs from the committed one only in the named packages' `packages`
+entries, plus **added** entries for packages the lock did not record yet
+(a newly declared producer's own package, for example). It never changes
+or removes another entry. Sibling revision pins (`deps`) already in the
+lock, provisioning records and the certificate-policy snapshot are carried
+forward; a sibling the lock does not pin yet (the newly declared producer
+itself) is added at the revision the solve saw. The one
+`deps` entry it rewrites is the repo's own (`path = "."`), which records
+the tree the lock was solved from.
+
+- When another held pin **also** contradicts a declared range, the
+  re-pin fails with that pin's `ELockConflict` and writes nothing. Add
+  that package to `--repin` and run it again. The flag never re-solves a
+  package you did not name.
+- It needs a committed lock and package names the solve actually has.
+  If either is missing it exits 2 and writes nothing.
+- The incomplete-solve refusal (exit 5) and the pin-regression gate
+  (exit 4) apply as they do to a full refresh.
+
+A full `repro lock refresh` (every version pin and every sibling
+revision pin re-solved) and relaxing the declared constraint are still
+available. Use them when that is the change you want.
+
 `repro workspace lock` resolves a bare invocation against the **current
 directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be
 pasted as printed.
+
+### An intended upgrade: `repro lock update`
+
+```
+repro lock update <dependency> [--to <rev>] [--repo-root=<dir>]
+                  [--allow-pin-regression=<name>[,<name>…]]
+```
+
+A recipe states a **constraint** and a lock records a **resolution**: a
+`repro.nim` `uses:` range or exact version against a `repro.lock` entry,
+a `flake.nix` input URL (a branch, or an exact `rev=<sha>` /
+`github:o/r/<sha>`) against a `flake.lock` node. The managed `pre-commit`
+hook re-pins resolutions from your sibling checkouts on every commit, but
+it **never rewrites a constraint**: when an exact pin (or a range) excludes
+the revision a sibling is at, it refuses the commit and names this
+command, because only you know whether the newer checkout is an upgrade or
+an experiment. A `repro test` or `repro certify` run that issues a test
+certificate refreshes both locks before its tests with the same writers and
+the same rules; where the hook would refuse the commit, that run writes
+nothing and issues no certificate, and its tests still run.
+
+`repro lock update` is that upgrade, in one step and for both systems:
+
+- **The dependency** may be named by its `flake.nix` input name, its
+  `repro.lock` dependency name or its workspace repo name. All of them must
+  mean one repository, identified by canonical URL (`github:o/r`,
+  `git+https://github.com/o/r` and `https://github.com/o/r.git` are one
+  repository). A name that means two repositories is refused with every
+  candidate; name one as `input:<name>`, `dep:<name>` or `repo:<name>`.
+- **The target** is `--to <rev>` (a commit id, or a ref resolved in the
+  sibling checkout); else the sibling checkout's `HEAD`; else, for a flake
+  input that follows a branch, the tip nix resolves. A `repro.lock`
+  dependency entry with no checkout needs `--to`: the entry records a
+  checkout's revision, and the solver selects package versions, never a
+  dependency's revision.
+- **Every resolution moves**: each `flake.lock` root input and each
+  `repro.lock` dependency entry of that repository.
+- **An exact pin that excludes the target is rewritten** in whichever recipe
+  states it. In `flake.nix` the revision in the input's URL changes and
+  nothing else in the file does; the node is then re-locked through nix
+  (`nix flake update <input>`), which is what computes its new `narHash`. In
+  `repro.nim` an exact `uses:` version is replaced by the version whose
+  producer `versions:` entry maps to the target; if none does, the command
+  refuses (exit 3) and asks you to add that entry.
+- **A pin you removed is finished for you.** To switch a `flake.nix` input
+  from an exact revision to a branch, remove the revision from its URL and
+  run this command. nix keeps the removed revision in the node's
+  `original.rev` until it re-locks the node, so the command re-locks it
+  through nix (`nix flake update <input>`) and then moves it to the target
+  like any branch-following input, under the same rules below.
+- **A `uses:` range is never rewritten.** One that admits the target is left
+  alone; one that excludes it is refused (exit 3), naming the line, because
+  widening a range is the author's decision.
+- **A pin never moves backward silently**: a target behind, or diverged
+  from, a current resolution is refused (exit 4) unless
+  `--allow-pin-regression=<name>` or `REPRO_ALLOW_PIN_REGRESSION=<name>`
+  names the dependency (any of its names).
+- **A pin names published content.** A target that exists only in the
+  sibling checkout (reachable from no remote-tracking ref, judged locally,
+  never over the network) is refused (exit 1) when a `flake.lock`
+  resolution would name it, because nix cannot fetch it for anyone else;
+  the message names the `git push` that publishes it. A move of
+  `repro.lock` alone is written with a warning, and the push gate refuses
+  the push until the target is published.
+- **A modified checkout is not its `HEAD`.** When the target defaults to the
+  sibling's `HEAD` and that checkout has uncommitted changes, the command
+  refuses (exit 1); commit or stash them, or name the commit with `--to`.
+- **All or nothing.** If anything fails — nix is missing or cannot fetch
+  the target, a rewrite does not land, the result would not pass the
+  recipe/lock consistency checks — every file is put back byte for byte
+  (exit 1). The result is left in the working tree; nothing is staged or
+  committed.
+
+When the target is not what the sibling checkout is at, the command says
+so: unless a recipe pins the dependency exactly, the next commit's re-pin
+records whatever is checked out, so check the sibling out at the target
+before committing.
+
+`repro flake refresh-lock --only=<names>` does the same for each input it
+names, with the sibling's `HEAD` as the target (`--record-downgrade` allows
+a target behind the current pin). Without an explicit
+`--only`, `refresh-lock` keeps refreshing only the branch-following inputs
+and declines an exact pin.
+
+### A temporary experiment: develop overrides and exact pins
+
+```
+repro develop --only=<dependency>     # substitute one dependency, pinned or not
+repro develop --all                   # substitute the lock set, exact pins excepted
+repro develop --drop=<dependency> [--workspace-root=<dir>] [--project-root=<dir>]
+```
+
+Debugging against a sibling checkout uses a develop override, which never
+writes a recipe or a lock. How it meets an exact recipe pin depends on how
+the dependency was selected:
+
+- **A bulk selection skips an exact pin.** `repro develop --all` (and every
+  other mode or pattern selection) does not substitute a dependency whose
+  `flake.nix` pins a revision (`rev=<sha>`, `github:o/r/<sha>`) or whose
+  `repro.nim` pins an exact `uses:` version. It records no override for it
+  and lists it as `pinned by recipe at <file>:<line>`; so do `--dry-run`,
+  `--list` (state `pinned`) and their `--json` forms. The flake override
+  verb's automatic mode (`repro flake override-args --all`, which
+  `useFlakeDevShell` runs at shell entry) leaves such an input on its
+  `flake.lock` pin in the same way. A pin means "this revision, not whatever
+  is checked out", and building against the checkout anyway would quietly
+  build something the recipe disclaims. The managed hooks do not compare a
+  skipped pin with its checkout, so a sibling that has moved on neither
+  re-pins nor refuses a commit.
+- **An explicit selection substitutes it.** `repro develop --only=<dependency>`
+  does, and so does `repro flake override-args --only=<dependency>` or an
+  explicit `overrideInputs` entry of `useFlakeDevShell`. This is how a pinned
+  dependency is debugged. Once the checkout moves past the pin, the next
+  commit is refused (H3), so the experiment is not published by accident.
+- **Dropping the override ends the experiment.** `repro develop
+  --drop=<dependency>` removes that dependency's override from the
+  workspace's `.repro/develop-overrides.toml` and from the per-project
+  override documents (`repro develop <dependency> --into`) of the workspace
+  root and of `--project-root` (default: the project you are in). It matches
+  an entry by the dependency's name or by its checkout, as the hooks do. It
+  touches no checkout and no lock, and naming a dependency with no override
+  is a reported no-op. The H3 refusal prints this command, with the right
+  roots, as its "temporary experiment" remedy.
+
+Which kind of selection recorded an override is kept in its `provenance`:
+`repro develop --only=<dependency>` for an explicit one, `repro develop --all`
+for a bulk one. **Overrides recorded before this distinction existed count
+as bulk**, because `--all` and `--only` both wrote `repro develop --all`
+then and the two cannot be told apart; so does an entry with no provenance.
+After upgrading, an exact pin under such an entry is therefore not
+substituted: the hooks do not compare it with its checkout, the flake override
+verbs leave it on its pin, `repro build` resolves it from the lock rather
+than the checkout (and says so once, naming the two commands below), and
+`--list` shows it `pinned` and names the ignored entry. An explicit entry
+still substitutes it in `repro build`, and an override of a dependency that is
+not exactly pinned is followed exactly as before, whatever its provenance. To
+keep substituting it, run `repro develop --only=<dependency>` again, which
+records the explicit provenance; to clear it, run `repro develop
+--drop=<dependency>`.
+
+### Exact pins of workspace siblings: guidance, never a refusal
+
+An exact revision in a recipe is legitimate, so no rule refuses one. But a
+repository you develop side by side as a workspace sibling is usually better
+tracked through the lock: the recipe names it on a branch (or a range), and the
+commit-time re-pin moves the lock as you work. Reprobuild says so in two
+places, and neither changes whether anything is refused or the exit status:
+
+- **In refusals.** An H1, H2 or H3 refusal about an exact pin of a repository
+  that has a sibling checkout adds one `Guidance:` line naming the sibling and
+  the conversion: replace the exact revision with a branch reference (a range
+  in `repro.nim`), then run the printed `repro lock update <dependency>`. That
+  one command finishes the job for a `flake.nix` input too: a `flake.lock`
+  node that still records the removed revision (`original.rev`) is re-locked
+  through nix from `flake.nix` before it is moved.
+- **In `repro check` and `repro health`.** Every exact recipe pin of a
+  workspace sibling, in `flake.nix` and in `repro.nim`, is listed as an
+  informational finding with its file and line, and with the comment written
+  beside the pin, or `no reason stated` when there is none. `repro check`
+  prints each as a `repro check: info:` line and in the `findings` array of
+  its JSON report; `repro health` lists them in its `sibling-exact-pins` row,
+  which is always `ok`. Write the reason next to a pin you mean to keep.
+
+Both point to "your organisation's dependency guidelines". Set
+`REPRO_DEPENDENCY_GUIDELINES_URL` to make them name your guidelines' address
+instead.
 
 ### `locked-integrity-mismatch` (a lock that no longer verifies)
 

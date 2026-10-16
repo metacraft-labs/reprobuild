@@ -20,6 +20,10 @@
 ##   exception: the planner selects them, readData REFUSES the file (resource
 ##   rows are constructor calls only Reprobuild evaluates; the spec requires
 ##   select-as-the-planner-does or refuse, never ignore) -- asserted as such.
+## * an evaluation marked `undeclaredHost` names a host the case's non-empty
+##   `hosts` map does not declare: the planner refuses it (`repro home export`
+##   exits 1, "is not declared in the profile's hosts: registry") and so does
+##   readData, with the same wording (spec Open question 6, answered by GM8).
 ## * `row-rejection`: `repro home export` exits 1 naming every listed
 ##   substring, and readData refuses with every listed substring (or, for a
 ##   file with resource rows, with the resource-row refusal).
@@ -94,7 +98,7 @@ when defined(linux) or defined(macosx):
       let sb = newProfileSandbox("gm5-readdata", profileText(nil))
       defer: sb.dispose()
 
-      var compared, nonEmpty = 0
+      var compared, nonEmpty, undeclaredRefused = 0
       var answers: seq[seq[string]]
       for dir in caseDirs("row-selection"):
         let name = dir.extractFilename
@@ -113,6 +117,16 @@ when defined(linux) or defined(macosx):
             "--target", system], host = host)
           checkpoint(name & ": " & host & " @ " & system & " -> exit " &
             $r.exitCode & "\n" & r.stderr)
+          if caseJson["evaluations"][i]{"undeclaredHost"}.getBool:
+            # Both sides refuse a host the registry does not declare.
+            const Undeclared = "` is not declared in the profile's hosts: " &
+              "registry"
+            check r.exitCode == 1
+            check r.stderr.contains("host `" & host & Undeclared)
+            checkpoint(name & ": nix -> " & $nix[i])
+            check nix[i]{"error"}.getStr.contains("host `" & host & Undeclared)
+            inc undeclaredRefused
+            continue
           require r.exitCode == 0
           let evaluation = parseJson(r.stdout)["evaluation"]
           var planner = evaluation["packages"].getElems.mapIt(
@@ -168,6 +182,7 @@ when defined(linux) or defined(macosx):
           inc refusedBoth
 
       # Vacuity.
+      check undeclaredRefused >= 1
       check compared >= 15
       check nonEmpty >= 10
       check answers.deduplicate().len >= 5
