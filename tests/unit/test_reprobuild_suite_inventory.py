@@ -7588,9 +7588,15 @@ compileProfileBinary()
                     "tarball executables the host cannot start::PT_INTERP of a "
                     "host binary is read, and a script has none",
                     "tarball executables the host cannot start::a binary whose "
+                    "existing loader accepts it resolves",
+                    "tarball executables the host cannot start::a binary whose "
+                    "loader exists but refuses is refused by name",
+                    "tarball executables the host cannot start::a binary whose "
                     "loader exists resolves as before",
                     "tarball executables the host cannot start::a binary whose "
                     "loader is missing is refused by name",
+                    "tarball executables the host cannot start::a loader that "
+                    "does not answer is refused, not waited on",
                     "tarball executables the host cannot start::the refusal is "
                     "a distinct, inspectable error",
                 },

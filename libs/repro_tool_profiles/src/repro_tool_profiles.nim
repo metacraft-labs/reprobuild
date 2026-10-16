@@ -564,6 +564,11 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
   let deadline = epochTime() + probeTimeoutSeconds.float
   var exitCode = -1
   var timedOut = false
+  # The poll interval starts at 1 ms and doubles to 50 ms. Most probes
+  # (`--version`, the loader's `--verify`) exit within a few milliseconds,
+  # and a flat 50 ms first sleep would make each of them cost 50 ms; the
+  # cap keeps a long probe from spinning.
+  var pollMs = 1
   try:
     while true:
       let code = process.peekExitCode()
@@ -578,7 +583,8 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
         # Reap the now-killed parent so no zombie/handle leaks.
         discard process.waitForExit()
         break
-      sleep(50)
+      sleep(pollMs)
+      pollMs = min(pollMs * 2, 50)
   finally:
     process.close()
 
@@ -3613,13 +3619,35 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
 type
   TarballHostLoaderMissing* = object of OSError
     ## A tarball-realized executable names a dynamic loader (ELF
-    ## ``PT_INTERP``) that does not exist on this host, so the kernel would
-    ## refuse to start it. NixOS is the common case: a generic-Linux binary
-    ## asks for ``/lib64/ld-linux-x86-64.so.2`` and NixOS has no such file.
+    ## ``PT_INTERP``) that cannot start it on this host: the loader does not
+    ## exist, or it exists and refuses (see ``hostLoaderRefusal``). NixOS is
+    ## the common case: a generic-Linux binary asks for
+    ## ``/lib64/ld-linux-x86-64.so.2``, which NixOS either lacks or — since
+    ## 24.05 — fills with ``stub-ld``, a stub that prints a diagnostic and
+    ## exits 127 (https://nix.dev/permalink/stub-ld).
     ## A distinct type so path-mode resolution can fall through to the
     ## package's Nix channel instead of reporting the tarball failure.
+    ##
+    ## The name predates the refusing-loader case and is kept because the
+    ## type is matched by callers and named by the specification.
     loader*: string
+      ## The ``PT_INTERP`` the executable asks for.
     executable*: string
+      ## The realized executable that cannot start.
+    prefix*: string
+      ## The sealed store prefix the executable was realized into. The bytes
+      ## are realized and verified; only this host cannot run them, so a
+      ## caller judging the archive (conformance) keeps inspecting it.
+    probeOutput*: string
+      ## What the loader printed when probed; "" when it does not exist.
+
+  HostLoaderRefusal* = object
+    ## Why this host's dynamic loader cannot start an ELF executable.
+    ## ``reason`` is "" when nothing stands in the way: the file is not a
+    ## dynamically linked ELF, or its loader accepted it.
+    loader*: string
+    reason*: string
+    probeOutput*: string
 
 proc elfProgramInterpreter*(path: string): string =
   ## The ``PT_INTERP`` string of the ELF file at ``path``, or "" when the
@@ -3678,15 +3706,82 @@ proc elfProgramInterpreter*(path: string): string =
     return interp
   ""
 
-proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
-                                       executable: string) =
-  ## Linux only: refuse a realized executable whose dynamic loader is absent
-  ## from this host. Starting it would fail with exit 127 inside whatever
-  ## action first runs it, far from the provisioning decision that caused
-  ## it; refusing here names the tool, the loader and the remedy.
+const LoaderCouldNotStartExitCodes = {126, 127}
+  ## Exit statuses that mean the loader refused to start anything. 127 is
+  ## what NixOS's ``stub-ld`` returns for every invocation
+  ## (https://nix.dev/permalink/stub-ld), and the shell's "command not
+  ## found"; 126 is the shell's "found but cannot execute" (no execute
+  ## permission, or an ELF for another architecture). The probe runs through
+  ## ``/bin/sh -c`` (``runProbe``), so both are what a loader the kernel
+  ## cannot run looks like. A real glibc ``ld.so --verify`` answers 0 (a
+  ## dynamic executable with an interpreter), 2 (a dynamic object without
+  ## one, such as a shared library) or 1 (static, not ELF, or not loadable)
+  ## -- the codes glibc's own ``ldd`` script branches on
+  ## (https://sourceware.org/git/?p=glibc.git;a=blob;f=elf/ldd.bash.in) --
+  ## and a loader that does not know ``--verify`` (musl's) prints its usage
+  ## and exits 1, so none of them is mistaken for a refusal.
+
+proc hostLoaderRefusal*(executable: string): HostLoaderRefusal =
+  ## Whether this host's dynamic loader can start the ELF ``executable``.
+  ##
+  ## Checking that ``PT_INTERP`` exists is not enough. NixOS 24.05 and later
+  ## put ``stub-ld`` at ``/lib64/ld-linux-x86-64.so.2``: the file the
+  ## generic-Linux binary asks for is present, and it refuses every program
+  ## with exit 127 ("NixOS cannot run dynamically linked executables
+  ## intended for generic linux environments out of the box"). So an
+  ## existing loader is asked: ``<loader> --verify <executable>`` is glibc
+  ## ld.so's "can you load this?" query (the one ``ldd`` asks before it
+  ## lists anything), which inspects the object without running it. The
+  ## loader is the one the kernel would run for this executable anyway, so
+  ## probing it executes nothing the realized tool would not. A probe that
+  ## cannot be started, that exits with one of
+  ## ``LoaderCouldNotStartExitCodes``, or that does not answer within
+  ## ``probeTimeoutSeconds`` is a refusal.
+  ##
+  ## The probe goes through ``runProbe``, the bounded launcher every tool
+  ## probe uses, not a blocking exec: a real ld.so answers ``--verify`` at
+  ## once, but ``PT_INTERP`` is whatever path the archive's author wrote,
+  ## and realization must not hang on whatever that path names.
+  ##
+  ## Linux only; elsewhere (and for a static binary, a script or a non-ELF
+  ## payload) the result carries no reason.
   when defined(linux):
-    let loader = elfProgramInterpreter(executable)
-    if loader.len == 0 or fileExists(loader):
+    result.loader = elfProgramInterpreter(executable)
+    if result.loader.len == 0:
+      return
+    if not fileExists(result.loader):
+      result.reason = "which this host does not have"
+      return
+    let probe = runProbe(result.loader, ToolProbeSpec(kind: tpkCapability,
+      name: "loader-verify", args: @["--verify", executable]))
+    result.probeOutput = probe.output
+    if probe.timedOut:
+      result.reason = "which on this host does not answer (`" &
+        result.loader & " --verify` was killed after " &
+        $probeTimeoutSeconds & "s)"
+    elif probe.exitCode == -1:
+      # ``runProbe`` reports a launch failure as -1, its error as output.
+      result.reason = "which this host cannot run (`" & result.loader &
+        " --verify` could not be started: " & probe.output.strip() & ")"
+    elif probe.exitCode in LoaderCouldNotStartExitCodes:
+      let firstLine = probe.output.strip().splitLines()
+      result.reason = "which on this host refuses to start it (`" &
+        result.loader & " --verify` exited " & $probe.exitCode &
+        (if firstLine.len > 0 and firstLine[0].len > 0:
+           ": " & firstLine[0].strip() else: "") & ")"
+  else:
+    discard executable
+
+proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
+                                       executable, prefix: string) =
+  ## Linux only: refuse a realized executable that this host's dynamic
+  ## loader cannot start (``hostLoaderRefusal``). Starting it would fail
+  ## with exit 127 inside whatever action first runs it, far from the
+  ## provisioning decision that caused it; refusing here names the tool,
+  ## the loader and the remedy, and lets path mode fall through to Nix.
+  when defined(linux):
+    let refusal = hostLoaderRefusal(executable)
+    if refusal.reason.len == 0:
       return
     let name =
       if useDef.executableName.len > 0: useDef.executableName
@@ -3694,14 +3789,21 @@ proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
     var err = newException(TarballHostLoaderMissing,
       "tool-resolution failed: the tarball-provisioned `" & name &
       "` (" & executable & ") is a dynamically linked generic-Linux " &
-      "binary that needs the loader " & loader & ", which this host does " &
-      "not have (NixOS and other hosts without an FHS loader cannot run " &
-      "it). Provide `" & name & "` on PATH (e.g. from the project's dev " &
-      "shell), or use Nix provisioning: --tool-provisioning=nix or " &
+      "binary that needs the loader " & refusal.loader & ", " &
+      refusal.reason & " (NixOS without nix-ld, and other hosts " &
+      "without an FHS loader, cannot run it). Provide `" & name &
+      "` on PATH (e.g. from the project's dev shell), or use Nix " &
+      "provisioning: --tool-provisioning=nix or " &
       "REPRO_TOOL_PROVISIONING=nix.")
-    err.loader = loader
+    err.loader = refusal.loader
     err.executable = executable
+    err.prefix = prefix
+    err.probeOutput = refusal.probeOutput
     raise err
+  else:
+    discard useDef
+    discard executable
+    discard prefix
 
 proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
                        prefix, selectedUrl, resolved: string):
@@ -4244,7 +4346,8 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
         "tool-resolution failed: tarball realization " & receiptProbe.reason &
         " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
-  refuseUnrunnableTarballExecutable(useDef, receipt.executable)
+  refuseUnrunnableTarballExecutable(useDef, receipt.executable,
+    receipt.prefix)
   result = tarballProfileFor(useDef, plan, receipt.prefix,
     receipt.selectedUrl, receipt.executable)
   # Not part of the profile fingerprint (see the field), so set after the
