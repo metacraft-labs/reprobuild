@@ -43,8 +43,12 @@
 ##    amortised; with no per-record syscall the same host measures
 ##    12-18x. Each path is timed as the fastest of several interleaved
 ##    rounds, because a ~10 ms batched window is otherwise at the mercy
-##    of a single preemption on a loaded host. The throughput figures are
-##    printed on every run.
+##    of a single preemption on a loaded host. The test builds with
+##    ``--opt:speed`` (``t_m9r15f_1_io_monitor_batched_writes.nim.cfg``):
+##    at the -O0 that test edges otherwise get, unoptimised Nim code
+##    alone held the batched path to ~2.5x on m1, and the writer ships
+##    in the monitor shim, which builds with ``-d:release``. The
+##    throughput figures are printed on every run.
 ## 2. **Write-count amortization** — emitting N short records must
 ##    drive far fewer ``writeBuffer`` syscalls than N: with the 64 KiB
 ##    stack buffer the underlying-write count must stay below
@@ -217,10 +221,11 @@ suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
     # frames. Writes: the ~90-byte frames fill a 64 KiB batch roughly
     # seven hundred at a time, so each 100k-record pass needs ~145 writes;
     # N div 64 per pass still leaves room for the 100 ms staleness
-    # flushes a loaded host adds. Descriptor-identity probes: one per flush plus one for each
-    # of the read-tail pending / committed markers that open and close a
-    # dirty cycle — at most three per flush, however many records the
-    # batch holds. No reopen happens on the steady-state path.
+    # flushes a loaded host adds. Descriptor-identity probes: one per
+    # flush plus one for each of the read-tail pending / committed
+    # markers that open and close a dirty cycle — at most three per
+    # flush, however many records the batch holds. No reopen happens on
+    # the steady-state path.
     check fragmentLogOpenCount() == 0
     check writes >= 1
     check writes == flushes
