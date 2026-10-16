@@ -49,12 +49,20 @@
 
 import std/[base64, os, sequtils, strutils, unittest]
 
+import repro_test_support/process_fixtures
+
 import repro_attest
 import repro_cli_support/attest
 
 include ./snp_digest_corpus
 
 let scratch = getTempDir() / "repro-snp-expectation-" & $getCurrentProcessId()
+# Removed when THIS process exits, whichever cases it ran — not by a final
+# "teardown" case, which under the runner's one-process-per-case model ran in
+# one process and left every other case process's scratch behind. Registering
+# a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 proc scratchFile(name: string; content: string): string =
   createDir(scratch)
@@ -412,7 +420,3 @@ suite "the computed launch measurement reaches the published document":
     except SnpLaunchError as err:
       refused = err.condition == slcProcessorCountOutOfRange
     check refused
-
-  test "the scratch directory is removed":
-    removeDir(scratch)
-    check not dirExists(scratch)

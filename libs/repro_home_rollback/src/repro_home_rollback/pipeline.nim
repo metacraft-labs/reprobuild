@@ -482,7 +482,8 @@ proc appBundleSourceInGeneration(store: var Store;
                                  rec: ResourceBinding): string =
   ## The store bundle a generation placed at ``rec``'s path: the generation
   ## roots the prefix of the package the resource address names, and the
-  ## prefix holds the bundle at its root under the placed name.
+  ## prefix holds the placed item -- the bundle, or an installer
+  ## application's product folder -- at its root under the placed name.
   let packageId = packageIdOfAppBundleAddress(rec.resourceAddress)
   if packageId.len == 0:
     raise newException(ValueError, "rollback: " & rec.resourceAddress &
@@ -537,7 +538,10 @@ proc stageAppBundleRestores(store: var Store; target: ActivationManifest;
   ## Step 6b: copy every bundle the target generation re-places from its
   ## store prefix to a staging directory beside its target and verify the
   ## staged copy against the identity the target generation recorded
-  ## (``verifyPinnedAppBundle``: intact signature, identical identity).
+  ## (``verifyPinnedPlacedItem``: intact signature, identical identity; for
+  ## a folder, every bundle directly in it intact and the folder identity
+  ## identical -- Store-And-Installation-Layout.md § Installer
+  ## applications, "Activation").
   ##
   ## This runs before ANY rollback operation, and none of it touches a
   ## target: a refusal (tampered or damaged store copy, a store copy that is

@@ -297,3 +297,33 @@ suite "shared bare refresh keeps what borrowers reference":
       for (key, value) in SharedBareSafetyConfig:
         check must(gitBin, s.bare, "config", "--get", key) == value
       borrowersIntact(s)
+
+  test "prepare_shared_bare_aborts_without_refspec_when_safety_fails":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case drives the real git binary")
+    else:
+      let root = createTempDir("repro-bare-safety-fail-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let bare = root / "bare.git"
+      discard must(gitBin, root, "init", "--bare", "-q", bare)
+      let stub = root / "git-stub"
+      writeFile(stub, "#!/bin/sh\n" &
+        "for arg in \"$@\"; do\n" &
+        "  if [ \"$arg\" = \"gc.auto\" ] || [ \"$arg\" = \"maintenance.auto\" ]; then\n" &
+        "    exit 1\n" &
+        "  fi\n" &
+        "done\n" &
+        "exec " & quoteShell(gitBin) & " \"$@\"\n")
+      setFilePermissions(stub, {fpUserExec, fpUserRead, fpUserWrite})
+      let diag = prepareSharedBare(stub, bare)
+      check diag.len > 0
+      check "safety" in diag.toLowerAscii
+      let fetchProbe = gitIn(gitBin, bare, "config", "--get-all", "remote.origin.fetch")
+      check fetchProbe.code != 0
+      check SharedBareFetchRefspec notin readFile(bare / "config")
+      check inspectSharedBareVerdict(bare) != "refspec-without-safety"
+      check inspectSharedBareVerdict(bare) == "unconfigured"
+

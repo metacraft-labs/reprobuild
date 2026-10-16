@@ -33,7 +33,7 @@
 ## matches the spec's "do NOT load packages at runtime" rule for M61
 ## while still letting the gate exercise the error path.
 
-import std/[json, options, os, osproc, sets, streams, strutils, tables, times]
+import std/[json, options, os, osproc, sets, streams, strutils, tables, tempfiles, times]
 from repro_core/paths import extendedPath
 from repro_core/source_root import publicCliImagePath
 from repro_core/process_streams import drainStream
@@ -51,6 +51,7 @@ import repro_profile_intent
 import repro_profile_compile
 import ./migrate_from_env_scripts as mfes
 import ./home_export
+import ./home_compare
 
 type
   PackageCatalogLookup* = proc(package: string): bool {.gcsafe.}
@@ -3469,20 +3470,23 @@ proc runHomeGcCommand(args: openArray[string]): int =
 # `repro home migrate-from-env-scripts` (M70).
 # ---------------------------------------------------------------------------
 
-proc defaultEnvFilePath(): string =
-  ## Resolve the default ``--env-file`` path from $METACRAFT_ROOT (set
-  ## by env.ps1) or fall back to the spec's canonical location
-  ## ``D:/metacraft/windows/toolchain-versions.env``. Tests pass an
-  ## explicit ``--env-file`` so they never depend on the env var.
-  let root = getEnv("METACRAFT_ROOT")
+proc defaultEnvFilePathFor*(root: string): string =
+  ## Default ``--env-file`` path for a workspace rooted at ``root``:
+  ## ``<root>/windows/toolchain-versions.env``. Returns ``""`` when
+  ## ``root`` is empty: there is no machine-neutral location to fall
+  ## back to, so ``runHomeMigrateFromEnvScripts`` refuses and asks for
+  ## an explicit ``--env-file`` instead of guessing one.
   if root.len > 0:
     return root / "windows" / "toolchain-versions.env"
-  when defined(windows):
-    return "D:/metacraft/windows/toolchain-versions.env"
-  else:
-    return ""
+  return ""
 
-proc renderMigrateUsage(): string =
+proc defaultEnvFilePath(): string =
+  ## Resolve the default ``--env-file`` path from ``$METACRAFT_ROOT``
+  ## (set by the workspace's ``env.ps1``). Tests pass an explicit
+  ## ``--env-file`` so they never depend on the env var.
+  defaultEnvFilePathFor(getEnv("METACRAFT_ROOT"))
+
+proc renderMigrateUsage*(): string =
   result = ""
   result.add "usage: repro home migrate-from-env-scripts [--env-file <path>] \n"
   result.add "                                           [--activity <name>] \n"
@@ -3493,7 +3497,9 @@ proc renderMigrateUsage(): string =
   result.add "\n"
   result.add "Options:\n"
   result.add "  --env-file <path>   Path to a toolchain-versions.env-shaped\n"
-  result.add "                      file. Default: " & defaultEnvFilePath() & "\n"
+  result.add "                      file. Default:\n"
+  result.add "                      $METACRAFT_ROOT/windows/toolchain-versions.env;\n"
+  result.add "                      required when METACRAFT_ROOT is unset.\n"
   result.add "  --activity <name>   Activity block to receive the synthesized\n"
   result.add "                      lines. Must be a Nim identifier (letters,\n"
   result.add "                      digits, underscore). Default:\n"
@@ -3868,6 +3874,279 @@ proc runHomeExport(args: openArray[string]): int =
     "json" & hostArg & " > " & quoteShell(checkFile) & "`")
   return 1
 
+# ---------------------------------------------------------------------------
+# `repro home facts` / `repro home compare` (GM6: host facts and the
+# equivalence report; docs/user-guide/host-facts.md).
+# ---------------------------------------------------------------------------
+
+const HomeFactsUsage* = """usage: repro home facts [--host NAME] [--target SYSTEM] [--output FILE]
+
+Report the host facts of the home profile for one host: its packages (by
+canonical name), the files an apply would write (mode and SHA-256 content
+digest), its environment and its user services -- the Reprobuild side of
+`repro home compare`.
+
+The facts come from the apply's planning half run against a PRIVATE home
+directory and state directory created for this run and removed after it:
+they describe what an apply would write, never this machine's home, and
+every path is reported relative to the home (`~/...`).
+
+  --host NAME      The host to plan (default: $REPRO_HOST, then the OS host
+                   name; a --host that $REPRO_HOST would override is refused).
+  --target SYSTEM  The platform to plan for (x86_64-linux, aarch64-darwin,
+                   ...; default: the platform this repro runs on). A platform
+                   other than the compiling one is planned only when the
+                   platform probe reports the profile `same` there, as for
+                   `repro home export --target`.
+  --output FILE    Write the document to FILE instead of standard output.
+
+Exit status: 0 printed; 1 the profile could not be compiled or planned;
+2 usage error; 3 the profile cannot be described for --target."""
+
+const HomeCompareUsage* = """usage: repro home compare --facts FILE --facts FILE [--allow FILE] [--format text|json] [--show-same]
+
+Compare a Nix-side and a Reprobuild-side host-facts document for the same host
+and system (`reprobuild.lib.homeManagerFacts`, `repro home facts`). For each
+category -- packages, files, environment, services -- every entry is `same`,
+`only-in-nix`, `only-in-reprobuild` or `different` (naming the differing
+fields); entries a producer could not give a logical id are `unmapped`:
+listed, never compared, and never a failure on their own.
+
+  --facts FILE     A host-facts document; give exactly two, one per side.
+  --allow FILE     A TOML allowlist of known differences: `[[allow]]` rows
+                   with `category`, a required non-empty `reason`, and
+                   optional `status`, `id` (one id, or a prefix ending
+                   in `*`), `hosts`, `milestone`. A row that
+                   applies to this host but matches no difference is stale.
+  --format FORMAT  `text` (default) or `json`.
+  --show-same      In text output, list the `same` entries too.
+
+Exit status: 0 no difference outside the allowlist and no stale row; 1 a
+difference not allowlisted, or a stale allowlist row; 2 the inputs cannot be
+compared (usage error, unreadable or malformed facts, two documents of the
+same side, different hosts or systems, an invalid allowlist)."""
+
+proc runHomeFacts(args: openArray[string]): int =
+  ## `repro home facts` -- see `HomeFactsUsage`.
+  var hostFlag = ""
+  var target = ""
+  var output = ""
+  var i = 0
+  try:
+    while i < args.len:
+      let a = args[i]
+      if a == "--help" or a == "-h":
+        echo HomeFactsUsage
+        return 0
+      elif a == "--host" or a.startsWith("--host="):
+        hostFlag = parseFlagValue(args, i, "--host")
+        if hostFlag.len == 0:
+          stderr.writeLine("repro home facts: --host needs a non-empty name")
+          return 2
+      elif a == "--target" or a.startsWith("--target="):
+        target = parseFlagValue(args, i, "--target")
+        if findTargetPlatform(target) < 0:
+          stderr.writeLine("repro home facts: unknown --target '" & target &
+            "' (known: " & targetSystemNames().join(", ") & ")")
+          return 2
+      elif a == "--output" or a.startsWith("--output="):
+        output = parseFlagValue(args, i, "--output")
+        if output.len == 0:
+          stderr.writeLine("repro home facts: --output needs a file")
+          return 2
+      elif a.startsWith("--"):
+        stderr.writeLine("repro home facts: unknown flag: " & a)
+        return 2
+      else:
+        stderr.writeLine("repro home facts: unexpected positional: " & a)
+        return 2
+      inc i
+  except ValueError as err:
+    stderr.writeLine("repro home facts: " & err.msg)
+    return 2
+  if target.len == 0:
+    target = compilingPlatformSystem()
+    if findTargetPlatform(target) < 0:
+      stderr.writeLine("repro home facts: this repro runs on " & target &
+        ", which is not a profile target platform; pass --target")
+      return 2
+
+  # Host identity, in the precedence `repro home export` documents.
+  let envHost = getEnv(HomeHostEnvVar)
+  if envHost.len > 0 and hostFlag.len > 0 and envHost != hostFlag:
+    stderr.writeLine("repro home facts: --host " & hostFlag &
+      " conflicts with $" & HomeHostEnvVar & "=" & envHost &
+      " (which takes precedence); unset one of them")
+    return 2
+  setHostOverride(hostFlag)
+  defer: setHostOverride("")
+  let host = currentHost()
+  if host.len == 0:
+    stderr.writeLine("repro home facts: could not determine the host " &
+      "name; pass --host NAME")
+    return 2
+
+  # The private home and state directory: the facts must not depend on, or
+  # touch, the home of the machine running this command.
+  let scratch = createTempDir("repro-home-facts-", "")
+  defer:
+    try: removeDir(scratch) except CatchableError: discard
+  let homeDir = scratch / "home"
+  let stateDir = scratch / "state"
+  let storeRoot = scratch / "store"
+  for d in [homeDir, stateDir, storeRoot]:
+    createDir(d)
+
+  var doc: JsonNode
+  try:
+    let profilePath = loadProfilePath()
+    let compileOpts = defaultProfileCompileOptionsFor(profilePath, stateDir)
+    let artifact =
+      try:
+        compileProfileToRbpi(profilePath, compileOpts)
+      except ProfileCompileError as err:
+        stderr.writeLine(formatProfileCompileError("repro home facts",
+          profilePath, err.msg, planCommand = "repro home plan"))
+        return 1
+    let intent = decodeRbpi(artifact.rbpiBytes)
+    if target != compilingPlatformSystem():
+      # The compile is native; another platform is described only when the
+      # platform probe shows the profile declares the same intent there
+      # (`repro home export`'s rule, `platformDependence`).
+      let probe =
+        try:
+          probeProfilePlatforms(profilePath, compileOpts)
+        except ProfileCompileError as err:
+          stderr.writeLine("repro home facts: the platform probe failed: " &
+            err.msg)
+          return 1
+      let dependence = platformDependence(intent, probe.outcomes)
+      var status = psUnevaluated
+      for (system, s) in dependence.statuses:
+        if system == target:
+          status = s
+      if status != psSame:
+        var why = ""
+        for (system, d) in dependence.diagnostics:
+          if system == target:
+            why = d.splitLines()[0]
+        stderr.writeLine("repro home facts: cannot describe " & target &
+          " from a compile on " & compilingPlatformSystem() & ": the " &
+          "platform probe reports the profile `" & $status & "` there" &
+          (if why.len > 0: " (" & why & ")" else: "") &
+          "; run `repro home facts` on " & target)
+        return 3
+    let profile =
+      try:
+        expandedHomeProfile(intent, profilePath)
+      except EDataFile as err:
+        stderr.writeLine("repro home facts: " & err.msg)
+        return 1
+    let platform = ProfileTargetPlatforms[findTargetPlatform(target)]
+    let opts = ApplyOptions(
+      profileDir: profilePath.parentDir,
+      profilePath: profilePath,
+      host: host,
+      targetContext: targetHostContext(platform, host),
+      hasTargetContext: true,
+      stateDir: stateDir,
+      storeRoot: storeRoot,
+      homeDir: homeDir,
+      preLoadedProfile: profile)
+    doc = collectHostFacts(opts, target)
+  except ENoProfile as e:
+    printNoProfile(e); return 1
+  except CatchableError as e:
+    stderr.writeLine("repro home facts: error: " & e.msg)
+    return 1
+  let rendered = pretty(doc) & "\n"
+  if output.len > 0:
+    try:
+      writeFile(output, rendered)
+    except IOError, OSError:
+      stderr.writeLine("repro home facts: cannot write " & output & ": " &
+        getCurrentExceptionMsg())
+      return 1
+  else:
+    stdout.write(rendered)
+  0
+
+proc runHomeCompare(args: openArray[string]): int =
+  ## `repro home compare` -- see `HomeCompareUsage` and `home_compare.nim`.
+  var factsFiles: seq[string]
+  var allowFile = ""
+  var format = "text"
+  var showSame = false
+  var i = 0
+  try:
+    while i < args.len:
+      let a = args[i]
+      if a == "--help" or a == "-h":
+        echo HomeCompareUsage
+        return 0
+      elif a == "--facts" or a.startsWith("--facts="):
+        factsFiles.add parseFlagValue(args, i, "--facts")
+      elif a == "--allow" or a.startsWith("--allow="):
+        if allowFile.len > 0:
+          stderr.writeLine("repro home compare: --allow given twice")
+          return 2
+        allowFile = parseFlagValue(args, i, "--allow")
+      elif a == "--format" or a.startsWith("--format="):
+        format = parseFlagValue(args, i, "--format")
+      elif a == "--show-same":
+        showSame = true
+      elif a.startsWith("--"):
+        stderr.writeLine("repro home compare: unknown flag: " & a)
+        return 2
+      else:
+        stderr.writeLine("repro home compare: unexpected positional: " & a)
+        return 2
+      inc i
+  except ValueError as err:
+    stderr.writeLine("repro home compare: " & err.msg)
+    return 2
+  if factsFiles.len != 2:
+    stderr.writeLine("repro home compare: give exactly two --facts files " &
+      "(one Nix-side, one Reprobuild-side); got " & $factsFiles.len)
+    return 2
+  if format notin ["text", "json"]:
+    stderr.writeLine("repro home compare: unsupported --format '" & format &
+      "' (supported: text, json)")
+    return 2
+  var docs: seq[JsonNode]
+  for f in factsFiles:
+    try:
+      docs.add parseJson(readFile(f))
+    except IOError, OSError:
+      stderr.writeLine("repro home compare: cannot read " & f & ": " &
+        getCurrentExceptionMsg())
+      return 2
+    except JsonParsingError, ValueError:
+      stderr.writeLine("repro home compare: " & f & " is not JSON: " &
+        getCurrentExceptionMsg())
+      return 2
+  var allow: seq[AllowEntry]
+  var report: CompareReport
+  try:
+    if allowFile.len > 0:
+      let content =
+        try: readFile(allowFile)
+        except IOError, OSError:
+          stderr.writeLine("repro home compare: cannot read " & allowFile &
+            ": " & getCurrentExceptionMsg())
+          return 2
+      allow = parseAllowlist(content, allowFile)
+    report = compareFacts(docs[0], docs[1], factsFiles[0], factsFiles[1],
+      allow)
+  except ECompareInput as err:
+    stderr.writeLine("repro home compare: " & err.msg)
+    return 2
+  if format == "json":
+    stdout.write(pretty(renderCompareJson(report)) & "\n")
+  else:
+    stdout.write(renderCompareText(report, showSame))
+  compareExitCode(report)
+
 proc runHomeCommand*(args: seq[string]): int =
   ## Implements `repro home <subcommand>` per M61. Always loads the
   ## package catalog from `$REPRO_HOME_PACKAGE_CATALOG` first; the
@@ -3897,8 +4176,9 @@ proc runHomeCommand*(args: seq[string]): int =
     inc i
   if sub.len == 0:
     stderr.writeLine("usage: repro home {add | remove | enable | disable | " &
-      "list | why | history | apply | plan | export | rollback | gc | set | " &
-      "get | adopt | resource | migrate-from-env-scripts} ...")
+      "list | why | history | apply | plan | export | facts | compare | " &
+      "rollback | gc | set | get | adopt | resource | " &
+      "migrate-from-env-scripts} ...")
     return 2
   case sub
   of "add": return runHomeAdd(subArgs)
@@ -3915,6 +4195,8 @@ proc runHomeCommand*(args: seq[string]): int =
   of "__remote-activate": return runHomeRemoteActivate(subArgs)
   of "plan": return runHomePlan(subArgs)
   of "export": return runHomeExport(subArgs)
+  of "facts": return runHomeFacts(subArgs)
+  of "compare": return runHomeCompare(subArgs)
   of "rollback": return runHomeRollback(subArgs)
   of "gc": return runHomeGcCommand(subArgs)
   of "set": return runHomeSet(subArgs)

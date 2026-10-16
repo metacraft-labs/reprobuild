@@ -4732,17 +4732,21 @@ when defined(macosx):
         raise newException(OSError, "`/usr/bin/xcrun -f clang` answered " &
           cc & ", a SIP-protected path the build monitor cannot follow")
     result.cc = cc
-    if getEnv("SDKROOT").len == 0:
-      let sdk = uncontrolledExecCmdEx("/usr/bin/xcrun --show-sdk-path",
-        options = {poStdErrToStdOut})
-      let path = lastOutputLine(sdk.output)
-      if sdk.exitCode != 0 or path.len == 0 or
-          not dirExists(extendedPath(path)):
-        raise newException(OSError, "`/usr/bin/xcrun --show-sdk-path` " &
-          "exited " & $sdk.exitCode & (if path.len > 0: ": " & path else: "") &
-          ". Install the Xcode Command Line Tools with " &
-          "`xcode-select --install`, or set SDKROOT.")
-      result.sdk = path
+    if not cc.startsWith("/nix/store/"):
+      let envSdk = getEnv("SDKROOT")
+      if envSdk.len > 0 and dirExists(extendedPath(envSdk)):
+        result.sdk = envSdk
+      else:
+        let sdk = uncontrolledExecCmdEx("/usr/bin/xcrun --show-sdk-path",
+          options = {poStdErrToStdOut})
+        let path = lastOutputLine(sdk.output)
+        if sdk.exitCode != 0 or path.len == 0 or
+            not dirExists(extendedPath(path)):
+          raise newException(OSError, "`/usr/bin/xcrun --show-sdk-path` " &
+            "exited " & $sdk.exitCode & (if path.len > 0: ": " & path else: "") &
+            ". Install the Xcode Command Line Tools with " &
+            "`xcode-select --install`, or set SDKROOT.")
+        result.sdk = path
 else:
   proc resolveXcodeClang(): tuple[cc, sdk: string] =
     raise newException(OSError, "the Xcode route exists only on macOS")

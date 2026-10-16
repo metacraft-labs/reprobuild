@@ -21,7 +21,8 @@
 ##
 ## MOCK POLICY: no mocks, and none may be added. Records are written through
 ## `writeSessionRecord` -- the daemon's single write funnel for creation and
-## for every state transition -- into a real temporary state directory, and
+## for every state transition -- or directly as files to model records left
+## by a previous daemon, into a real temporary state directory, and
 ## the reference count is a real directory walk. A fake filesystem would
 ## remove the only thing under test, which is whether the in-memory tally
 ## tracks what is actually on disk.
@@ -73,6 +74,16 @@ proc session(id, state: string): UserDaemonSession =
   result.startedAtUnix = 1_700_000_000
   result.endedAtUnix = 0
   result.exitCode = 0
+
+proc writeRawRunningRecord(root, id, writer: string) =
+  ## A `running` record written straight to `sessions/`, bypassing
+  ## `writeSessionRecord`: what a previous daemon process left behind, which
+  ## nothing in this process has seen.
+  createDir(root / "sessions")
+  writeFile(root / "sessions" / (id & ".session"),
+    "sessionId=" & id & "\nmode=build\nstate=running\n" &
+    "startedAtUnix=1700000000\nendedAtUnix=0\nexitCode=0\n" &
+    "writer=" & writer & "\n")
 
 proc resetTallyAsIfRestarted(config: UserDaemonConfig) =
   ## Force the next query to prime from disk, the way a fresh daemon process
@@ -201,8 +212,8 @@ suite "abandoned sessions are reclaimed, and only provably dead ones":
     let root = createTempDir("repro-reclaim-", "")
     defer: removeDir(root)
     let config = tempConfig(root)
-    # Prime first: priming reclaims, and an unprimed write triggers one, so
-    # without this the record is reclaimed before the assertion below runs.
+    # Prime first, on the empty directory: priming reclaims, so priming after
+    # the write would reclaim the record before the assertion below runs.
     check activeSessionTallyFor(config) == 0
     var stuck = session("stuck", "running")
     stuck.writer = deadWriter()
@@ -336,6 +347,84 @@ suite "abandoned sessions are reclaimed, and only provably dead ones":
       " fromDisk=" & $countActiveSessionRecordsFromDisk(config))
     check activeSessionTallyFor(config) == 1
     check countActiveSessionRecordsFromDisk(config) == 1
+
+  test "priming walks sessions/ a fixed number of times however many it reclaims":
+    # THE COST BUDGET RECLAMATION WAS ADMITTED UNDER. Reclamation reads the
+    # whole of `sessions/`, so it is allowed only where priming already pays
+    # for that walk -- once per daemon process. A prime that re-entered
+    # itself through the writes its own reclamation makes paid two walks per
+    # reclaimed record instead: with a few hundred killed builds, hundreds of
+    # walks of a 2,000-record directory on the first status query, at a
+    # recursion depth nothing bounded. The answer was right either way (the
+    # outermost frame recounts), which is why only a walk count can see it;
+    # elapsed time on a fixture this size cannot.
+    #
+    # The records are written as files rather than through
+    # `writeSessionRecord`, the way a previous daemon process left them, so
+    # nothing in this process has seen them before the measured call.
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    const Dead = 8
+    const Live = 3
+    let liveWriter = encodeWriterIdentity(currentWriterIdentity())
+    for i in 0 ..< Dead:
+      writeRawRunningRecord(root, "dead" & $i, deadWriter())
+    for i in 0 ..< Live:
+      writeRawRunningRecord(root, "live" & $i, liveWriter)
+    check countActiveSessionRecordsFromDisk(config) == Dead + Live
+    # Moves the cache key off this directory (if an earlier case left it
+    # here), so the measured call below is a real first prime.
+    resetTallyAsIfRestarted(config)
+
+    let before = sessionRecordsDirWalkCount()
+    let tally = activeSessionTallyFor(config)
+    let walks = sessionRecordsDirWalkCount() - before
+    # One walk to reclaim, one to count. Re-entry made it 2 * (Dead + 1).
+    checkpoint("reclaimed=" & $Dead & " walks during prime=" & $walks &
+      " tally=" & $tally)
+    check walks == 2
+    # The bound is not bought with correctness: the tally is still the
+    # from-disk count, and every dead-writer record was really reclaimed.
+    check tally == Live
+    check countActiveSessionRecordsFromDisk(config) == Live
+    for i in 0 ..< Dead:
+      check AbandonedSessionState in
+        readFile(root / "sessions" / ("dead" & $i & ".session"))
+    # ...and the tally keeps tracking incrementally afterwards, which it
+    # would not if the prime had left the cache unpublished.
+    var ended = session("live0", "completed")
+    ended.writer = liveWriter
+    let beforeUpdate = sessionRecordsDirWalkCount()
+    writeSessionRecord(config, ended)
+    check activeSessionTallyFor(config) == Live - 1
+    check sessionRecordsDirWalkCount() == beforeUpdate
+    check countActiveSessionRecordsFromDisk(config) == Live - 1
+
+  test "the startup reclaim reports every record it reclaims, in one walk":
+    # Daemon startup reclaims before anything has primed the tally, and logs
+    # the count it returns. Its first rewrite used to prime the directory --
+    # and the prime, which reclaims too, rewrote the remaining dead records
+    # behind its back -- so it returned 1 however many it reclaimed, and the
+    # log said so. A write no longer primes, so the reclaim does all of the
+    # work it reports, and walks the directory once to do it.
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    const Dead = 5
+    for i in 0 ..< Dead:
+      writeRawRunningRecord(root, "dead" & $i, deadWriter())
+    resetTallyAsIfRestarted(config)
+
+    let before = sessionRecordsDirWalkCount()
+    let reclaimed = reclaimAbandonedSessions(config)
+    let walks = sessionRecordsDirWalkCount() - before
+    checkpoint("reclaimed=" & $reclaimed & " walks=" & $walks)
+    check reclaimed == Dead
+    check walks == 1
+    check countActiveSessionRecordsFromDisk(config) == 0
+    # The first status query still primes, and finds nothing left to do.
+    check activeSessionTallyFor(config) == 0
 
   test "abandoned is distinguishable from cancelled and failed":
     # A user cancelling, a build losing, and a writer vanishing are three

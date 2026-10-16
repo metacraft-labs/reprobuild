@@ -226,13 +226,43 @@ suite "NF-1: the emitted overrides are the develop set":
       # with the sibling checkouts below, so an implementation that had
       # started refreshing would rewrite them.
       let lockPath = app / "flake.lock"
+      # Every declared input has a node: a missing root entry is unknown
+      # source identity, which the coordinate binder must not guess by name.
+      # Indirect originals carry no owner/repo coordinates and preserve this
+      # test's suffix-based binding and selection witnesses.
       let lockBytes = """{
   "nodes": {
     "alpha-src": {
+      "original": { "type": "indirect", "id": "alpha-src" },
       "locked": { "type": "github", "owner": "example", "repo": "alpha",
                   "rev": "0000000000000000000000000000000000000000" }
     },
-    "root": { "inputs": { "alpha-src": "alpha-src" } }
+    "beta-src": {
+      "original": { "type": "indirect", "id": "beta-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "beta",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "gamma-src": {
+      "original": { "type": "indirect", "id": "gamma-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "gamma",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "delta-src": {
+      "original": { "type": "indirect", "id": "delta-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "delta",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "epsilon-src": {
+      "original": { "type": "indirect", "id": "epsilon-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "epsilon",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "nowhere-src": {
+      "original": { "type": "indirect", "id": "nowhere-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "nowhere",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "root": { "inputs": { "alpha-src": "alpha-src", "beta-src": "beta-src", "gamma-src": "gamma-src", "delta-src": "delta-src", "epsilon-src": "epsilon-src", "nowhere-src": "nowhere-src" } }
   },
   "root": "root",
   "version": 7

@@ -96,7 +96,10 @@ if command -v timeout >/dev/null 2>&1; then
   bound=(timeout --kill-after=60 "${REPRO_SMOKE_TIMEOUT_SECONDS:-2700}")
 fi
 set +e
-(cd "$project" && "${bound[@]}" "$repro_bin" exec -- bash -c \
+# Guarded array expansion: under `set -u`, bash < 4.4 treats `"${bound[@]}"` on an
+# empty array as an unbound variable. `${bound[@]+"${bound[@]}"}` expands to nothing
+# when empty without triggering nounset errors on macOS stock /bin/bash (3.2).
+(cd "$project" && ${bound[@]+"${bound[@]}"} "$repro_bin" exec -- bash -c \
   'echo "$1"; echo "seeded-source-root=${REPROBUILD_SOURCE_ROOT:-}"' _ "$marker") \
   > "$out" 2>&1 < /dev/null
 rc=$?

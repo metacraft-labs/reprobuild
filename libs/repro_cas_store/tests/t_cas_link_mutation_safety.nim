@@ -40,6 +40,7 @@ import std/[algorithm, os, sequtils, strutils, unittest]
 
 import blake3
 from repro_core/paths import extendedPath
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 import repro_cas_store
 
@@ -57,12 +58,13 @@ type
     reflink: bool
     hardlink: bool
 
-var scratchDirs: seq[string] = @[]
-
 proc claimScratchDir(parent: string; tag: string): string =
   if parent.len == 0 or not dirExists(extendedPath(parent)):
     return ""
   let candidate = parent / ("repro-m3-" & $getCurrentProcessId() & "-" & tag)
+  # Owned by THIS process: removed when it exits, whichever cases it ran.
+  # Registered before the directory exists, so it is never on disk unowned.
+  releaseDirAtProcessExit(candidate)
   try:
     createDir(extendedPath(candidate))
     let witness = candidate / "witness"
@@ -70,7 +72,6 @@ proc claimScratchDir(parent: string; tag: string): string =
     removeFile(extendedPath(witness))
   except CatchableError, Defect:
     return ""
-  scratchDirs.add(candidate)
   candidate
 
 proc candidateParents(): seq[string] =
@@ -104,7 +105,23 @@ proc discoverVolumes(): seq[ProbeVolume] =
                            pairKey: filesystemPairKey(dir, dir),
                            reflink: cap.reflink, hardlink: cap.hardlink))
 
-let volumes = discoverVolumes()
+## Discovery is LAZY: it runs on first use, from inside a case, never at
+## module scope. The runner runs every case in its own process and probes
+## the binary with ``--list-json`` besides; discovery at module scope made
+## each of those processes claim a scratch directory on every volume, and
+## only the final "teardown" case removed any — its own process's.
+var discoveredVolumes: seq[ProbeVolume] = @[]
+var volumesDiscovered = false
+
+proc hostVolumes(): seq[ProbeVolume] =
+  if not volumesDiscovered:
+    volumesDiscovered = true
+    discoveredVolumes = discoverVolumes()
+  discoveredVolumes
+
+template volumes(): untyped =
+  ## Every discovered volume; discovers on first use.
+  hostVolumes()
 
 proc describeHost(): string =
   volumes.mapIt(it.dir & "(" & it.fsName & " reflink=" & $it.reflink &
@@ -295,7 +312,7 @@ suite "M3 mechanism independence — restore side":
       # arm produces here, so the handle is closed from a ``finally`` — a
       # trailing ``cas.close()`` would be skipped by the very failure this
       # case exists to detect, and the store would then hold its index open
-      # against the teardown.
+      # against the scratch directory's removal at process exit.
       try:
         let h = cas.casPut(payload)
         let dest = dir / "out" / "restored.bin"
@@ -746,7 +763,7 @@ suite "M3 — why read-only blobs do not rescue the shared-inode arm":
       # deliberately NOT wrapped in a swallow: if the arm ever starts
       # handing out a read-only output, the write raises and the case
       # fails. The ``finally`` exists only so the fixture cannot leave an
-      # unwritable blob and an open store behind for the teardown.
+      # unwritable blob and an open store behind for the removal at exit.
       try:
         setFilePermissions(extendedPath(blobPath), {fpUserRead})
         let dest = dir / "out" / "writable.bin"
@@ -950,24 +967,11 @@ suite "M3 — the decision, expressed where it is enforced":
 
 # ---------------------------------------------------------------------------
 
-suite "M3 mutation safety — teardown":
-  # Deliberately a test rather than an ``addExitProc``: under ORC the
-  # exit-proc closure runs after this module's globals are destroyed.
-  test "every scratch directory this suite created is removed":
-    var survivors: seq[string] = @[]
-    for d in scratchDirs:
-      var lastError = ""
-      try:
-        removeDir(extendedPath(d))
-      except CatchableError as err:
-        lastError = err.msg
-      except Defect:
-        lastError = "defect while removing"
-      if dirExists(extendedPath(d)):
-        let why = if lastError.len > 0: " (" & lastError & ")" else: ""
-        survivors.add(d & why)
-    # Named rather than merely counted: a survivor is almost always a store
-    # handle some earlier case left open, and the message has to say which
-    # directory so that is findable without re-running under a debugger.
-    checkpoint("surviving scratch directories: " & survivors.join(", "))
-    check survivors.len == 0
+# There is deliberately no "teardown" suite. This file used to end with a
+# case that removed every scratch directory, and the runner runs each case
+# in its own process: that case removed only what ITS OWN process had
+# claimed, while every other case process and the ``--list-json`` probe left
+# a directory per volume behind. Release now belongs to the process that
+# claimed the directory (``claimScratchDir``), and the guarantee is checked
+# the way the runner runs this file by
+# ``tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process``.

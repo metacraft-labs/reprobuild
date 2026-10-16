@@ -62,10 +62,15 @@ DEV_SHELL_OVERRIDES="${REPO_ROOT}/scripts/lib/dev_shell_overrides.sh"
 # sandbox without it fails every run with python3's exit 2 before the parts
 # under test are reached. Copied verbatim for the same reason as the others.
 STAGE_NIX_DAEMON="${REPO_ROOT}/scripts/stage_nix_daemon.py"
+# ``build_apps.sh`` asks this script for the source revision it embeds, and
+# stops when it cannot run it. Copied verbatim for the same reason. The
+# sandbox is not a git work tree, so it reports the revision unknown and the
+# fake ``nim`` sees no ``-d:ReprobuildSourceRevision=`` define.
+SOURCE_REVISION="${REPO_ROOT}/scripts/source_revision.sh"
 
 for required in "${BUILD_APPS}" "${SOURCE_PATHS}" \
   "${PRELOADED_SHIM_LOADER}" "${DEV_SHELL_OVERRIDES}" \
-  "${STAGE_NIX_DAEMON}"; do
+  "${STAGE_NIX_DAEMON}" "${SOURCE_REVISION}"; do
   if [ ! -f "${required}" ]; then
     echo "FIXTURE ERROR: missing ${required}" >&2
     exit 2
@@ -147,6 +152,7 @@ new_sandbox() {
   cp "${PRELOADED_SHIM_LOADER}" "${sandbox}/scripts/lib/preloaded_shim_loader.sh"
   cp "${DEV_SHELL_OVERRIDES}" "${sandbox}/scripts/lib/dev_shell_overrides.sh"
   cp "${STAGE_NIX_DAEMON}" "${sandbox}/scripts/stage_nix_daemon.py"
+  cp "${SOURCE_REVISION}" "${sandbox}/scripts/source_revision.sh"
 
   cat > "${sandbox}/apps/entrypoints.txt" <<'ENTRYPOINTS'
 # name path [extra-nim-flags...]

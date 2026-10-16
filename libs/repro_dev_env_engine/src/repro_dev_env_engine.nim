@@ -227,6 +227,29 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     runQuotaQueueTimeoutMs: devEnvRunQuotaQueueTimeoutMsDefault,
     suppressTrace: false,
     skipCacheHitEvidence: false)
+  # The root classification this activation declares, for
+  # `Incremental-Invalidation.md` §"Validation Criteria"'s second mandatory
+  # exemption: an enumerated directory in an UNTRACKED scope carries no
+  # membership digest.
+  #
+  # THIS EDGE IS THE ONE THE EXEMPTION WAS MEASURED ON. The provider compile
+  # is a `nim c`, and Nim's upward module and config search enumerates every
+  # ancestor of its working directory: 449 recorded enumerations on one
+  # activation, among them `/`, `/Users/`, `$HOME`, `$HOME/.cache/` and
+  # `/nix/` (see
+  # `issues/2026-09-24-dev-env-never-converges-on-a-fresh-project.md`, the
+  # fifth cause). So the edge's key carried the immediate membership of the
+  # filesystem root and of the user's home directory, and could not converge
+  # across processes at all — which relinked the provider binary, made it
+  # non-bit-reproducible, and left the introspection edge reporting "no cache
+  # record for weak fingerprint" downstream of it.
+  #
+  # No `repositoryRoot`: finding one is a `.git` walk (the CLI's
+  # `repositoryRootOf`), and an activation runs on every `cd`. Omitting a
+  # root leaves more directories membership-tracked, which is the safe
+  # direction.
+  result.filesystemRoots = declaredFilesystemRoots(config.projectRoot,
+    config.workDir, resolvedStoreRootOrEmpty(), outRoot = config.outDir)
   result.statsEnabled = config.statsEnabled
   result.progressCallback = config.progressCallback
   # A warm activation must stay on the no-op fast path even while it renders
@@ -303,11 +326,17 @@ proc fileFingerprintPart(path: string): string =
 # M77 — fast-path cache-key computation.
 #
 # ``computeDevEnvEdgeCacheKey`` is the public surface the shell hook's
-# per-prompt fast path calls BEFORE walking the build graph. It MUST
-# produce a key that is identical to the one the engine's normal
-# cache-hit path would use for the same ``DevEnvEdgeConfig`` — otherwise
-# the user sees flapping where the hook says "cached" but the next
-# prompt's full walk recomputes a different fingerprint.
+# per-prompt fast path calls BEFORE walking the build graph. The full
+# ``dev-env export`` emits this same key as the ``__REPRO_APPLIED`` marker,
+# and the next prompt re-derives it from disk and compares; both sides MUST
+# compute it identically for the same ``DevEnvEdgeConfig`` — otherwise the
+# user sees flapping where every prompt falls through to the full walk.
+#
+# It is a prompt-time key ONLY. ``computeDevEnvEdge`` does not consult it:
+# it reads the project file and none of the modules that file imports, so
+# it cannot say whether an extracted interface or a compiled provider is
+# still current. Using it for that once served a stale interface after a
+# stdlib package edit; see the interface step in ``computeDevEnvEdge``.
 #
 # The key is a deterministic hash of:
 #
@@ -614,15 +643,9 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if config.monitorCliPath.len == 0:
     raiseDevEnvEdge("monitorCliPath is required")
 
-  let candidateKey = devEnvCacheKey.computeDevEnvEdgeCacheKey(
-    config.projectRoot, config.activity, config.lockSliceId, config.developOverridesPath
-  )
-
   result.artifactPath = config.outDir / "dev-env.rbde"
   result.shellFragmentPath = config.outDir / "dev-env.env"
   result.shellNavigatorStatsPath = config.outDir / "dev-env.env.navigator.json"
-
-  let cacheKeyPath = config.outDir / "dev-env.rbde.cache-key"
 
   createDir(extendedPath(config.outDir))
   # This process is the activation itself (`repro exec`, the shell hook), not
@@ -644,25 +667,44 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   let stubPath = active.outDir / "project-interface.nim"
   result.interfacePath = interfacePath
 
-  var interfaceArtifact: ProjectInterfaceArtifact
-  var useCachedInterface = false
-  if fileExists(extendedPath(interfacePath)) and
-     fileExists(extendedPath(cacheKeyPath)):
-    try:
-      let cachedKey = readFile(extendedPath(cacheKeyPath)).strip()
-      if cachedKey == candidateKey:
-        interfaceArtifact = readInterfaceArtifact(interfacePath)
-        useCachedInterface = true
-    except CatchableError:
-      discard
-
-  if not useCachedInterface:
-    # ``consumerRoot`` is the recipe's OWN project root. Left implicit it
-    # would be the process cwd, which is only incidentally the same thing —
-    # and is baked into the compiled recipe, so a wrong value is silent.
-    interfaceArtifact = extractInterfaceFromModule(active.modulePath,
-      interfacePath, stubPath, workDir, compileScratchDir,
-      consumerRoot = parentDir(absolutePath(active.modulePath)))
+  # Whether the interface on disk can be reused is decided by
+  # ``extractInterfaceFromModule``'s own warm check and by nothing in front of
+  # it. That check is keyed on what the extraction actually compiles: the
+  # recipe's source closure (every module it imports, its own directory's
+  # sources included), the reprobuild library sources and their ``--path``
+  # set, the selected catalog and the compiler. A warm entry costs one stamp
+  # pass over those files, with no hashing and no compile.
+  #
+  # There used to be a second, cheaper gate here: reuse the interface whenever
+  # ``dev-env.rbde.cache-key`` equalled ``computeDevEnvEdgeCacheKey``. That is
+  # the PROMPT-TIME key, and it reads the project file and nothing it
+  # imports, so it vetoed the warm check in exactly the cases the warm check
+  # exists for. Editing a stdlib package the recipe compiles in
+  # (``repro_dsl_stdlib/packages/gh.nim``), or a module beside the project
+  # file, left every later activation replaying an interface extracted from
+  # the old source until the dev-env directory was deleted by hand
+  # (reprobuild-specs issue
+  # 2026-09-24-dev-env-reuses-interface-after-stdlib-package-change). Its file
+  # had no other reader and is no longer written.
+  #
+  # ``consumerRoot`` is the recipe's OWN project root. Left implicit it would
+  # be the process cwd, which is only incidentally the same thing — and is
+  # baked into the compiled recipe, so a wrong value is silent.
+  let interfaceArtifact = extractInterfaceFromModule(active.modulePath,
+    interfacePath, stubPath, workDir, compileScratchDir,
+    consumerRoot = parentDir(absolutePath(active.modulePath)))
+  # Shared-Development-Services §4.3's stale-lift precondition: record what
+  # this artifact was lifted from, beside it, so a CONSUMER of a shared
+  # service this recipe declares can establish whether it still corresponds
+  # to this recipe.
+  #
+  # Stamped after every call, warm or not. While the prompt-time key gated
+  # reuse, a reused interface could be older than its import closure, and
+  # stamping it would have recorded the current closure against older bytes.
+  # ``extractInterfaceFromModule`` returns an interface only after checking
+  # it against that closure (or after re-extracting it), so the closure
+  # recorded here is the one those bytes were extracted from.
+  writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
   let effectiveProvisioning =
     active.effectiveToolProvisioning(interfaceArtifact)
 
@@ -788,8 +830,3 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if not fileExists(extendedPath(result.artifactPath)):
     raiseDevEnvEdge("dev-env edge did not write artifact: " &
       result.artifactPath)
-
-  try:
-    writeFile(extendedPath(cacheKeyPath), candidateKey & "\n")
-  except CatchableError:
-    discard
