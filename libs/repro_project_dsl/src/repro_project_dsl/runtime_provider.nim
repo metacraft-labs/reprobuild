@@ -153,6 +153,10 @@ when defined(reproProviderMode):
     let isRootFragment = request.entryPointId == rootEntryPointId(pkg)
     if isRootFragment:
       rerunServiceDeclarators(pkg.packageName)
+      # #498: the build lane folds the deferred argv slots too, so the
+      # two lanes cannot disagree about one service's command line. The
+      # re-run above rebuilt the templates; this fills them.
+      discard foldDeferredServiceArgv(pkg.packageName)
     let actions = inferDeclaredActionDeps(
       registeredBuildActions(), request.arguments)
     var targets = registeredBuildTargets()
@@ -632,6 +636,27 @@ when defined(reproProviderMode):
         devEnvProc()
     finally:
       currentProviderProjectRoot = ""
+
+    # Shared-Development-Services, reprobuild issue #498 —
+    # FINALIZATION, and it must be HERE: after every activity body in
+    # the package has run and before anything reads a service's argv.
+    #
+    # `args <contributionPoint>` records a deferred slot rather than the
+    # point's folded members, because a contribution made by one
+    # activity's body to another activity's point lands at a moment
+    # decided by source order. Folding it here puts the argv fold at the
+    # same instant as `mergeTypedServiceFacts`' fold of
+    # `registrationMembers` below, so one artifact cannot state two
+    # different member sets for one point -- which is what #498
+    # measured, with the launcher started without a member the converge
+    # lane simultaneously handed to the registrar.
+    #
+    # Unconditional and not gated on the SELECTED activity: an
+    # unselected activity's service is gated out of `result.services` by
+    # `mergeTypedServiceFacts`' activity gate, and a registry row whose
+    # argv was left half-folded is a row a later re-resolution in the
+    # same process would read.
+    discard foldDeferredServiceArgv(pkg.packageName)
 
     let selectedActivities = selectedActivityList(request.activity)
     result = DevEnvResult(

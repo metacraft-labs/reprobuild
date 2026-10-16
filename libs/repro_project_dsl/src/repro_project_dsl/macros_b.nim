@@ -3740,7 +3740,10 @@ proc dss10RefuseRegistrationWithoutReadiness(packageName, serviceName: string;
     "REGISTRATION RESOURCE ordered on this service. " &
     dss10DegradationRule & " " & dss10ReadinessRemedy, anchor)
 
-proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
+proc m5ServiceEmission(packageName: string; stmt: NimNode;
+                       contributionPoints:
+                         seq[tuple[bareName, key: string]] = @[]):
+    NimNode =
   ## Lower ONE ``service <name>:`` statement to its wrap-and-register
   ## block, or return ``nil`` when ``stmt`` is not a recognised service
   ## entry.
@@ -3806,8 +3809,40 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
     tryBody.add(quote do:
       addActiveServiceConvergePoint(`pointLit`))
   for argExpr in parsedBody.argExprs:
-    tryBody.add(quote do:
-      addActiveServiceArg(`argExpr`))
+    # Shared-Development-Services, reprobuild issue #498: `args <point>`
+    # where `<point>` is a bare identifier naming an ordered-collection
+    # `config:` key of the ENCLOSING activity (or of the package, at
+    # package level) emits a DEFERRED slot instead of the folded
+    # tokens.
+    #
+    # WHY THE MACRO AND NOT THE RUNTIME. `addActiveServiceArg` receives
+    # a `seq[string]`; the key it came from is gone by then, and a
+    # runtime that guessed the key by matching the value against every
+    # point's current fold would be the "assertion satisfied by the
+    # wrong text" shape in executable form -- two points folding to the
+    # same members would be indistinguishable. The macro is the only
+    # place that still has the author's own identifier.
+    #
+    # The EAGER value is passed too, and `addActiveServiceArgPoint`
+    # documents what it is for: an `enable <activity>(<point> = ...)`
+    # site supplies the argument explicitly and the parameter default
+    # -- the read of the fold -- is never evaluated, so deferring such
+    # a value would let a later contribution overwrite an explicit
+    # argument.
+    var pointKey = ""
+    if argExpr.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      let bare = identText(argExpr).normalize
+      for point in contributionPoints:
+        if point.bareName.normalize == bare:
+          pointKey = point.key
+          break
+    if pointKey.len > 0:
+      let keyLit = newLit(pointKey)
+      tryBody.add(quote do:
+        addActiveServiceArgPoint(`keyLit`, `argExpr`))
+    else:
+      tryBody.add(quote do:
+        addActiveServiceArg(`argExpr`))
   for fileExpr in parsedBody.runtimeFileExprs:
     tryBody.add(quote do:
       addActiveServiceRuntimeFile(`fileExpr`))
@@ -4004,10 +4039,27 @@ proc emitM5Services*(packageName: string;
   ## The per-entry lowering itself lives in ``m5ServiceEmission``, which
   ## L2's dev-env ``activity`` walker shares.
   result = newStmtList()
+  # Shared-Development-Services #498: the PACKAGE-LEVEL contribution
+  # points, so `args <point>` in a package-level `service` body defers
+  # exactly as it does in an activity's. Collected here rather than
+  # inside `m5ServiceEmission` because the emitter is shared with L2's
+  # dev-env walker, which has a DIFFERENT key shape
+  # (`<pkg>.<activity>.<name>` against `<pkg>.<name>`) -- one emitter,
+  # two callers, each supplying its own key.
+  var packagePoints: seq[tuple[bareName, key: string]] = @[]
+  for entry in classified:
+    if entry.ownership != soM2Config:
+      continue
+    if entry.stmt.len < 2:
+      continue
+    for cfg in collectM2ConfigEntries(entry.stmt[entry.stmt.len - 1]):
+      if m2TypeReprIsOrderedCollection(cfg.typeNode.repr):
+        packagePoints.add((bareName: cfg.name,
+          key: packageName & "." & cfg.name))
   for entry in classified:
     if entry.ownership != soM5Service:
       continue
-    let emission = m5ServiceEmission(packageName, entry.stmt)
+    let emission = m5ServiceEmission(packageName, entry.stmt, packagePoints)
     if emission == nil:
       continue
     result.add(emission)
@@ -4722,13 +4774,24 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
     formal.add(nnkIdentDefs.newTree(ident(c.name), c.typeNode.copyNimTree(),
       default))
 
+  # Shared-Development-Services #498: this activity's ordered-collection
+  # `config:` keys, fully qualified. `args <point>` inside one of this
+  # activity's `service` bodies lowers to a DEFERRED slot filled at
+  # finalization, so a contribution made by ANOTHER activity's body
+  # reaches the command line whichever order the two are declared in.
+  var activityPoints: seq[tuple[bareName, key: string]] = @[]
+  for c in config:
+    if m2TypeReprIsOrderedCollection(c.typeNode.repr):
+      activityPoints.add((bareName: c.name,
+        key: packageName & "." & parsed.activityName & "." & c.name))
+
   let procBody = newStmtList()
   procBody.add(l2MemberCheckStmts(parsed.activityName, params, parsed.body))
   for entry in parsed.body:
     if l2IsHeadNamed(entry, "config"):
       continue
     if l2IsHeadNamed(entry, "service"):
-      let emission = m5ServiceEmission(packageName, entry)
+      let emission = m5ServiceEmission(packageName, entry, activityPoints)
       if emission != nil:
         procBody.add(emission)
         continue
