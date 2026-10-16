@@ -693,6 +693,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_output_directory_an_action_creates_is_not_an_input.nim",
+    binary: "build/test-bin/t_output_directory_an_action_creates_is_not_an_input",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
     binary: "build/test-bin/t_package_identity_is_the_producing_action",
     defines: @[],
