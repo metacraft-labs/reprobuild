@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2091,
+    "nimTestBinaries": 2093,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 648,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2112
+    "testEntries": 2114
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1278,7 +1278,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1130,
+      "integration": 1132,
       "platform/destructive": 129,
       "pure unit": 648,
       "unclassified": 186
@@ -1483,9 +1483,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2091,
+    "nimTestBinaryCount": 2093,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2112
+    "testEntryCount": 2114
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2763,7 +2763,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 326,
+          "line": 270,
           "path": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim",
           "patterns": [
             "gcc"
@@ -24462,7 +24462,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_hcr_agent"
+        "repro_hcr_agent",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": false,
@@ -24484,6 +24485,23 @@
       "source": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_concurrent_patch_gate_conditions",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -36191,6 +36209,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_provider_compile_follows_the_recipe.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provider_compile_key_ignores_the_callers_shell",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_provider_compile_key_ignores_the_callers_shell.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
