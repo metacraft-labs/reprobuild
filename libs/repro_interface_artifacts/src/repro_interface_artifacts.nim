@@ -8596,6 +8596,79 @@ proc decodeInterfaceFingerprintArg*(text: string): ContentDigest =
   for i in 0 ..< 32:
     result.bytes[i] = byte(parseHexInt(parts[2][2 * i .. 2 * i + 1]))
 
+const RelocatableProviderVerdict* = "relocatable"
+  ## The whole content (plus a newline) of a recipe-relative provider
+  ## compile's verdict file when its binary does not embed the recipe's
+  ## location. Anything else names the location-bound string it found.
+
+proc recipeRelativeProviderVerdictPath*(edgeArtifactPath: string): string =
+  ## Where the recipe-relative provider-compile edge records whether its
+  ## binary may be served to another location of the recipe. A declared
+  ## output of the edge, beside its artifact, so a cache hit restores the
+  ## verdict together with the binary it describes.
+  parentDir(edgeArtifactPath) / "relocation-verdict"
+
+proc isComponentByte(c: char): bool =
+  ## A byte that continues a path component. Deliberately not `@`: Nim
+  ## stores a string literal behind a capacity word whose last byte is `@`
+  ## (the literal flag), so every literal in a binary is preceded by one.
+  c in {'a'..'z', 'A'..'Z', '0'..'9', '.', '_', '-', '+', '~'}
+
+proc isEmbeddedPathByte(c: char): bool =
+  c == '/' or isComponentByte(c)
+
+proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
+  ## The first string in a compiled provider that names the directory it was
+  ## compiled in, or "" when it names none.
+  ##
+  ## WHY THIS IS CHECKED. A recipe-relative provider compile is shared by
+  ## every copy of a byte-identical recipe (`recipeCompileOutputDir`), which
+  ## is only sound if the binary does not depend on where it was compiled.
+  ## The DSL names its own source sites relative to the recipe, but Nim
+  ## makes `currentSourcePath()` and `instantiationInfo(fullPaths = true)`
+  ## absolute, and a recipe may bake them into the graph it evaluates:
+  ## CodeTracer's recipe computes `projectRootPath = parentDir(
+  ## currentSourcePath())` in a `const` and puts `projectRootPath / "libs/..."`
+  ## on every `nim js` command line. Served at another location, that
+  ## binary evaluated to the OTHER copy's absolute paths, so the copy's
+  ## actions compiled against the other copy's tree, and the shared binary
+  ## changed under it whenever another copy recompiled it — an action key
+  ## that moved between two builds of an unchanged tree.
+  ##
+  ## WHAT IS EXEMPT. A string `<recipeDir>/<file>.nim` (or `.nims`) naming a
+  ## source file that exists in the recipe directory: every provider carries
+  ## its main module's absolute path as compiler line information. Any other
+  ## spelling — the directory itself, a path under it that is not a source
+  ## file — is a location the provider can act on, and binds it.
+  if recipeDir.len == 0:
+    return ""
+  let dir = recipeDir.strip(leading = false, chars = {'/'})
+  if dir.len == 0:
+    return ""
+  var start = 0
+  while true:
+    let at = binaryBytes.find(dir, start)
+    if at < 0:
+      return ""
+    start = at + 1
+    # Only a whole path component: `/a/proj` must not match `/a/projX`, nor
+    # `/x/a/proj` (a longer path that merely ends in the same components).
+    if at > 0 and isComponentByte(binaryBytes[at - 1]):
+      continue
+    var stop = at + dir.len
+    if stop < binaryBytes.len and binaryBytes[stop] != '/' and
+        isEmbeddedPathByte(binaryBytes[stop]):
+      continue
+    while stop < binaryBytes.len and isEmbeddedPathByte(binaryBytes[stop]):
+      inc stop
+    let embedded = binaryBytes[at ..< stop]
+    if embedded.len > dir.len + 1:
+      let rel = embedded[dir.len + 1 .. ^1]
+      if (rel.endsWith(".nim") or rel.endsWith(".nims")) and
+          fileExists(extendedPath(dir / rel)):
+        continue
+    return embedded
+
 proc publishRecipeRelativeProviderCompile*(plan: ProviderCompilePlan;
     edgeArtifactPath, artifactPath, modulePath: string;
     workDir = getCurrentDir()): ProviderCompileArtifact =

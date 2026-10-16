@@ -9923,7 +9923,10 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
     inputs = inputs,
     # No freshness sidecar: the caller's artifact and sidecar are written by
     # the CLI from the caller's plan (`publishRecipeRelativeProviderCompile`).
-    outputs = @[edge.edgePlan.outputBinaryPath, edge.edgeArtifactPath],
+    # The verdict says whether the binary may be served to another copy of
+    # the recipe (`providerLocationEmbedding`); it travels with the binary.
+    outputs = @[edge.edgePlan.outputBinaryPath, edge.edgeArtifactPath,
+      recipeRelativeProviderVerdictPath(edge.edgeArtifactPath)],
     commandStatsId = "repro provider compile edge",
     cacheable = true,
     weakFingerprint = edge.edgePlan.providerCompileActionKey,
@@ -9940,6 +9943,19 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
       providerCompileIgnoredInputPrefixes(scratchDir)),
     relocatable = true,
     relocationAnchors = edge.anchors)
+
+proc recipeRelativeProviderLocationBound(
+    edge: RecipeRelativeProviderCompile): bool =
+  ## Whether the recipe-relative edge's binary may NOT be served to another
+  ## copy of the recipe: its verdict (`providerLocationEmbedding`) names an
+  ## embedded location. A verdict that is absent or unreadable is treated
+  ## as binding — sharing is the optimisation, and a binary nobody vouched
+  ## for is not shared.
+  let path = recipeRelativeProviderVerdictPath(edge.edgeArtifactPath)
+  try:
+    readFile(extendedPath(path)).strip() != RelocatableProviderVerdict
+  except IOError, OSError:
+    true
 
 proc runProviderCompileEdge(plan: ProviderCompilePlan;
     modulePath, interfacePath, artifactPath, helperCliPath, workDir,
@@ -9959,6 +9975,7 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
       config)
   # Every copy of the recipe shares the edge's outputs; hold them from
   # execution until this caller has its own copy.
+  var locationBound = false
   var edgeLock = acquireInterfaceArtifactLock(edge.edgeArtifactPath)
   try:
     result = runBuild(graph([recipeRelativeProviderCompileAction(edge,
@@ -9966,10 +9983,19 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
     if not result.hasFailedActions() and not config.dryRun and
         fileExists(extendedPath(edge.edgeArtifactPath)) and
         fileExists(extendedPath(edge.edgePlan.outputBinaryPath)):
-      discard publishRecipeRelativeProviderCompile(plan,
-        edge.edgeArtifactPath, artifactPath, modulePath, workDir)
+      locationBound = recipeRelativeProviderLocationBound(edge)
+      if not locationBound:
+        discard publishRecipeRelativeProviderCompile(plan,
+          edge.edgeArtifactPath, artifactPath, modulePath, workDir)
   finally:
     releaseInterfaceArtifactLock(edgeLock)
+  if locationBound:
+    # The shared binary names the directory it was compiled in, so it
+    # evaluates THAT copy's paths. This copy gets its own location-bound
+    # compile, keyed (and cached) at this location.
+    result = runBuild(graph([providerCompileBuildAction(plan, modulePath,
+      interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
+      config)
 
 var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## Per-PROCESS memo of extraction edges already materialized in this run,
@@ -13137,6 +13163,17 @@ proc runProviderCompileHelper(args: openArray[string]): int =
       (if scratchDir.len > 0: absolutePath(scratchDir) else: ""),
       useFreshnessCache = false, recipeRelative = recipeRelative,
       relocationAnchors = anchors)
+    if recipeRelative:
+      # The edge runs with its cwd at the recipe. Whether the binary it just
+      # produced may be served to another copy of the recipe is a fact about
+      # these bytes, so it is recorded beside them as a declared output.
+      let embedded = providerLocationEmbedding(
+        readFile(extendedPath(absolutePath(outputPath))), getCurrentDir())
+      let verdict =
+        if embedded.len == 0: RelocatableProviderVerdict
+        else: "location-bound: the binary names " & embedded
+      writeFile(extendedPath(recipeRelativeProviderVerdictPath(
+        absolutePath(artifactPath))), verdict & "\n")
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
@@ -77510,7 +77547,8 @@ proc tryLoadDurableSolverProviderArtifacts(
       let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
         helperCliPath, compileWorkDir, projectRootForModule(modulePath))
       let providerAction =
-        if relocated.active:
+        if relocated.active and
+            not recipeRelativeProviderLocationBound(relocated):
           recipeRelativeProviderCompileAction(relocated, modulePath,
             helperCliPath, compileWorkDir)
         else:
