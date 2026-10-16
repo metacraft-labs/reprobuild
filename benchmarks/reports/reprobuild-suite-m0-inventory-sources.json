@@ -10646,7 +10646,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_nix_store_references_scan.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 12,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
