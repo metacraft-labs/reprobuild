@@ -29,6 +29,7 @@ import repro_profile_compile
 import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
+from repro_core/source_root import publicCliImagePath
 
 # ---------------------------------------------------------------------------
 # M83 Phase D + F3: compile-then-adapt path for `system.nim` profiles.
@@ -85,7 +86,7 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
   ## not that it failed to compile.
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
-    publicCliPath: getAppFilename(),
+    publicCliPath: publicCliImagePath(),
     # Empty: `compileProfileToRbpi` resolves the sources through
     # `reprobuildRepoRoot()`, which honours `$REPROBUILD_REPO_ROOT` and the
     # installed package's `$REPROBUILD_SOURCE_ROOT` alike.
@@ -389,9 +390,10 @@ proc runInfraPlan(args: openArray[string]): int =
 # ---------------------------------------------------------------------------
 
 proc reproExePath(): string =
-  ## The `repro` binary the broker re-execs. Use the current
-  ## executable's own path.
-  getAppFilename()
+  ## The `repro` binary the broker re-execs: the running engine, by the path
+  ## that re-enters it (`publicCliImagePath`; under the portable Linux
+  ## launcher `getAppFilename()` names the glibc loader instead).
+  publicCliImagePath()
 
 proc takeInfraApplyLock(stateDir, command: string;
                         flags: InfraCliFlags): bool =

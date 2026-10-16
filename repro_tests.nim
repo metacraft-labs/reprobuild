@@ -16011,6 +16011,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_the_release_launcher_does_not_make_the_engine_self_spawn_the_loader.nim",
+    binary: "build/test-bin/t_the_release_launcher_does_not_make_the_engine_self_spawn_the_loader",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim",
     binary: "build/test-bin/t_the_resolving_launcher_execs_the_pinned_image",
     defines: @[],
