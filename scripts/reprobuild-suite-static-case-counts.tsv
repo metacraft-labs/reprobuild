@@ -236,6 +236,7 @@ libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim	nim
 libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_is_enrolled_for_conformance.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
+libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim	nim	12
@@ -413,6 +414,7 @@ libs/repro_lock_gen/tests/t_strategy_false_minimum_is_caught.nim	nim	3
 libs/repro_lock_gen/tests/t_strategy_lowest_and_highest_differ.nim	nim	6
 libs/repro_lock_gen/tests/t_strategy_lowest_vs_lowest_direct.nim	nim	6
 libs/repro_lock_gen/tests/t_strategy_without_candidates_is_reported.nim	nim	7
+libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim	nim	5
 libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim	nim	10
 libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim	nim	1
@@ -1496,6 +1498,7 @@ tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	
 tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim	nim	2
 tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim	nim	2
 tests/integration/t_lock_refresh_refuses_an_unreadable_recipe.nim	nim	2
+tests/integration/t_lock_refresh_repin_clears_a_conflict_from_a_newly_declared_producer.nim	nim	1
 tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim	nim	1
 tests/integration/t_lock_repin_after_testing_makes_the_commit_uncovered.nim	nim	1
 tests/integration/t_lock_store_backend_roundtrip_each_backend.nim	nim	1
@@ -1567,6 +1570,7 @@ tests/integration/t_no_runtime_compilation_in_tests.nim	nim	2
 tests/integration/t_old_names_read_until_retired.nim	nim	6
 tests/integration/t_only_overridden_nodes_are_rewritten.nim	nim	1
 tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1
+tests/integration/t_orphaned_lock_draft_is_swept_never_published.nim	nim	4
 tests/integration/t_output_cleanup_executor.nim	nim	10
 tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1
