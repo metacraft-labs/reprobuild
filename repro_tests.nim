@@ -8937,6 +8937,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/home-rollback/t_e2e_repro_home_rollback_restore_respects_drift.nim",
+    binary: "build/test-bin/t_e2e_repro_home_rollback_restore_respects_drift",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim",
     binary: "build/test-bin/t_e2e_repro_home_rollback_round_trip",
     defines: @[],

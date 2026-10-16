@@ -999,6 +999,7 @@ tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim	ni
 tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim	nim	1
 tests/e2e/home-resources/t_integration_prevent_destroy.nim	nim	3
 tests/e2e/home-resources/t_integration_resource_move.nim	nim	3
+tests/e2e/home-rollback/t_e2e_repro_home_rollback_restore_respects_drift.nim	nim	4
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim	nim	1
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim	nim	1
 tests/e2e/home-set-get/t_e2e_home_get_returns_the_effective_value.nim	nim	1
