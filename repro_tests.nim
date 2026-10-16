@@ -3132,6 +3132,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim",
+    binary: "build/test-bin/t_nix_lib_dir_selects_host_target_arch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim",
     binary: "build/test-bin/t_provider_link_flags_bake_no_host_rpath",
     defines: @[],
@@ -15671,6 +15680,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_source_hash_runtime_paths.nim",
     binary: "build/test-bin/t_source_hash_runtime_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_source_interface_openssl_runtime.nim",
+    binary: "build/test-bin/t_source_interface_openssl_runtime",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
