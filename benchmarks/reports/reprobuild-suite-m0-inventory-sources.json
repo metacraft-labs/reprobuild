@@ -36120,7 +36120,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_provider_compile_follows_the_recipe.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
