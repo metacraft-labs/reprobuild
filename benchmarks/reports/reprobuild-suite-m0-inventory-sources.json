@@ -35068,8 +35068,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_mutually_pinned_flake_siblings_land_through_repro_push.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 15,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
