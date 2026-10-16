@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2099,
+    "nimTestBinaries": 2102,
     "pureUnitConsolidationGroups": 61,
-    "pureUnitTests": 648,
+    "pureUnitTests": 649,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2120
+    "testEntries": 2123
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,10 +1279,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1138,
+      "integration": 1139,
       "platform/destructive": 129,
-      "pure unit": 648,
-      "unclassified": 186
+      "pure unit": 649,
+      "unclassified": 187
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2099,
+    "nimTestBinaryCount": 2102,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2120
+    "testEntryCount": 2123
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11405,6 +11405,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_lock",
+        "repro_solver"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -14680,6 +14699,25 @@
       "source": "libs/repro_lock_gen/tests/t_strategy_without_candidates_is_reported.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_targeted_repin_holds_every_unnamed_pin",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_lock_gen",
+        "repro_solver"
+      ],
+      "owner": "libs/repro_lock_gen",
+      "requiresReproBinary": false,
+      "source": "libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33916,6 +33954,25 @@
       "source": "tests/integration/t_lock_refresh_refuses_an_unreadable_recipe.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_refresh_repin_clears_a_conflict_from_a_newly_declared_producer",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_refresh_repin_clears_a_conflict_from_a_newly_declared_producer.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

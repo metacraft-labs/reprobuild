@@ -895,8 +895,33 @@ proc emitLockFileDesignations(pkg: PackageDef; site: NimNode): NimNode =
       newLit(entry.line)))
   discard site
 
+const
+  reproBin* {.strdefine.} = ""
+    ## Absolute path to the engine binary, handed in by the recipe compile.
+    ## Empty outside that compile (a plain `nim c` of a recipe), which is
+    ## exactly when the `dslDeps:` import emission must stay silent.
+  reproConsumerRoot* {.strdefine.} = ""
+    ## The consumer repo the recipe belongs to. The macro cannot derive it:
+    ## it expands in the extraction scratch directory, so `getProjectPath()`
+    ## points there rather than at the project.
+
+proc recipeIsUnderConsumerRoot(recipeFile: string): bool =
+  ## Whether ``recipeFile`` lies inside ``reproConsumerRoot``, the project the
+  ## interface compile is extracting. That compile's main module is a
+  ## generated runner that IMPORTS the recipe, so ``isMainModule`` is false in
+  ## the recipe there and cannot tell the project's own recipe from a sibling
+  ## producer's; the consumer root can. Empty outside an interface compile.
+  ## The comparison is textual (``normalizedPath``) because the VM has no
+  ## ``realpath``: a spelling mismatch reads as "not under", which only costs
+  ## the cross-repo sentence's accuracy, never a pin.
+  if reproConsumerRoot.len == 0 or recipeFile.len == 0: return false
+  let root = normalizedPath(reproConsumerRoot).replace('\\', '/')
+  let file = normalizedPath(recipeFile).replace('\\', '/')
+  file.startsWith(root.strip(leading = false, chars = {'/'}) & "/")
+
 proc emitVariantDeclarations(variants: seq[VariantDecl];
-                              pkg: PackageDef): NimNode =
+                              pkg: PackageDef;
+                              recipeFile = ""): NimNode =
   ## Spec-Implementation M1/M2d: lower the parsed ``VariantDecl`` list
   ## into Nim source code. Emits a single ``import`` of the
   ## configurables umbrella (when variants OR solver-bound dependencies
@@ -988,6 +1013,29 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
   # `nativeBuildDeps:` and `buildDeps:` is asking for exactly the two
   # instances NLF-PROP-4 asserts. Collapsing them here would silently answer
   # "one".
+  #
+  # Each edge also carries WHERE it was declared
+  # (`variants.SolverDeclarationSite`), so a lock-conflict diagnostic can say
+  # the declaring package is a cross-repo producer rather than one of the
+  # consuming project's own (`Locking-And-Solver.md` §"Targeted re-pin").
+  # `isMainModule` is resolved by the compiler in the module this expansion
+  # lands in — the recipe being evaluated is the provider's main module, and a
+  # sibling recipe reaching it is imported. An INTERFACE compile is the
+  # exception: its main module is a generated runner that imports the recipe,
+  # so there the recipe is recognised by lying under `reproConsumerRoot`
+  # instead (without this every own-package conflict a build reports from
+  # interface extraction was called a cross-repo producer's). Whether any
+  # other module is another project's recipe or a library module is decided
+  # here from the file name: every project recipe is `repro.nim` or
+  # `reprobuild.nim`, while a bundled package lives at
+  # `repro_dsl_stdlib/packages/<name>.nim`.
+  let recipeName = extractFilename(recipeFile)
+  let importedSite =
+    if recipeIsUnderConsumerRoot(recipeFile): "sdsRootRecipe"
+    elif recipeName in ["repro.nim", "reprobuild.nim"]: "sdsSiblingRecipe"
+    else: "sdsLibraryModule"
+  let siteExpr = "(when isMainModule: sdsRootRecipe else: " & importedSite &
+    ")"
   var emitted: seq[string] = @[]
   for (uses, kind) in [(pkg.toolUses, DepKindTarget),
                        (pkg.nativeBuildDeps, DepKindNative),
@@ -1005,7 +1053,8 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
         escForCode(useDef.rawConstraint) &
         ", gateVariant = " & escForCode(useDef.gateVariant) &
         ", gateValue = " & escForCode(useDef.gateValue) &
-        ", depKind = " & escForCode(kind) & ")\n"))
+        ", depKind = " & escForCode(kind) &
+        ", declarationSite = " & siteExpr & ")\n"))
   # ``finalizeVariantsAtModuleInit`` rather than ``finalizeVariants``: this
   # call sits at MODULE SCOPE, and the imports emitted above it mean one runs
   # per recipe in the transitive closure, over a registry that only grows. The
@@ -9348,16 +9397,6 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
     provisioningContributionLiteral(contribution) & ")")
 
 
-const
-  reproBin* {.strdefine.} = ""
-    ## Absolute path to the engine binary, handed in by the recipe compile.
-    ## Empty outside that compile (a plain `nim c` of a recipe), which is
-    ## exactly when the import emission below must stay silent.
-  reproConsumerRoot* {.strdefine.} = ""
-    ## The consumer repo the recipe belongs to. The macro cannot derive it:
-    ## it expands in the extraction scratch directory, so `getProjectPath()`
-    ## points there rather than at the project.
-
 proc collectDslDeps(sectionStmts: NimNode): seq[string] =
   ## Package names listed in a top-level ``dslDeps:`` block, in declaration
   ## order, deduplicated.
@@ -9641,7 +9680,8 @@ macro packageImpl*(name: untyped;
   # ``declareVariant`` template lives in
   # ``repro_dsl_stdlib/configurables/variants.nim``; the import below
   # is gated so packages without variants don't pull the stdlib in.
-  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
+  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg,
+    recipeFile = name.lineInfoObj.filename)
   # ── Named-Lock-Files NLF-M7: §4.9's compile error, §4.3's registration ──
   let lockFileEmission = emitLockFileDesignations(pkg, name)
   # ── Test-Certificates TC-9b: `enactCertificatePolicy` ─────────────

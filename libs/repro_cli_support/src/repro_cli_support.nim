@@ -77044,6 +77044,10 @@ type
     write: bool
     allowRegression: seq[string]
       ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` (refresh only)
+    repin: seq[string]
+      ## ``--repin=<package>[,<package>…]`` (refresh only): the targeted
+      ## re-pin of `Locking-And-Solver.md` §"Targeted re-pin". Empty is the
+      ## ordinary whole-lock refresh.
 
 proc parseLockVerbArgs(rest: openArray[string]; verb: string;
                        projectDir, inputsOverride, lockOverride,
@@ -77054,8 +77058,9 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
   ## [--strategy <default|lowest|highest|lowest-direct>] [--lowest]
   ## [--highest] [--registry <url>] [--write] [--json]``, plus, for
   ## ``refresh`` only, ``[--allow-pin-regression=<sibling>[,<sibling>…]]``
-  ## (see `gateRefreshedSiblingPins`). Returns 0 on success, 2 on a usage
-  ## error (diagnostic already emitted).
+  ## (see `gateRefreshedSiblingPins`) and ``[--repin=<package>[,<package>…]]``
+  ## (see `runLockGenerationVerb`). Returns 0 on success, 2 on a usage error
+  ## (diagnostic already emitted).
   ##
   ## ``--lowest`` / ``--highest`` are the spellings `Locking-And-Solver.md`
   ## §"CLI Surface" names for `repro lock solve`, and NLF-M6 ships them as
@@ -77105,6 +77110,21 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
         return 2
       for n in parsedAllow.names:
         if n notin gen.allowRegression: gen.allowRegression.add(n)
+    elif verb == "refresh" and (arg == "--repin" or
+        arg.startsWith("--repin=")):
+      # Package names, comma-separated, each once. An empty element is a
+      # usage error rather than something to skip: `--repin=` or `--repin=a,,b`
+      # is a typo, and a re-pin that quietly named fewer packages than the
+      # caller meant would fail later on a held pin with a misleading cause.
+      let raw = valueFromFlag(rest, i, "--repin")
+      for part in raw.split(','):
+        let name = part.strip()
+        if name.len == 0:
+          stderr.writeLine("repro lock " & verb & ": --repin names " &
+            "packages (--repin=<package>[,<package>…]); '" & raw &
+            "' contains an empty name")
+          return 2
+        if name notin gen.repin: gen.repin.add(name)
     elif arg.startsWith("--"):
       stderr.writeLine("repro lock " & verb & ": unknown flag " & arg)
       return 2
@@ -77142,6 +77162,21 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
 # workspace is sourced from its real provider.
 # ---------------------------------------------------------------------------
 
+const SolverDeclarationSitesSuffix = ".sites"
+  ## MUST match ``repro_dsl_stdlib/configurables/variants.SolverDeclarationSitesSuffix``
+  ## — appended to the emit path to name the declaration-site sidecar.
+
+proc parseSolverDeclarationSites(text: string): Table[string, string] =
+  ## ``<package>\t<site>`` lines (``variants.renderSolverDeclarationSites``).
+  ## A malformed line is skipped: the sites only decide whether a diagnostic
+  ## says "cross-repo producer", so a line this reader cannot use costs that
+  ## sentence and nothing else.
+  result = initTable[string, string]()
+  for line in text.splitLines():
+    let tab = line.find('\t')
+    if tab <= 0: continue
+    result[line[0 ..< tab]] = line[tab + 1 .. ^1].strip()
+
 const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## MUST match ``repro_dsl_stdlib/configurables/variants.SolverInputsEmitEnvVar``
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
@@ -77178,6 +77213,12 @@ type CompiledProviderSolverInputs = object
     ## Every ``uses:`` selector the transitive walk could not reach, with the
     ## recipe that named it. Filled by ``foldProviderSolverInputs``; the lock
     ## writer refuses when one names a develop-set sibling.
+  declarationSites: Table[string, string]
+    ## Where THIS provider's recipe registered each parent package
+    ## (``variants.SolverDeclarationSite`` spelled as text), read from the
+    ## sidecar the provider writes beside its emitted inputs. Diagnostics only
+    ## — never merged across providers, because a site is relative to the
+    ## recipe being evaluated: see ``rootDeclaresAsOwn``.
 
 type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
@@ -77553,10 +77594,16 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     let parsed = parseExplainFixture(text)
     if parsed.packages.len == 0 and parsed.variants.len == 0:
       return result
+    let sitesPath = emitPath & SolverDeclarationSitesSuffix
+    let sites =
+      if fileExists(extendedPath(sitesPath)):
+        parseSolverDeclarationSites(readFile(extendedPath(sitesPath)))
+      else: initTable[string, string]()
     return some(CompiledProviderSolverInputs(
       variants: parsed.variants,
       packages: parsed.packages,
       text: text,
+      declarationSites: sites,
       toolUses: artifact.projectInterface.toolUses,
       usesSelectors: usesSelectors,
       defaultToolProvisioning:
@@ -77765,7 +77812,8 @@ type RefreshSolverInputs = tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-    catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector]]
+    catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector];
+    rootDeclarationSites: Table[string, string]]
   ## What ``resolveRefreshSolverInputs`` answers. Named once because
   ## ``repro lock validate`` declares a variable of it.
 
@@ -77804,17 +77852,17 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
           p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-          p.unreachedSelectors)
+          p.unreachedSelectors, p.declarationSites)
       return (true, p.variants, p.packages, p.text, "provider",
         p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-        p.unreachedSelectors)
+        p.unreachedSelectors, p.declarationSites)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[], @[])
+      @[], @[], @[], @[], initTable[string, string]())
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -77834,11 +77882,13 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         # to PATH. A recipe this refresh cannot read is a failed refresh.
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
-      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[])
+      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[],
+        initTable[string, string]())
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
-  return (false, @[], @[], "", "", @[], @[], @[], @[])
+  return (false, @[], @[], "", "", @[], @[], @[], @[],
+    initTable[string, string]())
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -77846,7 +77896,8 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 entryPoint: LockGenerationEntryPoint;
                                 verb: string;
                                 request: var LockGenerationRequest;
-                                unreached: var seq[UnreachedUsesSelector]):
+                                unreached: var seq[UnreachedUsesSelector];
+                                rootSites: var Table[string, string]):
                                 int =
   ## Assemble the generation request the four CLI doors share.
   ##
@@ -77889,6 +77940,7 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
       resolved.sourceRecipeRoots, resolved.catalogRoots),
     entryPoint: entryPoint)
   unreached = resolved.unreachedSelectors
+  rootSites = resolved.rootDeclarationSites
   return 0
 
 const IncompleteSolveExitCode = 5
@@ -78504,6 +78556,21 @@ proc runCertificatesPolicyCommand*(args: openArray[string]): int =
     echo "branch " & branchText & ": " & applied.reason
   0
 
+proc rootDeclaresAsOwn(rootSites: Table[string, string];
+                       pkg: string): bool =
+  ## Whether the recipe a lock is written for declares ``pkg`` as one of its
+  ## own packages, from the declaration sites its provider reported
+  ## (``variants.SolverDeclarationSite``). A package the root provider
+  ## registered from an imported sibling RECIPE, or one the root provider does
+  ## not have at all (it came from a sibling's provider through the fold), is
+  ## a cross-repo producer's. With no sites to go on (a provider compiled
+  ## before they were reported, or the ``repro.solver`` sidecar path) every
+  ## package counts as the project's own: the diagnostic then makes no claim
+  ## rather than a wrong one.
+  if rootSites.len == 0: return true
+  if pkg notin rootSites: return false
+  rootSites[pkg] != "sdsSiblingRecipe"
+
 proc runLockGenerationVerb(rest: openArray[string]; verb: string;
                            entryPoint: LockGenerationEntryPoint;
                            writeByDefault: bool): int =
@@ -78522,11 +78589,49 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
+  # `--repin` (Locking-And-Solver.md §"Targeted re-pin"): "It requires a
+  # committed lock (there is nothing to hold otherwise) ... either missing is a
+  # usage error (exit 2) that writes nothing." Checked BEFORE the provider
+  # probe, which is the expensive part, so a usage error costs nothing.
+  var committedForRepin: LockedDependencies
+  if gen.repin.len > 0:
+    if not fileExists(extendedPath(lockP)):
+      stderr.writeLine("repro lock " & verb & ": --repin holds every pin " &
+        "the committed lock records and re-solves only the named packages, " &
+        "but there is no committed lock at " & lockP & " to hold; run `repro " &
+        "lock " & verb & "` without --repin to write one (nothing was " &
+        "written)")
+      return 2
+    try:
+      committedForRepin = parseLockedDependencies(
+        readFile(extendedPath(lockP)))
+    except CatchableError as e:
+      stderr.writeLine("repro lock " & verb & ": --repin cannot read the " &
+        "committed lock " & lockP & " whose pins it would hold: " & e.msg &
+        " (nothing was written)")
+      return 2
   var request: LockGenerationRequest
   var unreached: seq[UnreachedUsesSelector]
+  var rootSites: Table[string, string]
   let prc = buildLockGenerationRequest(projectDir, inputsOverride,
-    platformOverride, gen, entryPoint, verb, request, unreached)
+    platformOverride, gen, entryPoint, verb, request, unreached, rootSites)
   if prc != 0: return prc
+  if gen.repin.len > 0:
+    # "...and a package name the solve actually has". Judged against the
+    # solve's own declarations, not the lock's: a package the lock records
+    # but the recipe no longer declares has nothing to be re-solved against.
+    var known: seq[string]
+    for decl in request.packages: known.add(decl.name)
+    var unknown: seq[string]
+    for name in gen.repin:
+      if name notin known: unknown.add(name)
+    if unknown.len > 0:
+      var listing = known
+      listing.sort()
+      stderr.writeLine("repro lock " & verb & ": --repin names " &
+        "package(s) the solve does not have: '" & unknown.join("', '") &
+        "' (it has: " & listing.join(", ") & "); nothing was written")
+      return 2
   let writeTo = if writeByDefault or gen.write: lockP else: ""
   # A solve that could not read a develop-set sibling's recipe is a PARTIAL
   # solve: a lock written from it is one the next build in a complete
@@ -78582,12 +78687,28 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     for r in gate.allowed:
       stderr.writeLine("repro lock " & verb & ": " &
         pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
+  if gen.repin.len > 0:
+    # Every committed version and variant value except the named packages'
+    # becomes a hard pin. A held pin that contradicts a declared range is
+    # that pin's `ELockConflict`, reported and not widened. Done after the
+    # incomplete-solve refusal and the pin-regression gate, which apply to a
+    # re-pin exactly as to a full refresh and must not be masked by it.
+    let crossRepo = proc (pkg: string): bool =
+      not rootDeclaresAsOwn(rootSites, pkg)
+    try:
+      holdCommittedPins(request, committedForRepin, gen.repin, lockP,
+        crossRepo)
+    except ELockConflict as e:
+      stderr.writeLine("repro lock " & verb & ": " & e.msg &
+        " [ELockConflict] (nothing was written)")
+      return 1
   # Test-Certificates TC-9b: a writing door records the certificate policy the
   # recipe enacts as the lock's `[certificate_policy]` snapshot, naming the
   # package from the dependencies this lock pins. A policy that cannot be
   # read refuses the write: a lock written without it would silently drop a
-  # requirement that is still meant.
-  if writeTo.len > 0:
+  # requirement that is still meant. A targeted re-pin CARRIES the committed
+  # snapshot forward instead (`runLockRepin`), so it does not evaluate one.
+  if writeTo.len > 0 and gen.repin.len == 0:
     try:
       request.certificatePolicySection =
         evaluatedCertificatePolicySection(projectDir, request.extraDeps)
@@ -78602,9 +78723,12 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
       try: removeDir(extendedPath(request.workDir))
       except CatchableError: discard
     let generated =
-      case entryPoint
-      of lgeLockRefresh: runLockRefresh(request, writeTo)
-      else: runLockSolve(request, writeTo)
+      if gen.repin.len > 0:
+        runLockRepin(request, committedForRepin, gen.repin, writeTo)
+      else:
+        case entryPoint
+        of lgeLockRefresh: runLockRefresh(request, writeTo)
+        else: runLockSolve(request, writeTo)
     return reportGeneratedLock(verb, writeTo, generated)
   except EUnsatisfiable as e:
     stderr.writeLine("repro lock " & verb & ": solver UNSAT — cannot pin a " &
@@ -78645,8 +78769,9 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
   var gen = LockVerbOptions(strategy: strategy, registries: @[], write: false)
   var request: LockGenerationRequest
   var unreached: seq[UnreachedUsesSelector]
+  var rootSites: Table[string, string]
   let prc = buildLockGenerationRequest(projectDir, "", "", gen,
-    lgeStrategyHiddenLock, "build --strategy", request, unreached)
+    lgeStrategyHiddenLock, "build --strategy", request, unreached, rootSites)
   if prc != 0: return prc
   # The hidden lock is never committed, so an incomplete solve is a warning
   # here rather than a refusal — but it is said: a build pinned from a solve
