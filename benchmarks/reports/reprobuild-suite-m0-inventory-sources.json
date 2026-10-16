@@ -19669,7 +19669,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
