@@ -69,7 +69,9 @@
 ## committed locks (Workspace-And-Develop-Mode.md §"Develop overrides that wait
 ## on the push"); any other unpublished override still refuses. And
 ## `repro push` from a linked worktree outside the declared path used to widen
-## to the whole workspace and never push the worktree (CLI/push.md §"Scope").
+## to the whole workspace and never push the worktree (CLI/push.md §"Scope");
+## from a worktree outside the workspace directory it lands through the gate,
+## which follows the git common directory back to the workspace.
 ##
 ## ## Test-double policy: NO mocks, doubles or fakes
 ##
@@ -816,28 +818,49 @@ suite "develop overrides and worktrees land through repro push":
     # The unrelated repo is outside the closure and must not be published.
     check fx.remoteHead("extra") != extraHead
 
-  test "repro push refuses a worktree outside the workspace before pushing":
-    # Its own pre-push hook resolves no workspace from there and gates nothing,
-    # so publishing workspace state from it would bypass the gate.
+  test "repro push from a worktree outside the workspace lands it through its gate":
+    # A linked worktree parked OUTSIDE the workspace directory. Its managed
+    # pre-push hook finds the workspace by following the worktree's git common
+    # directory back to `lib` (`enclosingWorkspaceRoot`, reprobuild 37946561),
+    # so the gate ENFORCES there, and `repro push` publishes the closure as it
+    # does from any other checkout of `lib` (CLI/push.md §"Scope"). Both halves
+    # are asserted: without the first, a push that lands could be one nothing
+    # gated, which is the state the push-side stop existed to prevent.
     let fx = setup("outside-worktree")
     defer: fx.release()
     let coreHead = fx.commitFile(fx.dir("core"), "work.txt", "core\n",
       "core work")
     let wt = fx.scratch / "lib-outside"
     discard fx.gitIn(fx.dir("lib"), "worktree add -q -b outside " & q(wt))
-    discard fx.commitFile(wt, "work.txt", "lib outside\n", "lib: outside")
+    let wtHead = fx.commitFile(wt, "work.txt", "lib outside\n", "lib: outside")
     let extraHead = fx.commitFile(fx.dir("extra"), "unrelated.txt", "x\n",
       "extra: unrelated unpublished work")
     fx.installHooks()
+    # 1. The hook gates the outside worktree: `lib` depends on `core`, whose
+    #    HEAD is unpublished, so a raw push from there is refused by the gate
+    #    rather than no-oped as "not a workspace".
+    let raw = run(q(fx.git) & " -C " & q(wt) & " push origin HEAD:outside")
+    checkpoint("raw push output:\n" & raw.output)
+    check raw.code != 0
+    check not raw.output.contains("not a workspace")
+    # The refusal is the gate's own verdict on the closure, not some other
+    # failure of the push: the gate ran, and it named `core` as unpublished.
+    check raw.output.contains("mode=pre-push")
+    check raw.output.contains("core: unpublished")
+    check run(q(fx.git) & " -C " & q(fx.bare("lib")) &
+      " rev-parse --verify -q refs/heads/outside").code != 0
+    # 2. `repro push` publishes the closure in order, the worktree's own branch
+    #    included, and nothing outside it.
     let pushed = runShell(shellCommand(@[fx.repro, "push", "--no-certify",
       "--write-report", "--workspace-root=" & fx.workspace,
       "--current-repo=" & wt]), cwd = wt)
     checkpoint("repro push output:\n" & pushed.output)
-    check pushed.code == 2
-    check fx.remoteHead("core") != coreHead
-    check fx.remoteHead("extra") != extraHead
+    check pushed.code == 0
+    check fx.pushReport().orderOf() == @["core", "lib"]
+    check fx.remoteHead("core") == coreHead
     check run(q(fx.git) & " -C " & q(fx.bare("lib")) &
-      " rev-parse --verify -q refs/heads/outside").code != 0
+      " rev-parse --verify -q refs/heads/outside").output.strip() == wtHead
+    check fx.remoteHead("extra") != extraHead
 
   test "an override the pushed repo's flake.lock pins at its unpublished HEAD still refuses":
     # `core` and `other` are both unpublished overrides, so the deferral's

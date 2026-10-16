@@ -67156,23 +67156,31 @@ proc executePush(args: PushArgs): PushReport =
     if pushedRepoName.len == 0 and discoverGitWorktree(identity, abs).ok:
       let match = resolveRepoWorktreeMatch(identity, args.workspaceRoot,
         resolved.repos, abs)
-      if match.found and not sameFilesystemPath(
-          enclosingWorkspaceRoot(match.worktree.worktreeRoot),
+      let hookWorkspace =
+        if match.found: enclosingWorkspaceRoot(match.worktree.worktreeRoot)
+        else: ""
+      if match.found and not sameFilesystemPath(hookWorkspace,
           args.workspaceRoot):
-        # The managed hook finds its workspace by walking up from the pushed
-        # checkout. From a worktree OUTSIDE this workspace that walk finds none
-        # and the hook does not gate the push at all ("not a workspace;
-        # nothing to enforce") — so it writes no lock record, and this command
-        # would be publishing workspace state its own gate never saw. Stop
-        # before any push instead of producing a half-published state.
+        # The managed hook resolves its workspace with this same
+        # ``enclosingWorkspaceRoot``, which follows a linked worktree's git
+        # common directory back to the repo it belongs to — so a worktree
+        # parked anywhere outside the workspace directory still resolves THIS
+        # workspace and is gated like any other checkout of the repo. Only when
+        # the hook would resolve a DIFFERENT workspace (or none) does it gate
+        # something other than what this command is publishing; then this
+        # command would be publishing workspace state its own gate never saw,
+        # so it stops before any push instead of producing a half-published
+        # state.
         result.stoppedRepo = resolved.repos[match.repoIndex].name
         result.stoppedStage = "current-repo-identity"
-        result.retryCommand = "push from a worktree inside " &
-          args.workspaceRoot & " (for example one made by 'repro branch'), " &
-          "where the managed pre-push gate sees this workspace"
+        result.retryCommand = "push from a checkout whose managed pre-push " &
+          "gate resolves " & args.workspaceRoot & " (for example a worktree " &
+          "made by 'repro branch' inside it)"
         result.lockDiagnostic = match.worktree.worktreeRoot & " is a linked " &
           "worktree of '" & result.stoppedRepo & "' outside the workspace " &
-          args.workspaceRoot & "; its pre-push hook resolves no workspace"
+          args.workspaceRoot & "; its pre-push hook resolves " &
+          (if hookWorkspace.len == 0: "no workspace"
+           else: "the workspace " & hookWorkspace & " instead")
         result.exitCode = 2
         return
       if match.found:
