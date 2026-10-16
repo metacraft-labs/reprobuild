@@ -3177,6 +3177,35 @@ proc realizeBuiltinPackage*(store: var Store;
           resolution.appBundle, stagingDir, downloadDir / "unpack")
         discard verifyAppBundle(bundle, appBundleExpectationOf(resolution),
           appTrust)
+        # The bundle's declared commands (``extraExecutable``) are exported
+        # from the placed copy; refuse one that is absent, resolves outside
+        # the bundle (a symlink) or is not executable, before publishing.
+        # The generic `binRelpath` check below only tests presence.
+        let realBundle = expandFilename(bundle)
+        for rel in resolution.binRelpath[1 .. ^1]:
+          let p = stagingDir / rel
+          var why = ""
+          if not fileExists(p):
+            why = "is not in the bundle"
+          else:
+            let real = expandFilename(p)
+            if not real.startsWith(realBundle & "/"):
+              why = "resolves outside the bundle (" & real & ")"
+            else:
+              let perms = getFilePermissions(real)
+              if not (fpUserExec in perms or fpGroupExec in perms or
+                  fpOthersExec in perms):
+                why = "is not executable"
+          if why.len > 0:
+            var e = newException(EBuiltinBinaryMissing,
+              "builtin adapter: realized prefix for '" & packageId &
+              "' v" & version & " is missing declared binary '" & rel &
+              "': the application's declared command " & why)
+            e.step = 7
+            e.stepName = "realize"
+            e.packageId = packageId
+            e.missingPath = rel
+            raise e
       of imPkgInstall:
         var e = newException(EBuiltinInstallMethodUnsupported,
           "builtin adapter: package '" & packageId & "' is an installer " &

@@ -200,6 +200,7 @@ libs/repro_core/tests/t_source_root_installed_layout.nim	nim	9
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
 libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	28
+libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim	nim	4
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
@@ -948,7 +949,7 @@ tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim	nim	1
 tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	nim	6
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
-tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	5
+tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	8
 tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
 tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim	nim	2
 tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim	nim	4
@@ -1153,7 +1154,9 @@ tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	nim	1
 tests/integration/t_a_dirty_sibling_outside_the_closure_does_not_block.nim	nim	1
 tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	nim	5
 tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim	nim	1
+tests/integration/t_a_hand_run_gate_judges_the_repo_the_hook_judges.nim	nim	1
 tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim	nim	1
+tests/integration/t_a_mixed_direction_refusal_clears_in_one_pass.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim	nim	1
 tests/integration/t_a_pinned_nim_is_provisioned_from_a_cold_store.nim	nim	3

@@ -474,6 +474,31 @@ suite "GM4b: tarball archive detail fields":
       "      executablePath = \"bin/x\",\n")
     check outside.exitCode != 0
     check "must start with 'X.app/'" in outside.output
+    # A command the application exports is a path inside its bundle
+    # (Store-And-Installation-Layout.md § macOS Application Bundles,
+    # "Command line"), refused at authoring time when it is not.
+    # (A `..` component is refused earlier, by the rule every
+    # extraExecutable follows.)
+    for badCommand in ["bin/x", "Y.app/Contents/MacOS/x", "X.app",
+        "X.app/./x"]:
+      let commandOutside = compileRecord(
+        "      appBundle = \"X.app\",\n" &
+        "      bundleId = \"dev.x\",\n" &
+        "      teamId = \"ABCDE12345\",\n" &
+        "      executablePath = \"X.app/Contents/MacOS/X\",\n" &
+        "      extraExecutable = \"" & badCommand & "\",\n")
+      checkpoint badCommand & ": " & commandOutside.output
+      check commandOutside.exitCode != 0
+      check "extraExecutable names a command inside the bundle" in
+        commandOutside.output
+    let commandInside = compileRecord(
+      "      appBundle = \"X.app\",\n" &
+      "      bundleId = \"dev.x\",\n" &
+      "      teamId = \"ABCDE12345\",\n" &
+      "      executablePath = \"X.app/Contents/MacOS/X\",\n" &
+      "      extraExecutable = \"X.app/Contents/Resources/bin/x\",\n")
+    checkpoint commandInside.output
+    check commandInside.exitCode == 0
     # The archive is attached or expanded before any signature check, so
     # only a SHA-256 pin is accepted for it.
     let weakDigest = compileRecord(

@@ -1431,6 +1431,26 @@ proc archiveRealizationOf*(packageId: string;
       "': the app-bundle realization " & record.url & " must declare " &
       "appBundle, bundleId, teamId and version (the bundle's " &
       "CFBundleShortVersionString); realization verifies all four")
+  if result.installMethod == imAppBundle:
+    # The commands an application declares (``extraExecutable``) are
+    # exported from the PLACED bundle (Store-And-Installation-Layout.md
+    # § macOS Application Bundles, "Command line"), so each must name a
+    # file inside the bundle, the prefix's only content. The realizer then
+    # refuses one that is absent or not executable after extraction.
+    let leaf = result.appBundle.replace('\\', '/').split('/')[^1]
+    for rel in detail.extraExecutables:
+      let parts = rel.replace('\\', '/').split('/')
+      var inside = parts.len >= 2 and parts[0] == leaf
+      for part in parts:
+        if part.len == 0 or part == "." or part == "..":
+          inside = false
+      if not inside:
+        raise newException(ValueError, "package '" & packageId &
+          "': the app-bundle realization " & record.url & " declares " &
+          "extraExecutable " & rel.escape & "; a command of an application " &
+          "is a path inside its bundle, relative to the realized prefix: " &
+          "it must start with '" & leaf & "/' and contain no '.' or '..' " &
+          "component")
   # ``executablePath`` is a TARGET-platform path (``bin\gh.exe`` for a
   # Windows record); split on both separators so the leaf is right whichever
   # platform the resolution runs on.
