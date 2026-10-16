@@ -13896,6 +13896,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_pre_commit_hook_keeps_unstaged_work_when_interrupted.nim",
+    binary: "build/test-bin/t_pre_commit_hook_keeps_unstaged_work_when_interrupted",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_pre_migration_certificate_is_rejected_with_a_reissue_remedy.nim",
     binary: "build/test-bin/t_pre_migration_certificate_is_rejected_with_a_reissue_remedy",
     defines: @[],

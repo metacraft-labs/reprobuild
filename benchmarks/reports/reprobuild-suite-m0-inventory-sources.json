@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 31,
-    "nimTestBinaries": 2058,
+    "nimTestBinaries": 2059,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 646,
     "staticallyDetectedRuntimeCompilerFlowTests": 119,
-    "testEntries": 2076
+    "testEntries": 2077
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1277,7 +1277,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1104,
+      "integration": 1105,
       "platform/destructive": 126,
       "pure unit": 646,
       "unclassified": 183
@@ -1470,9 +1470,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2058,
+    "nimTestBinaryCount": 2059,
     "pythonTestFileCount": 18,
-    "testEntryCount": 2076
+    "testEntryCount": 2077
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -34859,6 +34859,23 @@
       "source": "tests/integration/t_pre_commit_gate_stands_down_during_replay.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_commit_hook_keeps_unstaged_work_when_interrupted",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_commit_hook_keeps_unstaged_work_when_interrupted.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
