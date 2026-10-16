@@ -81,6 +81,7 @@ package gm7pathapp:
       teamId = "RPBTEST666",
       version = "1.0",
       executablePath = "PathApp.app/Contents/MacOS/PathApp",
+      extraExecutable = "PathApp.app/Contents/Resources/bin/gm7pathapp-bin",
       packageId = "gm7pathapp@1.0",
       cpu = "any",
       os = "macos",

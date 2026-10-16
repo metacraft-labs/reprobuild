@@ -248,7 +248,23 @@ it and every evaluated package of a declaring host has a `concern`:
 - any other package is mapped as without a declaration.
 
 So a host that gives Reprobuild its applications and Nix its packages (or
-the reverse) needs no application list on the Nix side. In IFD mode, pass
+the reverse) needs no application list on the Nix side.
+
+The commands of what Reprobuild applies there -- including the ones an
+application carries, such as `code` or `utmctl` -- are launchers in
+Reprobuild's profile bin directory. When the host gives Reprobuild
+`packages` or `applications` and leaves `environment` to Nix, the evaluation
+names that directory (`evaluation.profileBin`), and the `environment`
+category puts it **first** on `home.sessionPath`
+(`reprobuild.intent.profileBin` shows the resolved path). Outside the
+module, resolve it with `reprobuild.lib.profileBinPath { evaluation;
+homeDirectory = config.home.homeDirectory; xdgStateHome =
+config.xdg.stateHome; }`, which returns null when there is nothing to add.
+If your shell start-up prepends another directory after Home Manager's
+session variables -- `eval "$(brew shellenv)"`, `path_helper` -- prepend
+this one again after it, or a stale copy of a command (a Homebrew cask's
+link) wins. A host that moves Reprobuild's state directory with
+`$REPRO_HOME_STATE_DIR` adds `<that>/current/bin` itself. In IFD mode, pass
 `reprobuild.intent.packagesCatalog` (a `reprobuild-packages` checkout): the
 sandboxed export cannot classify packages that catalog defines without it,
 and refuses rather than guess.

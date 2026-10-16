@@ -402,6 +402,19 @@ proc runApplyInline*(commandName: string;
           if opts.host.len > 0: opts.host else: currentHost())
       echo "apply: not applied: " & $outcome.notAppliedCount &
         " operation(s) of other concerns"
+    # Store-And-Installation-Layout.md § macOS Application Bundles: a
+    # running application is not replaced (deferred to the next apply), and
+    # one that updated itself past the declared version is kept.
+    if outcome.deferred.len > 0:
+      echo "apply: deferred " & $outcome.deferred.len & " change(s) to " &
+        "objects in use (the next apply makes them):"
+      for d in outcome.deferred:
+        echo "  defer    " & d
+    if outcome.keptVendorUpdates.len > 0:
+      echo "apply: kept " & $outcome.keptVendorUpdates.len & " vendor " &
+        "update(s) newer than the declared version:"
+      for k in outcome.keptVendorUpdates:
+        echo "  keep     " & k
     if outcome.released.len > 0:
       echo "apply: released " & $outcome.released.len & " item(s) of " &
         "concerns no longer applied (left in place, no longer managed):"

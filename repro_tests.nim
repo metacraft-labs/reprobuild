@@ -2997,6 +2997,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim",
+    binary: "build/test-bin/t_macos_app_vendor_updates",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_home_resources/tests/t_registry_root_override.nim",
     binary: "build/test-bin/t_registry_root_override",
     defines: @[],
@@ -8498,6 +8507,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim",
     binary: "build/test-bin/t_e2e_installer_app_install_and_rollback",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim",
+    binary: "build/test-bin/t_e2e_app_vendor_update_and_running_app",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

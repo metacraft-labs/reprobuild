@@ -237,12 +237,27 @@ proc concernsDocument*(): JsonNode =
   ## data. Package references are classified per target system by
   ## `packageClassificationDocument` (`concerns.packages`): their concern
   ## depends on the realization the planner selects there.
+  ##
+  ## `profileBin` is, per target system, where the launchers of the active
+  ## generation are reached (`defaultProfileBinLocation`): a base directory
+  ## (`home`, `xdgStateHome`, `localAppData`) and a `/`-separated path below
+  ## it. A host that gives Reprobuild the `packages` or `applications`
+  ## concern but leaves `environment` to Nix needs that directory on `PATH`,
+  ## and only the Nix side writes the shell environment there
+  ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply, "The
+  ## profile's commands").
   var kinds = newJObject()
   for (kind, concern) in resourceKindConcerns():
     kinds[kind] = %($concern)
+  var profileBin = newJObject()
+  for t in ProfileTargetPlatforms:
+    let location = defaultProfileBinLocation(t.platform)
+    profileBin[t.system] = %*{"base": $location.base,
+      "path": location.components.join("/")}
   %*{"names": stringArray(homeConcernNames()),
     "resourceKinds": kinds,
-    "configOverrides": $ConfigOverrideConcern}
+    "configOverrides": $ConfigOverrideConcern,
+    "profileBin": profileBin}
 
 proc sortedNames(s: HashSet[string]): JsonNode =
   var items: seq[string]
@@ -718,3 +733,21 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
       p["concern"] = %(if key in applications: $hcApplications
                        else: $hcPackages)
       p["resolved"] = %(key notin unresolved)
+    # The profile's commands: a host whose launchers Reprobuild writes
+    # (`packages` / `applications`) while Nix writes its shell environment
+    # gets the directory that reaches them, for Nix to put on `PATH`
+    # (§Concern-scoped apply, "The profile's commands"). Read from the
+    # document, as the Nix library's `evaluate` reads it.
+    if (hcPackages in applied.concerns or
+        hcApplications in applied.concerns) and
+        hcEnvironment notin applied.concerns:
+      let location = docAt(doc, ["concerns", "profileBin", system])
+      if location.isNil or location.kind != JObject or
+          location{"base"}.isNil or location{"path"}.isNil:
+        raise newException(ValueError, "host " & selectedHost & " leaves " &
+          "`environment` to Nix while Reprobuild applies its launchers, but " &
+          "the document does not say where they are for " & system &
+          " (concerns.profileBin." & system & "); it was produced by a " &
+          "repro that does not publish it -- re-export")
+      result["profileBin"] = %*{"base": location["base"].getStr,
+        "path": location["path"].getStr}

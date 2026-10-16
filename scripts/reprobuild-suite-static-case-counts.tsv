@@ -339,6 +339,7 @@ libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	34
 libs/repro_home_resources/tests/t_concern_classification.nim	nim	5
 libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
 libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
+libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	5
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	163
@@ -951,6 +952,7 @@ tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
 tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	8
 tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
 tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim	nim	2
+tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim	nim	3
 tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim	nim	4
 tests/e2e/gm7/t_e2e_hosts_applies_declaration_cli.nim	nim	1
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2

@@ -194,6 +194,16 @@ type
       ## apply does not own, released rather than removed: left in place
       ## and not recorded by the new generation. One `<kind> <name>` line
       ## each.
+    deferred*: seq[string]
+      ## Resources whose update, replace or destroy was deferred because
+      ## the live object is in use -- a placed application that is running
+      ## (Store-And-Installation-Layout.md § macOS Application Bundles,
+      ## "Running applications"). One `<address> <why>` line each; the
+      ## next apply does them.
+    keptVendorUpdates*: seq[string]
+      ## Placed applications that updated themselves to a newer build of
+      ## their vendor than the profile declares, kept rather than
+      ## downgraded ("Vendor updates"). One `<address> <version>` line each.
 
   ApplyOptions* = object
     profileDir*: string                ## "" → resolveProfileDir()
@@ -1564,6 +1574,26 @@ proc parseTwoPartIdentity(resourceId, prefix: string): tuple[a, b: string] =
 # No-op verification
 # ---------------------------------------------------------------------------
 
+const DeferredPayloadMark = "+deferred"
+  ## Appended to a recorded binding's `payloadKind` when the apply deferred
+  ## a change to it because the live object was in use (a running
+  ## application). The bytes and digests are the live object's, as for any
+  ## no-op; the mark only stops the next apply's no-op short-circuit, which
+  ## would otherwise find the record matching the live object and never
+  ## make the change the profile asks for.
+
+proc isDeferredMarked(payloadKind: string): bool =
+  payloadKind.endsWith(DeferredPayloadMark)
+
+proc withoutDeferredMark(payloadKind: string): string =
+  if isDeferredMarked(payloadKind):
+    payloadKind[0 ..< payloadKind.len - DeferredPayloadMark.len]
+  else:
+    payloadKind
+
+proc withDeferredMark(payloadKind: string): string =
+  withoutDeferredMark(payloadKind) & DeferredPayloadMark
+
 proc verifyManifestDigests(stateDir: string; store: var Store;
                            activeGenIdHex, homeDir: string;
                            outVerified: var int): bool =
@@ -1746,8 +1776,19 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
               break
           live = observeHomebrewCask(caskName, encodedVersion)
       of rkMacosAppBundle:
-        # GM4c: the placed bundle still carries the recorded identity.
+        # GM4c: the placed bundle still carries the recorded identity --
+        # or its vendor's own update of it, which is not drift
+        # (Store-And-Installation-Layout.md § macOS Application Bundles,
+        # "Vendor updates"). A record whose change was deferred (the
+        # application was running) is owed a change: never a no-op.
+        if isDeferredMarked(rb.payloadKind):
+          return false
         live = observeAppBundleAt(rb.realWorldIdentity)
+        if live.present and live.digest != recordedDigest and
+            isAcceptedVendorUpdate(rb.payloadBytes, live.rawBytes,
+              rb.realWorldIdentity):
+          inc outVerified
+          continue
     except CatchableError:
       return false
     if not live.present:
@@ -2418,8 +2459,20 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
           inc result.driftCount
       elif present:
         item.action = piaUpdate
+        let placedVersion = describeIdentityVersion(
+          observeAppBundleAt(target).rawBytes)
         item.detail = "placed by the active generation (" & address &
-          "); re-placed when the realized bundle differs"
+          (if placedVersion.len > 0: ", " & placedVersion & " there now"
+           else: "") &
+          "); re-placed when the realized bundle differs and is newer " &
+          "than a vendor update of it"
+        let pids = processesRunningFrom(target)
+        if pids.len > 0:
+          var ids: seq[string]
+          for pid in pids:
+            ids.add $pid
+          item.detail.add("; running (pid " & ids.join(", ") &
+            "): a replacement is deferred until it quits")
       else:
         item.action = piaCreate
         item.detail = "would place " & pp.packageId & "'s verified bundle (" &
@@ -3355,7 +3408,11 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           raiseIfDriftBlocked(action)
         of rakNoOp:
           # Cache-hit: re-record the previous binding's bytes so
-          # rollback diffs cleanly.
+          # rollback diffs cleanly. A deferred change (the object is in
+          # use) and a kept vendor update are no-ops too: the live object
+          # is still the recorded one (or its vendor's update of it), so
+          # the record stays. A deferred record is marked, so the next
+          # apply cannot short-circuit past the change it still owes.
           if action.address in recordedBindings:
             let prev = recordedBindings[action.address]
             var rb = ResourceBinding(
@@ -3367,9 +3424,17 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               hasPreWriteDigest: prev.hasPreWriteDigest,
               preWriteDigest: prev.preWriteDigest,
               postWriteDigest: prev.postWriteDigest,
-              payloadKind: prev.payloadKind,
+              payloadKind:
+                if action.deferred: withDeferredMark(prev.payloadKind)
+                else: withoutDeferredMark(prev.payloadKind),
               payloadBytes: prev.payloadBytes)
             appliedResourceBindings.add(rb)
+            if action.deferred:
+              result.deferred.add(action.address & " " & action.summary)
+            if action.keptVendorUpdate:
+              let observed = observeRecorded(action.address, prev)
+              result.keptVendorUpdates.add(action.address & " " &
+                describeIdentityVersion(observed.rawBytes))
         of rakCreate, rakUpdate, rakReplace:
           let desired = desiredResources.resources[action.address]
           let identity = realWorldIdentity(desired)

@@ -183,6 +183,32 @@
       "macos.appBundle": "applications"
     },
     "configOverrides": "files",
+    "profileBin": {
+      "x86_64-linux": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      },
+      "aarch64-linux": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      },
+      "x86_64-darwin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      },
+      "aarch64-darwin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      },
+      "x86_64-windows": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      },
+      "aarch64-windows": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      }
+    },
     "packages": {
       "x86_64-linux": {
         "applications": [],
@@ -246,10 +272,10 @@
   },
   "provenance": {
     "repro": {
-      "version": "0.2.5",
-      "sourceRevision": "13d9fac647c126d0f4357a72161bb8f468c3dc0d-dirty"
+      "version": "0.2.6",
+      "sourceRevision": "8c08316b32f66afb6cd30c98cf29fc227cf11a80-dirty"
     },
-    "hostSource": "flag",
+    "hostSource": "env",
     "profile": {
       "root": "home.nim",
       "digest": "3a55c86084ad97b103886f9890257a8b64373499b2b9484a35dc381b1b4a82c4",

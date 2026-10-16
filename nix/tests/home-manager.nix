@@ -484,7 +484,40 @@ let
     && lib.any (w: lib.hasInfix "category `environment` is enabled" w && lib.hasInfix "both sides apply" w) both.warnings
     && !(off.home.file ? ".config/gm7/app.conf");
 
+  # The profile's commands (§Concern-scoped apply): server gives Reprobuild
+  # the packages (whose launchers it writes) and Nix the environment, so the
+  # environment category puts Reprobuild's profile bin directory -- the
+  # location the export publishes for this system, resolved against the
+  # user's directories -- FIRST on home.sessionPath. m1 gives Reprobuild the
+  # environment too, home-pc declares nothing: no directory. Switching the
+  # environment category off leaves it off PATH with the rest of the
+  # category.
+  concernsProfileBinOk =
+    let
+      expected =
+        if isDarwin then
+          "/Users/gm7/Library/Application Support/repro/home/current/bin"
+        else
+          "/home/gm7/.local/state/repro/home/current/bin";
+      movedState = concernsConfig "server" { xdg.stateHome = "/srv/gm7-state"; };
+      envOff = concernsConfig "server" { reprobuild.intent.environment.enable = false; };
+    in
+    concernsServer.reprobuild.intent.evaluation.profileBin.base == (if isDarwin then "home" else "xdgStateHome")
+    && concernsServer.reprobuild.intent.profileBin == expected
+    && lib.head concernsServer.home.sessionPath == expected
+    && concernsM1.reprobuild.intent.profileBin == null
+    && !(concernsM1.reprobuild.intent.evaluation ? profileBin)
+    && !(lib.elem expected concernsM1.home.sessionPath)
+    && concernsHomePc.reprobuild.intent.profileBin == null
+    # The base is honoured: on Linux the directory follows xdg.stateHome, on
+    # macOS it does not.
+    && movedState.reprobuild.intent.profileBin == (
+      if isDarwin then expected else "/srv/gm7-state/repro/home/current/bin"
+    )
+    && !(lib.elem expected envOff.home.sessionPath);
+
   results = {
+    concerns-profile-bin = concernsProfileBinOk;
     concerns-complement-defaults = concernsOk;
     concerns-package-split = concernsPackagesOk;
     concerns-overridable = concernsOverrideOk;

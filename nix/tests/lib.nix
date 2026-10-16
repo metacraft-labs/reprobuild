@@ -561,8 +561,72 @@ let
       ).reason
     );
 
+  # The profile's commands (Gradual-Nix-To-Reprobuild-Migration.md
+  # §Concern-scoped apply): `profileBinPath` resolves the location the export
+  # publishes for a host that leaves `environment` to Nix while Reprobuild
+  # writes launchers; an export without that row is refused for such a host
+  # rather than leaving the commands off PATH unnoticed.
+  concernsDoc = fromJSON (readFile (intentRoot + "/concerns/export.json"));
+  serverOn = system: reprobuildLib.evaluateExport concernsDoc system "server";
+  profileBinTests =
+    expectTrue "profileBinPath: macOS, under the home directory" (
+      reprobuildLib.profileBinPath {
+        evaluation = serverOn "aarch64-darwin";
+        homeDirectory = "/Users/u";
+      } == "/Users/u/Library/Application Support/repro/home/current/bin"
+    )
+    ++ expectTrue "profileBinPath: Linux, under the XDG state directory (default and moved)" (
+      reprobuildLib.profileBinPath {
+        evaluation = serverOn "x86_64-linux";
+        homeDirectory = "/home/u";
+      } == "/home/u/.local/state/repro/home/current/bin"
+      && reprobuildLib.profileBinPath {
+        evaluation = serverOn "x86_64-linux";
+        homeDirectory = "/home/u";
+        xdgStateHome = "/var/state/u";
+      } == "/var/state/u/repro/home/current/bin"
+    )
+    ++ expectTrue "profileBinPath: a Windows location is refused" (
+      fails (
+        reprobuildLib.profileBinPath {
+          evaluation = serverOn "x86_64-windows";
+          homeDirectory = "C:/Users/u";
+        }
+      )
+    )
+    ++ expectTrue "profileBinPath: null where Reprobuild owns the environment or nothing is declared" (
+      reprobuildLib.profileBinPath {
+        evaluation = reprobuildLib.evaluateExport concernsDoc "aarch64-darwin" "m1";
+        homeDirectory = "/Users/u";
+      } == null
+      && reprobuildLib.profileBinPath {
+        evaluation = reprobuildLib.evaluateExport concernsDoc "aarch64-darwin" "home-pc";
+        homeDirectory = "/Users/u";
+      } == null
+    )
+    ++ expectTrue "an export without concerns.profileBin is refused for a host that needs it" (
+      fails (
+        (reprobuildLib.evaluateExport (
+          concernsDoc
+          // {
+            concerns = removeAttrs concernsDoc.concerns [ "profileBin" ];
+          }
+        ) "aarch64-darwin" "server").profileBin
+      )
+      # ...and only for such a host.
+      && !(fails (
+        reprobuildLib.evaluateExport (
+          concernsDoc
+          // {
+            concerns = removeAttrs concernsDoc.concerns [ "profileBin" ];
+          }
+        ) "aarch64-darwin" "m1"
+      ))
+    );
+
   failures =
-    predicateTests
+    profileBinTests
+    ++ predicateTests
     ++ dataSelectionTests
     ++ dataRejectionTests
     ++ dataThrowTests

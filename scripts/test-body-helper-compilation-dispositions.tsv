@@ -86,6 +86,8 @@
 # Since then: t_rp3_bind_deps_and_sharing product-api -> graph-owned
 # (product-api 17, graph-owned 8);
 # t_e2e_codetracer_in_place_project_file dynamic-source -> graph-owned.
+# GM7 added two migrate-pending rows, both blocked on the C edge:
+# t_macos_app_vendor_updates and t_e2e_app_vendor_update_and_running_app.
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -325,3 +327,5 @@ tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	product-api	e
 tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	product-api	extractInterfaceFromModule over a per-case consumer recipe is the uses: route the test compares a profile reference against; the extraction is the product path under test.
 tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	product-api	extractInterfaceFromModule over a recipe that uses: the catalog packages is the uses: route the test compares a profile reference against, and the profile side itself extracts a generated recipe through the same API; the extraction is the product path under test.
 tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim	product-api	compileProfileToRbpi is the production compile `repro home apply` performs (driven through build/bin/repro, decoded, expandedHomeProfile): the `applies:` declaration must travel the profile macro, the RBPI envelope and the adapter for the apply to honour it, so the compile is part of what the test asserts. The profile is written at run time per case; the test body compiles no helper.
+libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	migrate-pending	MIGRATABLE: /usr/bin/cc builds a fixed one-line C program that sleeps, written into a fixture bundle so the test has a process whose executable lies inside that bundle (the running-application probe is the subject, not the compiler). Any prebuilt sleeper copied into the bundle would serve. BLOCKED ON THE C EDGE: repro.nim has no C-compiler fixture edge.
+tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim	migrate-pending	MIGRATABLE: /usr/bin/cc builds a fixed one-line C program that sleeps, compiled into the PLACED bundle so a real apply sees a running application (deferral is the subject, not the compiler). A prebuilt sleeper copied into the bundle would serve. BLOCKED ON THE C EDGE: repro.nim has no C-compiler fixture edge.

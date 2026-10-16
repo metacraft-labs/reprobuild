@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2138,
+    "nimTestBinaries": 2140,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 657,
-    "staticallyDetectedRuntimeCompilerFlowTests": 122,
-    "testEntries": 2160
+    "staticallyDetectedRuntimeCompilerFlowTests": 124,
+    "testEntries": 2162
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1297,7 +1297,7 @@
     "classificationCounts": {
       "graph-fixture": 19,
       "integration": 1163,
-      "platform/destructive": 130,
+      "platform/destructive": 132,
       "pure unit": 657,
       "unclassified": 191
     },
@@ -1501,9 +1501,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2138,
+    "nimTestBinaryCount": 2140,
     "pythonTestFileCount": 22,
-    "testEntryCount": 2160
+    "testEntryCount": 2162
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1723,6 +1723,29 @@
         }
       ],
       "source": "libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim"
+    },
+    {
+      "class": "platform/destructive",
+      "matches": [
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cc",
+            "exe",
+            "root",
+            "runner"
+          ],
+          "line": 129,
+          "path": "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = execCmdEx(quoteShellCommand([\"<abs>/cc\", \"-o\", exe,"
+        }
+      ],
+      "source": "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim"
     },
     {
       "class": "graph-fixture",
@@ -2220,6 +2243,28 @@
         }
       ],
       "source": "tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim"
+    },
+    {
+      "class": "platform/destructive",
+      "matches": [
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cc",
+            "helper",
+            "root"
+          ],
+          "line": 288,
+          "path": "tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = execCmdEx(quoteShellCommand([\"<abs>/cc\", \"-o\", helper,"
+        }
+      ],
+      "source": "tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim"
     },
     {
       "class": "integration",
@@ -13457,6 +13502,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_macos_app_vendor_updates",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_resources",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_home_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_registry_root_override",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -24499,6 +24562,29 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_app_vendor_update_and_running_app",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply",
+        "repro_home_generations",
+        "repro_home_intent",
+        "repro_home_resources",
+        "repro_local_store",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

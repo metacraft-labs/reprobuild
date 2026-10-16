@@ -43,6 +43,18 @@
 # on the Nix side (home-manager-mapping.nix). A host without a declaration:
 # every switch defaults off, as before.
 #
+# The profile's commands (§Concern-scoped apply, "The profile's commands"):
+# when Reprobuild applies `packages` or `applications` -- whose launchers it
+# writes into its profile bin directory -- and Nix the environment, the
+# evaluation carries `profileBin`, and the `environment` category puts that
+# directory (`reprobuild.lib.profileBinPath`, resolved against
+# home.homeDirectory / xdg.stateHome; output `reprobuild.intent.profileBin`)
+# FIRST on home.sessionPath, so a command Reprobuild installs wins over a
+# copy of the same command another tool (a Homebrew cask's link) still
+# leaves on PATH. Shell startup code that re-prepends such a directory after
+# hm-session-vars.sh (`eval "$(brew shellenv)"`, path_helper) must
+# re-prepend this one after it.
+#
 # User documentation: docs/user-guide/nix-helper-library.md.
 { reprobuildLib }:
 {
@@ -84,6 +96,14 @@ let
     };
     inherit (reprobuildLib) lookupNixRealization;
     brewRealizationOf = cfg.homebrew.realizationOf;
+  };
+
+  # Where the launchers of the concerns Reprobuild applies are, when Nix
+  # owns the environment (null otherwise).
+  profileBin = reprobuildLib.profileBinPath {
+    inherit (result) evaluation;
+    inherit (config.home) homeDirectory;
+    xdgStateHome = config.xdg.stateHome;
   };
 
   describe = e: "${e.category}: ${e.id}: ${e.reason}";
@@ -216,6 +236,11 @@ in
       readOnly = true;
       description = "The evaluated intent (output): what `repro home export --target` reports for this host and system.";
     };
+    profileBin = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      readOnly = true;
+      description = "The directory holding the launchers of the concerns Reprobuild applies on this host (output): set when the host's `hosts:` entry gives Reprobuild `packages` or `applications` and leaves `environment` to Nix, null otherwise. The `environment` category puts it first on home.sessionPath.";
+    };
     unmapped = lib.mkOption {
       type = lib.types.listOf (lib.types.attrsOf lib.types.str);
       readOnly = true;
@@ -231,6 +256,7 @@ in
   config = lib.mkIf cfg.enable {
     reprobuild.intent = {
       inherit (result) evaluation;
+      inherit profileBin;
       inherit (mapped) unmapped uncategorized;
       homebrew = {
         inherit (mapped) casks formulae;
@@ -240,7 +266,12 @@ in
     home.packages = lib.mkIf cfg.packages.enable mapped.packages;
     home.file = lib.mkIf cfg.files.enable mapped.files;
     home.sessionVariables = lib.mkIf cfg.environment.enable mapped.sessionVariables;
-    home.sessionPath = lib.mkIf cfg.environment.enable mapped.sessionPath;
+    home.sessionPath = lib.mkIf cfg.environment.enable (
+      lib.mkMerge [
+        (lib.mkBefore (lib.optional (profileBin != null) profileBin))
+        mapped.sessionPath
+      ]
+    );
 
     assertions = map (r: {
       assertion = false;

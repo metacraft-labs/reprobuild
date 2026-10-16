@@ -1399,7 +1399,11 @@
       ],
       "applies": [
         "packages"
-      ]
+      ],
+      "profileBin": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      }
     },
     "aarch64-linux": {
       "target": "aarch64-linux",
@@ -1504,7 +1508,11 @@
       ],
       "applies": [
         "packages"
-      ]
+      ],
+      "profileBin": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      }
     },
     "x86_64-darwin": {
       "target": "x86_64-darwin",
@@ -1609,7 +1617,11 @@
       ],
       "applies": [
         "packages"
-      ]
+      ],
+      "profileBin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      }
     },
     "aarch64-darwin": {
       "target": "aarch64-darwin",
@@ -1714,7 +1726,11 @@
       ],
       "applies": [
         "packages"
-      ]
+      ],
+      "profileBin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      }
     },
     "x86_64-windows": {
       "target": "x86_64-windows",
@@ -1811,7 +1827,11 @@
       ],
       "applies": [
         "packages"
-      ]
+      ],
+      "profileBin": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      }
     },
     "aarch64-windows": {
       "target": "aarch64-windows",
@@ -1908,7 +1928,11 @@
       ],
       "applies": [
         "packages"
-      ]
+      ],
+      "profileBin": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      }
     }
   }
 }

@@ -58,6 +58,15 @@
 #     classified here: which package is an application is Reprobuild's
 #     realization selection (P1, P6). A document without a row for `system`
 #     is refused.
+#   * profile bin: for a host that declares, Reprobuild applies `packages`
+#     or `applications` (whose launchers it writes into its profile bin
+#     directory) and does not apply `environment`, `profileBin` -- the
+#     directory's location for `system` (`concerns.profileBin.<system>`:
+#     `{ base, path }`, base `home`, `xdgStateHome` or `localAppData`) -- so
+#     the Nix side, which writes the shell environment there, puts it on
+#     `PATH` (`profileBinPath`; Gradual-Nix-To-Reprobuild-Migration.md
+#     §Concern-scoped apply, "The profile's commands"). Absent otherwise. A
+#     document without that row is refused for such a host.
 #
 # Resource scope: the home planner refuses a home profile that declares a
 # resource it does not apply (a system-scope kind such as `fs.systemFile`),
@@ -206,6 +215,19 @@ let
         doc.concerns.packages.${system}
           or (throw "reprobuild.lib.readIntent: host ${selectedHost} declares the concerns Reprobuild applies, but the document carries no package classification for ${system} (concerns.packages.${system}); it was produced by a repro that does not publish one -- re-export");
       packageKey = p: if p.version == "" then p.name else "${p.name}@${p.version}";
+      # Reprobuild writes launchers (`packages` / `applications`) and Nix
+      # writes the shell environment: the launchers' directory is Nix's to
+      # put on PATH.
+      needsProfileBin =
+        applies != null && (elem "packages" applies || elem "applications" applies) && !(elem "environment" applies);
+      profileBin =
+        let
+          location = doc.concerns.profileBin.${system} or null;
+        in
+        if location == null || !(location ? base) || !(location ? path) then
+          throw "reprobuild.lib.readIntent: host ${selectedHost} leaves `environment` to Nix while Reprobuild applies its launchers, but the document does not say where they are for ${system} (concerns.profileBin.${system}); it was produced by a repro that does not publish it -- re-export"
+        else
+          { inherit (location) base path; };
       withConcern =
         p:
         p
@@ -229,7 +251,8 @@ let
         resources = filter (r: holdsFor facts (r.guard or null)) (intent.resources or [ ]);
         configOverrides = filter (o: holdsFor facts (o.guard or null)) (intent.configOverrides or [ ]);
       }
-      // (if applies == null then { } else { inherit applies; });
+      // (if applies == null then { } else { inherit applies; })
+      // (if needsProfileBin then { inherit profileBin; } else { });
 
   # The derivation IFD mode imports: `repro home export` of `profileDir` for
   # `host`, run by the packaged `repro` in the build sandbox with a private
@@ -272,9 +295,36 @@ let
         chmod -R u+w "$TMPDIR/profile"
         repro home export --profile-dir "$TMPDIR/profile" --host "$host" --format json > "$out"
       '';
+  # The absolute directory an evaluation's `profileBin` names, for a user
+  # whose home directory is `homeDirectory` (and XDG state directory
+  # `xdgStateHome`, by default `<home>/.local/state`, as Reprobuild resolves
+  # it when $XDG_STATE_HOME is unset), or null when the evaluation carries
+  # none (the host leaves its launchers to nobody, or Reprobuild writes its
+  # environment itself). `localAppData` is a Windows directory no Nix
+  # consumer manages, and is refused. Reprobuild resolves the state
+  # directory from $REPRO_HOME_STATE_DIR first; a host that sets it must
+  # put `<it>/current/bin` on PATH itself.
+  profileBinPath =
+    {
+      evaluation,
+      homeDirectory,
+      xdgStateHome ? "${homeDirectory}/.local/state",
+    }:
+    let
+      location = evaluation.profileBin or null;
+    in
+    if location == null then
+      null
+    else if location.base == "home" then
+      "${homeDirectory}/${location.path}"
+    else if location.base == "xdgStateHome" then
+      "${xdgStateHome}/${location.path}"
+    else
+      throw "reprobuild.lib.profileBinPath: the profile bin directory of ${evaluation.host} on ${evaluation.target} is under `${location.base}`, which a Nix consumer does not manage";
 in
 {
   inherit
+    profileBinPath
     evaluate
     refusalReason
     hostRefusalReason
