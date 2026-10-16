@@ -22252,6 +22252,37 @@ proc resolveProducerBinding*(selector: string;
   # 4. Not a cross-repo producer — the caller keeps its existing branch.
   ProducerBinding(selector: selector, kind: pbkNotProducer)
 
+proc bulkOverriddenExactPin(selector, projectRoot, overridePath: string;
+    lockedDep: LockedDep): string
+  ## Forward declaration; defined beside ``exactRecipePinsOf``, whose recipe
+  ## reading it shares.
+
+var bulkOverrideNoticesAnnounced = initHashSet[string]()
+  ## The selectors whose "bulk override not substituted" notice this process
+  ## has already printed: a build resolves a producer from several seams (the
+  ## splice pre-pass, the tool-identity resolver, the dev-env pins), and the
+  ## build says it once.
+
+proc announceBulkOverrideNotSubstituted(selector, projectRoot: string;
+    entry: repro_workspace_manifests.DevelopOverrideEntry; pinnedAt: string) =
+  ## The one-time stderr notice for a bulk override set aside (§16.4), with
+  ## both runnable remedies. Backticks mark commands that run as printed.
+  {.cast(gcsafe).}:
+    let key = absolutePath(projectRoot) & "\0" & selector
+    if key in bulkOverrideNoticesAnnounced: return
+    bulkOverrideNoticesAnnounced.incl(key)
+    stderr.writeLine("repro: NOT substituting '" & selector & "' with the " &
+      "develop override at " & entry.local_path & ": " & pinnedAt &
+      " pins it by exact revision, and the override was recorded by a bulk " &
+      "selection (" & developOverridesPath(projectRoot) & ", provenance " &
+      (if entry.provenance.isSome: "'" & entry.provenance.get() & "'"
+       else: "none") & "), which does not substitute an exact recipe pin; " &
+      "it is resolved from the lock instead. Run `repro develop --only=" &
+      selector & " --workspace-root=" & quoteShell(projectRoot) &
+      "` to substitute it explicitly, or `repro develop --drop=" & selector &
+      " --workspace-root=" & quoteShell(projectRoot) & "` to remove the " &
+      "override")
+
 proc resolveProducerBinding*(selector: string;
                              workspaceRoot: string): ProducerBinding =
   ## Workspace-rooted convenience: read the committed ``repro.lock`` and the
@@ -22287,6 +22318,30 @@ proc resolveProducerBinding*(selector: string;
       foundLegacyOverride = true
     if foundLegacyOverride:
       overrides = some(translated)
+  # §16.4 — an exact recipe pin is not substituted by a BULK override. A bulk
+  # entry (`repro develop --all`, and every entry written before provenance
+  # told bulk from explicit apart) that names a dependency the recipe pins by
+  # exact revision is set aside here, so the build resolves that dependency
+  # from the lock, as the managed hooks and the bulk selections already treat
+  # it. An explicit entry (`--only`, `repro develop <dep>`, `--into`) still
+  # substitutes. Only an override that actually matched AND is bulk pays for
+  # reading the recipes, so a dependency that is not exactly pinned — every
+  # ordinary develop override — resolves exactly as before.
+  if overrides.isSome and workspaceRoot.len > 0:
+    let entry = findOverride(overrides.get(), selector)
+    if entry.isSome and not isExplicitDevelopOverride(entry.get()):
+      var lockedDep = LockedDep()
+      for dep in lock.deps:
+        if dep.name == selector:
+          lockedDep = dep
+          break
+      let pinnedAt = bulkOverriddenExactPin(selector, absolutePath(workspaceRoot),
+        resolveOverrideAbsolutePath(absolutePath(workspaceRoot), entry.get()),
+        lockedDep)
+      if pinnedAt.len > 0:
+        announceBulkOverrideNotSubstituted(selector, workspaceRoot,
+          entry.get(), pinnedAt)
+        overrides = some(overrides.get().removeOverride(selector))
   resolveProducerBinding(selector, workspaceRoot, lock, overrides)
 
 # ---------------------------------------------------------------------------
@@ -31724,9 +31779,9 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
          "'" & prior.get().provenance.get() & "'"
        else: "none") & ") is IGNORED for it: a bulk selection does not " &
       "substitute an exact recipe pin, so the managed hooks do not compare " &
-      "it with the checkout and the flake override verbs leave it on its " &
-      "pin; while the entry exists, `repro build` still binds it to the " &
-      "checkout wherever it resolves it as a cross-repo producer. Run " &
+      "it with the checkout, the flake override verbs leave it on its pin, " &
+      "and repro build resolves it from the lock rather than the checkout. " &
+      "Run " &
       "`repro develop --only=" &
       node.name & " --workspace-root=" & quoteShell(root) &
       "` to substitute it explicitly, or `repro develop --drop=" &
@@ -50903,6 +50958,110 @@ proc exactRecipePinsOf(consumer, workspaceRoot: string;
       notices.add("the repro.nim exact pins of " & root &
         " could not be read (" & err.msg & ")")
 
+proc bulkOverriddenExactPin(selector, projectRoot, overridePath: string;
+    lockedDep: LockedDep): string =
+  ## `<file>:<line>` of the exact recipe pin (``exactRecipePinsOf``) that the
+  ## recipes of the project at ``projectRoot`` state for the dependency a bulk
+  ## develop override of ``selector`` would substitute, or "" when none does.
+  ## The pin is related to the dependency by checkout path (the override's
+  ## path, or the `repro.lock` entry's checkout) or by canonical repository
+  ## URL (the entry's url) — never by a name (§16.3). A recipe that cannot be
+  ## read pins nothing this can see, and the override applies as before.
+  var notices: seq[string]
+  var pins: seq[ExactRecipePin]
+  try:
+    pins = exactRecipePinsOf(projectRoot, "", notices)
+  except CatchableError:
+    return ""
+  if pins.len == 0: return ""
+  let url =
+    if lockedDep.coordinates.kind == ckVcs: lockedDep.coordinates.url else: ""
+  var hit = exactRecipePinMatching(pins, overridePath, url)
+  if hit < 0 and lockedDep.path.len > 0 and lockedDep.path != ".":
+    hit = exactRecipePinMatching(pins,
+      absolutePath(lockedDep.path, committedLockPathBase(projectRoot)), "")
+  if hit < 0: return ""
+  describeExactRecipePin(pins[hit], "")
+
+proc workspaceSiblingFor(repos: seq[ResolvedRepo]; workspaceRoot, selfRoot,
+    identity, path: string): tuple[found: bool; name, checkout: string]
+  ## Forward declaration; defined beside ``annotateSiblingGuidance``.
+
+type
+  SiblingExactPinFinding* = object
+    ## §16.6 — an exact recipe pin of a workspace sibling, listed by
+    ## `repro check` and `repro health` as an INFORMATIONAL finding. It never
+    ## changes an exit status: an exact pin is legitimate (§16.3), and the
+    ## finding only makes a pin added by mistake visible.
+    consumer*: string       ## the repo whose recipe states the pin
+    dependency*: string     ## the flake input, or the `repro.lock` dependency
+    system*: string         ## `flake` (flake.nix) or `repro` (repro.nim)
+    sibling*: string        ## the workspace repo the pin names
+    checkout*: string       ## that repo's sibling checkout
+    file*: string           ## the recipe
+    line*: int
+    revision*: string       ## the pinned revision
+    reason*: string         ## the comment beside the pin, "" when none
+
+const SiblingExactPinFindingKind* = "sibling-exact-recipe-pin"
+  ## The ``kind`` of the finding in every JSON form.
+
+const SiblingPinReasonDigestLimit* = 120
+  ## How much of the comment beside a pin a text DIGEST shows (the `repro
+  ## check` text lines, the `repro health` table without `--verbose`). The
+  ## JSON forms always carry the whole comment.
+
+proc describeSiblingExactPin*(f: SiblingExactPinFinding;
+    reasonLimit = 0): string =
+  ## The finding in one line, shared by `repro check` and `repro health`.
+  ## ``reasonLimit`` > 0 shortens a comment longer than that many bytes, at a
+  ## UTF-8 character boundary and ending in `…`, for a digest; the full
+  ## comment is always in the JSON.
+  var reason = f.reason
+  if reasonLimit > 0 and reason.len > reasonLimit:
+    var cut = reasonLimit
+    while cut > 0 and (ord(reason[cut]) and 0xC0) == 0x80: dec cut
+    reason = reason[0 ..< cut].strip(leading = false) & "…"
+  f.file & ":" & $f.line & " pins " &
+    (if f.system == "flake": "input '" else: "dependency '") & f.dependency &
+    "' at " & f.revision & ", an exact recipe pin of workspace sibling '" &
+    f.sibling & "' (checked out at " & f.checkout & "); " &
+    (if reason.len > 0: "reason: " & reason else: "no reason stated")
+
+proc toJsonNode*(f: SiblingExactPinFinding): JsonNode =
+  %*{"kind": SiblingExactPinFindingKind, "consumer": f.consumer,
+     "dependency": f.dependency, "system": f.system, "sibling": f.sibling,
+     "checkout": f.checkout, "file": f.file, "line": f.line,
+     "revision": f.revision, "reason": f.reason,
+     "reasonStated": f.reason.len > 0,
+     "message": describeSiblingExactPin(f)}
+
+proc siblingExactPinFindingsOf*(consumer, workspaceRoot: string;
+    repos: seq[ResolvedRepo]; notices: var seq[string]):
+    seq[SiblingExactPinFinding] =
+  ## Every exact pin the recipes of the repo at ``consumer`` state
+  ## (``exactRecipePinsOf``: `flake.nix` `rev=` / `/<sha>`, and an exact
+  ## `uses:` version a producer's `versions:` maps to a revision) whose
+  ## repository has a sibling checkout among ``repos`` — matched by canonical
+  ## URL or checkout path, never by a name — with the comment beside it
+  ## (``recipePinComment``). Whether an override substitutes the pin does not
+  ## matter: the finding is about what the recipe says. Reads files only.
+  let root = os.normalizedPath(absolutePath(consumer))
+  var texts = initTable[string, string]()
+  for p in exactRecipePinsOf(root, workspaceRoot, notices):
+    let sib = workspaceSiblingFor(repos, workspaceRoot, root, p.identity,
+      p.path)
+    if not sib.found: continue
+    if p.file notin texts:
+      texts[p.file] =
+        try: readFile(extendedPath(p.file))
+        except CatchableError: ""
+    result.add(SiblingExactPinFinding(consumer: root,
+      dependency: (if p.input.len > 0: p.input else: p.dependency),
+      system: (if p.input.len > 0: "flake" else: "repro"),
+      sibling: sib.name, checkout: sib.checkout, file: p.file, line: p.line,
+      revision: p.rev, reason: recipePinComment(texts[p.file], p.line)))
+
 proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
     repos: seq[ResolvedRepo]): HookDevelopSet =
   ## §16.5 — the flake half of the managed hooks' develop set for the repo at
@@ -51842,6 +52001,88 @@ proc coordinateCommitRepin(repoRoot, workspaceRoot: string;
           "the held input(s) (" & replanned.diagnostic & "), so it was " &
           "left alone")
 
+proc workspaceSiblingFor(repos: seq[ResolvedRepo]; workspaceRoot, selfRoot,
+    identity, path: string): tuple[found: bool; name, checkout: string] =
+  ## The workspace repo, other than the one at ``selfRoot``, that has a
+  ## checkout on disk and IS the repository named by the canonical URL
+  ## ``identity`` (one of its fetch URLs, or its checkout as a `file://` URL,
+  ## has that identity) or is checked out at ``path``. Identity and path only,
+  ## never a name (§16.3) — the binding ``hookDevelopSetOf`` uses.
+  ##
+  ## Used for WORDING only (the §16.6 guidance line and the informational
+  ## `repro check` / `repro health` finding); no refusal reads it.
+  if workspaceRoot.len == 0 or (identity.len == 0 and path.len == 0): return
+  let ws = os.normalizedPath(absolutePath(workspaceRoot))
+  let self = if selfRoot.len > 0: os.normalizedPath(absolutePath(selfRoot))
+             else: ""
+  let wanted = if path.len > 0: os.normalizedPath(absolutePath(path)) else: ""
+  for r in repos:
+    if r.path.len == 0 or r.path == ".": continue
+    let co = os.normalizedPath(absolutePath(ws / r.path))
+    if co == self or not dirExists(extendedPath(co)): continue
+    var hit = wanted.len > 0 and co == wanted
+    if not hit and identity.len > 0:
+      var urls = @[r.fetchUrl, "file://" & co]
+      for remote in r.remotes: urls.add(remote.fetchUrl)
+      for u in urls:
+        if u.len > 0 and canonicalRepositoryUrl(u) == identity:
+          hit = true
+          break
+    if hit: return (true, r.name, co)
+
+proc annotateSiblingGuidance(repoRoot: string;
+    violations: var seq[ConsistencyViolation]) =
+  ## §16.6 — attach the guidance line to every violation that concerns an
+  ## exact recipe pin of a repository with a sibling checkout in the
+  ## enclosing workspace. WORDING ONLY: it runs after the caller has decided to
+  ## refuse, sets nothing but ``guidance``, and a membership that does not
+  ## resolve (no workspace, a standalone clone) simply attaches nothing.
+  ##
+  ## The repository is found by the violation's canonical URL or sibling
+  ## checkout. A `repro.nim` violation that carries neither is related to its
+  ## `repro.lock` dependency entry by name — the relation H1 itself uses for a
+  ## `uses:` entry — and through that entry's checkout path.
+  ##
+  ## Never raises: a failure to read the membership or a lock leaves the
+  ## lines unannotated, so the refusal (and its exit status) is exactly what
+  ## it would be without the guidance.
+  var wanted = false
+  for v in violations:
+    if v.recipePinsExactly: wanted = true
+  if not wanted: return
+  var membership: tuple[resolved: bool; workspaceRoot: string;
+    repos: seq[ResolvedRepo]; selfName: string]
+  try:
+    membership = manifestMembershipOf(repoRoot)
+  except CatchableError:
+    return
+  if not membership.resolved: return
+  let root = os.normalizedPath(absolutePath(repoRoot))
+  var depPaths = initTable[string, string]()
+  let lockPath = root / CommittedLockFileName
+  if fileExists(extendedPath(lockPath)):
+    try:
+      let base = committedLockPathBase(root)
+      for d in parseLockedDependencies(readFile(extendedPath(lockPath))).deps:
+        if d.path.len > 0 and d.path != ".":
+          depPaths[d.name] = os.normalizedPath(absolutePath(base / d.path))
+    except CatchableError:
+      discard
+  let guidelines = getEnv(DependencyGuidelinesEnv)
+  for v in violations.mitems:
+    if not v.recipePinsExactly: continue
+    var path = v.checkout
+    if path.len == 0 and v.repository.len == 0:
+      path = depPaths.getOrDefault(v.dependency, "")
+    try:
+      let sib = workspaceSiblingFor(membership.repos,
+        membership.workspaceRoot, root, v.repository, path)
+      if sib.found:
+        v.guidance = siblingGuidanceLine(v, sib.name, sib.checkout, root,
+          guidelines)
+    except CatchableError:
+      v.guidance = ""
+
 proc consistencyFailureEvidence(vs: openArray[ConsistencyViolation]): string =
   var parts: seq[string]
   for v in vs: parts.add(v.evidence)
@@ -52130,6 +52371,8 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # §16.4 — one paragraph per repository: the observed revision, the
     # constrained one, the recipe line, and both ways forward. The same
     # renderer as the H1 / H2 refusals below.
+    # §16.6 — the guidance line, attached only now that the verdict is in.
+    annotateSiblingGuidance(repoRoot, coordination.exclusions)
     stderr.writeLine("repro pre-commit: commit REFUSED: a sibling checkout " &
       "is at a revision its recipe constraint excludes, and the commit-time " &
       "re-pin moves lock resolutions only, never a recipe constraint; " &
@@ -52142,6 +52385,7 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # The same paragraphs the pre-push gate prints (`renderConsistencyRefusal`),
     # one per inconsistency: the files, the recipe line, both values and each
     # way to restore consistency.
+    annotateSiblingGuidance(repoRoot, consistency.violations)
     stderr.writeLine("repro pre-commit: commit REFUSED: the recipe and the " &
       "locks this commit carries are inconsistent; nothing was written or " &
       "staged.")
@@ -52524,6 +52768,10 @@ type
     # never blocks a push. Empty for the default ``off`` mode and for every
     # gate run that predates a certificate policy.
     notices*: seq[string]
+    findings*: seq[SiblingExactPinFinding]
+      ## §16.6 — informational findings: each exact recipe pin of a workspace
+      ## sibling in the pushed repo's recipes, with the comment beside it or
+      ## `no reason stated`. Like ``notices`` they never touch ``exitCode``.
     lockUpdate*: CheckLockUpdate
     # RA-7: the manifest-layer checkout that owns the lock subtree, so the
     # caller can publish (commit + push) the just-written lock after a
@@ -52608,6 +52856,10 @@ proc toJsonNode*(report: CheckReport): JsonNode =
   for n in report.notices:
     notices.add(%n)
   result["notices"] = notices
+  var findings = newJArray()
+  for f in report.findings:
+    findings.add(f.toJsonNode())
+  result["findings"] = findings
   var lockObj = newJObject()
   lockObj["kind"] = %lockUpdateKindTag(report.lockUpdate.kind)
   lockObj["lockFilePath"] = %report.lockUpdate.lockFilePath
@@ -52649,6 +52901,10 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     result.add(line)
   for notice in report.notices:
     result.add("repro check: " & notice)
+  for f in report.findings:
+    # A digest: a long comment is shortened here, and is whole in `--json`.
+    result.add("repro check: info: " & describeSiblingExactPin(f,
+      SiblingPinReasonDigestLimit))
   # A public-only workspace declares no manifest-backed route, so no manifest
   # lock record exists to name (§10 "No implicit team route"): the lock-store
   # path is empty and these lines would read "lock created at " with nothing
@@ -59432,6 +59688,23 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.participation = executeParticipationWrites(deferredParticipation)
       applyParticipationTierPolicy(result)
 
+  # ---- §16.6: exact recipe pins of workspace siblings (informational) ------
+  #
+  # Listed before any stage can short-circuit, so a refused push lists them
+  # too. Never a failure and never an exit status: an exact pin is legitimate,
+  # and the guidelines only ask that its reason be written beside it. Read
+  # from the working tree's recipes, like the other recipe readers here that
+  # are not a verdict over `HEAD`.
+  if parsed.currentRepo.len > 0:
+    try:
+      var pinNotices: seq[string]
+      result.findings = siblingExactPinFindingsOf(parsed.currentRepo,
+        parsed.workspaceRoot, resolved.repos, pinNotices)
+      for n in pinNotices: result.notices.add(n)
+    except CatchableError as err:
+      result.notices.add("the exact recipe pins of " & parsed.currentRepo &
+        " could not be listed: " & err.msg)
+
   # ---- 0. HL-11 H1 / H2: the pushed recipe and locks are consistent -------
   #
   # Unified-Locking-And-Hooks.md §16.3. Each lock the pushed revision carries
@@ -59460,6 +59733,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # What the check could not evaluate is named, not left to read as a pass.
     for n in consistency.notChecked:
       result.notices.add("recipe/lock consistency not checked: " & n)
+    # §16.6 — wording only; the verdict below is already fixed by the check.
+    if consistency.hasViolations:
+      annotateSiblingGuidance(parsed.currentRepo, consistency.violations)
     for rule in [crH1, crH2]:
       let vs = consistency.violationsOf(rule)
       if vs.len == 0: continue
@@ -64565,6 +64841,67 @@ proc gatherHealthChecks(parsed: HealthArgs):
         # remedy naming a verb the binary does not have is worse than none.
         remedy: "",
         fixKind: hfNone))
+
+  # 9b. Exact recipe pins of workspace siblings (Unified-Locking-And-Hooks.md
+  #     §16.6) — INFORMATIONAL. An exact pin is legitimate, so the row is
+  #     never `warn` or `fail` and never moves the exit status; it lists each
+  #     pin with the reason written beside it, or `no reason stated`, so a pin
+  #     added by mistake is visible without blocking anyone. Every
+  #     participating checkout's recipes are read, plus the workspace root's.
+  block siblingExactPinsCheck:
+    if not ctx.resolvedOk:
+      checks.add(HealthCheck(
+        name: "sibling-exact-pins",
+        status: hsOk,
+        detail: "not listed: the workspace manifest did not resolve, so " &
+          "which repositories are siblings is unknown (the manifest row " &
+          "above carries the reason)",
+        remedy: "", fixKind: hfNone))
+      break siblingExactPinsCheck
+    let ws = os.normalizedPath(absolutePath(parsed.workspaceRoot))
+    var consumers = @[ws]
+    for r in ctx.resolved.repos:
+      if r.path.len == 0 or r.path == ".": continue
+      let co = os.normalizedPath(absolutePath(ws / r.path))
+      if co notin consumers and dirExists(extendedPath(co)):
+        consumers.add(co)
+    var findings: seq[SiblingExactPinFinding]
+    var unreadable: seq[string]
+    for consumer in consumers:
+      try:
+        var pinNotices: seq[string]
+        findings.add(siblingExactPinFindingsOf(consumer, ws,
+          ctx.resolved.repos, pinNotices))
+        unreadable.add(pinNotices)
+      except CatchableError as err:
+        unreadable.add("the exact recipe pins of " & consumer &
+          " could not be listed: " & err.msg)
+    # Built twice — digested and unabridged — and handed over as the
+    # `detail` / `fullDetail` pair the row convention uses, so `--verbose`
+    # and `--json` carry every comment whole.
+    proc pinsDetail(reasonLimit: int): string =
+      var parts: seq[string]
+      for f in findings: parts.add(describeSiblingExactPin(f, reasonLimit))
+      result =
+        if findings.len == 0:
+          "no exact recipe pin of a workspace sibling"
+        else:
+          $findings.len & " exact recipe pin(s) of workspace siblings " &
+            "(informational; the dependency guidelines suggest tracking a " &
+            "sibling through the lock, " &
+            dependencyGuidelinesPointer(getEnv(DependencyGuidelinesEnv)) &
+            "): " & parts.join("; ")
+      if unreadable.len > 0:
+        result.add(". Not read: " & unreadable.join("; "))
+    let digested = pinsDetail(
+      if parsed.verbose: 0 else: SiblingPinReasonDigestLimit)
+    let full = pinsDetail(0)
+    checks.add(HealthCheck(
+      name: "sibling-exact-pins",
+      status: hsOk,
+      detail: digested,
+      fullDetail: if digested != full: full else: "",
+      remedy: "", fixKind: hfNone))
 
   # 10. Toolchain provisioning for the active platform. Structural: the
   #     git toolchain probe above is the load-bearing one for workspace
@@ -81089,6 +81426,19 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
 # inputs: `nix flake lock` would also re-lock any OTHER input whose `original`
 # happens to disagree with `flake.nix` (an unrelated pending edit), which is
 # outside the one repository this command was asked to move.
+#
+# ## A pin removed from `flake.nix` (the §16.6 conversion)
+#
+# nix records a pinned input's revision in its node's `original.rev`. When the
+# author drops the revision from the url, the node keeps that `original.rev`
+# until nix re-locks it, and a `locked` moved by hand under it would be
+# reverted on the next evaluation. Such a node is therefore re-locked through
+# nix (the same `nix flake update <input>`, in the same all-or-nothing
+# snapshot), after which it follows the branch, and is then moved to the
+# target like every other branch-following input. The conversion "replace the
+# exact revision with a branch reference and run `repro lock update`" is thus
+# one command, with the regression and publication rules applied to it as to
+# any other move.
 # ---------------------------------------------------------------------------
 
 const
@@ -81135,6 +81485,12 @@ and the node re-locked through nix (`nix flake update <input>`); an exact
 repro.nim uses: version is replaced by the version whose producer versions:
 entry maps to the target. A uses: range that admits the target is left alone;
 one that excludes it is refused, naming its line.
+
+Converting an exact flake.nix pin to branch tracking is one step: remove the
+revision from the input's url and run this command. A flake.lock node that
+still records the removed revision (original.rev) is re-locked through nix
+from flake.nix first, then moved to the target like any branch-following
+input.
 
 A target that exists only in the sibling checkout (reachable from no
 remote-tracking ref) is refused when a flake.lock resolution would name it,
@@ -81614,6 +81970,8 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
     # range is checked and never rewritten.
     var flakeNixText = inputs.flakeNix.text
     var relock: seq[string]
+    var staleRelock: seq[string]
+      ## branch-following inputs whose node keeps a stale `original.rev`
     var floating: seq[tuple[input, rev: string]]
     if not branchTip:
       for r in flakeOfRepo:
@@ -81636,12 +81994,17 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
             # The recipe already names the target and the lock does not
             # follow it (an H1 state): nix re-locks it from `flake.nix`.
             relock.add(r.input)
-        elif original.len > 0 and original != target:
-          undoAll(LockUpdateExitFailed, flakeLockPath & " node '" & r.node &
-            "' (input '" & r.input & "') records original.rev " & original &
-            ", which " & flakeNixPath & " does not state; re-lock it from " &
-            "flake.nix first (`" & flakeRelockInputCommand(r.input, root) &
-            "`) and run this again")
+        elif original.len > 0:
+          # §16.6's conversion: the author replaced the exact revision with a
+          # branch reference, and the node still records the old pin in
+          # `original.rev`, which `flake.nix` no longer states. Rewriting
+          # `locked` alone would leave nix to revert the node on its next
+          # evaluation, and only nix rewrites `original` from `flake.nix`
+          # (with a `narHash` for what it fetched). So the node is re-locked
+          # through nix first — it then follows the branch — and is moved to
+          # the target below exactly like any branch-following input. This
+          # is what makes the conversion one command (§16.4).
+          staleRelock.add(r.input)
         elif locked != target:
           floating.add((input: r.input, rev: target))
     var reproNimText = inputs.reproNim.text
@@ -81713,18 +82076,20 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
           "' -> '" & edit.after & "'")
 
     # ---- apply: flake.nix, the nix re-lock, flake.lock, repro.lock, repro.nim
-    if relock.len > 0:
+    if relock.len > 0 or staleRelock.len > 0:
+      let nixInputs = relock & staleRelock
       if uncontrolledFindExe("nix").len == 0:
         undoAll(LockUpdateExitFailed, "nix is not on PATH, and re-locking " &
-          relock.join(", ") & " needs it: only nix computes the new narHash")
+          nixInputs.join(", ") & " needs it: only nix computes the new " &
+          "narHash")
       if flakeNixText != inputs.flakeNix.text:
         writeFile(extendedPath(flakeNixPath), flakeNixText)
         result.written.add(flakeNixPath)
-      let ran = runLockUpdateNix(root, relock)
+      let ran = runLockUpdateNix(root, nixInputs)
       if not ran.ok:
         undoAll(LockUpdateExitFailed, "re-locking " &
-          relock.join(", ") & " through nix failed (`nix flake update " &
-          relock.join(" ") & " --flake " & root & "`). If " & target &
+          nixInputs.join(", ") & " through nix failed (`nix flake update " &
+          nixInputs.join(" ") & " --flake " & root & "`). If " & target &
           " is not yet pushed to the input's url, push it first. nix said:" &
           nixSaid(ran.output))
       flakeLockText = readFile(extendedPath(flakeLockPath))
@@ -81738,6 +82103,28 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
             ", not at " & target)
         result.report.add("flake.lock input '" & input & "': re-locked " &
           "through nix at " & target)
+      for input in staleRelock:
+        let r = lockedAt.getOrDefault(input, FlakeLockResolution())
+        let tip = r.lockedRev.toLowerAscii()
+        if r.originalRev.len > 0 or not isExactRevision(tip):
+          # nix still records a revision in `original` (flake.nix states one
+          # that this command's reader did not see), or locked nothing: the
+          # node does not follow a branch, and moving its `locked` alone
+          # would be reverted by nix.
+          undoAll(LockUpdateExitFailed, "nix re-locked input '" & input &
+            "' from " & flakeNixPath & " at " &
+            (if tip.len > 0: tip else: "nothing") &
+            (if r.originalRev.len > 0:
+               " and kept original.rev " & r.originalRev & ", so " &
+               "flake.nix still pins it in a form this command does not " &
+               "read; state the pin in the input's url, or remove it"
+             else: ", not as a branch-following input"))
+        result.report.add("flake.lock input '" & input & "': re-locked " &
+          "through nix from flake.nix, which no longer pins a revision " &
+          "(the stale original.rev is dropped; the branch resolves to " &
+          tip & ")")
+        if tip != target:
+          floating.add((input: input, rev: target))
       if flakeLockPath notin result.written:
         result.written.add(flakeLockPath)
     if floating.len > 0:

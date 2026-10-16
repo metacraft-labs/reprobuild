@@ -535,3 +535,98 @@ suite "the uses: text scan":
     check got == @["9:a >=1:uses", "11:b ^2.1:uses",
       "14:c ==3.0.0:uses:cond", "15:d:uses", "16:e >=4:nativeBuildDeps",
       "18:f >=5:uses:cond"]
+
+suite "the sibling guidance line (Unified-Locking-And-Hooks.md §16.6)":
+
+  test "the guidance line names the sibling, the pointer and the conversion":
+    let v = ConsistencyViolation(rule: crH1, system: "flake",
+      dependency: "lib-src", pinnedInFlake: "lib-src",
+      summary: "H1 (the lock satisfies the recipe): x", remedies: @["r"])
+    let expected = "Guidance: 'lib' is a workspace sibling (checked out at " &
+      "/w/lib); the dependency guidelines suggest tracking a sibling " &
+      "through the lock rather than an exact recipe pin (see your " &
+      "organisation's dependency guidelines). To convert, in flake.nix, " &
+      "replace the exact revision in input 'lib-src''s url with a branch " &
+      "reference; then run `repro lock update lib-src --repo-root=/w/app`."
+    check siblingGuidanceLine(v, "lib", "/w/lib", "/w/app", "") == expected
+    # A configured pointer replaces the generic one, and nothing else.
+    check siblingGuidanceLine(v, "lib", "/w/lib", "/w/app",
+      "  https://example.invalid/g  ") == expected.replace(
+        "see your organisation's dependency guidelines",
+        "see https://example.invalid/g")
+    # The value is display text: a backtick (which would forge a command
+    # span) and a line break (which would forge a refusal line) are dropped.
+    check dependencyGuidelinesPointer("https://g.invalid/`rm -rf x`\nH1 (") ==
+      "see https://g.invalid/rm -rf xH1 ("
+    check dependencyGuidelinesPointer("\t\n `` ") ==
+      "see your organisation's dependency guidelines"
+    # A repro.nim pin, and a repository both recipes pin.
+    var r = ConsistencyViolation(rule: crH2, system: "both",
+      dependency: "lib", pinnedInReproNim: true)
+    let head = "Guidance: 'lib' is a workspace sibling (checked out at " &
+      "/w/lib); the dependency guidelines suggest tracking a sibling " &
+      "through the lock rather than an exact recipe pin (see your " &
+      "organisation's dependency guidelines). "
+    check siblingGuidanceLine(r, "lib", "/w/lib", "/w/app", "") == head &
+      "To convert, in repro.nim, replace the exact uses: version with " &
+      "a range, or name the dependency without one; then run `repro lock " &
+      "update lib --repo-root=/w/app`."
+    r.pinnedInFlake = "lib-src"
+    check siblingGuidanceLine(r, "lib", "/w/lib", "/w/app", "") == head &
+      "To convert, in flake.nix, replace the exact revision in input " &
+      "'lib-src''s url with a branch reference; in repro.nim, replace the " &
+      "exact uses: version with a range, or name the dependency without " &
+      "one; then run `repro lock update lib --repo-root=/w/app`."
+
+  test "no exact pin, no guidance line; the line renders after its paragraph":
+    var v = ConsistencyViolation(rule: crH1, system: "repro",
+      dependency: "libfoo",
+      summary: "H1 (the lock satisfies the recipe): a range", remedies: @["r"])
+    check not v.recipePinsExactly
+    check siblingGuidanceLine(v, "lib", "/w/lib", "/w/app", "") == ""
+    check renderConsistencyRefusal([v]) ==
+      @["H1 (the lock satisfies the recipe): a range. (1) r."]
+    v.guidance = "Guidance: g"
+    check renderConsistencyRefusal([v]) ==
+      @["H1 (the lock satisfies the recipe): a range. (1) r.", "Guidance: g"]
+
+  test "which violations carry an exact pin":
+    # An exact flake pin locked elsewhere: H1 naming the pinning input.
+    let flakeNix = "{\n  inputs = {\n    lib-src.url = " &
+      "\"github:o/lib/" & ShaA & "\";\n  };\n}\n"
+    let r = checkRecipeLockConsistency(ConsistencyInputs(repoRoot: "/w/app",
+      flakeNix: text("/w/app/flake.nix", flakeNix),
+      flakeLock: text("/w/app/flake.lock",
+        flakeLock([("lib-src", githubNode("o", "lib", ShaB))]))))
+    check r.violations.len == 1
+    if r.violations.len == 1:
+      check r.violations[0].pinnedInFlake == "lib-src"
+      check not r.violations[0].pinnedInReproNim
+      check r.violations[0].guidance == ""
+    # original.rev against locked.rev with NO recipe pin: nothing to convert.
+    let floating = "{\n  inputs = {\n    lib-src.url = \"github:o/lib\";\n" &
+      "  };\n}\n"
+    let f = checkRecipeLockConsistency(ConsistencyInputs(repoRoot: "/w/app",
+      flakeNix: text("/w/app/flake.nix", floating),
+      flakeLock: text("/w/app/flake.lock",
+        flakeLock([("lib-src", githubNode("o", "lib", ShaB, ShaA))]))))
+    check f.violations.len == 1
+    if f.violations.len == 1:
+      check not f.violations[0].recipePinsExactly
+    # An H3 range exclusion has no exact pin to convert; an exact one does.
+    let range = repinExclusionViolation(RepinConstraintExclusion(
+      kind: rckRange, dependency: "lib", checkout: "/w/lib",
+      observed: ShaB, constraintText: "lib >=1 <2", observedVersion: "2.0.0",
+      recipeFile: "/w/app/repro.nim", recipeLine: 5))
+    check not range.recipePinsExactly
+    check range.checkout == "/w/lib"
+    let exact = repinExclusionViolation(RepinConstraintExclusion(
+      kind: rckFlakeRev, dependency: "lib-src", checkout: "/w/lib",
+      observed: ShaB, pinnedRev: ShaA, recipeFile: "/w/app/flake.nix",
+      recipeLine: 3))
+    check exact.pinnedInFlake == "lib-src"
+    let version = repinExclusionViolation(RepinConstraintExclusion(
+      kind: rckExactVersion, dependency: "lib", checkout: "/w/lib",
+      observed: ShaB, pinnedRev: ShaA, constraintText: "lib ==1.0.0",
+      recipeFile: "/w/app/repro.nim", recipeLine: 5))
+    check version.pinnedInReproNim and version.pinnedInFlake == ""

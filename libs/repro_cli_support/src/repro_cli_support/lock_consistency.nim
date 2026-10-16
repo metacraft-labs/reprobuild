@@ -95,6 +95,20 @@ type
     summary*: string        ## one sentence: the files, the line, both values
     remedies*: seq[string]  ## each way to restore consistency
     evidence*: string       ## `key=value` fields, for the structured report
+    pinnedInFlake*: string
+      ## The flake input whose `flake.nix` url pins the repository this
+      ## violation concerns by exact revision (`rev=` / `/<sha>`), or "".
+    pinnedInReproNim*: bool
+      ## `repro.nim` pins it by an exact `uses:` version.
+    checkout*: string
+      ## The sibling checkout the violation concerns when the check knows it
+      ## (an H3 refusal always does), else "".
+    guidance*: string
+      ## The §16.6 guidance line (``siblingGuidanceLine``), or "". WORDING
+      ## ONLY: the caller fills it in after the verdict, from whether the
+      ## repository has a sibling checkout in the workspace, and nothing that
+      ## decides whether to refuse reads it (Unified-Locking-And-Hooks.md
+      ## §16.6: reprobuild "never refuses on it").
 
   ConsistencyText* = object
     ## One input file of the check, as the caller read it.
@@ -123,6 +137,12 @@ type
       ## an input that could not be read (a lock that does not parse)
 
 proc hasViolations*(r: ConsistencyReport): bool = r.violations.len > 0
+
+proc recipePinsExactly*(v: ConsistencyViolation): bool =
+  ## Does a recipe state an exact revision for the repository ``v`` concerns?
+  ## Only such a violation can carry the §16.6 guidance line, because the
+  ## conversion that line offers replaces that exact revision.
+  v.pinnedInFlake.len > 0 or v.pinnedInReproNim
 
 # ---------------------------------------------------------------------------
 # The shared remedy generator for a pin written in `flake.nix`
@@ -242,7 +262,7 @@ proc checkFlakeH1(inputs: ConsistencyInputs;
       var v = ConsistencyViolation(rule: crH1, system: "flake",
         dependency: c.input, repository: c.canonicalRepo,
         recipeFile: flakeFile, recipeLine: c.line, constraint: c.exactRev,
-        resolved: locked)
+        resolved: locked, pinnedInFlake: c.input)
       v.summary = "H1 (the lock satisfies the recipe): " & flakeFile & ":" &
         $c.line & " pins input '" & c.input & "' at revision " & c.exactRev &
         ", but " & lockFile & " locks it at " & locked & " (node '" & r.node &
@@ -269,7 +289,8 @@ proc checkFlakeH1(inputs: ConsistencyInputs;
       var v = ConsistencyViolation(rule: crH1, system: "flake",
         dependency: c.input, repository: c.canonicalRepo,
         recipeFile: flakeFile, recipeLine: c.line, constraint: original,
-        resolved: locked)
+        resolved: locked,
+        pinnedInFlake: (if c.exactRev.len > 0: c.input else: ""))
       v.summary = "H1 (the lock satisfies the recipe): " & lockFile &
         " node '" & r.node & "' for input '" & c.input &
         "' records original.rev " & original & " but locked.rev " & locked &
@@ -437,7 +458,7 @@ proc checkReproH1(inputs: ConsistencyInputs;
           dependency: c.selector, repository:
             canonicalRepositoryUrl(dep.coordinates.url),
           recipeFile: c.file, recipeLine: c.line,
-          constraint: mapped.rev, resolved: pinned)
+          constraint: mapped.rev, resolved: pinned, pinnedInReproNim: true)
         v.summary = "H1 (the lock satisfies the recipe): " & where &
           " requires '" & decl.rawConstraint & "', which " &
           mapped.producerFile & ":" & $mapped.producerLine &
@@ -492,7 +513,9 @@ proc checkH2(inputs: ConsistencyInputs; constraints: FlakeRecipeConstraints;
       if reproRev.len > 0 and flakeRev.len > 0 and reproRev != flakeRev:
         var v = ConsistencyViolation(rule: crH2, system: "both",
           dependency: dep.name, repository: identity, recipeFile: flakeFile,
-          recipeLine: c.line, constraint: flakeRev, resolved: reproRev)
+          recipeLine: c.line, constraint: flakeRev, resolved: reproRev,
+          pinnedInFlake: (if c.exactRev.len > 0: r.input else: ""),
+          pinnedInReproNim: dep.name in exactUses)
         let flakeStatement =
           if c.exactRev.len > 0:
             "pinned by " & flakeFile & ":" & $c.line & " at " & c.exactRev
@@ -539,7 +562,8 @@ proc checkH2(inputs: ConsistencyInputs; constraints: FlakeRecipeConstraints;
             dependency: dep.name, repository: identity,
             recipeFile: decl.constraint.file,
             recipeLine: decl.constraint.line, constraint: mapped.rev,
-            resolved: c.exactRev)
+            resolved: c.exactRev, pinnedInFlake: r.input,
+            pinnedInReproNim: true)
           v.summary = "H2 (the two recipes agree): repository " & identity &
             " is pinned by " & flakeFile & ":" & $c.line & " (input '" &
             r.input & "') at " & c.exactRev & ", but " & where &
@@ -624,9 +648,77 @@ proc renderConsistencyViolation*(v: ConsistencyViolation): string =
 proc renderConsistencyRefusal*(violations: openArray[ConsistencyViolation]):
     seq[string] =
   ## The refusal lines, shared verbatim by the `pre-commit` hook and the
-  ## pre-push gate.
+  ## pre-push gate: one paragraph per violation, followed by its guidance
+  ## line when the caller attached one (``siblingGuidanceLine``).
   for v in violations:
     result.add(renderConsistencyViolation(v))
+    if v.guidance.len > 0:
+      result.add(v.guidance)
+
+# ---------------------------------------------------------------------------
+# Guidance, the soft enforcement (Unified-Locking-And-Hooks.md §16.6)
+# ---------------------------------------------------------------------------
+#
+# A repository developed side by side as a workspace sibling is best tracked
+# through the locks: its recipe names it on a branch, or with a range at most,
+# and the lock carries the revision. A refusal that concerns such a repository
+# AND an exact recipe pin says so in one extra line. That line is wording only:
+# it is attached by the caller after the verdict, so whether a commit or a push
+# is refused never depends on sibling status.
+
+const
+  DependencyGuidelinesEnv* = "REPRO_DEPENDENCY_GUIDELINES_URL"
+    ## Where an organisation publishes its dependency guidelines. When set, the
+    ## guidance line points there; otherwise it points to "your organisation's
+    ## dependency guidelines" in words. Reprobuild is public and the guidelines
+    ## of any one organisation need not be, so no URL is built in.
+
+proc dependencyGuidelinesPointer*(url: string): string =
+  ## The pointer the guidance line and the `repro check` finding carry.
+  ##
+  ## The variable's value is DISPLAY TEXT only: it is never fetched, opened or
+  ## run. It is still sanitised, because it lands inside a refusal whose
+  ## backticked spans are commands that run as printed and whose lines are
+  ## read one by one: a backtick could forge a command span and a line break
+  ## could forge a refusal line. Both, and every other control character,
+  ## are dropped.
+  var clean = ""
+  for c in url:
+    if c == '`' or ord(c) < 0x20 or ord(c) == 0x7F: continue
+    clean.add(c)
+  clean = clean.strip()
+  if clean.len > 0: "see " & clean
+  else: "see your organisation's dependency guidelines"
+
+proc siblingGuidanceLine*(v: ConsistencyViolation; sibling, checkout,
+    repoRoot, guidelinesUrl: string): string =
+  ## THE guidance line (§16.6) for a violation that concerns the workspace
+  ## sibling ``sibling`` checked out at ``checkout``: the repository is a
+  ## sibling, the guidelines suggest tracking it through the lock, and the
+  ## conversion — replace the exact revision with a branch reference (a range
+  ## in `repro.nim`), then run `repro lock update <dependency>`.
+  ##
+  ## That one command completes the conversion of a `flake.nix` pin too: a
+  ## lock node that still records the removed revision in `original.rev` is
+  ## re-locked through nix by `repro lock update` itself. The command is
+  ## backticked because it runs as printed (see ``flakeRevPinEditRemedy``);
+  ## it names no `--to`, since after the conversion the lock follows the
+  ## checkout. "" for a violation that involves no exact recipe pin: there is
+  ## nothing to convert, and the recipe already follows the guidance.
+  if not v.recipePinsExactly: return ""
+  var steps: seq[string]
+  if v.pinnedInFlake.len > 0:
+    steps.add("in flake.nix, replace the exact revision in input '" &
+      v.pinnedInFlake & "''s url with a branch reference")
+  if v.pinnedInReproNim:
+    steps.add("in repro.nim, replace the exact uses: version with a range, " &
+      "or name the dependency without one")
+  "Guidance: '" & sibling & "' is a workspace sibling (checked out at " &
+    checkout & "); the dependency guidelines suggest tracking a sibling " &
+    "through the lock rather than an exact recipe pin (" &
+    dependencyGuidelinesPointer(guidelinesUrl) & "). To convert, " &
+    steps.join("; ") & "; then run `" &
+    lockUpdateCommand(v.dependency, "", repoRoot) & "`."
 
 # ---------------------------------------------------------------------------
 # H3: the commit-time re-pin moves lock resolutions, never a recipe constraint
@@ -816,7 +908,9 @@ proc repinExclusionViolation*(e: RepinConstraintExclusion):
     dependency: e.dependency, repository: e.repository,
     recipeFile: e.recipeFile, recipeLine: e.recipeLine,
     constraint: (if e.pinnedRev.len > 0: e.pinnedRev else: e.constraintText),
-    resolved: e.observed)
+    resolved: e.observed,
+    pinnedInFlake: (if e.kind == rckFlakeRev: e.dependency else: ""),
+    pinnedInReproNim: e.kind == rckExactVersion, checkout: e.checkout)
   let statement =
     case e.kind
     of rckFlakeRev:

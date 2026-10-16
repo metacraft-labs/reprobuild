@@ -1013,3 +1013,79 @@ proc scanReproUsesDeclarations*(source: string; file = ""):
       # `case x.value` with its `of` arms on the following lines at the same
       # indent: the arms open the regions, but mark the whole statement too.
       stack.add(Region(indent: ind, conditional: true))
+
+# ---------------------------------------------------------------------------
+# The comment beside a pin (Unified-Locking-And-Hooks.md §16.6)
+# ---------------------------------------------------------------------------
+
+proc splitLineComment(line: string): tuple[code, comment: string] =
+  ## ``line`` split at the `#` that starts its trailing comment: the code
+  ## before it and the comment text, or the whole line and "". A `#` inside a
+  ## double-quoted string is not a comment (Nix and Nim agree on this, and a
+  ## pin's url literal is exactly such a string).
+  var inString = false
+  var i = 0
+  while i < line.len:
+    let c = line[i]
+    if inString:
+      if c == '\\': inc i
+      elif c == '"': inString = false
+    elif c == '"':
+      inString = true
+    elif c == '#':
+      return (line[0 ..< i], line[i + 1 .. ^1].strip(chars = {'#', ' ', '\t'}))
+    inc i
+  (line, "")
+
+proc wholeLineComment(line: string): tuple[isComment: bool; text: string] =
+  ## Is ``line`` a comment line (only whitespace before a `#`), and its text.
+  let s = line.strip()
+  if s.len == 0 or s[0] != '#': return (false, "")
+  (true, s.strip(leading = true, trailing = false, chars = {'#'}).strip())
+
+proc recipePinComment*(source: string; line: int): string =
+  ## The comment an author wrote beside the pin on 1-based ``line`` of a
+  ## recipe (`flake.nix` or `repro.nim`), or "" when there is none. That is
+  ## the reason the dependency guidelines ask for next to an exact pin.
+  ##
+  ## Read, in order: a `#` comment at the end of the pin's own line; else the
+  ## block of `#` comment lines directly above it; else, when the line above
+  ## opens the input's attribute set (`io-mon-src = {`), the comment block
+  ## directly above that opener. Comment lines are joined with single spaces;
+  ## empty comment lines (a bare `#` used as a paragraph break) are dropped.
+  let lines = source.splitLines()
+  if line < 1 or line > lines.len: return ""
+  let own = splitLineComment(lines[line - 1]).comment
+  if own.len > 0: return own
+  proc blockAbove(idx: int): seq[string] =
+    ## The comment lines directly above 0-based line ``idx``, top first.
+    var i = idx - 1
+    while i >= 0:
+      let c = wholeLineComment(lines[i])
+      if not c.isComment: break
+      if c.text.len > 0: result.insert(c.text, 0)
+      dec i
+  var parts = blockAbove(line - 1)
+  # The opener fallback is for the attribute-set form only: the pin line is
+  # the set's bare `url = …` and the line above opens THAT input's set
+  # (`<name> = {`). A pin written as `<name>.url = …` directly under
+  # `inputs = {` (or under the file's top-level `{`) must not inherit the
+  # comment above that opener: it describes the whole block, not this pin.
+  proc isInputOpener(code: string): bool =
+    let c = code.strip()
+    if not c.endsWith("{"): return false
+    let lhs = c[0 ..< c.len - 1].strip()
+    if not lhs.endsWith("="): return false
+    let name = lhs[0 ..< lhs.len - 1].strip()
+    name.len > 0 and name != "inputs" and
+      name.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '\'', '"'})
+  let pinCode = splitLineComment(lines[line - 1]).code.strip()
+  let bareUrl = pinCode.startsWith("url ") or pinCode.startsWith("url=")
+  if parts.len == 0 and bareUrl and line >= 2 and
+      isInputOpener(splitLineComment(lines[line - 2]).code):
+    parts = blockAbove(line - 2)
+    if parts.len == 0:
+      # `name = { # reason` — a comment on the opener's own line.
+      let opener = splitLineComment(lines[line - 2]).comment
+      if opener.len > 0: parts.add(opener)
+  parts.join(" ")

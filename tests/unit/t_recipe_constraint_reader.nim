@@ -374,3 +374,68 @@ suite "repro.nim versions: source revisions":
       vs).found
     check not exactSourceRevision(parseReproUsesConstraint("lib >=1.0"),
       vs).found
+
+suite "the comment beside a pin (Unified-Locking-And-Hooks.md §16.6)":
+
+  test "trailing, block above, above the opener, and none":
+    let flake = "{\n" &                                              # 1
+      "  inputs = {\n" &                                             # 2
+      "    a-src.url = \"github:o/a/" & "1".repeat(40) &
+        "\"; # trailing reason\n" &                                  # 3
+      "    # first line of a reason\n" &                             # 4
+      "    #\n" &                                                    # 5
+      "    ## second line\n" &                                       # 6
+      "    b-src.url = \"github:o/b/" & "2".repeat(40) & "\";\n" &  # 7
+      "    # above the opener\n" &                                   # 8
+      "    c-src = {\n" &                                            # 9
+      "      url = \"git+https://h/o/c?rev=" & "3".repeat(40) &
+        "\";\n" &                                                    # 10
+      "    };\n" &                                                   # 11
+      "    d-src = { # on the opener\n" &                            # 12
+      "      url = \"github:o/d/" & "4".repeat(40) & "\";\n" &      # 13
+      "    };\n" &                                                   # 14
+      "    e-src.url = \"git+https://h/o/e?ref=a#b&rev=" &
+        "5".repeat(40) & "\";\n" &                                   # 15
+      "  };\n}\n"
+    check recipePinComment(flake, 3) == "trailing reason"
+    check recipePinComment(flake, 7) ==
+      "first line of a reason second line"
+    check recipePinComment(flake, 10) == "above the opener"
+    check recipePinComment(flake, 13) == "on the opener"
+    # A `#` inside the url string is not a comment, and nothing is above.
+    check recipePinComment(flake, 15) == ""
+    check recipePinComment(flake, 0) == ""
+    check recipePinComment(flake, 999) == ""
+    # Two adjacent pinned inputs: each keeps its own comment, and an input
+    # without one never inherits its neighbour's (trailing or above).
+    let adjacent = "{\n" &                                           # 1
+      "  # Inputs of the fixture.\n" &                               # 2
+      "  inputs = {\n" &                                             # 3
+      "    p-src.url = \"github:o/p/" & "6".repeat(40) & "\";\n" &  # 4
+      "    # reason for q\n" &                                       # 5
+      "    q-src.url = \"github:o/q/" & "7".repeat(40) &
+        "\"; # q trailing\n" &                                       # 6
+      "    r-src.url = \"github:o/r/" & "8".repeat(40) & "\";\n" &  # 7
+      "    s-src = {\n" &                                            # 8
+      "      url = \"github:o/s/" & "9".repeat(40) & "\";\n" &      # 9
+      "    };\n" &                                                   # 10
+      "    t-src = {\n" &                                            # 11
+      "      url = \"github:o/t/" & "a".repeat(40) & "\";\n" &      # 12
+      "      # about t's flake attribute, not its pin\n" &           # 13
+      "      flake = false;\n" &                                     # 14
+      "    };\n" &                                                   # 15
+      "  };\n}\n"
+    # The comment above `inputs = {` describes the block, not its first pin.
+    check recipePinComment(adjacent, 4) == ""
+    # The trailing comment wins over the block above.
+    check recipePinComment(adjacent, 6) == "q trailing"
+    # r follows q's line directly: q's trailing comment is not r's.
+    check recipePinComment(adjacent, 7) == ""
+    # s's opener follows r's line, which carries no comment.
+    check recipePinComment(adjacent, 9) == ""
+    check recipePinComment(adjacent, 12) == ""
+    let nim = "package app:\n  uses:\n" &
+      "    \"delta ==1.0.0\"  # the 1.x protocol\n" &
+      "    \"beta ==2.0.0\"\n"
+    check recipePinComment(nim, 3) == "the 1.x protocol"
+    check recipePinComment(nim, 4) == ""

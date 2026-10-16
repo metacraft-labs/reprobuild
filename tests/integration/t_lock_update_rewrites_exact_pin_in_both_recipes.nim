@@ -50,6 +50,17 @@
 ##   * `t_lock_update_moves_every_input_of_one_repository` — two inputs on one
 ##     repository (one pinned, with comments around it, one following a
 ##     branch) both move; `flake.nix` changes in that one revision only.
+##   * `t_lock_update_converts_an_exact_flake_pin_to_branch_tracking` — the
+##     author drops `rev=` from a pinned input's url, leaving the old revision
+##     in the node's `original.rev`; ONE `repro lock update` completes the
+##     conversion: nix re-locks the node from `flake.nix` (no `original.rev`,
+##     a fresh `narHash`), `repro.lock` moves with it, and H1 and H2 pass at
+##     commit and at push. A backward target (regression rule) and an
+##     unpublished one (publication rule) are refused with every file
+##     byte-identical; when the branch tip is not the target, the re-locked
+##     node is then moved to the target like any branch-following input.
+##     Before this, the command refused such a node and asked for a separate
+##     nix re-lock first.
 ##   * `t_the_h1_and_h2_refusals_lock_update_commands_run` — the backticked
 ##     `repro lock update` of a real H1 refusal and of a real H2 refusal runs
 ##     verbatim from the workspace root, and the same commit then passes.
@@ -782,6 +793,142 @@ suite "HL-11 M4: repro lock update":
         " (follows a branch; ") in r.output
       check nothingStaged(fx)
       checkConsistentAtCommitAndPush(fx, "beta moved in both inputs")
+
+  test "t_lock_update_converts_an_exact_flake_pin_to_branch_tracking":
+    if not nf3Prerequisites(
+        "t_lock_update_converts_an_exact_flake_pin_to_branch_tracking"):
+      skip("needs git on PATH and a built ./build/bin/repro (named above)")
+    else:
+      # §16.6's conversion is "replace the exact revision with a branch
+      # reference and run `repro lock update <dependency>`": ONE command.
+      # Dropping `rev=` from the url leaves the old revision in the node's
+      # `original.rev`, which only nix rewrites, so the command re-locks that
+      # node through nix itself, then moves it like any branch-following
+      # input — with the regression and publication rules and the
+      # all-or-nothing snapshot intact.
+      discard requireNix()
+      let fx = setupNf2Fixture("lu-convert")
+      defer: removeDir(fx.scratch)
+      isolateNf2Config(fx)
+      defer: releaseNf2Config()
+      publishAll(fx)
+      let betaDir = siblingDir(fx, "beta")
+      let betaSeed = fx.seedSha[1]
+      let betaTwo = moveAndPublishSibling(fx, "beta", "revision 2")
+      useNixLockedFlake(fx, betaPin = betaTwo)
+      writeAppReproLock(fx, betaTwo)
+      let ok = tryCommitInApp(fx, "pin beta at revision 2")
+      checkpoint(ok.output)
+      check ok.code == 0
+      publishRepo(fx, fx.app)
+      let flakeNixPath = fx.app / "flake.nix"
+      let pinnedFlake = readFile(flakeNixPath)
+      check nodeRev(readFile(lockPath(fx)), "beta-src", "original") == betaTwo
+
+      # The author's half of the conversion: the url now follows main.
+      let converted = pinnedFlake.replace("&rev=" & betaTwo, "")
+      check converted != pinnedFlake
+      check "rev=" notin converted
+      writeFile(flakeNixPath, converted)
+      let s0 = appFiles(fx)
+      # The stale state: flake.nix floats, the node still records the pin.
+      check nodeRev(s0.flakeLock, "beta-src", "original") == betaTwo
+      check nodeRev(s0.flakeLock, "beta-src", "locked") == betaTwo
+
+      # ---- (R) a backward target is refused by the regression rule. -------
+      let r = lockUpdate(fx, "beta-src --to " & betaSeed & " --repo-root=" &
+        q(fx.app))
+      checkpoint("lock update (R) -> " & $r.code & "\n" & r.output)
+      check r.code == 4
+      check (UpdateLabel & "REFUSED: this update would move 2 pinned " &
+        "sibling revision(s) BACKWARD. The lock was not written.") in
+        r.output.splitLines()
+      check (UpdateLabel & "nothing was written: every file is as it was") in
+        r.output.splitLines()
+      checkUnchanged(fx, s0)
+
+      # ---- (P) an unpublished target is refused before nix runs. ----------
+      let betaThree = moveSibling(fx, "beta", "revision 3")
+      check not siblingRevIsPublished(fx, "beta", betaThree)
+      let p = lockUpdate(fx, "beta-src --repo-root=" & q(fx.app))
+      checkpoint("lock update (P) -> " & $p.code & "\n" & p.output)
+      check p.code == 1
+      check (UpdateLabel & "the target " & betaThree & " exists ONLY in " &
+        "this local checkout: ") in p.output
+      check (UpdateLabel & "nothing was written: every file is as it was") in
+        p.output.splitLines()
+      check "re-locked" notin p.output
+      checkUnchanged(fx, s0)
+
+      # ---- (A) one command completes the conversion. ----------------------
+      publishSibling(fx, "beta")
+      check siblingRevIsPublished(fx, "beta", betaThree)
+      let a = lockUpdate(fx, "beta-src --repo-root=" & q(fx.app))
+      checkpoint("lock update (A) -> " & $a.code & "\n" & a.output)
+      check a.code == 0
+      let a1 = appFiles(fx)
+      # The recipe stays exactly as the author wrote it.
+      check a1.flakeNix == converted
+      # flake.lock: nix re-locked the node from flake.nix (no original.rev,
+      # a narHash nix computed for the branch tip, which is the target), and
+      # no other node changed.
+      check nodeRev(a1.flakeLock, "beta-src", "locked") == betaThree
+      check nodeRev(a1.flakeLock, "beta-src", "original") == ""
+      check parseJson(a1.flakeLock)["nodes"]["beta-src"]{"original"}{
+        "ref"}.getStr() == "main"
+      check nodeNarHash(a1.flakeLock, "beta-src").startsWith("sha256-")
+      check nodeNarHash(a1.flakeLock, "beta-src") !=
+        nodeNarHash(s0.flakeLock, "beta-src")
+      check nodeText(a1.flakeLock, "alpha-src") ==
+        nodeText(s0.flakeLock, "alpha-src")
+      check nodeText(a1.flakeLock, "gamma-src") ==
+        nodeText(s0.flakeLock, "gamma-src")
+      # repro.lock: exactly beta's revision and integrity.
+      check a1.reproLock == s0.reproLock.replace(betaTwo, betaThree)
+      check a1.reproLock != s0.reproLock
+      let identity = "_local_" & fx.scratch / "origin-beta"
+      check (UpdateLabel & "'beta-src' is repository " & identity &
+        "; target " & betaThree & " (the HEAD of " & betaDir & ")") in
+        a.output.splitLines()
+      check ("flake.lock input 'beta-src': re-locked through nix from " &
+        "flake.nix, which no longer pins a revision (the stale " &
+        "original.rev is dropped; the branch resolves to " & betaThree &
+        ")") in a.output.splitLines()
+      check ("repro.lock 'beta': " & betaTwo & " -> " & betaThree) in
+        a.output.splitLines()
+      check nothingStaged(fx)
+      # nix agrees with the lock it now holds: re-locking changes nothing.
+      let relock = nixIn(fx.app, "flake lock")
+      check relock.code == 0
+      check readFile(lockPath(fx)) == a1.flakeLock
+      # H1 and H2 pass, at commit and at push.
+      checkConsistentAtCommitAndPush(fx, "track beta through the lock")
+
+      # ---- (F) the branch tip is not the target: re-locked, then moved. ---
+      useNixLockedFlake(fx, betaPin = betaThree)
+      let betaFour = moveAndPublishSibling(fx, "beta", "revision 4")
+      discard gitIn(fx, betaDir, "checkout -q " & betaThree)
+      check headOf(fx, betaDir) == betaThree
+      let floating = readFile(flakeNixPath).replace("&rev=" & betaThree, "")
+      check "rev=" notin floating
+      writeFile(flakeNixPath, floating)
+      let f0 = appFiles(fx)
+      check nodeRev(f0.flakeLock, "beta-src", "original") == betaThree
+      let f = lockUpdate(fx, "beta-src --repo-root=" & q(fx.app))
+      checkpoint("lock update (F) -> " & $f.code & "\n" & f.output)
+      check f.code == 0
+      let f1 = appFiles(fx)
+      check f1.flakeNix == floating
+      check nodeRev(f1.flakeLock, "beta-src", "locked") == betaThree
+      check nodeRev(f1.flakeLock, "beta-src", "original") == ""
+      check f1.reproLock == f0.reproLock
+      check ("flake.lock input 'beta-src': re-locked through nix from " &
+        "flake.nix, which no longer pins a revision (the stale " &
+        "original.rev is dropped; the branch resolves to " & betaFour &
+        ")") in f.output.splitLines()
+      check ("flake.lock input 'beta-src': " & betaFour & " -> " &
+        betaThree & " (follows a branch; ") in f.output
+      checkConsistentAtCommitAndPush(fx, "beta follows main at revision 3")
 
   test "t_the_h1_and_h2_refusals_lock_update_commands_run":
     if not nf3Prerequisites(

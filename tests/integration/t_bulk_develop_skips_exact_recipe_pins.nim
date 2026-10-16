@@ -499,9 +499,9 @@ suite "HL-11 M5: bulk develop skips exact recipe pins; --drop":
         "'beta' by a bulk selection (" & overridesFile(fx) & ", provenance " &
         "'repro develop --all') is IGNORED for it: a bulk selection does " &
         "not substitute an exact recipe pin, so the managed hooks do not " &
-        "compare it with the checkout and the flake override verbs leave it " &
-        "on its pin; while the entry exists, `repro build` still binds it to " &
-        "the checkout wherever it resolves it as a cross-repo producer. Run " &
+        "compare it with the checkout, the flake override verbs leave it on " &
+        "its pin, and repro build resolves it from the lock rather than the " &
+        "checkout. Run " &
         "`repro develop " &
         "--only=beta --workspace-root=" & fx.ws & "` to substitute it " &
         "explicitly, or `repro develop --drop=beta --workspace-root=" &

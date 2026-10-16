@@ -480,6 +480,12 @@ an experiment.
   `repro.nim` an exact `uses:` version is replaced by the version whose
   producer `versions:` entry maps to the target; if none does, the command
   refuses (exit 3) and asks you to add that entry.
+- **A pin you removed is finished for you.** To switch a `flake.nix` input
+  from an exact revision to a branch, remove the revision from its URL and
+  run this command. nix keeps the removed revision in the node's
+  `original.rev` until it re-locks the node, so the command re-locks it
+  through nix (`nix flake update <input>`) and then moves it to the target
+  like any branch-following input, under the same rules below.
 - **A `uses:` range is never rewritten.** One that admits the target is left
   alone; one that excludes it is refused (exit 3), naming the line, because
   widening a range is the author's decision.
@@ -561,13 +567,41 @@ as bulk**, because `--all` and `--only` both wrote `repro develop --all`
 then and the two cannot be told apart; so does an entry with no provenance.
 After upgrading, an exact pin under such an entry is therefore not
 substituted: the hooks do not compare it with its checkout, the flake override
-verbs leave it on its pin, and `--list` shows it `pinned` and names the
-ignored entry. One consumer still follows the entry while it exists: `repro
-build` binds the dependency to the checkout wherever it resolves it as a
-cross-repo producer. To keep
-substituting it, run `repro develop --only=<dependency>` again, which
+verbs leave it on its pin, `repro build` resolves it from the lock rather
+than the checkout (and says so once, naming the two commands below), and
+`--list` shows it `pinned` and names the ignored entry. An explicit entry
+still substitutes it in `repro build`, and an override of a dependency that is
+not exactly pinned is followed exactly as before, whatever its provenance. To
+keep substituting it, run `repro develop --only=<dependency>` again, which
 records the explicit provenance; to clear it, run `repro develop
 --drop=<dependency>`.
+
+### Exact pins of workspace siblings: guidance, never a refusal
+
+An exact revision in a recipe is legitimate, so no rule refuses one. But a
+repository you develop side by side as a workspace sibling is usually better
+tracked through the lock: the recipe names it on a branch (or a range), and the
+commit-time re-pin moves the lock as you work. Reprobuild says so in two
+places, and neither changes whether anything is refused or the exit status:
+
+- **In refusals.** An H1, H2 or H3 refusal about an exact pin of a repository
+  that has a sibling checkout adds one `Guidance:` line naming the sibling and
+  the conversion: replace the exact revision with a branch reference (a range
+  in `repro.nim`), then run the printed `repro lock update <dependency>`. That
+  one command finishes the job for a `flake.nix` input too: a `flake.lock`
+  node that still records the removed revision (`original.rev`) is re-locked
+  through nix from `flake.nix` before it is moved.
+- **In `repro check` and `repro health`.** Every exact recipe pin of a
+  workspace sibling, in `flake.nix` and in `repro.nim`, is listed as an
+  informational finding with its file and line, and with the comment written
+  beside the pin, or `no reason stated` when there is none. `repro check`
+  prints each as a `repro check: info:` line and in the `findings` array of
+  its JSON report; `repro health` lists them in its `sibling-exact-pins` row,
+  which is always `ok`. Write the reason next to a pin you mean to keep.
+
+Both point to "your organisation's dependency guidelines". Set
+`REPRO_DEPENDENCY_GUIDELINES_URL` to make them name your guidelines' address
+instead.
 
 ### `locked-integrity-mismatch` (a lock that no longer verifies)
 

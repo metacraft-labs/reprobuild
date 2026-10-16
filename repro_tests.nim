@@ -10107,6 +10107,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_build_honours_override_provenance_for_exact_pins.nim",
+    binary: "build/test-bin/t_build_honours_override_provenance_for_exact_pins",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_build_machine_and_host_target_are_distinct.nim",
     binary: "build/test-bin/t_build_machine_and_host_target_are_distinct",
     defines: @[],
@@ -14528,6 +14537,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim",
     binary: "build/test-bin/t_shell_entry_reports_drift_over_the_applied_overrides",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_sibling_exact_pin_guidance.nim",
+    binary: "build/test-bin/t_sibling_exact_pin_guidance",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
