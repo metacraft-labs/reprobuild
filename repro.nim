@@ -353,7 +353,8 @@ const
                  "t_e2e_nix_reads_intent_like_export",
                  "t_e2e_profile_compile_clang_first_run_published",
                  "t_e2e_profile_compile_ignores_ancestor_membership",
-                 "t_e2e_home_facts_from_isolated_plan"]:
+                 "t_e2e_home_facts_from_isolated_plan",
+                 "t_e2e_activity_scoped_resource_follows_host_selection"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
     # The clang first-run gate's positive control compiles through a "clang"

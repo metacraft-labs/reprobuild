@@ -4203,6 +4203,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim",
+    binary: "build/test-bin/t_activity_scoped_intent_plans_per_host",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim",
     binary: "build/test-bin/t_builtin_predicate_fixtures",
     defines: @[],
@@ -9686,6 +9695,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim",
     binary: "build/test-bin/t_integration_privileged_broker_single_prompt",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/m83/t_e2e_activity_scoped_resource_follows_host_selection.nim",
+    binary: "build/test-bin/t_e2e_activity_scoped_resource_follows_host_selection",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

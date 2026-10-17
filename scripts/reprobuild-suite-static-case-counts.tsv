@@ -473,6 +473,7 @@ libs/repro_platform/tests/test_msvc_env_merge.nim	nim	9
 libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	18
 libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	137
 libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2
+libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
@@ -1083,6 +1084,7 @@ tests/e2e/m78/t_e2e_profile_declared_resources_apply.nim	nim	1
 tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim	nim	1
 tests/e2e/m80/t_integration_plan_classifier_bucket_drift_is_cache_hit.nim	nim	0
 tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim	nim	0
+tests/e2e/m83/t_e2e_activity_scoped_resource_follows_host_selection.nim	nim	2
 tests/e2e/m83/t_e2e_compare_allowlist_requires_reasons.nim	nim	1
 tests/e2e/m83/t_e2e_compare_reports_each_category.nim	nim	1
 tests/e2e/m83/t_e2e_compare_unmapped_is_not_different.nim	nim	1

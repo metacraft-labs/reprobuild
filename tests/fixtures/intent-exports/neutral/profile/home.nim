@@ -24,6 +24,15 @@ profile "gm5Neutral":
 
   activity cli:
     ripgrep
+    # GM9: resources that belong to the activity: planned (and exported in
+    # the evaluation) only for a host that selects `cli` -- home-pc, not m1.
+    resources:
+      fsUserFile(hostFile = "~/.config/gm9/cli.conf", content = "cli = 1\n")
+
+  activity laptop:
+    resources:
+      fsUserFile(hostFile = "~/.config/gm9/laptop.conf",
+        content = "laptop = 1\n")
 
   config:
     git:
@@ -33,7 +42,7 @@ profile "gm5Neutral":
         credentialHelper = "libsecret"
 
   hosts:
-    "m1": [desktop]
+    "m1": [desktop, laptop]
     "home-pc": [desktop, cli]
 
   resources:

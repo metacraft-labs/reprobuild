@@ -95,7 +95,8 @@ intent = reprobuild.lib.readIntent {
 };
 # intent.evaluation.activities       the activities the host runs
 # intent.evaluation.packages         [ { name; version; binaries; activity; } … ], sorted by name
-# intent.evaluation.resources        the resources whose guards hold, as in the export
+# intent.evaluation.resources        the resources whose guards hold, and whose activity
+#                                    (if any) the host selects, as in the export
 # intent.evaluation.configOverrides  the config overrides whose guards hold
 # intent.document                    the whole export
 ```
@@ -128,7 +129,9 @@ so an export never carries one.
 
 - the document is not a `repro home export` document, or its `schemaVersion`
   is one this library does not know (regenerate it with the `repro` the
-  flake pins);
+  flake pins; this library reads schema 3, which added the `activity` of a
+  resource);
+- a resource belongs to an activity the profile does not declare;
 - the export cannot describe the target: its `platforms` entry for `system`
   is `differs` or `unevaluated` — typically a `when defined(macosx)` in the
   profile, compiled on Linux. The message says why. Use runtime predicates

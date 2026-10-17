@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "selection": {
     "host": "m1",
     "hostDeclared": false,
@@ -44,7 +44,8 @@
           }
         },
         "dependsOn": [],
-        "guard": null
+        "guard": null,
+        "activity": null
       }
     ],
     "buildActions": [],
@@ -60,8 +61,8 @@
   },
   "provenance": {
     "repro": {
-      "version": "0.2.5",
-      "sourceRevision": "017df0b3879eddeed5f856da12b74a2527ea2ebe"
+      "version": "0.2.6",
+      "sourceRevision": "be536e9c217c16286be212ee829e2ac28ae23f0d-dirty"
     },
     "hostSource": "env",
     "profile": {
