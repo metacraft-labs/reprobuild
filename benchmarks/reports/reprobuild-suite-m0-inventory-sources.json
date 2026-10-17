@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2148,
+    "nimTestBinaries": 2150,
     "pureUnitConsolidationGroups": 62,
-    "pureUnitTests": 660,
+    "pureUnitTests": 661,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2170
+    "testEntries": 2172
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1296,9 +1296,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1167,
+      "integration": 1168,
       "platform/destructive": 132,
-      "pure unit": 660,
+      "pure unit": 661,
       "unclassified": 192
     },
     "graphOwnedTestArtifacts": [
@@ -1501,9 +1501,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2148,
+    "nimTestBinaryCount": 2150,
     "pythonTestFileCount": 22,
-    "testEntryCount": 2170
+    "testEntryCount": 2172
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15888,6 +15888,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_activity_scoped_intent_plans_per_host",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply",
+        "repro_home_intent",
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_profile_intent"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_builtin_predicate_fixtures",
       "class": "graph-fixture",
       "classificationReason": "fixture path or fixture-oriented test",
@@ -26935,6 +26956,26 @@
       "source": "tests/e2e/m81/t_integration_privileged_broker_single_prompt.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 0,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_activity_scoped_resource_follows_host_selection",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_activity_scoped_resource_follows_host_selection.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

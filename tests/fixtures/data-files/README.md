@@ -44,11 +44,15 @@ Gradual-Nix-To-Reprobuild-Migration.md, Open question 6). A host that should
 get the `default` activity alone is declared with `["default"]`.
 
 `resources` (present when the case has `[[resource]]` rows) is the SET
-(sorted) of addresses of the resource rows that apply: a resource row is
-profile-wide, so it applies wherever its `when` holds, whatever activities the
-host selects. Its address is the row's `address`, else the constructor's
+(sorted) of addresses of the resource rows that apply: a resource row without
+an `activity` key is profile-wide, so it applies wherever its `when` holds,
+whatever activities the host selects; a row with `activity = "<name>"` (GM9,
+case `activity-scoped-resource-rows`) belongs to that activity and applies
+only on a host whose selection enables it, and where its `when` holds (an
+activity no package row or block declares is created, as for a package row).
+Its address is the row's `address`, else the constructor's
 auto-address (`<kind>:<key fields>`, e.g. `fs.userFile:~/.config/a.conf`).
-A `[[resource]]` row's keys are `kind`, `when` and the parameters of the
+A `[[resource]]` row's keys are `kind`, `when`, `activity` and the parameters of the
 resource constructor `kind` names (`fsUserFile`, `envUserVariable`, ...),
 with the constructor's defaults for omitted ones.
 

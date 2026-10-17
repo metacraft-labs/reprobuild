@@ -5,7 +5,7 @@
 # The document is Reprobuild's: `repro home export` compiles the profile,
 # expands its data files and probes every target platform (reprobuild-pm spec
 # Gradual-Nix-To-Reprobuild-Migration.md §Exporting evaluated intent to Nix,
-# schema in §Export schema, version 2; public reference
+# schema in §Export schema (version 3 since GM9); public reference
 # docs/user-guide/home-export.md). Nix only reads it. Two consumption modes
 # (§Consumption modes), one consumer code path:
 #
@@ -42,7 +42,11 @@
 #     extractor edges with ties broken by name, which only the resolver can
 #     compute -- consumers should not depend on order);
 #   * resources and config overrides: those whose `guard` holds, in intent
-#     order;
+#     order; a resource that belongs to an activity (`activity`, GM9) only
+#     when the host's enabled activities include it
+#     (`applicableResourceEntries`). A resource naming an activity the
+#     intent does not declare is refused, as the planner refuses it
+#     (`profileIntentToHomeProfile`).
 #   * applies: the concerns the host's `hosts:` entry declares Reprobuild
 #     applies (`intent.hostApplies`, Gradual-Nix-To-Reprobuild-Migration.md
 #     §Concern-scoped apply), absent when it declares none. A declaration
@@ -92,7 +96,7 @@ let
     ;
 
   format = "repro.home.export";
-  knownSchemaVersions = [ 2 ];
+  knownSchemaVersions = [ 3 ];
 
   # Every condition under which a consumer must not use the document for
   # `system`, as a message, or null. Shared by both modes.
@@ -235,6 +239,20 @@ let
           concern = if elem (packageKey p) classification.applications then "applications" else "packages";
           resolved = !(elem (packageKey p) classification.unresolved);
         };
+      # GM9: an activity-scoped resource applies only where its activity is
+      # enabled; `null` (or absent) is profile-wide. An activity the intent
+      # does not declare is refused, never read as profile-wide.
+      resourceInSelection =
+        r:
+        let
+          activity = r.activity or null;
+        in
+        if activity == null then
+          true
+        else if !(elem activity declared) then
+          throw "reprobuild.lib.readIntent: resource `${toString (r.address or "")}` belongs to activity `${toString activity}`, which the profile does not declare (declared: ${builtins.concatStringsSep ", " declared})"
+        else
+          elem activity enabled;
     in
     if reason != null then
       throw "reprobuild.lib.readIntent: cannot evaluate this export for ${system}: ${reason}"
@@ -248,7 +266,9 @@ let
         host = selectedHost;
         inherit activities;
         packages = if applies == null then packages else map withConcern packages;
-        resources = filter (r: holdsFor facts (r.guard or null)) (intent.resources or [ ]);
+        resources = filter (r: resourceInSelection r && holdsFor facts (r.guard or null)) (
+          intent.resources or [ ]
+        );
         configOverrides = filter (o: holdsFor facts (o.guard or null)) (intent.configOverrides or [ ]);
       }
       // (if applies == null then { } else { inherit applies; })

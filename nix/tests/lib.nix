@@ -226,7 +226,31 @@ let
     );
   refusalTests =
     expectTrue "readIntent refuses an unknown schemaVersion" (
-      refusedSnapshot "schema3" (neutral // { schemaVersion = 3; })
+      refusedSnapshot "schema4" (neutral // { schemaVersion = 4; })
+    )
+    # GM9: a schema-2 reader would apply activity-scoped resources on every
+    # host, so a document is read by the version it declares only.
+    ++ expectTrue "readIntent refuses the previous schemaVersion (2)" (
+      refusedSnapshot "schema2" (neutral // { schemaVersion = 2; })
+    )
+    ++ expectTrue "readIntent refuses a resource of an undeclared activity" (
+      refusedSnapshot "undeclared-activity" (
+        neutral
+        // {
+          intent = neutral.intent // {
+            resources = neutral.intent.resources ++ [
+              {
+                kind = "fs.userFile";
+                address = "gm9-orphan";
+                fields = { };
+                dependsOn = [ ];
+                guard = null;
+                activity = "gm9_no_such_activity";
+              }
+            ];
+          };
+        }
+      )
     )
     ++ expectTrue "readIntent refuses a document of another format" (
       refusedSnapshot "format" (neutral // { format = "something.else"; })

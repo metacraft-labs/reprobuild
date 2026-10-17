@@ -1215,6 +1215,7 @@ proc resourceFromEntry(profilePath, homeDir: string;
       break
 
 proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
+                             activities: HashSet[string];
                              nodes: seq[IntentNode];
                              into: var DesiredSet) =
   ## Walk a `resources:` block body, emitting one `Resource` per
@@ -1222,9 +1223,10 @@ proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
   ## only when its predicate evaluates true against the host
   ## (`applicableResourceEntries`, the one guard walker), so a
   ## `when windows:`-guarded resource is materialized on Windows and
-  ## absent under a non-matching predicate. Two guarded resources may
+  ## absent under a non-matching predicate; an activity-scoped resource
+  ## (GM9) only when `activities` enables its activity. Two resources may
   ## share an address as long as no host gets both.
-  for node in applicableResourceEntries(nodes, ctx):
+  for node in applicableResourceEntries(nodes, ctx, activities):
     let r = resourceFromEntry(profilePath, homeDir, node)
     if r.address in into.resources:
       resourceProfileError(profilePath, node.resourceHeaderLine,
@@ -1238,11 +1240,21 @@ proc parseProfileResources*(profile: Profile; homeDir: string;
   ## M78: build a `DesiredSet` from the parsed profile's `resources:`
   ## block. Predicates are resolved against `ctx`. Raises
   ## `EUnstructured` on a malformed entry.
+  ##
+  ## GM9: an activity-scoped resource is planned only when the host's
+  ## selection -- `enabledActivitiesFor(profile, ctx.host)`, the planner's
+  ## one host-selection rule, which `buildPlan` applies to packages too --
+  ## enables its activity. The selection is computed only for a profile
+  ## that has such a resource, so a profile without one plans resources
+  ## exactly as before.
   result = initDesiredSet()
   let blkOpt = findResourcesBlock(profile)
   if blkOpt.isNone:
     return
-  collectProfileResources(profile.path, homeDir, ctx,
+  var activities = initHashSet[string]()
+  if hasActivityScopedResource(blkOpt.get.resourcesEntries):
+    activities = enabledActivitiesFor(profile, ctx.host)
+  collectProfileResources(profile.path, homeDir, ctx, activities,
     blkOpt.get.resourcesEntries, result)
 
 proc parseProfileResources*(profile: Profile; homeDir, host: string):

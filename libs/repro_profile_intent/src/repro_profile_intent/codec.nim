@@ -89,6 +89,10 @@ const
     ## GM3: the runtime predicate a ResourceIntent / ConfigOverride
     ## applies under (`ResourceIntent.guard`). Optional; omitted when the
     ## element applies on every host. Envelope schema 4.
+  KeyActivity     = "activity"
+    ## GM9: the activity a ResourceIntent belongs to
+    ## (`ResourceIntent.activity`). Optional; omitted for a profile-wide
+    ## resource. Envelope schema 8.
   KeyBinaries     = "binaries"
     ## 2026-06-09: the explicit binary names a package installs, used
     ## by the path-based catalog adapter when the package name
@@ -225,6 +229,8 @@ proc encodeResource(r: ResourceIntent): DynamicValue =
                  entry(KeyDependsOn, cborArray(deps))]
   if r.guard.expr.len > 0:
     fields.add entry(KeyGuard, cborText(r.guard.expr))
+  if r.activity.len > 0:
+    fields.add entry(KeyActivity, cborText(r.activity))
   cborMap(fields)
 
 proc encodeHosts(h: Table[string, seq[string]]): DynamicValue =
@@ -468,6 +474,10 @@ proc decodeResource(v: DynamicValue): ResourceIntent =
       lookup(entries, KeyDependsOn, "ResourceIntent"), KeyDependsOn):
     result.dependsOn.add decodeResourceAddress(d)
   result.guard = decodeGuard(entries)
+  var activityFound = false
+  let activity = lookupOpt(entries, KeyActivity, activityFound)
+  if activityFound:
+    result.activity = expectText(activity, KeyActivity)
 
 proc decodeHosts(v: DynamicValue): Table[string, seq[string]] =
   let entries = expectMap(v, "hosts")
