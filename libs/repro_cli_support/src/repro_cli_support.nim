@@ -15954,6 +15954,14 @@ proc runDevEnvExportCommand(args: openArray[string];
     selection.developOverridesPath =
       os.normalizedPath(absolutePath(parsed.developOverridesPath))
 
+  # The race guard's pre-edge listings: the membership of every directory the
+  # PREVIOUS activation's manifest tracks, listed now, before this
+  # activation's edge can move anything (``snapshotPromptWatchBaseline``).
+  # The previous manifest is the stable copy each activation leaves in the
+  # edge's output directory, below.
+  let stableWatchManifestPath = selection.outDir / PromptWatchFileName
+  let promptWatchBaseline =
+    snapshotPromptWatchBaseline(stableWatchManifestPath)
   let edge =
     try:
       computePublicDevEnv(selection, publicCliPath, announce = true)
@@ -16029,6 +16037,14 @@ proc runDevEnvExportCommand(args: openArray[string];
       writePromptWatchManifest(watchManifestPath, edge.promptWatch)
     except CatchableError:
       keyable = false
+  # The stable copy the NEXT activation's race guard lists before its edge
+  # runs. Best effort: without it the next activation only loses the
+  # listings, and is conservative where it would have used them.
+  if keyable:
+    try:
+      writePromptWatchManifest(stableWatchManifestPath, edge.promptWatch)
+    except CatchableError:
+      discard
   let settledKey = computeDevEnvEdgeCacheKey(fastPathConfig, watchManifestPath)
   # The race guard. The key above was built from metadata stat'ed AFTER the
   # edge ran. A watched file edited, a watched directory's membership
@@ -16045,7 +16061,8 @@ proc runDevEnvExportCommand(args: openArray[string];
   let unsettled =
     if keyable:
       unsettledPromptWatchPaths(watchManifestPath,
-        edge.introspectionStartedAt, edge.promptWatchOwnChanges)
+        edge.introspectionStartedAt, edge.promptWatchOwnChanges,
+        promptWatchBaseline)
     else:
       @["<the watch set could not be recorded completely>"]
   let fingerprint =

@@ -5,7 +5,9 @@ import repro_core
 import repro_dev_env_engine/cache_key as devEnvCacheKey
 export devEnvCacheKey.PromptWatchEntry, devEnvCacheKey.promptWatchManifestPathFor,
   devEnvCacheKey.writePromptWatchManifest,
-  devEnvCacheKey.unsettledPromptWatchPaths
+  devEnvCacheKey.unsettledPromptWatchPaths,
+  devEnvCacheKey.PromptWatchBaseline,
+  devEnvCacheKey.snapshotPromptWatchBaseline, devEnvCacheKey.PromptWatchFileName
 import repro_hash
 import repro_interface_artifacts
 import repro_runquota

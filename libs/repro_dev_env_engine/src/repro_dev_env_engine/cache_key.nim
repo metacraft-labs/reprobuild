@@ -406,8 +406,49 @@ proc changedSince(info: FileInfo; startedAt: float): bool =
   max(timeSeconds(info.lastWriteTime), timeSeconds(info.creationTime)) >=
     startedAt - margin
 
+type
+  PromptWatchBaseline* = object
+    ## The entry NAMES of each membership-tracked directory (``d`` entry) of
+    ## a prompt watch manifest, listed BEFORE an activation's edge runs (see
+    ## ``snapshotPromptWatchBaseline``). Keyed by
+    ## ``comparablePromptWatchPath``.
+    listings*: Table[string, seq[string]]
+
+proc directoryNames(dir: string; names: var seq[string]): bool =
+  ## The sorted entry names of ``dir``; false when it cannot be listed.
+  names.setLen(0)
+  try:
+    for child in walkDir(fastPathFsPath(dir), relative = true):
+      names.add(child.path)
+  except OSError:
+    return false
+  names.sort(system.cmp[string])
+  true
+
+proc snapshotPromptWatchBaseline*(manifestPath: string): PromptWatchBaseline =
+  ## List, NOW, every ``d`` entry of the manifest at ``manifestPath`` -- the
+  ## previous activation's, read before this activation's edge runs. The
+  ## race guard compares these listings with the directories after the edge
+  ## ran, which is the only way to tell a foreign removal from the edge's
+  ## own when both moved the same directory: timestamps say only THAT a
+  ## directory changed, and the edge's evidence says what IT did, not what
+  ## else happened. A manifest that cannot be read yields no listings, and
+  ## the guard is conservative for every directory it has no listing for.
+  result.listings = initTable[string, seq[string]]()
+  var entries: seq[PromptWatchEntry]
+  if manifestPath.len == 0 or
+      readPromptWatchManifest(manifestPath, entries).len > 0:
+    return
+  for entry in entries:
+    if not entry.enumerated:
+      continue
+    var names: seq[string]
+    if directoryNames(entry.path, names):
+      result.listings[comparablePromptWatchPath(entry.path)] = names
+
 proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
-                                ownChanges: openArray[string] = []):
+                                ownChanges: openArray[string] = [];
+                                baseline = PromptWatchBaseline()):
     seq[string] =
   ## The race guard. The paths of the manifest that may have changed after
   ## the edge observed them. ``startedAt`` is seconds since the epoch, taken
@@ -474,14 +515,28 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
   ## same directory, so a foreign removal beside the edge's own scratch is
   ## still reported.
   ##
-  ## WHAT IT CANNOT SEE. Timestamps say THAT a directory's membership moved,
-  ## not how often, so a foreign removal from an enumerated directory whose
-  ## move the edge's own changes also account for is taken for the edge's
-  ## own doing. Every other rule errs the
-  ## other way: an absent probe below a directory that changed for an
-  ## unrelated reason, or a foreign file created and removed again inside an
-  ## enumerated directory, costs one extra activation, never a missed
-  ## change.
+  ## WHEN THE EDGE'S OWN CHANGES EXPLAIN A MOVE. Timestamps say THAT a
+  ## directory's membership moved, not how often, so the edge having created
+  ## or removed something in an enumerated directory cannot by itself rule
+  ## out a foreign removal from the same directory. ``baseline`` decides
+  ## that case: the directory's entry names listed BEFORE the edge ran
+  ## (``snapshotPromptWatchBaseline``). Every name gone since must itself be
+  ## an own change, and every new one an own change or a directory above
+  ## one; otherwise it is reported. A directory with no baseline listing is
+  ## reported in that case, since nothing can verify it: one extra
+  ## activation the first time, after which the listing exists.
+  ##
+  ## ONE CASE THIS STILL CANNOT SEE. ``ownChanges`` merges the edge's writes
+  ## and its removals, so an entry the edge WROTE that somebody else then
+  ## removes before this guard runs is taken for the edge's own removal --
+  ## here and in the missing-path test above (an edge relocking
+  ## `flake.lock` while the user deletes it). Telling the two apart needs
+  ## the removal channel on its own, which a rename by the edge (recorded as
+  ## a write) would then turn into a report on every activation. Every other
+  ## rule errs the other way -- an absent probe below a directory that
+  ## changed for an unrelated reason, or a foreign file created and removed
+  ## again inside an enumerated directory, costs one extra activation,
+  ## never a missed change.
   ##
   ## A probed directory (a ``p`` entry that is a directory) is keyed on its
   ## kind only, and nothing about it is tested here: its appearance or
@@ -569,6 +624,39 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
     except OSError:
       foreign = true  # cannot be listed now: its membership is unknown
     if foreign or not explained:
+      result.add(entry.path)
+      continue
+    # Explained by the edge's own changes, which says nothing about whether
+    # SOMEBODY ELSE also removed an entry from the same directory meanwhile.
+    # The pre-edge listing decides: every name that disappeared must itself
+    # be an own change (``ownExact``), and every name that appeared an own
+    # change or a directory above one (``own``). Without a
+    # listing (the first activation in this output directory, or a
+    # directory the previous manifest did not track) that cannot be
+    # verified, so the directory is reported: one extra activation, which
+    # then has the listing.
+    let comparableDir = comparable
+    if not baseline.listings.hasKey(comparableDir):
+      result.add(entry.path)
+      continue
+    var current: seq[string]
+    if not directoryNames(entry.path, current):
+      result.add(entry.path)
+      continue
+    let before = baseline.listings[comparableDir]
+    var unexplained = false
+    for name in before:
+      if current.binarySearch(name) < 0 and
+          not ownExact.hasKey(comparablePromptWatchPath(entry.path / name)):
+        unexplained = true  # a foreign REMOVAL beside the edge's own
+        break
+    if not unexplained:
+      for name in current:
+        if before.binarySearch(name) < 0 and
+            not own.hasKey(comparablePromptWatchPath(entry.path / name)):
+          unexplained = true  # an addition that kept an old timestamp
+          break
+    if unexplained:
       result.add(entry.path)
 
 proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,

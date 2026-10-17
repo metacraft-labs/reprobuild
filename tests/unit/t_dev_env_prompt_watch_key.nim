@@ -30,7 +30,7 @@
 ## `writePromptWatchManifest` / `computeDevEnvEdgeCacheKey`, and the real
 ## filesystem's own metadata.
 
-import std/[os, strutils, tempfiles, times, unittest]
+import std/[os, strutils, tables, tempfiles, times, unittest]
 
 import repro_dev_env_engine/cache_key
 import repro_test_support/reasoned_skip
@@ -272,6 +272,11 @@ suite "dev-env prompt watch key":
       PromptWatchEntry(path: tree, enumerated: true),
       PromptWatchEntry(path: tree / "old.nim")])
     var started = window()
+    # The pre-edge listing production takes before the edge runs; an
+    # explanation by the edge's own changes is verified against it (the
+    # no-listing case is pinned in "a foreign removal beside the edge's own
+    # change is unsettled").
+    var baseline = snapshotPromptWatchBaseline(manifest)
     check unsettledPromptWatchPaths(manifest, started).len == 0
 
     # Created by the edge itself, directly and inside a directory it made.
@@ -279,19 +284,22 @@ suite "dev-env prompt watch key":
     writeFile(tree / "own-dir" / "inner", "x\n")
     writeFile(tree / "own.txt", "x\n")
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [tree / "own-dir" / "inner", tree / "own.txt"]).len == 0
+      ownChanges = [tree / "own-dir" / "inner", tree / "own.txt"],
+      baseline = baseline).len == 0
     # Created by anybody else: an addition, reported -- also beside the
     # edge's own entries.
     writeFile(tree / "new.nim", "new\n")
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [tree / "own-dir" / "inner", tree / "own.txt"]) == @[tree]
+      ownChanges = [tree / "own-dir" / "inner", tree / "own.txt"],
+      baseline = baseline) == @[tree]
 
     # Created and removed again by the edge (its scratch): explained.
     started = window()
+    baseline = snapshotPromptWatchBaseline(manifest)
     writeFile(tree / "scratch.tmp", "x\n")
     removeFile(tree / "scratch.tmp")
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [tree / "scratch.tmp"]).len == 0
+      ownChanges = [tree / "scratch.tmp"], baseline = baseline).len == 0
     # The same by anybody else leaves no entry to tell it from a removal, so
     # it is reported: one extra activation, never a missed removal.
     check unsettledPromptWatchPaths(manifest, started) == @[tree]
@@ -385,3 +393,41 @@ suite "dev-env prompt watch key":
       check unsettledPromptWatchPaths(manifest, started).len == 0
       removeFile(root / "real" / "read.nix")
       check unsettledPromptWatchPaths(manifest, started) == @[listed]
+
+  test "a foreign removal beside the edge's own change is unsettled":
+    # The case timestamps cannot decide: the edge created an entry in an
+    # enumerated directory, so the directory moved for a reason it explains,
+    # and somebody else removed an entry the edge never read from the same
+    # directory. The pre-edge listing (`snapshotPromptWatchBaseline`) tells
+    # them apart. Without a listing the move cannot be verified and is
+    # reported; with one, only an unexplained difference is.
+    let root = createTempDir("t_dev_env_prompt_watch_baseline", "")
+    defer: removeDir(root)
+    let tree = root / "sibling"
+    createDir(tree)
+    writeFile(tree / "kept.nim", "kept\n")
+    writeFile(tree / "unread.nim", "unread\n")
+    let manifest = root / "dev-env.prompt-watch"
+    writePromptWatchManifest(manifest, [
+      PromptWatchEntry(path: tree, enumerated: true),
+      PromptWatchEntry(path: tree / "kept.nim")])
+    sleep(2100)
+    let baseline = snapshotPromptWatchBaseline(manifest)
+    check baseline.listings.len == 1
+    let started = epochTime()
+    let own = tree / "own.txt"
+    writeFile(own, "own\n")
+    # The edge's own write, and nothing else: explained, with the listing.
+    check unsettledPromptWatchPaths(manifest, started, ownChanges = [own],
+      baseline = baseline).len == 0
+    # The same move with no listing to verify it against: reported.
+    check unsettledPromptWatchPaths(manifest, started,
+      ownChanges = [own]) == @[tree]
+    # A foreign removal of an entry the edge never read, beside the own
+    # write: reported, although the own write alone explains the move.
+    removeFile(tree / "unread.nim")
+    check unsettledPromptWatchPaths(manifest, started, ownChanges = [own],
+      baseline = baseline) == @[tree]
+    # And the edge removing that entry itself is explained again.
+    check unsettledPromptWatchPaths(manifest, started,
+      ownChanges = [own, tree / "unread.nim"], baseline = baseline).len == 0
