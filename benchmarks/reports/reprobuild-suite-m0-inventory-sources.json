@@ -2907,7 +2907,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 139,
+          "line": 141,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "gcc"
@@ -2932,7 +2932,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 142,
+          "line": 144,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "cc"
@@ -3025,7 +3025,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 166,
+          "line": 168,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
           "patterns": [
             "gcc"
@@ -3052,7 +3052,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 169,
+          "line": 171,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
           "patterns": [
             "cc"
@@ -25257,7 +25257,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_hcr_agent"
+        "repro_hcr_agent",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": false,
@@ -38684,7 +38685,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_runquota_long_temp_rendezvous.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

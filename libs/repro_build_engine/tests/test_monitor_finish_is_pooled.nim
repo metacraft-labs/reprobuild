@@ -22,6 +22,24 @@
 ##     observes exit for exactly this reason, and a pool must not silently
 ##     lengthen that interval. So the TIMING is asserted, not only the output.
 ##
+## PLATFORMS, AND WHAT EACH ONE CAN SHOW. Both hosting forms run on Linux and
+## macOS, and the evidence comparison runs on both. Two things do not exist on
+## macOS and are therefore asserted on Linux only, each with a pin that reddens
+## the day the platform gains them:
+##
+##   * the §4.1 detached-descendant guard — io-mon's is a ``/proc`` scan that
+##     runs only on Linux, so off Linux both arms grade a live descendant
+##     ``mcComplete`` (recorded as a gap in io-mon issues/
+##     2026-10-17-macos-grades-a-live-detached-descendant-complete.md);
+##   * hence the timing case's calibration, which is counted in grace windows.
+##
+## The macOS shim also stamps per-object and per-process identities
+## (``ino=``, ``mtime=``, ``start=``, ``childstart=``, KERN_PROC_PID MIBs) that
+## the Linux shim does not; the normaliser treats them like pids (see
+## ``IdentityTimeTokens``). Both were measured, at reprobuild 8a61fb6963 on
+## aarch64-darwin, to be the WHOLE of the arm-to-arm difference there — the
+## failure was the fixture's, not a hosting-mode divergence and not load.
+##
 ## NO MOCKS. Every case runs a real build, with a real monitored child, a real
 ## LD_PRELOAD shim, a real detached descendant held alive across a real grace
 ## window, and a real ``.iomon`` decoded with io-mon's own reader. The
@@ -230,6 +248,45 @@ else:
   # and by the ``PathSetEvidence`` comparison.
   # ------------------------------------------------------------------
   const PidPlaceholder = "<pid>"
+  const InoPlaceholder = "<ino>"
+  const TimePlaceholder = "<time>"
+
+  # THE macOS SHIM'S PER-OBJECT AND PER-PROCESS IDENTITY TOKENS, and why they
+  # are blanked rather than compared. The Linux shim writes none of these, so
+  # on Linux this changes nothing; the macOS shim
+  # (io-mon ``shim/macos_interpose.nim`` ``devInoSuffix`` / ``statDetail``)
+  # appends ``dev=<n> ino=<n>`` to file opens and path probes for hardlink
+  # identity, ``mtime=<n> size=<n>`` to successful stat probes, and
+  # ``start=<µs>`` / ``childstart=<µs>`` to process starts and spawns.
+  # Measured at reprobuild 8a61fb6963 on aarch64-darwin: with these compared
+  # verbatim the quiesced fixture differed in 28 of 350 records per arm and
+  # the descendant fixture in 32 of 375, and EVERY difference was one of
+  # these values — never a kind, a path, a flag, a result, or a record
+  # present in one arm and absent from the other.
+  #
+  # They cannot agree between the arms BY CONSTRUCTION, for the same reason
+  # the pids above cannot: each arm rebuilds the work directory, so
+  # ``marker.txt``, ``out.txt`` and the directory itself are new kernel
+  # objects with new inode numbers and new mtimes, and every process is new
+  # and starts at a new instant. (On Linux an inode number can be recycled
+  # by the delete-and-recreate, which would only ever have made such a
+  # comparison pass by luck.) So they get exactly the treatment this file
+  # already gives a ``localfd:<dev>:<ino>`` path and a pid:
+  #   * ``ino`` and the two time stamps are BLANKED;
+  #   * ``dev`` and ``size`` stay VERBATIM — the device is the same
+  #     filesystem in both arms, and a size is content, so the fixture keeps
+  #     the probed directories' contents identical between the arms (see
+  #     ``runOneArm``'s cache placement) rather than blanking it;
+  #   * the inode STRUCTURE is compared by counting, as the pid structure is:
+  #     ``distinctInodes`` counts the distinct ``(dev, ino)`` objects an arm's
+  #     records name, which a collapse of two objects into one changes and a
+  #     consistent renaming does not.
+  const IdentityTimeTokens = ["mtime=", "start=", "childstart="]
+
+  proc isIdentityTimeToken(token: string): bool =
+    for prefix in IdentityTimeTokens:
+      if token.startsWith(prefix): return true
+    false
 
   type Normaliser = object
     runs: Table[string, string]
@@ -246,6 +303,10 @@ else:
         if not n.runs.hasKey(id):
           n.runs[id] = "R" & $n.runs.len
         parts.add "run=" & n.runs[id]
+      elif token.startsWith("ino="):
+        parts.add "ino=" & InoPlaceholder
+      elif isIdentityTimeToken(token):
+        parts.add token[0 .. token.find('=')] & TimePlaceholder
       elif token.startsWith("pids="):
         var mapped: seq[string] = @[]
         for entry in token[5 .. ^1].split(','):
@@ -279,6 +340,15 @@ else:
       let bits = value.split(':')
       if bits.len == 3:
         value = bits[0] & ":" & bits[1] & ":<ino>"
+    # A macOS ``sysctl`` read is recorded under its MIB. ``1.14.1.<n>`` is
+    # CTL_KERN / KERN_PROC / KERN_PROC_PID / <pid> (``<sys/sysctl.h>``): the
+    # last element is the pid being asked about, so it is blanked like any
+    # other pid, and the MIB prefix is compared verbatim.
+    const KernProcPidMib = "mib:1.14.1."
+    if value.startsWith(KernProcPidMib):
+      let tail = value[KernProcPidMib.len .. ^1]
+      if tail.len > 0 and tail.allCharsInSet(Digits):
+        value = KernProcPidMib & PidPlaceholder
     value
 
   proc renderOneRecord(n: var Normaliser; record: MonitorRecord;
@@ -330,6 +400,20 @@ else:
              name == "threadId" or name == "childOsPid":
           if value != 0'u64:
             seen.incl value
+    seen.len
+
+  proc distinctInodes(depFile: MonitorDepFile): int =
+    ## How many DISTINCT filesystem objects (``dev=``/``ino=`` pairs in a
+    ## record's ``detail``) this run's records name — the inode counterpart of
+    ## ``distinctPids``. Zero on a shim that does not stamp them (Linux).
+    var seen = initHashSet[string]()
+    for record in depFile.records:
+      var dev, ino = ""
+      for token in record.detail.split(' '):
+        if token.startsWith("dev="): dev = token[4 .. ^1]
+        elif token.startsWith("ino="): ino = token[4 .. ^1]
+      if ino.len > 0:
+        seen.incl dev & ":" & ino
     seen.len
 
   proc renderEvidence(evidence: PathSetEvidence; workDir: string): string =
@@ -464,13 +548,29 @@ else:
     false
 
   proc firstDifference(a, b: seq[string]): string =
-    for i in 0 ..< max(a.len, b.len):
-      let left = if i < a.len: a[i] else: "<absent>"
-      let right = if i < b.len: b[i] else: "<absent>"
-      if left != right:
-        return "at index " & $i & ":\n  hosted:  " & left & "\n  wrapped: " &
-          right
-    ""
+    ## EVERY record one arm has and the other does not, as a multiset
+    ## difference of the two sorted renderings — not just the first index at
+    ## which the sorted lists diverge. One extra record shifts every index
+    ## after it, so "the first difference" names a symptom; the full
+    ## difference names the records, which is what a reader needs to tell a
+    ## real evidence divergence from a per-run identifier the normaliser has
+    ## not been taught about.
+    var counts = initCountTable[string]()
+    for x in a: counts.inc(x)
+    for x in b: counts.inc(x, -1)
+    var onlyHosted, onlyWrapped: seq[string] = @[]
+    for key, count in counts.pairs:
+      for _ in 0 ..< abs(count):
+        if count > 0: onlyHosted.add key
+        elif count < 0: onlyWrapped.add key
+    if onlyHosted.len == 0 and onlyWrapped.len == 0:
+      return ""
+    onlyHosted.sort()
+    onlyWrapped.sort()
+    result = $onlyHosted.len & " record(s) only in the hosted arm, " &
+      $onlyWrapped.len & " only in the wrapped arm:"
+    for x in onlyHosted: result.add "\n  hosted only:  " & x
+    for x in onlyWrapped: result.add "\n  wrapped only: " & x
 
   suite "TP-2 pooled monitor finish":
     test "evidence is unchanged versus the serial form":
@@ -503,11 +603,19 @@ else:
       ##     — and the descendant fixture reddens on ``completeness``.
       let root = scratchRoot("evidence")
       let work = root / "work"
+      # THE ARMS' CACHES ARE NOT UNDER ``root``. The monitored shell probes
+      # ``root`` (the work directory's parent), and the macOS shim records the
+      # probe's ``size=`` verbatim — correctly, it is content. With each arm's
+      # cache created beside ``work`` the directory grew by one entry per arm
+      # (128 -> 160 bytes, 192 -> 224 measured), so the two arms probed
+      # DIFFERENT directories and the comparison failed on the fixture, not on
+      # the evidence. Kept apart, ``root`` holds only ``work`` in every arm.
+      let cacheParent = scratchRoot("evidence-caches")
 
       # A TEMPLATE, NOT A PROC: `check` inside a plain `proc` prints
       # "Check failed" and the case still reports [OK].
       template runOneArm(tag: string; hosted: bool; descendant: bool):
-          tuple[records: seq[string]; pidCount: int;
+          tuple[records: seq[string]; pidCount, inodeCount: int;
                 evidence, histogram: string;
                 completeness: MonitorCompleteness; status: ActionStatus] =
         # The work directory is torn down and REBUILT for every arm, with
@@ -517,7 +625,7 @@ else:
         if dirExists(work): removeDir(work)
         createDir(work)
         writeFile(work / "marker.txt", "tp2-marker\n")
-        let armCacheRoot = root / ("cache-" & tag)
+        let armCacheRoot = cacheParent / ("cache-" & tag)
         let actionId = "tp2-evidence-" & tag
         let command =
           if descendant:
@@ -547,6 +655,7 @@ else:
           if fileExists(depPath): readMonitorDepFile(depPath)
           else: MonitorDepFile()
         (renderRecords(depFile, work), distinctPids(depFile),
+         distinctInodes(depFile),
          renderEvidence(run.results[0].evidence, work),
          kindHistogram(depFile), depFile.completeness,
          run.results[0].status)
@@ -607,6 +716,13 @@ else:
         " hosted, " & $quiescedWrapped.pidCount & " wrapped. Two pids " &
         "collapsed into one renders identically once pids are blanked, so " &
         "this count is what catches it."
+      checkOrEcho quiescedHosted.inodeCount == quiescedWrapped.inodeCount,
+        "the two arms agree record-for-record but name a different NUMBER " &
+        "of distinct (dev, ino) filesystem objects: " &
+        $quiescedHosted.inodeCount & " hosted, " &
+        $quiescedWrapped.inodeCount & " wrapped. Inode numbers are blanked " &
+        "in the comparison above, so this count is what catches two objects " &
+        "collapsing into one."
       checkOrEcho quiescedHosted.pidCount > 1,
         "the quiesced fixture mentions " & $quiescedHosted.pidCount &
         " distinct process(es), so the count above cannot distinguish a " &
@@ -626,15 +742,50 @@ else:
       # THE HALF THAT MAKES THE COMPARISON MEAN SOMETHING. Both arms must
       # reach the §4.1 downgrade; agreeing on mcComplete would be agreement
       # that the guard never ran.
-      checkOrEcho liveHosted.completeness == mcIncomplete,
-        "the HOSTED arm graded an action with a descendant alive across the " &
-        "whole grace window " & $liveHosted.completeness &
-        "; the §4.1 guard did not downgrade it, so the pooled finish is " &
-        "erring toward mcComplete — the direction DH-4 says is wrong"
-      checkOrEcho liveWrapped.completeness == mcIncomplete,
-        "the WRAPPED reference graded the descendant fixture " &
-        $liveWrapped.completeness & ", so this fixture does not exercise " &
-        "the §4.1 guard at all and the assertion above proves nothing"
+      #
+      # §4.1 EXISTS ON LINUX ONLY. io-mon's detached-descendant guard is a
+      # ``/proc/*/environ`` scan, and ``settleMonitorDescendants``
+      # (``io_mon/fs_snoop.nim``) runs it ``when defined(linux)`` and does
+      # nothing on macOS or Windows: "macOS and Windows have no §4.1
+      # equivalent yet". io-mon's own pins of the guard
+      # (``tests/linux/test_io_mon_external_host_descendant_guard.nim``,
+      # ``tests/linux/test_io_mon_evidence_identical_across_launch_paths``)
+      # are Linux-only for that reason. Off Linux, BOTH arms therefore grade
+      # this fixture ``mcComplete`` — measured at reprobuild 8a61fb6963 on
+      # aarch64-darwin at load averages ~6 and ~21 alike, so it is the
+      # platform and not the host's load.
+      when defined(linux):
+        checkOrEcho liveHosted.completeness == mcIncomplete,
+          "the HOSTED arm graded an action with a descendant alive across " &
+          "the whole grace window " & $liveHosted.completeness &
+          "; the §4.1 guard did not downgrade it, so the pooled finish is " &
+          "erring toward mcComplete — the direction DH-4 says is wrong"
+        checkOrEcho liveWrapped.completeness == mcIncomplete,
+          "the WRAPPED reference graded the descendant fixture " &
+          $liveWrapped.completeness & ", so this fixture does not exercise " &
+          "the §4.1 guard at all and the assertion above proves nothing"
+      else:
+        # What TP-2 owes here is that the pooled finish grades the edge
+        # EXACTLY as the batch reference does, and that is asserted on every
+        # platform: same completeness, and (below) the same records, the same
+        # process and object counts, the same engine evidence — and more
+        # processes than the quiesced fixture, so the detached child IS in
+        # the evidence being compared.
+        checkOrEcho liveHosted.completeness == liveWrapped.completeness,
+          "the two arms graded the descendant fixture differently: hosted=" &
+          $liveHosted.completeness & " wrapped=" & $liveWrapped.completeness
+        # And the platform premise is pinned rather than assumed, so this
+        # gate cannot outlive it. The day io-mon grows a §4.1 guard on this
+        # platform, the descendant fixture grades mcIncomplete here, this
+        # line reddens, and the Linux arm above must be enabled for it —
+        # instead of the gate silently keeping the stronger assertion off.
+        # The gap itself is recorded in io-mon issues/
+        # 2026-10-17-macos-grades-a-live-detached-descendant-complete.md.
+        checkOrEcho liveHosted.completeness == mcComplete,
+          "the descendant fixture graded " & $liveHosted.completeness &
+          " off Linux, where io-mon has had no §4.1 guard: if io-mon now " &
+          "implements one here, enable the `when defined(linux)` arm above " &
+          "for this platform"
 
       checkOrEcho liveHosted.histogram == liveWrapped.histogram,
         "the two arms disagree about WHICH KINDS of observation the " &
@@ -649,6 +800,11 @@ else:
         "the two arms agree record-for-record but mention a different " &
         "NUMBER of distinct processes for the descendant fixture: " &
         $liveHosted.pidCount & " hosted, " & $liveWrapped.pidCount &
+        " wrapped"
+      checkOrEcho liveHosted.inodeCount == liveWrapped.inodeCount,
+        "the two arms name a different NUMBER of distinct (dev, ino) " &
+        "filesystem objects for the descendant fixture: " &
+        $liveHosted.inodeCount & " hosted, " & $liveWrapped.inodeCount &
         " wrapped"
       checkOrEcho liveHosted.pidCount > quiescedHosted.pidCount,
         "the descendant fixture produced no MORE processes than the " &
@@ -789,37 +945,55 @@ else:
         "the one-worker arm handed off " & $serial.samples & " finishes, " &
         "not " & $Monitors
 
-      # THE INSTRUMENT IS NOT BLIND. With one worker the k-th finish waits
-      # for its k-1 predecessors, each of which holds the §4.1 window open
-      # for a full grace, so the worst delay must exceed one grace window.
-      # If it does not, the measurement below cannot distinguish a pool that
-      # runs finishes concurrently from one that does not, and this case
-      # refuses to report a pass it did not earn.
-      checkOrEcho serial.maxOpenDelayMs > float(GraceMs),
-        "SENSITIVITY CONTROL FAILED: with ONE worker and " & $Monitors &
-        " monitors each holding a " & $GraceMs & " ms grace window open, " &
-        "the worst grace-window delay was only " &
-        formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms. The " &
-        "instrument cannot see a delay it is supposed to be able to see, " &
-        "so the assertion below would pass from blindness."
+      # THE CONTROL AND THE PROPERTY ARE MEASURED IN §4.1 GRACE WINDOWS, AND
+      # §4.1 EXISTS ON LINUX ONLY. The one-worker arm can see a delay only
+      # because each finish holds the detached-descendant window open for a
+      # full grace — and io-mon's guard is a ``/proc`` scan that
+      # ``settleMonitorDescendants`` runs ``when defined(linux)`` alone
+      # ("macOS and Windows have no §4.1 equivalent yet"). Off Linux a finish
+      # holds nothing open, so the one-worker arm's worst delay is the sum of
+      # three ordinary finishes: 20.8 ms at load ~21 and 24.7 ms at load ~70,
+      # measured on aarch64-darwin at reprobuild 8a61fb6963 / 07391efa6e.
+      # That is not a loaded host making the instrument slow to see — it is
+      # an instrument with nothing to see, and no host load or bound makes it
+      # calibrated. So the comparison is made where the window exists; the
+      # grace-window delay is meaningless where there is no window.
+      # Everywhere, the handoff itself is still asserted: every monitor of
+      # both arms was handed to the pool (``samples`` above) and the submit
+      # reaches a worker promptly (below). The evidence case pins that the
+      # platform still lacks the guard, so this gate cannot outlive it.
+      when defined(linux):
+        # THE INSTRUMENT IS NOT BLIND. With one worker the k-th finish waits
+        # for its k-1 predecessors, each of which holds the §4.1 window open
+        # for a full grace, so the worst delay must exceed one grace window.
+        # If it does not, the measurement below cannot distinguish a pool that
+        # runs finishes concurrently from one that does not, and this case
+        # refuses to report a pass it did not earn.
+        checkOrEcho serial.maxOpenDelayMs > float(GraceMs),
+          "SENSITIVITY CONTROL FAILED: with ONE worker and " & $Monitors &
+          " monitors each holding a " & $GraceMs & " ms grace window open, " &
+          "the worst grace-window delay was only " &
+          formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms. The " &
+          "instrument cannot see a delay it is supposed to be able to see, " &
+          "so the assertion below would pass from blindness."
 
-      # THE PROPERTY. With a worker per monitor the pool must not delay the
-      # window's opening by even one grace window — i.e. no monitor's
-      # evidence can drift toward mcComplete by as much as a single §4.1
-      # interval because of where the work ran.
-      checkOrEcho pooled.maxOpenDelayMs < float(GraceMs),
-        "a pooled finish widened the §4.1 grace window by " &
-        formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms, which is " &
-        "at least one whole grace window (" & $GraceMs & " ms). A monitor " &
-        "that opens its window that late grades a descendant that died in " &
-        "the interval mcComplete where the reference grades it " &
-        "mcIncomplete (DH-4 item 2)."
-      checkOrEcho pooled.maxOpenDelayMs * 2.0 < serial.maxOpenDelayMs,
-        "the pooled arm's worst grace-window delay (" &
-        formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms) is not " &
-        "materially better than the one-worker arm's (" &
-        formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms), so the " &
-        "finishes are not actually running concurrently"
+        # THE PROPERTY. With a worker per monitor the pool must not delay the
+        # window's opening by even one grace window — i.e. no monitor's
+        # evidence can drift toward mcComplete by as much as a single §4.1
+        # interval because of where the work ran.
+        checkOrEcho pooled.maxOpenDelayMs < float(GraceMs),
+          "a pooled finish widened the §4.1 grace window by " &
+          formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms, which is " &
+          "at least one whole grace window (" & $GraceMs & " ms). A monitor " &
+          "that opens its window that late grades a descendant that died in " &
+          "the interval mcComplete where the reference grades it " &
+          "mcIncomplete (DH-4 item 2)."
+        checkOrEcho pooled.maxOpenDelayMs * 2.0 < serial.maxOpenDelayMs,
+          "the pooled arm's worst grace-window delay (" &
+          formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms) is not " &
+          "materially better than the one-worker arm's (" &
+          formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms), so the " &
+          "finishes are not actually running concurrently"
 
       # AND THE HANDOFF ITSELF COSTS NOTHING. ``openDelayNs`` includes the
       # rest of the settle pass; ``queueDelayNs`` is submit-to-worker alone,
