@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2150,
+    "nimTestBinaries": 2151,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 661,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2172
+    "testEntries": 2173
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1296,7 +1296,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1168,
+      "integration": 1169,
       "platform/destructive": 132,
       "pure unit": 661,
       "unclassified": 192
@@ -1501,9 +1501,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2150,
+    "nimTestBinaryCount": 2151,
     "pythonTestFileCount": 22,
-    "testEntryCount": 2172
+    "testEntryCount": 2173
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31150,6 +31150,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_develop_all_clones_into_a_second_placement_root.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_develop_all_ignores_an_unpublished_advisory_lock_ref",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_develop_all_ignores_an_unpublished_advisory_lock_ref.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
