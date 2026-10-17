@@ -164,7 +164,17 @@ reprobuild-packages=9f981af6c771ce062de810dcdd3affae21857f22
 # flake.nix and flake.lock; 9576b79 is an ancestor.
 # Moved to 414a3de (2026-10-15), io-mon's `agents` tip, with `io-mon-src` in
 # flake.nix and flake.lock; 3ccdd4b is an ancestor.
-io-mon=414a3de4f5912f498f6adea0994458b776884a26
+# Moved to 527368e (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 414a3de is an ancestor.
+# Moved to 2801e94 (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 527368e is an ancestor.
+# Moved to a4378d9 (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 2801e94 is an ancestor.
+# Moved to f33311e (2026-10-16), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; a4378d9 is an ancestor.
+# Moved to 3f8788c (2026-10-17), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; f33311e is an ancestor.
+io-mon=3f8788ce721a8f2d47eff09350b7c2047e1f3628
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -192,7 +202,8 @@ io-mon=414a3de4f5912f498f6adea0994458b776884a26
 # resumed mid-injection (it is waited for, and past a hard deadline the spawn
 # fails cleanly). 5125869 is an ancestor of 72f5782.
 # Match the shared SIP resolver used by the engine and monitor shim.
-nim-stackable-hooks=3af63afc5c0b55a27fc5e0a26f3a32833caf8873
+# Moved 3af63afc -> ff7eb18 (2026-10-16) with `nim-stackable-hooks-src`.
+nim-stackable-hooks=ff7eb18af166f9355c5e62bf1434ba5f9fd2c99e
 runquota=dev
 nim-shm-queue=5a8e43b52fa202859658692c9f8432967f3971ea
 nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27

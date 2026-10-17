@@ -47,7 +47,7 @@
 ##
 ##   1. a ``condaPackage`` source kind that understands the two-layer format
 ##      (what ``windows/ensure-clingo.ps1`` already does imperatively:
-##      Expand-Archive, then tar.exe on the ``pkg-`` payload); or
+##      unzip the outer archive, then tar.exe on the ``pkg-`` payload); or
 ##   2. nested-archive support on ``tarball`` (an inner-archive selector plus
 ##      its own strip depth); or
 ##   3. a reprobuild-published mirror of the extracted ``Library/bin`` as a

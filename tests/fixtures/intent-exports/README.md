@@ -7,11 +7,16 @@ Each case is a profile (`<case>/profile/`) and what Reprobuild says about it:
   …; }`.
 - `evaluations.json` — for every host in `hosts` below and every target
   system, what `repro home export --host <host> --target <system>` reports:
-  `{ "<host>": { "<system>": <evaluation> | { "refused": true } } }`. This is
+  `{ "<host>": { "<system>": <evaluation> | { "refused": true } |
+  { "undeclaredHost": true } } }`. This is
   Reprobuild's own evaluation (`evaluateHomeExport`), the answer the Nix
   evaluator (`nix/lib/intent.nix`) must reproduce from `export.json` alone.
 
 Hosts evaluated: `m1`, `home-pc`, `server` (declared, declared, undeclared).
+The undeclared host is refused on every system, by `repro home export` and by
+the Nix evaluator alike (`{ "undeclaredHost": true }`): a profile with a
+`hosts:` registry declares every host it may be applied to (reprobuild-pm
+spec Gradual-Nix-To-Reprobuild-Migration.md, Open question 6).
 
 Who reads them:
 
@@ -32,10 +37,32 @@ Cases:
 
 - `neutral` — runtime predicates only (activity guards, host guards, guarded
   resources and config, a data file with package and resource rows): every
-  platform `same`.
+  platform `same`. Since GM9 it also has activity-scoped resources (a
+  `resources:` block in `activity cli:` and `activity laptop:`, and a data
+  resource row with `activity = "cli"`), so each host's evaluation holds only
+  the scoped resources of the activities it selects.
+  Since GM10 `m1`'s entry says `system: managedElsewhere("example-org/infra")`,
+  so the export carries `intent.systemManagedElsewhere` and every evaluation
+  `system` (`elsewhere` for m1, `here` for home-pc); `lib-tests` also checks
+  `reprobuild.lib.hostSystemManagement` against them.
 - `compile-time` — a `when defined(macosx)` in `resources:`: exported on
   Linux, the darwin targets are `differs` and must be refused; the Linux and
   Windows targets are evaluated.
+- `concerns` (GM7) — `hosts:` entries in block form: `m1` declares
+  `applies: [applications, environment]`, `server` declares
+  `applies: [packages]`, `home-pc` declares nothing. The export carries
+  `intent.hostApplies` and the `concerns` classification, including the
+  per-system package classification (`concerns.packages`): `gm7app`, defined
+  by the fixture catalog `reprobuild-packages/` beside the profile as a disk
+  image, is an application on the darwin targets only. The declaring hosts'
+  evaluations carry `applies` and each package's `concern` / `resolved`; the
+  Home Manager module's switches default to the complement of the
+  declaration and packages are routed by their concern (`lib-home-manager`);
+  `lib-intent-ifd` exports the profile in the build sandbox with the fixture
+  catalog as `packagesCatalog`. Runtime predicates only: every platform
+  `same`. Exported on aarch64-darwin (m1) with `$REPROBUILD_PACKAGES_ROOT`
+  pointing at the fixture catalog; `--check` and the evaluations do not
+  depend on the exporting platform.
 
 The snapshots are produced on x86_64-linux. `export.json`'s `provenance`
 records the producing `repro`; `--check` never compares provenance, so a

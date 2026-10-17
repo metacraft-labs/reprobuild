@@ -13,10 +13,12 @@
 #
 # The project lives in a fresh temporary directory, so no reprobuild checkout
 # is its sibling or ancestor, and every variable that could point the image at
-# the build host's sources is removed first. The image has to find its own.
-# (Paths compiled into the binary still exist on the build host; the archive's
-# own trees outrank them, and check_release_source_closure.sh proves those
-# trees are complete without the host.)
+# the build host's sources is removed first. The package itself is COPIED into
+# that temporary directory and run from there, so the image does not run from
+# inside the checkout it was built in either. The image has to find its own
+# sources, exactly as on a consumer's machine (see "Where the sources come
+# from" below; check_release_source_closure.sh proves those trees are complete
+# without the host).
 #
 # Needs a Nim compiler on PATH (the release legs have one).
 set -euo pipefail
@@ -25,25 +27,75 @@ if [[ $# -ne 1 ]]; then
   echo "usage: $0 <package-dir>" >&2
   exit 64
 fi
-pkg=$(cd "$1" && pwd)
-repro_bin="$pkg/bin/repro"
-[[ -f "$repro_bin" ]] || repro_bin="$pkg/bin/repro.exe"
-[[ -f "$repro_bin" ]] || { echo "smoke_release_dev_exec: no bin/repro in $pkg" >&2; exit 1; }
+src_pkg=$(cd "$1" && pwd)
+[[ -f "$src_pkg/bin/repro" || -f "$src_pkg/bin/repro.exe" ]] ||
+  { echo "smoke_release_dev_exec: no bin/repro in $src_pkg" >&2; exit 1; }
 
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-smoke-XXXXXX")
 # Best-effort: on Windows a helper the run started can still hold the
 # project directory open for a moment ("Device or resource busy"), and a
 # leftover temp dir must not turn a passed check into a failed step.
 trap 'rm -rf "$work" 2>/dev/null || true' EXIT
+
+# Where the sources come from. The engine resolves the tree it compiles a
+# recipe against from, in order: the REPROBUILD_LIBS_DIR / REPROBUILD_REPO_ROOT
+# / REPROBUILD_SOURCE_ROOT variables, the installed layout beside its own image
+# (<prefix>/share/repro/source), the current directory when that is a
+# reprobuild tree, and last the checkout it was compiled in -- but only while
+# the image runs from inside that checkout (reprobuildSourceRootCandidates in
+# libs/repro_core/src/repro_core/source_root.nim). On the build host the
+# package directory sits inside the checkout, so that last arm would quietly
+# rescue an archive whose share/repro is missing. Running a copy that lives
+# outside the checkout closes it; the variables are scrubbed below and the
+# project directory is not a reprobuild tree, so a command that runs at all
+# was compiled against the archive's own sources.
+#
+# This used to be observed instead through the REPROBUILD_SOURCE_ROOT the
+# command inherited. `repro exec` now withdraws the roots the engine seeded
+# for its own compiles before it starts the command (they are not the
+# caller's, Distribution-And-Packaging section 5), so the command can no
+# longer see which tree was used, and the copy is what proves it.
+pkg="$work/$(basename "$src_pkg")"
+cp -R "$src_pkg" "$pkg"
+repro_bin="$pkg/bin/repro"
+[[ -f "$repro_bin" ]] || repro_bin="$pkg/bin/repro.exe"
 project="$work/project"
 mkdir -p "$project"
-cat > "$project/repro.nim" <<'EOF'
+# On Linux the recipe also declares a `dslDeps:` dependency and USES the symbol
+# it exports. Its macro expansion resolves the dependency by running
+# `<reproBin> internal resolve-package …` through `staticExec`, which ignores a
+# failed command: under the archive's loader launcher a `reproBin` naming the
+# glibc loader (getAppFilename()) resolved nothing and dropped the import
+# without a word. Using the symbol turns that into a compile error here
+# (`undeclared identifier`). The use is gated on `reproInterfaceMode` because
+# only the interface compile receives the dslDeps imports. Linux only because
+# the loader launcher is Linux-only, and that is where this has been verified.
+if [[ "$(uname -s)" == Linux* ]]; then
+  mkdir -p "$work/release_smoke_exporter"
+  cat > "$work/release_smoke_exporter/repro.nim" <<'EOF'
+const releaseSmokeExported* = "exported"
+EOF
+  cat > "$project/repro.nim" <<'EOF'
+import repro_project_dsl
+
+package releaseSmoke:
+  dslDeps:
+    "release_smoke_exporter"
+  when defined(reproInterfaceMode):
+    const releaseSmokeImported = releaseSmokeExported
+    static: doAssert releaseSmokeImported.len > 0
+  devEnv:
+    discard
+EOF
+else
+  cat > "$project/repro.nim" <<'EOF'
 import repro_project_dsl
 
 package releaseSmoke:
   devEnv:
     discard
 EOF
+fi
 
 scrub=(
   REPROBUILD_SOURCE_ROOT REPROBUILD_LIBS_DIR REPROBUILD_REPO_ROOT
@@ -72,7 +124,7 @@ set +e
 # empty array as an unbound variable. `${bound[@]+"${bound[@]}"}` expands to nothing
 # when empty without triggering nounset errors on macOS stock /bin/bash (3.2).
 (cd "$project" && ${bound[@]+"${bound[@]}"} "$repro_bin" exec -- bash -c \
-  'echo "$1"; echo "seeded-source-root=${REPROBUILD_SOURCE_ROOT:-}"' _ "$marker") \
+  'echo "$1"' _ "$marker") \
   > "$out" 2>&1 < /dev/null
 rc=$?
 set -e
@@ -87,21 +139,13 @@ if [[ $rc -ne 0 ]] || ! grep -q "^${marker}" "$out"; then
     echo "  A module the installed compile needs is missing from the archive's share/repro;" >&2
     echo "  see scripts/release/stage_release_sources.sh." >&2
   fi
+  if grep -q "error while loading shared libraries" "$out"; then
+    echo "  The engine re-executed the glibc loader instead of its launcher;" >&2
+    echo "  see publicCliImagePath in libs/repro_core/src/repro_core/source_root.nim." >&2
+  elif grep -q "undeclared identifier" "$out"; then
+    echo "  The recipe's dslDeps: import was dropped: its resolve-package callback" >&2
+    echo "  (-d:reproBin) did not name a runnable engine." >&2
+  fi
   exit 1
 fi
-# Reaching the command is not enough on the BUILD HOST: a binary built here
-# still finds this checkout through the source paths compiled into it, so a
-# missing share/repro would pass. Require that the roots the command inherited
-# are the archive's own -- that is the discovery a consumer relies on.
-# (check_release_source_closure.sh proves the trees are complete.)
-seeded=$(grep -m1 '^seeded-source-root=' "$out" | tr -d '\r' | cut -d= -f2-)
-case "${seeded//\\//}" in
-  */"$(basename "$pkg")"/share/repro/source) ;;
-  *)
-    echo "smoke_release_dev_exec: ERROR: repro did not take its sources from the archive." >&2
-    echo "  REPROBUILD_SOURCE_ROOT seen by the command: '${seeded}'" >&2
-    echo "  expected: <package>/share/repro/source under $pkg" >&2
-    exit 1
-    ;;
-esac
-echo "=== repro exec smoke test PASSED (sources: ${seeded}) ==="
+echo "=== repro exec smoke test PASSED (sources: the archive copy at $pkg) ==="

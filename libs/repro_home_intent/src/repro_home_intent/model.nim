@@ -116,6 +116,28 @@ type
       hostName*: string
       hostActivities*: seq[string]
       hostEntryLine*: int
+      hostAppliesDeclared*: bool
+        ## Whether the entry declares `applies: [...]` (block form). False:
+        ## Reprobuild applies every concern on the host.
+      hostApplies*: seq[string]
+        ## The declared concern names, validated
+        ## (`repro_profile/concerns.concernListProblem`); meaningful only
+        ## when `hostAppliesDeclared`. Read it through the planner's rule,
+        ## `repro_home_apply/plan.appliedConcernsFor`.
+      hostSystemManagedElsewhere*: bool
+        ## The entry says `system: managedElsewhere[(...)]` (block form;
+        ## `repro_profile/host_system`): the host's system scope is managed
+        ## by something other than this profile.
+      hostSystemManagedBy*: string
+        ## The `managedElsewhere("...")` pointer, "" when the entry names
+        ## none; meaningful only when `hostSystemManagedElsewhere`.
+      hostBlockForm*: bool
+        ## The text parser read the entry in block form (`activities:` /
+        ## `applies:` lines under the host); the structural editor rewrites
+        ## the `activities:` line rather than the host line.
+      hostActivitiesLine*: int
+        ## Block form: the 1-based line of `activities:`, or 0 when the
+        ## entry has none.
     of nkResourcesBlock:
       ## The single `resources:` block. Direct children are
       ## `nkResourceEntry` declarations and `nkCondBlock` predicate
@@ -137,11 +159,26 @@ type
         ## 1-based position of the `ResourceIntent` this entry was
         ## adapted from in the compiled `ProfileIntent.resources`; 0 for
         ## an entry parsed from source text (see `configIntentOrdinal`).
+      resourceActivity*: string
+        ## GM9: the activity the resource belongs to (an entry adapted from
+        ## a compiled `ResourceIntent` with `activity` set); "" for a
+        ## profile-wide one. `applicableResourceEntries` keeps an entry only
+        ## when the host's selection enables this activity.
     of nkResourceAttr:
       ## A `<key> = <value>` payload line inside a resource entry.
       resourceAttrKey*: string
       resourceAttrValueSource*: string  ## raw RHS bytes, no leading `=`
       resourceAttrLine*: int
+
+  StowScopeEntry* = object
+    ## GM11: one activity's claim of a `stow/` package (`repro_profile`'s
+    ## `StowScope`, adapted for the planner). The claim holds on a host
+    ## whose selection enables `activity` and where `guardAst` holds (no
+    ## guard: `guardSource` is empty and `guardAst` nil).
+    package*: string
+    activity*: string
+    guardSource*: string
+    guardAst*: PredNode
 
   Profile* = ref object
     ## Parsed and validated profile. `lines` is the source split on
@@ -174,6 +211,12 @@ type
       ## the text inspector (`repro home add --data` refuses a file not
       ## listed here); empty for a profile adapted from a compiled intent,
       ## whose rows are already expanded (see `loadedDataFiles`).
+    stowScopes*: seq[StowScopeEntry]
+      ## GM11: the `stow/` packages the profile's activities claim (`stow:`
+      ## blocks), one entry per claim, in declaration order. Set by the
+      ## compile-then-adapt path; empty for a profile without a `stow:`
+      ## block (every package is then materialized on every host). The
+      ## planner reads it through `repro_home_apply/stow.selectStowEntries`.
     catalogImports*: seq[string]
       ## The provisioning-contribution catalogs the profile's `catalogs:`
       ## section imports, as Nim module paths relative to the profile

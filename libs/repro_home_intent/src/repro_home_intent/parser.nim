@@ -24,6 +24,9 @@ import std/[strutils, tables]
 from repro_core/paths import extendedPath
 from repro_profile/data_refs import dataFilePathProblem
 from repro_profile/catalog_refs import catalogImportPathProblem
+from repro_profile/concerns import concernListProblem
+from repro_profile/host_system import HostSystemKey, ManagedElsewhereKeyword,
+  systemPointerProblem
 
 import ./errors
 import ./model
@@ -833,6 +836,52 @@ proc parseConfigBlock(ctx: ParseCtx; idx, parentIndent,
     indent: parentIndent, configHeaderLine: idx + 1,
     configPackages: packages)
 
+proc parseHostSystemText(ctx: ParseCtx; idx: int; raw: string;
+                         startCol: int; hostName: string): string =
+  ## The value of a block-form host entry's `system:` line, the text form of
+  ## what the `profile` macro accepts (`repro_profile/host_system`):
+  ## `managedElsewhere` (returns "") or `managedElsewhere("<pointer>")`
+  ## (returns the pointer), optionally followed by a `#` comment.
+  let expected = "`" & ManagedElsewhereKeyword & "` or `" &
+    ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  var s = raw.strip()
+  if not s.startsWith(ManagedElsewhereKeyword):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & s & "' as the `system:` value of hosts entry \"" & hostName &
+      "\"", expected)
+  s = s[ManagedElsewhereKeyword.len .. ^1].strip()
+  if s.len == 0 or s.startsWith("#"):
+    return ""
+  # `("...")`: a plain string literal with `\\` and `\"` escapes.
+  if not s.startsWith("(\""):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & raw.strip() & "' as the `system:` value of hosts entry \"" &
+      hostName & "\"", expected)
+  var i = 2
+  var pointer = ""
+  while i < s.len and s[i] != '"':
+    if s[i] == '\\' and i + 1 < s.len:
+      pointer.add s[i + 1]
+      inc i, 2
+    else:
+      pointer.add s[i]
+      inc i
+  if i + 1 >= s.len or s[i + 1] != ')':
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "an unterminated `" & ManagedElsewhereKeyword & "(...)` in hosts " &
+      "entry \"" & hostName & "\"", expected)
+  let tail = s[i + 2 .. ^1].strip()
+  if tail.len > 0 and not tail.startsWith("#"):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & tail & "' after the `system:` value of hosts entry \"" &
+      hostName & "\"", "nothing, or a `#` comment")
+  let problem = systemPointerProblem(pointer)
+  if problem.len > 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "system: " & problem & " in hosts entry \"" & hostName & "\"",
+      expected)
+  pointer
+
 proc splitHostList(ctx: ParseCtx; idx: int; raw: string;
                   startCol: int): seq[string] =
   ## Parse a `[a, b, c]` activity list. The brackets are required.
@@ -890,6 +939,63 @@ proc parseHostsEntry(ctx: ParseCtx; idx, entryIndent: int): IntentNode =
   while i < trimmed.len and trimmed[i] in {' ', '\t'}:
     inc i
   let rest = trimmed[i .. ^1]
+  if rest.len == 0 or rest.startsWith("#"):
+    # Block form (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+    # apply): `activities: [...]` and / or `applies: [...]` lines, indented
+    # under the host -- the same surface the `profile` macro accepts, with
+    # the same refusals.
+    result = IntentNode(kind: nkHostsEntry,
+      startLine: idx + 1, endLine: idx + 1, indent: entryIndent,
+      hostName: hostName, hostEntryLine: idx + 1, hostBlockForm: true)
+    let childIndent = entryIndent + ctx.indentStep
+    let endIdx = lastStructuralIdx(ctx.lines, idx + 1, childIndent)
+    var seenKeys: seq[string]
+    for j in idx + 1 .. endIdx:
+      let line = ctx.lines[j]
+      if isBlankOrComment(line):
+        continue
+      let ind = countLeadingSpaces(line)
+      if ind != childIndent:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "'" & line.strip() & "' at indent " & $ind,
+          "`activities: [...]`, `applies: [...]` or `system: ...` at indent " &
+          $childIndent)
+      let body = trimTrailing(line)[ind .. ^1]
+      let colon = body.find(':')
+      let key = if colon > 0: body[0 ..< colon].strip() else: ""
+      if key notin ["activities", "applies", HostSystemKey]:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "'" & body & "' in hosts entry \"" & hostName & "\"",
+          "`activities: [...]`, `applies: [...]` or `system: ...`")
+      if key in seenKeys:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "a second `" & key & ":` in hosts entry \"" & hostName & "\"",
+          "each of `activities:` / `applies:` / `system:` at most once")
+      seenKeys.add key
+      if key == HostSystemKey:
+        result.hostSystemManagedElsewhere = true
+        result.hostSystemManagedBy = parseHostSystemText(ctx, j,
+          body[colon + 1 .. ^1], ind + colon + 1, hostName)
+        continue
+      let list = splitHostList(ctx, j, body[colon + 1 .. ^1],
+        ind + colon + 1)
+      if key == "activities":
+        result.hostActivities = list
+        result.hostActivitiesLine = j + 1
+      else:
+        let problem = concernListProblem(list)
+        if problem.len > 0:
+          raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+            "applies: " & problem & " in hosts entry \"" & hostName & "\"",
+            "known concern names, each at most once")
+        result.hostAppliesDeclared = true
+        result.hostApplies = list
+    if seenKeys.len == 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, i + 1,
+        "a host entry with neither a list nor an indented block",
+        "`[activities]` or an indented `activities:` / `applies:` block")
+    result.endLine = max(endIdx + 1, idx + 1)
+    return
   let activities = splitHostList(ctx, idx, rest, i)
   result = IntentNode(kind: nkHostsEntry,
     startLine: idx + 1, endLine: idx + 1, indent: entryIndent,
@@ -910,8 +1016,9 @@ proc parseHostsBlock(ctx: ParseCtx; idx, parentIndent,
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "' at indent " & $ind,
         "content at indent " & $entryIndent)
-    entries.add parseHostsEntry(ctx, i, entryIndent)
-    inc i
+    let entry = parseHostsEntry(ctx, i, entryIndent)
+    entries.add entry
+    i = entry.endLine
   result = IntentNode(kind: nkHostsBlock,
     startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
     indent: parentIndent, hostsHeaderLine: idx + 1,

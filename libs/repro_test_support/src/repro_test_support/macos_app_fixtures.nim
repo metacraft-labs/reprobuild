@@ -63,14 +63,20 @@ proc runChecked(exe: string; args: openArray[string]; workingDir = "") =
 
 proc makeFixtureApp*(dir, name, bundleId, version: string;
                      teamId = FixtureTeamId; sign = true;
-                     declareExecutable = true): string =
+                     declareExecutable = true;
+                     commands: openArray[tuple[path, body: string]] = []):
+    string =
   ## Build ``dir/<name>.app`` and return its path. ``version`` becomes both
   ## ``CFBundleShortVersionString`` and ``CFBundleVersion``; different
   ## versions therefore have different signatures (different code-directory
   ## hashes), which is what the rollback tests compare. With
   ## ``declareExecutable = false`` the ``CFBundleExecutable`` value is empty,
   ## as in DB Browser for SQLite's bundle: macOS then finds the main
-  ## executable by the bundle's directory name.
+  ## executable by the bundle's directory name. ``commands`` are executable
+  ## files written into the bundle before it is signed, at paths relative to
+  ## the bundle (``Contents/Resources/bin/tool``), the way Visual Studio
+  ## Code carries ``code``: the command-line tools an application record
+  ## declares with ``extraExecutable``.
   let app = dir / (name & ".app")
   let contents = app / "Contents"
   createDir(contents / "MacOS")
@@ -95,6 +101,12 @@ proc makeFixtureApp*(dir, name, bundleId, version: string;
   writeFile(source, "int main(void) { return 0; }\n")
   runChecked("/usr/bin/cc", ["-o", contents / "MacOS" / name, source])
   removeFile(source)
+  for command in commands:
+    let target = app / command.path
+    createDir(target.parentDir)
+    writeFile(target, command.body)
+    setFilePermissions(target, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
   if sign:
     runChecked("/usr/bin/codesign", ["--force", "-s", "-",
       "--team-identifier", teamId, app])

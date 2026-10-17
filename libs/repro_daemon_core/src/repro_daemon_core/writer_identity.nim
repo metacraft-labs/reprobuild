@@ -71,6 +71,31 @@ const NativeWriterBootSource =
   elif defined(linux): "linux-boot-uuid-fnv1a64-or1"
   else: "unsupported"
 
+proc decodeProcStatStartTime*(raw: string): Option[string] =
+  ## Field 22 (`starttime`) of one Linux `/proc/<pid>/stat` record, or none
+  ## when the record is incomplete or malformed. Pure, so the record format
+  ## is checked on every platform, not only where `/proc` exists.
+  ##
+  ## Only a record ending in the newline that Linux's `do_task_stat` emits
+  ## after its last field is complete. A short read cut inside field 22
+  ## leaves a numeric prefix ("809" of "8097736") that otherwise reads as a
+  ## different start time, i.e. as false proof of pid reuse. None is an
+  ## unknown probe, never evidence of death.
+  if not raw.endsWith('\n'): return none(string)
+  # comm can contain spaces and parentheses: field 22 is counted from
+  # its final closing parenthesis, not from whitespace in the whole line.
+  let close = raw.rfind(')')
+  if close < 0: return none(string)
+  let rest = raw[close + 1 .. ^1].strip().splitWhitespace()
+  if rest.len < 20 or rest[19].len == 0 or
+      not rest[19].allCharsInSet({'0' .. '9'}):
+    return none(string)
+  try:
+    discard parseBiggestUInt(rest[19])
+  except ValueError:
+    return none(string)
+  some(rest[19])
+
 when defined(macosx):
   # `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)` yields `kinfo_proc`, whose
   # `kp_proc.p_starttime` is the process's own start time to microsecond
@@ -120,17 +145,9 @@ elif defined(linux):
       return ProcessStartProbe(status: pssUnknown)
     let path = "/proc/" & $pid & "/stat"
     try:
-      let raw = readFile(path)
-      # comm can contain spaces and parentheses: field 22 is counted from
-      # its final closing parenthesis, not from whitespace in the whole line.
-      let close = raw.rfind(')')
-      if close < 0: return ProcessStartProbe(status: pssUnknown)
-      let rest = raw[close + 1 .. ^1].strip().splitWhitespace()
-      if rest.len < 20 or rest[19].len == 0 or
-          not rest[19].allCharsInSet({'0' .. '9'}):
-        return ProcessStartProbe(status: pssUnknown)
-      discard parseBiggestUInt(rest[19])
-      ProcessStartProbe(status: pssPresent, stamp: rest[19])
+      let stamp = decodeProcStatStartTime(readFile(path))
+      if stamp.isNone: return ProcessStartProbe(status: pssUnknown)
+      ProcessStartProbe(status: pssPresent, stamp: stamp.get())
     except CatchableError:
       # ENOENT is also possible under hidepid=2. Only ESRCH from kill proves
       # absence; EPERM, malformed data, and failed reads remain uncertainty.

@@ -34,6 +34,9 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 include tc5_cert_signing_helpers
 
@@ -58,6 +61,20 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc requiredPolicy(): string =
+  ## TC-9d: the policy is the pushed content's own -- a
+  ## ``[certificate_policy]`` snapshot in its committed ``repro.lock`` --
+  ## requiring t-unit on this platform, under one rule for every branch
+  ## (``everyBranchSnapshot``).
+  everyBranchSnapshot(pmRequired, ["t-unit"],
+    [currentPlatformTag()], name = "lib-a")
+
+proc policyLockText(snapshot: string): string =
+  ## A committed ``repro.lock`` that pins nothing and records ``snapshot``.
+  replaceCertificatePolicySection(serializeLockedDependencies(
+    LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[])),
+    snapshot)
+
 proc seedGitOrigin(gitBin, originPath, workPath: string;
                    branch = "main"): string =
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
@@ -68,7 +85,8 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"TC5 Tester\"")
   writeFile(workPath / "README.md", "TC-5 fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+  writeFile(workPath / "repro.lock", policyLockText(requiredPolicy()))
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m fixture")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " remote add origin " & q(originPath))
@@ -84,13 +102,12 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"TC5 Tester\"")
 
-proc projectToml(libAUrl, certificatesTable: string): string =
+proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n\n" &
-  certificatesTable &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
@@ -113,16 +130,10 @@ type
     libAPath: string
     libASha: string
 
-proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
+proc writeProjectManifest(fx: Fixture) =
   let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(fx.libAOrigin), certificatesTable))
-
-proc requiredPolicy(): string =
-  "[certificates]\n" &
-  "gate_mode = \"required\"\n" &
-  "required_targets = [\"t-unit\"]\n" &
-  "required_platforms = [\"" & currentPlatformTag() & "\"]\n\n"
+    projectToml(fileUrl(fx.libAOrigin)))
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-tc5-verify-", "")
@@ -140,7 +151,7 @@ proc setupFixture(gitBin: string): Fixture =
   result.workspaceRoot = workspaceRoot
   seedManifestLockStore(gitBin, workspaceRoot)
   result.libAPath = workspaceRoot / "lib-a"
-  writeProjectManifest(result, requiredPolicy())
+  writeProjectManifest(result)
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 

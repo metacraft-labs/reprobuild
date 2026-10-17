@@ -18,7 +18,9 @@
 ## ``offerWithRunQuotaBatch``).  This test pins:
 ##
 ##   1. ``umaskWrappedArgv`` emits the canonical ``/bin/sh -c "umask
-##      022 && <quoted argv>"`` 3-element argv on POSIX.
+##      022 && <quoted argv>"`` 3-element argv on POSIX — on macOS with the
+##      non-SIP shell ``resolveNonSipShell`` returns in place of ``/bin/sh``
+##      (see ``expectedWrapShell``).
 ##   2. The wrap is the identity transform on Windows (where umask
 ##      doesn't apply and ``/bin/sh`` isn't a host dep).
 ##   3. Each argv element is shell-quoted via ``quoteShell`` so a
@@ -72,12 +74,44 @@ import repro_build_engine
 from repro_test_support import prepareMonitorTools, testCaseScratchSlug,
   nimSourceCommentsBlanked
 
+proc expectedWrapShell(): string =
+  ## The shell ``umaskWrappedArgv`` must put in front of the argv.
+  ##
+  ## Linux and the other POSIX hosts: ``/bin/sh``.
+  ##
+  ## macOS: NOT ``/bin/sh`` whenever a replacement exists. RunQuota launches
+  ## the wrapped argv directly, and SIP-protected ``/bin/sh`` strips
+  ## ``DYLD_*`` from its environment, so a wrapper running it would lose the
+  ## monitor's injection and the loader paths for the whole action
+  ## (reprobuild 709a9ba647 / 3f86455ec7). ``spec/MacOS-Monitoring.md``
+  ## §"Packaged SIP replacements without an ambient shell" requires the
+  ## engine's wrapper shell to come from the SIP-replacement resolver —
+  ## that is ``resolveNonSipShell``. Only when it finds nothing does the
+  ## engine keep ``/bin/sh`` (and the monitored path then fails closed
+  ## elsewhere). The expectation is computed from the same resolver under
+  ## the same environment, so it pins WHICH shell the product chose, and
+  ## the extra checks below pin that a resolved one is never a SIP path.
+  result = "/bin/sh"
+  when defined(macosx):
+    let nonSip = resolveNonSipShell()
+    if nonSip.len > 0:
+      result = nonSip
+
+proc checkWrapShell(shell: string) =
+  check shell == expectedWrapShell()
+  when defined(macosx):
+    if resolveNonSipShell().len > 0:
+      # The point of the macOS arm: the wrapper is outside SIP's prefixes.
+      for sipPrefix in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]:
+        check not shell.startsWith(sipPrefix)
+      check fileExists(shell)
+
 suite "M9.R.36.3 umask-022 sh-wrap":
   test "POSIX wrap shape: 3-element /bin/sh -c argv":
     let wrapped = umaskWrappedArgv(@["echo", "hello"])
     when defined(posix):
       check wrapped.len == 3
-      check wrapped[0] == "/bin/sh"
+      checkWrapShell(wrapped[0])
       check wrapped[1] == "-c"
       check wrapped[2].startsWith("umask 022 && ")
       # Verify the wrapped command tail contains both argv elements,
@@ -94,7 +128,7 @@ suite "M9.R.36.3 umask-022 sh-wrap":
     let wrapped = umaskWrappedArgv(@["cc", "my file.c"])
     when defined(posix):
       check wrapped.len == 3
-      check wrapped[0] == "/bin/sh"
+      checkWrapShell(wrapped[0])
       check wrapped[1] == "-c"
       check wrapped[2].startsWith("umask 022 && ")
       # quoteShell on POSIX single-quotes elements with spaces.  Either
@@ -112,7 +146,7 @@ suite "M9.R.36.3 umask-022 sh-wrap":
     let wrapped = umaskWrappedArgv(@["true"])
     when defined(posix):
       check wrapped.len == 3
-      check wrapped[0] == "/bin/sh"
+      checkWrapShell(wrapped[0])
       check wrapped[1] == "-c"
       check wrapped[2] == "umask 022 && true"
     else:

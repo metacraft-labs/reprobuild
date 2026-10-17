@@ -336,6 +336,55 @@ suite "§7.2 — an external registrar must claim the issuer, and say so legibly
     check message.contains("no `registrations` array")
     check message.contains("nothing to register")
 
+  test "TWO MEMBERS, ONE IDENTIFIER is refused by name":
+    # The laundering hazard, and the direction the repeated-MEMBER
+    # refusal above cannot see. `seen` is keyed by member, so two rows
+    # naming two different members and ONE `client_id` both landed and
+    # the decode returned a pair of consumers holding one credential --
+    # which means either the registrar silently dropped one of them (and
+    # its consumer's argv would carry a credential belonging to the
+    # other) or it reused an existing registration for a member that
+    # asked for its own.
+    let shared = IssuerIds[0]
+    var message = ""
+    var answered = @[(member: Sentinel, mintedId: Sentinel)]
+    try:
+      answered = decodeServiceRegistrarAnswer("p",
+        "{\"schemaId\": \"" & ServiceRegistrarAnswerSchemaId &
+        "\", \"provenance\": \"" & $rprIssuer &
+        "\", \"registrations\": [" &
+        "{\"member\": \"" & Members[0] & "\", \"" &
+        ClientIdAttributeName & "\": \"" & shared & "\"}, " &
+        "{\"member\": \"" & Members[1] & "\", \"" &
+        ClientIdAttributeName & "\": \"" & shared & "\"}]}", Members)
+    except ServiceRegistrarError as err:
+      message = err.msg
+    checkpoint(message)
+    # It REFUSED rather than answering: the sentinel is what says so, a
+    # bare `expect` cannot tell a refusal from a return the except arm
+    # never saw.
+    check answered == @[(member: Sentinel, mintedId: Sentinel)]
+    # BOTH members by name, and the identifier they collided on.
+    check message.contains(Members[0])
+    check message.contains(Members[1])
+    check message.contains(shared)
+    check message.contains("TWO MEMBERS, ONE IDENTIFIER")
+
+  test "the SAME two members with DISTINCT identifiers still decode":
+    # The control for the case above. Without it the refusal could be
+    # firing on the member pair rather than on the shared identifier,
+    # and every well-formed two-member answer would be refused.
+    let answered = decodeServiceRegistrarAnswer("p",
+      "{\"schemaId\": \"" & ServiceRegistrarAnswerSchemaId &
+      "\", \"provenance\": \"" & $rprIssuer &
+      "\", \"registrations\": [" &
+      "{\"member\": \"" & Members[0] & "\", \"" &
+      ClientIdAttributeName & "\": \"" & IssuerIds[0] & "\"}, " &
+      "{\"member\": \"" & Members[1] & "\", \"" &
+      ClientIdAttributeName & "\": \"" & IssuerIds[1] & "\"}]}", Members)
+    check answered == @[(member: Members[0], mintedId: IssuerIds[0]),
+                        (member: Members[1], mintedId: IssuerIds[1])]
+
   test "an answer that is not JSON, or not an object, is refused":
     for text in ["not json at all", "[1, 2, 3]", "\"a string\""]:
       var message = ""

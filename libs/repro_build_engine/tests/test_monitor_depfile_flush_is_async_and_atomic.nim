@@ -324,9 +324,29 @@ when defined(linux) or defined(macosx):
       ## the first action's depfile and records what it saw, so the
       ## observation is taken at the instant the next edge RUNS.
       ##
-      ## The publication is delayed so the question is decidable at all: a
-      ## bare rename lands in microseconds, and "the next edge got there
-      ## first" would then be a race this test happened to win.
+      ## The publication is HELD so the question is decidable at all: a bare
+      ## rename lands in microseconds, and "the next edge got there first"
+      ## would then be a race this test happened to win.
+      ##
+      ## HELD BY ORDER, NOT BY A CLOCK. This case used to delay the first
+      ## publication a fixed 400 ms and require the second edge to look
+      ## before it landed. That is a race the second edge must win by
+      ## starting a monitored shell within 400 ms, and on a loaded host it
+      ## lost: on aarch64-darwin, during a suite run, the non-cacheable arm saw
+      ## ``LANDED`` once with nothing wrong with the engine. Now the
+      ## non-cacheable arm sets ``REPROBUILD_MONITOR_FLUSH_RELEASE_PATH``: the
+      ## first publication cannot land until the release file exists, and the
+      ## ONLY thing that creates it is the second edge's own command, AFTER it
+      ## has recorded what it saw. An engine that starts the second edge
+      ## before publishing therefore observes ``NOTYET`` however slow the
+      ## host is. An engine that publishes FIRST is, by doing so, waiting on
+      ## the flush tenant, and a waiter ends the hold at once
+      ## (``worker_pool.enginePoolTenantHasWaiter``): the file lands, the
+      ## second edge then observes ``LANDED``, and the case reddens — also by
+      ## order, and without waiting out anything. With a release path set,
+      ## ``REPROBUILD_MONITOR_FLUSH_DELAY_MS`` is only a hang breaker for a
+      ## build that neither releases nor waits, which ``runBuild``'s own
+      ## end-of-build wait rules out.
       ##
       ## AND THE BOUNDARY IS ASSERTED, not left implicit. The engine waits for
       ## a CACHEABLE hosted action's publication before publishing its cache
@@ -339,13 +359,15 @@ when defined(linux) or defined(macosx):
       ##
       ## MUTATION TARGET: make ``finishMonitorHostAction`` wait for its own
       ## flush before returning (``discard awaitMonitorFlushes()`` after the
-      ## enqueue) and the non-cacheable arm reddens on ``NOTYET``.
+      ## enqueue) and the non-cacheable arm reddens on ``NOTYET``: that wait
+      ## ends the hold, so the second edge finds the file.
       let witness = "order-witness.txt"
 
       # A TEMPLATE, NOT A PROC, and that is not a style choice: `check` inside
       # a plain `proc` prints "Check failed" and the case still reports [OK],
       # so a helper that asserts must inline into the test body.
-      template runOrderingChain(tag: string; firstIsCacheable: bool):
+      template runOrderingChain(tag: string; firstIsCacheable: bool;
+                                heldUntilObserved: bool):
           tuple[observed, firstDep, cacheRoot: string] =
         let root = flushScratchRoot("ordering-" & tag)
         let work = root / "work"
@@ -354,7 +376,17 @@ when defined(linux) or defined(macosx):
         let chainFirstDep = depfilePathFor(chainCacheRoot,
           "hm5-order-a-" & tag)
 
-        putEnv("REPROBUILD_MONITOR_FLUSH_DELAY_MS", "400")
+        # Held until observed (the release file appears only once the second
+        # edge has written its witness), or, for the cacheable arm — where
+        # the engine itself waits for the publication and a release the
+        # next edge would make could never come — delayed for long enough
+        # that ``LANDED`` means "the engine waited", not "it was quick".
+        let release = "order-release"
+        if heldUntilObserved:
+          putEnv("REPROBUILD_MONITOR_FLUSH_RELEASE_PATH", work / release)
+          putEnv("REPROBUILD_MONITOR_FLUSH_DELAY_MS", "120000")
+        else:
+          putEnv("REPROBUILD_MONITOR_FLUSH_DELAY_MS", "400")
         var run: BuildRunResult
         try:
           run = runBuild(graph([
@@ -368,14 +400,17 @@ when defined(linux) or defined(macosx):
               @["sh", "-c",
                 "if [ -e " & quoteShell(chainFirstDep) &
                 " ]; then printf LANDED; " &
-                "else printf NOTYET; fi > " & quoteShell(witness)],
+                "else printf NOTYET; fi > " & quoteShell(witness) &
+                # Observe FIRST, release SECOND: the order is the oracle.
+                " && : > " & quoteShell(release)],
               cwd = work,
               inputs = ["first.txt"],
-              outputs = [witness],
+              outputs = [witness, release],
               governingLockIdentity = lockIdentityOutsideSolvedGraph())]),
             hostedConfig(chainCacheRoot, 1'u32))
         finally:
           delEnv("REPROBUILD_MONITOR_FLUSH_DELAY_MS")
+          delEnv("REPROBUILD_MONITOR_FLUSH_RELEASE_PATH")
 
         check run.results.len == 2
         for res in run.results:
@@ -392,7 +427,8 @@ when defined(linux) or defined(macosx):
       # THE MILESTONE'S PROPERTY. Nothing about this action is published to
       # the action cache, so nothing about it waits: the next edge runs while
       # the publication is still in flight.
-      let asyncArm = runOrderingChain("async", firstIsCacheable = false)
+      let asyncArm = runOrderingChain("async", firstIsCacheable = false,
+        heldUntilObserved = true)
       checkOrEcho asyncArm.observed == "NOTYET",
         "the second edge ran only AFTER the first edge's depfile had landed" &
         " (saw '" & asyncArm.observed & "'), so the publication is still on" &
@@ -411,7 +447,8 @@ when defined(linux) or defined(macosx):
       # edge therefore finds the file. If this ever reports NOTYET, the
       # conservative direction in `a failed flush causes a re-execution` has
       # become a race again.
-      let syncArm = runOrderingChain("sync", firstIsCacheable = true)
+      let syncArm = runOrderingChain("sync", firstIsCacheable = true,
+        heldUntilObserved = false)
       checkOrEcho syncArm.observed == "LANDED",
         "a CACHEABLE action published its cache entry without waiting for" &
         " its own depfile (saw '" & syncArm.observed & "'), so a failed" &

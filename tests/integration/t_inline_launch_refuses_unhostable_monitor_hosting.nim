@@ -176,6 +176,25 @@ when defined(linux) or defined(macosx):
   const ProducedName = "produced.txt"
   const MarkerName = "marker.txt"
 
+  proc rootShell(): string =
+    ## The action's ROOT process. Not ``/bin/sh`` on macOS: a SIP-protected
+    ## root strips ``DYLD_INSERT_LIBRARIES``, the shim never loads in it, and
+    ## io-mon (correctly) fails closed with "spawn child missing
+    ## process-start parent=0" and no reads — so the L1 control below would
+    ## fail on the marker for a reason unrelated to hosting. Measured at
+    ## reprobuild 8a61fb6963 on aarch64-darwin. io-mon rewrites a SIP
+    ## SHEBANG interpreter for the root, not a SIP root executable, so the
+    ## fixture takes the engine's own non-SIP resolution
+    ## (``resolveNonSipShell``; spec/MacOS-Monitoring.md §"Packaged SIP
+    ## replacements without an ambient shell") and refuses to run without one.
+    when defined(macosx):
+      result = resolveNonSipShell()
+      doAssert result.len > 0,
+        "no non-SIP shell resolves on this host (" & nonSipShellSearchReport() &
+        "); a /bin/sh root would be uninjectable and capture nothing"
+    else:
+      result = "/bin/sh"
+
   proc monitoredShellAction(id, workRoot: string): BuildAction =
     ## Reads a marker and writes an output, both inside the case's own work
     ## tree. The OUTPUT is the oracle for "did this action run at all"; the
@@ -188,7 +207,7 @@ when defined(linux) or defined(macosx):
     ## perfectly well. Measured, not guessed — the first version of this
     ## file used the relative form and recorded fifteen shared objects and
     ## no marker.
-    action(id, ["/bin/sh", "-c",
+    action(id, [rootShell(), "-c",
                 "cat " & quoteShell(expandFilename(workRoot) / MarkerName) &
                 " > " & quoteShell(expandFilename(workRoot) / ProducedName)],
       cwd = workRoot,

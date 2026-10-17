@@ -19,6 +19,8 @@ import repro_test_support
 import repro_cli_support
 import repro_lock
 import repro_workspace_manifests
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 include tc5_cert_signing_helpers
 
@@ -71,26 +73,40 @@ remote = "lib-a-origin"
 revision = "main"
 """
 
-proc storeProjectToml(libAUrl, certificatesTable: string): string =
+proc storeProjectToml(libAUrl: string): string =
+  ## The project manifest. It carries no certificate policy: since TC-9d the
+  ## policy lives in lib-a's own ``repro.lock`` (``setupStoreFixture``).
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n\n" &
-  certificatesTable &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 proc requiredPolicy*(targets: seq[string]; platforms: seq[string];
-                     mode = "required"; ciTrust = ""): string =
-  var t, p: seq[string]
-  for x in targets: t.add("\"" & x & "\"")
-  for x in platforms: p.add("\"" & x & "\"")
-  "[certificates]\n" &
-  "gate_mode = \"" & mode & "\"\n" &
-  "required_targets = [" & t.join(", ") & "]\n" &
-  "required_platforms = [" & p.join(", ") & "]\n" &
-  (if ciTrust.len > 0: "ci_trust = \"" & ciTrust & "\"\n" else: "") & "\n"
+                     mode = "required"; ciTrust = "";
+                     untrackedInputs = ""): string =
+  ## The ``[certificate_policy]`` snapshot of a policy with one rule for
+  ## every branch (``everyBranchPolicy``): ``targets`` on ``platforms`` under
+  ## ``mode``. ``setupStoreFixture`` commits it in lib-a's ``repro.lock``.
+  let policyMode =
+    case mode
+    of "required": pmRequired
+    of "advisory": pmAdvisory
+    else: pmOff
+  everyBranchSnapshot(policyMode, targets, platforms,
+    ciTrust = (if ciTrust == "skip": pctSkip else: pctAdvisory),
+    untrackedInputs =
+      (if untrackedInputs == "strict": puiStrict else: puiReadSet),
+    name = "lib-a")
+
+proc policyLock*(snapshot: string): string =
+  ## A committed ``repro.lock`` that pins nothing and carries ``snapshot``
+  ## ("" for none), laid out as the lock writer lays it out.
+  let lock = serializeLockedDependencies(LockedDependencies(
+    schema: "reprobuild.solved-graph-lock.v2", deps: @[]))
+  replaceCertificatePolicySection(lock, snapshot)
 
 proc committedLockBody*(revision: string): string =
   ## A real committed ``repro.lock``, written by the real serializer.
@@ -103,12 +119,17 @@ proc committedLockBody*(revision: string): string =
       integrity: "git-sha1:" & revision,
       visibility: "public")]))
 
-proc setupStoreFixture(certificatesTable: string; slug: string;
+proc setupStoreFixture(policySnapshot: string; slug: string;
                        recordStore = true;
                        committedLock = false): StoreFixture =
+  ## ``policySnapshot``: a ``[certificate_policy]`` snapshot (``requiredPolicy``)
+  ## the seed commit records in lib-a's ``repro.lock`` -- the only place a
+  ## gate reads a policy from since TC-9d, a record-store project included
+  ## -- or "" for none.
   ## ``recordStore``: the workspace declares a manifest-backed lock route (the
   ## record-store opt-in), which issuance on the ``repro test`` path needs.
-  ## ``committedLock``: lib-a tracks a ``repro.lock`` of its own.
+  ## ``committedLock``: lib-a tracks a ``repro.lock`` pinning itself (with
+  ## no policy and no ``committedLock``, lib-a tracks no ``repro.lock``).
   result.scratch = createTempDir("repro-tc8c-" & slug & "-", "")
   result.userRoot = result.scratch / "store-user"
   result.systemDir = result.scratch / "store-system"
@@ -127,7 +148,10 @@ proc setupStoreFixture(certificatesTable: string; slug: string;
   discard gitOut(seed, "config", "user.name", "TC8c Seeder")
   writeFile(seed / "README.md", "TC-8c fixture\n")
   if committedLock:
-    writeFile(seed / "repro.lock", committedLockBody("1".repeat(40)))
+    writeFile(seed / "repro.lock", replaceCertificatePolicySection(
+      committedLockBody("1".repeat(40)), policySnapshot))
+  elif policySnapshot.len > 0:
+    writeFile(seed / "repro.lock", policyLock(policySnapshot))
   discard gitOut(seed, "add", "-A")
   discard gitOut(seed, "commit", "-m", "seed")
   discard gitOut(seed, "remote", "add", "origin", result.upstreamBare)
@@ -139,7 +163,7 @@ proc setupStoreFixture(certificatesTable: string; slug: string;
   createDir(ws / "repos")
   writeFile(ws / "repos" / "lib-a.toml", storeLibAFragment)
   writeFile(ws / "projects" / "lib-a.toml",
-    storeProjectToml(fileUrl(result.upstreamBare), certificatesTable))
+    storeProjectToml(fileUrl(result.upstreamBare)))
   result.workspaceRoot = ws
   if recordStore:
     seedManifestLockStore("git", ws)
@@ -244,13 +268,11 @@ proc noticesText(report: JsonNode): string =
       result.add(n.getStr() & "\n")
 
 proc wireStoreGateway(fx: StoreFixture; registeredKeys = "") =
-  ## Wire the developer clone's push URL to a gateway bare whose
-  ## ``pre-receive`` verifies under ``required`` (record-store lock source),
-  ## forwarding to the upstream bare.
+  ## Wire the developer clone's push URL to a gateway bare (record-store
+  ## lock source) forwarding to the upstream bare. The gateway applies the
+  ## policy the PUSHED tree records in its ``repro.lock`` (TC-9d): the
+  ## fixture's ``policySnapshot``.
   let cfg = GatewayConfig(
-    gateMode: cgmRequired,
-    requiredTargets: @["t-unit"],
-    requiredPlatforms: @[currentPlatformTag()],
     lockRecordsDir: lockRecordsDirFor(
       fx.workspaceRoot / ".repro" / "manifests", "lib-a", "lib-a"),
     registeredKeysPath:

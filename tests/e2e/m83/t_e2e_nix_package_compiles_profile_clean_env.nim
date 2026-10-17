@@ -63,9 +63,11 @@
 ## GM0m). Windows has no Nix package; the release bundle's equivalent is
 ## GM1w's `t_e2e_windows_bundle_compiles_profile.nim`, run on eli-pc.
 ##
-## Mocks: none. A real `nix build`, the real wrapped package, the real build
-## engine and io-mon monitor, a real `nim c`, a real C compiler and the real
-## planner.
+## Mocks: none. A real `nix build` of this tree (run once by the fixture edge
+## `reprobuild.test_fixtures.nix_package`, which each case checks against its
+## own `nix eval`; see `nix_package_support.nixPackageUnderTest`), the real
+## wrapped package, the real build engine and io-mon monitor, a real `nim c`,
+## a real C compiler and the real planner.
 
 import std/[algorithm, json, os, sets, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
@@ -197,7 +199,7 @@ else:
 
     test "e2e_nix_package_compiles_profile_linux: the installed package " &
         "plans a profile in a clean environment, from directories with spaces":
-      let pkg = buildNixPackage()
+      let pkg = nixPackageUnderTest()
       let repro = pkg / "bin" / "repro"
       let sourceRoot = wrapperDefault(repro, "REPROBUILD_SOURCE_ROOT")
       let nimCompiler = wrapperDefault(repro, "REPRO_NIM_COMPILER")
@@ -283,7 +285,7 @@ else:
 
     test "e2e_nix_package_compiles_profile_linux: negative control - the " &
         "unwrapped engine in the same environment has no sources and refuses":
-      let pkg = buildNixPackage()
+      let pkg = nixPackageUnderTest()
       let engine = pkg / "bin" / ".reprobuild-wrapped"
       doAssert fileExists(engine), "the package has no unwrapped engine at " &
         engine & "; makeWrapper's hidden-name convention changed"
@@ -303,7 +305,7 @@ else:
 
     test "e2e_nix_package_compiles_profile_linux: negative control - a " &
         "REPRO_BOOTSTRAP_CC naming no file is refused by the profile compile":
-      let pkg = buildNixPackage()
+      let pkg = nixPackageUnderTest()
       let repro = pkg / "bin" / "repro"
       let box = newSandbox()
       defer: removeSandbox(box)

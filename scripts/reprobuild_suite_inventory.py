@@ -16,6 +16,7 @@ preserving each runner summary under bench-results.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ast
 import dataclasses
 import hashlib
@@ -30,7 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -6164,6 +6165,327 @@ def format_source_inventory_drift(drift: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Drift attribution (`--attribute-to REV`)
+# ---------------------------------------------------------------------------
+#
+# WHY. The two checks above name every stale source, and say nothing about
+# whether the change being checked put it there. When the mainline itself went
+# stale, every push and pull request after it was refused naming files its
+# author had never touched (reprobuild-pm issue 2026-10-01: three foreign files
+# on PR #478 and on five consecutive `dev` commits), and people learned to read
+# the job as noise. That is the seventh such event; the refusal has to say
+# which lines are the pusher's.
+#
+# HOW. Measure the SAME drift at REV -- REV's recorded artifact against a scan
+# of REV's tree, with this script's own functions -- and split the tree's drift
+# by identity: an item REV's drift lists identically is inherited, anything
+# else (including a source REV had at `16 -> 17` that is now `16 -> 18`) was
+# introduced. Only on drift: a green tree pays nothing.
+#
+# WHAT IT DOES NOT DO. Change the verdict. The tree being published is stale
+# either way and the remedy is the same one command; attribution only says
+# whose staleness it is, so a pusher can tell their own lines from inherited
+# ones without having to diff two revisions by hand.
+
+ATTRIBUTION_SCANNER_PATH = Path("scripts/reprobuild_suite_inventory.py")
+
+STATIC_DRIFT_ITEM_KEYS = (
+    "lostSources",
+    "decreased",
+    "gainedSources",
+    "increased",
+    "relabelled",
+)
+SOURCE_INVENTORY_DRIFT_ENTRY_KEYS = (
+    "lostSources",
+    "gainedSources",
+    "changedSources",
+)
+
+
+class AttributionUnavailable(Exception):
+    """Attribution cannot be computed reliably; the message says why."""
+
+
+def _partition_drift_items(
+    head: Mapping[str, Any], base: Mapping[str, Any], keys: tuple[str, ...]
+) -> dict[str, dict[str, list[Any]]]:
+    introduced: dict[str, list[Any]] = {key: [] for key in keys}
+    inherited: dict[str, list[Any]] = {key: [] for key in keys}
+    for key in keys:
+        already = list(base.get(key, ()))
+        for item in head.get(key, ()):
+            (inherited if item in already else introduced)[key].append(item)
+    return {"introduced": introduced, "inherited": inherited}
+
+
+def attribute_static_case_count_drift(
+    head: Mapping[str, Any], base: Mapping[str, Any]
+) -> dict[str, dict[str, list[Any]]]:
+    """Split a `static_case_count_drift` into introduced and inherited items.
+
+    An item is inherited only when `base` lists it IDENTICALLY: base
+    `(src, 16, 17)` and head `(src, 16, 18)` is introduced, because this
+    change moved the source further. Items only `base` lists (fixed since) are
+    not reported in either partition.
+    """
+    return _partition_drift_items(head, base, STATIC_DRIFT_ITEM_KEYS)
+
+
+def attribute_source_inventory_drift(
+    head: Mapping[str, Any], base: Mapping[str, Any]
+) -> dict[str, dict[str, list[Any]]]:
+    """Split a `source_inventory_drift` into introduced and inherited items.
+
+    Entry-level items compare whole (a changed source by its full field-diff
+    list). An aggregate section is inherited only when `base` lists it too
+    AND every entry-level item is inherited: the aggregates are sums over the
+    entries, so once this change moved any entry it has a share in every
+    section that moved with it.
+    """
+    result = _partition_drift_items(
+        head, base, SOURCE_INVENTORY_DRIFT_ENTRY_KEYS
+    )
+    entries_inherited = not any(result["introduced"].values())
+    base_sections = list(base.get("changedSections", ()))
+    result["introduced"]["changedSections"] = []
+    result["inherited"]["changedSections"] = []
+    for section in head.get("changedSections", ()):
+        side = (
+            "inherited"
+            if entries_inherited and section in base_sections
+            else "introduced"
+        )
+        result[side]["changedSections"].append(section)
+    return result
+
+
+def _static_drift_item_line(key: str, item: Any) -> str:
+    if key == "lostSources":
+        return f"- {item} (no longer declared)"
+    if key == "gainedSources":
+        return f"+ {item} (new source)"
+    if key == "relabelled":
+        source, was, now = item
+        return f"! {source}: language {was} -> {now}"
+    source, was, now = item
+    return f"{'+' if now > was else '-'} {source}: {was} -> {now} ({now - was:+d})"
+
+
+def _source_inventory_drift_item_line(key: str, item: Any) -> str:
+    if key == "lostSources":
+        return f"- {item} (recorded but no longer declared)"
+    if key == "gainedSources":
+        return f"+ {item} (declared but absent from the artifact)"
+    if key == "changedSources":
+        fields = ", ".join(field["field"] for field in item["fields"])
+        return f"! {item['source']}: {fields}"
+    return f"~ aggregate section {item}"
+
+
+def format_drift_attribution(
+    partition: Mapping[str, Mapping[str, list[Any]]],
+    keys: tuple[str, ...],
+    item_line: Any,
+    base_label: str,
+    regenerate_command: str,
+) -> str:
+    """Render a partition as the labelled block printed after the drift text."""
+    lines = [f"attribution against {base_label}:"]
+    introduced = [
+        item_line(key, item) for key in keys for item in partition["introduced"][key]
+    ]
+    inherited = [
+        item_line(key, item) for key in keys for item in partition["inherited"][key]
+    ]
+    if introduced:
+        lines.append("  introduced by this change:")
+        lines.extend(f"    {line}" for line in introduced)
+    if inherited:
+        lines.append(
+            f"  already stale at {base_label} (this change did not put these "
+            "there):"
+        )
+        lines.extend(f"    {line}" for line in inherited)
+    if not introduced:
+        # Said plainly, because the reader who sees ONLY inherited lines is the
+        # one about to dismiss the whole job: the refusal still stands, and
+        # the fix is still theirs to carry if they want to publish this tree.
+        lines.extend(
+            [
+                f"  This change introduced none of the drift above; all of it "
+                f"was already stale at {base_label}.",
+                "  The tree being published is still stale, so the verdict "
+                "stands and the remedy is the same one command:",
+                f"    {regenerate_command}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _attribution_git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    # GIT_INDEX_FILE / GIT_WORK_TREE are dropped: a hook may run with them set
+    # for the checkout being pushed, and `worktree add` must not write the
+    # temporary tree's index into it.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("GIT_INDEX_FILE", "GIT_WORK_TREE")
+    }
+    return subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, env=env
+    )
+
+
+def resolve_attribution_base(root: Path, rev: str) -> tuple[str, str]:
+    """Return `(sha, short sha)` for REV, or raise `AttributionUnavailable`.
+
+    Refuses when the scanner differs between REV and the one running now. The
+    base drift is measured with THIS scanner against an artifact REV's scanner
+    wrote, so a scanner edit in the range would surface at REV as drift and
+    be mis-reported as inherited -- precisely the drift this change caused.
+    """
+    resolved = _attribution_git(
+        root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"
+    )
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        raise AttributionUnavailable(f"{rev!r} does not resolve to a commit here")
+    sha = resolved.stdout.strip()
+    short = _attribution_git(root, "rev-parse", "--short", sha).stdout.strip()
+    short = short or sha[:12]
+    running = Path(__file__).resolve()
+    tracked = root / ATTRIBUTION_SCANNER_PATH
+    if tracked.is_file() and tracked.resolve() == running:
+        # `git diff` rather than a byte compare so a CRLF checkout of an
+        # unchanged scanner is not reported as a scanner change.
+        diff = _attribution_git(
+            root, "diff", "--quiet", sha, "--", str(ATTRIBUTION_SCANNER_PATH)
+        )
+        same = diff.returncode == 0
+        if diff.returncode not in (0, 1):
+            raise AttributionUnavailable(
+                f"could not compare {ATTRIBUTION_SCANNER_PATH} with {short}: "
+                + first_line(diff.stderr)
+            )
+    else:
+        # Run against another tree (`--repo-root`): what matters is the
+        # scanner actually executing, so compare its bytes with REV's blob.
+        shown = subprocess.run(
+            ["git", "show", f"{sha}:{ATTRIBUTION_SCANNER_PATH.as_posix()}"],
+            cwd=root,
+            capture_output=True,
+        )
+        same = shown.returncode == 0 and shown.stdout == running.read_bytes()
+    if not same:
+        raise AttributionUnavailable(
+            f"{ATTRIBUTION_SCANNER_PATH} differs between {short} and the scanner "
+            "running now, so drift measured at "
+            f"{short} would not be comparable"
+        )
+    return sha, short
+
+
+@contextlib.contextmanager
+def materialized_revision(root: Path, sha: str):
+    """Yield a temporary detached worktree of `sha`; always removed after.
+
+    The `finally` covers exceptions and KeyboardInterrupt alike: a leaked
+    worktree is registered in the user's repository and outlives this run.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="suite-drift-attribution-"))
+    tree = scratch / "tree"
+    try:
+        added = _attribution_git(
+            root, "worktree", "add", "--detach", "--quiet", str(tree), sha
+        )
+        if added.returncode != 0:
+            raise AttributionUnavailable(
+                "could not create a worktree of "
+                f"{sha[:12]}: {first_line(added.stderr)}"
+            )
+        yield tree
+    finally:
+        _attribution_git(root, "worktree", "remove", "--force", str(tree))
+        _attribution_git(root, "worktree", "prune")
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _static_drift_at(tree: Path) -> tuple[dict[str, Any], str | None]:
+    measured = static_case_counts(tree)
+    try:
+        recorded = load_static_case_counts(tree)
+    except (OSError, ValueError) as error:
+        return static_case_count_drift({}, {}), (
+            f"{STATIC_CASE_COUNTS_PATH} is unreadable there ({error})"
+        )
+    return static_case_count_drift(recorded, measured), None
+
+
+def _source_inventory_drift_at(tree: Path) -> tuple[dict[str, Any], str | None]:
+    measured = source_inventory(tree)
+    try:
+        recorded = load_source_inventory(tree)
+    except (OSError, ValueError, InventoryProjectionError) as error:
+        empty = {key: [] for key in SOURCE_INVENTORY_DRIFT_ENTRY_KEYS}
+        empty["changedSections"] = []
+        return empty, f"{SOURCE_INVENTORY_PATH} is unreadable there ({error})"
+    return source_inventory_drift(recorded, measured), None
+
+
+ATTRIBUTION_KINDS: dict[str, tuple[Any, Any, tuple[str, ...], Any, str]] = {
+    "static": (
+        _static_drift_at,
+        attribute_static_case_count_drift,
+        STATIC_DRIFT_ITEM_KEYS,
+        _static_drift_item_line,
+        STATIC_CASE_COUNTS_REGENERATE_COMMAND,
+    ),
+    "inventory": (
+        _source_inventory_drift_at,
+        attribute_source_inventory_drift,
+        SOURCE_INVENTORY_DRIFT_ENTRY_KEYS + ("changedSections",),
+        _source_inventory_drift_item_line,
+        SOURCE_INVENTORY_REGENERATE_COMMAND,
+    ),
+}
+
+
+def report_drift_attribution(
+    root: Path, rev: str, head: Mapping[str, Any], kind: str
+) -> str:
+    """Return the attribution block for `head`, or one `note:` line.
+
+    Never raises for an attribution failure (KeyboardInterrupt still
+    propagates, after the worktree is removed): the drift text and the
+    verdict are already decided, and attribution is an annotation on them.
+    """
+    drift_at, attribute, keys, item_line, regenerate = ATTRIBUTION_KINDS[kind]
+    try:
+        sha, short = resolve_attribution_base(root, rev)
+        with materialized_revision(root, sha) as tree:
+            try:
+                base, unreadable = drift_at(tree)
+            except (Exception, SystemExit) as error:  # noqa: BLE001
+                # `parse_repro_tests` signals a malformed table with
+                # SystemExit; at REV that is a reason to skip attribution,
+                # not to end this process.
+                raise AttributionUnavailable(
+                    f"could not measure the drift at {short}: {error}"
+                ) from None
+    except AttributionUnavailable as error:
+        return f"note: drift attribution skipped: {error}."
+    block = format_drift_attribution(
+        attribute(head, base), keys, item_line, short, regenerate
+    )
+    if unreadable:
+        block = (
+            f"note: at {short}, {unreadable}; treating its drift as empty, so "
+            "every item below counts as introduced.\n" + block
+        )
+    return block
+
+
 def md_table(headers: list[str], rows: list[list[str]]) -> list[str]:
     out = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for row in rows:
@@ -7235,6 +7557,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--attribute-to",
+        metavar="REV",
+        default=None,
+        help=(
+            "with --check-static-case-counts or --check-inventory: when the "
+            "tree has drifted, measure the same drift at REV (in a temporary "
+            "git worktree, removed afterwards) and say which stale items this "
+            "change introduced and which were already stale at REV. Never "
+            "changes the verdict or the exit code, and costs nothing on a "
+            "clean tree. Skipped with a note when REV does not resolve or "
+            "when " + str(ATTRIBUTION_SCANNER_PATH) + " differs between REV "
+            "and the running scanner"
+        ),
+    )
+    parser.add_argument(
         "--no-catalog",
         action="store_true",
         help=(
@@ -7255,130 +7592,226 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# ---------------------------------------------------------------------------
+# The suite-artifact actions.
+#
+# One function per action flag, composed by `SUITE_ARTIFACT_ACTIONS` below.
+# Each takes the parsed arguments (the two checks read `--attribute-to` from
+# them), returns its own exit status and is otherwise independent of the others:
+# `main` runs every requested one and returns the worst status.
+#
+# "Early exit" in the comments below is kept from when these were arms of an
+# `if` chain in `main`, and still says the thing that matters -- every one of
+# them runs BEFORE any binary probing, so each stays reachable in a tree with
+# nothing built. What is no longer true is that reaching one of them stops the
+# others; that was the defect. See `SUITE_ARTIFACT_ACTIONS`.
+# ---------------------------------------------------------------------------
+
+
+def _action_write_static_case_counts(root: Path, args: argparse.Namespace) -> int:
+    # Early exit, BEFORE any binary probing: the baseline is a static scan and
+    # must stay refreshable in a tree with nothing built. Making it depend on
+    # `build_inventory` would recreate the defect it replaces.
+    recorded: dict[str, tuple[str, int]] = {}
+    if (root / STATIC_CASE_COUNTS_PATH).is_file():
+        recorded = load_static_case_counts(root)
+    measured = static_case_counts(root)
+    drift = static_case_count_drift(recorded, measured)
+    written = write_static_case_counts(root, measured)
+    print(f"wrote {rel(written, root)} ({len(measured)} sources, "
+          f"{drift['measuredTotal']} statically visible cases)")
+    if recorded and not drift["clean"]:
+        print(format_static_case_count_drift(drift))
+    return 0
+
+
+def _action_check_static_case_counts(root: Path, args: argparse.Namespace) -> int:
+    measured = static_case_counts(root)
+    drift = static_case_count_drift(load_static_case_counts(root), measured)
+    if drift["clean"]:
+        print(
+            f"{STATIC_CASE_COUNTS_PATH}: "
+            f"{drift['measuredTotal']} test cases across "
+            f"{len(measured)} sources, as recorded"
+        )
+        return 0
+    print(format_static_case_count_drift(drift), file=sys.stderr)
+    if args.attribute_to:
+        print(
+            "\n" + report_drift_attribution(
+                root, args.attribute_to, drift, "static"
+            ),
+            file=sys.stderr,
+        )
+    return 1
+
+
+def _action_write_inventory_sources(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: BEFORE any binary probing. A gate
+    # that needs the build cannot run before the build, and the whole point of
+    # this one is that it can.
+    recorded_sources: dict[str, Any] | None = None
+    if (root / SOURCE_INVENTORY_PATH).is_file():
+        # Tolerant HERE and nowhere else. This is the remedy command the
+        # gate's refusal prints, so it has to work against whatever is on
+        # disk -- including a file written by an older revision of this
+        # script that predates a field, which `--check-inventory` would
+        # rightly refuse to read. Refusing to REGENERATE such a file would
+        # leave a contributor with a gate they cannot satisfy.
+        try:
+            recorded_sources = load_source_inventory(root)
+        except (InventoryProjectionError, json.JSONDecodeError) as error:
+            print(
+                f"note: {SOURCE_INVENTORY_PATH} could not be read "
+                f"({error}); rewriting it from the tree."
+            )
+    measured_sources = source_inventory(root)
+    written = write_source_inventory(root, measured_sources)
+    print(
+        f"wrote {rel(written, root)} "
+        f"({len(measured_sources['tests'])} entries)"
+    )
+    if recorded_sources is not None:
+        drift = source_inventory_drift(recorded_sources, measured_sources)
+        if not drift["clean"]:
+            print(format_source_inventory_drift(drift))
+    return 0
+
+
+def _action_check_declared_sources(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: BEFORE any binary probing. This
+    # one reads the tree and one generated file and nothing else.
+    drift = declared_source_drift(root)
+    if drift["clean"]:
+        print(
+            "declared test sources: "
+            f"{drift['candidateCount']} Nim test sources in the tree, all "
+            f"enrolled ({drift['declaredCount']} own build edges, "
+            f"{drift['bundledCount']} folded into pure-unit bundles); "
+            f"{drift['shellCandidateCount']} shell test scripts "
+            f"({drift['shellReferencedCount']} referenced, "
+            f"{drift['shellBaselineCount']} accepted baseline debt)"
+        )
+        return 0
+    print(format_declared_source_drift(drift), file=sys.stderr)
+    return 1
+
+
+def _action_check_shape_parity(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: this one reads one generated file
+    # and nothing else -- not even the tree.
+    drift = shape_parity_drift(root)
+    if drift["clean"]:
+        print(
+            "test-source shape parity: "
+            f"{drift['rows']} path shapes classified identically by "
+            "scripts/generate_test_edges.nim and by this gate "
+            f"({drift['generatorAccepts']} accepted by both, "
+            f"{drift['rows'] - drift['generatorAccepts']} refused by both)"
+        )
+        return 0
+    print(format_shape_parity_drift(drift), file=sys.stderr)
+    return 1
+
+
+def _action_check_inventory(root: Path, args: argparse.Namespace) -> int:
+    # Same placement and the same reason: BEFORE any binary probing. A gate
+    # that needs the build cannot run before the build, and the whole point of
+    # this one is that it can.
+    if not (root / SOURCE_INVENTORY_PATH).is_file():
+        # Fatal, never skipped. A check that passes when the artifact it
+        # guards is absent reports green and proves nothing.
+        print(
+            f"FAIL: {SOURCE_INVENTORY_PATH} not found; there is no "
+            "tracked entry set to check. Generate it and commit it:",
+            file=sys.stderr,
+        )
+        print(f"  {SOURCE_INVENTORY_REGENERATE_COMMAND}", file=sys.stderr)
+        return 1
+    drift = source_inventory_drift(
+        load_source_inventory(root), source_inventory(root)
+    )
+    if drift["clean"]:
+        print(
+            f"{SOURCE_INVENTORY_PATH}: "
+            f"{drift['measuredEntryCount']} entries, "
+            "language/owner/binary/class/static-case-count as recorded"
+        )
+        return 0
+    print(format_source_inventory_drift(drift), file=sys.stderr)
+    if args.attribute_to:
+        print(
+            "\n" + report_drift_attribution(
+                root, args.attribute_to, drift, "inventory"
+            ),
+            file=sys.stderr,
+        )
+    return 1
+
+
+SUITE_ARTIFACT_ACTIONS: dict[
+    str, Callable[[Path, argparse.Namespace], int]
+] = {
+    "write_static_case_counts": _action_write_static_case_counts,
+    "write_inventory_sources": _action_write_inventory_sources,
+    "check_static_case_counts": _action_check_static_case_counts,
+    "check_inventory": _action_check_inventory,
+    "check_declared_sources": _action_check_declared_sources,
+    "check_shape_parity": _action_check_shape_parity,
+}
+"""The six suite-artifact actions, keyed by `parse_args` destination, IN THE
+ORDER THEY RUN.
+
+INDEPENDENT ACTIONS, NOT MUTUALLY EXCLUSIVE SUBCOMMANDS. These used to be a
+chain of `if args.<flag>: ... return 0` arms in `main`, which is the correct
+shape for subcommands and the wrong one for this: every campaign brief in
+this repository says
+
+    reprobuild_suite_inventory.py --write-static-case-counts
+                                  --write-inventory-sources
+
+and under the chain the first arm regenerated its artifact and returned 0
+before the second was ever reached. The second artifact stayed stale and the
+run still exited 0, so a truthful "regenerated, exit 0" report was routinely
+followed by a red `--check-inventory`. See
+`reprobuild-pm/issues/2026-10-09-generate-test-edges-accepts-any-flag-and-
+reports-success.md`.
+
+THE ORDER IS THIS TABLE'S, NOT ARGV'S. Writes first, then checks, so that a
+write-then-check invocation is coherent whichever way the flags were typed —
+the checks see what the writers just produced instead of racing the order
+somebody happened to type. Nothing in `main` sorts or re-reads argv; it walks
+this table.
+
+A FAILING CHECK DOES NOT STOP THE REST. `main` runs every requested action
+and returns the WORST status any of them returned, because a composition that
+stopped at the first red would hide every later gate behind it and make a
+contributor rediscover the drifts one run at a time.
+
+ONE TABLE, SO A SEVENTH FLAG CANNOT BE FORGOTTEN. `tests/unit/
+test_reprobuild_suite_inventory.py`'s `SuiteArtifactActionCompositionTests`
+derives the parser's boolean `--write-*` / `--check-*` destinations and
+requires them to be exactly this table's keys, so an action flag that parses
+but is composed nowhere is a test failure rather than a flag that silently
+does nothing.
+"""
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     root = Path(args.repo_root).resolve()
 
-    # Early exit, BEFORE any binary probing: the baseline is a static scan and
-    # must stay refreshable in a tree with nothing built. Making it depend on
-    # `build_inventory` would recreate the defect it replaces.
-    if args.write_static_case_counts:
-        recorded: dict[str, tuple[str, int]] = {}
-        if (root / STATIC_CASE_COUNTS_PATH).is_file():
-            recorded = load_static_case_counts(root)
-        measured = static_case_counts(root)
-        drift = static_case_count_drift(recorded, measured)
-        written = write_static_case_counts(root, measured)
-        print(f"wrote {rel(written, root)} ({len(measured)} sources, "
-              f"{drift['measuredTotal']} statically visible cases)")
-        if recorded and not drift["clean"]:
-            print(format_static_case_count_drift(drift))
-        return 0
-
-    if args.check_static_case_counts:
-        measured = static_case_counts(root)
-        drift = static_case_count_drift(load_static_case_counts(root), measured)
-        if drift["clean"]:
-            print(
-                f"{STATIC_CASE_COUNTS_PATH}: "
-                f"{drift['measuredTotal']} test cases across "
-                f"{len(measured)} sources, as recorded"
-            )
-            return 0
-        print(format_static_case_count_drift(drift), file=sys.stderr)
-        return 1
-
-    # Same placement and the same reason: BEFORE any binary probing. A gate
-    # that needs the build cannot run before the build, and the whole point of
-    # this one is that it can.
-    if args.write_inventory_sources:
-        recorded_sources: dict[str, Any] | None = None
-        if (root / SOURCE_INVENTORY_PATH).is_file():
-            # Tolerant HERE and nowhere else. This is the remedy command the
-            # gate's refusal prints, so it has to work against whatever is on
-            # disk -- including a file written by an older revision of this
-            # script that predates a field, which `--check-inventory` would
-            # rightly refuse to read. Refusing to REGENERATE such a file would
-            # leave a contributor with a gate they cannot satisfy.
-            try:
-                recorded_sources = load_source_inventory(root)
-            except (InventoryProjectionError, json.JSONDecodeError) as error:
-                print(
-                    f"note: {SOURCE_INVENTORY_PATH} could not be read "
-                    f"({error}); rewriting it from the tree."
-                )
-        measured_sources = source_inventory(root)
-        written = write_source_inventory(root, measured_sources)
-        print(
-            f"wrote {rel(written, root)} "
-            f"({len(measured_sources['tests'])} entries)"
-        )
-        if recorded_sources is not None:
-            drift = source_inventory_drift(recorded_sources, measured_sources)
-            if not drift["clean"]:
-                print(format_source_inventory_drift(drift))
-        return 0
-
-    # Same placement and the same reason: BEFORE any binary probing. This
-    # one reads the tree and one generated file and nothing else.
-    if args.check_declared_sources:
-        drift = declared_source_drift(root)
-        if drift["clean"]:
-            print(
-                "declared test sources: "
-                f"{drift['candidateCount']} Nim test sources in the tree, all "
-                f"enrolled ({drift['declaredCount']} own build edges, "
-                f"{drift['bundledCount']} folded into pure-unit bundles); "
-                f"{drift['shellCandidateCount']} shell test scripts "
-                f"({drift['shellReferencedCount']} referenced, "
-                f"{drift['shellBaselineCount']} accepted baseline debt)"
-            )
-            return 0
-        print(format_declared_source_drift(drift), file=sys.stderr)
-        return 1
-
-    # Same placement and the same reason: this one reads one generated file
-    # and nothing else -- not even the tree.
-    if args.check_shape_parity:
-        drift = shape_parity_drift(root)
-        if drift["clean"]:
-            print(
-                "test-source shape parity: "
-                f"{drift['rows']} path shapes classified identically by "
-                "scripts/generate_test_edges.nim and by this gate "
-                f"({drift['generatorAccepts']} accepted by both, "
-                f"{drift['rows'] - drift['generatorAccepts']} refused by both)"
-            )
-            return 0
-        print(format_shape_parity_drift(drift), file=sys.stderr)
-        return 1
-
-    # Same placement and the same reason: BEFORE any binary probing. A gate
-    # that needs the build cannot run before the build, and the whole point of
-    # this one is that it can.
-    if args.check_inventory:
-        if not (root / SOURCE_INVENTORY_PATH).is_file():
-            # Fatal, never skipped. A check that passes when the artifact it
-            # guards is absent reports green and proves nothing.
-            print(
-                f"FAIL: {SOURCE_INVENTORY_PATH} not found; there is no "
-                "tracked entry set to check. Generate it and commit it:",
-                file=sys.stderr,
-            )
-            print(f"  {SOURCE_INVENTORY_REGENERATE_COMMAND}", file=sys.stderr)
-            return 1
-        drift = source_inventory_drift(
-            load_source_inventory(root), source_inventory(root)
-        )
-        if drift["clean"]:
-            print(
-                f"{SOURCE_INVENTORY_PATH}: "
-                f"{drift['measuredEntryCount']} entries, "
-                "language/owner/binary/class/static-case-count as recorded"
-            )
-            return 0
-        print(format_source_inventory_drift(drift), file=sys.stderr)
-        return 1
+    # Every requested action runs, in THIS TABLE's order rather than argv's,
+    # and the exit status is the worst any of them returned. When at least one
+    # action flag is given the full inventory/report path below is skipped, as
+    # it always was: these actions are the build-free surfaces and must stay
+    # reachable in a tree with nothing built.
+    requested = [name for name in SUITE_ARTIFACT_ACTIONS if getattr(args, name)]
+    if requested:
+        status = 0
+        for name in requested:
+            status = max(status, SUITE_ARTIFACT_ACTIONS[name](root, args))
+        return status
 
     json_path = Path(args.json)
     report_path = Path(args.write_report)
