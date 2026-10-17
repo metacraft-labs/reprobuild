@@ -399,10 +399,14 @@ suite "CMake-generated actions declare their PATH":
 
       let workA = testRoot / "work-inherited-A"
       let workB = testRoot / "work-inherited-B"
-      let armA = build(reproBin, buildDir, workA, pathA, forceRebuild = true)
+      # `--log=summary`: arm A's census is read below (see test 4); both
+      # arms get it so they differ in PATH alone.
+      let armA = build(reproBin, buildDir, workA, pathA, forceRebuild = true,
+        logMode = "summary")
       checkpoint(armA.output)
       check armA.code == 0
-      let armB = build(reproBin, buildDir, workB, pathB, forceRebuild = true)
+      let armB = build(reproBin, buildDir, workB, pathB, forceRebuild = true,
+        logMode = "summary")
       checkpoint(armB.output)
       check armB.code == 0
 
