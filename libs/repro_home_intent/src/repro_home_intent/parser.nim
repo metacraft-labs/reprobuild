@@ -25,6 +25,8 @@ from repro_core/paths import extendedPath
 from repro_profile/data_refs import dataFilePathProblem
 from repro_profile/catalog_refs import catalogImportPathProblem
 from repro_profile/concerns import concernListProblem
+from repro_profile/host_system import HostSystemKey, ManagedElsewhereKeyword,
+  systemPointerProblem
 
 import ./errors
 import ./model
@@ -834,6 +836,52 @@ proc parseConfigBlock(ctx: ParseCtx; idx, parentIndent,
     indent: parentIndent, configHeaderLine: idx + 1,
     configPackages: packages)
 
+proc parseHostSystemText(ctx: ParseCtx; idx: int; raw: string;
+                         startCol: int; hostName: string): string =
+  ## The value of a block-form host entry's `system:` line, the text form of
+  ## what the `profile` macro accepts (`repro_profile/host_system`):
+  ## `managedElsewhere` (returns "") or `managedElsewhere("<pointer>")`
+  ## (returns the pointer), optionally followed by a `#` comment.
+  let expected = "`" & ManagedElsewhereKeyword & "` or `" &
+    ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  var s = raw.strip()
+  if not s.startsWith(ManagedElsewhereKeyword):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & s & "' as the `system:` value of hosts entry \"" & hostName &
+      "\"", expected)
+  s = s[ManagedElsewhereKeyword.len .. ^1].strip()
+  if s.len == 0 or s.startsWith("#"):
+    return ""
+  # `("...")`: a plain string literal with `\\` and `\"` escapes.
+  if not s.startsWith("(\""):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & raw.strip() & "' as the `system:` value of hosts entry \"" &
+      hostName & "\"", expected)
+  var i = 2
+  var pointer = ""
+  while i < s.len and s[i] != '"':
+    if s[i] == '\\' and i + 1 < s.len:
+      pointer.add s[i + 1]
+      inc i, 2
+    else:
+      pointer.add s[i]
+      inc i
+  if i + 1 >= s.len or s[i + 1] != ')':
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "an unterminated `" & ManagedElsewhereKeyword & "(...)` in hosts " &
+      "entry \"" & hostName & "\"", expected)
+  let tail = s[i + 2 .. ^1].strip()
+  if tail.len > 0 and not tail.startsWith("#"):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & tail & "' after the `system:` value of hosts entry \"" &
+      hostName & "\"", "nothing, or a `#` comment")
+  let problem = systemPointerProblem(pointer)
+  if problem.len > 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "system: " & problem & " in hosts entry \"" & hostName & "\"",
+      expected)
+  pointer
+
 proc splitHostList(ctx: ParseCtx; idx: int; raw: string;
                   startCol: int): seq[string] =
   ## Parse a `[a, b, c]` activity list. The brackets are required.
@@ -910,20 +958,25 @@ proc parseHostsEntry(ctx: ParseCtx; idx, entryIndent: int): IntentNode =
       if ind != childIndent:
         raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
           "'" & line.strip() & "' at indent " & $ind,
-          "`activities: [...]` or `applies: [...]` at indent " &
+          "`activities: [...]`, `applies: [...]` or `system: ...` at indent " &
           $childIndent)
       let body = trimTrailing(line)[ind .. ^1]
       let colon = body.find(':')
       let key = if colon > 0: body[0 ..< colon].strip() else: ""
-      if key notin ["activities", "applies"]:
+      if key notin ["activities", "applies", HostSystemKey]:
         raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
           "'" & body & "' in hosts entry \"" & hostName & "\"",
-          "`activities: [...]` or `applies: [...]`")
+          "`activities: [...]`, `applies: [...]` or `system: ...`")
       if key in seenKeys:
         raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
           "a second `" & key & ":` in hosts entry \"" & hostName & "\"",
-          "each of `activities:` / `applies:` at most once")
+          "each of `activities:` / `applies:` / `system:` at most once")
       seenKeys.add key
+      if key == HostSystemKey:
+        result.hostSystemManagedElsewhere = true
+        result.hostSystemManagedBy = parseHostSystemText(ctx, j,
+          body[colon + 1 .. ^1], ind + colon + 1, hostName)
+        continue
       let list = splitHostList(ctx, j, body[colon + 1 .. ^1],
         ind + colon + 1)
       if key == "activities":

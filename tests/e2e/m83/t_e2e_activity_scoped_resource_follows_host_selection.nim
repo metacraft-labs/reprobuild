@@ -16,7 +16,7 @@
 ##   and every `desktop_core` resource; `--host gm9-server` plans the
 ##   profile-level resource and the `server_extras` row, and none of the
 ##   `desktop_core` ones;
-## * `repro home export` (schema 3) carries each resource's `activity`
+## * `repro home export` (schema 3 at GM9; 4 since GM10) carries each resource's `activity`
 ##   (`null` for the profile-level one), and `--target <this platform>`
 ##   evaluates each host to exactly what the planner plans for it;
 ## * a real `repro home apply --host gm9-desktop` writes the desktop files
@@ -210,7 +210,7 @@ suite "GM9: activity-scoped resources follow host selection":
     require exported.exitCode == 0
     let doc = parseJson(exported.stdout)
     check doc["schemaVersion"].getInt == HomeExportSchemaVersion
-    check HomeExportSchemaVersion == 3
+    check HomeExportSchemaVersion == 4
     var scopes: seq[string]
     for r in doc["intent"]["resources"]:
       let activity = r["activity"]

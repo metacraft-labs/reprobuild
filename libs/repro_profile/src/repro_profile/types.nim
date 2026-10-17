@@ -85,6 +85,12 @@ type
       ## validated by the macro; an empty seq is a host where Reprobuild
       ## applies nothing (Gradual-Nix-To-Reprobuild-Migration.md
       ## §Concern-scoped apply).
+    systemManagedElsewhere*: Table[string, string]
+      ## The hosts whose `hosts:` entry says `system: managedElsewhere[(...)]`
+      ## (`repro_profile/host_system`): host -> the pointer to what manages
+      ## the host's system, "" when the entry names none. A host absent from
+      ## this table has its system managed here (Gradual-Nix-To-Reprobuild-
+      ## Migration.md §Hosts, feature 2).
     resources*: seq[ResourceIntent]
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G. Action-edge items emitted

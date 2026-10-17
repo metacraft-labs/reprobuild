@@ -129,8 +129,10 @@ so an export never carries one.
 
 - the document is not a `repro home export` document, or its `schemaVersion`
   is one this library does not know (regenerate it with the `repro` the
-  flake pins; this library reads schema 3, which added the `activity` of a
-  resource);
+  flake pins; this library reads schema 4, which added who manages each
+  host's system, `intent.systemManagedElsewhere`);
+- `intent.systemManagedElsewhere` is malformed or names a host the registry
+  does not declare;
 - a resource belongs to an activity the profile does not declare;
 - the export cannot describe the target: its `platforms` entry for `system`
   is `differs` or `unevaluated` — typically a `when defined(macosx)` in the
@@ -148,6 +150,27 @@ can therefore read each host's activities from a single committed export
 (`readIntent { snapshot; host = <each host>; … }.evaluation.activities`) —
 the `hosts:` registry is then the one host-to-activity map both sides
 read.
+
+## `hostSystemManagement` — who manages a host's system
+
+```nix
+reprobuild.lib.hostSystemManagement {
+  host = "build-server";
+  snapshot = ./home-export.json;     # or: document = <an already-read export>;
+}
+# => { host = "build-server"; managed = "elsewhere"; managedBy = "example-org/infra"; }
+# => { host = "home-pc"; managed = "here"; managedBy = null; }
+```
+
+Reads the host's `system:` attribute
+([home-export.md](./home-export.md#hosts-whose-system-is-managed-elsewhere))
+from an export without evaluating a target system -- what a script that
+switches a machine's NixOS or nix-darwin configuration asks before taking
+the machine over. `managedBy` is the pointer the profile gives, or `null`.
+It refuses (throws) what `readIntent` refuses about the document and the
+host: another format, a `schemaVersion` other than 4, a host the registry
+does not declare, and a malformed `systemManagedElsewhere`. `readIntent`'s
+`evaluation.system` carries the same answer.
 
 ## `nixRealizationOf` — canonical name to nixpkgs attribute
 

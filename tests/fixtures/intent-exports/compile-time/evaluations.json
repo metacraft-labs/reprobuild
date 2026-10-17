@@ -37,7 +37,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-linux": {
       "target": "aarch64-linux",
@@ -76,7 +80,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "x86_64-darwin": {
       "refused": true
@@ -121,7 +129,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-windows": {
       "target": "aarch64-windows",
@@ -160,7 +172,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     }
   },
   "home-pc": {
@@ -201,7 +217,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-linux": {
       "target": "aarch64-linux",
@@ -240,7 +260,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "x86_64-darwin": {
       "refused": true
@@ -285,7 +309,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-windows": {
       "target": "aarch64-windows",
@@ -324,7 +352,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     }
   },
   "server": {
@@ -365,7 +397,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-linux": {
       "target": "aarch64-linux",
@@ -404,7 +440,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "x86_64-darwin": {
       "refused": true
@@ -449,7 +489,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-windows": {
       "target": "aarch64-windows",
@@ -488,7 +532,11 @@
           "activity": null
         }
       ],
-      "configOverrides": []
+      "configOverrides": [],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     }
   }
 }

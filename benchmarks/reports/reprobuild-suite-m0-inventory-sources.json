@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2153,
+    "nimTestBinaries": 2155,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 658,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2177
+    "testEntries": 2179
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1293,7 +1293,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1170,
+      "integration": 1172,
       "platform/destructive": 132,
       "pure unit": 658,
       "unclassified": 198
@@ -1498,9 +1498,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2153,
+    "nimTestBinaryCount": 2155,
     "pythonTestFileCount": 24,
-    "testEntryCount": 2177
+    "testEntryCount": 2179
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13459,7 +13459,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_intent/tests/t_smoke_home_intent.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 34,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16191,7 +16191,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 33,
+      "staticCaseCount": 34,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24515,6 +24515,41 @@
       "source": "tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hosts_system_attribute_cli",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm10/t_e2e_hosts_system_attribute_cli.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_infra_apply_refuses_externally_managed_host",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
