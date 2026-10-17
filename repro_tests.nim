@@ -4662,6 +4662,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_exports_refuse_nim_magics.nim",
+    binary: "build/test-bin/t_dsl_lifted_exports_refuse_nim_magics",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_service_reference_is_typed.nim",
     binary: "build/test-bin/t_dsl_lifted_service_reference_is_typed",
     defines: @[],

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2152,
+    "nimTestBinaries": 2153,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 661,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2174
+    "testEntries": 2175
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1299,7 +1299,7 @@
       "integration": 1170,
       "platform/destructive": 132,
       "pure unit": 661,
-      "unclassified": 192
+      "unclassified": 193
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1501,9 +1501,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2152,
+    "nimTestBinaryCount": 2153,
     "pythonTestFileCount": 22,
-    "testEntryCount": 2174
+    "testEntryCount": 2175
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16818,6 +16818,23 @@
       "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_export_names_are_reserved.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dsl_lifted_exports_refuse_nim_magics",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_exports_refuse_nim_magics.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
