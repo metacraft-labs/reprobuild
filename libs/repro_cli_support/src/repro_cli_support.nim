@@ -19159,17 +19159,26 @@ proc isReprobuildVcsHook(path, hookName: string): bool =
 #
 #   <hook>                          a dispatcher, header marker
 #                                   `# repo-workspaces hook dispatcher`
-#                                   (an older release wrote a wrapper marked
-#                                   `# repo-workspaces <hook> wrapper` instead)
-#   <hook>.repo-workspaces-managed  its body, marker
+#                                   (its first release, `hooks/install.sh`,
+#                                   wrote a self-contained WRAPPER marked
+#                                   `# repo-workspaces <hook> wrapper` instead,
+#                                   for `pre-commit` and `post-commit`)
+#   <hook>.repo-workspaces-managed  the dispatcher's body, marker
 #                                   `# repo-workspaces managed <hook> hook`;
 #                                   the pre-push one publishes locks by
 #                                   committing and pushing into the manifest
 #                                   repository
 #   <hook>.repo-workspaces-local    the USER's previous hook, which the
-#                                   dispatcher ran first
-#   <hook>.original                 an older backup of a user hook, run by
-#                                   nothing
+#                                   DISPATCHER ran first
+#   <hook>.original                 the USER's previous hook as the WRAPPER
+#                                   preserved it; the wrapper ran it first
+#                                   (`"$REPO_HOOKS_DIR/<hook>.original" "$@"`,
+#                                   when executable). A dispatcher does not
+#                                   run it: the later release moved it into
+#                                   `<hook>.repo-workspaces-local` when it
+#                                   replaced a wrapper
+#                                   (`migrateLegacyBackupIfSafe`), and a copy
+#                                   it could not move stayed behind, unrun.
 #
 # None of it carries a Reprobuild marker, so without this recogniser `ensure`
 # classified the dispatcher as a foreign user hook and chained it to
@@ -19188,26 +19197,30 @@ const
   RetiredRepoWorkspacesDispatcherMarker = "repo-workspaces hook dispatcher"
     ## Header marker of the retired tool's dispatcher (its `DispatcherMarker`).
 
+proc retiredRepoWorkspacesWrapperMarker(hookName: string): string =
+  ## Header marker of the retired tool's first-release wrapper
+  ## (`hooks/<hook>-wrapper`, installed by its `hooks/install.sh`).
+  "repo-workspaces " & hookName & " wrapper"
+
 proc retiredRepoWorkspacesMarkers(hookName: string): array[3, string] =
   ## Every header marker the retired tool wrote into a file it owned — the
   ## same three its own `isRepoWorkspacesOwned` tested for.
   [RetiredRepoWorkspacesDispatcherMarker,
    "repo-workspaces managed " & hookName & " hook",
-   "repo-workspaces " & hookName & " wrapper"]
+   retiredRepoWorkspacesWrapperMarker(hookName)]
 
-proc isRetiredRepoWorkspacesHook(path, hookName: string): bool =
-  ## True when ``path`` is a file the retired `repo-workspaces` tool GENERATED
-  ## (dispatcher, managed body, or the older wrapper), and so may be deleted.
+proc headerCarriesRetiredMarker(path: string;
+                                markers: openArray[string]): bool =
+  ## True when one of ``markers`` opens a comment line of the leading header
+  ## of the file at ``path`` (the shebang and the comment block under it).
   ##
-  ## Stricter than the retired tool's own substring test, because this one
-  ## leads to a DELETE: the marker has to be a comment line of the file's
-  ## leading header (the shebang and the comment block under it), which is
-  ## where every generated file carries it — line 2. A user's hook that merely
-  ## mentions the marker further down (the retired dispatcher itself greps for
-  ## it in its body) is not matched by its mention.
+  ## Stricter than the retired tool's own substring test, because what it
+  ## decides leads to a DELETE: every generated file carries its marker in
+  ## that header — line 2. A user's hook that merely mentions the marker
+  ## further down (the retired dispatcher itself greps for it in its body) is
+  ## not matched by its mention.
   if not fileExists(extendedPath(path)):
     return false
-  let markers = retiredRepoWorkspacesMarkers(hookName)
   var content = ""
   try:
     content = readFile(extendedPath(path))
@@ -19226,11 +19239,27 @@ proc isRetiredRepoWorkspacesHook(path, hookName: string): bool =
         return true
   false
 
+proc isRetiredRepoWorkspacesHook(path, hookName: string): bool =
+  ## True when ``path`` is a file the retired `repo-workspaces` tool GENERATED
+  ## (dispatcher, managed body, or the older wrapper), and so may be deleted.
+  headerCarriesRetiredMarker(path, retiredRepoWorkspacesMarkers(hookName))
+
+proc isRetiredRepoWorkspacesWrapper(path, hookName: string): bool =
+  ## True when ``path`` is specifically the retired tool's first-release
+  ## WRAPPER — the one generation that ran ``<hook>.original`` first — and
+  ## not its later dispatcher or that dispatcher's body.
+  headerCarriesRetiredMarker(path,
+    [retiredRepoWorkspacesWrapperMarker(hookName)])
+
 proc retiredRepoWorkspacesManagedPath(hooksDir, hookName: string): string =
   hooksDir / (hookName & ".repo-workspaces-managed")
 
 proc retiredRepoWorkspacesLocalPath(hooksDir, hookName: string): string =
   hooksDir / (hookName & ".repo-workspaces-local")
+
+proc retiredRepoWorkspacesOriginalPath(hooksDir, hookName: string): string =
+  ## Where the retired tool's first-release wrapper preserved the user's hook.
+  hooksDir / (hookName & ".original")
 
 proc ensureExecutable(path: string) =
   if not fileExists(extendedPath(path)):
@@ -20900,9 +20929,10 @@ type
       ## its dispatcher (or older wrapper) at the canonical path, already
       ## chained at ``<hook>.repro-local``, or displaced to ``<hook>.legacy``,
       ## and/or its ``<hook>.repo-workspaces-managed`` body — and DELETED. The
-      ## user hook that dispatcher had preserved in
-      ## ``<hook>.repo-workspaces-local`` was moved to ``<hook>.repro-local``
-      ## (see ``isRetiredRepoWorkspacesHook``).
+      ## user hook it had preserved and run first —
+      ## ``<hook>.repo-workspaces-local`` for the dispatcher,
+      ## ``<hook>.original`` for the wrapper — was moved to
+      ## ``<hook>.repro-local`` (see ``isRetiredRepoWorkspacesHook``).
       ##
       ## Its own state, and not ``chained-user-hook``, because chaining is
       ## exactly the wrong repair that used to be reported under that name:
@@ -21100,6 +21130,96 @@ type
 proc certificateGatePlan*(repoRoot: string): CertificateGatePlan
   ## Defined after the workspace resolution it needs.
 
+type
+  RetiredPreservedHook = tuple[path, runner: string]
+    ## A user hook a retired `repo-workspaces` generation preserved and ran
+    ## first, and the generation that ran it (``dispatcher`` / ``wrapper``),
+    ## named in a refusal.
+
+proc retiredPreservedHooks(hooksDir, hookName: string;
+                           dispatcherRuns, wrapperRuns: bool):
+                             seq[RetiredPreservedHook] =
+  ## The user hooks the retired generations preserved that a retired file
+  ## still present would run, and so must keep running once it is gone:
+  ##
+  ##   * ``<hook>.repo-workspaces-local`` when ``dispatcherRuns`` (a retired
+  ##     file is present) and it is not itself a generated file;
+  ##   * ``<hook>.original`` when ``wrapperRuns`` (the WRAPPER specifically is
+  ##     present: no dispatcher ever ran it) and it is neither a retired
+  ##     generated file nor a Reprobuild hook.
+  ##
+  ## An orphaned preserved hook — its runner already gone — runs in no chain
+  ## today, and nothing here starts running it. Order is the preference when
+  ## two copies are the same hook: the dispatcher's is the newer one.
+  let retiredLocal = retiredRepoWorkspacesLocalPath(hooksDir, hookName)
+  let retiredOriginal = retiredRepoWorkspacesOriginalPath(hooksDir, hookName)
+  if dispatcherRuns and fileExists(extendedPath(retiredLocal)) and
+      not isRetiredRepoWorkspacesHook(retiredLocal, hookName):
+    result.add((retiredLocal, "dispatcher"))
+  if wrapperRuns and fileExists(extendedPath(retiredOriginal)) and
+      not isRetiredRepoWorkspacesHook(retiredOriginal, hookName) and
+      not isReprobuildVcsHook(retiredOriginal, hookName):
+    result.add((retiredOriginal, "wrapper"))
+
+proc sameHookBody(a, b: string): bool =
+  ## Byte-identical, or the same generated shim regenerated against new tool
+  ## paths (`regeneratedShimIdentity`): the two equivalences the chaining in
+  ## ``ensureVcsHookDetailed`` also accepts as "one hook, keep one copy".
+  let identity = regeneratedShimIdentity(a)
+  a == b or (identity.len > 0 and identity == regeneratedShimIdentity(b))
+
+proc refuseCompetingRetiredPreserved(hooksDir, hookName, verb, command,
+                                     destination: string;
+                                     preserved: openArray[RetiredPreservedHook];
+                                     occupants: seq[tuple[path, what: string]]) =
+  ## Raises "cannot <verb>", naming both files and the `repro hooks
+  ## <command>` to re-run, when any two of ``preserved`` and
+  ## ``occupants`` are DIFFERENT hooks: all of them are headed for the one
+  ## slot ``destination``, so keeping one would silently drop the other
+  ## user's checks. Reads only — callers run it before deleting anything, so
+  ## a refusal leaves the retired file still running the preserved hook.
+  var competing = occupants
+  for item in preserved:
+    let preservedBody = readFile(extendedPath(item.path))
+    for occupant in competing:
+      if sameHookBody(readFile(extendedPath(occupant.path)), preservedBody):
+        continue
+      raise newException(ValueError,
+        "cannot " & verb & " " & hookName & ": " & item.path &
+          " holds the hook the retired repo-workspaces " & item.runner &
+          " preserved and ran first, and " & occupant.path & " " &
+          occupant.what & ". Reconcile them by hand: merge the checks you " &
+          "want into " & occupant.path & ", delete " & item.path &
+          ", then re-run 'repro hooks " & command & " --vcs " &
+          parentDir(parentDir(hooksDir)) & "'.")
+    # A later preserved hook is checked against this one exactly as against
+    # an occupant: both are headed for the same slot.
+    competing.add((item.path, "holds the different hook the retired " &
+      "repo-workspaces " & item.runner & " preserved and ran first; both " &
+      "would be run from " & destination))
+
+proc moveRetiredPreservedInto(preserved: openArray[RetiredPreservedHook];
+                              destination: string) =
+  ## Moves ONE of ``preserved`` (proved the same hook by
+  ## ``refuseCompetingRetiredPreserved``) to ``destination`` and deletes the
+  ## rest. An executable copy is preferred, so a hook the retired generations
+  ## ran keeps running. Mode preserved, deliberately not `ensureExecutable`:
+  ## every generation skips a non-executable preserved hook (`[[ -x ]]` /
+  ## `[ -x ]`), so a hook that did not run under the retired tool must not
+  ## start running now.
+  if preserved.len == 0:
+    return
+  var keeper = 0
+  for i, item in preserved:
+    if fpUserExec in getFilePermissions(extendedPath(item.path)):
+      keeper = i
+      break
+  for i, item in preserved:
+    if i == keeper:
+      moveFileReplacing(item.path, destination)
+    else:
+      discard removeFileIfExists(item.path)
+
 proc ensureVcsHookDetailed(hooksDir, hookName: string;
                            guard: HookWriteGuard = nil;
                            repoRoot = ""): VcsHookEnsureOutcome =
@@ -21156,16 +21276,25 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   #        * at `<hook>.legacy`, where pre-commit or prek moved it when they
   #          were installed over it, and from where their shim still runs it.
   #
-  #      Its body `<hook>.repo-workspaces-managed` goes with it. The one file
-  #      of the user's in that layout is `<hook>.repo-workspaces-local`, the
-  #      hook the retired dispatcher preserved and ran first; it is moved to
-  #      `<hook>.repro-local`, which Reprobuild's dispatcher runs first, so the
-  #      user's checks keep running. It is moved only when a retired
-  #      dispatcher that would run it is present: an orphaned one (its
-  #      dispatcher already deleted by hand) runs today in no chain, and
-  #      `ensure` does not start running something nobody runs.
-  #      `<hook>.original`, an older backup the retired tool kept and nothing
-  #      runs, is the user's and is left alone.
+  #      Its body `<hook>.repo-workspaces-managed` goes with it. The user's
+  #      files in that layout are the hooks the retired generations PRESERVED
+  #      and ran first, and each is moved to `<hook>.repro-local`, which
+  #      Reprobuild's dispatcher runs first, so the user's checks keep running:
+  #
+  #        * `<hook>.repo-workspaces-local`, which the dispatcher ran;
+  #        * `<hook>.original`, which the first release's wrapper ran (its
+  #          `hooks/install.sh` renamed the user's hook there and the wrapper
+  #          executed `.git/hooks/<hook>.original`). Removing the wrapper
+  #          without moving it would silently stop the user's hook.
+  #
+  #      Each is moved only when a retired file that would run it is present:
+  #      an orphaned one (its runner already deleted by hand) runs today in no
+  #      chain, and `ensure` does not start running something nobody runs.
+  #      For `<hook>.original` that runner is the WRAPPER specifically: a
+  #      dispatcher never ran it (the later release moved it into
+  #      `<hook>.repo-workspaces-local` when it replaced a wrapper, and a copy
+  #      it could not move stayed behind unrun), so with only a dispatcher
+  #      present `<hook>.original` is the user's and is left alone.
   let retiredLegacy = hooksDir / (hookName & ".legacy")
   let retiredManaged = retiredRepoWorkspacesManagedPath(hooksDir, hookName)
   let retiredLocal = retiredRepoWorkspacesLocalPath(hooksDir, hookName)
@@ -21174,39 +21303,33 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   let retiredAtLegacy = isRetiredRepoWorkspacesHook(retiredLegacy, hookName)
   let retiredDispatcherRuns =
     retiredAtStandard or retiredAtLocal or retiredAtLegacy
+  let retiredWrapperRuns =
+    isRetiredRepoWorkspacesWrapper(standard, hookName) or
+    isRetiredRepoWorkspacesWrapper(local, hookName) or
+    isRetiredRepoWorkspacesWrapper(retiredLegacy, hookName)
   let retiredLocalIsGenerated =
     isRetiredRepoWorkspacesHook(retiredLocal, hookName)
-  let migrateRetiredLocal = retiredDispatcherRuns and
-    fileExists(extendedPath(retiredLocal)) and not retiredLocalIsGenerated
-  if migrateRetiredLocal:
-    # Decide BEFORE deleting anything. The preserved hook is headed for
+  let preserved = retiredPreservedHooks(hooksDir, hookName,
+    retiredDispatcherRuns, retiredWrapperRuns)
+  if preserved.len > 0:
+    # Decide BEFORE deleting anything. Every preserved hook is headed for
     # `<hook>.repro-local`, and so is whatever foreign hook already sits there
-    # or at the canonical path (which the chaining below moves there). If one
-    # of those is a DIFFERENT hook, two users' checks compete for one slot —
-    # the same conflict as two foreign hooks below, refused the same way. The
-    # refusal comes first so that it leaves the hooks directory exactly as it
-    # found it: the retired dispatcher is, at that point, the only thing still
+    # or at the canonical path (which the chaining below moves there). If any
+    # two of them are DIFFERENT hooks, two users' checks compete for one slot
+    # — the same conflict as two foreign hooks below, refused the same way.
+    # The refusal comes first so that it leaves the hooks directory exactly as
+    # it found it: the retired file is, at that point, the only thing still
     # running the user's preserved hook.
-    let preservedBody = readFile(extendedPath(retiredLocal))
+    var occupants: seq[tuple[path, what: string]]
     for occupant in [local, standard]:
       if not fileExists(extendedPath(occupant)) or
           isReprobuildVcsHook(occupant, hookName) or
           isRetiredRepoWorkspacesHook(occupant, hookName):
         continue
-      let occupantBody = readFile(extendedPath(occupant))
-      let identity = regeneratedShimIdentity(occupantBody)
-      if occupantBody == preservedBody or
-          (identity.len > 0 and identity == regeneratedShimIdentity(preservedBody)):
-        continue
-      raise newException(ValueError,
-        "cannot install " & hookName & ": " & retiredLocal &
-          " holds the hook the retired repo-workspaces dispatcher preserved " &
-          "and ran first, and " & occupant & " holds a different hook that " &
-          "Reprobuild's dispatcher would run in the same place (" & local &
-          "). Reconcile them by hand: merge the checks you want into " &
-          occupant & ", delete " & retiredLocal &
-          ", then re-run 'repro hooks ensure --vcs " &
-          parentDir(parentDir(hooksDir)) & "'.")
+      occupants.add((occupant, "holds a different hook that Reprobuild's " &
+        "dispatcher would run in the same place (" & local & ")"))
+    refuseCompetingRetiredPreserved(hooksDir, hookName, "install", "ensure",
+      local, preserved, occupants)
   if retiredAtStandard:
     removedRetired = removeFileIfExists(standard) or removedRetired
   if retiredAtLocal:
@@ -21219,20 +21342,19 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
     # The retired tool's own files never belong in the user's slot (its
     # `sanitizePreservedLocalHook` removed them too).
     removedRetired = removeFileIfExists(retiredLocal) or removedRetired
-  if migrateRetiredLocal:
+  if preserved.len > 0:
+    # The check above proved every preserved copy, and any foreign occupant,
+    # the same hook: keep exactly one.
     if fileExists(extendedPath(local)) or
         (fileExists(extendedPath(standard)) and
           not isReprobuildVcsHook(standard, hookName)):
       # The same hook is already chained, or is at the canonical path and is
-      # chained below: keep that one copy (the check above proved them the
-      # same hook) and drop the retired tool's.
-      discard removeFileIfExists(retiredLocal)
+      # chained below: keep that one copy and drop the retired tool's.
+      for item in preserved:
+        discard removeFileIfExists(item.path)
     else:
-      # Mode preserved, deliberately not `ensureExecutable`: both dispatchers
-      # skip a non-executable preserved hook (`[[ -x ]]` / `[ -x ]`), so a
-      # hook that did not run under the retired dispatcher must not start
-      # running under this one.
-      moveFileReplacing(retiredLocal, local)
+      # Nothing is chained yet and nothing at the canonical path will be.
+      moveRetiredPreservedInto(preserved, local)
     removedRetired = true
   anyChange = anyChange or removedRetired
 
@@ -21547,8 +21669,9 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
       of vheoRemovedRetiredDispatcher:
         result.add("repro hooks: repaired " & hookName & " in " & top &
           " (removed-retired-dispatcher: the retired repo-workspaces hook " &
-          "dispatcher and its body were removed; any user hook it had " &
-          "preserved now runs as " & hookName & ".repro-local)")
+          "dispatcher (or its older wrapper) and its body were removed; any " &
+          "user hook it had preserved now runs as " & hookName &
+          ".repro-local)")
     except CatchableError as err:
       result.add("repro hooks: could NOT repair " & hookName & " in " & top &
         ": " & err.msg)
@@ -21927,17 +22050,34 @@ proc uninstallVcsHook(hooksDir, hookName: string): bool =
   let managed = managedHookPath(hooksDir, hookName)
   if fileExists(extendedPath(standard)) and
       isReprobuildVcsHook(standard, hookName):
-    result = removeFileIfExists(standard) or result
     if isRetiredRepoWorkspacesHook(local, hookName):
-      # A retired repo-workspaces dispatcher that an `ensure` predating
-      # `isRetiredRepoWorkspacesHook` chained here is not the user's hook, so
-      # it is not "restored": putting it back at the canonical path would
-      # reinstate the retired tool's lock publication on every push.
+      # A retired repo-workspaces file (dispatcher or older wrapper) that an
+      # `ensure` predating `isRetiredRepoWorkspacesHook` chained here is not
+      # the user's hook, so it is not "restored": putting it back at the
+      # canonical path would reinstate the retired tool's own checks and lock
+      # publication on every fire. What IS restored is the user hook it
+      # preserved and ran first (`retiredPreservedHooks`, the qualification
+      # `ensure` uses) — deleting the retired file without it would strand
+      # that hook where nothing runs it. Decided before anything is deleted:
+      # two different preserved hooks for the one canonical slot are refused,
+      # leaving the chain exactly as it was.
+      let preserved = retiredPreservedHooks(hooksDir, hookName,
+        dispatcherRuns = true,
+        wrapperRuns = isRetiredRepoWorkspacesWrapper(local, hookName))
+      refuseCompetingRetiredPreserved(hooksDir, hookName, "uninstall",
+        "uninstall",
+        standard, preserved, @[])
+      result = removeFileIfExists(standard) or result
       result = removeFileIfExists(local) or result
-    elif fileExists(extendedPath(local)):
-      moveFileReplacing(local, standard)
-      ensureExecutable(standard)
-      result = true
+      if preserved.len > 0:
+        moveRetiredPreservedInto(preserved, standard)
+        result = true
+    else:
+      result = removeFileIfExists(standard) or result
+      if fileExists(extendedPath(local)):
+        moveFileReplacing(local, standard)
+        ensureExecutable(standard)
+        result = true
   elif fileExists(extendedPath(standard)) and
       fileExists(extendedPath(managed)):
     raise newException(ValueError,
