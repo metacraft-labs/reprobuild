@@ -42725,7 +42725,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_dev_env_prompt_watch_key.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

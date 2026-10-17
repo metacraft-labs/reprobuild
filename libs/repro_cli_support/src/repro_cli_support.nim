@@ -15996,22 +15996,34 @@ proc runDevEnvExportCommand(args: openArray[string];
       keyable = false
   let settledKey = computeDevEnvEdgeCacheKey(fastPathConfig, watchManifestPath)
   # The race guard. The key above was built from metadata stat'ed AFTER the
-  # edge ran. A watched path changed at or after
+  # edge ran. A watched file edited, a watched directory's membership
+  # changed, or a listed path removed at or after
   # ``edge.introspectionStartedAt`` (taken just before the introspection
-  # edge's build) may have changed after the edge read it, in which case
-  # that key describes the new content while this script carries an
+  # edge's build) may have changed after the edge observed it -- the edge's
+  # own writes and removals aside (``unsettledPromptWatchPaths``) -- in which
+  # case that key describes the new state while this script carries an
   # environment built from the old one, and every later prompt would agree
   # with it. Emit a marker no prompt can match instead (a computed key is
   # exactly 32 hex digits; this is not), so the next prompt falls through
   # and activates again against settled files. The same applies when the
   # watch set could not be recorded completely.
-  let fingerprint =
-    if keyable and
-        unsettledPromptWatchPaths(watchManifestPath,
-          edge.introspectionStartedAt).len == 0:
-      settledKey
+  let unsettled =
+    if keyable:
+      unsettledPromptWatchPaths(watchManifestPath,
+        edge.introspectionStartedAt, edge.promptWatchOwnChanges)
     else:
-      "unsettled-" & settledKey
+      @["<the watch set could not be recorded completely>"]
+  let fingerprint =
+    if unsettled.len == 0: settledKey
+    else: "unsettled-" & settledKey
+  # Say WHY, beside the manifest: an unmatchable marker costs the next prompt
+  # a full activation, and without this nothing on disk or on screen named
+  # the path that caused it. Best effort -- the marker is already decided.
+  if unsettled.len > 0:
+    try:
+      writeFile(watchManifestPath & ".unsettled", unsettled.join("\n") & "\n")
+    except CatchableError:
+      discard
   # M75 — emit the manifest path as a marker BEFORE the
   # ``__REPRO_APPLIED`` fingerprint so the hook's deactivation arm
   # can locate the manifest via ``$__REPRO_ACTIVE_MANIFEST`` on the

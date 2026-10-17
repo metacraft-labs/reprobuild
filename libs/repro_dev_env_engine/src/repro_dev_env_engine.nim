@@ -98,6 +98,12 @@ type
       ## at process start instead -- before the provider compile -- made a
       ## project whose files were written just before `repro` was launched
       ## look unsettled on its first activation, every time.
+    promptWatchOwnChanges*: seq[string]
+      ## Absolute paths the introspection edge itself wrote or removed, when
+      ## it ran. The race guard treats an entry these explain -- one the edge
+      ## created or deleted, or a directory it wrote into -- as the edge's own
+      ## doing rather than a change it might have missed. Empty for a cache
+      ## hit: nothing ran, so nothing is explained.
 
 proc raiseDevEnvEdge(message: string) {.noreturn.} =
   raise newException(DevEnvEdgeError, message)
@@ -947,6 +953,15 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     result.introspectionAction, active.projectRoot, active.outDir,
     trackedFilesystemRootPaths(devEnvConfig.filesystemRoots),
     result.promptWatchComplete)
+  if result.introspectionAction.launched:
+    # The race guard's own-changes list (see the field). Only from an edge
+    # that RAN: a hit's evidence is the record replayed, and wrote nothing.
+    let evidence = result.introspectionAction.evidence
+    proc absolute(path: string): string =
+      if path.isAbsolute: path else: active.workDir / path
+    for channel in [evidence.monitorWrites, evidence.monitorRemovals]:
+      for path in channel:
+        result.promptWatchOwnChanges.add(absolute(path))
   result.shellRenderAction = result.devEnvResult.actionById(
     "__repro_dev_env_shell_render")
   result.stats.providerIntrospectionLaunched =
