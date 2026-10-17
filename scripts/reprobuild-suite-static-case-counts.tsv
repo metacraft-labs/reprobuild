@@ -1364,6 +1364,7 @@ tests/integration/t_gate_runs_after_the_chained_hook.nim	nim	1
 tests/integration/t_gateway_accepts_one_ref_push_certified_before_push.nim	nim	3
 tests/integration/t_gateway_finds_certificates_by_the_pushed_tree.nim	nim	1
 tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
+tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim	nim	7
 tests/integration/t_health_fix_remediates_safe_issues_only.nim	nim	2
 tests/integration/t_health_names_the_binary_skew_and_does_not_propose_an_older_ensure.nim	nim	1
 tests/integration/t_health_push_gateway_check_reports_observed_state.nim	nim	5
@@ -1960,6 +1961,7 @@ tests/unit/t_install_mirror_tool_metadata.nim	nim	8
 tests/unit/t_library_stage_alias.nim	nim	3
 tests/unit/t_local_file_cannot_declare_policy.nim	nim	1
 tests/unit/t_local_name_without_shared_layer_is_an_error.nim	nim	1
+tests/unit/t_lock_writer_trace_reader_classifies_refusal_runs.nim	nim	14
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22
 tests/unit/t_m9q_from_source_provisioning.nim	nim	9
 tests/unit/t_m9r10a_cycle_break.nim	nim	7

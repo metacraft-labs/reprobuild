@@ -12222,6 +12222,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim",
+    binary: "build/test-bin/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_health_fix_remediates_safe_issues_only.nim",
     binary: "build/test-bin/t_health_fix_remediates_safe_issues_only",
     defines: @[],
@@ -17561,6 +17570,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_local_name_without_shared_layer_is_an_error.nim",
     binary: "build/test-bin/t_local_name_without_shared_layer_is_an_error",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_lock_writer_trace_reader_classifies_refusal_runs.nim",
+    binary: "build/test-bin/t_lock_writer_trace_reader_classifies_refusal_runs",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

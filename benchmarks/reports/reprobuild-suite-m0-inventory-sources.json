@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2092,
+    "nimTestBinaries": 2094,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 648,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2113
+    "testEntries": 2115
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1278,10 +1278,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1131,
+      "integration": 1132,
       "platform/destructive": 129,
       "pure unit": 648,
-      "unclassified": 186
+      "unclassified": 187
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1483,9 +1483,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2092,
+    "nimTestBinaryCount": 2094,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2113
+    "testEntryCount": 2115
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31715,6 +31715,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_health_fix_remediates_safe_issues_only",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -42255,6 +42273,24 @@
       "source": "tests/unit/t_local_name_without_shared_layer_is_an_error.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_writer_trace_reader_classifies_refusal_runs",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_lock_writer_trace_reader_classifies_refusal_runs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

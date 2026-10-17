@@ -190,6 +190,8 @@ import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/attest as cli_attest
 import repro_cli_support/mode1_loader
+import repro_cli_support/post_commit_trace
+export post_commit_trace
 from repro_cli_support/partition as repro_partition import
   ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
   PartitionPlanReadError,
@@ -50380,61 +50382,14 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
 #     stderr so the operator sees it at the terminal. Post-commit still exits
 #     0 unconditionally: loud, never blocking. A hook that fails commits would
 #     be strictly worse than the starvation it reports.
+#
+# The outcome vocabulary itself (``PostCommitOutcome`` and
+# ``postCommitOutcomeTag``) lives in ``repro_cli_support/post_commit_trace``,
+# beside the reader that classifies the trace for `repro health`'s
+# ``lock-writer`` row: the writer and that reader must agree on every tag, so
+# they share one definition rather than two copies of the strings.
 
 type
-  PostCommitOutcome* = enum
-    pcoPublished         ## Per-repo lock TOML written (RA-1: no index) AND
-                         ## already present in the store's last-known
-                         ## upstream. The only success tag.
-    pcoWrittenPending    ## Record written to a PUBLISHABLE store but not yet
-                         ## in its upstream. The designed post-commit steady
-                         ## state — pre-push publishes it. Loud only when the
-                         ## store carries STRANDED records (below).
-    pcoWrittenLocalOnly  ## Record written, but the store is not publishable
-                         ## (not its own checkout / no upstream). This record
-                         ## will never leave this machine.
-    pcoWrittenUnknown    ## Record written; the publication probe itself
-                         ## failed. Never reported as success.
-    pcoNoManifestRecord  ## The lock writer succeeded but wrote no manifest
-                         ## record: this workspace routes per-repo records to
-                         ## their own backends, or is public-only and carries
-                         ## its lock in the in-repo ``repro.lock``. Nothing to
-                         ## publish here, and nothing claimed.
-    pcoNoLockDirty       ## At least one in-scope repo is dirty; strict M11
-                         ## refused with exit 2 and NO lock exists.
-    pcoSkippedNoWorkspace ## No ``.repo/workspace.toml`` or no resolvable
-                          ## project; common in a freshly-cloned repo
-                          ## that has not been initialised. A genuine
-                          ## "this hook does not apply here" no-op, not a
-                          ## starvation: log-only.
-    pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
-                         ## failure, missing checkout, ...) and NO lock
-                         ## exists.
-    pcoSkippedMembershipRepo ## The commit landed in the MEMBERSHIP repo (the
-                          ## checkout carrying ``projects/``/``repos/``), for
-                          ## which Workspace-And-Develop-Mode.md §"Gate scope
-                          ## when the pushed repo is the membership repo"
-                          ## decides that no trigger-keyed record is due at
-                          ## all: it is not a project repo, so it has no
-                          ## declared name to encode as the ``<repo>``
-                          ## component and belongs to no tier's partition.
-                          ## Writing nothing is the SPECIFIED outcome here, so
-                          ## it is a skip and not a failure — the distinction
-                          ## this suite's invariant 4 reserves
-                          ## ``no-lock-failed`` for. A stray undeclared
-                          ## checkout keeps that tag: it has no resolvable
-                          ## anchor, which does block a record somebody would
-                          ## have looked for.
-    pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
-                           ## mid-bisect in the repo that fired the hook. The
-                           ## commit this hook saw is one of that operation's
-                           ## intermediate commits, and writing a lock into a
-                           ## working tree its owner has not finished with is
-                           ## how a hook breaks somebody else's rebase.
-    pcoInertGitStateUnknown ## The "is an operation in flight" probe could not
-                            ## answer. The hook did nothing and SAID so — an
-                            ## unanswerable question is not the same as "no".
-
   PostCommitPublication* = enum
     ## Publication state of the record this run wrote, probed WITHOUT any
     ## network access (post-commit must not require the network, so the
@@ -50472,20 +50427,6 @@ type
       ## commit that is ALREADY published in the trigger repo. Each one is
       ## proof that a push went out without its lock: publication is broken,
       ## not merely pending. Any non-zero value is loud.
-
-proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
-  case outcome
-  of pcoPublished: "published"
-  of pcoWrittenPending: "written-pending-publish"
-  of pcoWrittenLocalOnly: "written-local-only"
-  of pcoWrittenUnknown: "written-publication-unknown"
-  of pcoNoManifestRecord: "no-manifest-record"
-  of pcoNoLockDirty: "no-lock-dirty-siblings"
-  of pcoSkippedNoWorkspace: "skipped-no-workspace"
-  of pcoNoLockFailed: "no-lock-failed"
-  of pcoSkippedMembershipRepo: "skipped-membership-repo"
-  of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
-  of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
 proc postCommitPublicationTag(state: PostCommitPublication): string =
   case state
@@ -64596,6 +64537,13 @@ type
     fullDetail*: string
     remedy*: string
     fixKind*: HealthFixKind
+    data*: JsonNode
+      ## Structured facts a row carries beside its prose, emitted as ``data``
+      ## under ``--json`` when set; nil for a row that has none. The
+      ## ``lock-writer`` row is the first user: CLI/health.md requires its
+      ## ``--json`` to carry the run length, the timestamps and the full
+      ## reason list, which an agent should not have to scrape from a
+      ## sentence.
 
   HealthArgs = object
     workspaceRoot: string
@@ -65028,6 +64976,35 @@ proc formatFindingList(items: openArray[string]; verbose: bool;
     let shown = items[0 ..< maxShown]
     let elided = items.len - maxShown
     shown.join(", ") & " (+" & $elided & " more)"
+
+proc lockWriterOutcomeCheck(workspaceRoot, self: string): HealthCheck =
+  ## The ``lock-writer`` row of ``repro health`` (CLI/health.md, **Lock
+  ## writer**): reads the tail of ``post-commit-lock.log`` and reports the
+  ## run of refusals since the newest written record.
+  ##
+  ## Every decision is ``evaluateLockWriterTrace``'s, in
+  ## ``repro_cli_support/post_commit_trace``, which is pure and unit-tested;
+  ## this proc only reads the file and maps the verdict onto a row.
+  ##
+  ## Never ``--fix``-able: the row only reads, and each refusal's remedy is a
+  ## change the operator makes (commit or stash a sibling, restore a
+  ## checkout), not one a doctor may make for them.
+  let path = postCommitLogPath(workspaceRoot)
+  let tail = readPostCommitTraceTail(path)
+  let row = evaluateLockWriterTrace(tail.text, getTime(), path,
+    tracePresent = tail.present, tailOnly = tail.tailOnly,
+    reproCommand = self, readError = tail.error)
+  HealthCheck(
+    name: "lock-writer",
+    status:
+      case row.verdict
+      of lwvOk: hsOk
+      of lwvWarn: hsWarn
+      of lwvFail: hsFail,
+    detail: row.detail,
+    remedy: row.remedy,
+    fixKind: hfNone,
+    data: row.data)
 
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
@@ -65667,6 +65644,15 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     disagreement between shells, which is PG-14's.)
   checks.add(hookInterpreterSkewCheck(parsed.workspaceRoot))
 
+  # 8d. The post-commit lock writer's OUTCOME (CLI/health.md, **Lock writer**).
+  #
+  #     8b and 8c answer "is the hook installed" and "can the resolved `repro`
+  #     service it"; both stayed ``ok`` through eighteen days in which the
+  #     writer refused on every commit, because neither looks at what a run
+  #     DID. The writer never fails a commit and says so in one stderr line,
+  #     so the only durable record is its trace, and this row is what reads it.
+  checks.add(lockWriterOutcomeCheck(parsed.workspaceRoot, self))
+
   # 9. Push gateway — PG-16. OBSERVED state, per §7.6.6, replacing a constant.
   #
   #    What this used to be, verbatim, and why it had to go (spec §1.6c): an
@@ -66210,6 +66196,8 @@ proc toJsonNode*(check: HealthCheck): JsonNode =
     result["digest"] = %check.detail
   result["remedy"] = %check.remedy
   result["fixable"] = %(check.fixKind != hfNone)
+  if not check.data.isNil:
+    result["data"] = check.data
 
 proc healthChecksToJson*(checks: seq[HealthCheck]): JsonNode =
   result = newJObject()
