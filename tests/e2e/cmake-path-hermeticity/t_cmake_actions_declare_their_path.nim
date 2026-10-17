@@ -152,7 +152,7 @@ proc configure(cmakeBin, sourceDir, buildDir, reproBin: string;
   runShell(shellCommand(args))
 
 proc build(reproBin, buildDir, workRoot, pathValue: string;
-           forceRebuild: bool; target = "all"): CmdResult =
+           forceRebuild: bool; target = "all"; logMode = ""): CmdResult =
   ## THE SHELL IS THE VARIABLE. `PATH` is overlaid per invocation, which
   ## is the whole experiment: two otherwise identical builds, two
   ## different login environments.
@@ -163,6 +163,8 @@ proc build(reproBin, buildDir, workRoot, pathValue: string;
   ]
   if forceRebuild:
     args.add("--force-rebuild")
+  if logMode.len > 0:
+    args.add("--log=" & logMode)
   runShell(shellCommand(args, @[(name: "PATH", value: pathValue)]))
 
 proc censusLine(output: string): string =
@@ -545,8 +547,17 @@ suite "CMake-generated actions declare their PATH":
       check configure(forkedCMake, sourceDir, buildDir, reproBin).code == 0
       # The direct provider must export the same default alias as the
       # generated Nim provider, not just select it for an unnamed build.
+      #
+      # `--log=summary` because the census is a STATUS LINE, and `--log`
+      # is what governs status lines. Without it the line appeared only
+      # when the build happened to be daemon-hosted -- the daemon streams
+      # every diagnostic whatever `--log` says -- while a direct build
+      # (`REPRO_DAEMON=off`, or a daemon that could not be started)
+      # honours the quiet default and prints nothing, and this case
+      # failed with an empty census for a reason unrelated to PATH.
       let built = build(reproBin, buildDir, testRoot / "work-census", pathA,
-        forceRebuild = true, target = "default")
+        forceRebuild = true, target = "default",
+        logMode = "summary")
       checkpoint(built.output)
       check built.code == 0
       let census = censusLine(built.output)
