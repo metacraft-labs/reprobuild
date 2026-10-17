@@ -608,6 +608,12 @@ const
   ## list is not answerable until it is green; removing an entry on a red case
   ## would be exactly the weak evidence the paragraphs above refuse.
   ExclusiveStems = [
+    # Asserts no single shared-index insert takes over 50 ms of WALL time
+    # while eight producers storm one chain. Under the parallel phase's load a
+    # descheduled producer exceeds that without blocking (full suite run 35:
+    # 0.34 s), so the latency claim is measured on a quiet host. The bound is
+    # unchanged.
+    "t_action_index_backpressure_and_tombstones",
     "t_a2_5_p3_streaming_sink",
     "t_a2_5_p8_throughput_bench",
     "t_b1_apps_action_cache_hit",
