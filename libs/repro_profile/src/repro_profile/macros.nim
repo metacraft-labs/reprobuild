@@ -52,6 +52,10 @@
 ## - A `resources:` block directly inside `activity <name>:` (GM9) declares
 ##   resources that belong to that activity: the planner plans them only on
 ##   hosts that select it (`parseActivityResources`).
+## - A `stow:` block directly inside `activity <name>:` (GM11) names the
+##   `stow/` packages that belong to that activity: the planner materializes
+##   them only on hosts that select it (`parseActivityStow`,
+##   `repro_profile/stow_scopes`).
 ## - `data:` lists plan-time data files (GM4). The macro records the
 ##   paths only; the planner reads and expands the files, so a data edit
 ##   never recompiles the profile.
@@ -76,6 +80,7 @@ import ./data_refs
 import ./catalog_refs
 import ./concerns
 import ./host_system
+import ./stow_scopes
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -91,6 +96,12 @@ proc isActivityResourcesBlock(stmt: NimNode): bool =
   ## `resources: <body>` -- the GM9 activity-scoped resources block.
   stmt.kind == nnkCall and stmt.len == 2 and stmt[0].kind == nnkIdent and
     $stmt[0] == "resources" and stmt[1].kind == nnkStmtList
+
+proc isActivityStowBlock(stmt: NimNode): bool =
+  ## `stow: <body>` -- the GM11 block naming the `stow/` packages that
+  ## belong to the activity (`repro_profile/stow_scopes`).
+  stmt.kind == nnkCall and stmt.len == 2 and stmt[0].kind == nnkIdent and
+    $stmt[0] == StowBlockKeyword and stmt[1].kind == nnkStmtList
 
 proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
   ## A single statement inside an activity body. The valid shapes are:
@@ -153,6 +164,11 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
       error("an activity's `resources:` block must sit directly in the " &
         "activity body, not under a `when`; put the `when <predicate>:` " &
         "inside the `resources:` block", stmt)
+    # GM11: the same for a `stow:` block.
+    if isActivityStowBlock(stmt):
+      error("an activity's `stow:` block must sit directly in the " &
+        "activity body, not under a `when`; put the `when <predicate>:` " &
+        "inside the `stow:` block", stmt)
     # M69: recognize the `package(<id>[, "<version>"])` call form and
     # emit a typed `aekPackageRef` with the version literal pinned.
     # The bare-arg call `package(<id>)` records `pkgVersion = ""`. The
@@ -1107,6 +1123,87 @@ proc parseActivityResources(blk: NimNode; actName: string;
         raise newException(ValueError, `msg`)
       applyActivity(`profileVar`.resources, `start`, `nameLit`)
 
+proc parseActivityStowEntries(body: NimNode; actName: string;
+                              profileVar, guardSym, guardAst: NimNode;
+                              seen: var seq[(string, string)]): NimNode =
+  ## The entries of a `stow:` block (or of a `when` inside one): string
+  ## literals naming `stow/` packages, and single-branch `when <pred>:`
+  ## blocks whose predicate conjoins into the guard of the entries under
+  ## it. `guardSym` is the in-scope `PredicateExpr` of the enclosing guard
+  ## (the empty expression at the top of the block); `guardAst` is that
+  ## guard's source, used only to recognise a repeated claim at compile
+  ## time.
+  result = newNimNode(nnkStmtList)
+  let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
+  let nameLit = newStrLitNode(actName)
+  for stmt in stmts:
+    case stmt.kind
+    of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+      let pkg = stmt.strVal
+      let problem = stowPackageNameProblem(pkg)
+      if problem.len > 0:
+        error("activity `" & actName & "`: stow: " & problem, stmt)
+      let key = (pkg, repr(guardAst))
+      if key in seen:
+        error("activity `" & actName & "` claims stow package `" & pkg &
+          "` twice", stmt)
+      seen.add key
+      let pkgLit = newStrLitNode(pkg)
+      result.add quote do:
+        `profileVar`.stowScopes.add StowScope(package: `pkgLit`,
+          activity: `nameLit`, guard: `guardSym`)
+    of nnkWhenStmt:
+      if stmt.len != 1 or stmt[0].kind != nnkElifBranch:
+        error("activity `" & actName & "`: a `when` in a `stow:` block " &
+          "must have exactly one branch (no `elif` / `else`)", stmt)
+      let predExpr = stmt[0][0]
+      let innerGuard = genSym(nskLet, "stowGuard")
+      let inner = newNimNode(nnkStmtList)
+      # A runtime predicate only: `when defined(...)` (a bool) fails to type
+      # as a `PredicateExpr` here, since a claim must describe every host
+      # whatever platform compiled the profile.
+      inner.add quote do:
+        let `innerGuard`: PredicateExpr = conjoinGuard(`guardSym`,
+          `predExpr`)
+      let innerAst = newStmtList(guardAst.copyNimTree, predExpr.copyNimTree)
+      inner.add parseActivityStowEntries(stmt[0][1], actName, profileVar,
+        innerGuard, innerAst, seen)
+      let blk = newNimNode(nnkBlockStmt)
+      blk.add newEmptyNode()
+      blk.add inner
+      result.add blk
+    of nnkCommentStmt, nnkDiscardStmt:
+      discard
+    else:
+      error("activity `" & actName & "`: a `stow:` block lists `stow/` " &
+        "package names as string literals (e.g. \"kitty\" for " &
+        "stow/kitty/), optionally under `when <predicate>:`; got " &
+        $stmt.kind, stmt)
+
+proc parseActivityStow(blk: NimNode; actName: string;
+                       profileVar: NimNode;
+                       seen: var seq[(string, string)]): NimNode =
+  ## GM11: a `stow:` block inside `activity <name>:` -- the `stow/`
+  ## packages that belong to the activity (`repro_profile/stow_scopes`).
+  ##
+  ##   activity desktop_core:
+  ##     stow:
+  ##       "kitty"
+  ##       when macos():
+  ##         "ghostty"
+  ##
+  ## Each entry becomes a `StowScope` claim; the planner materializes a
+  ## claimed package only on a host where one of its claims holds.
+  let top = genSym(nskLet, "stowGuard")
+  let inner = newNimNode(nnkStmtList)
+  inner.add quote do:
+    let `top` = PredicateExpr(expr: "")
+  inner.add parseActivityStowEntries(blk[1], actName, profileVar, top,
+    newStmtList(), seen)
+  result = newNimNode(nnkBlockStmt)
+  result.add newEmptyNode()
+  result.add inner
+
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an
   ## ActivityIntent into __profileIntent.activities.
@@ -1125,10 +1222,14 @@ proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   # that belong to this activity; everything else is the package body.
   var elements = newNimNode(nnkStmtList)
   var resourceBlocks: seq[NimNode]
+  var stowBlocks: seq[NimNode]
   let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
   for stmt in stmts:
     if isActivityResourcesBlock(stmt):
       resourceBlocks.add stmt
+    elif isActivityStowBlock(stmt):
+      # GM11: the `stow/` packages that belong to this activity.
+      stowBlocks.add stmt
     else:
       elements.add stmt
   let inner = newNimNode(nnkStmtList)
@@ -1140,6 +1241,9 @@ proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
       body: `bodySym`)
   for blk in resourceBlocks:
     inner.add parseActivityResources(blk, actName, profileVar)
+  var stowSeen: seq[(string, string)]
+  for blk in stowBlocks:
+    inner.add parseActivityStow(blk, actName, profileVar, stowSeen)
   result = newNimNode(nnkBlockStmt)
   result.add newEmptyNode()
   result.add inner

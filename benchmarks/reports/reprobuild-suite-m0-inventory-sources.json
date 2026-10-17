@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2156,
+    "nimTestBinaries": 2157,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 658,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2180
+    "testEntries": 2181
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1293,7 +1293,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1173,
+      "integration": 1174,
       "platform/destructive": 132,
       "pure unit": 658,
       "unclassified": 198
@@ -1498,9 +1498,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2156,
+    "nimTestBinaryCount": 2157,
     "pythonTestFileCount": 24,
-    "testEntryCount": 2180
+    "testEntryCount": 2181
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16109,7 +16109,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 95,
+      "staticCaseCount": 96,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16191,7 +16191,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 34,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24550,6 +24550,24 @@
       "source": "tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_stow_package_follows_activity",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm11/t_e2e_stow_package_follows_activity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

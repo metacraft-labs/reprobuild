@@ -8523,6 +8523,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/gm11/t_e2e_stow_package_follows_activity.nim",
+    binary: "build/test-bin/t_e2e_stow_package_follows_activity",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim",
     binary: "build/test-bin/t_e2e_home_apply_realizes_nix_selection",
     defines: @[],

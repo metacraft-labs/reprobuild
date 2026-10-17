@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 9'u16            ## Current envelope schema version.
+  RbpiSchemaVersion* = 10'u16           ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -94,6 +94,12 @@ const
     ##     Bumped because a build that did not know the key would let
     ##     ``repro infra apply`` take over a host whose system another
     ##     repository manages.
+    ##  10 (GM11, activity-scoped stow packages): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"stowScopes"`` array (maps with ``"package"``,
+    ##     ``"activity"`` and an optional ``"guard"``) -- the `stow/` packages
+    ##     an activity's ``stow:`` block claims. Bumped because a build that
+    ##     did not know the key would materialize a claimed package on every
+    ##     host, including the ones that do not select its activity.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

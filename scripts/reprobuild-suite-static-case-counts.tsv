@@ -483,11 +483,11 @@ libs/repro_profile_compile/tests/t_smoke_apply_integration.nim	nim	4
 libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_module_imports.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	nim	11
-libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	95
+libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	96
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	30
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
-libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	34
+libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	35
 libs/repro_project_dsl/tests/dsl_port/t_dsl_activity_surface_is_typed.nim	nim	16
 libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_build_input_wiring.nim	nim	8
@@ -953,6 +953,7 @@ tests/e2e/generated-config/t_e2e_generated_config_file_managed_block.nim	nim	4
 tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim	nim	3
 tests/e2e/gm10/t_e2e_hosts_system_attribute_cli.nim	nim	1
 tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim	nim	1
+tests/e2e/gm11/t_e2e_stow_package_follows_activity.nim	nim	2
 tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim	nim	1
 tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	nim	6
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3

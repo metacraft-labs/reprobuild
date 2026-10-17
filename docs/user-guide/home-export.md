@@ -160,6 +160,44 @@ activity body (put the `when` inside the block), and an action edge
 In the export, each such resource carries `"activity": "<name>"`; a
 profile-level one carries `"activity": null`.
 
+## Stow packages that belong to an activity
+
+Every immediate subdirectory of the profile's `stow/` tree is a package whose
+files are linked into the home directory on every host. A `stow:` block inside
+an activity claims packages for that activity: a claimed package is linked
+only on a host where one of its claims holds -- the host selects the activity
+and the claim's guard, if any, holds there.
+
+```nim
+activity desktop_core:
+  stow:
+    "kitty"                    # stow/kitty/: a GUI terminal's settings
+    "rdp"
+    when macos():
+      "hammerspoon"
+
+activity default:
+  stow:
+    when windows():
+      "rdp"                    # every Windows host keeps stow/rdp/ too
+
+hosts:
+  "workstation": [desktop_core]
+  "server": [default]          # gets neither kitty's nor rdp's files
+```
+
+A package no activity claims is linked on every host, as before. Claims are a
+union: several activities (or guards) may claim one package. Refused: a claim
+of a package the `stow/` tree does not have (when the host is planned, naming
+the packages that exist), a `stow:` block under a `when` of the activity body,
+an entry that is not a string literal or that names a path rather than one
+package directory, and one package named twice by one activity (when the
+profile compiles). `repro home facts`, `repro home apply` and its `--plan`
+follow the selection. The export's `intent` carries the claims as
+`stowScopes` (`[{"package", "activity", "guard"}]`, present only when some
+activity has a `stow:` block); the Nix helper library does not read them,
+since the Nix side keeps its own links (schema version unchanged).
+
 ## The document (schema version 4)
 
 ```jsonc
