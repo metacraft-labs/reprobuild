@@ -1653,6 +1653,7 @@ tests/integration/t_rename_relocates_instead_of_cloning.nim	nim	5
 tests/integration/t_rename_relocation_failure_is_clean.nim	nim	1
 tests/integration/t_rename_renamed_and_rewritten_repo_relocates.nim	nim	1
 tests/integration/t_report_classifies_at_ahead_and_behind.nim	nim	1
+tests/integration/t_repos_add_commit_passes_end_of_file_fixer.nim	nim	1
 tests/integration/t_repos_add_records_project_membership_by_key.nim	nim	1
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	6
 tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	nim	2
@@ -2045,7 +2046,7 @@ tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	8
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
-tests/unit/t_manifest_editor_edge_cases.nim	nim	21
+tests/unit/t_manifest_editor_edge_cases.nim	nim	28
 tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim	nim	5
 tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5

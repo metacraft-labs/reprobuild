@@ -14823,6 +14823,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_repos_add_commit_passes_end_of_file_fixer.nim",
+    binary: "build/test-bin/t_repos_add_commit_passes_end_of_file_fixer",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_repos_add_records_project_membership_by_key.nim",
     binary: "build/test-bin/t_repos_add_records_project_membership_by_key",
     defines: @[],

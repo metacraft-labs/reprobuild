@@ -17,8 +17,9 @@
 ##   ``ensureArrayTableEntry`` adds one ``[[table]]`` entry. Every edit
 ##   rewrites only the lines of the span it changes, so comments, key order,
 ##   blank lines and line endings (LF or CRLF) outside that span survive byte
-##   for byte. ``saveManifestDoc`` writes the result back only when something
-##   changed.
+##   for byte — except the file END of an edited document, which is
+##   normalised to exactly one line terminator (see ``manifestDocText``).
+##   ``saveManifestDoc`` writes the result back only when something changed.
 ##
 ## Why a document model and not a serializer: a manifest is authored by
 ## people. A writer that decoded the file and re-emitted it would delete every
@@ -592,6 +593,11 @@ proc writeWorkspaceManifestFile*(path, text: string) =
   ## Write ``text`` to ``path`` (creating the parent directory) through a
   ## sibling temporary file and a rename, so a reader never observes a
   ## half-written manifest.
+  ##
+  ## ``text`` is written verbatim. The typed ``*Text`` renderers and
+  ## ``manifestDocText`` of an edited document already end in exactly one
+  ## line terminator, and this proc is also used to snapshot a legacy state
+  ## file's bytes exactly (``workspace_branch``), so it must not reshape them.
   let dir = parentDir(path)
   if dir.len > 0:
     createDir(dir)
@@ -628,12 +634,40 @@ proc loadManifestDoc*(path: string): ManifestDoc =
   manifestDocFromText(readFile(path), path)
 
 proc manifestDocText*(doc: ManifestDoc): string =
-  for i, line in doc.lines:
-    result.add(line)
-    result.add(doc.terms[i])
+  ## The document's text. An unchanged document is reproduced byte for byte.
+  ##
+  ## A CHANGED document additionally ends in exactly one line terminator: an
+  ## unterminated last line gets the document's ``eol``, and trailing EMPTY
+  ## lines are dropped (a line holding only spaces is content and stays). That
+  ## is ``end-of-file-fixer``'s rule, and the manifest repo's managed
+  ## pre-commit set runs it: a staged file it rewrites makes the commit a
+  ## ``repro ws`` verb then attempts fail with the edit left staged
+  ## (CLI/workspace.md, "Every file a verb writes ends in exactly one line
+  ## terminator"). Keeping each line's own terminator would otherwise carry a
+  ## defective file end through every edit — the editor replaces an
+  ## unterminated last line with one that keeps "its" empty terminator, and
+  ## appends after content but before blank lines that close the file.
+  ##
+  ## The normalisation is applied here, on output, rather than to ``lines``,
+  ## so the line numbers later edits and diagnostics use are not disturbed,
+  ## and so ``blankTable`` (which blanks lines without marking the document
+  ## changed) keeps every line. An empty document stays empty; one left with
+  ## only empty lines becomes empty, as ``end-of-file-fixer`` would make it.
+  var last = doc.lines.len - 1
+  if doc.changed:
+    while last >= 0 and doc.lines[last].len == 0:
+      dec last
+  for i in 0 .. last:
+    result.add(doc.lines[i])
+    if i == last and doc.changed and doc.terms[i].len == 0:
+      result.add(doc.eol)
+    else:
+      result.add(doc.terms[i])
 
 proc saveManifestDoc*(doc: ManifestDoc) =
-  ## Write the document back when an edit changed it.
+  ## Write the document back when an edit changed it. Only then is its end
+  ## normalised (``manifestDocText``): a file the verb did not edit is not
+  ## rewritten at all.
   if doc.changed:
     writeWorkspaceManifestFile(doc.path, doc.manifestDocText)
 
