@@ -40,6 +40,9 @@ import repro_core
 import repro_home_intent
 import repro_home_apply
 import repro_profile_compile
+import repro_home_resources/concerns
+from repro_project_dsl/reprobuild_packages_catalog import
+  reachableReprobuildPackagesRoots, ReprobuildPackagesRootEnv
 from repro_profile/types import ProfileIntent
 from repro_profile/emit import emitProfileIntentJson, parseProfileIntentJson
 
@@ -54,7 +57,7 @@ const
     ## version-1 reader would apply a guarded resource on every platform, so
     ## this is a new version, not a compatible addition.
   HomeExportComparedFields* = ["format", "schemaVersion", "selection",
-    "intent", "platforms"]
+    "intent", "concerns", "platforms"]
     ## The top-level fields `--check` compares. `provenance` is deliberately
     ## absent: it records how the document was produced (which `repro`, from
     ## which files, on which platform), not what it tells a consumer, and
@@ -63,13 +66,6 @@ const
   MaxReportedDifferences* = 40
 
 type
-  HostSource* = enum
-    ## How the host identity in `selection.host` was chosen, in the
-    ## documented precedence (`$REPRO_HOST`, `--host`, the OS hostname).
-    hsEnv = "env"
-    hsFlag = "flag"
-    hsHostname = "hostname"
-
   HostSelection* = object
     host*: string
     hostDeclared*: bool
@@ -234,11 +230,96 @@ proc stringArray(items: openArray[string]): JsonNode =
   for item in items:
     result.add %item
 
+proc concernsDocument*(): JsonNode =
+  ## The export's `concerns` object: the concern names in canonical order,
+  ## every home-scope resource kind with its concern, and the concern of a
+  ## `config:` override -- `repro_home_resources/concerns`, published as
+  ## data. Package references are classified per target system by
+  ## `packageClassificationDocument` (`concerns.packages`): their concern
+  ## depends on the realization the planner selects there.
+  ##
+  ## `profileBin` is, per target system, where the launchers of the active
+  ## generation are reached (`defaultProfileBinLocation`): a base directory
+  ## (`home`, `xdgStateHome`, `localAppData`) and a `/`-separated path below
+  ## it. A host that gives Reprobuild the `packages` or `applications`
+  ## concern but leaves `environment` to Nix needs that directory on `PATH`,
+  ## and only the Nix side writes the shell environment there
+  ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply, "The
+  ## profile's commands").
+  var kinds = newJObject()
+  for (kind, concern) in resourceKindConcerns():
+    kinds[kind] = %($concern)
+  var profileBin = newJObject()
+  for t in ProfileTargetPlatforms:
+    let location = defaultProfileBinLocation(t.platform)
+    profileBin[t.system] = %*{"base": $location.base,
+      "path": location.components.join("/")}
+  %*{"names": stringArray(homeConcernNames()),
+    "resourceKinds": kinds,
+    "configOverrides": $ConfigOverrideConcern,
+    "profileBin": profileBin}
+
+proc sortedNames(s: HashSet[string]): JsonNode =
+  var items: seq[string]
+  for item in s:
+    items.add item
+  items.sort()
+  stringArray(items)
+
+proc packageClassificationDocument*(intent: ProfileIntent;
+                                    profilePath, stateDir: string): JsonNode =
+  ## The export's `concerns.packages`: for every `ProfileTargetPlatforms`
+  ## system, the package references (`packageClassificationKey`) whose
+  ## selection there places an application and those that resolve to
+  ## nothing there -- `classifyPackages`, the planner's selection without the
+  ## host inventory, over every reference of the profile
+  ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply, "The
+  ## per-package split comes from Reprobuild"). `intent` is the expanded
+  ## intent; the lock is the one beside the profile; catalog projections are
+  ## staged under `stateDir`.
+  ##
+  ## Raises `ValueError` when a reference is defined nowhere this process can
+  ## see and no `reprobuild-packages` catalog is reachable: the catalog might
+  ## define it as an application, and publishing `packages` for it would be
+  ## a guess the Nix side then acts on.
+  let profile = profileIntentToHomeProfile(intent, profilePath)
+  let references = profilePackageReferences(profile)
+  var names: seq[string]
+  for r in references:
+    if r.packageId notin names:
+      names.add r.packageId
+  let catalog = projectCatalogPackages(names, profilePath,
+    stateDir / "catalog-projection", profile.catalogImports)
+  let lock = readHomeProfileLock(homeProfileLockPath(profilePath.parentDir))
+  var unknown: seq[string]
+  result = newJObject()
+  for t in ProfileTargetPlatforms:
+    let c = classifyPackages(references, profile.adapterPreference,
+      t.platform, t.arch, lock, false, catalog)
+    result[t.system] = %*{"applications": sortedNames(c.applications),
+      "unresolved": sortedNames(c.unresolved)}
+    for key in c.unknownDefinitions:
+      if key notin unknown:
+        unknown.add key
+  if unknown.len > 0 and
+      reachableReprobuildPackagesRoots(profilePath).len == 0:
+    unknown.sort()
+    raise newException(ValueError, "cannot classify the packages of a " &
+      "profile whose hosts: entries declare `applies:`: " &
+      unknown.join(", ") & " " &
+      (if unknown.len == 1: "is" else: "are") & " defined nowhere this " &
+      "repro can see, and no reprobuild-packages catalog is reachable, so " &
+      "whether " & (if unknown.len == 1: "it is" else: "they are") &
+      " an application cannot be known. Point $" &
+      ReprobuildPackagesRootEnv & " at a reprobuild-packages checkout " &
+      "(Nix IFD: readIntent's / the module's `packagesCatalog`)")
+
 proc buildHomeExport*(intent: ProfileIntent;
                       artifact: ProfileCompileArtifact;
                       probe: ProfilePlatformProbeArtifact;
                       profilePath, host: string;
-                      hostSource: HostSource): JsonNode =
+                      hostSource: HostSource;
+                      stateDir: string): JsonNode =
   ## Assemble the export document (schema version `HomeExportSchemaVersion`)
   ## from a compiled intent. Field order is fixed so the rendered bytes are
   ## stable for an unchanged input.
@@ -282,6 +363,14 @@ proc buildHomeExport*(intent: ProfileIntent;
     "activities": stringArray(selection.activities),
     "unknownActivities": stringArray(selection.unknownActivities)}
   result["intent"] = parseJson(emitProfileIntentJson(expanded.intent))
+  # GM7: the concern vocabulary and classification, for a profile that
+  # declares which concerns Reprobuild applies per host, so the Nix side
+  # reads the classification instead of restating it
+  # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+  if expanded.intent.hostApplies.len > 0:
+    result["concerns"] = concernsDocument()
+    result["concerns"]["packages"] = packageClassificationDocument(
+      expanded.intent, profilePath, stateDir)
   result["platforms"] = platformsNode
   result["provenance"] = %*{
     "repro": {
@@ -465,10 +554,16 @@ proc diffHomeExports*(snapshot, fresh: JsonNode): seq[string] =
     if field in ["format", "schemaVersion"]:
       continue
     let snap = snapshot.getOrDefault(field)
+    let freshNode = fresh.getOrDefault(field)
+    # `concerns` is present only for a profile that declares `applies:`.
+    if snap.isNil and freshNode.isNil:
+      continue
     if snap.isNil:
       result.add field & ": only in a fresh export"
+    elif freshNode.isNil:
+      result.add field & ": only in the snapshot"
     else:
-      diffNodes(field, snap, fresh[field], result)
+      diffNodes(field, snap, freshNode, result)
 
 proc provenanceNotes*(snapshot, fresh: JsonNode): seq[string] =
   ## Informational lines naming provenance fields that differ. They never
@@ -612,3 +707,47 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
     "packages": packages,
     "resources": resources,
     "configOverrides": overrides}
+  # GM7: the concerns the host's entry declares Reprobuild applies, by the
+  # planner's rule; absent when it declares none (every concern).
+  let applied = appliedConcernsFor(profile, selectedHost)
+  if applied.declared:
+    result["applies"] = stringArray(concernNames(applied.concerns))
+    # Each package's concern, from the classification the export carries for
+    # this system (`packageClassificationDocument`); nothing is classified
+    # here, so the Nix library's `evaluate` reads exactly the same.
+    let classification = docAt(doc, ["concerns", "packages", system])
+    if classification.isNil or classification.kind != JObject:
+      raise newException(ValueError, "host " & selectedHost & " declares " &
+        "the concerns Reprobuild applies, but the document carries no " &
+        "package classification for " & system & " (concerns.packages." &
+        system & "); it was produced by a repro that does not publish " &
+        "one -- re-export")
+    var applications, unresolved: HashSet[string]
+    for item in classification{"applications"}.getElems():
+      applications.incl item.getStr
+    for item in classification{"unresolved"}.getElems():
+      unresolved.incl item.getStr
+    for p in result["packages"].getElems():
+      let key = packageClassificationKey(p["name"].getStr,
+        p["version"].getStr)
+      p["concern"] = %(if key in applications: $hcApplications
+                       else: $hcPackages)
+      p["resolved"] = %(key notin unresolved)
+    # The profile's commands: a host whose launchers Reprobuild writes
+    # (`packages` / `applications`) while Nix writes its shell environment
+    # gets the directory that reaches them, for Nix to put on `PATH`
+    # (§Concern-scoped apply, "The profile's commands"). Read from the
+    # document, as the Nix library's `evaluate` reads it.
+    if (hcPackages in applied.concerns or
+        hcApplications in applied.concerns) and
+        hcEnvironment notin applied.concerns:
+      let location = docAt(doc, ["concerns", "profileBin", system])
+      if location.isNil or location.kind != JObject or
+          location{"base"}.isNil or location{"path"}.isNil:
+        raise newException(ValueError, "host " & selectedHost & " leaves " &
+          "`environment` to Nix while Reprobuild applies its launchers, but " &
+          "the document does not say where they are for " & system &
+          " (concerns.profileBin." & system & "); it was produced by a " &
+          "repro that does not publish it -- re-export")
+      result["profileBin"] = %*{"base": location["base"].getStr,
+        "path": location["path"].getStr}

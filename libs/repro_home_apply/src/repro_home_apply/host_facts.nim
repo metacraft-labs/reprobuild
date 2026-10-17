@@ -28,6 +28,7 @@ import nimcrypto/sha2 as factsSha2
 
 import repro_home_intent
 import repro_home_resources
+import repro_profile/concerns
 
 import ./plan
 import ./pipeline
@@ -244,6 +245,15 @@ proc hostFactsFromState*(state: PlannedDesiredState; system: string):
   result["categories"] = cats
   result["unmapped"] = sortedArray(b.unmapped)
   result["uncategorized"] = sortedArray(b.uncategorized)
+  # GM7: informational, never compared -- which concerns Reprobuild applies
+  # on this host (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+  # apply). The categories above always describe EVERY concern, so a concern
+  # is measured before its declaration moves it.
+  var applied = newJArray()
+  for name in concernNames(state.applied.concerns):
+    applied.add %name
+  result["concerns"] = %*{"declared": state.applied.declared,
+    "applied": applied}
 
 proc collectHostFacts*(opts: ApplyOptions; system: string): JsonNode =
   ## Plan `opts` (`planDesiredState`) and report its host facts. The

@@ -221,6 +221,19 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
     probe(result, "beside the reprobuild checkout " & reprobuildCheckoutRoot(),
       besideReprobuild)
 
+proc reachableReprobuildPackagesRoots*(consumerSourceFile: string):
+    seq[string] =
+  ## The catalog checkouts that exist among the places
+  ## `reprobuildPackagesSearch` consults from ``consumerSourceFile``, in
+  ## search order. Empty when no catalog is reachable at all -- then a name
+  ## no linked definition provides is "unknown" only because the catalog
+  ## could not be read, not because nothing defines it.
+  const probeSelector = "reprobuild-catalog-reachability-probe"
+  for probe in reprobuildPackagesSearch(probeSelector,
+      consumerSourceFile).probes:
+    if probe.rootExists and probe.root notin result:
+      result.add probe.root
+
 proc reprobuildPackagesInterfaceModule*(selector, consumerSourceFile: string):
     string =
   ## The module that defines package ``selector`` in the catalog --

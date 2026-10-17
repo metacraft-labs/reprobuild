@@ -115,7 +115,13 @@ let
         };
         case = "readData ${name}: ${e.host} @ ${e.system}";
       in
-      if hasResourceRows dir then
+      if e.undeclaredHost or false then
+        # A host the case's hosts: registry does not declare is refused, as
+        # the planner refuses it (hosts.nix; spec Open question 6).
+        expectTrue "${case} refuses the undeclared host" (
+          contains "host `${e.host}` is not declared in the profile's hosts: registry" (r.error or "")
+        )
+      else if hasResourceRows dir then
         # Resource rows are refused, never ignored (data.nix header).
         expectTrue "${case} refuses the resource rows" (contains resourceRefusal (r.error or ""))
       else
@@ -167,9 +173,13 @@ let
 
   # --- readIntent / evaluateExport -----------------------------------------
   intentRoot = root + "/tests/fixtures/intent-exports";
+  # The order `repro home export` refuses in: an undeclared host first (the
+  # export itself fails), then a target the document does not describe.
   evaluateOrRefuse =
     doc: system: host:
-    if reprobuildLib.internal.refusalReason doc system != null then
+    if reprobuildLib.internal.hostRefusalReason doc host != null then
+      { undeclaredHost = true; }
+    else if reprobuildLib.internal.refusalReason doc system != null then
       { refused = true; }
     else
       reprobuildLib.evaluateExport doc system host;
@@ -197,7 +207,7 @@ let
         expect "intent ${name}: ${host} @ ${system}" want (evaluateOrRefuse doc system host)
         # readIntent refuses (throws) exactly where the evaluation is refused.
         ++ expect "readIntent ${name}: ${host} @ ${system} refuses iff Reprobuild refused" (
-          want ? refused
+          want ? refused || want ? undeclaredHost
         ) viaReadIntent
       ) (attrNames expected.${host})
     ) (attrNames expected)
@@ -551,8 +561,72 @@ let
       ).reason
     );
 
+  # The profile's commands (Gradual-Nix-To-Reprobuild-Migration.md
+  # §Concern-scoped apply): `profileBinPath` resolves the location the export
+  # publishes for a host that leaves `environment` to Nix while Reprobuild
+  # writes launchers; an export without that row is refused for such a host
+  # rather than leaving the commands off PATH unnoticed.
+  concernsDoc = fromJSON (readFile (intentRoot + "/concerns/export.json"));
+  serverOn = system: reprobuildLib.evaluateExport concernsDoc system "server";
+  profileBinTests =
+    expectTrue "profileBinPath: macOS, under the home directory" (
+      reprobuildLib.profileBinPath {
+        evaluation = serverOn "aarch64-darwin";
+        homeDirectory = "/Users/u";
+      } == "/Users/u/Library/Application Support/repro/home/current/bin"
+    )
+    ++ expectTrue "profileBinPath: Linux, under the XDG state directory (default and moved)" (
+      reprobuildLib.profileBinPath {
+        evaluation = serverOn "x86_64-linux";
+        homeDirectory = "/home/u";
+      } == "/home/u/.local/state/repro/home/current/bin"
+      && reprobuildLib.profileBinPath {
+        evaluation = serverOn "x86_64-linux";
+        homeDirectory = "/home/u";
+        xdgStateHome = "/var/state/u";
+      } == "/var/state/u/repro/home/current/bin"
+    )
+    ++ expectTrue "profileBinPath: a Windows location is refused" (
+      fails (
+        reprobuildLib.profileBinPath {
+          evaluation = serverOn "x86_64-windows";
+          homeDirectory = "C:/Users/u";
+        }
+      )
+    )
+    ++ expectTrue "profileBinPath: null where Reprobuild owns the environment or nothing is declared" (
+      reprobuildLib.profileBinPath {
+        evaluation = reprobuildLib.evaluateExport concernsDoc "aarch64-darwin" "m1";
+        homeDirectory = "/Users/u";
+      } == null
+      && reprobuildLib.profileBinPath {
+        evaluation = reprobuildLib.evaluateExport concernsDoc "aarch64-darwin" "home-pc";
+        homeDirectory = "/Users/u";
+      } == null
+    )
+    ++ expectTrue "an export without concerns.profileBin is refused for a host that needs it" (
+      fails (
+        (reprobuildLib.evaluateExport (
+          concernsDoc
+          // {
+            concerns = removeAttrs concernsDoc.concerns [ "profileBin" ];
+          }
+        ) "aarch64-darwin" "server").profileBin
+      )
+      # ...and only for such a host.
+      && !(fails (
+        reprobuildLib.evaluateExport (
+          concernsDoc
+          // {
+            concerns = removeAttrs concernsDoc.concerns [ "profileBin" ];
+          }
+        ) "aarch64-darwin" "m1"
+      ))
+    );
+
   failures =
-    predicateTests
+    profileBinTests
+    ++ predicateTests
     ++ dataSelectionTests
     ++ dataRejectionTests
     ++ dataThrowTests

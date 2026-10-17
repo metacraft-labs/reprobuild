@@ -682,21 +682,109 @@ proc stageDevDaemonBinary*(sourceExe: string; config: UserDaemonConfig;
 
 proc logLine(path, message: string)
 
-proc cleanupPreviousStagedGeneration(config: UserDaemonConfig) =
-  if not config.devMode or config.previousStagedGenerationDir.len == 0:
+type
+  DevStagedGenerationSweep* = object
+    ## What one ``sweepStaleDevStagedGenerations`` pass did. ``removed`` and
+    ## ``failed`` are absolute paths of generation directories under
+    ## ``<state>/dev-bin``; ``kept`` is this daemon's own generation, or ""
+    ## when it runs from its source image and owns none.
+    removed*: seq[string]
+    failed*: seq[string]
+    kept*: string
+
+proc sweepStaleDevStagedGenerations(config: UserDaemonConfig):
+    DevStagedGenerationSweep =
+  ## Remove every staged image generation under ``<state>/dev-bin`` except
+  ## the one THIS daemon is running from. Called only by a daemon that HOLDS
+  ## the state directory's lock (``acquireUserDaemonLock``), after it has
+  ## established that no other daemon answers on its endpoint.
+  ##
+  ## WHY A SWEEP AND NOT A HAND-OFF. Every dev-mode start stages a copy of
+  ## its image (``stageDevDaemonBinary``) and nothing removed it except a dev
+  ## SELF-restart, whose child was told its predecessor's directory
+  ## (``previousStagedGenerationDir``). A daemon REPLACED by a client --
+  ## ``startUserDaemon``'s staleness restart, ``daemon stop`` followed by a
+  ## start, a crash -- hands nothing to its successor, so its copy stayed for
+  ## good: reprobuild-pm issue 2026-09-30 found 260 of them, the oldest four
+  ## months old, at one engine image (tens of MB) each. The spec allows
+  ## exactly this pass (Local-Daemons-And-Control-Plane.md, "Windows
+  ## Executable Staging", last paragraph): a development daemon startup "may
+  ## scan the staged-generation directory and delete generations that are
+  ## not referenced by any live daemon status record or running process".
+  ##
+  ## WHY THE LOCK MAKES THIS SAFE. ``dev-bin`` is per state directory, and so
+  ## is the lock, so the lock holder is the only daemon that can be serving
+  ## from any generation here. What else can still be RUNNING from one:
+  ##
+  ##   * a predecessor that is exiting -- it released the lock (a dev
+  ##     self-restart releases it before launching its child) but has not
+  ##     yet exited. POSIX unlinks a running image without complaint; Windows
+  ##     refuses, which lands in ``failed`` and is retried by the next start.
+  ##   * a launch still in flight from a client that staged its generation
+  ##     and lost the race to this daemon. Removing its image makes its exec
+  ##     (or its lock acquisition, if it got that far) fail, and that client
+  ##     then finds THIS daemon on the endpoint it is polling -- the outcome
+  ##     it would have had anyway, since only one daemon can hold the lock.
+  ##
+  ## It subsumes the self-restart hand-off: the predecessor's directory is
+  ## under ``dev-bin`` and is not ours, so it is removed with the rest.
+  ##
+  ## WHAT IS NEVER TOUCHED. Only DIRECTORIES that are DIRECT children of
+  ## ``dev-bin`` are removed: a symlink there is not something
+  ## ``stageDevDaemonBinary`` creates and would point outside, and a path
+  ## that does not normalize to a child of ``dev-bin`` is refused before any
+  ## removal. ``removeDir`` unlinks a symlink inside a generation rather than
+  ## following it. A non-dev daemon stages nothing and sweeps nothing.
+  if not config.devMode:
+    return
+  # No state directory, no `dev-bin` to sweep. Without this guard an empty one
+  # would make `devBinRoot` the RELATIVE "dev-bin", anchored to whatever the
+  # working directory happens to be -- a directory this daemon does not own.
+  if config.stateDir.len == 0:
     return
   let root = absoluteNormalized(devBinRoot(config))
-  let previous = absoluteNormalized(config.previousStagedGenerationDir)
-  if previous.len == 0 or previous == root or not previous.startsWith(root):
+  if root.len == 0 or not dirExists(root):
     return
-  try:
-    if dirExists(previous):
-      removeDir(previous)
-      logLine(config.logPath, "cleaned previous dev staged generation=" &
-        previous)
-  except CatchableError as err:
-    logLine(config.logPath, "previous dev staged generation cleanup failed=" &
-      previous & " error=" & err.msg)
+  result.kept = absoluteNormalized(config.stagedGenerationDir)
+  for kind, entry in walkDir(root):
+    if kind != pcDir:
+      continue
+    let candidate = absoluteNormalized(entry)
+    if candidate == result.kept:
+      continue
+    # Our own generation spelled differently (the state directory reached
+    # through a symlink by whoever staged it) is still our own: compared by
+    # file identity too, because removing it would delete the image this
+    # daemon reports as running.
+    if result.kept.len > 0:
+      try:
+        if sameFile(candidate, result.kept):
+          continue
+      except OSError:
+        discard
+    # Containment, checked on the normalized spelling: strictly inside
+    # `dev-bin`, one level down. `walkDir` yields exactly that, so this can
+    # only fire if it ever stops doing so -- which is when it matters.
+    if candidate == root or parentDir(candidate) != root or
+        not candidate.startsWith(root & DirSep):
+      continue
+    try:
+      removeDir(candidate)
+      result.removed.add(candidate)
+    except CatchableError as err:
+      result.failed.add(candidate)
+      logLine(config.logPath, "dev staged generation cleanup failed=" &
+        candidate & " error=" & err.msg)
+  if result.removed.len > 0 or result.failed.len > 0:
+    logLine(config.logPath, "swept stale dev staged generations removed=" &
+      $result.removed.len & " failed=" & $result.failed.len & " kept=" &
+      (if result.kept.len > 0: result.kept else: "<none>"))
+
+proc sweepStaleDevStagedGenerationsForTest*(config: UserDaemonConfig):
+    DevStagedGenerationSweep =
+  ## Exported for `t_daemon_dev_bin_retention.nim`, which asserts what the
+  ## sweep keeps and that it never reaches outside `dev-bin`.
+  sweepStaleDevStagedGenerations(config)
 
 proc logLine(path, message: string) =
   try:
@@ -897,7 +985,7 @@ proc atomicWriteTextFile(path, content: string) =
     raise
 
 const AbandonedSessionState* = "abandoned"
-  ## A session whose WRITER PROVABLY NO LONGER EXISTS.
+  ## A session whose writer is gone, or whose legacy record expired.
   ##
   ## Distinct from `cancelled` on purpose: a user cancelling a build and a
   ## build process vanishing are different events, and a reader looking at
@@ -1087,6 +1175,92 @@ proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
       return companionDigest
   fileDigestHex(sourceExe)
 
+type ForeignEngineVerdict* = object
+  ## What `foreignEngineVerdict` found. `decline` is true only when a
+  ## mismatch is PROVEN; the two digests are carried for the decline's
+  ## payload and the daemon log.
+  decline*: bool
+  requestImageHash*: string
+  daemonImageHash*: string
+
+proc foreignEngineVerdict*(config: UserDaemonConfig;
+                           requestPublicCliPath, daemonRunningHash: string):
+    ForeignEngineVerdict =
+  ## Whether a build or watch request was sent for an engine OTHER than the
+  ## one this daemon is running, and must therefore be declined.
+  ##
+  ## WHY THE CLIENT'S OWN CHECK IS NOT ENOUGH. `startUserDaemon` compares the
+  ## daemon's running-image digest with the client's engine and restarts a
+  ## daemon that differs. But every checkout on a host shares ONE per-user
+  ## endpoint, and that check runs before the request is sent. A second
+  ## workspace whose reprobuild is a different build runs the same check
+  ## against the same endpoint, finds the daemon "outdated" from its side, and
+  ## restarts it onto its own engine. A request sent in between is served by
+  ## that other engine, which then reads THIS checkout's build state -- and an
+  ## interface artifact written in a newer envelope version than it knows
+  ## fails the build with `unsupported interface envelope version`
+  ## (reprobuild-pm issue 2026-10-16, shared-daemon dry-run). No client-side
+  ## check can close the window, because the daemon can always be swapped
+  ## after it. The request, however, names the engine it was sent for
+  ## (`publicCliPath`), so the daemon can close it at the only point that
+  ## is not racy: when it holds the request.
+  ##
+  ## THE SAME COMPARISON AS `startUserDaemon`, on purpose: the request's image
+  ## through the memoized `cachedImageDigestHex` (which the client has
+  ## normally just warmed for exactly this path, so this is a stat and a
+  ## small read rather than a hash of the whole image), against the
+  ## daemon's `runningHash`. A request that passed the client's check against
+  ## an un-swapped daemon therefore always passes this one.
+  ##
+  ## THIS SIDE SERVES WHAT IT CANNOT DISPROVE: an empty, relative or missing
+  ## path (an older client, or an engine deleted since) or an unavailable
+  ## digest proves nothing, and the request is served as before. That is
+  ## the opposite of `startUserDaemon`, which refuses to route to a daemon
+  ## whose identity it cannot establish (reprobuild-pm issue 2026-09-30).
+  ## The client's check is the one that must establish identity; this one
+  ## only closes the race after it, so declining on an unknown here would
+  ## turn every request from a client too old to name its engine into a
+  ## direct build without making any of them more correct.
+  result.daemonImageHash = daemonRunningHash
+  if requestPublicCliPath.len == 0 or not isAbsolute(requestPublicCliPath) or
+      not fileExists(requestPublicCliPath) or daemonRunningHash.len == 0:
+    return
+  result.requestImageHash = cachedImageDigestHex(config, requestPublicCliPath)
+  result.decline = result.requestImageHash.len > 0 and
+    result.requestImageHash != daemonRunningHash
+
+proc foreignEngineDeclineEvent(command, runId, projectRoot,
+                               requestPublicCliPath, daemonImagePath: string;
+                               verdict: ForeignEngineVerdict):
+    UserDaemonBuildEvent =
+  ## The single terminal event that declines a foreign engine's request:
+  ## unsupported, fallback allowed. Both clients already treat that as "run
+  ## it yourself": the full CLI's `runDaemonBuild` / watch path fall back to
+  ## a direct run, and the thin client hands over to its engine, whose own
+  ## `startUserDaemon` then restarts the daemon onto the matching image. So
+  ## the decline costs the race's loser one direct build; serving it cost a
+  ## wrong answer.
+  UserDaemonBuildEvent(
+    schemaId: BuildEventSchemaId,
+    schemaVersion: BuildEventSchemaVersion,
+    eventId: 1'u64,
+    occurredAtUnixMs: nowUnixMs(),
+    runId: runId,
+    projectRoot: projectRoot,
+    command: command,
+    kind: bekUnsupported,
+    severity: "warning",
+    message: "daemon-hosted " & command & " declined: the request was sent " &
+      "for engine " & requestPublicCliPath & " (" & verdict.requestImageHash &
+      ") but this repro-daemon runs " & daemonImagePath & " (" &
+      verdict.daemonImageHash & "); another reprobuild build sharing this " &
+      "endpoint restarted it",
+    terminal: true,
+    exitCode: 64,
+    payloadJson: "{\"fallbackAllowed\":true,\"reason\":\"engine-mismatch\"," &
+      "\"requestImageHash\":\"" & verdict.requestImageHash & "\"," &
+      "\"daemonImageHash\":\"" & verdict.daemonImageHash & "\"}")
+
 proc writeSessionRecord*(config: UserDaemonConfig; session: UserDaemonSession) =
   ## Exported for `t_daemon_active_session_tally.nim`. It is the daemon's
   ## SINGLE write funnel for session records -- creation and every state
@@ -1218,59 +1392,79 @@ var activeSessionCacheDir = ""
 var activeSessionStateById = initTable[string, bool]()
 var activeSessionTally = 0
 
-proc abandonedRecord(session: UserDaemonSession): UserDaemonSession =
-  ## The `abandoned` rewrite of one record whose writer is provably gone.
-  ##
-  ## ONE DEFINITION, because two sites reclaim: the startup sweep
-  ## (`reclaimAbandonedSessions`) and the tally reconciliation
-  ## (`refreshBelievedActiveSessions`). A second spelling of the same rewrite
-  ## is how the two would come to disagree about what a reclaimed record
-  ## looks like, and `repro daemon sessions` reads both.
+const LegacySessionInactivitySeconds = 7'i64 * 24 * 60 * 60
+
+type SessionReclamation = enum
+  srNone, srDeadWriter, srLegacyInactive
+
+proc sessionReclamation(session: UserDaemonSession; path: string;
+                        nowUnix: int64): SessionReclamation =
+  # Unknown nonempty identities are never aged out. Only the pre-identity
+  # population needs a bounded inactivity policy; an identified writer's
+  # ownership must instead be settled by the actual liveness probe.
+  if session.writer.len > 0:
+    if writerLiveness(session.writer) == wlDead:
+      return srDeadWriter
+    return srNone
+  if session.startedAtUnix <= 0 or nowUnix < LegacySessionInactivitySeconds:
+    return srNone
+  let modified =
+    try: getLastModificationTime(path).toUnix
+    except CatchableError: return srNone
+  # The later timestamp protects a recently updated old session and a
+  # recently started backdated file. Comparing with a cutoff also avoids
+  # overflowing on corrupt/future start times. Exactly seven days qualifies.
+  if modified <= 0:
+    return srNone
+  if max(session.startedAtUnix, modified) <=
+      nowUnix - LegacySessionInactivitySeconds:
+    return srLegacyInactive
+  srNone
+
+proc abandonedRecord(session: UserDaemonSession;
+                     reason: SessionReclamation): UserDaemonSession =
+  ## The shared terminal rewrite for startup and query reconciliation.
+  ## Keep history and an existing message; supply the reason only when empty.
   result = session
   result.state = AbandonedSessionState
   result.endedAtUnix = getTime().toUnix
   if result.message.len == 0:
-    result.message = "writer process no longer exists"
+    result.message =
+      if reason == srLegacyInactive:
+        "no writer identity or activity for seven days"
+      else:
+        "writer process no longer exists"
 
 proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
-  ## Rewrite every non-terminal record whose writer PROVABLY no longer exists
-  ## as `abandoned`. Returns how many were reclaimed.
+  ## Rewrite active records with provably dead writers, and legacy records
+  ## with no writer identity and at least seven days of inactivity.
+  ## Returns how many records were successfully reclaimed.
   ##
-  ## WHY THIS EXISTS. A `repro build` that is killed leaves its record
-  ## `running` forever, and nothing distinguished that from a build still in
-  ## flight. Measured on a developer machine: 19 such records, writers dead
-  ## for up to three weeks, which `restartCandidateReady` counted as live work
-  ## -- so the dev self-restart was permanently deferred and said so 949,394
-  ## times in an 82 MB log.
+  ## Killed workers never write a terminal state, so records can otherwise
+  ## defer development self-restart forever. Writer liveness alone does not
+  ## settle pre-field records: the historical 16,788-deferral flood included
+  ## records without writer identities. The legacy inactivity rule covers
+  ## that population while preserving recent records and unknown nonempty
+  ## identities. File mtime and start time must both meet the age bound.
   ##
-  ## WHERE IT IS CALLED FROM, AND WHERE IT MUST NOT BE. Daemon startup and the
-  ## active-tally prime, both of which happen ONCE per daemon process. NOT on
-  ## the status request path: a per-request scan is exactly the cost that was
-  ## just removed from it -- `sessions/` had grown to 2,177 records and
-  ## walking it cost 37.6 ms of every build. Reclamation reads the same
-  ## directory, so it has to be as rare as priming is.
-  ##
-  ## UNKNOWN IDENTITY IS TREATED AS LIVE. Records written before this field
-  ## existed carry no writer, and `writerLiveness` answers `wlUnknown` for
-  ## them and for anything it cannot parse or probe. Those are left alone.
-  ## That means the fix is not retroactive for pre-existing records -- which
-  ## is the correct trade: reclaiming a record whose writer might still be
-  ## running would let two builds believe they own one session, and a
-  ## lingering record only defers a restart.
+  ## This full directory sweep runs at startup/prime only. Status queries
+  ## reconcile only believed-active records, avoiding a walk of every record
+  ## ever written on every build.
+  let nowUnix = getTime().toUnix
   for path in sessionRecordFiles(config):
-    var session =
+    let session =
       try: readSessionRecord(path)
       except CatchableError: continue
     if session.sessionId.len == 0 or not sessionStateIsActive(session.state):
       continue
-    if writerLiveness(session.writer) != wlDead:
+    let reason = sessionReclamation(session, path, nowUnix)
+    if reason == srNone:
       continue
     try:
-      writeSessionRecord(config, abandonedRecord(session))
+      writeSessionRecord(config, abandonedRecord(session, reason))
       inc result
     except CatchableError:
-      # A record that cannot be rewritten stays as it was; the next daemon
-      # start tries again. Never fatal to startup.
+      # Preserve the record on write failure; startup is never fatal.
       discard
 
 proc primeActiveSessionTally(config: UserDaemonConfig) =
@@ -1278,7 +1472,7 @@ proc primeActiveSessionTally(config: UserDaemonConfig) =
   ## abandoned ones. At most two walks of the directory, whatever it holds:
   ## see the note above `activeSessionCacheDir` for why nothing re-enters it.
   # Reclaim BEFORE counting, so the tally this produces already excludes
-  # records whose writers are gone. Counting first and reclaiming later would
+  # dead writers and expired legacy records. Counting first and reclaiming later would
   # leave the first status answer of every daemon reporting phantom work.
   discard reclaimAbandonedSessions(config)
   activeSessionStateById = initTable[string, bool]()
@@ -1336,8 +1530,9 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
   ## that it is active and the tally keeps blocking the dev self-restart --
   ## for the whole life of the daemon process, because
   ## `reclaimAbandonedSessions` runs only at prime/startup. Measured on this
-  ## workstation: a daemon deferring its restart 16,788 consecutive times,
-  ## and a live per-user daemon holding a tally that never came down.
+  ## workstation: a daemon deferring its restart 16,788 consecutive times.
+  ## Dead-writer probing alone did not cover that flood's pre-field records;
+  ## those require the narrowly scoped legacy inactivity rule below.
   ##
   ## So the reconciliation happens WHERE THE ANSWER WOULD BLOCK AN ACTION
   ## rather than only at startup. It costs nothing extra: the record has just
@@ -1347,12 +1542,14 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
   ## the record, and every other process that reads `sessions/` now sees
   ## `abandoned` instead of a lie.
   ##
-  ## UNKNOWN IDENTITY IS STILL TREATED AS LIVE, exactly as in
-  ## `reclaimAbandonedSessions` and for the same reason: only `wlDead` is
-  ## provable, and reclaiming a record out from under a running writer would
-  ## let two builds believe they own one session.
+  ## Nonempty unknown identities remain live. Records without any identity
+  ## instead expire after seven days without activity, using the same
+  ## timestamp checks as startup. A failed legacy rewrite keeps the tally
+  ## active for retry, because age is policy rather than proof of death.
   var ended: seq[string] = @[]
-  var abandoned: seq[UserDaemonSession] = @[]
+  var abandoned: seq[tuple[record: UserDaemonSession,
+                           reason: SessionReclamation]] = @[]
+  let nowUnix = getTime().toUnix
   for sessionId, active in activeSessionStateById.pairs:
     if not active:
       continue
@@ -1368,28 +1565,31 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
       continue
     if not sessionStateIsActive(record.state):
       ended.add(sessionId)
-    elif writerLiveness(record.writer) == wlDead:
-      abandoned.add(record)
+    else:
+      let reason = sessionReclamation(record, path, nowUnix)
+      if reason != srNone:
+        abandoned.add((record, reason))
   for sessionId in ended:
     activeSessionStateById[sessionId] = false
     dec activeSessionTally
   # After the loop, never inside it: `writeSessionRecord` folds the record
   # into `activeSessionStateById` through `noteSessionRecordWritten`, and a
   # table must not be mutated while it is being iterated.
-  for record in abandoned:
+  for (record, reason) in abandoned:
     try:
-      writeSessionRecord(config, abandonedRecord(record))
+      writeSessionRecord(config, abandonedRecord(record, reason))
     except CatchableError:
-      # The record stays as it is on disk and the next reconciliation tries
-      # again -- but this process stops counting it either way, because the
-      # writer is provably gone whether or not the rewrite landed.
-      discard
+      # A proved-dead writer is no longer work even if persistence fails.
+      # For legacy expiry ownership is unknown, so keep the belief active
+      # until the terminal rewrite succeeds and is shared with other readers.
+      if reason == srLegacyInactive:
+        continue
     if activeSessionStateById.getOrDefault(record.sessionId, false):
       activeSessionStateById[record.sessionId] = false
       dec activeSessionTally
 
 proc activeSessionTallyFor*(config: UserDaemonConfig): int =
-  ## The number `statusFor` reports. O(1) after the first call.
+  ## The number `statusFor` reports; refresh cost is believed-active records.
   ##
   ## Exported for `t_daemon_active_session_tally.nim`, which asserts the
   ## invariant this exists to preserve: it equals a fresh from-disk
@@ -2360,16 +2560,42 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
         "repro-daemon development restart is in progress; retry by run id " &
         "after reconnect where supported"))
       return
-    handleBuildRequest(socket, config, parseBuildRequestBody(frame.body),
-      sessions)
+    let request = parseBuildRequestBody(frame.body)
+    # Before the request is accepted, and before anything (the parent
+    # prewarm included) reads its project: a request sent for another
+    # engine is declined here, with no session record, because no session
+    # ever ran. See `foreignEngineVerdict` for why only the daemon can do it.
+    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+      devRestart.runningHash)
+    if verdict.decline:
+      logLine(config.logPath, "build request declined reason=engine-mismatch" &
+        " request-image=" & request.publicCliPath & " request-hash=" &
+        verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
+      socket.writeFrame(udkBuildEvent, buildEventBody(
+        foreignEngineDeclineEvent("build", request.runId, request.projectRoot,
+          request.publicCliPath, devRestart.runningImagePath, verdict)))
+      return
+    handleBuildRequest(socket, config, request, sessions)
   of udkWatchStartRequest:
     if devRestart.restartPending:
       socket.writeFrame(udkError, errorBody(
         "repro-daemon development restart is in progress; retry by run id " &
         "after reconnect where supported"))
       return
-    handleWatchStart(socket, config, parseWatchRequestBody(frame.body),
-      sessions)
+    let request = parseWatchRequestBody(frame.body)
+    # Same decline as a build request, for the same reason: every watch
+    # cycle is a build run by this daemon's engine.
+    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+      devRestart.runningHash)
+    if verdict.decline:
+      logLine(config.logPath, "watch request declined reason=engine-mismatch" &
+        " request-image=" & request.publicCliPath & " request-hash=" &
+        verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
+      socket.writeFrame(udkWatchEvent, buildEventBody(
+        foreignEngineDeclineEvent("watch", request.runId, request.projectRoot,
+          request.publicCliPath, devRestart.runningImagePath, verdict)))
+      return
+    handleWatchStart(socket, config, request, sessions)
   of udkWatchAttachRequest:
     handleWatchAttach(socket, config, parseWatchSessionRequestBody(frame.body))
   of udkWatchStopRequest:
@@ -2549,21 +2775,11 @@ proc restartCandidateReady(config: UserDaemonConfig;
     return false
   let active = activeSessionTallyFor(config)
   if active > 0:
-    # The SECOND re-read loop reachable from this proc, and it used to be
-    # worse than the digest one: the count opened and parsed EVERY
-    # ``*.session`` record in the state directory (1343 of them on the host
-    # this was found on), and at the 250 ms poll cadence that was thousands
-    # of opens a second plus one repeated log line per pass, for as long as
-    # a candidate stayed deferred. The count is now maintained rather than
-    # recounted (``activeSessionTallyFor``), so the re-read is gone; the
-    # cadence and log-on-change below are kept because they are still the
-    # right shape and because nothing here should depend on the count being
-    # cheap. Sessions that block a restart are
-    # long-lived by nature — and records stuck non-terminal by a crashed
-    # writer never clear at all — so re-asking on the poll cadence buys
-    # nothing. Re-ask on the stability cadence, and log only when the
-    # answer changes, so a permanently-deferred restart is stated once
-    # instead of flooding the log.
+    # Reconciliation reads only believed-active records, rather than every
+    # historical session. Dead writers and inactive legacy records can now
+    # clear a deferral; live sessions may remain active for a long time.
+    # Re-ask on the stability cadence, and bound repeated diagnostics so a
+    # persistent deferral stays visible without flooding the log.
     state.deferredUntilMs = nowMs + devRestartStableMs()
     if state.deferralLogDue(nowMs, devRestartDeferralLogWindowMs()):
       let suppressed = state.deferralPollsSuppressed
@@ -2825,7 +3041,10 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   if reclaimed > 0:
     logLine(config.logPath,
       "reclaimed abandoned sessions count=" & $reclaimed)
-  cleanupPreviousStagedGeneration(config)
+  # Retention of dev staged image copies. Here, not earlier: the lock is held
+  # and no other daemon answered on this endpoint, so no generation under
+  # `dev-bin` but our own can be serving. See `sweepStaleDevStagedGenerations`.
+  discard sweepStaleDevStagedGenerations(config)
   var sessions: seq[UserDaemonSession] = @[]
   # Shared-Development-Services L7 (§4.5): "A daemon that restarts
   # rebuilds it from the lease records". This IS that rebuild, and it runs
@@ -3377,6 +3596,15 @@ proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
   raise newException(UserDaemonRuntimeError,
     "timed out waiting for repro-daemon at " & endpoint)
 
+proc raiseDaemonBinaryNotFound(publicCliPath: string) {.noreturn.} =
+  ## The one wording of "there is no daemon image to start", shared by the
+  ## launch guard and by the identity check that cannot digest the image it
+  ## would compare. Callers catch it and fall back to direct mode.
+  raise newException(UserDaemonRuntimeError,
+    "repro-daemon binary not found (looked for sibling next to " &
+      publicCliPath & " and on PATH as 'repro-daemon'); set " &
+      "REPRO_DAEMON=off or install/build repro-daemon next to repro")
+
 proc startUserDaemon*(publicCliPath: string;
                       requestedConfig: UserDaemonConfig): UserDaemonStatus =
   # Absolute before anything is derived from it: the daemon starts in its
@@ -3403,16 +3631,48 @@ proc startUserDaemon*(publicCliPath: string;
     # Detect that by comparing the daemon-reported running-image hash to the
     # on-disk image that daemon startup will actually execute. `repro` is a
     # single full-CLI image (no thin wrapper / `repro-full` companion), so the
-    # digest tracks that one binary. If either hash is unavailable we cannot
-    # prove staleness, so we leave the daemon running (fail safe).
+    # digest tracks that one binary.
+    #
+    # THIS FAILS CLOSED. The running daemon is reused only when BOTH digests
+    # are known and EQUAL. It used to fail open -- "if either hash is
+    # unavailable we cannot prove staleness, so leave the daemon running" --
+    # and that is how a thin client handed a RELATIVE engine path (for which
+    # `expectedDaemonRunningDigestHex` answers "") routed every build to
+    # whatever older engine was resident, silently (reprobuild-pm issue
+    # 2026-09-30). The contract is that a routed invocation runs the engine a
+    # fallback would have run; an identity nobody can establish does not meet
+    # it. So:
+    #
+    #   * equal digests -> reuse;
+    #   * different digests -> restart onto the current image;
+    #   * the DAEMON's digest unknown (an image deleted or unreadable under
+    #     it) -> restart as well: it is unproven, and replacing it costs one
+    #     daemon start;
+    #   * OUR digest unknown -> refuse, without touching the daemon. We cannot
+    #     name the image we would run, so we can neither vouch for the
+    #     resident daemon nor start a replacement; the error makes every
+    #     caller fall back to the engine in-process (direct mode), which is
+    #     exactly the image it named.
     let expectedHash = expectedDaemonRunningDigestHex(config, sourceExe,
       config.devMode)
-    if expectedHash.len == 0 or existing.runningHash.len == 0 or
-        existing.runningHash == expectedHash:
+    if expectedHash.len == 0:
+      if not isAbsolute(sourceExe) or not fileExists(sourceExe):
+        raiseDaemonBinaryNotFound(publicCliPath)
+      raise newException(UserDaemonRuntimeError,
+        "cannot digest the repro-daemon image " & sourceExe & " to verify " &
+          "the daemon running at " & config.endpoint & "; refusing to route " &
+          "to a daemon of unverified identity (set REPRO_DAEMON=off for " &
+          "direct mode)")
+    if existing.runningHash == expectedHash:
       return existing
-    logLine(config.logPath, "restarting outdated daemon: running-hash=" &
-      existing.runningHash & " expected-hash=" & expectedHash &
-      " (reprobuild image changed)")
+    if existing.runningHash.len == 0:
+      logLine(config.logPath, "restarting daemon of unknown identity: " &
+        "running-hash unavailable expected-hash=" & expectedHash &
+        " (cannot prove it runs the current reprobuild image)")
+    else:
+      logLine(config.logPath, "restarting outdated daemon: running-hash=" &
+        existing.runningHash & " expected-hash=" & expectedHash &
+        " (reprobuild image changed)")
     try:
       requestUserDaemonShutdown(config.endpoint)
     except CatchableError as err:
@@ -3434,10 +3694,7 @@ proc startUserDaemon*(publicCliPath: string;
   # lets ``runBuildCommand`` / ``runWatchCommand`` switch to direct mode in
   # milliseconds with a clear diagnostic naming the path we tried.
   if not isAbsolute(sourceExe) or not fileExists(sourceExe):
-    raise newException(UserDaemonRuntimeError,
-      "repro-daemon binary not found (looked for sibling next to " &
-        publicCliPath & " and on PATH as 'repro-daemon'); set " &
-        "REPRO_DAEMON=off or install/build repro-daemon next to repro")
+    raiseDaemonBinaryNotFound(publicCliPath)
   var launchConfig = config
   launchConfig.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
   var exe = sourceExe

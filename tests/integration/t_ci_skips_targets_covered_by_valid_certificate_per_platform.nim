@@ -43,6 +43,8 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
 
 include tc5_cert_signing_helpers
 
@@ -340,3 +342,57 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
         # The valid cert is surfaced as an advisory signal (not a skip).
         check blockAdv.hasKey("advisory_note")
         check "ci_trust=advisory" in blockAdv["advisory_note"].getStr()
+
+      # ============ TC-9c: the requirement declared as a policy ============
+      # The same fast-track, with the requirement declared as a policy
+      # snapshot in the committed `repro.lock` of the base (`origin/main`,
+      # which the job evaluates against) rather than in the `[certificates]`
+      # table. The table is left saying something else (`t-never`,
+      # `ci_trust = "advisory"`): where a snapshot exists the table is not
+      # consulted, so the plan follows the snapshot.
+      block policyDeclared:
+        let fx = setupFixture(gitBin)
+        defer: removeDir(fx.scratch)
+        writeProjectManifest(fx, policyTable(@["t-never"], "advisory"))
+        let snapshot = renderCertificatePolicySnapshot(BranchCertificatePolicy(
+          name: "ci-fast-track", package: "certpolicy", ciTrust: pctSkip,
+          rules: @[PolicyRule(branches: @["main"], gateMode: pmAdvisory,
+            commitGate: pmAdvisory, requires: @[PolicyRequirement(
+              certificate: "t-unit", platforms: @[platformA, platformB])])]))
+        writeFile(fx.libAPath / "repro.lock", replaceCertificatePolicySection(
+          serializeLockedDependencies(LockedDependencies(
+            schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+        discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+          " add repro.lock")
+        discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+          " commit -q --no-verify -m policy")
+        discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+          " push -q --no-verify origin main")
+        # The candidate is a change on top of the base, published on its own
+        # branch the way a pull request's head is: the base must not be the
+        # candidate itself, or it would be trusting its own snapshot.
+        writeFile(fx.libAPath / "change.txt", "the change under review\n")
+        discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+          " add change.txt")
+        discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+          " commit -q --no-verify -m change")
+        discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+          " push -q --no-verify origin HEAD:refs/heads/pr")
+        seedLock(fx)
+        const keyIdP = "tc9c-policy-key"
+        let keyP = genEd25519Key(fx.scratch / "keys", "key-policy", keyIdP)
+        writeRegistry(fx.workspaceRoot,
+          @[RegisteredKey(keyId: keyIdP, publicKey: keyP.pub,
+            status: rksActive)])
+        let certP = issueRealCert(fx, keyP.priv, keyIdP, @["t-unit"])
+        check attachCertificate(gitBin, fx.libAPath, certP).ok
+
+        let planP = planJson(fx, platformA)
+        check planP["ci_trust"].getStr() == "skip"
+        check planP["policy"]["source"].getStr() == "base"
+        check planP["required_targets"].to(seq[string]) == @["t-unit"]
+        let blockP = platformBlock(planP, platformA)
+        check targets(blockP, "skip") == @["t-unit"]
+        check targets(blockP, "run").len == 0
+        let planPB = planJson(fx, platformB)
+        check targets(platformBlock(planPB, platformB), "run") == @["t-unit"]

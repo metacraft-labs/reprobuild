@@ -1,4 +1,4 @@
-import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, times, net]
+import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, tempfiles, times, net]
 
 import blake3
 import cbor
@@ -58,20 +58,6 @@ import nimcrypto/[hash, sha2]
 # out its realized prefix on disk so the same SQLite-backed
 # `index.db` records every prefix the system has materialized
 # regardless of which adapter produced it.
-
-proc hostToolEnvironment(): StringTableRef =
-  ## A provisioned target profile may export libraries that are ABI-incompatible
-  ## with host bootstrap tools such as Nix. Keep those loader controls at the
-  ## action boundary instead of forwarding them into host processes.
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    case key
-    of "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG",
-       "LD_DEBUG_OUTPUT", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
-       "DYLD_INSERT_LIBRARIES":
-      discard
-    else:
-      result[key] = value
 
 type
   ToolProvisioningMode* = enum
@@ -1569,6 +1555,46 @@ proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
     addUniquePath(profile.libraryPathList, storePath / "lib64")
   refreshProfileIdentity(profile)
 
+proc readNixReceiptPaths*(receipt: string): seq[string] =
+  ## The store paths a ``"nix"`` provisioning edge's receipt names, one per
+  ## line, the executable-bearing output first (the engine's ``"nix"``
+  ## executor writes it). Empty when the receipt is missing or unreadable.
+  try:
+    for line in readFile(extendedPath(receipt)).splitLines():
+      let path = line.strip()
+      if path.len > 0:
+        result.add(path)
+  except IOError, OSError:
+    result = @[]
+
+proc nixToolProvisionReceipt(useDef: InterfaceToolUse;
+                             storeRoot: string): string
+  ## Forward declaration -- defined with the Nix tool provisioning edge,
+  ## after the provisioning-subgraph helpers it is built from.
+
+proc realizeNixToolPaths(useDef: InterfaceToolUse;
+                         storeRoot, workspaceRoot: string;
+                         allOutputs: bool):
+    tuple[paths: seq[string]; receipt: string]
+  ## Forward declaration -- see the definition, after ``resolveTarballTool``.
+
+proc nixReceiptNamesProfile(receipt: string;
+                            profile: PathOnlyToolProfile): bool =
+  ## Whether ``receipt`` currently names the realization ``profile``
+  ## describes: the profile's selected store path is one of the receipt's
+  ## paths, and every path the receipt names is one the profile realized.
+  ## The receipt's path is shared by every pin of the same tool request, so a
+  ## materialization record of one pin can sit beside a receipt another pin
+  ## wrote; serving that record with that receipt would hand consumers an
+  ## input that names a different realization than the tool they run.
+  let named = readNixReceiptPaths(receipt)
+  if named.len == 0 or profile.selectedStorePath notin named:
+    return false
+  for path in named:
+    if path notin profile.realizedStorePaths:
+      return false
+  true
+
 when defined(windows):
   proc resolveNixTool*(useDef: InterfaceToolUse;
                        storeRoot = "";
@@ -1578,74 +1604,64 @@ else:
   proc resolveNixTool*(useDef: InterfaceToolUse;
                        storeRoot = "";
                        writerMode = "direct"): PathOnlyToolProfile =
+    ## Realize a ``nixPackage`` THROUGH ITS PROVISIONING EDGE and return its
+    ## profile (Dependency-Provisioning-In-Build-Graph.md sections 2 and 3):
+    ## a ``bakForeignProvision`` edge whose provisioner is ``"nix"``, executed
+    ## by the engine's own ``"nix"`` executor through ``reprobuild-nix-daemon``
+    ## and cached by the action cache under the tool store. The edge's receipt
+    ## becomes ``provisioningReceipt``, which every consumer of the tool
+    ## declares as an input. See ``nixToolProvisioningEdges`` for its shape.
+    ##
+    ## WITH NO ``storeRoot`` THERE IS NO RECEIPT. A receipt is a declared input
+    ## of the tool's consumers, so it has to live at a path that outlives this
+    ## resolution and is the same on the next one; the provisioning state that
+    ## holds it (receipts, action cache) lives under the tool store it
+    ## describes (``provisioningStateRoot``). A store-less resolution has no
+    ## such place, and by this resolver's contract writes nothing that
+    ## outlives the returned profile (no record, no GC root -- see
+    ## ``rootNixRealization``), so it runs the same edge once, against a
+    ## scratch receipt it then discards, and returns a profile with no
+    ## receipt. Every build the CLI drives passes a store
+    ## (``<out>/tool-store``, the producer's ``runtime-tool-store``, the store
+    ## daemon's and home-apply's store root).
     let plan = nixAcquisitionPlan(useDef)
-    let selector = plan.nixSelector
+    # The flake a ``.#…`` selector names, and what the helper reports the
+    # evaluation read (``flake.nix`` / ``flake.lock``), are relative to the
+    # working directory -- a project's own ``repro`` invocation.
+    let workspaceRoot = getCurrentDir()
     let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
     if cached.hit:
-      # The record is reusable only because its paths still exist (see
-      # ``nixMaterializationProfileMatches``); re-assert their root so they
-      # keep existing. Warm, this is one directory listing and no process.
-      rootNixRealization(storeRoot, useDef, plan,
-        cached.profile.realizedStorePaths)
-      return cached.profile
+      let receipt = nixToolProvisionReceipt(useDef, storeRoot)
+      if nixReceiptNamesProfile(receipt, cached.profile):
+        # The record is reusable only because its paths still exist (see
+        # ``nixMaterializationProfileMatches``); re-assert their root so they
+        # keep existing. Warm, this is one directory listing, one receipt
+        # read and no process.
+        rootNixRealization(storeRoot, useDef, plan,
+          cached.profile.realizedStorePaths)
+        result = cached.profile
+        # Not part of the profile fingerprint (see the field).
+        result.provisioningReceipt = receipt
+        return
+      # The receipt is missing or names another realization (another pin of
+      # the same tool request wrote it last): run the edge, which restores
+      # or re-realizes this pin's receipt.
 
-    # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
-    let req = %*{
-      "action": "resolve",
-      "selector": selector,
-      "expressionFile": plan.nixExpressionFile,
-      "workspaceRoot": getCurrentDir(),
-      "evaluateOnly": true
-    }
-    # ONE RESOLVER AND ONE CLIENT, THE ENGINE'S. This used to carry a private
-    # candidate chain of its own -- ``getCurrentDir()``'s ``build/``,
-    # ``tools/`` and a sibling, then ``REPROBUILD_SOURCE_ROOT``'s ``tools/``
-    # before its ``build/`` -- which had drifted from
-    # ``resolveNixDaemonExecutable`` (the ``bakForeignProvision`` path). It
-    # never considered the STAGED helper ``build/bin/reprobuild-nix-daemon``,
-    # whose ``#!`` names the interpreter pinned at build time; and it
-    # preferred the checked-in ``tools/`` script, whose ``#!/usr/bin/env
-    # python3`` resolves ``python3`` through the build's PATH. Under a PATH
-    # that carries a ``python3`` that is not Python (CodeTracer's in-place
-    # project tests put a version-answering stub there) the "daemon" exited
-    # 0 at once, never bound its socket, and the recipe's C compiler could
-    # not be provisioned: "Failed to connect or spawn reprobuild-nix-daemon".
-    # ``requestNixDaemon`` resolves through the engine's resolver, which tries
-    # the staged helper first and refuses a script whose interpreter is
-    # missing, and it starts the helper the same way the engine does.
-    let exchange =
-      try:
-        requestNixDaemon($req, getCurrentDir())
-      except BuildEngineError as err:
-        raise newException(OSError, err.msg)
-    if not exchange.connected:
-      raise newException(OSError, "Failed to connect or spawn " &
-        "reprobuild-nix-daemon at " & exchange.socketPath & ": " &
-        exchange.diagnostic)
-    let respLine = exchange.response
-
-    if respLine.len == 0:
-      raise newException(OSError, "Received empty response from " &
-        "reprobuild-nix-daemon during tool resolution (the connection " &
-        "closed without a response on each of " & $exchange.attempts &
-        " attempts)")
-
-    let resp = parseJson(respLine)
-    if resp.getOrDefault("status").getStr() != "success":
-      raise newException(OSError, "Daemon resolution error: " & resp.getOrDefault("error").getStr())
-
-    let paths = resp.getOrDefault("paths")
-    if paths.len == 0:
-      raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
-
-    var realized: seq[string] = @[]
-    for path in paths:
-      let realizedPath = path.getStr()
-      if realizedPath.len > 0:
-        realized.add(realizedPath)
-    if realized.len == 0:
-      raise newException(OSError,
-        "Daemon returned no materialized paths for selector: " & selector)
+    # ONE RESOLVER AND ONE CLIENT, THE ENGINE'S. The edge is executed by the
+    # engine's ``"nix"`` provisioner, which reaches ``reprobuild-nix-daemon``
+    # through ``requestNixDaemon``. Before the edge existed this resolver
+    # made that request itself, and before that it carried a private
+    # candidate chain for the helper that had drifted from
+    # ``resolveNixDaemonExecutable``: it preferred the checked-in ``tools/``
+    # script, whose ``#!/usr/bin/env python3`` resolves ``python3`` through
+    # the build's PATH, so under a PATH whose ``python3`` is not Python the
+    # recipe's C compiler could not be provisioned ("Failed to connect or
+    # spawn reprobuild-nix-daemon"). The engine's resolver tries the staged
+    # helper first and refuses a script whose interpreter is missing.
+    let first = realizeNixToolPaths(useDef, storeRoot, workspaceRoot,
+      allOutputs = false)
+    var realized = first.paths
+    var receipt = first.receipt
 
     var selectedStorePath = ""
     var resolved = ""
@@ -1661,28 +1677,21 @@ else:
         selectedStorePath = storePath
         resolved = storePath / plan.declaredExecutablePath
     if resolved.len == 0:
-      var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
-      if plan.nixExpressionFile.len > 0:
-        nixArgs.add("--file")
-        nixArgs.add(plan.nixExpressionFile)
-      else:
-        let selector =
-          if '^' in plan.nixSelector: plan.nixSelector
-          else: plan.nixSelector & "^*"
-        nixArgs.add(selector)
-      let direct = uncontrolledExecCmdEx(shellCommand(nixArgs),
-        env = hostToolEnvironment())
-      if direct.exitCode != 0:
+      # The selector's default outputs do not carry the executable (it lives
+      # in a non-default output). Realize EVERY output, through the same edge
+      # -- the same receipt path, a different selector and fingerprint -- so
+      # the receipt names the realization the profile is built from. An
+      # expression file is built whole by the helper (``nix-build``), and a
+      # selector that already names its outputs (``^``) asks for them, so
+      # neither has more to realize.
+      if plan.nixExpressionFile.len > 0 or '^' in plan.nixSelector:
         raise newException(OSError,
           "tool-resolution failed: nix package realized outputs without " &
-          plan.declaredExecutablePath & "; direct nix build exited " &
-          $direct.exitCode & "\n" & direct.output)
-
-      realized.setLen(0)
-      for line in direct.output.splitLines:
-        let realizedPath = line.strip()
-        if realizedPath.startsWith("/nix/store/"):
-          realized.add(realizedPath)
+          plan.declaredExecutablePath & ": " & realized.join(", "))
+      let all = realizeNixToolPaths(useDef, storeRoot, workspaceRoot,
+        allOutputs = true)
+      realized = all.paths
+      receipt = all.receipt
       selectedStorePath = ""
       resolved = ""
       for storePath in realized:
@@ -1704,7 +1713,7 @@ else:
       installMethod: "nix",
       packageSelector: useDef.packageSelector,
       packageId: plan.packageId,
-      nixSelector: selector,
+      nixSelector: plan.nixSelector,
       declaredExecutablePath: plan.declaredExecutablePath,
       nixExpressionFile: plan.nixExpressionFile,
       realizedStorePaths: realized,
@@ -1751,8 +1760,8 @@ else:
         nixVersion, "nix", plan.lockIdentity,
         plan.declaredExecutablePath, "nix://" & plan.nixSelector,
         selectedStorePath, realized)
-      # Root BEFORE recording: ``nix build --no-link`` (the helper's and the
-      # direct fallback's) left no root, and the record written next outlives
+      # Root BEFORE recording: the helper's ``nix build --no-link`` left no
+      # root of its own, and the record written next outlives
       # the process by design. Without its own root the recorded path stays
       # alive only while some dev-shell profile generation happens to name
       # the same path (reprobuild-pm issue 2026-10-02, addendum 2026-10-03).
@@ -1767,7 +1776,13 @@ else:
         unified.absolutePath, [plan.declaredExecutablePath],
         writerMode = writerMode)
       result.realizedStorePaths.add(unified.absolutePath)
+      # Not part of the profile fingerprint (see the field). Recorded with
+      # the materialization, which is served only while the receipt still
+      # names it (``nixReceiptNamesProfile``).
+      result.provisioningReceipt = receipt
       writeCachedNixMaterialization(storeRoot, useDef, plan, result)
+    # ``receipt`` is "" for a store-less resolution (see above).
+    result.provisioningReceipt = receipt
 
     refreshProfileIdentity(result)
 
@@ -2267,7 +2282,39 @@ proc validateTarEntries(archivePath, archiveType: string) =
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
   let tarExe = requireHostTar()
   requireTarDecompressor(tarExe, archivePath, archiveType)
-  let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
+  # The listing below is read through ``execCmdExCloseOnce``, which merges
+  # stderr into stdout, so every line tar prints is checked as an entry name.
+  # GNU tar warns on stderr about pax keywords it does not know — notably the
+  # ``LIBARCHIVE.xattr.*`` keywords macOS ``/usr/bin/tar`` writes for every
+  # file's xattrs (``com.apple.provenance``) — and that line begins with tar's
+  # own absolute path, so the check below refused every macOS-built archive
+  # as "unsafe" (reprobuild-pm issue 2026-10-16-tar-listing-preflight-reads-
+  # tar-warnings-as-archive-entries). Two GNU-only flags keep tar's own
+  # messages out of the listing on the GNU attempt:
+  #
+  #   * ``--warning=none`` silences GNU tar's warning class
+  #     (https://www.gnu.org/software/tar/manual/html_node/warnings.html).
+  #     Warnings never change tar's exit status, and errors are not warnings,
+  #     so a truncated, unreadable or undecompressable archive still exits
+  #     non-zero and is still refused below (GNU tar 1.35: exit 2).
+  #   * ``--absolute-names`` (``-P``): ``Removing leading `/' from member
+  #     names`` is NOT in that warning class and survives ``--warning=none``.
+  #     In list mode ``-P`` only stops that message: tar prints member names
+  #     as stored either way (measured on GNU tar 1.35, an ``/etc/hosts`` and
+  #     a ``../x`` entry list identically with and without it), so an unsafe
+  #     entry still reaches the check below — and the refusal now names the
+  #     entry instead of tar's diagnostic about it.
+  #
+  # Neither flag can hide an entry: they only REMOVE diagnostic lines, and
+  # entry names are on stdout regardless, so the unsafe-entry check is not
+  # weakened. Filtering lines by a ``tar:`` prefix instead would be, because
+  # an entry may be named like that. Reading stdout apart from stderr is the
+  # more general fix, but it needs both pipes drained concurrently (a quiet
+  # stdout with a full stderr pipe deadlocks), which no exec helper here
+  # provides. bsdtar refuses both flags, falls through to the plain attempt
+  # and needs neither: libarchive reads ``LIBARCHIVE.xattr`` natively.
+  let res = runTarTwice(tarExe,
+    ["--force-local", "--warning=none", "--absolute-names"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
       execCmdExCloseOnce(command))
   if res.exitCode != 0:
@@ -2286,7 +2333,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
         "tool-resolution failed: unsafe archive entry: " & entry)
 
 proc resolveZipExtractor(): tuple[exe: string; kind: string] =
-  ## Choose a zip extractor. PowerShell's `Expand-Archive` is the
+  ## Choose a zip extractor. PowerShell (.NET's zip reader) is the
   ## native Windows path and round-trips both `\\`- and `/`-separated
   ## archives. `unzip` is the POSIX baseline. Returns a (path, kind)
   ## pair; `kind` discriminates the command line shape because they
@@ -4165,7 +4212,9 @@ proc extractorExecutable(node: JsonNode): string =
       "tool-resolution failed: the " & node{"role"}.getStr() &
       " dependency edge left no receipt at " & receipt)
   if node{"kind"}.getStr() == NixProvisionerName:
-    result = readFile(extendedPath(receipt)).strip() /
+    # The receipt's first path is the executable-bearing output.
+    let paths = readNixReceiptPaths(receipt)
+    result = (if paths.len > 0: paths[0] else: "") /
       node{"executablePath"}.getStr()
   else:
     result = readTarballProvisionReceipt(receipt).executable
@@ -4355,6 +4404,184 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
   result.provisioningReceipt = edges.rootReceipt
 
 # ---------------------------------------------------------------------------
+# Nix realization in tool resolution as a build-graph edge.
+#
+# Dependency-Provisioning-In-Build-Graph.md sections 2 and 3, applied to the
+# `nixPackage` realizations `resolveNixTool` performs (reprobuild-pm issue
+# 2026-10-07, "from-source and out-of-dev-env Nix realizations are not
+# provisioning edges"). The edge is a `bakForeignProvision` whose provisioner
+# (`argv[0]`) is `"nix"`, executed by the ENGINE's own `"nix"` executor -- the
+# one the dev env's `devEnvNixProvisioningActions` and the POSIX extractor
+# edges (`addNixProvisionEdge`) use -- which asks `reprobuild-nix-daemon` to
+# realize the selector and writes the receipt. Nothing here registers a
+# second Nix executor.
+#
+#   * IDENTITY: package selector, declared executable and host, not the pin
+#     (`provisionEdgeIdentity`), so a re-pin -- and the all-outputs retry --
+#     is the same edge and the same receipt path with new content;
+#   * STATIC INPUTS, in the weak fingerprint: the materialization key
+#     (`nixMaterializationCacheKey`: selector, nixpkgs pin, lock identity,
+#     expression file and its digest, executable, probes, host), the selector
+#     actually requested and the working directory a `.#…` selector is
+#     resolved against. DECLARED INPUTS, keyed by content: the expression
+#     file, when there is one, and the `flake.nix` / `flake.lock` of that
+#     directory when present -- the files the helper reads for every request
+#     (`dependencies_for`) and reports back. The report itself is kept as the
+#     edge's provisioner-reported inputs, which are attribution, not a cache
+#     key: nothing revalidates them on a hit, so the files that decide a
+#     `.#…` selector's realization are declared (section 3, step 3);
+#   * OUTPUT: the receipt, naming every realized store path, the
+#     executable-bearing output first. Store paths are content-addressed and
+#     host-independent, so the receipt reads the same on every host that
+#     realizes the same pin;
+#   * a receipt whose store paths have since been collected is re-executed
+#     rather than trusted (`realizeNixToolPaths`).
+#
+# The edge is `netFetch`: realizing a selector fetches its sources and
+# substitutes. Its destination is the logical `nix://<selector>` source the
+# pin names; what Nix itself contacts is Nix's substituter configuration.
+# ---------------------------------------------------------------------------
+
+const NixToolProvisionEdgeSchema = "reprobuild.nix-tool-provision.v1"
+
+proc nixToolProvisionEdgeId(useDef: InterfaceToolUse;
+                            plan: NixAcquisitionPlan): string =
+  ## Distinct from ``addNixProvisionEdge``'s ``nix-provision.`` ids: an
+  ## extractor edge resolves its selector from the tool store, this edge from
+  ## the project's working directory, and the two must not share a receipt.
+  let identity = provisionEdgeIdentity(NixProvisionerName,
+    useDef.packageSelector, plan.declaredExecutablePath)
+  "nix-tool-provision." & safeIdSegment(useDef.packageSelector) & "." &
+    identity[0 .. 11]
+
+proc nixToolProvisionReceipt(useDef: InterfaceToolUse;
+                             storeRoot: string): string =
+  ## The receipt path of ``useDef``'s Nix provisioning edge in ``storeRoot``,
+  ## or "" when there is no store (see ``resolveNixTool``).
+  if storeRoot.len == 0:
+    return ""
+  let plan = nixAcquisitionPlan(useDef)
+  provisioningStateRoot(absolutePath(storeRoot)) / "receipts" /
+    (nixToolProvisionEdgeId(useDef, plan) & ".receipt")
+
+proc nixToolProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
+                               workspaceRoot = getCurrentDir();
+                               allOutputs = false): ProvisioningEdges =
+  ## The provisioning subgraph that realizes ``useDef`` from its
+  ## ``nixPackage`` pin: one ``"nix"`` edge (the helper provisions whatever
+  ## Nix needs; there is no extractor edge). ``workspaceRoot`` is the
+  ## directory the selector is resolved against. ``allOutputs`` asks for every
+  ## output of the selector (``<selector>^*``), for a package whose
+  ## executable is not in its default outputs. Raises the plan's own errors
+  ## (no ``nixPackage`` metadata, an incomplete one) before any edge exists.
+  let plan = nixAcquisitionPlan(useDef)
+  let id = nixToolProvisionEdgeId(useDef, plan)
+  let receipt = provisioningStateRoot(storeRoot) / "receipts" /
+    (id & ".receipt")
+  let selector =
+    if allOutputs and '^' notin plan.nixSelector: plan.nixSelector & "^*"
+    else: plan.nixSelector
+  # Read by the engine's ``"nix"`` executor (``builtinText``). The selector is
+  # resolved against ``workspaceRoot``; the edge's ``cwd`` is the tool store,
+  # so the engine's run ledger -- which keys an action's GC-root manifest by
+  # its id and ``cwd`` -- keeps one manifest per tool request in this store,
+  # and a re-pin replaces it and lets the superseded realization's root go
+  # (as ``rootNixRealization`` does for its own root). A ``cwd`` per project
+  # directory would keep every directory's last realization rooted.
+  let text = $(%*{
+    "schema": NixToolProvisionEdgeSchema,
+    "workspaceRoot": workspaceRoot,
+    "expressionFile": plan.nixExpressionFile})
+  var inputs: seq[string]
+  if plan.nixExpressionFile.len > 0:
+    let expression =
+      if isAbsolute(plan.nixExpressionFile): plan.nixExpressionFile
+      else: workspaceRoot / plan.nixExpressionFile
+    # A missing file is the helper's error to report, so it is declared only
+    # when present.
+    if fileExists(extendedPath(expression)):
+      inputs.add(expression)
+  # The helper reads these for every request, and a `.#…` selector is
+  # evaluated from them; declaring them is what makes editing the flake miss
+  # the action cache instead of serving the previous receipt. Absent files
+  # are not declared (a `nixpkgs#…` selector from a directory with no flake).
+  for name in ["flake.nix", "flake.lock"]:
+    let flakeFile = workspaceRoot / name
+    if fileExists(extendedPath(flakeFile)):
+      inputs.add(flakeFile)
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = storeRoot,
+    inputs = inputs,
+    outputs = [receipt],
+    commandStatsId = "repro nix tool provision edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(
+      NixToolProvisionEdgeSchema & "\0" &
+      nixMaterializationCacheKey(useDef, plan) & "\0" & selector & "\0" &
+      workspaceRoot),
+    actionCachePolicy = ffpChecksum,
+    text = text,
+    networkMode = netFetch,
+    netDestinations = ["nix://" & selector])
+  action.argv = @[NixProvisionerName, selector]
+  result.actions.add(action)
+  result.rootId = id
+  result.rootReceipt = receipt
+
+proc raiseNixProvisioningFailure(run: BuildRunResult) =
+  ## The engine's ``"nix"`` executor reports a failure as the message it
+  ## raised ("Failed to connect or spawn reprobuild-nix-daemon at …",
+  ## "Daemon resolution error: …"); it is re-raised as the ``OSError`` this
+  ## resolver has always raised, with the message unchanged.
+  for item in run.results:
+    if item.status == asFailed:
+      raise newException(OSError, item.stderr)
+  for item in run.results:
+    if item.status == asBlocked:
+      raise newException(OSError,
+        "tool-resolution failed: provisioning edge " & item.id &
+        " was blocked by " & item.blockedBy)
+
+proc realizeNixToolPaths(useDef: InterfaceToolUse;
+                         storeRoot, workspaceRoot: string;
+                         allOutputs: bool):
+    tuple[paths: seq[string]; receipt: string] =
+  ## Run ``useDef``'s Nix provisioning edge and return the store paths its
+  ## receipt names, and the receipt (``""`` with no store).
+  if storeRoot.len == 0:
+    # No tool store: execute the same edge once against a scratch receipt
+    # and discard it (see ``resolveNixTool`` for why there is no receipt).
+    let scratch = createTempDir("repro-nix-tool-", "")
+    defer: removeDir(scratch)
+    let edges = nixToolProvisioningEdges(useDef, scratch, workspaceRoot,
+      allOutputs)
+    let res = executeBuiltinAction(edges.actions[0])
+    if res.status != asSucceeded:
+      raise newException(OSError, res.stderr)
+    result.paths = readNixReceiptPaths(edges.rootReceipt)
+  else:
+    let stateStore = absolutePath(storeRoot)
+    let edges = nixToolProvisioningEdges(useDef, stateStore, workspaceRoot,
+      allOutputs)
+    result.receipt = edges.rootReceipt
+    for attempt in 0 .. 1:
+      # The action cache can keep a receipt whose store paths were collected
+      # since (``nix-store --gc``, a dropped root); the second attempt forces
+      # the edge to execute, and the helper realizes them again.
+      let run = runProvisioningEdges(edges, stateStore,
+        forceRebuild = attempt > 0)
+      raiseNixProvisioningFailure(run)
+      result.paths = readNixReceiptPaths(edges.rootReceipt)
+      if result.paths.len > 0 and
+          result.paths.allIt(dirExists(extendedPath(it))):
+        break
+  if result.paths.len == 0:
+    raise newException(OSError,
+      "Daemon returned no materialized paths for selector: " &
+      nixAcquisitionPlan(useDef).nixSelector)
+
+# ---------------------------------------------------------------------------
 # MR5 -- Bootstrap toolchain resolution for the interface-extract step.
 #
 # The engine's `repro-interface-extract` step compiles the project's
@@ -4382,6 +4609,14 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
 # ---------------------------------------------------------------------------
 
 const
+  BootstrapNimVersion* = "2.2.10"
+    ## The Nim release every bootstrap archive below is. The URLs and
+    ## digests are measured for this release, so changing it means
+    ## re-measuring them. Package ids, lock identities and the version the
+    ## records carry (which the ``uses`` range check reads) are spelled from
+    ## it, so they cannot disagree with one another.
+  BootstrapNimPackageId = "nim@" & BootstrapNimVersion
+  BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
     "https://nim-lang.org/download/nim-2.2.10_x64.zip"
   BootstrapNimTarballSha256 =
@@ -4426,7 +4661,7 @@ const
 proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "nim >=2.2 <3.0",
-    packageSelector: "nim@2.2.10",
+    packageSelector: BootstrapNimPackageId,
     executableName: "nim")
   when defined(windows):
     result.tarballProvisioning = @[
@@ -4437,8 +4672,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "zip",
         executablePath: "bin/nim.exe",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:sha256:" & BootstrapNimTarballSha256,
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId & ":sha256:" &
+          BootstrapNimTarballSha256,
         cpu: "x86_64",
         os: "windows")]
   elif defined(macosx):
@@ -4452,8 +4688,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-aarch64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-aarch64:sha256:" &
           BootstrapNimTarballMacosArm64Sha256,
         cpu: "aarch64",
         os: "macos"),
@@ -4466,8 +4703,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-x86_64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-x86_64:sha256:" &
           BootstrapNimTarballMacosX64Sha256,
         cpu: "x86_64",
         os: "macos")]
@@ -4502,9 +4740,19 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "build.sh",
         stripComponents: 1,
-        packageId: "nim-source@2.2.10",
-        lockIdentity: "tarball:nim-source@2.2.10:sha256:" &
+        packageId: BootstrapNimSourcePackageId,
+        lockIdentity: "tarball:" & BootstrapNimSourcePackageId & ":sha256:" &
           BootstrapNimSourceTarballSha256)]
+  # Every record above is the ``BootstrapNimVersion`` release, and says so --
+  # from the constant its package ids are spelled from, so the two cannot
+  # drift apart. Acquisition holds a request to its ``uses`` range
+  # (``selectTarballRecord``'s ``versionRange``) and admits an unversioned
+  # record only for an unversioned request, so these records -- built here
+  # rather than by the ``tarball`` DSL statement, which records ``version``
+  # -- must carry it, or this host's only route refuses the bootstrap's own
+  # ``nim >=2.2 <3.0``.
+  for record in result.tarballProvisioning.mitems:
+    record.detail.version = BootstrapNimVersion
 
 proc bootstrapGccToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -5036,7 +5284,7 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
   ## The tarball package of Nim ``version``'s pinned source archive. Its
   ## declared executable is ``build.sh``: what the tarball edge must find in
   ## the extracted tree for the build edge to run.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim-source@" & version,
     executableName: "nim",
@@ -5049,6 +5297,9 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
       stripComponents: 1,
       packageId: "nim-source@" & version,
       lockIdentity: "tarball:nim-source@" & version & ":sha256:" & sha256)])
+  # The record is ``version``'s archive; without the version the range check
+  # refuses the ``nim ==<version>`` this use asks for.
+  result.tarballProvisioning[0].detail.version = version
 
 proc nimSourceBuildEdges*(version, url, sha256, storeRoot, cc,
                           sdkRoot: string): ProvisioningEdges =
@@ -5172,7 +5423,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
       if cc.len == 0:
         raise newException(OSError, "there is no bootstrap C compiler to " &
           "build it with")
-      result = buildNimFromSourceThroughEdges("2.2.10",
+      result = buildNimFromSourceThroughEdges(BootstrapNimVersion,
         BootstrapNimSourceTarballUrl, BootstrapNimSourceTarballSha256,
         storeRoot, cc, "")
     if result.len == 0:
@@ -5180,7 +5431,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
   except CatchableError as err:
     raise newException(BootstrapNimError,
       "could not provision the Nim compiler that compiles the recipe" &
-      "\n  package: nim 2.2.10" &
+      "\n  package: nim " & BootstrapNimVersion &
       "\n  route: " & describeBootstrapNimRoute(route) &
       "\n  tool store: " & storeRoot &
       "\n  failure: " & indentDetail(err.msg) &
@@ -5295,7 +5546,7 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
   ## bootstrap's own Windows Nim this is the same selector, URL, digest and
   ## lock identity as ``bootstrapNimToolUse``, so the two share one
   ## tool-store prefix.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim@" & version,
     executableName: "nim",
@@ -5308,6 +5559,10 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
       stripComponents: 1,
       packageId: "nim@" & version,
       lockIdentity: "tarball:nim@" & version & ":sha256:" & sha256)])
+  # The record is ``version``'s archive; without the version the range check
+  # refuses the ``nim ==<version>`` this use asks for (as in
+  # ``nimSourceToolUse``).
+  result.tarballProvisioning[0].detail.version = version
 
 type
   PinnedNimRealization* = object

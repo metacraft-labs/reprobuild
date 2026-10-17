@@ -11,6 +11,11 @@
       "source": "libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim"
     },
     {
+      "ctTestCaseCount": 2,
+      "inventoryStaticCaseCount": 3,
+      "source": "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim"
+    },
+    {
       "ctTestCaseCount": 4,
       "inventoryStaticCaseCount": 5,
       "source": "tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim"
@@ -30,15 +35,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 13411,
-      "suite": 3116
+      "case": 13689,
+      "suite": 3191
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 16207,
-      "python-unittest": 317
+      "nim-unittest": 16518,
+      "python-unittest": 359
     },
-    "itemsTotal": 16527,
+    "itemsTotal": 16880,
     "responseDiagnostics": {
       "info": 1,
       "warning": 34
@@ -237,29 +242,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.96,
-    "caseItemsInCatalog": 13411,
-    "casesAddressableThroughTheSurface": 12715,
+    "caseCoveragePercent": 97.0,
+    "caseItemsInCatalog": 13689,
+    "casesAddressableThroughTheSurface": 12955,
     "collidingIdentities": 12,
-    "distinctCaseIdentities": 13397,
+    "distinctCaseIdentities": 13675,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 2049,
-      "compared": 2054,
-      "disagree": 5
+      "agree": 2093,
+      "compared": 2099,
+      "disagree": 6
     },
-    "sourceCoveragePercent": 99.61,
-    "sourcesAddressableThroughTheSurface": 2054,
+    "sourceCoveragePercent": 99.62,
+    "sourcesAddressableThroughTheSurface": 2099,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 2062,
-    "trackedStaticCaseCount": 13114
+    "trackedNimSuiteSources": 2107,
+    "trackedStaticCaseCount": 13355
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "9a487d10b3d3f3816a7023a634e8143561e8cf5892494d58cc412a89f8e87d2d"
+    "sha256": "200bda63d73ed76c387c31b5de962f1bc333f088ebf5c206c963dd0b5c0c3a1c"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [

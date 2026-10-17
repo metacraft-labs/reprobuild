@@ -21,6 +21,17 @@ type
     ## Step 1: could not parse `home.nim` or its predicate modules.
     profilePath*: string
 
+  EUndeclaredHost* = object of EApplyIntentLoad
+    ## The profile declares a `hosts:` registry and the selected host is not
+    ## in it. Refused rather than planned with `default` alone: a misspelt or
+    ## forgotten host would otherwise get a valid-looking, much smaller home
+    ## while the run reports success (Core-Invariants.md §Unrecognised Input
+    ## Is Rejected, Not Skipped; Gradual-Nix-To-Reprobuild-Migration.md Open
+    ## question 6). A host that should run `default` alone says so with an
+    ## entry naming only `default`.
+    host*: string
+    declaredHosts*: seq[string]
+
   EApplyConfigurableFinalize* = object of EHomeApply
     ## Step 2: configurable graph could not be resolved.
     configurableKey*: string
@@ -34,6 +45,22 @@ type
     ## Step 4-5: diff computation against the current generation
     ## raised. Distinct from realize/materialize so partial-recovery
     ## tests can tell the planning phase apart.
+
+  EApplyPackageCommandRefused* = object of EApplyPlanFailed
+    ## Step 5: a command a package reference asks for cannot be provided by
+    ## the realization it selected, or two packages would export the same
+    ## command. Raised before anything is realized or placed.
+    ## ``reason`` is ``"undeclared-binary"`` -- the profile names
+    ## ``binaries`` the selected application record does not declare
+    ## (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped) --
+    ## or ``"command-collision"`` -- ``commandName`` is exported by
+    ## ``packageId`` and by ``otherPackageId``.
+    packageId*: string
+    commandName*: string
+    realization*: string
+      ## The selected record's lock identity (or URL when it has none).
+    reason*: string
+    otherPackageId*: string
 
   EApplyRealizeFailed* = object of EHomeApply
     ## Step 7: a package's realization through Scoop / Nix / tarball
@@ -197,6 +224,22 @@ proc raisePlanFailed*(msg: string) {.noreturn.} =
     "repro home apply: step 5 (plan) failed: " & msg)
   e.step = 5
   e.stepName = "plan"
+  raise e
+
+proc raisePackageCommandRefused*(packageId, commandName, realization,
+                                 reason, otherPackageId, msg: string)
+    {.noreturn.} =
+  ## Step 5 refusal of a package command (``EApplyPackageCommandRefused``).
+  var e = newException(EApplyPackageCommandRefused,
+    "repro home apply: step 5 (plan) failed for package " & packageId &
+    ", command '" & commandName & "': " & msg)
+  e.step = 5
+  e.stepName = "plan"
+  e.packageId = packageId
+  e.commandName = commandName
+  e.realization = realization
+  e.reason = reason
+  e.otherPackageId = otherPackageId
   raise e
 
 proc raiseRealizeFailed*(packageId, adapter, msg: string) {.noreturn.} =

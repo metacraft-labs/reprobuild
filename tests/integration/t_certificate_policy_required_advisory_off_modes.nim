@@ -63,11 +63,14 @@
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos + the REAL
 ## installed hooks; no network. Skip rule: ``git`` missing on PATH.
 
+import repro_test_support/reasoned_skip
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
 
 proc q(value: string): string = quoteShell(value)
 
@@ -279,6 +282,70 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         check ("key_id '" & modesUnregisteredKeyId & "' not registered") in
           pushed.output
         check "untrusted certs ignored" in pushed.output
+
+  test "t_certificate_policy_modes_come_from_the_pushed_snapshot":
+    ## TC-9c reconciliation. The three arms above drive the mode through the
+    ## gateway config's BAKED ``gate_mode`` — the interim input for pushed
+    ## content that carries no policy snapshot. This case declares the policy
+    ## instead: the pushed commit's ``repro.lock`` carries a
+    ## ``[certificate_policy]`` whose rule for ``main`` sets the mode, and the
+    ## config is wired with the OPPOSITE baked mode, which the snapshot must
+    ## override:
+    ##
+    ##   * snapshot ``required``, baked ``off``  → REJECTED, by key id;
+    ##   * snapshot ``advisory``, baked ``required`` → ACCEPTED + FORWARDED,
+    ##     the advisory naming the key id;
+    ##   * snapshot ``off``, baked ``required`` → ACCEPTED + FORWARDED, no
+    ##     certificate verdict (only the policy line saying ``off``).
+    ##
+    ## The upstream ``main`` carries no snapshot, so the ratchet's anchor sets
+    ## no floor here (that is the gateway test of TC-9c).
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case pushes through a real gateway")
+    else:
+      for (snapshotMode, bakedMode) in [(pmRequired, cgmOff),
+          (pmAdvisory, cgmRequired), (pmOff, cgmRequired)]:
+        let fx = setupModeFixture(gitBin, "snapshot-" & $snapshotMode)
+        defer: removeDir(fx.scratch)
+        let seedTip = upstreamTip(gitBin, fx.upstreamBare)
+        wire(gitBin, fx, bakedMode)
+        let snapshot = renderCertificatePolicySnapshot(BranchCertificatePolicy(
+          name: "modes", package: "certpolicy", rules: @[PolicyRule(
+            branches: @["main"], gateMode: snapshotMode,
+            commitGate: snapshotMode,
+            requires: @[PolicyRequirement(certificate: "t-unit",
+              platforms: @[currentPlatformTag()])])]))
+        writeFile(fx.clone / "repro.lock", replaceCertificatePolicySection(
+          serializeLockedDependencies(LockedDependencies(
+            schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+        discard requireGit(q(gitBin) & " -C " & q(fx.clone) &
+          " add repro.lock")
+        let newSha = makeNewCommit(gitBin, fx, $snapshotMode & " change\n")
+        discard attachUntrustedCert(gitBin, fx, newSha)
+        let pushed = pushThroughGateway(gitBin, fx)
+        checkpoint($snapshotMode & " (baked " & $bakedMode & ") push output: " &
+          pushed.output)
+        check ("rule \"main\"") in pushed.output
+        check ("applied gate_mode " & $snapshotMode) in pushed.output
+        if bakedMode != cgmOff:
+          check "IGNORED" in pushed.output
+        case snapshotMode
+        of pmRequired:
+          check pushed.code != 0
+          check upstreamTip(gitBin, fx.upstreamBare) == seedTip
+          check ("key_id '" & modesUnregisteredKeyId & "' not registered") in
+            pushed.output
+        of pmAdvisory:
+          check pushed.code == 0
+          check upstreamTip(gitBin, fx.upstreamBare) == newSha
+          check "advisory" in pushed.output
+          check ("key_id '" & modesUnregisteredKeyId & "' not registered") in
+            pushed.output
+        of pmOff:
+          check pushed.code == 0
+          check upstreamTip(gitBin, fx.upstreamBare) == newSha
+          check modesUnregisteredKeyId notin pushed.output
 
   test "t_certificate_note_ref_name_read_tells_unreadable_from_absent":
     ## W11 — the ref-NAME certificate-note read reports an UNREADABLE note

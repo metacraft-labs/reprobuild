@@ -53,6 +53,7 @@ import repro_attest
 import repro_attest_verify
 import repro_attest_verify/snp_report
 import repro_cli_support/attest as cli_attest
+import repro_test_support/process_fixtures
 
 include ./snp_vectors
 include ./attestation_verifier_harness
@@ -549,6 +550,7 @@ suite "the certificate chain the AGENT produced reaches the verdict":
     # it against the vendor root it holds. Nothing in between is
     # hand-assembled.
     let dir = getTempDir() / ("repro-snp-verdict-" & $getCurrentProcessId())
+    releaseDirAtProcessExit(dir)    # nothing else removed it
     createDir(dir)
     writeFile(dir / TsmOutblobAttr, stringOfHex(partA.reportHex))
     writeFile(dir / TsmProviderAttr, SevSnpProviderName & "\n")
@@ -640,6 +642,11 @@ suite "the command line can hand the verifier a vendor revocation list":
   # did not reach the field.
 
   let dir = getTempDir() / ("repro-attest-vendor-crl-" & $getCurrentProcessId())
+  # Removed when THIS process exits. Suite-level code runs in every process
+  # the runner starts -- one per case, plus its ``--list-json`` probe -- and
+  # nothing removed this directory in any of them. Registered before it is
+  # created. See ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(dir)
   createDir(dir)
 
   proc write(name, content: string): string =

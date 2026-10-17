@@ -24,6 +24,7 @@ import std/[strutils, tables]
 from repro_core/paths import extendedPath
 from repro_profile/data_refs import dataFilePathProblem
 from repro_profile/catalog_refs import catalogImportPathProblem
+from repro_profile/concerns import concernListProblem
 
 import ./errors
 import ./model
@@ -890,6 +891,58 @@ proc parseHostsEntry(ctx: ParseCtx; idx, entryIndent: int): IntentNode =
   while i < trimmed.len and trimmed[i] in {' ', '\t'}:
     inc i
   let rest = trimmed[i .. ^1]
+  if rest.len == 0 or rest.startsWith("#"):
+    # Block form (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+    # apply): `activities: [...]` and / or `applies: [...]` lines, indented
+    # under the host -- the same surface the `profile` macro accepts, with
+    # the same refusals.
+    result = IntentNode(kind: nkHostsEntry,
+      startLine: idx + 1, endLine: idx + 1, indent: entryIndent,
+      hostName: hostName, hostEntryLine: idx + 1, hostBlockForm: true)
+    let childIndent = entryIndent + ctx.indentStep
+    let endIdx = lastStructuralIdx(ctx.lines, idx + 1, childIndent)
+    var seenKeys: seq[string]
+    for j in idx + 1 .. endIdx:
+      let line = ctx.lines[j]
+      if isBlankOrComment(line):
+        continue
+      let ind = countLeadingSpaces(line)
+      if ind != childIndent:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "'" & line.strip() & "' at indent " & $ind,
+          "`activities: [...]` or `applies: [...]` at indent " &
+          $childIndent)
+      let body = trimTrailing(line)[ind .. ^1]
+      let colon = body.find(':')
+      let key = if colon > 0: body[0 ..< colon].strip() else: ""
+      if key notin ["activities", "applies"]:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "'" & body & "' in hosts entry \"" & hostName & "\"",
+          "`activities: [...]` or `applies: [...]`")
+      if key in seenKeys:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "a second `" & key & ":` in hosts entry \"" & hostName & "\"",
+          "each of `activities:` / `applies:` at most once")
+      seenKeys.add key
+      let list = splitHostList(ctx, j, body[colon + 1 .. ^1],
+        ind + colon + 1)
+      if key == "activities":
+        result.hostActivities = list
+        result.hostActivitiesLine = j + 1
+      else:
+        let problem = concernListProblem(list)
+        if problem.len > 0:
+          raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+            "applies: " & problem & " in hosts entry \"" & hostName & "\"",
+            "known concern names, each at most once")
+        result.hostAppliesDeclared = true
+        result.hostApplies = list
+    if seenKeys.len == 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, i + 1,
+        "a host entry with neither a list nor an indented block",
+        "`[activities]` or an indented `activities:` / `applies:` block")
+    result.endLine = max(endIdx + 1, idx + 1)
+    return
   let activities = splitHostList(ctx, idx, rest, i)
   result = IntentNode(kind: nkHostsEntry,
     startLine: idx + 1, endLine: idx + 1, indent: entryIndent,
@@ -910,8 +963,9 @@ proc parseHostsBlock(ctx: ParseCtx; idx, parentIndent,
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "' at indent " & $ind,
         "content at indent " & $entryIndent)
-    entries.add parseHostsEntry(ctx, i, entryIndent)
-    inc i
+    let entry = parseHostsEntry(ctx, i, entryIndent)
+    entries.add entry
+    i = entry.endLine
   result = IntentNode(kind: nkHostsBlock,
     startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
     indent: parentIndent, hostsHeaderLine: idx + 1,

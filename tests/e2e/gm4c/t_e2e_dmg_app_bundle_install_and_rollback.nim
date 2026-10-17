@@ -74,15 +74,38 @@
 ## operation runs), no staging directory is left, `current` does not move,
 ## and no disk image is attached.
 ##
+## Command line (§ macOS Application Bundles, "Command line"): an
+## application record that declares a command inside its bundle
+## (`extraExecutable`, the way Visual Studio Code carries `code`) gets a
+## launcher for it in the home profile's bin directory, and the launcher runs
+## the PLACED copy in `~/Applications` -- the fixture command prints its own
+## path, so the test sees which copy ran. Rolling back to a generation
+## without the application removes the command with the bundle; rolling
+## forward again restores both; narrowing the host's concerns to `packages`
+## releases the bundle and drops the command. A declared command missing from
+## the bundle fails realization (`EBuiltinBinaryMissing`, naming the package
+## and the path) with nothing placed or published, and a
+## profile `binaries` name (as a dotfiles `apps.toml` row declares it) the application does not provide is refused at
+## plan time, before anything is downloaded.
+##
+## Falsifying mutations (performed): making `addApplicationCommands` skip the
+## declared commands (the pre-fix behaviour, `extraExecutable` on an
+## application silently ignored) turns the command test red at the first
+## launcher check, and the `binaries` test red (the refusal then names
+## `gm4ccli`, which is no longer provided). Dropping the `binaries` check
+## alone (the pre-fix acceptance) turns the `binaries` test red: the apply
+## succeeds and places the application.
+##
 ## Never touches the real `~/Applications` or `/Applications`: the apply's
 ## home is a temporary directory.
 
 when defined(macosx):
-  import std/[os, strutils, tempfiles, unittest]
+  import std/[os, osproc, strutils, tempfiles, unittest]
 
   import repro_project_dsl
   import repro_local_store
   import repro_home_apply
+  from repro_home_apply/builtin_adapter import EBuiltinBinaryMissing
   import repro_home_generations
   import repro_home_intent
   import repro_home_resources
@@ -117,6 +140,18 @@ when defined(macosx):
   let dmgV1 = makeFixtureDmg(fixtureRoot, "gm4c-1.0.0.dmg", [appV1])
   let dmgV2 = makeFixtureDmg(fixtureRoot, "gm4c-2.0.0.dmg", [appV2], "APFS")
   let dmgBad = makeFixtureDmg(fixtureRoot, "gm4c-bad.dmg", [appBad])
+  # An application carrying a command-line tool inside its bundle, the way
+  # Visual Studio Code carries `code`. The tool prints its own path, so the
+  # test can tell which copy of the bundle a launcher ran.
+  const
+    CliAppName = "GM4cCli"
+    CliAppId = "dev.reprobuild.gm4c.cli"
+    CliCommandInBundle = "Contents/Resources/bin/gm4ccli"
+    CliCommand = CliAppName & ".app/" & CliCommandInBundle
+  let appCli = makeFixtureApp(fixtureRoot / "cli", CliAppName, CliAppId,
+    "1.0.0", commands = [(path: CliCommandInBundle,
+      body: "#!/bin/sh\necho \"gm4ccli 1.0.0 $0 $*\"\n")])
+  let dmgCli = makeFixtureDmg(fixtureRoot, "gm4c-cli-1.0.0.dmg", [appCli])
   let identityV1 = appBundleCanonicalBytes(readAppBundleIdentity(appV1))
   let identityV2 = appBundleCanonicalBytes(readAppBundleIdentity(appV2))
 
@@ -143,6 +178,27 @@ when defined(macosx):
       tarballProvisioning: @[
         if appVersion == "2.0.0": appRecord(dmgV2, "2.0.0")
         else: appRecord(dmgV1, "1.0.0")]))
+    proc cliRecord(package: string; commands: seq[string]):
+        TarballProvisioningDef =
+      let sha = sha256Of(dmgCli)
+      TarballProvisioningDef(url: "file://" & dmgCli, sha256: sha,
+        archiveType: "dmg",
+        executablePath: CliAppName & ".app/Contents/MacOS/" & CliAppName,
+        packageId: package & "@1.0.0",
+        lockIdentity: "tarball:" & package & "@1.0.0:macos-any:sha256:" & sha,
+        cpu: "any", os: "macos",
+        detail: TarballArchiveDetail(version: "1.0.0",
+          installMethod: "app-bundle", appBundle: CliAppName & ".app",
+          bundleId: CliAppId, teamId: FixtureTeamId,
+          extraExecutables: commands))
+    registerPackageDef(PackageDef(packageName: "gm4ccliapp",
+      sourceFile: currentSourcePath(), sourceLine: 4,
+      tarballProvisioning: @[cliRecord("gm4ccliapp", @[CliCommand])]))
+    # The same bundle, declaring a command it does not carry.
+    registerPackageDef(PackageDef(packageName: "gm4cclimissing",
+      sourceFile: currentSourcePath(), sourceLine: 5,
+      tarballProvisioning: @[cliRecord("gm4cclimissing",
+        @[CliAppName & ".app/Contents/Resources/bin/absent"])]))
     var bad = appRecord(dmgBad, "1.0.0")
     bad.executablePath = "GM4cBad.app/Contents/MacOS/GM4cBad"
     bad.packageId = "gm4cbad@1.0.0"
@@ -153,14 +209,18 @@ when defined(macosx):
       tarballProvisioning: @[bad]))
 
   proc writeProfile(root: string; packages: openArray[string];
-                    marker = "") =
+                    marker = ""; applies = "") =
     ## ``marker``, when set, adds an `fs.userFile` resource writing it to
-    ## `~/.gm4c-marker`.
+    ## `~/.gm4c-marker`. ``applies``, when set, declares this host with that
+    ## `applies:` list (GM7 concern-scoped apply).
     var text = "import repro/profile\n\nprofile \"gm4cApps\":\n" &
       "  adapterPreference:\n    darwin: [tarball]\n\n" &
       "  activity default:\n"
     for p in packages:
       text.add("    " & p & "\n")
+    if applies.len > 0:
+      text.add("\n  hosts:\n    \"" & currentHost() & "\":\n" &
+        "      activities: [default]\n      applies: [" & applies & "]\n")
     if marker.len > 0:
       text.add("\n  resources:\n    fs.userFile marker:\n" &
         "      hostFile = \"~/.gm4c-marker\"\n" &
@@ -221,7 +281,163 @@ when defined(macosx):
       if row.packageName == packageName:
         return true
 
+  proc withBinaries(opts: ApplyOptions; package: string;
+                    binaries: seq[string]): ApplyOptions =
+    ## ``opts`` with its profile pre-loaded and ``binaries`` declared on the
+    ## reference to ``package`` -- what the compiled profile carries for
+    ## `package(<id>, binaries = @[...])` or a data-file row's `binaries`
+    ## (`adapter_home`). The text reader this test's applies otherwise use
+    ## reads neither, so the declaration is set on the parsed reference.
+    result = opts
+    let profile = loadProfile(opts.profilePath)
+    var found = false
+    for activity in profile.root.children:
+      if activity.kind != nkActivity:
+        continue
+      for child in activity.activityChildren:
+        if child.kind == nkPackageRef and child.packageName == package:
+          child.packageBinaries = binaries
+          found = true
+    doAssert found, "the profile names no package " & package
+    result.preLoadedProfile = profile
+
+  proc profileBin(root: string): string =
+    ## The home profile's bin directory: the active generation's.
+    root / "state" / "current" / "bin"
+
+  proc runCommand(path: string; args: openArray[string] = []):
+      tuple[output: string; exitCode: int] =
+    execCmdEx(quoteShellCommand(@[path] & @args))
+
   suite "GM4c: e2e_dmg_app_bundle_install_and_rollback":
+
+    test "an application's declared command runs from the profile bin " &
+        "directory against the placed bundle, and leaves with it":
+      let root = newRoot("command")
+      withApplyEnv(root):
+        registerFixtures("1.0.0")
+        writeProfile(root, ["gm4cbase"])
+        let genA = runApply(applyOptions(root, 1000))
+        check genA.kind == aokFreshApplied
+        check not fileExists(profileBin(root) / "gm4ccli")
+
+        writeProfile(root, ["gm4cbase", "gm4ccliapp"])
+        let genB = runApply(applyOptions(root, 2000))
+        check genB.kind == aokFreshApplied
+        let placed = root / "home" / "Applications" / (CliAppName & ".app")
+        check dirExists(placed)
+        # The command is a launcher in the profile bin directory, and it runs
+        # the copy in ~/Applications, not the store copy.
+        let launcher = profileBin(root) / "gm4ccli"
+        check fileExists(launcher)
+        let ran = runCommand(launcher, ["--version"])
+        checkpoint ran.output
+        check ran.exitCode == 0
+        check ran.output.strip() == "gm4ccli 1.0.0 " &
+          (placed / CliCommandInBundle) & " --version"
+        # The package's own launcher runs the placed copy too.
+        check fileExists(profileBin(root) / "gm4ccliapp")
+        let appLauncher = readFile(profileBin(root) / "gm4ccliapp")
+        check (placed / "Contents" / "MacOS" / CliAppName) in appLauncher
+        check (root / "store") notin appLauncher.splitLines()[^2]
+        # `--plan` lists the command, so the preview shows what apply wrote.
+        let preview = runApplyPlan(applyOptions(root, 2100))
+        var plannedCommand = false
+        for item in preview.items:
+          if item.category == "launcher" and item.name == "gm4ccli":
+            plannedCommand = true
+        check plannedCommand
+        check preview.isNoOp
+
+        # Rollback to A removes the command with the bundle.
+        discard runRollback(RollbackOptions(stateDir: root / "state",
+          storeRoot: root / "store", homeDir: root / "home",
+          targetGenerationId: genA.generationIdHex,
+          activationTimestamp: 3000))
+        check not dirExists(placed)
+        check not fileExists(profileBin(root) / "gm4ccli")
+        check not fileExists(profileBin(root) / "gm4ccliapp")
+        # Rolling forward to B restores both.
+        discard runRollback(RollbackOptions(stateDir: root / "state",
+          storeRoot: root / "store", homeDir: root / "home",
+          targetGenerationId: genB.generationIdHex,
+          activationTimestamp: 4000))
+        check dirExists(placed)
+        let again = runCommand(profileBin(root) / "gm4ccli")
+        check again.exitCode == 0
+        check again.output.strip() == "gm4ccli 1.0.0 " &
+          (placed / CliCommandInBundle)
+
+        # Narrowing the host to `packages` releases the bundle (left in
+        # place for the tool that now owns applications) and its commands
+        # leave the profile bin directory with the concern.
+        writeProfile(root, ["gm4cbase", "gm4ccliapp"], applies = "packages")
+        let narrowed = runApply(applyOptions(root, 5000))
+        check narrowed.kind == aokFreshApplied
+        check dirExists(placed)
+        check not fileExists(profileBin(root) / "gm4ccli")
+        check fileExists(profileBin(root) / "gm4cbase")
+      removeDir(root)
+
+    test "a declared command the bundle does not carry is refused at " &
+        "realization; nothing is placed or published":
+      let root = newRoot("command-missing")
+      withApplyEnv(root):
+        registerFixtures("1.0.0")
+        writeProfile(root, ["gm4cbase"])
+        let genA = runApply(applyOptions(root, 1000))
+        check genA.kind == aokFreshApplied
+        writeProfile(root, ["gm4cbase", "gm4cclimissing"])
+        var refused = false
+        try:
+          discard runApply(applyOptions(root, 2000))
+        except EBuiltinBinaryMissing as err:
+          refused = true
+          checkpoint err.msg
+          check err.step == 7
+          check err.packageId == "gm4cclimissing"
+          check err.missingPath == CliAppName &
+            ".app/Contents/Resources/bin/absent"
+          check "is not in the bundle" in err.msg
+        check refused
+        check not dirExists(root / "home" / "Applications" /
+          (CliAppName & ".app"))
+        check not storeHasPackage(root / "store", "gm4cclimissing")
+        check readCurrentGenerationId(root / "state") == genA.generationIdHex
+        check attachedImagesOf(dmgCli).len == 0
+      removeDir(root)
+
+    test "a profile `binaries` name the application does not provide is " &
+        "refused at plan time, before anything is realized":
+      let root = newRoot("binaries")
+      withApplyEnv(root):
+        registerFixtures("1.0.0")
+        writeProfile(root, ["gm4cbase", "gm4ccliapp"])
+        let declared = withBinaries(applyOptions(root, 1000), "gm4ccliapp",
+          @["gm4ccli", "gm4cnope"])
+        var refused = false
+        try:
+          discard runApply(declared)
+        except EApplyPackageCommandRefused as err:
+          refused = true
+          checkpoint err.msg
+          check err.packageId == "gm4ccliapp"
+          check err.commandName == "gm4cnope"
+          check err.reason == "undeclared-binary"
+          check err.realization.startsWith("tarball:gm4ccliapp@1.0.0:")
+          check "gm4ccliapp, gm4ccli" in err.msg
+        check refused
+        # `--plan` refuses the same way.
+        expect EApplyPackageCommandRefused:
+          discard runApplyPlan(declared)
+        check not storeHasPackage(root / "store", "gm4ccliapp")
+        check not dirExists(root / "home" / "Applications")
+        check readCurrentGenerationId(root / "state").len == 0
+        # A name the application does provide is accepted.
+        check runApply(withBinaries(applyOptions(root, 2000), "gm4ccliapp",
+          @["gm4ccli"])).kind == aokFreshApplied
+        check fileExists(profileBin(root) / "gm4ccli")
+      removeDir(root)
 
     test "a DMG-realized package installs its app bundle into " &
         "~/Applications, upgrades, and rollback restores then removes it":
