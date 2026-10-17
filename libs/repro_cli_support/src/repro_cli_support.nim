@@ -15037,7 +15037,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  mergeExtensions = true;
                                  includeDevEnvOnlyProvider = false;
                                  lowerGraph = true;
-                                 selectedActionOverride = ""):
+                                 selectedActionOverride = "";
+                                 bypassRunQuotaExplicit = false):
                                    BuildGraphInspection
 
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
@@ -28151,7 +28152,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  mergeExtensions = true;
                                  includeDevEnvOnlyProvider = false;
                                  lowerGraph: bool;
-                                 selectedActionOverride: string):
+                                 selectedActionOverride: string;
+                                 bypassRunQuotaExplicit: bool):
                                    BuildGraphInspection =
   ## ``mergeExtensions`` (MO-6) folds any present ``projectExtension``
   ## sibling's fragments into this project's snapshot before lowering /
@@ -28177,9 +28179,19 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   # MR5 — see executeBuildTarget for the bootstrap toolchain rationale.
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
   var inspectionStats: BuildStats
+  # The interface edge follows the same runquota policy as the one
+  # ``executeBuildTarget`` runs: an explicit or environment bypass skips the
+  # daemon, and a path/scoop (or not-yet-known) mode falls back to running
+  # unleased when no daemon answers. Without this an inspection on a host
+  # with no reachable ``runquotad`` refused the very edge the build it
+  # inspects would have run.
   let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir, projectRoot, publicCliPath,
-    outDir / "build-engine-cache", inspectionStats, requireStub = false)
+    outDir / "build-engine-cache", inspectionStats, requireStub = false,
+    bypassRunQuota =
+      effectiveProviderCompileRunQuotaBypass(bypassRunQuotaExplicit),
+    fallbackToRunQuotaBypass =
+      mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
   result.interfacePath = interfacePath
 
   var effectiveMode = mode
@@ -28264,7 +28276,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
       deferLocalOutputBlobs: true,
-      bypassRunQuota: runQuotaBypassedByEnv(),
+      bypassRunQuota: effectiveProviderCompileRunQuotaBypass(
+        bypassRunQuotaExplicit),
       fallbackToRunQuotaBypass: effectiveMode in {tpmPathOnly, tpmScoop},
       inlineRunQuota: true,
       dryRun: false,
@@ -28441,9 +28454,14 @@ proc refreshRecipeProviderSnapshot(target: string;
   let compileScratchDir = outDir / "provider-work"
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
   var snapshotStats: BuildStats
+  # Same runquota policy as ``prepareBuildGraphInspection``'s interface edge.
   let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir, projectRoot, publicCliPath,
-    outDir / "build-engine-cache", snapshotStats, requireStub = false)
+    outDir / "build-engine-cache", snapshotStats, requireStub = false,
+    bypassRunQuota =
+      effectiveProviderCompileRunQuotaBypass(bypassRunQuotaExplicit),
+    fallbackToRunQuotaBypass =
+      mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
 
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
@@ -79515,8 +79533,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   var part: CertificatePlanPart
   var names: seq[string]
   try:
-    var autoRunQuota = startAutoRunQuotaIfNeeded(
-      "--no-runquota" in opts.buildFlags)
+    # ``--no-runquota`` reaches the plan's own edges too, not only the build.
+    let bypassRunQuota = "--no-runquota" in opts.buildFlags
+    var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     defer: releaseAutoRunQuotaProcess(autoRunQuota)
     if selectors.len == 0 and opts.certifyExplicit:
       # TC-9c: ``repro certify`` with no names materializes the names the
@@ -79561,7 +79580,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       if selectors.len == 0:
         let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
           selectDefaultAction = false, workRoot = workRoot,
-          lowerGraph = false)
+          lowerGraph = false, bypassRunQuotaExplicit = bypassRunQuota)
         for entry in aggregateCertificateExportTable(declared.snapshot).entries:
           if selectors.find(entry.name) < 0:
             selectors.add(entry.name)
@@ -79579,7 +79598,8 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       if names.find(name) < 0:
         names.add(name)
     info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
-      selectDefaultAction = false, workRoot = workRoot, lowerGraph = false)
+      selectDefaultAction = false, workRoot = workRoot, lowerGraph = false,
+      bypassRunQuotaExplicit = bypassRunQuota)
     part = certificatePlanPart(info.snapshot, info.projectRoot, names)
   except BuildTargetUnknownError, BuildTargetAmbiguousError:
     # The build reports the same selector error in its ordinary form.
