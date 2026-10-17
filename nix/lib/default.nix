@@ -13,6 +13,8 @@
 #   brewRealizationOf  canonical package -> Homebrew cask / formula token,
 #                      from the pinned reprobuild-brew-packages contribution
 #                      records (bridge records: Reprobuild never realizes them)
+#   hostSystemManagement  who manages a host's system scope (here, or
+#                      elsewhere with a pointer), from an export
 #   profileBinPath     an evaluation's `profileBin` -> the absolute directory
 #                      holding the launchers of the concerns Reprobuild
 #                      applies, for the Nix side to put on PATH
@@ -62,6 +64,13 @@ in
   # `packages` / `applications` and Nix the environment (the evaluation's
   # `profileBin`), or null (nix/lib/intent.nix).
   inherit (intent) profileBinPath;
+
+  # `hostSystemManagement { host, snapshot ? null, document ? null }` ->
+  # `{ host, managed = "here" | "elsewhere", managedBy }`: who manages a
+  # host's system scope, read from an export without evaluating a target
+  # system (GM10; nix/lib/intent.nix). A system switch asks it before taking
+  # over a host.
+  inherit (intent) hostSystemManagement;
 
   # The reverse of nixRealizationOf, for the equivalence report:
   # `{ pkgs, drv }` -> `{ found, name, attribute, packageName }` or

@@ -226,7 +226,13 @@ let
     );
   refusalTests =
     expectTrue "readIntent refuses an unknown schemaVersion" (
-      refusedSnapshot "schema4" (neutral // { schemaVersion = 4; })
+      refusedSnapshot "schema5" (neutral // { schemaVersion = 5; })
+    )
+    # GM10: a schema-3 document cannot say a host's system is managed
+    # elsewhere, so a reader that acts on the attribute must not take its
+    # silence for "managed here".
+    ++ expectTrue "readIntent refuses the previous schemaVersion (3)" (
+      refusedSnapshot "schema3" (neutral // { schemaVersion = 3; })
     )
     # GM9: a schema-2 reader would apply activity-scoped resources on every
     # host, so a document is read by the version it declares only.
@@ -648,8 +654,98 @@ let
       ))
     );
 
+  # GM10: `hostSystemManagement` answers what the evaluation's `system`
+  # says, for every declared host of every intent fixture (whose evaluations
+  # are Reprobuild's own, `evaluations.json`), and refuses what readIntent
+  # refuses. The neutral fixture declares m1's system managed elsewhere
+  # (`example-org/infra`) and home-pc's managed here, so both answers occur.
+  systemManagementTests =
+    concatMap (
+      name:
+      let
+        snapshot = intentRoot + "/${name}/export.json";
+        expected = fromJSON (readFile (intentRoot + "/${name}/evaluations.json"));
+      in
+      concatMap (
+        host:
+        let
+          evaluated = filter (e: e ? system) (map (s: expected.${host}.${s}) (attrNames expected.${host}));
+          undeclared = elem true (map (s: expected.${host}.${s} ? undeclaredHost) (attrNames expected.${host}));
+        in
+        if undeclared then
+          expectTrue "hostSystemManagement ${name}: refuses undeclared host ${host}" (
+            fails (reprobuildLib.hostSystemManagement { inherit snapshot host; })
+          )
+        else if evaluated == [ ] then
+          [ ]
+        else
+          expect "hostSystemManagement ${name}: ${host}" ({ inherit host; } // (builtins.head evaluated).system) (
+            reprobuildLib.hostSystemManagement { inherit snapshot host; }
+          )
+      ) (attrNames expected)
+    ) intentCases
+    ++ expect "hostSystemManagement: the neutral fixture's m1 is managed elsewhere" {
+      host = "m1";
+      managed = "elsewhere";
+      managedBy = "example-org/infra";
+    } (reprobuildLib.hostSystemManagement { document = neutral; host = "m1"; })
+    ++ expect "hostSystemManagement: the neutral fixture's home-pc is managed here" {
+      host = "home-pc";
+      managed = "here";
+      managedBy = null;
+    } (reprobuildLib.hostSystemManagement { document = neutral; host = "home-pc"; })
+    ++ expectTrue "hostSystemManagement refuses the previous schemaVersion (3)" (
+      fails (reprobuildLib.hostSystemManagement {
+        document = neutral // { schemaVersion = 3; };
+        host = "home-pc";
+      })
+    )
+    ++ expectTrue "hostSystemManagement refuses a malformed entry" (
+      fails (reprobuildLib.hostSystemManagement {
+        document = neutral // {
+          intent = neutral.intent // {
+            systemManagedElsewhere = {
+              "home-pc" = "example-org/infra";
+            };
+          };
+        };
+        host = "m1";
+      })
+    )
+    ++ expectTrue "hostSystemManagement refuses an entry for an undeclared host" (
+      fails (reprobuildLib.hostSystemManagement {
+        document = neutral // {
+          intent = neutral.intent // {
+            systemManagedElsewhere = neutral.intent.systemManagedElsewhere // {
+              "gm10-nowhere" = {
+                managedBy = null;
+              };
+            };
+          };
+        };
+        host = "m1";
+      })
+    )
+    # The evaluation refuses the same malformed table rather than reading
+    # the host as managed here.
+    ++ expectTrue "readIntent refuses a malformed systemManagedElsewhere" (
+      refusedSnapshot "malformed-system" (
+        neutral
+        // {
+          intent = neutral.intent // {
+            systemManagedElsewhere = {
+              "m1" = {
+                managedBy = "";
+              };
+            };
+          };
+        }
+      )
+    );
+
   failures =
-    profileBinTests
+    systemManagementTests
+    ++ profileBinTests
     ++ predicateTests
     ++ dataSelectionTests
     ++ dataRejectionTests

@@ -224,7 +224,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "elsewhere",
+        "managedBy": "example-org/infra"
+      }
     },
     "aarch64-linux": {
       "target": "aarch64-linux",
@@ -450,7 +454,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "elsewhere",
+        "managedBy": "example-org/infra"
+      }
     },
     "x86_64-darwin": {
       "target": "x86_64-darwin",
@@ -683,7 +691,11 @@
           },
           "guard": "macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "elsewhere",
+        "managedBy": "example-org/infra"
+      }
     },
     "aarch64-darwin": {
       "target": "aarch64-darwin",
@@ -922,7 +934,11 @@
           },
           "guard": "macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "elsewhere",
+        "managedBy": "example-org/infra"
+      }
     },
     "x86_64-windows": {
       "target": "x86_64-windows",
@@ -1123,7 +1139,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "elsewhere",
+        "managedBy": "example-org/infra"
+      }
     },
     "aarch64-windows": {
       "target": "aarch64-windows",
@@ -1324,7 +1344,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "elsewhere",
+        "managedBy": "example-org/infra"
+      }
     }
   },
   "home-pc": {
@@ -1570,7 +1594,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-linux": {
       "target": "aarch64-linux",
@@ -1814,7 +1842,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "x86_64-darwin": {
       "target": "x86_64-darwin",
@@ -2065,7 +2097,11 @@
           },
           "guard": "macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-darwin": {
       "target": "aarch64-darwin",
@@ -2322,7 +2358,11 @@
           },
           "guard": "macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "x86_64-windows": {
       "target": "x86_64-windows",
@@ -2535,7 +2575,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     },
     "aarch64-windows": {
       "target": "aarch64-windows",
@@ -2748,7 +2792,11 @@
           },
           "guard": "not macos"
         }
-      ]
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
     }
   },
   "server": {

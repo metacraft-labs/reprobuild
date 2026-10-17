@@ -336,7 +336,7 @@ libs/repro_home_apply/tests/test_m69_catalog_lookup.nim	nim	9
 libs/repro_home_apply/tests/test_m69_env_export.nim	nim	11
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	nim	4
 libs/repro_home_generations/tests/t_smoke_home_generations.nim	nim	8
-libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	34
+libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	35
 libs/repro_home_resources/tests/t_concern_classification.nim	nim	5
 libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
 libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
@@ -487,7 +487,7 @@ libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	95
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	30
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
-libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	33
+libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	34
 libs/repro_project_dsl/tests/dsl_port/t_dsl_activity_surface_is_typed.nim	nim	16
 libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_build_input_wiring.nim	nim	8
@@ -951,6 +951,8 @@ tests/e2e/generated-config/t_e2e_generated_config_file_external_template.nim	nim
 tests/e2e/generated-config/t_e2e_generated_config_file_json_value.nim	nim	3
 tests/e2e/generated-config/t_e2e_generated_config_file_managed_block.nim	nim	4
 tests/e2e/generated-config/t_e2e_managed_block_cache_key_isolation.nim	nim	3
+tests/e2e/gm10/t_e2e_hosts_system_attribute_cli.nim	nim	1
+tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim	nim	1
 tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim	nim	1
 tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	nim	6
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
@@ -1418,7 +1420,7 @@ tests/integration/t_hooks_ensure_generates_the_gate_from_the_imported_policy.nim
 tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim	nim	1
 tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	18
 tests/integration/t_hooks_ensure_refuses_to_strand_a_hook_the_runner_can_service.nim	nim	1
-tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim	nim	5
+tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim	nim	11
 tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim	nim	1
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	4
 tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
@@ -1703,6 +1705,7 @@ tests/integration/t_rename_relocates_instead_of_cloning.nim	nim	5
 tests/integration/t_rename_relocation_failure_is_clean.nim	nim	1
 tests/integration/t_rename_renamed_and_rewritten_repo_relocates.nim	nim	1
 tests/integration/t_report_classifies_at_ahead_and_behind.nim	nim	1
+tests/integration/t_repos_add_commit_passes_end_of_file_fixer.nim	nim	1
 tests/integration/t_repos_add_records_project_membership_by_key.nim	nim	1
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	6
 tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	nim	2
@@ -2100,7 +2103,7 @@ tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	8
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
-tests/unit/t_manifest_editor_edge_cases.nim	nim	21
+tests/unit/t_manifest_editor_edge_cases.nim	nim	28
 tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim	nim	5
 tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
@@ -2171,6 +2174,7 @@ tests/unit/test_generated_artifact_merge_policy.py	python	19
 tests/unit/test_graph_owned_test_artifacts.py	python	24
 tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	10
 tests/unit/test_install_nix_paths.py	python	14
+tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nix_daemon_descriptors.py	python	5
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_prune_undeclared_test_binaries.py	python	5
@@ -2179,6 +2183,7 @@ tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	3
 tests/unit/test_reprobuild_suite_inventory.py	python	98
 tests/unit/test_source_revision.py	python	18
+tests/unit/test_suite_drift_attribution.py	python	12
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	7

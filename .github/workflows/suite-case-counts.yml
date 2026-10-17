@@ -89,5 +89,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The base revision the refusal attributes drift against, so a run that
+      # fails on staleness it INHERITED says so instead of naming files the
+      # pusher never touched (see the script header). `pull_request` checks
+      # out the merge commit, whose base is the base branch tip; a push's base
+      # is the previous tip, all zeros for a new branch. Fetched explicitly
+      # because the checkout is shallow; best effort, since the verdict does
+      # not depend on it.
       - name: Check the baseline against the tree
-        run: bash scripts/check_suite_case_counts.sh
+        env:
+          ATTRIBUTION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "${ATTRIBUTION_BASE}" ] && [ -n "${ATTRIBUTION_BASE//0/}" ] &&
+             git fetch --no-tags --depth=1 origin "${ATTRIBUTION_BASE}"; then
+            export SUITE_CASE_COUNTS_BASE="${ATTRIBUTION_BASE}"
+          fi
+          bash scripts/check_suite_case_counts.sh

@@ -184,7 +184,7 @@ suite "repro home export: compiled intent":
       "export after plan, compile edge")
     check alphaRun.nimSpawns - alphaRun.nimCompileSpawns == ProbeSpawns
     check alpha["format"].getStr == "repro.home.export"
-    check alpha["schemaVersion"].getInt == 3
+    check alpha["schemaVersion"].getInt == 4
     check alpha["intent"] == plannerJson
     # The intent round-trips through the one ProfileIntent decoder.
     check emitProfileIntentJson(parseProfileIntentJson($alpha["intent"])) ==
@@ -392,7 +392,7 @@ content = "x\n"
 """)
     let (run, doc) = sb.exportFor(["--host", "alpha"])
     require run.exitCode == 0
-    check doc["schemaVersion"].getInt == 3
+    check doc["schemaVersion"].getInt == 4
     check keysOf(doc["intent"]) == sorted(@["name", "activities",
       "configOverrides", "hosts", "resources", "buildActions",
       "adapterPreference"])

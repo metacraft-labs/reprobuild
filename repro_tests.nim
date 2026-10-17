@@ -8505,6 +8505,24 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/gm10/t_e2e_hosts_system_attribute_cli.nim",
+    binary: "build/test-bin/t_e2e_hosts_system_attribute_cli",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim",
+    binary: "build/test-bin/t_e2e_infra_apply_refuses_externally_managed_host",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim",
     binary: "build/test-bin/t_e2e_home_apply_realizes_nix_selection",
     defines: @[],
@@ -15273,6 +15291,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_repos_add_commit_passes_end_of_file_fixer.nim",
+    binary: "build/test-bin/t_repos_add_commit_passes_end_of_file_fixer",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_repos_add_records_project_membership_by_key.nim",
     binary: "build/test-bin/t_repos_add_records_project_membership_by_key",
     defines: @[],
@@ -19481,6 +19508,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_graph_owned_test_artifacts.py",
   "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
   "tests/unit/test_install_nix_paths.py",
+  "tests/unit/test_lint_gate_ordering.py",
   "tests/unit/test_nix_daemon_descriptors.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_prune_undeclared_test_binaries.py",
@@ -19489,5 +19517,6 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_release_smoke_dev_exec.py",
   "tests/unit/test_reprobuild_suite_inventory.py",
   "tests/unit/test_source_revision.py",
+  "tests/unit/test_suite_drift_attribution.py",
   "tests/unit/test_wrapper_default_provenance.py"
 ]

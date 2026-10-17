@@ -22,7 +22,7 @@
 ## Phase A constructor names are themselves derived from the M69
 ## `SystemResourceKind` string-enum values.
 
-import std/[strutils, tables]
+import std/[algorithm, strutils, tables]
 
 import repro_elevation
 import repro_profile
@@ -687,6 +687,22 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
       "system profiles do not import contribution catalogs (`catalogs:` " &
       "declares " & p.catalogImports.join(", ") & "); catalogs serve " &
       "package references, which only home profiles have")
+  # GM10: who manages a host's system is an attribute of the host registry,
+  # which is the home profile's `hosts:` (Gradual-Nix-To-Reprobuild-
+  # Migration.md §Hosts). `repro infra` reads it from there; a `system:`
+  # key in a system profile's own `hosts:` would be read by nothing and
+  # look effective, so it is refused (Core-Invariants.md §Unrecognised Input
+  # Is Rejected, Not Skipped).
+  if p.systemManagedElsewhere.len > 0:
+    var hosts: seq[string]
+    for h in p.systemManagedElsewhere.keys:
+      hosts.add h
+    hosts.sort()
+    raise newException(ValueError,
+      "a system profile's `hosts:` cannot say who manages a host's system " &
+      "(`system: managedElsewhere` for " & hosts.join(", ") & "); declare " &
+      "it in the home profile's `hosts:` registry, which `repro infra " &
+      "plan` / `apply` read")
   for r in p.resources:
     # A resource the system planner does not apply is refused, naming it,
     # rather than left out. Leaving it out is how the `pkg.homebrewCask`

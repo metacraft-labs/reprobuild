@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "selection": {
     "host": "m1",
     "hostDeclared": true,
@@ -405,7 +405,12 @@
       }
     ],
     "buildActions": [],
-    "adapterPreference": {}
+    "adapterPreference": {},
+    "systemManagedElsewhere": {
+      "m1": {
+        "managedBy": "example-org/infra"
+      }
+    }
   },
   "platforms": {
     "x86_64-linux": "same",
@@ -418,16 +423,16 @@
   "provenance": {
     "repro": {
       "version": "0.2.6",
-      "sourceRevision": "be536e9c217c16286be212ee829e2ac28ae23f0d-dirty"
+      "sourceRevision": "c0a2b186e658a931beaf96fe78287c344c7202fd-dirty"
     },
     "hostSource": "env",
     "profile": {
       "root": "home.nim",
-      "digest": "91245946a9f082965721baa8cea677ddb53407257ea18acaf7eee11d79146580",
+      "digest": "d82b6926443c9f6c241b7e6c84e138faf76992f26841dc5ee7a694633f2d188f",
       "inputs": [
         {
           "path": "home.nim",
-          "blake3": "550c26485d94fe12b5fdc4970860bb915f889a8ab9cbeb993af971c02f21ca71"
+          "blake3": "165cef53d0dee9ef68b828d75140bf68655620e44481f4622398a883524747c2"
         }
       ]
     },

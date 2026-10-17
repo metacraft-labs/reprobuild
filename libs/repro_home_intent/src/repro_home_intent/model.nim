@@ -124,6 +124,13 @@ type
         ## (`repro_profile/concerns.concernListProblem`); meaningful only
         ## when `hostAppliesDeclared`. Read it through the planner's rule,
         ## `repro_home_apply/plan.appliedConcernsFor`.
+      hostSystemManagedElsewhere*: bool
+        ## The entry says `system: managedElsewhere[(...)]` (block form;
+        ## `repro_profile/host_system`): the host's system scope is managed
+        ## by something other than this profile.
+      hostSystemManagedBy*: string
+        ## The `managedElsewhere("...")` pointer, "" when the entry names
+        ## none; meaningful only when `hostSystemManagedElsewhere`.
       hostBlockForm*: bool
         ## The text parser read the entry in block form (`activities:` /
         ## `applies:` lines under the host); the structural editor rewrites
