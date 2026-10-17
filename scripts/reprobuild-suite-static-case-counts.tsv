@@ -933,6 +933,7 @@ tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim	nim	6
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	nim	2
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	16
+tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim	nim	3
 tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	5
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
