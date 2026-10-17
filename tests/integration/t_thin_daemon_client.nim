@@ -67,6 +67,18 @@
 ##     it answer true. Deleting the ``stderrIsTerminal()`` arm of
 ##     ``shouldRouteToDaemon`` reddens it — verified, not assumed.
 ##
+##   * ``thin_client_never_routes_to_a_daemon_running_another_engine`` — the
+##     identity contract: a routed build runs the engine a hand-over would
+##     have run. A daemon resident from a different engine image is replaced,
+##     even when the client names its engine by a RELATIVE ``REPRO_FULL_CLI``
+##     (whose digest could not be taken, and which therefore used to keep the
+##     stale daemon), and the replaced daemon's staged image copy is removed
+##     from ``<state>/dev-bin``. Reverting both ``resolveFullCli``'s anchoring
+##     of ``REPRO_FULL_CLI`` and ``startUserDaemon``'s fail-closed reuse
+##     reddens the identity checks; reverting the anchoring alone reddens the
+##     served-not-handed-over check; removing the dev-bin sweep from the serve
+##     path reddens the retention check — each verified, not assumed.
+##
 ##   * ``thin_client_does_not_link_the_build_engine`` — the structural
 ##     property the milestone's number depends on. Importing
 ##     ``repro_cli_support`` from ``apps/repro-client`` reddens it.
@@ -745,6 +757,139 @@ suite "MAC-1 thin daemon client":
       let logText = if fileExists(logPath): readFile(logPath) else: ""
       checkpoint("daemon log:\n" & logText)
       check not logText.contains("restarting outdated daemon")
+
+    test "integration_thin_client_never_routes_to_a_daemon_running_another_engine":
+      # THE DEFECT THIS PINS (reprobuild-pm issue 2026-09-30, "the `repro`
+      # thin client routes to a resident daemon running an older engine
+      # image"). A routed build must run the engine a hand-over would have
+      # run. The resident daemon here is started from a DIFFERENT engine image
+      # -- a copy of `reprobuild` with bytes appended, so it still executes
+      # but digests differently, which is all a rebuilt engine looks like to
+      # the identity check -- and the thin client is then pointed at the real
+      # engine through a RELATIVE `REPRO_FULL_CLI`.
+      #
+      # WHY RELATIVE. `expectedDaemonRunningDigestHex` digests only an
+      # absolute path and answers "" otherwise. `startUserDaemon` used to read
+      # an unknown digest as "cannot prove staleness, keep the daemon", so a
+      # relative override silently routed every build to whatever image was
+      # resident. Two fixes close it: `startUserDaemon` FAILS CLOSED -- it
+      # reuses a running daemon only when both digests are known and equal --
+      # and `resolveFullCli` anchors the override against the working
+      # directory (as it already did for `REPRO_PUBLIC_CLI_PATH`). The first
+      # alone keeps the stale daemon from serving, but by refusing to route:
+      # the client hands over and the ENGINE restarts the daemon. The second
+      # is what lets the thin client itself verify, restart and be served, and
+      # the request-source check below pins it.
+      #
+      # THE SECOND HALF: RETENTION. Every dev-mode start stages a copy of its
+      # image under `<state>/dev-bin/`, and before the fix only a dev
+      # SELF-restart removed its predecessor's copy. A daemon replaced by a
+      # client's staleness restart (this case) or by `daemon stop` left its
+      # copy behind forever; the issue counted 260 of them. The daemon that
+      # wins the state directory's lock now sweeps every generation but its
+      # own, so after the restart exactly ONE generation may remain.
+      #
+      # WHAT MAKES THIS FAIL, each measured: on the unfixed tree the status
+      # after the thin build still names the copy as its source image and
+      # running hash. With only the fail-closed reuse in place the identity
+      # checks pass but the request source is the engine's `request`. With
+      # both identity fixes and no dev-bin sweep, `dev-bin` holds two
+      # generations.
+      let tempRoot = createTempDir("repro-mac1-stale", "")
+      let endpoint = daemonSocketEndpoint("mac1-stale")
+      defer:
+        stopDaemon(tempRoot, endpoint)
+        removeDirEventually(tempRoot)
+      createDir(tempRoot / "state")
+      createDir(tempRoot / "store")
+
+      # The OTHER engine. Appended bytes leave an ELF executable (the loader
+      # reads only what the program headers name) and change its digest.
+      let otherBin = tempRoot / "other-bin"
+      createDir(otherBin)
+      let otherEngine = otherBin / reprobuildEngineExeName()
+      copyFile(fullCliBin(), otherEngine)
+      block:
+        var f = open(otherEngine, fmAppend)
+        defer: f.close()
+        f.write("\nstale-engine-marker\n")
+      setFilePermissions(otherEngine, {fpUserRead, fpUserWrite, fpUserExec})
+
+      let project = freshProject(tempRoot)
+      let shimEnv = @[("REPRO_MONITOR_SHIM_LIB",
+        repoRoot() / "build" / "lib" / "librepro_monitor_shim.so")]
+      let baseEnv = @[
+        ("REPRO_DAEMON_ENDPOINT", endpoint),
+        ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
+        ("REPROBUILD_STORE_ROOT", tempRoot / "store")] & shimEnv
+
+      proc daemonStatus(): string =
+        runShell(shellCommand(@[fullCliBin(), "daemon", "status",
+          "--endpoint", endpoint, "--state-dir", tempRoot / "state"]),
+          repoRoot()).output
+
+      proc statusField(text, name: string): string =
+        for line in text.splitLines():
+          if line.startsWith(name & ": "):
+            return line[name.len + 2 .. ^1].strip()
+
+      proc devBinGenerations(): seq[string] =
+        let root = tempRoot / "state" / "dev-bin"
+        if dirExists(root):
+          for kind, path in walkDir(root):
+            result.add(path)
+
+      # Leave the OTHER engine's daemon resident. Its build's own outcome is
+      # not the subject (a copied engine outside the checkout may resolve its
+      # providers differently); the daemon it leaves behind is.
+      let viaOther = runCaptured(otherEngine, buildArgs(project, tempRoot),
+        tempRoot, baseEnv & @[("REPRO_FULL_CLI", otherEngine)])
+      checkpoint("other-engine stdout:\n" & viaOther.output)
+      checkpoint("other-engine stderr:\n" & viaOther.errors)
+      let before = daemonStatus()
+      checkpoint("status with the other engine resident:\n" & before)
+      check statusField(before, "source-image-path") == otherEngine
+      let otherHash = statusField(before, "running-hash")
+      check otherHash.len > 0
+
+      # The THIN CLIENT, told about the real engine by a RELATIVE path that
+      # resolves from its working directory.
+      let relativeEngine = relativePath(fullCliBin(), tempRoot)
+      check not relativeEngine.isAbsolute
+      let viaThin = runCaptured(thinCliBin(), buildArgs(project, tempRoot),
+        tempRoot, baseEnv & @[("REPRO_FULL_CLI", relativeEngine)])
+      checkpoint("thin stdout:\n" & viaThin.output)
+      checkpoint("thin stderr:\n" & viaThin.errors)
+      check viaThin.code == 0
+      check fileExists(project / "dist" / "copied.txt")
+      # ...and SERVED, not handed over: the last accepted request is one the
+      # daemon had to derive the project root for, which only the thin client
+      # sends (see `daemonBuildRequestRootSources`). Without the anchoring in
+      # `resolveFullCli` the fail-closed `startUserDaemon` refuses the
+      # unverifiable relative path, the client hands over, and the engine's
+      # own `request` lands here instead.
+      let sources = daemonBuildRequestRootSources(tempRoot)
+      checkpoint("build request root sources: " & sources.join(" | "))
+      check sources.len > 0 and sources[^1] == "derived"
+
+      # THE ASSERTIONS THIS CASE EXISTS FOR. The resident daemon is now the
+      # real engine's, by path and by content.
+      let after = daemonStatus()
+      checkpoint("status after the thin build:\n" & after)
+      check statusField(after, "source-image-path") == fullCliBin()
+      let runningHash = statusField(after, "running-hash")
+      check runningHash.len > 0
+      check runningHash != otherHash
+      check runningHash == statusField(after, "source-hash")
+
+      # ...and the replaced daemon's staged copy is gone: only the running
+      # generation is left in dev-bin.
+      let generations = devBinGenerations()
+      checkpoint("dev-bin: " & generations.join(" | "))
+      check generations.len == 1
+      if generations.len == 1:
+        check generations[0] ==
+          statusField(after, "staged-generation-dir")
 
   when isNixSupported and defined(posix):
     test "integration_thin_client_interactive_terminal_build_still_builds":

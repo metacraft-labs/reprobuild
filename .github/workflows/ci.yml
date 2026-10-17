@@ -5,6 +5,20 @@ on:
     branches: [main, dev]
   pull_request:
     branches-ignore: [agents]
+  # Dispatchable on any branch, which every other workflow here already is
+  # (benchmark, hcr-lanes, release, deploy-get, attestation-collateral) and
+  # this one was not.
+  #
+  # That omission is not cosmetic: it is why a check that fails ONLY under CI
+  # conditions could not be worked on. `just lint`'s sibling-pin gate failed on
+  # every run for five days because the runner injects a scoped installation
+  # token that this repo's own probe anchors are not covered by -- a condition
+  # that cannot be reproduced on a laptop and, with the triggers above, could
+  # not be reproduced on a branch either. The only way to get a verdict was to
+  # push to `dev` or open a pull request into it, so the fix for a gate that
+  # blocks promotions could not be tested without doing the thing the gate
+  # blocks. Promotions landed on locally-substituted evidence instead.
+  workflow_dispatch:
 
 # This workflow supersedes its own older runs, on branches as well as pull
 # requests, and that is deliberate rather than merely inherited.

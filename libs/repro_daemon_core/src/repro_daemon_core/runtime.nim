@@ -682,21 +682,109 @@ proc stageDevDaemonBinary*(sourceExe: string; config: UserDaemonConfig;
 
 proc logLine(path, message: string)
 
-proc cleanupPreviousStagedGeneration(config: UserDaemonConfig) =
-  if not config.devMode or config.previousStagedGenerationDir.len == 0:
+type
+  DevStagedGenerationSweep* = object
+    ## What one ``sweepStaleDevStagedGenerations`` pass did. ``removed`` and
+    ## ``failed`` are absolute paths of generation directories under
+    ## ``<state>/dev-bin``; ``kept`` is this daemon's own generation, or ""
+    ## when it runs from its source image and owns none.
+    removed*: seq[string]
+    failed*: seq[string]
+    kept*: string
+
+proc sweepStaleDevStagedGenerations(config: UserDaemonConfig):
+    DevStagedGenerationSweep =
+  ## Remove every staged image generation under ``<state>/dev-bin`` except
+  ## the one THIS daemon is running from. Called only by a daemon that HOLDS
+  ## the state directory's lock (``acquireUserDaemonLock``), after it has
+  ## established that no other daemon answers on its endpoint.
+  ##
+  ## WHY A SWEEP AND NOT A HAND-OFF. Every dev-mode start stages a copy of
+  ## its image (``stageDevDaemonBinary``) and nothing removed it except a dev
+  ## SELF-restart, whose child was told its predecessor's directory
+  ## (``previousStagedGenerationDir``). A daemon REPLACED by a client --
+  ## ``startUserDaemon``'s staleness restart, ``daemon stop`` followed by a
+  ## start, a crash -- hands nothing to its successor, so its copy stayed for
+  ## good: reprobuild-pm issue 2026-09-30 found 260 of them, the oldest four
+  ## months old, at one engine image (tens of MB) each. The spec allows
+  ## exactly this pass (Local-Daemons-And-Control-Plane.md, "Windows
+  ## Executable Staging", last paragraph): a development daemon startup "may
+  ## scan the staged-generation directory and delete generations that are
+  ## not referenced by any live daemon status record or running process".
+  ##
+  ## WHY THE LOCK MAKES THIS SAFE. ``dev-bin`` is per state directory, and so
+  ## is the lock, so the lock holder is the only daemon that can be serving
+  ## from any generation here. What else can still be RUNNING from one:
+  ##
+  ##   * a predecessor that is exiting -- it released the lock (a dev
+  ##     self-restart releases it before launching its child) but has not
+  ##     yet exited. POSIX unlinks a running image without complaint; Windows
+  ##     refuses, which lands in ``failed`` and is retried by the next start.
+  ##   * a launch still in flight from a client that staged its generation
+  ##     and lost the race to this daemon. Removing its image makes its exec
+  ##     (or its lock acquisition, if it got that far) fail, and that client
+  ##     then finds THIS daemon on the endpoint it is polling -- the outcome
+  ##     it would have had anyway, since only one daemon can hold the lock.
+  ##
+  ## It subsumes the self-restart hand-off: the predecessor's directory is
+  ## under ``dev-bin`` and is not ours, so it is removed with the rest.
+  ##
+  ## WHAT IS NEVER TOUCHED. Only DIRECTORIES that are DIRECT children of
+  ## ``dev-bin`` are removed: a symlink there is not something
+  ## ``stageDevDaemonBinary`` creates and would point outside, and a path
+  ## that does not normalize to a child of ``dev-bin`` is refused before any
+  ## removal. ``removeDir`` unlinks a symlink inside a generation rather than
+  ## following it. A non-dev daemon stages nothing and sweeps nothing.
+  if not config.devMode:
+    return
+  # No state directory, no `dev-bin` to sweep. Without this guard an empty one
+  # would make `devBinRoot` the RELATIVE "dev-bin", anchored to whatever the
+  # working directory happens to be -- a directory this daemon does not own.
+  if config.stateDir.len == 0:
     return
   let root = absoluteNormalized(devBinRoot(config))
-  let previous = absoluteNormalized(config.previousStagedGenerationDir)
-  if previous.len == 0 or previous == root or not previous.startsWith(root):
+  if root.len == 0 or not dirExists(root):
     return
-  try:
-    if dirExists(previous):
-      removeDir(previous)
-      logLine(config.logPath, "cleaned previous dev staged generation=" &
-        previous)
-  except CatchableError as err:
-    logLine(config.logPath, "previous dev staged generation cleanup failed=" &
-      previous & " error=" & err.msg)
+  result.kept = absoluteNormalized(config.stagedGenerationDir)
+  for kind, entry in walkDir(root):
+    if kind != pcDir:
+      continue
+    let candidate = absoluteNormalized(entry)
+    if candidate == result.kept:
+      continue
+    # Our own generation spelled differently (the state directory reached
+    # through a symlink by whoever staged it) is still our own: compared by
+    # file identity too, because removing it would delete the image this
+    # daemon reports as running.
+    if result.kept.len > 0:
+      try:
+        if sameFile(candidate, result.kept):
+          continue
+      except OSError:
+        discard
+    # Containment, checked on the normalized spelling: strictly inside
+    # `dev-bin`, one level down. `walkDir` yields exactly that, so this can
+    # only fire if it ever stops doing so -- which is when it matters.
+    if candidate == root or parentDir(candidate) != root or
+        not candidate.startsWith(root & DirSep):
+      continue
+    try:
+      removeDir(candidate)
+      result.removed.add(candidate)
+    except CatchableError as err:
+      result.failed.add(candidate)
+      logLine(config.logPath, "dev staged generation cleanup failed=" &
+        candidate & " error=" & err.msg)
+  if result.removed.len > 0 or result.failed.len > 0:
+    logLine(config.logPath, "swept stale dev staged generations removed=" &
+      $result.removed.len & " failed=" & $result.failed.len & " kept=" &
+      (if result.kept.len > 0: result.kept else: "<none>"))
+
+proc sweepStaleDevStagedGenerationsForTest*(config: UserDaemonConfig):
+    DevStagedGenerationSweep =
+  ## Exported for `t_daemon_dev_bin_retention.nim`, which asserts what the
+  ## sweep keeps and that it never reaches outside `dev-bin`.
+  sweepStaleDevStagedGenerations(config)
 
 proc logLine(path, message: string) =
   try:
@@ -1124,9 +1212,15 @@ proc foreignEngineVerdict*(config: UserDaemonConfig;
   ## daemon's `runningHash`. A request that passed the client's check against
   ## an un-swapped daemon therefore always passes this one.
   ##
-  ## FAIL SAFE, LIKE `startUserDaemon`: an empty, relative or missing path
-  ## (an older client, or an engine deleted since) or an unavailable digest
-  ## proves nothing, and the request is served as before.
+  ## THIS SIDE SERVES WHAT IT CANNOT DISPROVE: an empty, relative or missing
+  ## path (an older client, or an engine deleted since) or an unavailable
+  ## digest proves nothing, and the request is served as before. That is
+  ## the opposite of `startUserDaemon`, which refuses to route to a daemon
+  ## whose identity it cannot establish (reprobuild-pm issue 2026-09-30).
+  ## The client's check is the one that must establish identity; this one
+  ## only closes the race after it, so declining on an unknown here would
+  ## turn every request from a client too old to name its engine into a
+  ## direct build without making any of them more correct.
   result.daemonImageHash = daemonRunningHash
   if requestPublicCliPath.len == 0 or not isAbsolute(requestPublicCliPath) or
       not fileExists(requestPublicCliPath) or daemonRunningHash.len == 0:
@@ -2947,7 +3041,10 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   if reclaimed > 0:
     logLine(config.logPath,
       "reclaimed abandoned sessions count=" & $reclaimed)
-  cleanupPreviousStagedGeneration(config)
+  # Retention of dev staged image copies. Here, not earlier: the lock is held
+  # and no other daemon answered on this endpoint, so no generation under
+  # `dev-bin` but our own can be serving. See `sweepStaleDevStagedGenerations`.
+  discard sweepStaleDevStagedGenerations(config)
   var sessions: seq[UserDaemonSession] = @[]
   # Shared-Development-Services L7 (§4.5): "A daemon that restarts
   # rebuilds it from the lease records". This IS that rebuild, and it runs
@@ -3499,6 +3596,15 @@ proc waitForUserDaemonStatus*(endpoint: string; timeoutMs = 60000):
   raise newException(UserDaemonRuntimeError,
     "timed out waiting for repro-daemon at " & endpoint)
 
+proc raiseDaemonBinaryNotFound(publicCliPath: string) {.noreturn.} =
+  ## The one wording of "there is no daemon image to start", shared by the
+  ## launch guard and by the identity check that cannot digest the image it
+  ## would compare. Callers catch it and fall back to direct mode.
+  raise newException(UserDaemonRuntimeError,
+    "repro-daemon binary not found (looked for sibling next to " &
+      publicCliPath & " and on PATH as 'repro-daemon'); set " &
+      "REPRO_DAEMON=off or install/build repro-daemon next to repro")
+
 proc startUserDaemon*(publicCliPath: string;
                       requestedConfig: UserDaemonConfig): UserDaemonStatus =
   # Absolute before anything is derived from it: the daemon starts in its
@@ -3525,16 +3631,48 @@ proc startUserDaemon*(publicCliPath: string;
     # Detect that by comparing the daemon-reported running-image hash to the
     # on-disk image that daemon startup will actually execute. `repro` is a
     # single full-CLI image (no thin wrapper / `repro-full` companion), so the
-    # digest tracks that one binary. If either hash is unavailable we cannot
-    # prove staleness, so we leave the daemon running (fail safe).
+    # digest tracks that one binary.
+    #
+    # THIS FAILS CLOSED. The running daemon is reused only when BOTH digests
+    # are known and EQUAL. It used to fail open -- "if either hash is
+    # unavailable we cannot prove staleness, so leave the daemon running" --
+    # and that is how a thin client handed a RELATIVE engine path (for which
+    # `expectedDaemonRunningDigestHex` answers "") routed every build to
+    # whatever older engine was resident, silently (reprobuild-pm issue
+    # 2026-09-30). The contract is that a routed invocation runs the engine a
+    # fallback would have run; an identity nobody can establish does not meet
+    # it. So:
+    #
+    #   * equal digests -> reuse;
+    #   * different digests -> restart onto the current image;
+    #   * the DAEMON's digest unknown (an image deleted or unreadable under
+    #     it) -> restart as well: it is unproven, and replacing it costs one
+    #     daemon start;
+    #   * OUR digest unknown -> refuse, without touching the daemon. We cannot
+    #     name the image we would run, so we can neither vouch for the
+    #     resident daemon nor start a replacement; the error makes every
+    #     caller fall back to the engine in-process (direct mode), which is
+    #     exactly the image it named.
     let expectedHash = expectedDaemonRunningDigestHex(config, sourceExe,
       config.devMode)
-    if expectedHash.len == 0 or existing.runningHash.len == 0 or
-        existing.runningHash == expectedHash:
+    if expectedHash.len == 0:
+      if not isAbsolute(sourceExe) or not fileExists(sourceExe):
+        raiseDaemonBinaryNotFound(publicCliPath)
+      raise newException(UserDaemonRuntimeError,
+        "cannot digest the repro-daemon image " & sourceExe & " to verify " &
+          "the daemon running at " & config.endpoint & "; refusing to route " &
+          "to a daemon of unverified identity (set REPRO_DAEMON=off for " &
+          "direct mode)")
+    if existing.runningHash == expectedHash:
       return existing
-    logLine(config.logPath, "restarting outdated daemon: running-hash=" &
-      existing.runningHash & " expected-hash=" & expectedHash &
-      " (reprobuild image changed)")
+    if existing.runningHash.len == 0:
+      logLine(config.logPath, "restarting daemon of unknown identity: " &
+        "running-hash unavailable expected-hash=" & expectedHash &
+        " (cannot prove it runs the current reprobuild image)")
+    else:
+      logLine(config.logPath, "restarting outdated daemon: running-hash=" &
+        existing.runningHash & " expected-hash=" & expectedHash &
+        " (reprobuild image changed)")
     try:
       requestUserDaemonShutdown(config.endpoint)
     except CatchableError as err:
@@ -3556,10 +3694,7 @@ proc startUserDaemon*(publicCliPath: string;
   # lets ``runBuildCommand`` / ``runWatchCommand`` switch to direct mode in
   # milliseconds with a clear diagnostic naming the path we tried.
   if not isAbsolute(sourceExe) or not fileExists(sourceExe):
-    raise newException(UserDaemonRuntimeError,
-      "repro-daemon binary not found (looked for sibling next to " &
-        publicCliPath & " and on PATH as 'repro-daemon'); set " &
-        "REPRO_DAEMON=off or install/build repro-daemon next to repro")
+    raiseDaemonBinaryNotFound(publicCliPath)
   var launchConfig = config
   launchConfig.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
   var exe = sourceExe
