@@ -447,7 +447,8 @@ proc snapshotPromptWatchBaseline*(manifestPath: string): PromptWatchBaseline =
       result.listings[comparablePromptWatchPath(entry.path)] = names
 
 proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
-                                ownChanges: openArray[string] = [];
+                                ownWrites: openArray[string] = [];
+                                ownRemovals: openArray[string] = [];
                                 baseline = PromptWatchBaseline()):
     seq[string] =
   ## The race guard. The paths of the manifest that may have changed after
@@ -504,16 +505,41 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
   ##     scratch name resolved against the wrong directory, so that test made
   ##     every activation unmatchable.
   ##
-  ## ``ownChanges`` are the paths the edge itself wrote or removed. They come
-  ## from the edge's evidence; an edge that did not run (a cache hit) changed
-  ## nothing, so the caller passes none, and every change after
-  ## ``startedAt`` is then foreign by construction. An own change explains a
-  ## current entry it is, or lies beneath (an entry the edge created, or a
-  ## directory it wrote into), and the move of the directory directly holding
-  ## it. A removal of a listed path is explained only by that path ITSELF
-  ## being an own change, never by the edge having written elsewhere in the
-  ## same directory, so a foreign removal beside the edge's own scratch is
-  ## still reported.
+  ## ``ownWrites`` and ``ownRemovals`` are the paths the edge itself wrote
+  ## (or created) and removed, kept APART. They come from the edge's
+  ## evidence; an edge that did not run (a cache hit) changed nothing, so the
+  ## caller passes none, and every change after ``startedAt`` is then foreign
+  ## by construction. Each side explains only its own kind of state. A
+  ## PRESENT entry that changed is explained by being an own write, or a
+  ## directory above any own change (an entry the edge created, or a
+  ## directory it wrote into or removed from) -- never by being an own
+  ## removal itself, so an entry the edge deleted and somebody else then
+  ## created again is reported. Either kind explains the move of the
+  ## directory directly holding it. An ABSENCE --
+  ## a listed path missing now, or a name gone from an enumerated directory
+  ## since the pre-edge listing -- is explained only by that exact path being
+  ## an own REMOVAL: never by the edge having written elsewhere in the same
+  ## directory (so a foreign removal beside the edge's own scratch is still
+  ## reported), and never by the edge having WRITTEN that path (so an entry
+  ## the edge relocked and somebody else then deleted is reported too).
+  ##
+  ## WHAT THE REMOVAL CHANNEL HOLDS, and why the absence rule converges. It
+  ## is `PathSetEvidence.monitorRemovals`: io-mon's `unlink`, `unlinkat`,
+  ## `rmdir` and `remove` records (`isRemovalMutation`), on Linux and macOS
+  ## alike, so an edge's ordinary deletion of a watched entry is explained.
+  ## A RENAME is not a removal there: io-mon records its destination as a
+  ## write and its source as a read (Linux) or not at all (macOS), so an edge
+  ## renaming a pre-existing watched entry away -- or deleting one through a
+  ## call io-mon does not classify, which includes every deletion on Windows,
+  ## where io-mon records `DeleteFileW` and a `MoveFileExW` source as writes
+  ## -- leaves an absence nothing explains, and it is reported. That costs
+  ## one extra activation, never a loop: the entry is gone by then, so the
+  ## next activation either hits the cache
+  ## (no own changes, and nothing moves after its start) or runs an edge
+  ## that cannot remove the entry again, and the next pre-edge listing no
+  ## longer holds its name. Either way its guard sees no absence. Reading a
+  ## write as a removal instead would close that extra activation by
+  ## missing a change, which no rule here may do.
   ##
   ## WHEN THE EDGE'S OWN CHANGES EXPLAIN A MOVE. Timestamps say THAT a
   ## directory's membership moved, not how often, so the edge having created
@@ -521,22 +547,15 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
   ## out a foreign removal from the same directory. ``baseline`` decides
   ## that case: the directory's entry names listed BEFORE the edge ran
   ## (``snapshotPromptWatchBaseline``). Every name gone since must itself be
-  ## an own change, and every new one an own change or a directory above
-  ## one; otherwise it is reported. A directory with no baseline listing is
-  ## reported in that case, since nothing can verify it: one extra
+  ## an own removal, and every new one an own write or a directory above an
+  ## own change; otherwise it is reported. A directory with no baseline
+  ## listing is reported in that case, since nothing can verify it: one extra
   ## activation the first time, after which the listing exists.
   ##
-  ## ONE CASE THIS STILL CANNOT SEE. ``ownChanges`` merges the edge's writes
-  ## and its removals, so an entry the edge WROTE that somebody else then
-  ## removes before this guard runs is taken for the edge's own removal --
-  ## here and in the missing-path test above (an edge relocking
-  ## `flake.lock` while the user deletes it). Telling the two apart needs
-  ## the removal channel on its own, which a rename by the edge (recorded as
-  ## a write) would then turn into a report on every activation. Every other
-  ## rule errs the other way -- an absent probe below a directory that
-  ## changed for an unrelated reason, or a foreign file created and removed
-  ## again inside an enumerated directory, costs one extra activation,
-  ## never a missed change.
+  ## Every rule errs the same way -- an absent probe below a directory that
+  ## changed for an unrelated reason, a foreign file created and removed
+  ## again inside an enumerated directory, or an own rename-away as above,
+  ## costs one extra activation, never a missed change.
   ##
   ## A probed directory (a ``p`` entry that is a directory) is keyed on its
   ## kind only, and nothing about it is tested here: its appearance or
@@ -547,17 +566,24 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
   if manifestPath.len == 0 or
       readPromptWatchManifest(manifestPath, entries).len > 0:
     return @[manifestPath]
-  # ``ownExact``: the own changes themselves. ``own``: those and every
-  # directory above one -- an entry the edge created, or a directory it
-  # wrote into. ``ownHolders``: the directories directly holding an own
-  # change, whose membership moves the edge explains.
+  # ``ownRemoved``: the own removals themselves, the only explanation of an
+  # absence. ``own``: the only explanation of a PRESENT entry -- every own
+  # write, and every directory above any own change (an entry the edge
+  # created, or a directory it wrote into or removed from). An own removal
+  # is not in it itself: the entry the edge removed being there now is
+  # somebody else's re-creation. ``ownHolders``: the directories directly
+  # holding an own change, whose membership moves the edge explains.
+  # Invariant the early break below relies on: an entry in ``own`` has every
+  # directory above it in ``own`` too.
   var own = initTable[string, bool]()
-  var ownExact = initTable[string, bool]()
+  var ownRemoved = initTable[string, bool]()
   var ownHolders = initTable[string, bool]()
-  for path in ownChanges:
+  proc addOwnChange(path: string; written: bool) =
     var cursor = comparablePromptWatchPath(path)
-    own[cursor] = true
-    ownExact[cursor] = true
+    if written:
+      own[cursor] = true
+    else:
+      ownRemoved[cursor] = true
     let holder = parentDir(cursor)
     if holder.len > 0 and holder != cursor:
       ownHolders[holder] = true
@@ -567,6 +593,10 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
         break
       own[parent] = true
       cursor = parent
+  for path in ownWrites:
+    addOwnChange(path, written = true)
+  for path in ownRemovals:
+    addOwnChange(path, written = false)
 
   proc nearestExistingAncestorChanged(path: string): bool =
     ## The REMOVAL test's directory: the closest one above ``path`` that
@@ -590,8 +620,9 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
       info = getFileInfo(fastPathFsPath(entry.path), followSymlink = false)
     except OSError:
       # Missing now. A REMOVAL when the directory that held it changed after
-      # the start and the edge did not remove the entry itself.
-      if not ownExact.hasKey(comparable) and
+      # the start and the edge did not remove the entry itself -- writing it
+      # is no explanation of its absence.
+      if not ownRemoved.hasKey(comparable) and
           nearestExistingAncestorChanged(entry.path):
         result.add(entry.path)
       continue
@@ -602,7 +633,8 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
     if not entry.enumerated or not info.changedSince(startedAt):
       continue  # a probed directory, or a membership nothing has moved
     # The membership moved. Explained when the edge created or removed an
-    # entry directly in it, or when a current entry that changed is its own.
+    # entry directly in it, or when a current entry that changed is its own
+    # write (or a directory above an own change).
     var explained = ownHolders.hasKey(comparable)
     var foreign = false
     try:
@@ -629,8 +661,8 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
     # Explained by the edge's own changes, which says nothing about whether
     # SOMEBODY ELSE also removed an entry from the same directory meanwhile.
     # The pre-edge listing decides: every name that disappeared must itself
-    # be an own change (``ownExact``), and every name that appeared an own
-    # change or a directory above one (``own``). Without a
+    # be an own removal (``ownRemoved``), and every name that appeared an own
+    # write or a directory above an own change (``own``). Without a
     # listing (the first activation in this output directory, or a
     # directory the previous manifest did not track) that cannot be
     # verified, so the directory is reported: one extra activation, which
@@ -647,8 +679,8 @@ proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
     var unexplained = false
     for name in before:
       if current.binarySearch(name) < 0 and
-          not ownExact.hasKey(comparablePromptWatchPath(entry.path / name)):
-        unexplained = true  # a foreign REMOVAL beside the edge's own
+          not ownRemoved.hasKey(comparablePromptWatchPath(entry.path / name)):
+        unexplained = true  # a REMOVAL the edge did not make
         break
     if not unexplained:
       for name in current:

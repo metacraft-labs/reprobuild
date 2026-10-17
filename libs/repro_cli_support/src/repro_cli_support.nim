@@ -16051,7 +16051,8 @@ proc runDevEnvExportCommand(args: openArray[string];
   # changed, or a listed path removed at or after
   # ``edge.introspectionStartedAt`` (taken just before the introspection
   # edge's build) may have changed after the edge observed it -- the edge's
-  # own writes and removals aside (``unsettledPromptWatchPaths``) -- in which
+  # own writes and removals aside, and only a removal explaining an absence
+  # (``unsettledPromptWatchPaths``) -- in which
   # case that key describes the new state while this script carries an
   # environment built from the old one, and every later prompt would agree
   # with it. Emit a marker no prompt can match instead (a computed key is
@@ -16061,8 +16062,8 @@ proc runDevEnvExportCommand(args: openArray[string];
   let unsettled =
     if keyable:
       unsettledPromptWatchPaths(watchManifestPath,
-        edge.introspectionStartedAt, edge.promptWatchOwnChanges,
-        promptWatchBaseline)
+        edge.introspectionStartedAt, edge.promptWatchOwnWrites,
+        edge.promptWatchOwnRemovals, promptWatchBaseline)
     else:
       @["<the watch set could not be recorded completely>"]
   let fingerprint =

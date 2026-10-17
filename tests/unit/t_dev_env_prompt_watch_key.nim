@@ -284,13 +284,13 @@ suite "dev-env prompt watch key":
     writeFile(tree / "own-dir" / "inner", "x\n")
     writeFile(tree / "own.txt", "x\n")
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [tree / "own-dir" / "inner", tree / "own.txt"],
+      ownWrites = [tree / "own-dir" / "inner", tree / "own.txt"],
       baseline = baseline).len == 0
     # Created by anybody else: an addition, reported -- also beside the
     # edge's own entries.
     writeFile(tree / "new.nim", "new\n")
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [tree / "own-dir" / "inner", tree / "own.txt"],
+      ownWrites = [tree / "own-dir" / "inner", tree / "own.txt"],
       baseline = baseline) == @[tree]
 
     # Created and removed again by the edge (its scratch): explained.
@@ -299,7 +299,8 @@ suite "dev-env prompt watch key":
     writeFile(tree / "scratch.tmp", "x\n")
     removeFile(tree / "scratch.tmp")
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [tree / "scratch.tmp"], baseline = baseline).len == 0
+      ownWrites = [tree / "scratch.tmp"], ownRemovals = [tree / "scratch.tmp"],
+      baseline = baseline).len == 0
     # The same by anybody else leaves no entry to tell it from a removal, so
     # it is reported: one extra activation, never a missed removal.
     check unsettledPromptWatchPaths(manifest, started) == @[tree]
@@ -350,12 +351,12 @@ suite "dev-env prompt watch key":
     # The edge removed its own scratch: explained.
     removeFile(ownTemp)
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [ownTemp]).len == 0
+      ownRemovals = [ownTemp]).len == 0
     # Somebody else removed a file beside it: reported, although the edge
     # also changed that directory.
     removeFile(read)
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [ownTemp]) == @[read]
+      ownRemovals = [ownTemp]) == @[read]
 
     # A whole directory removed: the listed file's parent is gone too, and
     # the directory above it moved.
@@ -418,16 +419,144 @@ suite "dev-env prompt watch key":
     let own = tree / "own.txt"
     writeFile(own, "own\n")
     # The edge's own write, and nothing else: explained, with the listing.
-    check unsettledPromptWatchPaths(manifest, started, ownChanges = [own],
+    check unsettledPromptWatchPaths(manifest, started, ownWrites = [own],
       baseline = baseline).len == 0
     # The same move with no listing to verify it against: reported.
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [own]) == @[tree]
+      ownWrites = [own]) == @[tree]
     # A foreign removal of an entry the edge never read, beside the own
     # write: reported, although the own write alone explains the move.
     removeFile(tree / "unread.nim")
-    check unsettledPromptWatchPaths(manifest, started, ownChanges = [own],
+    check unsettledPromptWatchPaths(manifest, started, ownWrites = [own],
       baseline = baseline) == @[tree]
     # And the edge removing that entry itself is explained again.
     check unsettledPromptWatchPaths(manifest, started,
-      ownChanges = [own, tree / "unread.nim"], baseline = baseline).len == 0
+      ownWrites = [own], ownRemovals = [tree / "unread.nim"],
+      baseline = baseline).len == 0
+
+  test "a foreign removal of an entry the edge wrote is unsettled":
+    # reprobuild-pm `issues/2026-10-17-dev-env-race-guard-takes-a-foreign-
+    # removal-of-an-own-write-for-its-own.md`. The edge rewrites
+    # `flake.lock` (a relock), then somebody else deletes it before the guard
+    # runs. The environment was built while `flake.lock` existed, so the
+    # absence must be reported -- by the missing-path rule and by the
+    # membership of the enumerated project directory. A WRITE explains an
+    # entry that is there, never one that is gone.
+    let root = createTempDir("t_dev_env_prompt_watch_own_write_gone", "")
+    defer: removeDir(root)
+    let project = root / "proj"
+    createDir(project)
+    let flakeNix = project / "flake.nix"
+    let flakeLock = project / "flake.lock"
+    writeFile(flakeNix, "{ }\n")
+    writeFile(flakeLock, "{ \"v\": 1 }\n")
+    let manifest = root / "dev-env.prompt-watch"
+    writePromptWatchManifest(manifest, [
+      PromptWatchEntry(path: project, enumerated: true),
+      PromptWatchEntry(path: flakeNix), PromptWatchEntry(path: flakeLock)])
+    sleep(2100)
+    let baseline = snapshotPromptWatchBaseline(manifest)
+    let started = epochTime()
+    writeFile(flakeLock, "{ \"v\": 2 }\n")  # the edge's own write
+    removeFile(flakeLock)                     # a foreign removal
+    check unsettledPromptWatchPaths(manifest, started, ownWrites = [flakeLock],
+      baseline = baseline) == @[project, flakeLock]
+    # The edge deleting it itself is explained -- under the write it may
+    # also have recorded, and on its own.
+    check unsettledPromptWatchPaths(manifest, started, ownWrites = [flakeLock],
+      ownRemovals = [flakeLock], baseline = baseline).len == 0
+    check unsettledPromptWatchPaths(manifest, started,
+      ownRemovals = [flakeLock], baseline = baseline).len == 0
+
+  test "a foreign re-creation of an entry the edge removed is unsettled":
+    # The mirror image of the case above. The edge deletes an entry of an
+    # enumerated directory (one it does not read, so only the directory's
+    # membership watches it), then somebody else creates it again before the
+    # guard runs. The environment was built while the entry was gone, and
+    # the key would fingerprint it as present, so the move must be reported.
+    # A REMOVAL explains an entry that is gone, never one that is there.
+    let root = createTempDir("t_dev_env_prompt_watch_own_removal_back", "")
+    defer: removeDir(root)
+    let project = root / "proj"
+    createDir(project)
+    let flakeNix = project / "flake.nix"
+    let generated = project / "generated.nix"
+    writeFile(flakeNix, "{ }\n")
+    writeFile(generated, "old\n")
+    let manifest = root / "dev-env.prompt-watch"
+    writePromptWatchManifest(manifest, [
+      PromptWatchEntry(path: project, enumerated: true),
+      PromptWatchEntry(path: flakeNix)])
+    sleep(2100)
+    let baseline = snapshotPromptWatchBaseline(manifest)
+    let started = epochTime()
+    removeFile(generated)               # the edge's own removal
+    writeFile(generated, "foreign\n")   # a foreign re-creation
+    check unsettledPromptWatchPaths(manifest, started,
+      ownRemovals = [generated], baseline = baseline) == @[project]
+    # The edge removing it and writing it again itself is explained.
+    check unsettledPromptWatchPaths(manifest, started,
+      ownWrites = [generated], ownRemovals = [generated],
+      baseline = baseline).len == 0
+
+  test "an own absence recorded as a write costs one activation, not a loop":
+    # The price of explaining an absence only by an own REMOVAL. io-mon does
+    # not record a rename's source as a removal (Linux: a read; macOS:
+    # nothing; Windows records `MoveFileExW`'s source and `DeleteFileW` as
+    # writes), so an edge that moves a pre-existing watched entry away leaves
+    # an absence its removal channel does not explain, and that activation
+    # is unsettled. What must hold is that the NEXT activation is settled:
+    # the entry is already gone, so its edge either hits the cache (no own
+    # changes) or runs without removing it again, and its pre-edge listing
+    # no longer holds the name. Otherwise the prompt would never reach a
+    # no-op.
+    let root = createTempDir("t_dev_env_prompt_watch_rename_away", "")
+    defer: removeDir(root)
+    let project = root / "proj"
+    createDir(project)
+    createDir(root / "elsewhere")
+    let flakeNix = project / "flake.nix"
+    let moved = project / "moved.nim"
+    let target = root / "elsewhere" / "moved.nim"
+    writeFile(flakeNix, "{ }\n")
+    writeFile(moved, "moved\n")
+    let manifest = root / "dev-env.prompt-watch"
+    writePromptWatchManifest(manifest, [
+      PromptWatchEntry(path: project, enumerated: true),
+      PromptWatchEntry(path: flakeNix), PromptWatchEntry(path: moved)])
+    sleep(2100)
+    var baseline = snapshotPromptWatchBaseline(manifest)
+    var started = epochTime()
+    # The edge renames the entry away, and its evidence carries the move as
+    # writes only.
+    moveFile(moved, target)
+    check unsettledPromptWatchPaths(manifest, started,
+      ownWrites = [moved, target], baseline = baseline) == @[project, moved]
+
+    # The next activation, as a cache hit: no own changes. The same manifest
+    # (an absent probe is listed too), listed afresh before its edge.
+    started = window()
+    baseline = snapshotPromptWatchBaseline(manifest)
+    check unsettledPromptWatchPaths(manifest, started,
+      baseline = baseline).len == 0
+    # As an edge that ran: it writes scratch of its own, but cannot remove
+    # the entry a second time.
+    started = window()
+    baseline = snapshotPromptWatchBaseline(manifest)
+    let scratch = root / "elsewhere" / "scratch.tmp"
+    writeFile(scratch, "x\n")
+    removeFile(scratch)
+    check unsettledPromptWatchPaths(manifest, started,
+      ownWrites = [scratch], ownRemovals = [scratch],
+      baseline = baseline).len == 0
+    # An edge that moves the very directory holding the absent entry is the
+    # absent-probe rule's conservative side ("a listed path removed after
+    # the start is unsettled"), which reports it whatever the channels say:
+    # nothing tells an entry absent all along from one present when the edge
+    # read it and removed after. That rule predates the channel split and
+    # applies to every absent probe, so it is pinned, not changed, here.
+    started = window()
+    baseline = snapshotPromptWatchBaseline(manifest)
+    writeFile(project / "own.txt", "own\n")
+    check unsettledPromptWatchPaths(manifest, started,
+      ownWrites = [project / "own.txt"], baseline = baseline) == @[moved]
