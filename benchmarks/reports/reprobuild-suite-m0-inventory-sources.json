@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 648,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2114
+    "testEntries": 2116
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1281,7 +1281,7 @@
       "integration": 1132,
       "platform/destructive": 129,
       "pure unit": 648,
-      "unclassified": 186
+      "unclassified": 188
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1484,8 +1484,8 @@
       }
     ],
     "nimTestBinaryCount": 2093,
-    "pythonTestFileCount": 21,
-    "testEntryCount": 2114
+    "pythonTestFileCount": 23,
+    "testEntryCount": 2116
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -44934,6 +44934,21 @@
       "localDependencyShape": [],
       "owner": "tests/unit",
       "requiresReproBinary": false,
+      "source": "tests/unit/test_lint_gate_ordering.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
       "source": "tests/unit/test_nix_daemon_descriptors.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
@@ -45042,6 +45057,21 @@
       "source": "tests/unit/test_source_revision.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `importlib.util`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_suite_drift_attribution.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

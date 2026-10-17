@@ -2110,6 +2110,7 @@ tests/unit/test_generated_artifact_merge_policy.py	python	19
 tests/unit/test_graph_owned_test_artifacts.py	python	24
 tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	10
 tests/unit/test_install_nix_paths.py	python	14
+tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nix_daemon_descriptors.py	python	5
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_prune_undeclared_test_binaries.py	python	5
@@ -2118,6 +2119,7 @@ tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	3
 tests/unit/test_reprobuild_suite_inventory.py	python	94
 tests/unit/test_source_revision.py	python	16
+tests/unit/test_suite_drift_attribution.py	python	12
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	7
