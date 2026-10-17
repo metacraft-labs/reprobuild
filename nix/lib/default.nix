@@ -13,6 +13,9 @@
 #   brewRealizationOf  canonical package -> Homebrew cask / formula token,
 #                      from the pinned reprobuild-brew-packages contribution
 #                      records (bridge records: Reprobuild never realizes them)
+#   profileBinPath     an evaluation's `profileBin` -> the absolute directory
+#                      holding the launchers of the concerns Reprobuild
+#                      applies, for the Nix side to put on PATH
 #   homeManagerFacts   a Home Manager configuration -> host facts, the Nix
 #                      side of `repro home compare` (homeEquivalenceCheck
 #                      runs the comparison as a check)
@@ -37,8 +40,9 @@
 let
   predicate = import ./predicate.nix;
   platforms = import ./platforms.nix;
-  data = import ./data.nix { inherit predicate platforms; };
-  intent = import ./intent.nix { inherit predicate platforms; };
+  hostSelection = import ./hosts.nix;
+  data = import ./data.nix { inherit predicate platforms hostSelection; };
+  intent = import ./intent.nix { inherit predicate platforms hostSelection; };
   realizations = import ./realizations.nix { inherit catalogs; };
   brew = import ./brew.nix { inherit catalogs; };
   hostFacts = import ./host-facts.nix {
@@ -52,6 +56,12 @@ in
   inherit (data) readData;
   inherit (realizations) nixRealizationOf;
   readIntent = intent.mkReadIntent { inherit pkgsFor reproFor; };
+
+  # `profileBinPath { evaluation, homeDirectory, xdgStateHome ? <home>/.local/state }`
+  # -> the absolute profile bin directory of a host where Reprobuild applies
+  # `packages` / `applications` and Nix the environment (the evaluation's
+  # `profileBin`), or null (nix/lib/intent.nix).
+  inherit (intent) profileBinPath;
 
   # The reverse of nixRealizationOf, for the equivalence report:
   # `{ pkgs, drv }` -> `{ found, name, attribute, packageName }` or
@@ -102,6 +112,6 @@ in
   # Failure-as-value forms used by the library's own tests.
   internal = {
     inherit (data) readDataResult;
-    inherit (intent) refusalReason;
+    inherit (intent) refusalReason hostRefusalReason;
   };
 }

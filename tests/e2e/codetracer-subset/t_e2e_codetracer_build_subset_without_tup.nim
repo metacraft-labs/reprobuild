@@ -526,6 +526,8 @@ proc assertNimPackageBoundary(projectRoot, tempRoot: string) =
         directory.setLen(directory.len - 1)
       if directory notin directories:
         directories.add(directory)
+  checkpoint("directory enumerations recorded in " & capture & ":\n  " &
+    directories.join("\n  "))
   check projectRoot in directories or expandFilename(projectRoot) in directories
   check tempRoot notin directories
   check expandFilename(tempRoot) notin directories

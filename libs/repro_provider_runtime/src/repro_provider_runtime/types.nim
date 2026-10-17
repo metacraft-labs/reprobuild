@@ -389,6 +389,34 @@ type
       ## this evaluation made. Appended at the END for the reason the
       ## L8 and L9 service fields were: a diff of the codec reads as an
       ## addition rather than a reshuffle.
+    actions*: seq[GraphNode]
+      ## Shared-Development-Services F1 (§2) — THE ACTIONS CHANNEL:
+      ## every build ACTION the `devEnv:` body registered, as the
+      ## `gnkAction` graph nodes the build lane already carries.
+      ##
+      ## WHY `seq[GraphNode]` AND NOT A NEW RECORD, which is the
+      ## decision this field is. `renderConfigFile` registers a
+      ## `BuildActionDef`; the build lane lowers one into a `gnkAction`
+      ## node whose payload is `actionPayload`'s versioned bytes, and
+      ## `GraphNode` already crosses this codec. A bespoke
+      ## `DevEnvAction` record would be a SECOND representation of one
+      ## action, with a second codec to version and two readings that
+      ## can disagree about the same edge -- which is the shape this
+      ## campaign keeps finding. One representation, two channels.
+      ##
+      ## L9's F1 measured the absence: "`DevEnvResult` ... has NO
+      ## actions field, so an action registered while the `devEnv:` body
+      ## runs reaches nothing", and the consequence end to end was
+      ## `repro up --activity sso` reporting the session up with
+      ## `etc/sso/` never created -- "the path reached argv and the file
+      ## never did".
+      ##
+      ## AN ACTION NOTHING CONSUMES IS AN ERROR DIAGNOSTIC, not an
+      ## absence: see `buildPackageDevEnv`. Carrying the actions without
+      ## that check would move the silent drop one hop downstream rather
+      ## than close it.
+      ##
+      ## Appended at the END, for `sharedResolutions`' reason.
 
   ProviderGraphRequest* = object
     kind*: ProviderRequestKind

@@ -77,6 +77,14 @@ type
     activities*: seq[ActivityIntent]
     configOverrides*: seq[ConfigOverride]
     hosts*: Table[string, seq[string]]
+    hostApplies*: Table[string, seq[string]]
+      ## The concerns Reprobuild applies on a host, for every host whose
+      ## `hosts:` entry declares `applies: [...]` (block form). A host
+      ## absent from this table declares nothing: Reprobuild applies every
+      ## concern there. Values are concern names (`repro_profile/concerns`),
+      ## validated by the macro; an empty seq is a host where Reprobuild
+      ## applies nothing (Gradual-Nix-To-Reprobuild-Migration.md
+      ## §Concern-scoped apply).
     resources*: seq[ResourceIntent]
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G. Action-edge items emitted
@@ -277,6 +285,16 @@ type
       ## host. Two resources may share an address when their guards select
       ## different hosts; the planner rejects a duplicate only among the
       ## resources a host actually gets.
+    activity*: string
+      ## The activity this resource belongs to (GM9, activity-scoped
+      ## resources); "" means profile-wide. Set for every resource declared
+      ## in a `resources:` block inside `activity <name>:` (and for a data
+      ## file's `[[resource]]` row with an `activity` key). The planner
+      ## plans such a resource only on a host whose selection enables the
+      ## activity (`default` plus the host's `hosts:` entry), and only where
+      ## its `guard` also holds. It must name an activity the profile
+      ## declares; an unknown name is refused, never treated as
+      ## profile-wide.
 
   PredicateExpr* = object
     expr*: string         ## canonical-stringified predicate; apply-

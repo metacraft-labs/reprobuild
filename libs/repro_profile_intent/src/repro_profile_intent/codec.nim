@@ -59,6 +59,11 @@ const
     ## imports (`ProfileIntent.catalogImports`). Optional; omitted when
     ## empty, so a profile without the section encodes exactly as before.
     ## Envelope schema 6.
+  KeyHostApplies  = "hostApplies"
+    ## The concerns Reprobuild applies per host (`ProfileIntent.hostApplies`,
+    ## a block-form `hosts:` entry's `applies:`). Optional; omitted when no
+    ## host declares, so a profile without a declaration encodes exactly as
+    ## before. Envelope schema 7.
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -84,6 +89,10 @@ const
     ## GM3: the runtime predicate a ResourceIntent / ConfigOverride
     ## applies under (`ResourceIntent.guard`). Optional; omitted when the
     ## element applies on every host. Envelope schema 4.
+  KeyActivity     = "activity"
+    ## GM9: the activity a ResourceIntent belongs to
+    ## (`ResourceIntent.activity`). Optional; omitted for a profile-wide
+    ## resource. Envelope schema 8.
   KeyBinaries     = "binaries"
     ## 2026-06-09: the explicit binary names a package installs, used
     ## by the path-based catalog adapter when the package name
@@ -220,6 +229,8 @@ proc encodeResource(r: ResourceIntent): DynamicValue =
                  entry(KeyDependsOn, cborArray(deps))]
   if r.guard.expr.len > 0:
     fields.add entry(KeyGuard, cborText(r.guard.expr))
+  if r.activity.len > 0:
+    fields.add entry(KeyActivity, cborText(r.activity))
   cborMap(fields)
 
 proc encodeHosts(h: Table[string, seq[string]]): DynamicValue =
@@ -296,6 +307,8 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
     entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
   if p.catalogImports.len > 0:
     entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
+  if p.hostApplies.len > 0:
+    entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
   cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
@@ -461,6 +474,10 @@ proc decodeResource(v: DynamicValue): ResourceIntent =
       lookup(entries, KeyDependsOn, "ResourceIntent"), KeyDependsOn):
     result.dependsOn.add decodeResourceAddress(d)
   result.guard = decodeGuard(entries)
+  var activityFound = false
+  let activity = lookupOpt(entries, KeyActivity, activityFound)
+  if activityFound:
+    result.activity = expectText(activity, KeyActivity)
 
 proc decodeHosts(v: DynamicValue): Table[string, seq[string]] =
   let entries = expectMap(v, "hosts")
@@ -570,6 +587,12 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   if ciFound:
     for it in expectArray(ciNode, KeyCatalogImports):
       result.catalogImports.add expectText(it, KeyCatalogImports)
+  # The per-host concern declaration is OPTIONAL on the wire (absent when
+  # no host declares one).
+  var haFound = false
+  let haNode = lookupOpt(entries, KeyHostApplies, haFound)
+  if haFound:
+    result.hostApplies = decodeHosts(haNode)
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

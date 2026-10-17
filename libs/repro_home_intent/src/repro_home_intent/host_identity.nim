@@ -8,7 +8,9 @@
 ##     (`$XDG_CONFIG_HOME/repro/home/` on Linux/macOS,
 ##      `%APPDATA%\repro\home\` on Windows).
 ##   - Host identity: `$REPRO_HOST` > `--host <name>` (CLI override) >
-##     lowercased OS hostname.
+##     lowercased OS hostname. Every `repro home` subcommand resolves it once,
+##     through `selectHost`, which also refuses a `--host` that `$REPRO_HOST`
+##     would silently override (§Host Identity).
 
 import std/[os, osproc, strutils]
 from repro_core/paths import extendedPath
@@ -141,3 +143,62 @@ proc currentHost*(): string =
   if cliHostOverride.len > 0:
     return cliHostOverride
   result = systemHostname()
+
+# ---------------------------------------------------------------------------
+# The one host resolver of the `repro home` commands.
+# ---------------------------------------------------------------------------
+
+type
+  HostSource* = enum
+    ## Where the resolved host identity came from, in the documented
+    ## precedence (`$REPRO_HOST`, `--host`, the OS hostname).
+    hsEnv = "env"
+    hsFlag = "flag"
+    hsHostname = "hostname"
+
+  HostIdentity* = object
+    name*: string
+    source*: HostSource
+
+  EHostIdentity* = object of CatchableError
+    ## The host cannot be resolved as the caller asked: a `--host` that
+    ## `$REPRO_HOST` would override, an empty `--host`, or no name at all.
+
+proc machineHost*(): string =
+  ## The identity this machine has WITHOUT any `--host`: `$REPRO_HOST`, else
+  ## the lowercased OS hostname. `repro home enable/disable --host NAME`
+  ## compare NAME with it to tell an edit for this machine from one for
+  ## another host.
+  let env = getEnv(HomeHostEnvVar)
+  if env.len > 0: env else: systemHostname()
+
+proc selectHost*(hostFlag: string; flagGiven = hostFlag.len > 0):
+    HostIdentity =
+  ## Resolve the host identity for one `repro home` command and install it
+  ## as the process-wide `--host` override, so everything the command calls
+  ## afterwards (`currentHost()` in the planner, the apply pipeline, the
+  ## export and facts producers) sees the same host. `hostFlag` is the
+  ## command's `--host` value ("" when the flag was not given).
+  ##
+  ## Refusals (raise `EHostIdentity`):
+  ## * `--host` given with an empty value;
+  ## * `--host NAME` while `$REPRO_HOST` names ANOTHER host: `$REPRO_HOST`
+  ##   takes precedence, and silently planning, applying or exporting for a
+  ##   host the user did not name is worse than refusing;
+  ## * no host at all (no `$REPRO_HOST`, no `--host`, no OS hostname).
+  if flagGiven and hostFlag.len == 0:
+    raise newException(EHostIdentity, "--host needs a non-empty name")
+  let env = getEnv(HomeHostEnvVar)
+  if env.len > 0 and hostFlag.len > 0 and env != hostFlag:
+    raise newException(EHostIdentity, "--host " & hostFlag &
+      " conflicts with $" & HomeHostEnvVar & "=" & env &
+      " (which takes precedence); unset one of them")
+  setHostOverride(hostFlag)
+  result.name = currentHost()
+  result.source =
+    if env.len > 0: hsEnv
+    elif hostFlag.len > 0: hsFlag
+    else: hsHostname
+  if result.name.len == 0:
+    raise newException(EHostIdentity,
+      "could not determine the host name; pass --host NAME")

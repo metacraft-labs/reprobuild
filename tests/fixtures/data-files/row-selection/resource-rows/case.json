@@ -1,6 +1,6 @@
 {
   "description": "A [[resource]] row is its constructor's resource (auto-address unless address is given); it applies wherever its guard holds, whatever activities the host selects.",
-  "hosts": { "m1": ["desktop"] },
+  "hosts": { "m1": ["desktop"], "home-pc": ["default"], "server": ["default"] },
   "evaluations": [
     { "host": "m1", "system": "aarch64-darwin", "packages": ["ghostty"],
       "resources": ["env.userVariable:EDITOR", "launchd.userAgent:org.gm4.agent"] },

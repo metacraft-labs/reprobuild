@@ -521,6 +521,17 @@ int main(int argc, char **argv) {
     ts.tv_nsec = (hold_ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
   }
+  /* Remove a file this action did not create: `<out>.stale`, which the
+     launch-path cases seed before each run. io-mon records the unlink as an
+     `mrPathMutation`, the engine folds it into `monitorRemovals`, and without
+     it that field renders `[]` on every launch path, so the identity
+     comparison cannot fail for a difference in it. Where nothing was seeded
+     the unlink fails, and a failed removal records nothing. See the header. */
+  {
+    char stale[4096];
+    int written = snprintf(stale, sizeof(stale), "%s.stale", argv[2]);
+    if (written > 0 && (size_t)written < sizeof(stale)) unlink(stale);
+  }
   FILE *out = fopen(argv[2], "w");
   if (out == NULL) return 82;
   fputs(buffer, out);
@@ -1633,6 +1644,7 @@ proc evidenceShape(res: ActionResult;
     render("depfileInputs", ev.depfileInputs.paths),
     render("monitorReads", ev.monitorReads.paths),
     render("monitorWrites", ev.monitorWrites.paths),
+    render("monitorRemovals", ev.monitorRemovals.paths),
     render("monitorProbes", ev.monitorProbes.paths),
     # P10. The EIGHTH field, and the last one this rendering was blind to.
     # An enumeration lands in `monitorProbes` too, so a difference in this
@@ -2630,6 +2642,7 @@ suite "every_launch_path_is_monitored":
         for i in 0 .. 1:
           let marker = workRoot / ("marker-" & $i & ".txt")
           writeFile(marker, "hm4 marker payload " & $i & "\n")
+          writeFile(workRoot / ("out-" & $i & ".txt.stale"), "stale\n")
           actions.add monitoredFixtureAction("queued-" & $i, fixtureBin,
             marker, workRoot / ("out-" & $i & ".txt"), workRoot,
             holdMs = 400, cpuMilli = 800'u32)
@@ -2658,6 +2671,7 @@ suite "every_launch_path_is_monitored":
       else:
         let marker = workRoot / "marker.txt"
         writeFile(marker, "hm4 marker payload\n")
+        writeFile(workRoot / "out.txt.stale", "stale\n")
         let act = monitoredFixtureAction("monitored-" & $ord(lp.kind),
           fixtureBin, marker, workRoot / "out.txt", workRoot,
           holdMs = 0, cpuMilli = 100'u32)
@@ -3002,6 +3016,19 @@ suite "every_launch_path_is_monitored":
           # `opendir` as an enumeration, or the engine stops folding it into
           # this field, it reddens HERE rather than turning the comparison
           # below into a tautology.
+          # AND THE REMOVAL SET IS NOT EMPTY: the same pin for
+          # `monitorRemovals`, the paths the action removed without having
+          # made them. The fixture unlinks a seeded `<out>.stale`; if it stops,
+          # or io-mon stops recording the unlink, or the engine stops folding
+          # it here, the comparison below compares empty sets for this field.
+          let removals = shapeList(shape, "monitorRemovals")
+          if "<out>.stale" notin removals:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape carries no removal of the ",
+              "seeded `<out>.stale`, so the cross-path comparison of ",
+              "`monitorRemovals` below is vacuous:\n", shape
+          check "<out>.stale" in removals
+
           let enumerations = shapeList(shape,
             "monitorDirectoryEnumerations")
           if "<work>" notin enumerations:

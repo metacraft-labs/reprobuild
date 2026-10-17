@@ -61,28 +61,31 @@ suite "dev-env large environment values":
     let digest = blake3.digest(encodeDevEnvArtifact(fixture("small")))
     var hex = ""
     for b in digest: hex.add(toHex(int(b), 2).toLowerAscii())
-    # Measured at Shared-Development-Services D-SS11. The three
-    # superseded pins, kept so the history of this guard is readable
-    # from the guard:
+    # Measured at Shared-Development-Services F1. The four superseded
+    # pins, kept so the history of this guard is readable from the
+    # guard:
     #   pre-L8: 5260be4bfb09c2ffe0536e5057001b866a0b478e5e5251660495d7c54be5521e
     #   L8:     04d3aa770b1e294eb716ae258fdd56830d9e8c5da310a888cb927ae7e4eb7e53
     #   L9:     1cdd6d320513d693cb051af7c48e9faf9c9d7a1ac427cafab5bdf42b404c7844
+    #   D-SS11: 2758a09be9e22f307c4dd3d267947f15520e530d00e5027bf00066998421631c
     # The header says what moved it each time. D-SS11 moved it by adding
     # `DevEnvArtifact.sharedResolutions` -- a new variable-size SSZ
     # field, so the container's fixed portion grew by one 4-byte offset
     # entry and every later offset shifted -- and by moving both version
-    # numbers 3 -> 4.
+    # numbers 3 -> 4. F1 moved it the same way, by adding
+    # `DevEnvArtifact.actions` and moving both numbers 4 -> 5.
     #
-    # THIS FIXTURE CARRIES NO RESOLUTION, which is what makes the pin
-    # worth having: the digest moved for the SCHEMA, not for content, so
-    # an implementation that added the field without moving the versions
-    # would fail the two cases below rather than this one.
-    check hex == "2758a09be9e22f307c4dd3d267947f15520e530d00e5027bf00066998421631c"
+    # THIS FIXTURE CARRIES NO RESOLUTION AND NO ACTION, which is what
+    # makes the pin worth having: the digest moved for the SCHEMA, not
+    # for content, so an implementation that added the field without
+    # moving the versions would fail the two cases below rather than
+    # this one.
+    check hex == "8bd1f76aa34ead11c0ad5fd8bd4154af116c8c8ced2f1f02dd987bb37196e6dc"
 
   test "the declared schema version is pinned, and every superseded envelope version is refused":
     # The assertions that keep the re-pin above from being a blessing.
     check decodeDevEnvArtifact(
-      encodeDevEnvArtifact(fixture("small"))).schemaVersion == 4'u32
+      encodeDevEnvArtifact(fixture("small"))).schemaVersion == 5'u32
     # The envelope version is a little-endian u16 directly after the
     # 4-byte magic. PINNED rather than searched for: an earlier revision
     # of this case scanned for the first `02 00` pair, which does land on
@@ -102,7 +105,7 @@ suite "dev-env large environment values":
     # version-literal-ok: THE pin of this file, and the comment above
     # says why at length -- it is meant to fail loudly and name itself on
     # a bump, while every probe below it is relative to the accessor.
-    check devEnvEnvelopeVersion() == 4'u16
+    check devEnvEnvelopeVersion() == 5'u16
     # The ENCODER writes the current version at that offset. Relative,
     # and it is the control for the pokes below: if the offset were
     # wrong, every refusal below would be a checksum failure that said

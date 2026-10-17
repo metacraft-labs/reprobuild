@@ -2,7 +2,7 @@
 ## (rebase, cherry-pick, ``am``), as every managed commit-path hook does
 ## (``managedHookStandDown``), and logs that it did.
 ##
-## Under ``gate_mode = required``, three uncovered commits (made with
+## Under ``gate_mode = required`` (recorded in lib-a's committed ``repro.lock``, TC-9d), three uncovered commits (made with
 ## ``--no-verify``) are replayed by ``git rebase --exec 'git commit --amend
 ## --no-edit'`` onto a moved base: a multi-commit rebase in which git fires
 ## ``pre-commit`` once per replayed commit, with the rebase in flight.

@@ -138,7 +138,12 @@ proc encodeResource(r: ResourceIntent): string =
     if i > 0:
       result.add ","
     result.add encodeAddress(dep)
-  result.add "],\"guard\":" & encodeGuard(r.guard) & "}"
+  # `activity` (GM9) is always emitted, `null` for a profile-wide resource,
+  # for the reason `guard` is: a consumer must never read an absent key as
+  # "every host".
+  result.add "],\"guard\":" & encodeGuard(r.guard) &
+    ",\"activity\":" &
+    (if r.activity.len == 0: "null" else: encodeStr(r.activity)) & "}"
 
 proc encodeHosts(h: Table[string, seq[string]]): string =
   var keys: seq[string] = @[]
@@ -267,6 +272,12 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # unchanged.
   if p.catalogImports.len > 0:
     result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
+  # The concerns Reprobuild applies per host (`applies:` in a block-form
+  # `hosts:` entry), only when some host declares them, so the key set of a
+  # profile without a declaration is unchanged
+  # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+  if p.hostApplies.len > 0:
+    result.add ",\"hostApplies\":" & encodeHosts(p.hostApplies)
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -358,6 +369,14 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     var ri = ResourceIntent(kind: r["kind"].getStr(),
       address: r["address"].getStr(),
       guard: parseGuard(r.getOrDefault("guard")))
+    # GM9: `null` / absent (an intent written before activity-scoped
+    # resources) -> profile-wide. Anything but a string or null is refused.
+    let activity = r.getOrDefault("activity")
+    if not activity.isNil and activity.kind != JNull:
+      if activity.kind != JString:
+        raise newException(ValueError, "resource `" & ri.address &
+          "`: `activity` must be a string or null, got " & $activity.kind)
+      ri.activity = activity.getStr()
     for fk, fv in r["fields"]:
       ri.fields[fk] = parseFieldValue(fv)
     for dep in r["dependsOn"]:
@@ -407,6 +426,13 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
   if root.hasKey("catalogImports"):
     for it in root["catalogImports"]:
       result.catalogImports.add it.getStr()
+  # Optional; absent when no host declares the concerns Reprobuild applies.
+  if root.hasKey("hostApplies"):
+    for k, v in root["hostApplies"]:
+      var concerns: seq[string] = @[]
+      for it in v:
+        concerns.add it.getStr()
+      result.hostApplies[k] = concerns
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.

@@ -1,0 +1,1 @@
+{ "description": "GM9: a resource row's activity is a string.", "error": ["resource row 1", "`activity`", "expected a string"] }

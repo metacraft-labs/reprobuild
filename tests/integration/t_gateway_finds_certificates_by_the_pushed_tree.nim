@@ -5,7 +5,7 @@
 ##
 ## A real gateway bare (its installed ``pre-receive`` / ``post-receive``
 ## hooks driving the built ``repro``) in front of a real upstream bare, under
-## ``required``, every push made with ``--no-verify`` so only the receiving
+## ``required`` (the policy the pushed tree records), every push made with ``--no-verify`` so only the receiving
 ## side decides:
 ##
 ##   1. a push whose note sits on ``<new>^{tree}`` is ACCEPTED and FORWARDED;
@@ -35,7 +35,10 @@ const legacyNotesRef = "refs/notes/reprobuild/certificates"
 suite "TC-8c — the gateway finds certificates by the pushed tree":
 
   test "t_gateway_finds_certificates_by_the_pushed_tree":
-    let fx = setupStoreFixture("", "gateway")
+    # The policy is the pushed tree's own (TC-9d): the seed commit records
+    # t-unit required on this platform in lib-a's repro.lock.
+    let fx = setupStoreFixture(
+      requiredPolicy(@["t-unit"], @[currentPlatformTag()]), "gateway")
     defer: removeDir(fx.scratch)
     wireStoreGateway(fx)
     let notes = certificateNotesRef & ":" & certificateNotesRef

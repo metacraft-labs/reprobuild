@@ -236,3 +236,42 @@ when defined(posix):
       check "lock is held" in second.output
       check queryUserDaemonStatus(liveEndpoint).running
       check recordsNaming(stateDir, liveEndpoint).len == 1
+
+    test "the daemon lock is not handed to the programs the daemon runs":
+      # An flock belongs to the open file DESCRIPTION, so it is released when
+      # the last descriptor on it closes -- in ANY process. Opened without
+      # close-on-exec, the lock went to every program the daemon or a build
+      # worker exec'd. Measured in a full-suite run: the daemon was SIGTERMed
+      # mid-build, the `runquotad` its worker had auto-started survived as an
+      # orphan still holding fd 3 = `.repro-daemon.lock`, every later start
+      # was refused "lock is held", and every later `repro build` fell back to
+      # direct mode for the rest of the run. The kernel's record of the
+      # descriptor's flags is the statement: O_CLOEXEC (02000000) set.
+      when defined(linux):
+        let scratch = createTempDir("repro-status-", "")
+        defer: removeDir(scratch)
+        let stateDir = scratch / "state"
+        let endpoint = scratch / "a" / "d.sock"
+        var daemon = startDaemon(endpoint, stateDir)
+        defer: daemon.stopDaemon()
+        let pid = daemon.process.processID
+        let lockPath = stateDir / ".repro-daemon.lock"
+        var lockFds: seq[string]
+        for kind, entry in walkDir("/proc/" & $pid & "/fd"):
+          try:
+            if expandSymlink(entry) == lockPath:
+              lockFds.add(entry.extractFilename)
+          except OSError:
+            discard
+        checkpoint("daemon pid " & $pid & " lock descriptors: " & $lockFds)
+        # Premise: the daemon holds the lock through a descriptor we found,
+        # so the flag check below is about the real lock.
+        check lockFds.len == 1
+        for fd in lockFds:
+          var flags = ""
+          for line in readFile("/proc/" & $pid & "/fdinfo/" & fd).splitLines():
+            if line.startsWith("flags:"):
+              flags = line["flags:".len .. ^1].strip()
+          checkpoint("fd " & fd & " flags=" & flags)
+          check flags.len > 0
+          check (parseOctInt(flags) and 0o2000000) != 0

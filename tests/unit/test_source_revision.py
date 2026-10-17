@@ -13,8 +13,9 @@ These cases pin the script's contract against real git repositories in a
 temporary directory: the env override wins, a clean tree reports HEAD, a
 change to a tracked file appends `-dirty` (an untracked file does not), a
 directory that is not the top level of a work tree reports nothing, a refused
-character fails, and the generated Nim module is exactly the revision. Two
-source checks keep the two routes from growing a second derivation again.
+character fails, and the generated Nim module is exactly the revision and is
+left untouched while the revision is unchanged. Two source checks keep the
+two routes from growing a second derivation again.
 
 No mocks: the real script runs under the real bash against real git.
 """
@@ -155,9 +156,36 @@ class SourceRevisionScriptTests(unittest.TestCase):
             'const reprobuildGeneratedSourceRevision* = "'
             + head + '-dirty"\n').encode("ascii")
         self.assertEqual(self.nim_module(), expected)
-        # Deterministic: an unchanged revision rewrites identical bytes, which
-        # is what keeps the engine edge that reads the file a cache hit.
+        # Deterministic: an unchanged revision yields identical bytes.
         self.assertEqual(self.nim_module(), expected)
+
+    def test_nim_module_is_left_alone_when_the_revision_is_unchanged(self):
+        # Identical bytes are not enough: the engine edge revalidates its
+        # recorded inputs by timestamp metadata first, so rewriting the same
+        # bytes made the engine miss on every `repro build`
+        # (t_b1_apps_action_cache_hit). The module may change on disk only
+        # when the revision does.
+        self.commit_tree()
+        first = self.nim_module()
+        module = self.base / "generated" / "source-revision" / "rev.nim"
+        past = module.stat().st_mtime_ns - 10_000_000_000
+        os.utime(module, ns=(past, past))
+        before = module.stat()
+        self.assertEqual(self.nim_module(), first)
+        after = module.stat()
+        self.assertEqual(after.st_mtime_ns, past)
+        self.assertEqual(after.st_ino, before.st_ino)
+        # A real change -- the tree turning dirty -- still rewrites it.
+        (self.tree / "tracked.txt").write_text("two\n", encoding="ascii")
+        self.assertNotEqual(self.nim_module(), first)
+        self.assertNotEqual(module.stat().st_mtime_ns, past)
+
+    def test_nim_module_with_other_content_is_rewritten(self):
+        head = self.commit_tree()
+        module = self.base / "generated" / "source-revision" / "rev.nim"
+        module.parent.mkdir(parents=True)
+        module.write_bytes(b"const reprobuildGeneratedSourceRevision* = \"\"\n")
+        self.assertIn(head.encode("ascii"), self.nim_module())
 
     def test_nim_module_for_unknown_revision_is_empty_string(self):
         self.assertEqual(

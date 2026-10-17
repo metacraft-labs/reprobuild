@@ -103,10 +103,56 @@ proc providerSnapshotPath*(storeRoot: string): string =
   storeRoot / "provider-fragments.rbsz"
 
 proc loadProviderGraphSnapshot*(storeRoot: string): ProviderGraphSnapshot =
+  ## The provider-fragment cache, or an EMPTY snapshot when there is
+  ## nothing this build can read -- which the refresher reads as
+  ## "recompute".
+  ##
+  ## A SNAPSHOT IS A DERIVED CACHE, so an unreadable one must be
+  ## DISCARDED AND RECOMPUTED rather than raised. That is the whole of
+  ## the rule, and the absent-file arm below has always implemented half
+  ## of it; the version arm is the other half. Nothing in
+  ## `provider-fragments.rbsz` is anything but the output of an
+  ## evaluation this build can run again, and no caller holds an
+  ## identifier for a particular snapshot, so throwing one away costs
+  ## one evaluation and nothing else.
+  ##
+  ## WHY THAT IS NOT THE RULE FOR AN ARTIFACT, which is the comparison
+  ## that decides it. D-SS11 deliberately version-gates and DECODES the
+  ## dev-env artifact: an artifact IS the evaluation's output, addressed
+  ## by its content id, and a reader that silently discarded one would
+  ## answer with a recomputation whose id the caller had already been
+  ## promised. The two rules differ because the two things differ, not
+  ## because one lane is stricter than the other.
+  ##
+  ## AND WHY THIS ARM HAD TO LAND BEFORE THE VERSION MOVED. One
+  ## `ProviderGraphVersion` governs all THREE envelope types this
+  ## library frames -- request, response and snapshot -- so
+  ## Shared-Development-Services F1's change to the RESPONSE
+  ## (`DevEnvResult` grew an `actions` list) moves the version for the
+  ## SNAPSHOT too, although the snapshot payload layout did not change
+  ## at all. Bumping without this arm would therefore have turned every
+  ## `provider-fragments.rbsz` already on disk into a hard error at the
+  ## next build, for a cache the build was free to rebuild. With the arm
+  ## in place the same skew is a named, silent recomputation instead of
+  ## the loud-but-unnamed `trailing provider response payload bytes`
+  ## that a version-blind decode produced.
+  ##
+  ## THE ARM IS NARROW, and that is what keeps it from becoming "ignore
+  ## every snapshot that will not decode". Only `eeUnsupportedVersion`
+  ## is translated. A corrupt magic, a truncated payload, a wrong type
+  ## id or trailing bytes still raise, because those do not say "this
+  ## cache is from another epoch" -- they say the file is not the thing
+  ## it claims to be, and answering real corruption with a silent
+  ## recomputation is how it stays invisible.
   let path = providerSnapshotPath(storeRoot)
   if not fileExists(extendedPath(path)):
     return ProviderGraphSnapshot()
-  decodeProviderSnapshot(fromByteString(readFile(extendedPath(path))))
+  try:
+    result = decodeProviderSnapshot(fromByteString(readFile(extendedPath(path))))
+  except EnvelopeError as err:
+    if err.kind != eeUnsupportedVersion:
+      raise
+    result = ProviderGraphSnapshot()
 
 proc saveProviderGraphSnapshot*(storeRoot: string; snapshot: ProviderGraphSnapshot) =
   createDir(extendedPath(storeRoot))

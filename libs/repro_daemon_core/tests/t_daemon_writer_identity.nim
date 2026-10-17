@@ -29,6 +29,9 @@
 ## real processes, so the cases interrogate this process, a real spawned child
 ## before and after it exits, and pids that cannot exist. A fake process table
 ## would decide by fiat the one thing under test.
+## The `/proc/<pid>/stat` text fixtures below are wire-decoder fixtures for
+## the stat record format, not a fake process table: they decide no process's
+## liveness, only how one record's bytes are read.
 
 import std/[options, os, osproc, strutils, streams, json, times, unittest]
 
@@ -284,6 +287,47 @@ suite "writer identity recognises a live writer and only a dead one":
       # of this suite executes the case above and reports it; on any other
       # platform this line records that it remains unverified rather than
       # letting the suite pass vacuously.
+
+  test "an incomplete /proc/<pid>/stat record is unknown, never pid reuse":
+    # A read cut inside field 22 leaves a numeric prefix ("809" of
+    # "8097736") that would otherwise compare unequal to the recorded stamp
+    # and prove pid reuse. Only a record ending in the newline Linux's
+    # `do_task_stat` emits is complete. `comm` here contains spaces and
+    # parentheses and looks like fields, so field 22 must still be counted
+    # from the final ')'.
+    let head = "1234 ((a) b) 1 2 (c)) S 1 1234 1234 0 -1 4194560 100 0 0 0 0" &
+      " 0 0 0 20 0 1 0 "
+    let tail = " 12345678 300 18446744073709551615 0 0 0 0 0 0 0 0 0 17 3" &
+      " 0 0 0 0 0\n"
+    # Positive control: the complete record yields the whole start time.
+    check decodeProcStatStartTime(head & "8097736" & tail) == some("8097736")
+    # In order: cut inside field 22; cut right after it; following fields
+    # but no newline; every field but no newline; complete but overflowing;
+    # no closing parenthesis at all.
+    let rejected = [head & "809", head & "8097736",
+      head & "8097736 12345678 300", head & "8097736" & tail[0 ..< ^1],
+      head & "18446744073709551616" & tail, "1234 (x\n"]
+    for incomplete in rejected:
+      checkpoint("record=" & incomplete.escape)
+      check decodeProcStatStartTime(incomplete).isNone
+    when defined(linux):
+      let raw = readFile("/proc/self/stat")
+      let stamp = processStartStamp(int(getCurrentProcessId()))
+      checkpoint("self stat=" & raw.escape)
+      require stamp.len > 1
+      check decodeProcStatStartTime(raw) == some(stamp)
+      # Locate field 22 by counting tokens after the final ')'.
+      var pos = raw.rfind(')') + 1
+      for _ in 0 ..< 19:
+        while raw[pos] == ' ': inc pos
+        while raw[pos] != ' ': inc pos
+      while raw[pos] == ' ': inc pos
+      require raw[pos ..< pos + stamp.len] == stamp
+      let cut = raw[0 ..< pos + stamp.len div 2]
+      checkpoint("cut=" & cut.escape)
+      check decodeProcStatStartTime(cut).isNone
+    # Nothing changes for a live writer reading its own complete record.
+    check writerLiveness(encodeWriterIdentity(currentWriterIdentity())) == wlLive
 
   test "a live identity survives advancing wall clock seconds":
     let me = currentWriterIdentity()

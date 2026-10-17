@@ -173,7 +173,8 @@ suite "profile compile edge: a clang compile is published on its first run":
         check ("--cc:clang") in compileLine
         check ("--clang.exe:" & clang) in compileLine
         check ("--passC:" & clangNoTempFileFlag) in compileLine
-        check ("--passC:-Xclang -dependency-file -Xclang " & nullDevice) in compileLine
+        check ("--passC:-MD -MT " & ProfileDepfileTarget &
+          " -Xclang -dependency-file -Xclang " & nullDevice) in compileLine
         check "--forceBuild:on" in compileLine
         var objectCount = 0
         for path in walkDirRec(sb.stateDir / "profile-cache"):
