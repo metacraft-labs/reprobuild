@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2093,
+    "nimTestBinaries": 2094,
     "pureUnitConsolidationGroups": 61,
-    "pureUnitTests": 648,
+    "pureUnitTests": 649,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2114
+    "testEntries": 2115
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1138,7 +1138,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 9,
+      "count": 10,
       "defines": [],
       "dependencyShape": [
         "repro_workspace_manifests"
@@ -1152,6 +1152,7 @@
         "tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim",
         "tests/unit/t_manifest_editor_preserves_unrelated_text.nim",
         "tests/unit/t_repo_fragment_role_keys.nim",
+        "tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim",
         "tests/unit/t_repo_v1_and_v2_resolve_identically.nim",
         "tests/unit/t_workspace_settings_v1_decode.nim"
       ],
@@ -1280,7 +1281,7 @@
       "graph-fixture": 19,
       "integration": 1132,
       "platform/destructive": 129,
-      "pure unit": 648,
+      "pure unit": 649,
       "unclassified": 186
     },
     "graphOwnedTestArtifacts": [
@@ -1483,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2093,
+    "nimTestBinaryCount": 2094,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2114
+    "testEntryCount": 2115
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -44109,6 +44110,23 @@
       "source": "tests/unit/t_repo_fragment_role_keys.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repo_fragment_writer_emits_v1_when_v1_can_say_it",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

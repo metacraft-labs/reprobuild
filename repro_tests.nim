@@ -18495,6 +18495,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim",
+    binary: "build/test-bin/t_repo_fragment_writer_emits_v1_when_v1_can_say_it",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_repo_relocation_move_ordering.nim",
     binary: "build/test-bin/t_repo_relocation_move_ordering",
     defines: @[],

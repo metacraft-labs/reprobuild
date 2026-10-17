@@ -139,11 +139,13 @@ suite "membership model — `repro ws sets` authoring":
       let infraFragment = readRepoFragment(
         fx.workspaceRoot / "repos" / "infra.toml")
       check infraFragment.repo.url_prefix.get("") == "acme"
-      # `--branch` is written as a repo.v2 `mainline` (Workspace-Branch-Roles.md
-      # §3.1), and never as the v1 `branch` key.
-      check infraFragment.schema == schemaRepoFragmentV2
-      check infraFragment.repo.mainline == some("dev")
-      check infraFragment.repo.branch.isNone
+      # `--branch` is the mainline, written in the v1 spelling `branch`: the
+      # fragment declares nothing repo.v1 cannot say, so it stays readable by a
+      # `repro` that predates repo.v2 (Workspace-Branch-Roles.md §6).
+      check infraFragment.schema == schemaRepoFragmentV1
+      check infraFragment.repo.branch == some("dev")
+      check infraFragment.repo.mainline.isNone
+      check infraFragment.repo.mainlineBranch == some("dev")
       # The NEW spelling only. A fragment naming a project's `[[remote]]` key
       # is not shareable without every consumer learning that key.
       check infraFragment.repo.remote.isNone

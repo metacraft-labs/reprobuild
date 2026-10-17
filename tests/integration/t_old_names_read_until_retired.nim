@@ -302,7 +302,10 @@ suite "old names are read until retired":
     check f1.repo.mainlineBranch == f2.repo.mainlineBranch
     check f1.repo.roleDecls == f2.repo.roleDecls
 
-    # A write after reading the v1 spelling produces the v2 spelling.
+    # Writing either record back produces the v1 spelling: neither declares
+    # anything repo.v1 cannot say (Workspace-Branch-Roles.md §6).
     let rewritten = scratch / "rewritten.toml"
     writeWorkspaceManifestFile(rewritten, repoFragmentText(f1))
-    check readFile(rewritten) == readFile(v2)
+    check readFile(rewritten) == readFile(v1)
+    writeWorkspaceManifestFile(rewritten, repoFragmentText(f2))
+    check readFile(rewritten) == readFile(v1)
