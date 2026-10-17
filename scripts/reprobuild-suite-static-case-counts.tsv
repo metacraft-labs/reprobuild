@@ -1480,6 +1480,7 @@ tests/integration/t_integration_variant_value_accessor.nim	nim	4
 tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	nim	1
 tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	nim	1
 tests/integration/t_interface_extraction_follows_the_selected_catalog.nim	nim	1
+tests/integration/t_interface_extraction_is_served_to_a_copy_at_another_path.nim	nim	1
 tests/integration/t_interface_extraction_variants_keep_their_own_outputs.nim	nim	1
 tests/integration/t_is_published_accepts_any_remote_name.nim	nim	1
 tests/integration/t_issuance_leaves_the_user_index_untouched.nim	nim	1

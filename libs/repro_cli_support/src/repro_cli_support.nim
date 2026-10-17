@@ -5877,6 +5877,28 @@ const BuildReportSchemaId* = "reprobuild.build.report.v1"
   ## apart from the failure report (and from a stale pre-schema file) by
   ## value rather than by file name.
 
+var interfaceExtractReportTrace {.threadvar.}: seq[SchedulerTraceEvent]
+var interfaceExtractReportItems {.threadvar.}: seq[ActionResult]
+  ## The interface-extraction edge results of the build being reported.
+  ## The edge runs in its own engine pass (`extractInterfaceEdge`), so its
+  ## outcome is in none of the results the report is otherwise built from;
+  ## without this the report could not say why the extraction re-ran.
+  ## Cleared when `executeBuildTarget` starts, appended by the edge.
+
+proc interfaceExtractActionJson(item: ActionResult): JsonNode =
+  ## The outcome of one extraction edge: whether it ran and why its lookup
+  ## missed or its record was not published. Not `actionResultJson`: the
+  ## edge runs with cache-hit evidence elided whatever the report asks for.
+  %*{
+    "id": item.id,
+    "status": $item.status,
+    "launched": item.launched,
+    "cacheDecision": $item.cacheDecision,
+    "cacheMissReason": item.cacheMissReason,
+    "cachePublishSkipReason": item.cachePublishSkipReason,
+    "reason": item.reason
+  }
+
 type
   BuildReportProviderKind* = enum
     ## How the graph a full build report describes was obtained. The report's
@@ -6059,6 +6081,15 @@ proc buildReportJson*(context: BuildReportProviderContext;
       "keyAvailable": false
     }
     result["providerInvocations"] = %0
+  var interfaceExtractActions = newJArray()
+  for item in interfaceExtractReportItems:
+    interfaceExtractActions.add(interfaceExtractActionJson(item))
+  result["interfaceExtractActions"] = interfaceExtractActions
+  var interfaceExtractTrace = newJArray()
+  for event in interfaceExtractReportTrace:
+    interfaceExtractTrace.add(%*{"actionId": event.actionId,
+      "event": event.event, "detail": event.detail})
+  result["interfaceExtractTrace"] = interfaceExtractTrace
   result["cmakeRegenerationActions"] = cmakeRegenerationActions
   result["actions"] = actions
   result["trace"] = trace
@@ -10417,6 +10448,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   try:
     let edgeResult = runBuild(graph([extractAction]), edgeConfig)
     stats.mergeStats(edgeResult.stats)
+    interfaceExtractReportItems.add(edgeResult.results)
+    interfaceExtractReportTrace.add(edgeResult.trace)
     # M1 N11. This edge may run under the RunQuota bypass while the rest
     # of the build does not (see ``interfaceEdgeRunQuotaBypass``), and
     # the compensating control for a bypass is the warning that says one
@@ -10634,6 +10667,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # is the only handle we have on enabling them.
   if fromSourceBuildInvocationDepth == 0:
     fromSourceResolvedRecipes.clear()
+    interfaceExtractReportItems.setLen(0)
+    interfaceExtractReportTrace.setLen(0)
   inc fromSourceBuildInvocationDepth
   defer:
     dec fromSourceBuildInvocationDepth
