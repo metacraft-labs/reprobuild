@@ -937,6 +937,7 @@ tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	5
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	2
+tests/e2e/dev-env/t_e2e_shell_hook_prompt_key_sees_flake_inputs.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_templates.nim	nim	10
 tests/e2e/dotfiles-replacement/t_e2e_dotfiles_replacement_on_real_host.nim	nim	2
@@ -1975,6 +1976,8 @@ tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
 tests/unit/t_dev_env_large_values.nim	nim	5
 tests/unit/t_dev_env_path_ops.nim	nim	9
+tests/unit/t_dev_env_prompt_watch_entries.nim	nim	3
+tests/unit/t_dev_env_prompt_watch_key.nim	nim	7
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_export_plan_carries_tool_ops.nim	nim	4

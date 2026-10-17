@@ -15874,12 +15874,23 @@ proc runDevEnvExportCommand(args: openArray[string];
     activity:
       if parsed.activity.len > 0: parsed.activity else: "default",
     developOverridesPath: fastPathOverridesPath)
-  let candidateKey = computeDevEnvEdgeCacheKey(fastPathConfig)
+  #
+  # The key is compared against the ACTIVE activation's prompt watch manifest
+  # (the observed inputs it was built from), located through
+  # ``$__REPRO_ACTIVE_MANIFEST`` exactly as the thin client's
+  # ``tryDevEnvExportFastPath`` locates it — same proc, same derivation, or
+  # the two fast paths disagree. The key this run EMITS is computed further
+  # down, against the manifest this run writes. See the prompt watch section
+  # of ``repro_dev_env_engine/cache_key`` and ``reprobuild-pm``
+  # ``issues/2026-09-28-dev-env-prompt-key-ignores-flake-inputs.md``.
   let activeKey = getEnv("__REPRO_APPLIED")
-  if not parsed.allowStale and activeKey.len > 0 and
-      candidateKey == activeKey:
-    stdout.write(emitFastPathNoOpScript(parsed.shell))
-    return 0
+  if not parsed.allowStale and activeKey.len > 0:
+    let activeWatchManifest = promptWatchManifestPathFor(
+      getEnv(ReproActiveManifestMarkerName))
+    if computeDevEnvEdgeCacheKey(fastPathConfig, activeWatchManifest) ==
+        activeKey:
+      stdout.write(emitFastPathNoOpScript(parsed.shell))
+      return 0
 
   # Everything above this line is the fast path: it answers in ~70 ms and MUST
   # stay silent, because the shell hook runs it on every prompt. Reaching this
@@ -15967,8 +15978,40 @@ proc runDevEnvExportCommand(args: openArray[string];
   # inputs and compares; a match short-circuits without any build
   # engine work. Using the cache key (not the SSZ artifact ID) is what
   # makes the fast path actually fast.
-  let fingerprint = candidateKey
+  #
+  # The key folds in THIS activation's prompt watch manifest: the inputs its
+  # introspection edge was observed to depend on (`Nix-Flake-Coexistence.md`
+  # §2b, `Shell-Direnv-Hook.md` §"Fast-Path Cache-Key Check"). It is written
+  # into the activation directory next to the rollback manifest, where
+  # ``promptWatchManifestPathFor($__REPRO_ACTIVE_MANIFEST)`` finds it on the
+  # next prompt, and the key is computed only once it is on disk, so the
+  # emitted marker and every later prompt read the same file.
   let manifestPath = rollbackManifestPath(activationArtifactPath)
+  let watchManifestPath = promptWatchManifestPathFor(manifestPath)
+  var keyable = edge.promptWatchComplete
+  if keyable:
+    try:
+      writePromptWatchManifest(watchManifestPath, edge.promptWatch)
+    except CatchableError:
+      keyable = false
+  let settledKey = computeDevEnvEdgeCacheKey(fastPathConfig, watchManifestPath)
+  # The race guard. The key above was built from metadata stat'ed AFTER the
+  # edge ran. A watched path changed at or after
+  # ``edge.introspectionStartedAt`` (taken just before the introspection
+  # edge's build) may have changed after the edge read it, in which case
+  # that key describes the new content while this script carries an
+  # environment built from the old one, and every later prompt would agree
+  # with it. Emit a marker no prompt can match instead (a computed key is
+  # exactly 32 hex digits; this is not), so the next prompt falls through
+  # and activates again against settled files. The same applies when the
+  # watch set could not be recorded completely.
+  let fingerprint =
+    if keyable and
+        unsettledPromptWatchPaths(watchManifestPath,
+          edge.introspectionStartedAt).len == 0:
+      settledKey
+    else:
+      "unsettled-" & settledKey
   # M75 — emit the manifest path as a marker BEFORE the
   # ``__REPRO_APPLIED`` fingerprint so the hook's deactivation arm
   # can locate the manifest via ``$__REPRO_ACTIVE_MANIFEST`` on the
