@@ -11007,6 +11007,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_batched_launch_partial_failure_keeps_ownership.nim",
+    binary: "build/test-bin/t_batched_launch_partial_failure_keeps_ownership",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim",
     binary: "build/test-bin/t_bearssl_source_resolution_rejects_stale_layout",
     defines: @[],

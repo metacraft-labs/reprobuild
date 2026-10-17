@@ -19757,6 +19757,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     action: BuildAction
     resultPath: string
 
+  # The exception unwinding out of the scheduling loop, if any, recorded by
+  # the ``except`` clause at the end of this ``try`` as it passes through.
+  #
+  # It has to be RECORDED, not read back with ``getCurrentException()`` in the
+  # ``finally``, and the ``finally`` has to put it back before it ends. Under
+  # Nim's goto-based exceptions an exception raised inside a cleanup's own
+  # ``finally`` -- ``cancelAndWait``'s lease release after its lease finish
+  # failed, say -- is pushed on top of the one it supersedes, and when that
+  # cleanup's error is handled the current exception falls back to the
+  # SUPERSEDED one, not to ours. Propagation then resumes with whatever is
+  # current, so the build used to surface a teardown ``Broken pipe`` in place
+  # of the error that started the unwinding, even with every teardown step
+  # guarded. The same leftover makes ``getCurrentException()`` unreliable for
+  # telling "unwinding" from "ended normally".
+  var unwinding: ref Exception = nil
   try:
     while completed < buildGraph.actions.len:
       raiseIfCancelled()
@@ -21209,6 +21224,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
             asWouldRun, asFailed, asBlocked}:
           inc completed
+  except Exception as err:
+    # Recorded and re-raised unchanged; see ``unwinding``. ``Exception``
+    # rather than ``CatchableError`` so a ``Defect`` (``--panics:off``) keeps
+    # its place as the cause too. This widens no raises effect: ``runBuild``
+    # already calls the unannotated ``progressCallback``.
+    unwinding = err
+    raise
   finally:
     # Engine-Threadpool TP-2 — every handed-off finish comes back BEFORE the
     # teardown below touches a slot. A worker owns a ``MonitorHandle`` for the
@@ -21220,31 +21242,54 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var pendingFinishes = awaitMonitorFinishes()
     for outcome in pendingFinishes.mitems:
       applyMonitorFinishOutcome(monitorHosts, outcome)
+    # Each teardown step below is guarded on its own and its failure
+    # collected, rather than allowed to raise out of this ``finally``. Two
+    # reasons (RunQuota-Protocol-And-Client-Libraries.md, "Ownership Across a
+    # Batched Client Launch"): a step that raised used to skip every step
+    # after it -- the remaining children, the session close, the drains below
+    # -- and, when the build was already unwinding, it REPLACED the exception
+    # that started the unwinding, so the build reported a cleanup symptom
+    # (a broken pipe, ``session still owns leases``) instead of its cause.
+    # What is collected is raised, or appended to the in-flight exception, at
+    # the very end of this block.
+    var teardownFailures: seq[string]
+    var firstTeardownError: ref CatchableError = nil
     for item in running.mitems:
-      case item.processKind
-      of rpkInlineRunQuotaPending:
-        if item.queuedRunQuotaProcess.active:
-          item.queuedRunQuotaProcess.cancelQueued()
-      of rpkInlineRunQuota:
-        if item.runQuotaProcess.active and not item.runQuotaProcess.completed:
-          discard item.runQuotaProcess.cancelAndWait()
-      of rpkInlineRunQuotaFailed:
-        discard
-      of rpkMonitorHost:
-        # HM-4 — kill the monitored root, then let the handle go. Dropping it
-        # reaps the root before releasing the consumer, so no producer is ever
-        # left publishing into a released set (LF-2); killing first is what
-        # keeps that reap from blocking shutdown indefinitely.
-        abandonMonitorHost(monitorHosts, item.monitorSlot)
-      of rpkBypassProcess:
-        if item.directProcess.active and not item.directProcess.completed:
-          discard item.directProcess.cancelAndWait()
-      of rpkHelperProcess:
-        terminateRunningAction(item)
-        closeProcessOnce(item.process)
+      try:
+        case item.processKind
+        of rpkInlineRunQuotaPending:
+          if item.queuedRunQuotaProcess.active:
+            item.queuedRunQuotaProcess.cancelQueued()
+        of rpkInlineRunQuota:
+          if item.runQuotaProcess.active and not item.runQuotaProcess.completed:
+            discard item.runQuotaProcess.cancelAndWait()
+        of rpkInlineRunQuotaFailed:
+          discard
+        of rpkMonitorHost:
+          # HM-4 — kill the monitored root, then let the handle go. Dropping it
+          # reaps the root before releasing the consumer, so no producer is ever
+          # left publishing into a released set (LF-2); killing first is what
+          # keeps that reap from blocking shutdown indefinitely.
+          abandonMonitorHost(monitorHosts, item.monitorSlot)
+        of rpkBypassProcess:
+          if item.directProcess.active and not item.directProcess.completed:
+            discard item.directProcess.cancelAndWait()
+        of rpkHelperProcess:
+          terminateRunningAction(item)
+          closeProcessOnce(item.process)
+      except CatchableError as err:
+        if firstTeardownError.isNil: firstTeardownError = err
+        teardownFailures.add("stopping action " & item.id & ": " & err.msg)
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
-      inlineRunQuotaSession.close()
+      # The daemon refuses to close a session that still owns leases, and
+      # that refusal is correct: it is kept verbatim in the collected text,
+      # never swallowed, so the build stays failed and says why.
+      try:
+        inlineRunQuotaSession.close()
+      except CatchableError as err:
+        if firstTeardownError.isNil: firstTeardownError = err
+        teardownFailures.add("closing the RunQuota session: " & err.msg)
     # HM-5 — the build does not end while a depfile publication is still in
     # flight. Not for correctness of the build (the evidence was folded from
     # memory and every cacheable action already waited for its own
@@ -21292,6 +21337,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         removeFile(extendedPath(capture))
       except CatchableError as err:
         runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
+    # Only now, with every drain above done, does a teardown failure leave
+    # this block. With the build already unwinding, the exception in flight
+    # stays the one raised -- same object, same type, its message first -- and
+    # the teardown failures are appended to it as additional lifecycle
+    # failures. With nothing in flight the build was otherwise complete, and
+    # the teardown failure is itself the build's failure, as it always was.
+    if unwinding != nil:
+      if teardownFailures.len > 0:
+        unwinding.msg.add("\nbuild teardown also failed: " &
+          teardownFailures.join("; "))
+      # Make it current again, whatever a cleanup's own exception handling
+      # left there, so propagation resumes with the build's real cause.
+      if getCurrentException() != unwinding:
+        setCurrentException(unwinding)
+    elif teardownFailures.len > 0:
+      # The first failure is raised as the error object it was, so its type
+      # and its text -- the daemon's refusal verbatim, when that is what it
+      # is -- reach the caller exactly as they did before teardown was
+      # guarded; any later ones ride along in its message.
+      if teardownFailures.len > 1:
+        firstTeardownError.msg.add("\nbuild teardown also failed: " &
+          teardownFailures[1 .. ^1].join("; "))
+      raise firstTeardownError
   maintainNixLedger()
   finishStat("repro scheduler total", totalStart)
   finishChildCpuStat()
