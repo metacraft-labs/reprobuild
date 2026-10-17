@@ -5,9 +5,9 @@
 ## does not register it as a test binary of its own.
 ##
 ## WHY THIS EXISTS RATHER THAN ``compiles``. The obvious spelling for a
-## macro-refusal gate is ``check not compiles((block: package …))`` and
-## there is an existing test in this repository written that way. It is
-## vacuous, and measured so: ``compiles`` returns **false for every**
+## macro-refusal gate is ``check not compiles((block: package …))`` but
+## that probe is vacuous, and measured so: ``compiles`` returns
+## **false for every**
 ## ``package`` block placed inside a ``block:`` expression, including a
 ## minimal well-formed one, because the macro expands to module-level
 ## ``type`` / ``const`` declarations that cannot live in a block

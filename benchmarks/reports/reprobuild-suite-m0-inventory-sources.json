@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 33,
     "nimTestBinaries": 2153,
     "pureUnitConsolidationGroups": 62,
-    "pureUnitTests": 661,
+    "pureUnitTests": 658,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
     "testEntries": 2175
   },
@@ -447,7 +447,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 45,
+      "count": 42,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -486,9 +486,6 @@
         "libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim",
         "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
         "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
-        "libs/repro_project_dsl/tests/t_dsl_outputs_forward_reference_error.nim",
-        "libs/repro_project_dsl/tests/t_dsl_outputs_sibling_scope_invisible_error.nim",
-        "libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim",
         "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
         "libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim",
         "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
@@ -1298,8 +1295,8 @@
       "graph-fixture": 19,
       "integration": 1170,
       "platform/destructive": 132,
-      "pure unit": 661,
-      "unclassified": 193
+      "pure unit": 658,
+      "unclassified": 196
     },
     "graphOwnedTestArtifacts": [
       {
@@ -17542,8 +17539,8 @@
     },
     {
       "binary": "build/test-bin/t_dsl_outputs_forward_reference_error",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -17613,8 +17610,8 @@
     },
     {
       "binary": "build/test-bin/t_dsl_outputs_sibling_scope_invisible_error",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -17738,8 +17735,8 @@
     },
     {
       "binary": "build/test-bin/t_dsl_outputs_unknown_flag_error",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
