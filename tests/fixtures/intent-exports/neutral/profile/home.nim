@@ -42,7 +42,11 @@ profile "gm5Neutral":
         credentialHelper = "libsecret"
 
   hosts:
-    "m1": [desktop, laptop]
+    # GM10: m1's system scope is managed elsewhere; the export carries
+    # it (`intent.systemManagedElsewhere`, `evaluation.system`).
+    "m1":
+      activities: [desktop, laptop]
+      system: managedElsewhere("example-org/infra")
     "home-pc": [desktop, cli]
 
   resources:

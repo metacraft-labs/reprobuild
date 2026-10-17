@@ -382,6 +382,52 @@ suite "ProfileIntent CBOR body round-trip":
     check q.hostApplies["home-pc"].len == 0
     check decodeProfileIntentFromBytes(plain).hostApplies.len == 0
 
+  test "systemManagedElsewhere round-trips (RBPI and JSON), absent when empty":
+    # GM10 (envelope schema 9): the hosts whose system scope is managed
+    # elsewhere, with the optional pointer. A profile without one encodes
+    # exactly as a schema-8 profile did -- no key, in either encoding.
+    var p: ProfileIntent
+    p.name = "sme"
+    p.hosts["infra-host"] = @["default"]
+    p.hosts["distro-host"] = @["default"]
+    p.hosts["home-pc"] = @["default"]
+    let plain = encodeProfileIntentToBytes(p)
+    var plainText = ""
+    for b in plain: plainText.add char(b)
+    check "systemManagedElsewhere" notin plainText
+    check "systemManagedElsewhere" notin emitProfileIntentJson(p)
+    check decodeProfileIntentFromBytes(plain).systemManagedElsewhere.len == 0
+    p.systemManagedElsewhere["infra-host"] = "example-org/infra"
+    p.systemManagedElsewhere["distro-host"] = ""
+    let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))
+    check q.systemManagedElsewhere.len == 2
+    check q.systemManagedElsewhere["infra-host"] == "example-org/infra"
+    check q.systemManagedElsewhere["distro-host"] == ""
+    check not q.systemManagedElsewhere.hasKey("home-pc")
+    let js = emitProfileIntentJson(p)
+    check js.contains("\"systemManagedElsewhere\":{\"distro-host\":" &
+      "{\"managedBy\":null},\"infra-host\":{\"managedBy\":" &
+      "\"example-org/infra\"}}")
+    let r = parseProfileIntentJson(js)
+    check r.systemManagedElsewhere == p.systemManagedElsewhere
+    # The lookup every reader uses.
+    let m = systemManagementFor(r, "infra-host")
+    check m.declared and m.managedElsewhere and
+      m.managedBy == "example-org/infra"
+    let n = systemManagementFor(r, "distro-host")
+    check n.managedElsewhere and n.managedBy == ""
+    let h = systemManagementFor(r, "home-pc")
+    check h.declared and not h.managedElsewhere
+    check not systemManagementFor(r, "nowhere").declared
+    # A malformed JSON entry is refused, never read as "managed here".
+    for bad in ["{\"systemManagedElsewhere\":{\"x\":\"repo\"}}",
+                "{\"systemManagedElsewhere\":{\"x\":{}}}",
+                "{\"systemManagedElsewhere\":{\"x\":{\"managedBy\":1}}}",
+                "{\"systemManagedElsewhere\":[]}"]:
+      let doc = js[0 ..< js.len - 1] & "," & bad[1 ..< bad.len - 1] & "}"
+      expect ValueError:
+        discard parseProfileIntentJson(doc)
+
   test "full fixture round-trips structurally":
     let p = fixtureFull()
     let q = decodeProfileIntentFromBytes(encodeProfileIntentToBytes(p))

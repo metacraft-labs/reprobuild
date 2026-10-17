@@ -64,6 +64,13 @@ const
     ## a block-form `hosts:` entry's `applies:`). Optional; omitted when no
     ## host declares, so a profile without a declaration encodes exactly as
     ## before. Envelope schema 7.
+  KeySystemManagedElsewhere = "systemManagedElsewhere"
+    ## GM10: the hosts whose system scope is managed elsewhere
+    ## (`ProfileIntent.systemManagedElsewhere`): a map host -> map, the inner
+    ## map carrying `"managedBy"` (text) only when the entry names a manager.
+    ## Optional; omitted when no host says so, so a profile without the
+    ## attribute encodes exactly as before. Envelope schema 9.
+  KeyManagedBy    = "managedBy"
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -309,6 +316,15 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
     entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
   if p.hostApplies.len > 0:
     entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
+  if p.systemManagedElsewhere.len > 0:
+    var hostEntries: seq[DynamicMapEntry] = @[]
+    for host, pointer in p.systemManagedElsewhere:
+      var inner: seq[DynamicMapEntry] = @[]
+      if pointer.len > 0:
+        inner.add entry(KeyManagedBy, cborText(pointer))
+      hostEntries.add entry(host, cborMap(inner))
+    hostEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
+    entries.add entry(KeySystemManagedElsewhere, cborMap(hostEntries))
   cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
@@ -593,6 +609,17 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   let haNode = lookupOpt(entries, KeyHostApplies, haFound)
   if haFound:
     result.hostApplies = decodeHosts(haNode)
+  # GM10: the system-management attribute is OPTIONAL on the wire (absent
+  # when no host's system is managed elsewhere).
+  var smeFound = false
+  let smeNode = lookupOpt(entries, KeySystemManagedElsewhere, smeFound)
+  if smeFound:
+    for e in expectMap(smeNode, KeySystemManagedElsewhere):
+      var pointerFound = false
+      let pointerNode = lookupOpt(expectMap(e.value, KeySystemManagedElsewhere),
+        KeyManagedBy, pointerFound)
+      result.systemManagedElsewhere[e.key] =
+        if pointerFound: expectText(pointerNode, KeyManagedBy) else: ""
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

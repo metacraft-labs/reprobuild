@@ -75,6 +75,7 @@ import ./emit
 import ./data_refs
 import ./catalog_refs
 import ./concerns
+import ./host_system
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -543,6 +544,33 @@ proc isHostsBlockForm(value: NimNode): bool =
     value[0].kind in {nnkCall, nnkCommand} and value[0].len == 2 and
     value[0][0].kind == nnkIdent
 
+proc parseHostSystemValue(value: NimNode; hostName: string): string =
+  ## The value of a block-form host entry's `system:` key: `managedElsewhere`
+  ## (no pointer, returns "") or `managedElsewhere("<pointer>")` (returns the
+  ## pointer). Anything else is a compile error naming the host.
+  var v = value
+  if v.kind == nnkStmtList and v.len == 1:
+    v = v[0]
+  let expected = "`system: " & ManagedElsewhereKeyword & "` or `system: " &
+    ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  if v.kind == nnkIdent and $v == ManagedElsewhereKeyword:
+    return ""
+  if v.kind in {nnkCall, nnkCommand} and v.len == 2 and
+      v[0].kind == nnkIdent and $v[0] == ManagedElsewhereKeyword:
+    # A plain string literal only: the text parser behind `repro home list`
+    # / `add` (`repro_home_intent/parser`) reads the same entry, and it reads
+    # "..." strings.
+    if v[1].kind != nnkStrLit:
+      error("hosts entry \"" & hostName & "\": the " &
+            ManagedElsewhereKeyword & " pointer must be a string literal " &
+            "naming what manages the system (expected " & expected & ")", v[1])
+    let problem = systemPointerProblem(v[1].strVal)
+    if problem.len > 0:
+      error("hosts entry \"" & hostName & "\": system: " & problem, v[1])
+    return v[1].strVal
+  error("hosts entry \"" & hostName & "\": unknown `system:` value " &
+        "`" & v.repr & "` (expected " & expected & ")", v)
+
 proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
   ## `hosts:` body is a list of host entries, each either
   ##
@@ -555,9 +583,14 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
   ##   "hostname":
   ##     activities: [activity1, activity2]   # omitted: `default` only
   ##     applies: [applications]              # omitted: every concern
+  ##     system: managedElsewhere("org/infra") # omitted: managed here
   ##
-  ## An unknown key, a repeated key, an unknown concern and a concern named
-  ## twice are compile errors naming the host.
+  ## `system:` (`repro_profile/host_system`) says the host's system scope is
+  ## managed elsewhere, optionally naming what manages it.
+  ##
+  ## An unknown key, a repeated key, an unknown concern, a concern named
+  ## twice and a malformed `system:` value are compile errors naming the
+  ## host.
   result = newNimNode(nnkStmtList)
   if body.kind != nnkStmtList:
     error("hosts: expects an indented block of host -> activity-list " &
@@ -575,6 +608,8 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
     var actNames: seq[string] = @[]
     var applies: seq[string] = @[]
     var hasApplies = false
+    var systemElsewhere = false
+    var systemPointer = ""
     let value = entry[1]
     if isHostsBlockForm(value):
       var seenKeys: seq[string] = @[]
@@ -582,7 +617,7 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
         if item.kind notin {nnkCall, nnkCommand} or item.len != 2 or
             item[0].kind != nnkIdent:
           error("hosts entry \"" & hostName & "\": expected " &
-                "`activities: [...]` or `applies: [...]`", item)
+                "`activities: [...]`, `applies: [...]` or `system: ...`", item)
         let key = $item[0]
         if key in seenKeys:
           error("hosts entry \"" & hostName & "\": `" & key &
@@ -598,9 +633,12 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
           if problem.len > 0:
             error("hosts entry \"" & hostName & "\": applies: " & problem,
                   item)
+        of HostSystemKey:
+          systemElsewhere = true
+          systemPointer = parseHostSystemValue(item[1], hostName)
         else:
           error("hosts entry \"" & hostName & "\": unknown key `" & key &
-                ":` (expected `activities:` or `applies:`)", item)
+                ":` (expected `activities:`, `applies:` or `system:`)", item)
     else:
       actNames = hostsNameList(value, "entry value")
     let hostLit = newStrLitNode(hostName)
@@ -624,6 +662,10 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
           `appliesSym`.add `cLit`
       addCalls.add quote do:
         `profileVar`.hostApplies[`hostLit`] = `appliesSym`
+    if systemElsewhere:
+      let pointerLit = newStrLitNode(systemPointer)
+      addCalls.add quote do:
+        `profileVar`.systemManagedElsewhere[`hostLit`] = `pointerLit`
     let blk = newNimNode(nnkBlockStmt)
     blk.add newEmptyNode()
     blk.add addCalls
