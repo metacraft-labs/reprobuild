@@ -457,7 +457,15 @@ suite "HL-11 M4: repro lock update":
       check after.reproLock == before.reproLock
       check after.flakeNix == before.flakeNix
       check nodeRev(after.flakeLock, "beta-src", "locked") == newBeta
-      check nodeNarHash(after.flakeLock, "beta-src") == ""
+      # …as a whole node: the `narHash` nix reports for the target, obtained
+      # here independently (`nix flake prefetch`), never a `rev`-only node
+      # (reprobuild-pm issue 2026-09-27).
+      let expected = nixPrefetchedFields(fx, "beta", newBeta)
+      if not expected.ok: checkpoint(expected.diagnostic)
+      check expected.ok
+      check nodeNarHash(after.flakeLock, "beta-src") == expected.narHash
+      check nodeNarHash(after.flakeLock, "beta-src") !=
+        nodeNarHash(before.flakeLock, "beta-src")
       check nodeText(after.flakeLock, "gamma-src") ==
         nodeText(before.flakeLock, "gamma-src")
       check nodeText(after.flakeLock, "nixpkgs") ==

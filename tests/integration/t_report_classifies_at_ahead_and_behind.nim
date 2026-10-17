@@ -31,9 +31,11 @@
 ##         disagrees with the sibling" is not a proposition that can be false
 ##         about it, and refusing would name a command that cannot help;
 ##   4. an input whose node carries a `rev` and NO `narHash` / `lastModified` /
-##      `revCount` verifies normally. Those three fields are exactly what
-##      NF-2's refresh DELETES from every node whose revision it moved, so a
-##      verifier that required them would call every lock NF-2 wrote broken;
+##      `revCount` verifies normally. NF-2's refresh now writes those three
+##      from nix, but earlier versions DELETED them from every node whose
+##      revision they moved, and such `rev`-only nodes are in committed history
+##      and in checkouts today; a verifier that required them would call every
+##      one of those locks broken;
 ##   5. the ARGUMENTS and the REPORT describe the same set. There is one
 ##      resolution of the override set, so the inputs `override-args` hands the
 ##      dev shell and the inputs this report classifies are the same inputs —
@@ -156,9 +158,10 @@ suite "NF-3: the report classifies at, ahead and behind":
       check text.stderr.contains("1 at pin, 1 ahead, 1 behind")
 
       # ---- (4) a node with no derived fields verifies normally --------------
-      # NF-2's refresh drops `narHash`, `lastModified` and `revCount` from any
-      # node whose `rev` it moved. Strip them from alpha's node — the AT row —
-      # and the classification must be unchanged.
+      # Earlier NF-2 refreshes dropped `narHash`, `lastModified` and `revCount`
+      # from every node whose `rev` they moved, and those locks still exist.
+      # Strip them from alpha's node — the AT row — and the classification
+      # must be unchanged.
       var stripped: seq[string]
       for line in readFile(lockPath(fx)).splitLines():
         let t = line.strip()

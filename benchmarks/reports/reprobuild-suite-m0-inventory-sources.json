@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2159,
+    "nimTestBinaries": 2164,
     "pureUnitConsolidationGroups": 62,
-    "pureUnitTests": 659,
+    "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2183
+    "testEntries": 2188
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -129,7 +129,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
@@ -140,6 +140,7 @@
         "libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim",
         "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
         "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
+        "libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim",
         "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim"
       ],
       "targetOs": "soAny"
@@ -1293,9 +1294,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1175,
+      "integration": 1179,
       "platform/destructive": 132,
-      "pure unit": 659,
+      "pure unit": 660,
       "unclassified": 198
     },
     "graphOwnedTestArtifacts": [
@@ -1498,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2159,
+    "nimTestBinaryCount": 2164,
     "pythonTestFileCount": 24,
-    "testEntryCount": 2183
+    "testEntryCount": 2188
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10411,6 +10412,23 @@
       "source": "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_refresh_flake_lock_text_writes_the_fields_nix_reports",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28542,6 +28560,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_refreshed_flake_pin_carries_what_nix_would_write",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_refreshed_flake_pin_carries_what_nix_would_write.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_repo_not_in_develop_mode_is_not_substituted",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -28941,6 +28976,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_an_ahead_sibling_is_still_recorded.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_an_unfetchable_flake_revision_is_withheld",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_an_unfetchable_flake_revision_is_withheld.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -39209,6 +39261,40 @@
       "source": "tests/integration/t_single_platform_entries_declare_platforms.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_skip_lock_refresh_leaves_the_flake_lock_alone",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_skip_lock_refresh_leaves_the_flake_lock_alone.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_skip_lock_refresh_leaves_the_repro_lock_alone",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_skip_lock_refresh_leaves_the_repro_lock_alone.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

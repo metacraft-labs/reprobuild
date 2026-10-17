@@ -156,7 +156,7 @@ proc nodesStatingAnOriginalRev(doc: JsonNode): seq[string] =
 suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
 
   test "t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back":
-    if not nf2Prerequisites(
+    if not nf2RecordingPrerequisites(
         "t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back"):
       skip()
     else:
@@ -287,7 +287,12 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
           "\nfound: " & lockedRevOf(doc, "alpha-src") & "\nlog:\n" &
           preCommitLog(fx))
       check lockedRevOf(doc, "alpha-src") == newAlpha
-      check not doc["nodes"]["alpha-src"]["locked"].hasKey("narHash")
+      # …and, moved, it carries the NEW revision's derived fields: the
+      # targeted decline did not turn into a weaker node for the input that
+      # was free to move.
+      check doc["nodes"]["alpha-src"]["locked"]{"narHash"} !=
+        beforeDoc["nodes"]["alpha-src"]["locked"]{"narHash"}
+      check doc["nodes"]["alpha-src"]["locked"].hasKey("narHash")
 
       # ---- (4) the whole-document invariant, with its vacuity guard. ------
       let stating = nodesStatingAnOriginalRev(doc)
