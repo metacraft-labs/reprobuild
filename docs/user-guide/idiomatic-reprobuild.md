@@ -824,6 +824,15 @@ Without a primitive you can still build it, but you own the parts:
 - The probe is an edge whose output is a file, declared `cacheable =
   false` — its whole purpose is to re-observe the host. That is fine; it
   is cheap.
+- The probe must **leave its fact file untouched when the fact has not
+  changed** — compare, and write only on a difference. Writing the same
+  bytes again is not enough: a downstream edge revalidates its recorded
+  inputs by timestamp metadata first (the default `ffpTimestamp` policy),
+  so a fresh mtime is a changed input and the expensive edge misses on
+  `input metadata changed: <fact file>` on every build.
+  `scripts/source_revision.sh --nim-module` is the worked example; before
+  it compared, the engine edge rebuilt on every `repro build`
+  (`tests/integration/t_b1_apps_action_cache_hit.nim`).
 - The downstream edge takes that file as a declared input **and must
   actually read it**, because the monitored read set is what keys the
   cache (§2). A declared-but-unread fact file orders the edge and nothing

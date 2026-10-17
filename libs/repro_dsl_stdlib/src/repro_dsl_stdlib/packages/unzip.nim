@@ -3,9 +3,9 @@
 ##
 ## ``unzip`` is the InfoZIP CLI; consumed by the ``expandArchive`` typed
 ## tool (see ``packages/expand_archive.nim``) when extracting ``zip``
-## archives on Linux / macOS. Windows uses ``Expand-Archive`` PowerShell
-## cmdlet directly so no Windows provisioning channel is needed (Scoop
-## does not ship a first-party ``unzip`` manifest either).
+## archives on Linux / macOS. Windows uses Windows PowerShell and its
+## .NET zip reader directly, so no Windows provisioning channel is needed
+## (Scoop does not ship a first-party ``unzip`` manifest either).
 ##
 ## Per the spec §2.2 fallback note, ``python3 -m zipfile`` is an
 ## acceptable substitute if ``unzip`` is unavailable; the typed-tool

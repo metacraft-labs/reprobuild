@@ -196,6 +196,10 @@ suite "repro build --action-output":
       check StdoutMarker in run.stdoutText
       check StderrMarker in run.stdoutText
       check StderrMarker notin run.stderrText
+      # ``--no-runquota`` reaches the plan ``repro test`` reads before it
+      # builds: with no runquota daemon on the host the plan is still read,
+      # not refused and retried as a plain build.
+      check "could not be read" notin run.stderrText
 
   test "an unknown value is rejected with the vocabulary":
     if not fileExists(reproBin) or findExe("sh").len == 0:

@@ -49,6 +49,9 @@
 ##   on the resources / overrides they declare when their conditions are
 ##   predicates (`when linux():`), and stay Nim compile-time branches when
 ##   they are `defined(...)` conditions (`lowerWhenChain`).
+## - A `resources:` block directly inside `activity <name>:` (GM9) declares
+##   resources that belong to that activity: the planner plans them only on
+##   hosts that select it (`parseActivityResources`).
 ## - `data:` lists plan-time data files (GM4). The macro records the
 ##   paths only; the planner reads and expands the files, so a data edit
 ##   never recompiles the profile.
@@ -71,6 +74,8 @@ import ./predicates
 import ./emit
 import ./data_refs
 import ./catalog_refs
+import ./concerns
+import ./host_system
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -81,6 +86,11 @@ const ActivityBodyVar* = "activityBodyBuilder"
 # ---------------------------------------------------------------------
 
 proc parseActivityBody(body: NimNode; targetSeq: NimNode): NimNode
+
+proc isActivityResourcesBlock(stmt: NimNode): bool =
+  ## `resources: <body>` -- the GM9 activity-scoped resources block.
+  stmt.kind == nnkCall and stmt.len == 2 and stmt[0].kind == nnkIdent and
+    $stmt[0] == "resources" and stmt[1].kind == nnkStmtList
 
 proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
   ## A single statement inside an activity body. The valid shapes are:
@@ -135,6 +145,14 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
     result.add newEmptyNode()
     result.add inner
   of nnkCall, nnkCommand:
+    # GM9: `resources:` belongs at the top of an activity body, where
+    # `parseActivityCall` handles it. Here it would be under a `when` of the
+    # body (or otherwise misplaced): refuse it rather than read it as a
+    # helper call. Guard the resources themselves inside the block instead.
+    if isActivityResourcesBlock(stmt):
+      error("an activity's `resources:` block must sit directly in the " &
+        "activity body, not under a `when`; put the `when <predicate>:` " &
+        "inside the `resources:` block", stmt)
     # M69: recognize the `package(<id>[, "<version>"])` call form and
     # emit a typed `aekPackageRef` with the version literal pinned.
     # The bare-arg call `package(<id>)` records `pkgVersion = ""`. The
@@ -490,9 +508,89 @@ proc parseConfigSection(body: NimNode; profileVar: NimNode): NimNode =
           body)
   result = rewriteConfigBody(body, profileVar)
 
+proc hostsNameList(listSrc: NimNode; what: string): seq[string] =
+  ## A `[a, b]` list of identifiers / string literals, as written after a
+  ## host name or after `activities:` / `applies:`. `what` names the list in
+  ## the diagnostics.
+  var listNode: NimNode
+  case listSrc.kind
+  of nnkStmtList:
+    if listSrc.len != 1:
+      error("hosts " & what & " must be a single bracket list", listSrc)
+    listNode = listSrc[0]
+  else:
+    listNode = listSrc
+  if listNode.kind notin {nnkBracket, nnkPrefix}:
+    error("hosts " & what & " must be a `[name1, name2]` bracket list",
+          listNode)
+  let items = if listNode.kind == nnkPrefix and listNode.len == 2 and
+                   listNode[1].kind == nnkBracket: listNode[1]
+              else: listNode
+  if items.kind != nnkBracket:
+    error("hosts " & what & " must be a `[name1, name2]` bracket list",
+          listNode)
+  for item in items:
+    case item.kind
+    of nnkIdent: result.add $item
+    of nnkStrLit: result.add item.strVal
+    else:
+      error("hosts " & what & " entry must be an identifier or string " &
+            "literal", item)
+
+proc isHostsBlockForm(value: NimNode): bool =
+  ## Whether a host entry's value is the block form (`activities:` /
+  ## `applies:` lines) rather than the one-line `[activities]` list.
+  value.kind == nnkStmtList and value.len > 0 and
+    value[0].kind in {nnkCall, nnkCommand} and value[0].len == 2 and
+    value[0][0].kind == nnkIdent
+
+proc parseHostSystemValue(value: NimNode; hostName: string): string =
+  ## The value of a block-form host entry's `system:` key: `managedElsewhere`
+  ## (no pointer, returns "") or `managedElsewhere("<pointer>")` (returns the
+  ## pointer). Anything else is a compile error naming the host.
+  var v = value
+  if v.kind == nnkStmtList and v.len == 1:
+    v = v[0]
+  let expected = "`system: " & ManagedElsewhereKeyword & "` or `system: " &
+    ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  if v.kind == nnkIdent and $v == ManagedElsewhereKeyword:
+    return ""
+  if v.kind in {nnkCall, nnkCommand} and v.len == 2 and
+      v[0].kind == nnkIdent and $v[0] == ManagedElsewhereKeyword:
+    # A plain string literal only: the text parser behind `repro home list`
+    # / `add` (`repro_home_intent/parser`) reads the same entry, and it reads
+    # "..." strings.
+    if v[1].kind != nnkStrLit:
+      error("hosts entry \"" & hostName & "\": the " &
+            ManagedElsewhereKeyword & " pointer must be a string literal " &
+            "naming what manages the system (expected " & expected & ")", v[1])
+    let problem = systemPointerProblem(v[1].strVal)
+    if problem.len > 0:
+      error("hosts entry \"" & hostName & "\": system: " & problem, v[1])
+    return v[1].strVal
+  error("hosts entry \"" & hostName & "\": unknown `system:` value " &
+        "`" & v.repr & "` (expected " & expected & ")", v)
+
 proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
-  ## `hosts:` body is a list of `"hostname": [activity1, activity2]`
-  ## entries.
+  ## `hosts:` body is a list of host entries, each either
+  ##
+  ##   "hostname": [activity1, activity2]
+  ##
+  ## or the block form, which can also say which concerns Reprobuild applies
+  ## on the host (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+  ## apply):
+  ##
+  ##   "hostname":
+  ##     activities: [activity1, activity2]   # omitted: `default` only
+  ##     applies: [applications]              # omitted: every concern
+  ##     system: managedElsewhere("org/infra") # omitted: managed here
+  ##
+  ## `system:` (`repro_profile/host_system`) says the host's system scope is
+  ## managed elsewhere, optionally naming what manages it.
+  ##
+  ## An unknown key, a repeated key, an unknown concern, a concern named
+  ## twice and a malformed `system:` value are compile errors naming the
+  ## host.
   result = newNimNode(nnkStmtList)
   if body.kind != nnkStmtList:
     error("hosts: expects an indented block of host -> activity-list " &
@@ -507,29 +605,42 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
     else:
       error("hosts entry key must be a string literal or identifier",
             entry[0])
-    let listSrc = entry[1]
-    var activitySeq: NimNode
-    case listSrc.kind
-    of nnkStmtList:
-      if listSrc.len != 1:
-        error("hosts entry body must be a single bracket list", listSrc)
-      activitySeq = listSrc[0]
-    else:
-      activitySeq = listSrc
-    if activitySeq.kind notin {nnkBracket, nnkPrefix}:
-      error("hosts entry value must be a `[activity1, activity2]` " &
-            "bracket list", activitySeq)
     var actNames: seq[string] = @[]
-    let actNode = if activitySeq.kind == nnkPrefix and activitySeq.len == 2 and
-                       activitySeq[1].kind == nnkBracket: activitySeq[1]
-                  else: activitySeq
-    for item in actNode:
-      case item.kind
-      of nnkIdent: actNames.add $item
-      of nnkStrLit: actNames.add item.strVal
-      else:
-        error("hosts activity list entry must be an identifier or " &
-              "string literal", item)
+    var applies: seq[string] = @[]
+    var hasApplies = false
+    var systemElsewhere = false
+    var systemPointer = ""
+    let value = entry[1]
+    if isHostsBlockForm(value):
+      var seenKeys: seq[string] = @[]
+      for item in value:
+        if item.kind notin {nnkCall, nnkCommand} or item.len != 2 or
+            item[0].kind != nnkIdent:
+          error("hosts entry \"" & hostName & "\": expected " &
+                "`activities: [...]`, `applies: [...]` or `system: ...`", item)
+        let key = $item[0]
+        if key in seenKeys:
+          error("hosts entry \"" & hostName & "\": `" & key &
+                ":` is given twice", item)
+        seenKeys.add key
+        case key
+        of "activities":
+          actNames = hostsNameList(item[1], "entry `activities:`")
+        of "applies":
+          hasApplies = true
+          applies = hostsNameList(item[1], "entry `applies:`")
+          let problem = concernListProblem(applies)
+          if problem.len > 0:
+            error("hosts entry \"" & hostName & "\": applies: " & problem,
+                  item)
+        of HostSystemKey:
+          systemElsewhere = true
+          systemPointer = parseHostSystemValue(item[1], hostName)
+        else:
+          error("hosts entry \"" & hostName & "\": unknown key `" & key &
+                ":` (expected `activities:`, `applies:` or `system:`)", item)
+    else:
+      actNames = hostsNameList(value, "entry value")
     let hostLit = newStrLitNode(hostName)
     var addCalls = newNimNode(nnkStmtList)
     let tmpSym = genSym(nskVar, "hostActs")
@@ -541,6 +652,20 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
         `tmpSym`.add `aLit`
     addCalls.add quote do:
       `profileVar`.hosts[`hostLit`] = `tmpSym`
+    if hasApplies:
+      let appliesSym = genSym(nskVar, "hostApplies")
+      addCalls.add quote do:
+        var `appliesSym`: seq[string] = @[]
+      for c in applies:
+        let cLit = newStrLitNode(c)
+        addCalls.add quote do:
+          `appliesSym`.add `cLit`
+      addCalls.add quote do:
+        `profileVar`.hostApplies[`hostLit`] = `appliesSym`
+    if systemElsewhere:
+      let pointerLit = newStrLitNode(systemPointer)
+      addCalls.add quote do:
+        `profileVar`.systemManagedElsewhere[`hostLit`] = `pointerLit`
     let blk = newNimNode(nnkBlockStmt)
     blk.add newEmptyNode()
     blk.add addCalls
@@ -925,6 +1050,63 @@ proc parseCatalogsSection(body: NimNode; profileVar: NimNode): NimNode =
         "module relative to the profile directory (e.g. " &
         "\"../reprobuild-scoop-packages/repro\"); got " & $entry.kind, entry)
 
+proc findActionEdgeCall(n: NimNode): NimNode =
+  ## The first action-edge call (`isProfileActionEdgeCall`) anywhere in `n`,
+  ## or nil.
+  if isProfileActionEdgeCall(n):
+    return n
+  for child in n:
+    let found = findActionEdgeCall(child)
+    if not found.isNil:
+      return found
+  nil
+
+proc parseActivityResources(blk: NimNode; actName: string;
+                            profileVar: NimNode): NimNode =
+  ## GM9: a `resources:` block inside `activity <name>:`.
+  ##
+  ##   activity desktop_core:
+  ##     hyprland
+  ##     resources:
+  ##       hyprlandConfig()          # a helper module's resource template
+  ##       when linux():
+  ##         fsUserFile(hostFile = "~/.config/foo", content = "...")
+  ##
+  ## The body is exactly a profile-level `resources:` body (constructor
+  ## calls, helper templates, runtime `when` chains, compile-time
+  ## `when defined(...)`, `for` loops) and is lowered by the same rewriter;
+  ## every resource it declares then belongs to the activity
+  ## (`ResourceIntent.activity`, `applyActivity`), so the planner plans it
+  ## only on a host that selects the activity -- and, under a guard, only
+  ## where the guard also holds.
+  ##
+  ## Action edges (`expandArchive.build`, `inlineExecCall`) are refused: they
+  ## land in `buildActions`, which has no activity, so inside an activity
+  ## they would run on every host.
+  let edge = findActionEdgeCall(blk[1])
+  if not edge.isNil:
+    error("activity `" & actName & "`: an action edge (`expandArchive." &
+      "build`, `inlineExecCall`) cannot sit in an activity's `resources:` " &
+      "block; action edges carry no activity. Declare it in the " &
+      "profile-level `resources:` block.", edge)
+  let start = genSym(nskLet, "activityResourcesStart")
+  let actionsBefore = genSym(nskLet, "activityActionsBefore")
+  let lowered = parseResourcesSection(blk[1], profileVar)
+  let nameLit = newStrLitNode(actName)
+  let msg = newStrLitNode("activity `" & actName & "`: an action edge " &
+    "cannot sit in an activity's `resources:` block; action edges carry " &
+    "no activity")
+  result = quote do:
+    block:
+      let `start` = `profileVar`.resources.len
+      let `actionsBefore` = `profileVar`.buildActions.len
+      `lowered`
+      # A helper template could still add an action edge the AST check
+      # above cannot see; refuse it rather than run it on every host.
+      if `profileVar`.buildActions.len != `actionsBefore`:
+        raise newException(ValueError, `msg`)
+      applyActivity(`profileVar`.resources, `start`, `nameLit`)
+
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an
   ## ActivityIntent into __profileIntent.activities.
@@ -939,13 +1121,25 @@ proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   let body = call[2]
   let bodySym = genSym(nskVar, "actBody")
   let nameLit = newStrLitNode(actName)
+  # GM9: `resources:` blocks directly in the activity body declare resources
+  # that belong to this activity; everything else is the package body.
+  var elements = newNimNode(nnkStmtList)
+  var resourceBlocks: seq[NimNode]
+  let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
+  for stmt in stmts:
+    if isActivityResourcesBlock(stmt):
+      resourceBlocks.add stmt
+    else:
+      elements.add stmt
   let inner = newNimNode(nnkStmtList)
   inner.add quote do:
     var `bodySym`: seq[ActivityElement] = @[]
-  inner.add parseActivityBody(body, bodySym)
+  inner.add parseActivityBody(elements, bodySym)
   inner.add quote do:
     `profileVar`.activities.add ActivityIntent(name: `nameLit`,
       body: `bodySym`)
+  for blk in resourceBlocks:
+    inner.add parseActivityResources(blk, actName, profileVar)
   result = newNimNode(nnkBlockStmt)
   result.add newEmptyNode()
   result.add inner

@@ -1,6 +1,6 @@
 {
   "description": "Guards combine with and/or/not and parentheses, and a guarded row still needs its activity selected.",
-  "hosts": { "m1": ["desktop"], "home-pc": ["desktop"] },
+  "hosts": { "m1": ["desktop"], "home-pc": ["desktop"], "server": ["default"] },
   "evaluations": [
     { "host": "m1", "system": "aarch64-darwin", "packages": ["always", "ghidra", "utm"] },
     { "host": "m1", "system": "x86_64-darwin", "packages": ["always", "ghidra"] },

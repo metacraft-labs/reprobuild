@@ -229,7 +229,7 @@ suite "manifest editor edge cases":
   test "a [[remote]] entry is added once, after the last remote block":
     let src = "member_repos = [\n]\n\n[project]\nname = \"p\"\n\n" &
       "[[remote]]\nname = \"origin\"\nfetch = \"https://a\"\n\n" &
-      "[certificates]\ngate_mode = \"off\"\n"
+      "[extensions]\nnote = \"after the remotes\"\n"
     var doc = manifestDocFromText(src)
     let fields = @[tomlField("name", tomlStr("upstream")),
                    tomlField("fetch", tomlStr("https://b"))]

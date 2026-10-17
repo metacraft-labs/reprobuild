@@ -129,10 +129,10 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
   ## Union `additional` projects onto an already-resolved `primary`.
   ##
   ## The primary project's identity is carried through unchanged
-  ## (`projectName`, `defaultRevision`, `trunk`, `projectFile`,
-  ## `certificatePolicy`): everything that needs exactly ONE project — the
-  ## lock destination, the certificate gate policy, `repro add`'s mutation
-  ## target — keeps resolving to the primary. Only the repo set grows.
+  ## (`projectName`, `defaultRevision`, `trunk`, `projectFile`): everything
+  ## that needs exactly ONE project — the lock destination, `repro add`'s
+  ## mutation target — keeps resolving to the primary. Only the repo set
+  ## grows.
   ##
   ## First-seen order is preserved, so adding a project APPENDS its
   ## previously-unseen repos and never reorders what was already there.

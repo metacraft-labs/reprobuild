@@ -12,13 +12,22 @@
 ## access). Read back the depfile and inspect the
 ## ``mrFileRead`` records.
 ##
-## Strict bar: the no-op path may read AT MOST 3 files via
+## Strict bar: the no-op path may read AT MOST 4 files via
 ## ``mrFileRead`` records that belong to the dev-env edge cache key:
 ##
 ## * ``<project-root>/reprobuild.nim``  — the project file content
 ## * ``<project-root>/.repro/dev-env.lock`` — the lock-slice file
 ##   (may be absent — in that case the count is lower)
 ## * the develop-overrides file — same caveat (may be absent)
+## * the active activation's prompt watch manifest
+##   (``<activation-dir>/dev-env.prompt-watch``, located through
+##   ``$__REPRO_ACTIVE_MANIFEST``). Added deliberately with cache-key v2:
+##   the key now folds in the inputs the activation was OBSERVED to depend
+##   on, because without them an edit to ``flake.nix`` or to an override
+##   sibling was answered as a no-op forever (``reprobuild-pm``
+##   ``issues/2026-09-28-dev-env-prompt-key-ignores-flake-inputs.md``). The
+##   watched paths themselves are ``lstat``ed, not opened, so they land as
+##   probes and do not count against this bar.
 ##
 ## NO build-engine artifacts may appear: no ``dev-env.rbde``, no
 ## ``provider-compile.rbsz``, no ``project-interface.rbsz``,
@@ -45,16 +54,19 @@ const ForbiddenSubstrings = [
   "dev-env.env.navigator.json"
 ]
 
-proc readFingerprint(script: string): string =
-  const needle = "__REPRO_APPLIED='"
+proc readMarker(script, name: string): string =
+  let needle = name & "='"
   let s = script.find(needle)
   if s < 0:
-    raise newException(ValueError, "no __REPRO_APPLIED marker in script")
+    raise newException(ValueError, "no " & name & " marker in script")
   let rest = script[(s + needle.len) .. ^1]
   let e = rest.find('\'')
   if e < 0:
-    raise newException(ValueError, "unterminated __REPRO_APPLIED quote")
+    raise newException(ValueError, "unterminated " & name & " quote")
   rest[0 ..< e]
+
+proc readFingerprint(script: string): string =
+  readMarker(script, "__REPRO_APPLIED")
 
 proc runExport(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
     tuple[stdout: string; exitCode: int] =
@@ -67,13 +79,19 @@ proc runExport(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
   ], env.envEntries), c.repoRoot)
   (stdout: res.output, exitCode: res.code)
 
-proc runExportUnderMonitor(c: ShellHookCase; fingerprint, depfilePath: string):
+proc runExportUnderMonitor(c: ShellHookCase;
+                           fingerprint, activeManifest, depfilePath: string):
     tuple[stdout: string; exitCode: int] =
   ## Wrap the export call under ``repro internal io monitor`` so the monitor shim
   ## records every file read into ``depfilePath`` (iomon format).
+  ##
+  ## Both markers are set, as the activation script sets them in a real
+  ## shell: the prompt key is compared against the prompt watch manifest of
+  ## the activation ``$__REPRO_ACTIVE_MANIFEST`` names.
   var env = c.baselineEnvForBash()
   env["REPRO_MONITOR_SHIM_LIB"] = c.monitorShim
   env["__REPRO_APPLIED"] = fingerprint
+  env["__REPRO_ACTIVE_MANIFEST"] = activeManifest
   let res = runShell(shellCommand(@[
     c.monitorCliPath
   ] & c.monitorCliArgs & @[
@@ -104,11 +122,15 @@ suite "e2e_shell_hook_noop_io_bounded":
         check initial.exitCode == 0
         let fingerprint = readFingerprint(initial.stdout)
         check fingerprint.len > 0
+        let activeManifest =
+          readMarker(initial.stdout, "__REPRO_ACTIVE_MANIFEST")
+        check activeManifest.len > 0
 
         # Measured run: same command, but with the fingerprint in env
         # so the fast path engages.
         let depfilePath = c.tempRoot / "noop-io.iomon"
-        let monitored = runExportUnderMonitor(c, fingerprint, depfilePath)
+        let monitored = runExportUnderMonitor(c, fingerprint, activeManifest,
+          depfilePath)
         if monitored.exitCode != 0 or
             not monitored.stdout.contains(
               "repro shell hook: no-op (cache key unchanged)"):
@@ -160,7 +182,8 @@ suite "e2e_shell_hook_noop_io_bounded":
         # project file is the only one that exists in the standard
         # fixture; ``.repro/dev-env.lock`` and ``develop-overrides.json``
         # are absent and resolve via ``mrPathProbe``, not
-        # ``mrFileOpen``). Tolerance: 3 unique paths so this still
+        # ``mrFileOpen``), plus the prompt watch manifest (see the file
+        # header for why it was added). Tolerance: 4 unique paths so this still
         # leaves headroom for shim instrumentation artefacts (e.g.
         # the inline-detour install probe) without losing the
         # decisive-failure shape — a regression that adds a stray
@@ -183,4 +206,4 @@ suite "e2e_shell_hook_noop_io_bounded":
           $projectScopedReads.len, "):"
         for p in projectScopedReads:
           echo "  ", p
-        check projectScopedReads.len <= 3
+        check projectScopedReads.len <= 4

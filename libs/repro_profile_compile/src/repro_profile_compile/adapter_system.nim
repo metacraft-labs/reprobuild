@@ -22,7 +22,7 @@
 ## Phase A constructor names are themselves derived from the M69
 ## `SystemResourceKind` string-enum values.
 
-import std/[strutils, tables]
+import std/[algorithm, strutils, tables]
 
 import repro_elevation
 import repro_profile
@@ -687,6 +687,22 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
       "system profiles do not import contribution catalogs (`catalogs:` " &
       "declares " & p.catalogImports.join(", ") & "); catalogs serve " &
       "package references, which only home profiles have")
+  # GM10: who manages a host's system is an attribute of the host registry,
+  # which is the home profile's `hosts:` (Gradual-Nix-To-Reprobuild-
+  # Migration.md §Hosts). `repro infra` reads it from there; a `system:`
+  # key in a system profile's own `hosts:` would be read by nothing and
+  # look effective, so it is refused (Core-Invariants.md §Unrecognised Input
+  # Is Rejected, Not Skipped).
+  if p.systemManagedElsewhere.len > 0:
+    var hosts: seq[string]
+    for h in p.systemManagedElsewhere.keys:
+      hosts.add h
+    hosts.sort()
+    raise newException(ValueError,
+      "a system profile's `hosts:` cannot say who manages a host's system " &
+      "(`system: managedElsewhere` for " & hosts.join(", ") & "); declare " &
+      "it in the home profile's `hosts:` registry, which `repro infra " &
+      "plan` / `apply` read")
   for r in p.resources:
     # A resource the system planner does not apply is refused, naming it,
     # rather than left out. Leaving it out is how the `pkg.homebrewCask`
@@ -721,6 +737,15 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
         "profiles do not evaluate runtime predicates (system scope has no " &
         "host selection) -- use a compile-time `when defined(...)` for " &
         "system-scope resources")
+    # GM9: activities are a home-profile layer. A system profile has none to
+    # select, so an activity-scoped system resource would apply on every
+    # host; refuse instead of dropping the scope.
+    if r.activity.len > 0:
+      raise newException(ValueError,
+        "system-scope resource " & r.kind &
+        (if r.address.len > 0: " `" & r.address & "`" else: "") &
+        " belongs to activity `" & r.activity & "`; system profiles have " &
+        "no activities to select it with")
     result.resources.add(buildSystemResource(r))
 
 # ---------------------------------------------------------------------------

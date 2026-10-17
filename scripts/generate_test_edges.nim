@@ -9,6 +9,11 @@
 ##
 ##   nim r scripts/generate_test_edges.nim
 ##
+## IT TAKES NO ARGUMENTS, and refuses any it is given (exit 2) rather than
+## discarding them and printing a success line — see ``argumentRefusal``. In
+## particular the ``--write-*`` / ``--check-*`` suite-artifact flags belong to
+## ``scripts/reprobuild_suite_inventory.py``, not here.
+##
 ## The output (``repro_tests.nim``) is checked into git so the diff is
 ## review-visible.
 ##
@@ -543,6 +548,24 @@ proc isProviderModePath(path: string): bool =
     # exist only under this define.
     "libs/repro_project_dsl/tests/" &
       "t_dss11_resolutions_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services, reprobuild issue #498: drives
+    # ``buildPackageDevEnv`` over a fixture whose two activities
+    # contribute across each other, and reads the argv the provider
+    # lowered -- ``buildPackageDevEnv``, ``ProviderGraphRequest`` and
+    # the generated ``devEnv<Pkg>Package`` exist only under this
+    # define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss498_cross_activity_contribution_is_order_independent.nim",
+    # Shared-Development-Services F1: drives ``buildPackageDevEnv`` and
+    # reads ``DevEnvResult.actions``, the channel that only exists on
+    # the provider's own return.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssf1_dev_env_actions_reach_the_caller.nim",
+    # Shared-Development-Services J-2: drives ``buildPackageDevEnv``
+    # over a two-owner / two-resolver fixture and reads the resolutions
+    # the provider lowered.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssj2_two_resolvers_do_not_collide.nim",
   ]:
     if p == exact:
       return true
@@ -1196,7 +1219,61 @@ proc renderShapeParity(): string =
     result.add(path & "\t" &
       (if walkAcceptsSource(path): "ACCEPT" else: "REJECT") & "\n")
 
-proc main() =
+const SuiteInventoryScript = "scripts/reprobuild_suite_inventory.py"
+  ## The tool the ``--write-*`` / ``--check-*`` suite-artifact flags belong
+  ## to. Named in the refusal below because the recognised argument set HERE
+  ## is empty, so "unrecognised argument" on its own tells the caller nothing
+  ## they can act on.
+
+proc argumentRefusal*(args: openArray[string]): string =
+  ## "" when there is nothing to refuse; otherwise the full stderr text.
+  ##
+  ## THIS SCRIPT TAKES NO ARGUMENTS. It regenerates two checked-in artifacts
+  ## from the source tree and has nothing to configure. Until this existed,
+  ## every argument was accepted, discarded, and followed by the generator's
+  ## two "is up to date" lines and exit 0 — so a command that did nothing was
+  ## indistinguishable, in a log or a milestone drawer, from one that did the
+  ## work. An agent recorded having regenerated the suite artifacts with
+  ## ``nim r scripts/generate_test_edges.nim --write-static-case-counts``,
+  ## which regenerates neither; the claim was false and was caught only
+  ## because a reviewer re-derived it. See ``reprobuild-pm/issues/
+  ## 2026-10-09-generate-test-edges-accepts-any-flag-and-reports-success.md``.
+  ##
+  ## ``--write-static-case-counts`` and ``--write-inventory-sources`` are the
+  ## arguments most likely to arrive here, and they are REAL flags of a
+  ## DIFFERENT tool, so the message says where they live rather than only
+  ## that they are not understood here.
+  ##
+  ## A ``string`` rather than a ``quit`` so the whole message is testable
+  ## without spawning a process:
+  ## ``tests/integration/
+  ## t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim``
+  ## calls it directly. ``main`` consults it before any work and exits 2.
+  if args.len == 0:
+    return ""
+  var named: seq[string] = @[]
+  for arg in args:
+    named.add("'" & arg & "'")
+  result = "generate_test_edges: refusing to run: unrecognised argument " &
+    named.join(", ") & "\n"
+  result.add("generate_test_edges: this script takes no arguments. It " &
+    "regenerates " & GeneratedFile & " and " & ShapeParityFile &
+    " from the source tree; there is nothing to select or configure.\n")
+  result.add("generate_test_edges: the --write-* / --check-* suite-artifact " &
+    "flags belong to " & SuiteInventoryScript & ", not to this script. For " &
+    "example:\n")
+  result.add("  python3 " & SuiteInventoryScript &
+    " --write-static-case-counts --write-inventory-sources\n")
+
+proc main(args: openArray[string]) =
+  # The refusal comes FIRST, before `writeBundleSources` and `discoverTests`,
+  # so a refused run writes no file. A generator that rewrote its checked-in
+  # artifacts and then complained would already have done the thing it was
+  # refusing to do.
+  let refusal = argumentRefusal(args)
+  if refusal.len > 0:
+    stderr.write(refusal)
+    quit(2)  # usage error
   let repoRoot = getCurrentDir()
   # Bundle sources must exist before discovery: each one is enrolled as an
   # ordinary TestSpec by path, and ``detectReproBinaryUsage`` reads it.
@@ -1231,4 +1308,9 @@ proc main() =
     $shapeParityCorpus().len & " path shapes")
 
 when isMainModule:
-  main()
+  # `commandLineParams()` is called HERE and never at module scope. This
+  # module is imported by
+  # `tests/integration/t_test_edge_migration_covers_all_test_files.nim`, and
+  # that test binary receives its own arguments; reading argv at module scope
+  # would make the generator's refusal fire on the importer's flags.
+  main(commandLineParams())

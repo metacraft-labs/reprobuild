@@ -29,6 +29,7 @@ import repro_profile_compile
 import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
+import repro_cli_support/infra_host_registry
 from repro_core/source_root import publicCliImagePath
 
 # ---------------------------------------------------------------------------
@@ -230,6 +231,10 @@ type
     stateDir: string
     profilePath: string
     host: string
+    homeProfileDir: string
+      ## `--home-profile-dir`: the home profile whose `hosts:` registry says
+      ## who manages each host's system (GM10, `infra_host_registry`).
+      ## Default: the `home.nim` beside the system profile.
     planId: string
     generationId: string
     noElevate: bool
@@ -282,6 +287,9 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--profile": result.flags.profilePath = valueOf()
     elif a.startsWith("--profile="):
       result.flags.profilePath = a["--profile=".len .. ^1]
+    elif a == "--home-profile-dir": result.flags.homeProfileDir = valueOf()
+    elif a.startsWith("--home-profile-dir="):
+      result.flags.homeProfileDir = a["--home-profile-dir=".len .. ^1]
     elif a == "--host": result.flags.host = valueOf()
     elif a.startsWith("--host="):
       result.flags.host = a["--host=".len .. ^1]
@@ -322,6 +330,32 @@ proc parseInfraFlags(args: openArray[string]):
     inc i
 
 # ---------------------------------------------------------------------------
+# GM10: the host registry gate.
+# ---------------------------------------------------------------------------
+
+proc gateHostSystemManagement(flags: InfraCliFlags; profilePath, stateDir,
+                              command: string;
+                              verdict: var HostRegistryVerdict): bool =
+  ## Read the host registry (`infra_host_registry`) and refuse a host whose
+  ## system is managed elsewhere. Runs BEFORE the system profile is
+  ## compiled and before any plan, lock or generation is written, so a
+  ## refused host leaves the state directory as it was. Returns false (after
+  ## printing why) when the command must stop.
+  try:
+    let registry = resolveHostRegistryPath(flags.homeProfileDir, profilePath)
+    verdict = readHostRegistry(registry, registryHost(flags.host), stateDir)
+  except EHostRegistry as e:
+    stderr.writeLine(command & ": " & e.msg)
+    stderr.writeLine("  Who manages this host's system is unknown, so " &
+      "nothing was planned or changed.")
+    return false
+  let refusal = managedElsewhereRefusal(verdict, command)
+  if refusal.len > 0:
+    stderr.writeLine(refusal)
+    return false
+  true
+
+# ---------------------------------------------------------------------------
 # repro infra plan
 # ---------------------------------------------------------------------------
 
@@ -333,6 +367,10 @@ proc runInfraPlan(args: openArray[string]): int =
   let profilePath = resolveProfilePath(flags, stateDir)
   if not fileExists(profilePath):
     stderr.writeLine("repro infra plan: no system profile at " & profilePath)
+    return 1
+  var registry: HostRegistryVerdict
+  if not gateHostSystemManagement(flags, profilePath, stateDir,
+      "repro infra plan", registry):
     return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
@@ -357,6 +395,7 @@ proc runInfraPlan(args: openArray[string]): int =
   echo "repro infra plan"
   echo "  profile : " & profilePath
   echo "  host    : " & host
+  echo "  registry: " & describeRegistry(registry)
   echo "  plan-id : " & env.planId
   var changeCount = 0
   for op in env.operations:
@@ -440,6 +479,10 @@ proc runInfraApply(args: openArray[string]): int =
     stderr.writeLine("repro infra apply: no system profile at " &
       profilePath)
     return 1
+  var registry: HostRegistryVerdict
+  if not gateHostSystemManagement(flags, profilePath, stateDir,
+      "repro infra apply", registry):
+    return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
   # failure exits non-zero with a uniform actionable error.
@@ -499,6 +542,7 @@ proc runInfraApply(args: openArray[string]): int =
 
   echo "repro infra apply"
   echo "  plan-id      : " & applyResult.planId
+  echo "  registry     : " & describeRegistry(registry)
   echo "  generation   : " & applyResult.generationId
   echo "  applied      : " & $applyResult.appliedCount
   echo "  no-op        : " & $applyResult.noOpCount
@@ -737,6 +781,10 @@ proc runSystemSync(args: openArray[string]): int =
     stderr.writeLine("repro system sync: no system profile at " &
       profilePath)
     return 1
+  var registry: HostRegistryVerdict
+  if not gateHostSystemManagement(flags, profilePath, stateDir,
+      "repro system sync", registry):
+    return 1
   let originalText = readFile(profilePath)
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
   # failure exits non-zero with a uniform actionable error.
@@ -842,6 +890,17 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
   var targetId = flags.generationId
   if targetId.len == 0 and positional.len > 0:
     targetId = positional[0]
+  # A rollback re-applies a generation's system profile, so a host whose
+  # system the registry says is managed elsewhere is refused exactly as
+  # `repro infra apply` refuses it (GM10). The registry is resolved against
+  # the system profile path even when that file does not exist: the rollback
+  # reads the generation's copy, but the configuration it belongs to is the
+  # directory `--profile` (or the state dir's default) names.
+  var registry: HostRegistryVerdict
+  if not gateHostSystemManagement(flags,
+      systemProfilePathOrCreate(flags, stateDir), stateDir,
+      "repro system rollback", registry):
+    return 1
   if not takeInfraApplyLock(stateDir, "repro system rollback", flags):
     return 1
   defer: releaseApplyLock(stateDir)

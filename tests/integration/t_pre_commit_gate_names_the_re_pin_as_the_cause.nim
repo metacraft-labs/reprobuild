@@ -4,8 +4,9 @@
 ## test reads this line).
 ##
 ## Fixture: ``committed_lock_siblings_fixture.nim`` (a real manifest
-## workspace, app → lib-b → lib-c), with a ``required`` ``[certificates]``
-## table on the project and the hooks ``repro hooks ensure --vcs`` installs.
+## workspace, app → lib-b → lib-c), with a ``required`` certificate policy
+## recorded in app's committed ``repro.lock`` (TC-9d) and the hooks
+## ``repro hooks ensure --vcs`` installs.
 ## No certificate exists, so every commit is uncovered; what is asserted is
 ## WHY the gate says so:
 ##
@@ -23,22 +24,27 @@
 import std/[os, osproc, strutils, unittest]
 import repro_test_support/reasoned_skip
 import repro_cli_support
+import repro_lock/certificate_policy
+import repro_workspace_manifests
 import ./committed_lock_siblings_fixture
+import ./every_branch_policy
 
 const causeLine = "this commit's lock refresh re-pinned and staged repro.lock"
 
 proc requireCertificates(fx: SiblingFixture) =
-  ## Insert a ``required`` ``[certificates]`` table into the project, right
-  ## after its ``[project]`` table.
-  let path = fx.ws / "projects" / "app.toml"
-  let body = readFile(path)
-  let at = body.find("[[remote]]")
-  doAssert at > 0
-  writeFile(path, body[0 ..< at] &
-    "[certificates]\ngate_mode = \"required\"\n" &
-    "required_targets = [\"t-unit\"]\n" &
-    "required_platforms = [\"" & currentPlatformTag() & "\"]\n\n" &
-    body[at .. ^1])
+  ## Record a ``required`` certificate policy in app's committed
+  ## ``repro.lock`` — the only place a gate reads one since TC-9d. The
+  ## snapshot is one rule for every branch (t-unit, required on this
+  ## platform),
+  ## rendered by the production renderer and spliced in by the production
+  ## splicer, then committed with ``--no-verify`` (the policy commit is not
+  ## what a case judges).
+  let path = fx.app / "repro.lock"
+  let snapshot = everyBranchSnapshot(pmRequired, ["t-unit"],
+    [currentPlatformTag()], name = "app")
+  writeFile(path, replaceCertificatePolicySection(readFile(path), snapshot))
+  discard fx.git(fx.app, "add repro.lock")
+  discard fx.git(fx.app, "commit --no-verify -q -m " & q("certificate policy"))
 
 proc commitInApp(fx: SiblingFixture; label: string):
     tuple[code: int; output: string] =

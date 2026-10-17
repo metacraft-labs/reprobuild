@@ -41,8 +41,12 @@ const
     ## The source tree an installed package ships. The Nix package's wrapper
     ## sets it (`--set-default`) to the exact sources the binary was built
     ## from (`nix/pkgs/by-name/re/reprobuild/package.nix`), and a source
-    ## checkout's engine sets it to its own checkout while resolving the
-    ## monitor shim.
+    ## checkout's engine seeds it with its own checkout while resolving the
+    ## monitor shim. That seed fills only an unset variable, is recorded in
+    ## `REPRO_BOOTSTRAP_SOURCE_ENV`, and is withdrawn before `repro exec` /
+    ## `shell` / `run` / `develop` start the user's command
+    ## (Distribution-And-Packaging §5), so it is never mistaken for a value
+    ## the caller set.
   PublicCliPathEnvVar* = "REPRO_PUBLIC_CLI_PATH"
     ## The path of the ENGINE image (`bin/reprobuild`), when a launcher names
     ## it: the portable Linux archive's wrapper script and the version

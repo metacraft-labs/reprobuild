@@ -55,6 +55,7 @@ profile "gm6Facts":
 
   hosts:
     "gm6-host": [desktop]
+    "gm6-other": [default]
 
   resources:
     fsUserFile(hostFile = "~/.config/gm6/app.conf", content = "answer = 42\n")
@@ -205,7 +206,9 @@ when defined(linux) or defined(macosx):
       checkServices(crossDoc, other)
       check treeFingerprint(sb.homeDir) == homeBefore
 
-      # --host is the planned host: another host selects other activities.
+      # --host is the planned host: another host selects other activities
+      # (`gm6-other` is declared with `default` alone -- an undeclared host
+      # is refused, spec Open question 6).
       let defaultOnly = sb.runRepro(["home", "facts", "--host", "gm6-other",
         "--target", native], host = "")
       check defaultOnly.exitCode == 0
