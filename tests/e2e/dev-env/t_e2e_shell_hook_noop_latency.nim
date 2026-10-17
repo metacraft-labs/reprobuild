@@ -149,6 +149,23 @@ proc readFingerprint(script: string): string =
     raise newException(ValueError, "unterminated __REPRO_APPLIED quote")
   rest[0 ..< e]
 
+proc readActiveManifest(script: string): string =
+  ## The ``export __REPRO_ACTIVE_MANIFEST='<path>'`` value. The prompt key is
+  ## compared against the prompt watch manifest of the activation this names
+  ## (cache-key v2, ``reprobuild-pm``
+  ## ``issues/2026-09-28-dev-env-prompt-key-ignores-flake-inputs.md``), so a
+  ## prompt carries both markers, as the activation script leaves them in a
+  ## real shell.
+  const needle = "__REPRO_ACTIVE_MANIFEST='"
+  let s = script.find(needle)
+  if s < 0:
+    raise newException(ValueError, "no __REPRO_ACTIVE_MANIFEST marker")
+  let rest = script[(s + needle.len) .. ^1]
+  let e = rest.find('\'')
+  if e < 0:
+    raise newException(ValueError, "unterminated __REPRO_ACTIVE_MANIFEST")
+  rest[0 ..< e]
+
 proc exportBaseEnv(c: ShellHookCase): StringTableRef =
   ## Build the stable environment block once. The latency gate is about
   ## child process startup + the no-op fast path; rebuilding this table in
@@ -296,6 +313,7 @@ suite "e2e_shell_hook_noop_latency":
       echo "=== initial stdout/stderr ===\n", initial.stdout
     check fingerprint.len > 0
     fastPathEnv["__REPRO_APPLIED"] = fingerprint
+    fastPathEnv["__REPRO_ACTIVE_MANIFEST"] = readActiveManifest(initial.stdout)
 
     # Sanity check: a SECOND invocation with __REPRO_APPLIED=<fp> must
     # emit the no-op script (proves the fast path is reachable before
@@ -401,6 +419,8 @@ suite "e2e_shell_hook_noop_latency":
     # 1. Trusted by REPRO_DEV_ENV_AUTO_ALLOW, key matches: answered locally.
     let autoAllowEnv = copyEnv(activationEnv)
     autoAllowEnv["__REPRO_APPLIED"] = fingerprint
+    autoAllowEnv["__REPRO_ACTIVE_MANIFEST"] =
+      readActiveManifest(initial.stdout)
     autoAllowEnv["REPRO_FULL_CLI"] = noEngine
     let autoAllow = runExportPlain(c, autoAllowEnv)
     if autoAllow.exitCode != 0:
@@ -425,6 +445,7 @@ suite "e2e_shell_hook_noop_latency":
       echo "=== repro allow output ===\n", allowOut
     require allowCode == 0
     allowEnv["__REPRO_APPLIED"] = fingerprint
+    allowEnv["__REPRO_ACTIVE_MANIFEST"] = readActiveManifest(initial.stdout)
     allowEnv["REPRO_FULL_CLI"] = noEngine
     let allowed = runExportPlain(c, allowEnv)
     if allowed.exitCode != 0:

@@ -10582,7 +10582,23 @@ proc evidenceFromRecord*(action: BuildAction;
   # would otherwise be O(N^2) over the cache-hit reconstructed evidence.
   var seenMonitorReads = initHashSet[string]()
   var seenDepfileInputs = initHashSet[string]()
+  var seenEnumerations = initHashSet[string]()
   for input in record.inputs:
+    # A directory whose MEMBERSHIP the record fingerprinted was an
+    # enumeration of the execution behind it, and the record says so
+    # itself (`membershipTrackedDirectory`), so the replay can say so too.
+    # Without it a hit's evidence was indistinguishable from one in which
+    # every directory had merely been probed, and a consumer that keys on
+    # the difference -- the dev-env prompt watch manifest
+    # (`repro_dev_env_engine.devEnvPromptWatchEntries`), which tracks an
+    # enumerated directory's membership and a probed one's existence --
+    # got a different answer from a hit than from the execution that wrote
+    # the record. Declared inputs included: a declared directory keeps its
+    # membership too (`cacheEnumeratedDirectories`). The path also stays in
+    # `monitorReads` below, as before, so no existing count moves.
+    if membershipTrackedDirectory(input.metadata):
+      result.monitorDirectoryEnumerations.observe(result.evidenceProvenance,
+        evcReplayedCacheRecord, seenEnumerations, input.path)
     if not declaredInputPaths.contains(input.path):
       if action.dependencyPolicy.kind in MonitorPolicyKinds:
         result.monitorReads.observe(result.evidenceProvenance,
