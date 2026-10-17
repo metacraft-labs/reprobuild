@@ -720,6 +720,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_pattern_scoped_enumeration_keys_only_matching_entries.nim",
+    binary: "build/test-bin/t_pattern_scoped_enumeration_keys_only_matching_entries",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim",
     binary: "build/test-bin/t_portable_fingerprint_engine",
     defines: @[],
@@ -3404,6 +3413,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
     binary: "build/test-bin/t_overlay_materialize_report_names_the_cause",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
+    binary: "build/test-bin/t_pattern_scoped_enumeration_names",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

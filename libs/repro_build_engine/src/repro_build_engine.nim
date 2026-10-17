@@ -7372,11 +7372,23 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # Stays in `monitorProbes` (every existing consumer keeps its set) AND
     # is recorded separately, because membership, not existence, is what
     # an enumeration depends on. See `monitorDirectoryEnumerations`.
+    #
+    # A PATTERN-SCOPED scan (glob(3) matching one pattern component against
+    # the directory's entries, `io_mon.globScanPattern`) depends only on the
+    # entries that match, so it travels under the directory's
+    # pattern-scoped name and every membership digest of it covers those
+    # entries alone (`pattern_scoped_enumeration.nim`). The name stands for
+    # the directory's existence in `monitorProbes` too, so nothing else
+    # about the scan changes.
+    let pattern = globScanPattern(record.detail)
+    let enumerated =
+      if pattern.len > 0: patternScopedEnumerationPath(materialized, pattern)
+      else: materialized
     evidence.monitorProbes.observe(evidence.evidenceProvenance,
-      evcMonitorCapture, seen.monitorProbes, materialized)
+      evcMonitorCapture, seen.monitorProbes, enumerated)
     evidence.monitorDirectoryEnumerations.observe(
       evidence.evidenceProvenance, evcMonitorCapture,
-      seen.monitorDirectoryEnumerations, materialized)
+      seen.monitorDirectoryEnumerations, enumerated)
   else:
     discard
 
@@ -10794,9 +10806,15 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # for something the record does not hold. What giving up the membership
     # costs, and why that is acceptable, is the "limit of the licence"
     # section of `isGitObjectStorePath`.
-    if path.isUnderAnyRoot(toolRoots) or
-        path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-        path.isGitObjectStorePath(gitDirMemo):
+    #
+    # Every test from here on asks WHERE the enumeration is, and a
+    # pattern-scoped one (`patternScopedEnumerationPath`) is in its
+    # directory: the scope narrows what was read there, not where. The name
+    # itself is what is kept, so the record digests the scoped membership.
+    let location = path.patternScopedBase()
+    if location.isUnderAnyRoot(toolRoots) or
+        location.isUnderCanonicalPolicyRoot(ignoredRoots) or
+        location.isGitObjectStorePath(gitDirMemo):
       continue
     # An enumerated directory in an UNTRACKED scope — under none of the
     # roots this workspace declared, which includes every ancestor above
@@ -10804,7 +10822,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # §"Validation Criteria", second mandatory exemption; the whole
     # argument is on `untrackedEnumerationScope`. A DECLARED input never
     # reaches here: it was kept by the first test above.
-    if trackedRoots.untrackedEnumerationScope(path):
+    if trackedRoots.untrackedEnumerationScope(location):
       continue
     # The action's OWN output directory: its entry list changed because this
     # action added an entry to it, so the membership digest is derived state
@@ -10813,7 +10831,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # the MEMBERSHIP channel; reads and probes of paths inside it are
     # unaffected, and the exact declared outputs stay excluded by
     # `selfWrittenOutputKeys` as before.
-    if selfWrittenDirs.contains(normalizeWriteRoot(path)):
+    if selfWrittenDirs.contains(normalizeWriteRoot(location)):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -17434,8 +17452,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## process on the machine writes into it, so its membership changes
     ## between any two runs; gemini-cli's bundle step enumerates it. Files
     ## BENEATH it stay ordinary inputs: projects and test fixtures do live
-    ## under temp, and their contents are real.
-    var key = path.replace('\\', '/')
+    ## under temp, and their contents are real. A pattern-scoped listing of
+    ## it is still a listing of it.
+    var key = path.patternScopedBase().replace('\\', '/')
     while key.len > 1 and key.endsWith("/"):
       key.setLen(key.len - 1)
     when defined(windows):
@@ -17651,6 +17670,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## false -- keep the disk's identity -- for a directory with no declared
     ## path beneath it, and for one at or inside a declared path (an
     ## output's own contents are its record's business).
+    ##
+    ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is viewed as
+    ## its directory, keeping only the names that may match its pattern,
+    ## which is what `membershipHex` reads from disk for the same name.
+    let (base, scope) = splitPatternScopedEnumeration(dir)
+    if scope.len > 0:
+      result = graphDirView(base, selfId, ancestors, ancestorOutput)
+      result.names = result.names.namesMatchingScope(scope)
+      return
     refreshGraphPathIndex()
     let key = scratchKey(dir)
     if key notin graphPathsBeneath:
@@ -19508,7 +19536,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let name = entry.path["env:".len .. ^1]
           let (present, value) = launchEnv(name)
           return some(envIdentity(portableRecordRoots(), present, value))
-        let path = entry.path
+        # A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is answered
+        # for its directory, listing only the names that may match its
+        # pattern, which is what the recorder's `membershipHex` and
+        # `graphDirView` computed for the same name. Looked up as written, it
+        # named no produced path or manifest entry, so a scoped listing of a
+        # produced directory could never resolve.
+        let (path, scope) = splitPatternScopedEnumeration(entry.path)
         if path in producer:
           if path notin producedOutputs:
             return some(Unresolved)
@@ -19521,7 +19555,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             return some("present")
           of pikEnumeration:
             if o.directory:
-              return some(membershipHexOfNames(childNames(o.entries, "")))
+              return some(membershipHexOfNames(
+                childNames(o.entries, "").namesMatchingScope(scope)))
             return some(Unresolved)
           of pikEnvironment:
             return some(Unresolved)   # answered above
@@ -19548,7 +19583,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               return some(if at >= 0: "present" else: "absent")
             of pikEnumeration:
               if at >= 0 and o.entries[at].kind == tekDirectory:
-                return some(membershipHexOfNames(childNames(o.entries, rel)))
+                return some(membershipHexOfNames(
+                  childNames(o.entries, rel).namesMatchingScope(scope)))
               return some(Unresolved)
             of pikEnvironment:
               return some(Unresolved)   # answered above
@@ -19556,7 +19592,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # Above produced paths: the rule the recorder and the determinism
         # probe apply -- this host's undeclared entries plus what this
         # action's ancestors produce, from their records.
-        let physical = toPhysicalPath(roots, path)
+        # The scoped name itself: `graphDirView` applies its scope.
+        let physical = toPhysicalPath(roots, entry.path)
         if physical.isSome:
           let view = graphDirView(physical.get(), action.id, ancestors,
             proc (output: GraphPathEntry): AncestorOutputState =

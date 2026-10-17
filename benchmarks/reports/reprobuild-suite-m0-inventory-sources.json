@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2157,
+    "nimTestBinaries": 2159,
     "pureUnitConsolidationGroups": 62,
-    "pureUnitTests": 658,
+    "pureUnitTests": 659,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2181
+    "testEntries": 2183
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1293,9 +1293,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1174,
+      "integration": 1175,
       "platform/destructive": 132,
-      "pure unit": 658,
+      "pure unit": 659,
       "unclassified": 198
     },
     "graphOwnedTestArtifacts": [
@@ -1498,9 +1498,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2157,
+    "nimTestBinaryCount": 2159,
     "pythonTestFileCount": 24,
-    "testEntryCount": 2181
+    "testEntryCount": 2183
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8769,6 +8769,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_pattern_scoped_enumeration_keys_only_matching_entries",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_pattern_scoped_enumeration_keys_only_matching_entries.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_portable_fingerprint_engine",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -14336,6 +14357,24 @@
       "source": "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pattern_scoped_enumeration_names",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

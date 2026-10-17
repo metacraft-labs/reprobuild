@@ -35,6 +35,7 @@ import ./repro_local_store/sandbox_manifest
 import ./repro_local_store/optimise
 import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
+import ./repro_local_store/pattern_scoped_enumeration
 export action_index
 export sqlite3_binding
 export store
@@ -43,6 +44,7 @@ export sandbox_manifest
 export optimise
 export portable_fingerprint
 export portable_memo
+export pattern_scoped_enumeration
 
 type
   LocalStoreError* = object of CatchableError
@@ -1611,7 +1613,8 @@ const
     ## Substituted when a real listing happens to hash to one of the two
     ## reserved values.
 
-proc directoryMembershipDigest*(root: string; entriesWalked: var int64): uint64 =
+proc directoryMembershipDigest*(root: string; entriesWalked: var int64;
+                                pattern = ""): uint64 =
   ## Order-independent digest over the IMMEDIATE children of `root` -- their
   ## names and kinds, one `readdir` sweep, no per-entry `lstat`.
   ##
@@ -1650,17 +1653,26 @@ proc directoryMembershipDigest*(root: string; entriesWalked: var int64): uint64 
   ## `outputStateMismatchImpl`); this now does too, by raising here and
   ## letting `fingerprintDirectoryMembership` substitute
   ## `DirectoryMembershipUnlistable`.
+  ##
+  ## A non-empty `pattern` digests only the entries that may match it
+  ## (`globComponentMatches`): the key of a PATTERN-SCOPED enumeration (see
+  ## `pattern_scoped_enumeration.nim`). `entriesWalked` still counts every
+  ## entry read, because that is the work done.
   var entries = 0'u64
+  var walked = 0'i64
   var scratch = newSeq[byte](0)
   for kind, path in walkDir(extendedPath(root), relative = true,
       checkDir = true):
+    inc walked
+    if pattern.len > 0 and not globComponentMatches(pattern, path):
+      continue
     inc entries
     scratch.setLen(0)
     for c in path:
       scratch.add(byte(c))
     scratch.writeU64Le(uint64(ord(kind)))
     result = result + localHash(scratch).value
-  entriesWalked = int64(entries)
+  entriesWalked = walked
   # Fold the count in so an empty directory and a missing one differ, and so
   # a pair of entries cannot cancel out.
   result = result xor (entries * 0x9E3779B97F4A7C15'u64)
@@ -1854,15 +1866,22 @@ proc fingerprintDirectoryMembership*(path: string): FileMetadata =
   ## scratch directory records it as `ffkMissing` and keeps comparing as
   ## "still missing", which is what stops per-run temporary directories from
   ## making every such edge a permanent miss.
+  ##
+  ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is fingerprinted
+  ## as its directory, with the digest taken over the entries that may match
+  ## its pattern. Its directory is named explicitly rather than left to the
+  ## NUL to truncate: the truncated spelling keeps the `/`, and `lstat` of
+  ## `<link>/` reports the directory a link points to, not the link.
   lastMembershipWalkEntries = 0
-  result = fingerprintMetadata(path)
+  let (dir, pattern) = splitPatternScopedEnumeration(path)
+  result = fingerprintMetadata(dir)
   if result.kind != ffkDirectory:
     return
-  if path.isImmutablePackageStoreRoot():
+  if dir.isImmutablePackageStoreRoot():
     return
   try:
     var walked = 0'i64
-    result.mtimeNs = directoryMembershipDigest(path, walked)
+    result.mtimeNs = directoryMembershipDigest(dir, walked, pattern)
     lastMembershipWalkEntries = walked
   except OSError, IOError:
     # The directory exists but could not be listed. Leaving `mtimeNs` at 0
