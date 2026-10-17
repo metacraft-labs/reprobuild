@@ -266,7 +266,11 @@
         # reads before exec when no shim lock was held at the fork; otherwise
         # (and after a raw clone or _Fork) it reports the evidence it skips
         # as event-loss instead of grading complete without it.
-      url = "github:metacraft-labs/io-mon/f33311ea06be5fe1569172ade9a6cd27b480e9af";
+        # Bumped to 3f8788c (2026-10-17), io-mon's `agents` tip; f33311e is an
+        # ancestor. Each directory a glob(3) scan opens is recorded with the
+        # pattern component matched there, when it can be named with
+        # certainty, so the engine keys the scan on the matching entries.
+      url = "github:metacraft-labs/io-mon/3f8788ce721a8f2d47eff09350b7c2047e1f3628";
       flake = false;
     };
     nim-shm-gset-src = {
