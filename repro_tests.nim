@@ -12501,6 +12501,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_git_object_store_lookups_are_not_cache_inputs.nim",
+    binary: "build/test-bin/t_git_object_store_lookups_are_not_cache_inputs",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_health_fix_remediates_safe_issues_only.nim",
     binary: "build/test-bin/t_health_fix_remediates_safe_issues_only",
     defines: @[],
