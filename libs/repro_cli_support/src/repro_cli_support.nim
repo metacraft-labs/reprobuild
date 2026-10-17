@@ -1954,10 +1954,14 @@ proc reprobuildLibraryWorkDir*(): string =
   ## `reprobuildLibsRootFromEnv` documents for exactly this. They used to be
   ## consulted only downstream, by `reprobuildExternalLibsRoot`, which never
   ## asks once the work dir is itself a reprobuild tree -- and this proc
-  ## always returned one: `$REPROBUILD_SOURCE_ROOT`, which the engine sets to
-  ## its OWN checkout while resolving the monitor shim, or else the checkout
-  ## the engine was compiled from. So a dev environment compiled every
-  ## recipe against the engine's libs whatever the override said.
+  ## always returned one: `$REPROBUILD_SOURCE_ROOT`, which the engine seeds
+  ## with its OWN checkout while resolving the monitor shim, or else the
+  ## checkout the engine was compiled from. So a dev environment compiled
+  ## every recipe against the engine's libs whatever the override said.
+  ##
+  ## That seed is recorded (`seedSourcePackageEnvironment`) and withdrawn
+  ## before a user's command starts, so an engine started INSIDE `repro exec`
+  ## resolves from its own image instead of from the outer engine's tree.
   ##
   ## The resolution itself is `repro_core/source_root`'s
   ## `resolveReprobuildSourceRoot`, shared with the profile compile so the two
@@ -2032,8 +2036,21 @@ proc resolveMonitorShimLibPath(): string =
       else:
         ""
     if candidate.len > 0 and fileExists(extendedPath(candidate)):
+      # Seed the checkout as this process's source root: nested recipe
+      # compiles, daemon forwarding and `reprobuildLibraryWorkDir` read it.
+      # It is the engine's root for ITSELF, so it goes through the recorded
+      # seeding rather than a bare `putEnv`. A bare `putEnv` could not be told
+      # apart from a caller's value, and `repro exec` handed it to the user's
+      # command (reprobuild-pm issue 2026-09-30, `cd A && B/build/bin/repro
+      # exec -- ...` saw `REPROBUILD_SOURCE_ROOT=B`). Recorded, the activation
+      # surfaces withdraw it with `clearSeededSourcePackageEnvironment`
+      # (Distribution-And-Packaging §5). An empty value counts as unset, as it
+      # always has here; the seeding only fills names that do not exist.
       if getEnv("REPROBUILD_SOURCE_ROOT").len == 0:
-        putEnv("REPROBUILD_SOURCE_ROOT", localSourceRoot)
+        if existsEnv("REPROBUILD_SOURCE_ROOT"):
+          delEnv("REPROBUILD_SOURCE_ROOT")
+        seedSourcePackageEnvironment(
+          [("REPROBUILD_SOURCE_ROOT", localSourceRoot)])
       return candidate
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
@@ -13099,6 +13116,12 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
       DevEnvShellOp(kind: deskSetEnv, name: "REPRO_PROJECT_ROOT",
         value: canonicalProjectRoot)
     ] & prefixEnvOpsForDevelop(identity))
+  # The engine's self-seeded source roots stay out of the command, as for
+  # `repro exec` (Distribution-And-Packaging §5). Every compile this
+  # invocation runs is done by now; a `repro build` the command calls back
+  # into (CMake regeneration) derives its own root from its own image, and the
+  # CMake configure wrapper exports the root it needs explicitly.
+  clearSeededSourcePackageEnvironment()
   # W2-no-producer-ops-and-no-report: this artifact is SYNTHESIZED right above
   # from ``binDirsForDevelop`` — it is ``repro develop``'s own PATH projection,
   # not a dev-env introspection artifact, and it carries no ``toolProfiles``.
@@ -15466,6 +15489,9 @@ proc runReproRunCommand(args: openArray[string];
     let producerOps = devEnvProducerActivation(artifact,
       parsed.selection.projectRoot)
     restoreBootstrapToolchainEnv(userToolchainEnv)
+    # The engine's self-seeded source roots stay out of the task, as for
+    # `repro exec` (Distribution-And-Packaging §5).
+    clearSeededSourcePackageEnvironment()
     return runTaskCommand(artifact, edge.artifactPath, task,
       parsed.forwardedArgs, parsed.selection.projectRoot, producerOps, toolOps)
 
@@ -15613,6 +15639,12 @@ proc runReproExecCommand(args: openArray[string];
   let producerOps = devEnvProducerActivation(artifact,
     parsed.selection.projectRoot)
   restoreBootstrapToolchainEnv(userToolchainEnv)
+  # Likewise the source roots this engine seeded for its own compiles
+  # (`REPROBUILD_SOURCE_ROOT`, the built `*_SRC`): withdrawn here, after the
+  # last compile, per Distribution-And-Packaging §5. Otherwise an engine
+  # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
+  # resolves its libraries from B. Caller values are not seeds and stay.
+  clearSeededSourcePackageEnvironment()
   return runActivatedCommand(artifact, edge.artifactPath, parsed.command,
     parsed.selection.projectRoot, producerOps, toolOps)
 
@@ -15651,6 +15683,9 @@ proc runReproShellCommand(args: openArray[string];
     else:
       defaultInteractiveShell()
   restoreBootstrapToolchainEnv(userToolchainEnv)
+  # The engine's self-seeded source roots stay out of the shell, as for
+  # `repro exec` (Distribution-And-Packaging §5).
+  clearSeededSourcePackageEnvironment()
   return spawnActivatedShell(artifact, edge.artifactPath, shellPath,
     parsed.selection.projectRoot, producerOps, toolOps)
 

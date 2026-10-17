@@ -8343,6 +8343,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim",
+    binary: "build/test-bin/t_e2e_repro_exec_does_not_leak_engine_source_root",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim",
     binary: "build/test-bin/t_e2e_repro_exec_recipe_compiler",
     defines: @[],
